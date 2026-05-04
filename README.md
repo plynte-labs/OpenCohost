@@ -1,4 +1,4 @@
-# VoiceAI — Kira, tu co-host virtual para Stream
+# VoiceAI — Kira, tu co-host virtual para Stream v1.0.0
 
 Aplicación de escritorio que crea un co-host de IA (**Kira**) corriendo 100% en local: sin internet, sin suscripciones, sin censura corporativa. Usa tu GPU para generar texto (LLM) y voz clonada (TTS) en tiempo real.
 
