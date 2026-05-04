@@ -1,0 +1,40 @@
+# ── Directorios del proyecto ──
+docs/
+logs/
+Grabaciones/
+__pycache__/
+legacy/
+modelos_f5/
+temp/
+test/
+
+# ── Archivos específicos ──
+result.txt
+result_predict.txt
+
+# ── Python ──
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+
+# ── Entorno virtual ──
+venv/
+.venv/
+env/
+.env
+*.env
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ──
+Thumbs.db
+.DS_Store
+Desktop.ini
