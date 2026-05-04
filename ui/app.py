@@ -685,7 +685,11 @@ class VocalAIApp(ctk.CTk):
     # ──────────────────────────────────────────────
 
     def _al_toggle_ptt(self):
-        self.ptt_enabled = self.switch_ptt.get()
+        nuevo_estado = self.switch_ptt.get()
+        if nuevo_estado == self.ptt_enabled:
+            logger.debug(f"[PTT] Toggle ignorado (ya en estado {nuevo_estado})")
+            return
+        self.ptt_enabled = nuevo_estado
         logger.debug(f"[PTT] Toggle: ptt_enabled={self.ptt_enabled}")
         if self.ptt_enabled:
             self.switch_ptt.configure(text="PTT ON")
@@ -698,12 +702,12 @@ class VocalAIApp(ctk.CTk):
             self._print_log(f"[PTT] Activado — hotkey: {self.ptt_hotkey}")
         else:
             self.switch_ptt.configure(text="PTT OFF")
-        self._stop_ptt_listener()
-        for lst in getattr(self, '_ptt_mapping_listeners', []):
-            try:
-                lst.stop()
-            except Exception:
-                pass
+            self._stop_ptt_listener()
+            for lst in getattr(self, '_ptt_mapping_listeners', []):
+                try:
+                    lst.stop()
+                except Exception:
+                    pass
             self._set_ptt_status("", "#888888")
             self._print_log("[PTT] Desactivado — modo continuo WebSocket")
 
