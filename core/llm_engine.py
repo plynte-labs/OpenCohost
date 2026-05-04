@@ -286,6 +286,7 @@ class MotorVocalIA(threading.Thread):
     def _hablar(self, texto_a_generar):
         with self._lock:
             self._speaking = True
+        self.ui_callback("speaking_start")
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
@@ -294,6 +295,7 @@ class MotorVocalIA(threading.Thread):
                 self._log("ERROR: Archivo de referencia no existe o no ha sido cargado.", level="error")
                 with self._lock:
                     self._speaking = False
+                self.ui_callback("speaking_end")
                 return
 
         texto_limpio = re.sub(r'\*[^*]+\*', '', texto_a_generar)
@@ -328,6 +330,7 @@ class MotorVocalIA(threading.Thread):
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
             with self._lock:
                 self._speaking = False
+            self.ui_callback("speaking_end")
             return
 
         self._log(f"Sintetizando {len(oraciones)} fragmento(s) con pipeline...")
@@ -444,6 +447,7 @@ class MotorVocalIA(threading.Thread):
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")
         with self._lock:
             self._speaking = False
+        self.ui_callback("speaking_end")
 
         hilo_productor.join(timeout=2.0)
 

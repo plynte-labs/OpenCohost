@@ -148,3 +148,5 @@ PTT_HOTKEY_LIST = [
 ]
 
 PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
+WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
+ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")

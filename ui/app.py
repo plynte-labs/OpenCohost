@@ -19,7 +19,8 @@ from config.settings import (
     WS_URI, WS_TIMEOUT, WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_MAX_DELAY, WS_MAX_RETRIES,
     RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
-    PTT_DEFAULT_HOTKEY, PTT_HOTKEY_LIST, PTT_CONFIG_FILE
+    PTT_DEFAULT_HOTKEY, PTT_HOTKEY_LIST, PTT_CONFIG_FILE,
+    WINDOW_GEOMETRY_FILE, ACCIONES_LOG_FILE
 )
 from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
@@ -63,6 +64,49 @@ def _guardar_ptt_config(hotkey):
     except Exception as e:
         logger.warning(f"No se pudo guardar config PTT: {e}")
 
+def _cargar_geometria():
+    try:
+        if os.path.exists(WINDOW_GEOMETRY_FILE):
+            with open(WINDOW_GEOMETRY_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def _guardar_geometria(x, y, w, h):
+    try:
+        os.makedirs(os.path.dirname(WINDOW_GEOMETRY_FILE), exist_ok=True)
+        with open(WINDOW_GEOMETRY_FILE, "w") as f:
+            json.dump({"x": x, "y": y, "width": w, "height": h}, f)
+    except Exception:
+        pass
+
+def _guardar_accion(msg):
+    try:
+        os.makedirs(os.path.dirname(ACCIONES_LOG_FILE), exist_ok=True)
+        with open(ACCIONES_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "msg": msg}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _cargar_acciones(limite=50):
+    acciones = []
+    try:
+        if os.path.exists(ACCIONES_LOG_FILE):
+            with open(ACCIONES_LOG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        acciones.append(
+                            f"[{time.strftime('%H:%M:%S', time.localtime(entry['ts']))}] {entry['msg']}"
+                        )
+                    except Exception:
+                        continue
+            return acciones[-limite:]
+    except Exception:
+        pass
+    return []
+
 logger = get_logger()
 
 class VocalAIApp(ctk.CTk):
@@ -72,13 +116,22 @@ class VocalAIApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"VocalAI — Qwen3-TTS + {DEFAULT_MODEL}")
-        self.geometry("1100x700")
+
+        geo = _cargar_geometria()
+        if geo:
+            try:
+                self.geometry(f"{geo['width']}x{geo['height']}+{geo['x']}+{geo['y']}")
+            except Exception:
+                self.geometry("1100x700")
+        else:
+            self.geometry("1100x700")
         self.minsize(800, 500)
 
         self.log_queue = queue.Queue()
         self.ws_connected = False
         self.ws_should_reconnect = False
         self.dispositivo_seleccionado = None
+        self._pipeline_state = "idle"
 
         self.ptt_enabled = False
         self.ptt_hotkey = _cargar_ptt_config()
@@ -156,8 +209,14 @@ class VocalAIApp(ctk.CTk):
         self.switch_logs.pack(side="left", padx=10)
         self.switch_logs.select()
 
-        self.lbl_status = ctk.CTkLabel(frame_top, text="⏳ Inicializando IA...")
+        self.lbl_status = ctk.CTkLabel(frame_top, text="🟢 En Espera", font=ctk.CTkFont(size=13, weight="bold"))
         self.lbl_status.pack(side="right", padx=10)
+
+        # ── Barra de audio RMS ──
+        self.barra_rms = ctk.CTkProgressBar(frame_top, width=120, height=8)
+        self.barra_rms.set(0)
+        self.barra_rms.pack(side="right", padx=5)
+        self.barra_rms.pack_forget()
 
         frame_model = ctk.CTkFrame(self)
         frame_model.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
@@ -265,11 +324,35 @@ class VocalAIApp(ctk.CTk):
         )
         self.lbl_ptt_status.pack(side="left", padx=10)
 
+        self.consola = None  # will be the Log tab textbox
+
+        self.tabview = ctk.CTkTabview(
+            self,
+            command=self._on_tab_change,
+            height=1
+        )
+        self.tabview.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+        tab_log = self.tabview.add("📋 Log General")
+        tab_acciones = self.tabview.add("📝 Kira Acciones")
+
         self.consola = ctk.CTkTextbox(
-            self, font=ctk.CTkFont(family="Consolas", size=13),
+            tab_log, font=ctk.CTkFont(family="Consolas", size=13),
             state="disabled"
         )
-        self.consola.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.consola.pack(fill="both", expand=True)
+
+        self.consola_acciones = ctk.CTkTextbox(
+            tab_acciones, font=ctk.CTkFont(family="Consolas", size=13),
+            state="disabled"
+        )
+        self.consola_acciones.pack(fill="both", expand=True)
+
+        for accion in _cargar_acciones():
+            self.consola_acciones.configure(state="normal")
+            self.consola_acciones.insert("end", accion + "\n")
+            self.consola_acciones.configure(state="disabled")
+        self.consola_acciones.see("end")
 
         frame_bottom = ctk.CTkFrame(self)
         frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
@@ -289,39 +372,87 @@ class VocalAIApp(ctk.CTk):
         )
         self.btn_enviar.grid(row=0, column=1, padx=(0, 5), pady=5)
 
+    def _actualizar_pipeline(self, estado):
+        self._pipeline_state = estado
+        estados = {
+            "idle": ("🟢 En Espera", "#aaaaaa"),
+            "listening": ("🟢 Escuchando", "#44ff44"),
+            "processing": ("🟡 Procesando LLM", "#ffaa00"),
+            "speaking": ("🔵 Sintetizando Voz", "#4488ff"),
+            "playing": ("🔵 Hablando", "#44ccff"),
+            "downloading": ("📥 Descargando Modelo", "#ff8800"),
+            "init": ("⏳ Inicializando IA...", "#888888"),
+        }
+        text, color = estados.get(estado, ("", "#aaaaaa"))
+        self.after(0, lambda t=text, c=color: (
+            self.lbl_status.configure(text=t, text_color=c)
+        ))
+
+        if estado == "listening":
+            self.after(0, lambda: self.barra_rms.pack(side="right", padx=5))
+            self._animar_rms()
+        else:
+            self.after(0, lambda: self.barra_rms.pack_forget())
+
+    def _animar_rms(self):
+        if self._pipeline_state != "listening":
+            return
+        import random
+        nivel = random.uniform(0.2, 0.9)
+        self.barra_rms.set(nivel)
+        self.after(150, self._animar_rms)
+
+    def _log_accion(self, msg):
+        ts = time.strftime("%H:%M:%S")
+        entrada = f"[{ts}] {msg}"
+        self.consola_acciones.configure(state="normal")
+        self.consola_acciones.insert("end", entrada + "\n")
+        self.consola_acciones.see("end")
+        self.consola_acciones.configure(state="disabled")
+        _guardar_accion(msg)
+
+    def _on_tab_change(self):
+        pass
+
     def _on_motor_event(self, status):
         if status == "ready":
             self.after(0, lambda: self.btn_grabar.configure(state="normal"))
             self.after(0, lambda: self.btn_voz.configure(state="normal"))
             self.after(0, lambda: self.btn_ws.configure(state="normal"))
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
-            self.after(0, lambda: self.lbl_status.configure(text="✅ Motor IA Listo"))
+            self._actualizar_pipeline("idle")
             self.after(0, self._refresh_modelo_instalado)
         elif status == "processing":
-            self.after(0, lambda: self.lbl_status.configure(text="🔄 Procesando..."))
+            self._actualizar_pipeline("processing")
             self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
             self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
             self.after(0, lambda: self.btn_download.configure(state="disabled"))
             self.after(0, lambda: self.switch_ptt.configure(state="disabled"))
             self.after(0, lambda: self.btn_mapear.configure(state="disabled"))
         elif status == "idle":
-            self.after(0, lambda: self.lbl_status.configure(text="✅ Listo"))
+            self._actualizar_pipeline("idle")
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.btn_download.configure(state="normal"))
             self.after(0, lambda: self.switch_ptt.configure(state="normal"))
             self.after(0, lambda: self.btn_mapear.configure(state="normal"))
+        elif status == "speaking_start":
+            self._actualizar_pipeline("speaking")
+            self._log_accion("Kira comenzó a sintetizar respuesta")
+        elif status == "speaking_end":
+            estado = "listening" if self.ws_connected else "idle"
+            self._actualizar_pipeline(estado)
         elif status == "model_changed":
             model = self.motor_ia.current_model
             self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
             self.after(0, lambda: self._actualizar_info_modelo(model))
-            self.after(0, lambda: self.lbl_status.configure(text=f"✅ Modelo: {model}"))
+            self._actualizar_pipeline("idle")
         elif status == "download_start":
             self.after(0, lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
             self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
             self.after(0, lambda: self.progress_download.pack(side="right", padx=10))
             self.after(0, lambda: self.progress_download.set(0))
-            self.after(0, lambda: self.lbl_status.configure(text="📥 Descargando modelo..."))
+            self._actualizar_pipeline("downloading")
         elif status == "download_done":
             model = self.motor_ia.current_model
             self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
@@ -329,13 +460,13 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.progress_download.pack_forget())
             self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
             self.after(0, lambda: self._actualizar_info_modelo(model))
-            self.after(0, lambda: self.lbl_status.configure(text=f"✅ {model} listo"))
+            self._actualizar_pipeline("idle")
             self.after(0, self._refresh_modelo_instalado)
         elif status == "download_error":
             self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.progress_download.pack_forget())
-            self.after(0, lambda: self.lbl_status.configure(text="❌ Error en descarga"))
+            self._actualizar_pipeline("idle")
 
     def _al_seleccionar_modelo(self, display_name):
         tag = self._model_display_to_tag.get(display_name, display_name)
@@ -677,6 +808,7 @@ class VocalAIApp(ctk.CTk):
             self._ptt_accept_logged = False
             logger.info(f"[PTT] MATCH: {key} -> ptt_pressed=True")
             self._set_ptt_status("🔴 ESCUCHANDO...", "#44ff44")
+            self._actualizar_pipeline("listening")
 
     def _on_ptt_release(self, key):
         if self.ptt_enabled:
@@ -690,6 +822,7 @@ class VocalAIApp(ctk.CTk):
                 f"Manten presionado [{self.ptt_hotkey}] para hablar",
                 "#888888"
             )
+            self._actualizar_pipeline("idle")
 
     def _on_ptt_click(self, x, y, button, pressed):
         kind, target = getattr(self, '_ptt_target', (None, None))
@@ -700,11 +833,13 @@ class VocalAIApp(ctk.CTk):
             logger.debug(f"[PTT] MOUSE {'PRESS' if pressed else 'RELEASE'}: {button} → ptt_pressed={pressed}")
             if pressed:
                 self._set_ptt_status("🔴 ESCUCHANDO...", "#44ff44")
+                self._actualizar_pipeline("listening")
             else:
                 self._set_ptt_status(
                     f"Manten presionado [{self.ptt_hotkey}] para hablar",
                     "#888888"
                 )
+                self._actualizar_pipeline("idle")
 
     # ─── Fin PTT ───
 
@@ -772,6 +907,7 @@ class VocalAIApp(ctk.CTk):
         ) as websocket:
             self.log_queue.put("[Red] 🟢 Conectado. Escuchando transcripciones...")
             logger.info("WebSocket conectado.")
+            self._actualizar_pipeline("listening")
 
             while self.ws_connected:
                 try:
@@ -845,6 +981,15 @@ class VocalAIApp(ctk.CTk):
         self.ws_should_reconnect = False
 
         self._stop_ptt_listener()
+
+        try:
+            x = self.winfo_x()
+            y = self.winfo_y()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            _guardar_geometria(x, y, w, h)
+        except Exception:
+            pass
         
         try:
             import ollama

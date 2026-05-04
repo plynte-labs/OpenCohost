@@ -11,6 +11,11 @@ test/
 result.txt
 result_predict.txt
 
+# ── Configuración generada en runtime ──
+config/ptt_settings.json
+config/window_geometry.json
+logs/acciones.jsonl
+
 # ── Python ──
 *.py[cod]
 *.pyo

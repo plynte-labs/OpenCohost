@@ -28,9 +28,9 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 ### 2. Interfaz y Experiencia de Usuario (UI/UX)
 **Propósito:** Minimizar el impacto en los recursos del sistema y evitar interferencias visuales en el monitor principal.
 
-*   **RF2.1 - Arquitectura Multi-Monitor:** El diseño de la interfaz se optimizará para escalado en un segundo monitor, eliminando la necesidad de capas de **Overlay** (DirectX/Vulkan) que consumen ciclos de GPU críticos durante el juego.
-*   **RF2.2 - Estado del Pipeline:** La UI debe mostrar indicadores visuales del estado del "grifo" (Tap State): *Escuchando*, *Procesando LLM*, *Sintetizando Voz* y *En Espera*.
-*   **RF2.3 - Registro de Acciones (Console Log):** Inclusión de un panel de actividad donde Kira confirme las acciones administrativas ejecutadas (ej: "Título de Twitch actualizado con éxito").
+*   **RF2.1 - Arquitectura Multi-Monitor:** El diseño de la interfaz se optimizará para escalado en un segundo monitor, eliminando la necesidad de capas de **Overlay** (DirectX/Vulkan) que consumen ciclos de GPU críticos durante el juego. ✅ *Implementado — persistencia de geometría.*
+*   **RF2.2 - Estado del Pipeline:** La UI debe mostrar indicadores visuales del estado del "grifo" (Tap State): *Escuchando*, *Procesando LLM*, *Sintetizando Voz* y *En Espera*. ✅ *Implementado — texto + colores + barra RMS.*
+*   **RF2.3 - Registro de Acciones (Console Log):** Inclusión de un panel de actividad donde Kira confirme las acciones administrativas ejecutadas (ej: "Título de Twitch actualizado con éxito"). ✅ *Implementado — pestaña Kira Acciones + persistencia JSONL.*
 
 ### 3. Procesador Inteligente de Chat (Smart Aggregator)
 **Propósito:** Escalar la interacción para audiencias masivas mediante algoritmos de consolidación.
