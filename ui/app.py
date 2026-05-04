@@ -133,6 +133,7 @@ class VocalAIApp(ctk.CTk):
         self.ws_connected = False
         self.ws_should_reconnect = False
         self.dispositivo_seleccionado = None
+        self._ptt_lock = threading.RLock()
         self._pipeline_state = "idle"
 
         self.ptt_enabled = False
@@ -685,6 +686,7 @@ class VocalAIApp(ctk.CTk):
 
     def _al_toggle_ptt(self):
         self.ptt_enabled = self.switch_ptt.get()
+        logger.debug(f"[PTT] Toggle: ptt_enabled={self.ptt_enabled}")
         if self.ptt_enabled:
             self.switch_ptt.configure(text="PTT ON")
             if not self._ptt_mapping:
@@ -776,39 +778,58 @@ class VocalAIApp(ctk.CTk):
         return (None, None)
 
     def _start_ptt_listener(self):
-        self._stop_ptt_listener()
-        kind, target = self._build_ptt_target()
-        if kind == "keyboard":
-            self.ptt_listener = keyboard.Listener(
-                on_press=self._on_ptt_press,
-                on_release=self._on_ptt_release
-            )
-        elif kind == "mouse":
-            self.ptt_listener = mouse.Listener(
-                on_click=self._on_ptt_click
-            )
-        else:
-            logger.warning(f"[PTT] Tecla no soportada: {self.ptt_hotkey}")
-            return
-        self.ptt_listener.daemon = True
-        self.ptt_listener.start()
-        self._ptt_target = (kind, target)
-        logger.debug(f"[PTT] Listener iniciado: kind={kind} target={target}")
+        with self._ptt_lock:
+            self._stop_ptt_listener()
+            kind, target = self._build_ptt_target()
+            if kind == "keyboard":
+                self.ptt_listener = keyboard.Listener(
+                    on_press=self._on_ptt_press,
+                    on_release=self._on_ptt_release
+                )
+            elif kind == "mouse":
+                self.ptt_listener = mouse.Listener(
+                    on_click=self._on_ptt_click
+                )
+            else:
+                logger.warning(f"[PTT] Tecla no soportada: {self.ptt_hotkey}")
+                return
+            self.ptt_listener.daemon = True
+            self._ptt_target = (kind, target)
+            self.ptt_listener.start()
+            logger.debug(f"[PTT] Listener iniciado: kind={kind} target={target}")
 
     def _stop_ptt_listener(self):
-        if self.ptt_listener:
-            try:
-                self.ptt_listener.stop()
-            except Exception as e:
-                logger.debug(f"[PTT] Error stopping listener: {e}")
-            self.ptt_listener = None
-        self.ptt_pressed = False
-        logger.debug("[PTT] Listener detenido")
+        with self._ptt_lock:
+            if self.ptt_listener:
+                try:
+                    self.ptt_listener.stop()
+                except Exception as e:
+                    logger.debug(f"[PTT] Error stopping listener: {e}")
+                self.ptt_listener = None
+            self.ptt_pressed = False
+            logger.debug("[PTT] Listener detenido")
 
     def _ensure_ptt_listener(self):
-        if self.ptt_enabled and self.ptt_listener is None and not self._ptt_mapping:
-            logger.debug("[PTT] Reconciliando listener...")
-            self._start_ptt_listener()
+        with self._ptt_lock:
+            if self.ptt_enabled and self.ptt_listener is None and not self._ptt_mapping:
+                logger.debug("[PTT] Reconciliando listener...")
+                # Don't call _start_ptt_listener here (it would acquire lock again)
+                kind, target = self._build_ptt_target()
+                if kind == "keyboard":
+                    self.ptt_listener = keyboard.Listener(
+                        on_press=self._on_ptt_press,
+                        on_release=self._on_ptt_release
+                    )
+                elif kind == "mouse":
+                    self.ptt_listener = mouse.Listener(
+                        on_click=self._on_ptt_click
+                    )
+                else:
+                    return
+                self.ptt_listener.daemon = True
+                self._ptt_target = (kind, target)
+                self.ptt_listener.start()
+                logger.debug(f"[PTT] Listener reconciliado: kind={kind} target={target}")
 
     def _on_ptt_press(self, key):
         kind, target = getattr(self, '_ptt_target', (None, None))
