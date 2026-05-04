@@ -800,8 +800,6 @@ class VocalAIApp(ctk.CTk):
         logger.debug("[PTT] Listener detenido")
 
     def _on_ptt_press(self, key):
-        if self.ptt_enabled:
-            logger.debug(f"[PTT] Key: {key}  type={type(key).__name__}")
         kind, target = getattr(self, '_ptt_target', (None, None))
         if kind == "keyboard" and key == target:
             self.ptt_pressed = True
@@ -811,8 +809,6 @@ class VocalAIApp(ctk.CTk):
             self._actualizar_pipeline("listening")
 
     def _on_ptt_release(self, key):
-        if self.ptt_enabled:
-            logger.debug(f"[PTT] Release: {key}")
         kind, target = getattr(self, '_ptt_target', (None, None))
         if kind == "keyboard" and key == target:
             self.ptt_pressed = False
