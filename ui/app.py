@@ -807,7 +807,8 @@ class VocalAIApp(ctk.CTk):
                     logger.debug(f"[PTT] Error stopping listener: {e}")
                 self.ptt_listener = None
             self.ptt_pressed = False
-            logger.debug("[PTT] Listener detenido")
+            import traceback
+            logger.debug(f"[PTT] Listener detenido\n{traceback.format_stack()[-3].strip()}")
 
     def _ensure_ptt_listener(self):
         with self._ptt_lock:
