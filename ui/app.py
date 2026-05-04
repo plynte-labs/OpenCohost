@@ -801,19 +801,19 @@ class VocalAIApp(ctk.CTk):
 
     def _on_ptt_press(self, key):
         kind, target = getattr(self, '_ptt_target', (None, None))
-        if kind == "keyboard" and key == target:
+        if kind == "keyboard" and key == target and not self.ptt_pressed:
             self.ptt_pressed = True
             self._ptt_accept_logged = False
-            logger.info(f"[PTT] MATCH: {key} -> ptt_pressed=True")
+            logger.debug(f"[PTT] MATCH press: {key}")
             self._set_ptt_status("🔴 ESCUCHANDO...", "#44ff44")
             self._actualizar_pipeline("listening")
 
     def _on_ptt_release(self, key):
         kind, target = getattr(self, '_ptt_target', (None, None))
-        if kind == "keyboard" and key == target:
+        if kind == "keyboard" and key == target and self.ptt_pressed:
             self.ptt_pressed = False
             self._ptt_accept_logged = False
-            logger.info(f"[PTT] MATCH release: {key} -> ptt_pressed=False")
+            logger.debug(f"[PTT] MATCH release: {key}")
             self._set_ptt_status(
                 f"Manten presionado [{self.ptt_hotkey}] para hablar",
                 "#888888"
