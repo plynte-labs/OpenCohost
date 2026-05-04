@@ -41,6 +41,18 @@ class MotorVocalIA(threading.Thread):
 
         self.historial = deque(maxlen=HISTORY_MAX_TURNS * 2)
 
+        self._lock = threading.Lock()
+
+    @property
+    def is_speaking(self):
+        with self._lock:
+            return self._speaking
+
+    @property
+    def is_processing(self):
+        with self._lock:
+            return self._processing
+
     def run(self):
         self._log("Inicializando cliente ligero...")
         try:
@@ -272,14 +284,16 @@ class MotorVocalIA(threading.Thread):
             logger.exception("Error en inferencia LLM")
 
     def _hablar(self, texto_a_generar):
-        self._speaking = True
+        with self._lock:
+            self._speaking = True
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
         if self.motor_tts == "pesado":
             if not ruta_absoluta_ref or not os.path.exists(ruta_absoluta_ref):
                 self._log("ERROR: Archivo de referencia no existe o no ha sido cargado.", level="error")
-                self._speaking = False
+                with self._lock:
+                    self._speaking = False
                 return
 
         texto_limpio = re.sub(r'\*[^*]+\*', '', texto_a_generar)
@@ -312,7 +326,8 @@ class MotorVocalIA(threading.Thread):
 
         if not oraciones:
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
-            self._speaking = False
+            with self._lock:
+                self._speaking = False
             return
 
         self._log(f"Sintetizando {len(oraciones)} fragmento(s) con pipeline...")
@@ -427,7 +442,8 @@ class MotorVocalIA(threading.Thread):
         self._log(f"✅ Pipeline TTS completado: {chunks_played}/{len(oraciones)} fragmentos en {total_elapsed:.2f}s")
         if error_count > 0:
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")
-        self._speaking = False
+        with self._lock:
+            self._speaking = False
 
         hilo_productor.join(timeout=2.0)
 

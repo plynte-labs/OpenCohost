@@ -130,3 +130,19 @@ WS_MAX_RETRIES = 10
 RECORDING_SAMPLERATE = 24000
 RECORDING_DURATION = 8
 MIN_AUDIO_RMS = 0.005  # Umbral mínimo para detectar audio real vs silencio
+
+# ──────────────────────────────────────────────
+# Configuración Push-to-Talk (PTT)
+# ──────────────────────────────────────────────
+PTT_DEFAULT_HOTKEY = "F10"
+PTT_MIN_DURATION = 0.5   # Duración mínima de grabación en segundos
+PTT_MAX_DURATION = 30.0  # Duración máxima (truncar si se excede)
+PTT_RMS_THRESHOLD = 0.005  # Umbral RMS para detección de silencio
+
+# Teclas disponibles para PTT (ordenadas)
+PTT_HOTKEY_LIST = [
+    "F1", "F2", "F3", "F4", "F5", "F6",
+    "F7", "F8", "F9", "F10", "F11", "F12",
+    "Mouse4", "Mouse5",
+    "ScrollLock", "Insert", "Pause"
+]

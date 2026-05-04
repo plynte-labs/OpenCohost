@@ -12,16 +12,32 @@ import customtkinter as ctk
 import tkinter.messagebox as messagebox
 from tkinter import filedialog
 
+from pynput import keyboard, mouse
+
 from config.settings import (
     DEFAULT_MODEL, MODELS_CATALOG, BASE_DIR, TEMP_DIR,
     WS_URI, WS_TIMEOUT, WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_MAX_DELAY, WS_MAX_RETRIES,
-    RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS
+    RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
+    PTT_DEFAULT_HOTKEY, PTT_MIN_DURATION, PTT_MAX_DURATION,
+    PTT_RMS_THRESHOLD, PTT_HOTKEY_LIST
 )
 from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
 from core.llm_engine import MotorVocalIA
 from ui.profiles_window import ConfiguradorPerfiles
+
+# ── Mapeo de teclas PTT (display → pynput) ──
+_PTT_KB_MAP = {f"F{i}": getattr(keyboard.Key, f"f{i}") for i in range(1, 13)}
+_PTT_KB_MAP.update({
+    "ScrollLock": keyboard.Key.scroll_lock,
+    "Insert": keyboard.Key.insert,
+    "Pause": keyboard.Key.pause,
+})
+_PTT_MOUSE_MAP = {
+    "Mouse4": mouse.Button.x2,
+    "Mouse5": mouse.Button.x1,
+}
 
 logger = get_logger()
 
@@ -39,11 +55,17 @@ class VocalAIApp(ctk.CTk):
         self.ws_connected = False
         self.ws_should_reconnect = False
         self.dispositivo_seleccionado = None
+
+        self.ptt_enabled = False
+        self.ptt_hotkey = PTT_DEFAULT_HOTKEY
+        self.ptt_pressed = False
+        self.ptt_listener = None
+        self._ptt_target = None
         
         self.perfiles = cargar_perfiles()
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
 
         self.lista_dispositivos = self._obtener_dispositivos_entrada()
         self._build_ui()
@@ -183,14 +205,43 @@ class VocalAIApp(ctk.CTk):
         )
         self.btn_editar_perfiles.pack(side="left", padx=3)
 
+        # ── Frame PTT ──
+        frame_ptt = ctk.CTkFrame(self)
+        frame_ptt.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
+
+        ctk.CTkLabel(frame_ptt, text="🎙️ PTT:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(5, 3))
+
+        self.switch_ptt = ctk.CTkSwitch(
+            frame_ptt, text="PTT OFF",
+            command=self._al_toggle_ptt,
+            onvalue=True, offvalue=False
+        )
+        self.switch_ptt.pack(side="left", padx=3)
+
+        self.combo_hotkey = ctk.CTkOptionMenu(
+            frame_ptt,
+            values=PTT_HOTKEY_LIST,
+            command=self._al_seleccionar_hotkey,
+            width=100
+        )
+        self.combo_hotkey.set(PTT_DEFAULT_HOTKEY)
+        self.combo_hotkey.pack(side="left", padx=10)
+        self.combo_hotkey.configure(state="disabled")
+
+        self.lbl_ptt_status = ctk.CTkLabel(
+            frame_ptt, text="", font=ctk.CTkFont(size=12),
+            text_color="#888888"
+        )
+        self.lbl_ptt_status.pack(side="left", padx=10)
+
         self.consola = ctk.CTkTextbox(
             self, font=ctk.CTkFont(family="Consolas", size=13),
             state="disabled"
         )
-        self.consola.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.consola.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
 
         frame_bottom = ctk.CTkFrame(self)
-        frame_bottom.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
+        frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
         frame_bottom.grid_columnconfigure(0, weight=1)
 
         self.entry_chat = ctk.CTkEntry(
@@ -220,11 +271,16 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
             self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
             self.after(0, lambda: self.btn_download.configure(state="disabled"))
+            self.after(0, lambda: self.switch_ptt.configure(state="disabled"))
+            self.after(0, lambda: self.combo_hotkey.configure(state="disabled"))
         elif status == "idle":
             self.after(0, lambda: self.lbl_status.configure(text="✅ Listo"))
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.btn_download.configure(state="normal"))
+            self.after(0, lambda: self.switch_ptt.configure(state="normal"))
+            if self.ptt_enabled:
+                self.after(0, lambda: self.combo_hotkey.configure(state="normal"))
         elif status == "model_changed":
             model = self.motor_ia.current_model
             self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
@@ -456,6 +512,98 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia.command_queue.put(("clear_history", None))
         self._print_log("[Sistema] 🗑️ Memoria de conversación limpiada.")
 
+    # ──────────────────────────────────────────────
+    # PTT — Push-to-Talk (gate sobre WebSocket)
+    # ──────────────────────────────────────────────
+
+    def _al_toggle_ptt(self):
+        self.ptt_enabled = self.switch_ptt.get()
+        if self.ptt_enabled:
+            self.switch_ptt.configure(text="PTT ON")
+            self.combo_hotkey.configure(state="normal")
+            self._start_ptt_listener()
+            self.lbl_ptt_status.configure(text="[manten presionado para hablar]", text_color="#888888")
+            self._print_log(f"[PTT] Activado — hotkey: {self.ptt_hotkey}")
+        else:
+            self.switch_ptt.configure(text="PTT OFF")
+            self.combo_hotkey.configure(state="disabled")
+            self._stop_ptt_listener()
+            self.lbl_ptt_status.configure(text="")
+            self._print_log("[PTT] Desactivado — modo continuo WebSocket")
+
+    def _al_seleccionar_hotkey(self, value):
+        self.ptt_hotkey = value
+        if self.ptt_enabled:
+            self._start_ptt_listener()
+            self.lbl_ptt_status.configure(text="[manten presionado para hablar]", text_color="#888888")
+        self._print_log(f"[PTT] Hotkey: {value}")
+
+    def _build_ptt_target(self):
+        name = self.ptt_hotkey
+        if name in _PTT_KB_MAP:
+            return ("keyboard", _PTT_KB_MAP[name])
+        if name in _PTT_MOUSE_MAP:
+            return ("mouse", _PTT_MOUSE_MAP[name])
+        return (None, None)
+
+    def _start_ptt_listener(self):
+        self._stop_ptt_listener()
+        kind, target = self._build_ptt_target()
+        if kind == "keyboard":
+            self.ptt_listener = keyboard.Listener(
+                on_press=self._on_ptt_press,
+                on_release=self._on_ptt_release
+            )
+        elif kind == "mouse":
+            self.ptt_listener = mouse.Listener(
+                on_click=self._on_ptt_click
+            )
+        else:
+            return
+        self.ptt_listener.daemon = True
+        self.ptt_listener.start()
+        self._ptt_target = (kind, target)
+
+    def _stop_ptt_listener(self):
+        if self.ptt_listener:
+            try:
+                self.ptt_listener.stop()
+            except Exception:
+                pass
+            self.ptt_listener = None
+        self.ptt_pressed = False
+
+    def _on_ptt_press(self, key):
+        kind, target = getattr(self, '_ptt_target', (None, None))
+        if kind == "keyboard" and key == target:
+            self.ptt_pressed = True
+            self.after(0, lambda: self.lbl_ptt_status.configure(
+                text="🟢 ESCUCHANDO...", text_color="#44ff44"
+            ))
+
+    def _on_ptt_release(self, key):
+        kind, target = getattr(self, '_ptt_target', (None, None))
+        if kind == "keyboard" and key == target:
+            self.ptt_pressed = False
+            self.after(0, lambda: self.lbl_ptt_status.configure(
+                text="[manten presionado para hablar]", text_color="#888888"
+            ))
+
+    def _on_ptt_click(self, x, y, button, pressed):
+        kind, target = getattr(self, '_ptt_target', (None, None))
+        if kind == "mouse" and button == target:
+            self.ptt_pressed = pressed
+            if pressed:
+                self.after(0, lambda: self.lbl_ptt_status.configure(
+                    text="🟢 ESCUCHANDO...", text_color="#44ff44"
+                ))
+            else:
+                self.after(0, lambda: self.lbl_ptt_status.configure(
+                    text="[manten presionado para hablar]", text_color="#888888"
+                ))
+
+    # ─── Fin PTT ───
+
     def _toggle_websocket(self):
         if not self.ws_connected:
             self.ws_connected = True
@@ -533,7 +681,12 @@ class VocalAIApp(ctk.CTk):
                     if texto_transcrito:
                         logger.debug(f"WS recibido ({len(texto_transcrito)} chars): {texto_transcrito[:60]}...")
 
-                    if self.motor_ia._processing or self.motor_ia._speaking:
+                    if self.ptt_enabled and not self.ptt_pressed:
+                        if texto_transcrito:
+                            logger.debug("WS descartado (PTT ON, tecla no presionada)")
+                        continue
+
+                    if self.motor_ia.is_speaking or self.motor_ia.is_processing:
                         if texto_transcrito:
                             logger.debug(f"WS descartado (IA ocupada): {texto_transcrito[:40]}...")
                         continue
@@ -581,6 +734,8 @@ class VocalAIApp(ctk.CTk):
         logger.info("Cerrando aplicación...")
         self.ws_connected = False
         self.ws_should_reconnect = False
+
+        self._stop_ptt_listener()
         
         try:
             import ollama

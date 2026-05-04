@@ -7,14 +7,14 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 ### 1. Módulo de Control de Entrada (Control & PTT)
 **Propósito:** Sustituir la escucha continua por un sistema de captura bajo demanda para eliminar falsos positivos y reducir carga computacional.
 
-*   **RF1.1 - Gestión de Feature Toggle:** La UI debe incluir un interruptor (Switch) maestro para activar/desactivar la función de **Push-to-Talk (PTT)**. 🚧 *En implementación en rama `feature/rf1-ptt-hotkey`.*
+*   **RF1.1 - Gestión de Feature Toggle:** La UI debe incluir un interruptor (Switch) maestro para activar/desactivar la función de **Push-to-Talk (PTT)**. ✅ *Implementado en rama `feature/rf1-ptt-hotkey`.*
     *   **Implementación técnica:**
         *   Se agregará un `CTkSwitch` en `ui/app.py` (frame de control) vinculado a `self.ptt_enabled`.
         *   Cuando PTT está **OFF**, el sistema opera en modo WebSocket continuo (comportamiento actual).
         *   Cuando PTT está **ON**, el WebSocket se pausa y la captura de audio solo ocurre bajo demanda del hotkey.
         *   Estado persistido en memoria de la app (no requiere disco).
 
-*   **RF1.2 - Remapeo de Teclas:** Implementación de un selector de entrada en la interfaz para configurar el **Global Hotkey** (ej. F10, Mouse4) mediante la librería `pynput`. 🚧 *En implementación en rama `feature/rf1-ptt-hotkey`.*
+*   **RF1.2 - Remapeo de Teclas:** Implementación de un selector de entrada en la interfaz para configurar el **Global Hotkey** (ej. F10, Mouse4) mediante la librería `pynput`. ✅ *Implementado en rama `feature/rf1-ptt-hotkey`.*
     *   **Implementación técnica:**
         *   Dependencia: `pip install pynput`.
         *   Hilo daemon `pynput.keyboard.Listener` + `pynput.mouse.Listener` iniciado en `ui/app.py`.
