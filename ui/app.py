@@ -669,17 +669,23 @@ class VocalAIApp(ctk.CTk):
         logger.debug("[PTT] Listener detenido")
 
     def _on_ptt_press(self, key):
+        if self.ptt_enabled:
+            logger.debug(f"[PTT] Key: {key}  type={type(key).__name__}")
         kind, target = getattr(self, '_ptt_target', (None, None))
         if kind == "keyboard" and key == target:
             self.ptt_pressed = True
-            logger.debug(f"[PTT] TECLA PRESIONADA: {key} → ptt_pressed=True")
+            self._ptt_accept_logged = False
+            logger.info(f"[PTT] MATCH: {key} -> ptt_pressed=True")
             self._set_ptt_status("🔴 ESCUCHANDO...", "#44ff44")
 
     def _on_ptt_release(self, key):
+        if self.ptt_enabled:
+            logger.debug(f"[PTT] Release: {key}")
         kind, target = getattr(self, '_ptt_target', (None, None))
         if kind == "keyboard" and key == target:
             self.ptt_pressed = False
-            logger.debug(f"[PTT] TECLA SOLTADA: {key} → ptt_pressed=False")
+            self._ptt_accept_logged = False
+            logger.info(f"[PTT] MATCH release: {key} -> ptt_pressed=False")
             self._set_ptt_status(
                 f"Manten presionado [{self.ptt_hotkey}] para hablar",
                 "#888888"
@@ -689,6 +695,8 @@ class VocalAIApp(ctk.CTk):
         kind, target = getattr(self, '_ptt_target', (None, None))
         if kind == "mouse" and button == target:
             self.ptt_pressed = pressed
+            if not pressed:
+                self._ptt_accept_logged = False
             logger.debug(f"[PTT] MOUSE {'PRESS' if pressed else 'RELEASE'}: {button} → ptt_pressed={pressed}")
             if pressed:
                 self._set_ptt_status("🔴 ESCUCHANDO...", "#44ff44")
@@ -779,8 +787,13 @@ class VocalAIApp(ctk.CTk):
 
                     if self.ptt_enabled and not self.ptt_pressed:
                         if texto_transcrito:
-                            logger.debug("WS descartado (PTT ON, tecla no presionada)")
+                            self.log_queue.put(f"[PTT] Descartado (tecla no presionada)")
                         continue
+
+                    if self.ptt_enabled and self.ptt_pressed:
+                        if not getattr(self, '_ptt_accept_logged', False):
+                            self._ptt_accept_logged = True
+                            logger.debug("[PTT] Gate abierto: aceptando transcripciones")
 
                     if self.motor_ia.is_speaking or self.motor_ia.is_processing:
                         if texto_transcrito:
