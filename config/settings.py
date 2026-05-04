@@ -146,3 +146,5 @@ PTT_HOTKEY_LIST = [
     "Mouse4", "Mouse5",
     "ScrollLock", "Insert", "Pause"
 ]
+
+PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
