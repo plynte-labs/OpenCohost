@@ -52,8 +52,10 @@ def _cargar_ptt_config():
                 hotkey = data.get("hotkey", PTT_DEFAULT_HOTKEY)
                 if hotkey in PTT_HOTKEY_LIST:
                     return hotkey
-    except Exception:
-        pass
+                else:
+                    logger.warning(f"[PTT] Hotkey en archivo no valida: '{hotkey}', usando default")
+    except Exception as e:
+        logger.warning(f"[PTT] Error cargando config PTT: {e}")
     return PTT_DEFAULT_HOTKEY
 
 def _guardar_ptt_config(hotkey):
@@ -154,6 +156,7 @@ class VocalAIApp(ctk.CTk):
 
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
+        self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt_hotkey}")
         logger.info("Aplicación VoiceAI iniciada.")
 
     def _aplicar_perfil_actual(self):
@@ -436,12 +439,15 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.btn_download.configure(state="normal"))
             self.after(0, lambda: self.switch_ptt.configure(state="normal"))
             self.after(0, lambda: self.btn_mapear.configure(state="normal"))
+            self._ensure_ptt_listener()
         elif status == "speaking_start":
             self._actualizar_pipeline("speaking")
             self._log_accion("Kira comenzó a sintetizar respuesta")
         elif status == "speaking_end":
             estado = "listening" if self.ws_connected else "idle"
             self._actualizar_pipeline(estado)
+            self.after(0, lambda: self.switch_ptt.configure(state="normal"))
+            self._ensure_ptt_listener()
         elif status == "model_changed":
             model = self.motor_ia.current_model
             self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
@@ -798,6 +804,11 @@ class VocalAIApp(ctk.CTk):
             self.ptt_listener = None
         self.ptt_pressed = False
         logger.debug("[PTT] Listener detenido")
+
+    def _ensure_ptt_listener(self):
+        if self.ptt_enabled and self.ptt_listener is None and not self._ptt_mapping:
+            logger.debug("[PTT] Reconciliando listener...")
+            self._start_ptt_listener()
 
     def _on_ptt_press(self, key):
         kind, target = getattr(self, '_ptt_target', (None, None))
