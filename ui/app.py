@@ -706,10 +706,7 @@ class VocalAIApp(ctk.CTk):
         self.text_stream_admin_log.pack(fill="both", expand=True)
 
         for accion in _cargar_acciones():
-            self.consola_acciones.configure(state="normal")
-            self.consola_acciones.insert("end", accion + "\n")
-            self.consola_acciones.configure(state="disabled")
-        self.consola_acciones.see("end")
+            self._append_limited_textbox(self.consola_acciones, accion, max_lines=1000)
 
         if not _cargar_acciones():
             mensajes_demo = [
@@ -720,11 +717,7 @@ class VocalAIApp(ctk.CTk):
                 "📋 [Kira] Descripción actualizada en canal",
             ]
             for msg in mensajes_demo:
-                self.consola_acciones.configure(state="normal")
-                self.consola_acciones.insert("end", msg + "\n")
-                self.consola_acciones.configure(state="disabled")
-                _guardar_accion(msg.replace("🎮 [Sistema] ", "").replace("📺 [Kira] ", "").replace("🔇 [Kira] ", "").replace("🎵 [Sistema] ", "").replace("📋 [Kira] ", ""))
-            self.consola_acciones.see("end")
+                self._append_limited_textbox(self.consola_acciones, f"[demo] {msg}", max_lines=1000)
 
         self._frame_model = frame_model
         self._frame_profile = frame_profile
@@ -794,10 +787,14 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
         self.lbl_stream_metadata_state = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa")
         self.lbl_stream_metadata_state.grid(row=0, column=1, columnspan=3, padx=8, pady=6, sticky="w")
-        ctk.CTkButton(frame_meta, text="Leer", command=self._stream_admin_refresh_metadata, width=80, fg_color="#555555", hover_color="#666666").grid(row=0, column=4, padx=4, pady=6)
-        ctk.CTkButton(frame_meta, text="Sugerir", command=self._stream_admin_suggest_metadata, width=85, fg_color="#2f5f8f", hover_color="#3670aa").grid(row=0, column=5, padx=4, pady=6)
-        ctk.CTkButton(frame_meta, text="Aplicar", command=self._stream_admin_apply_metadata, width=85, fg_color="#2a7d3f").grid(row=0, column=6, padx=4, pady=6)
-        ctk.CTkButton(frame_meta, text="Rechazar", command=self._stream_admin_reject_pending, width=85, fg_color="#7d2a2a").grid(row=0, column=7, padx=4, pady=6)
+        self.btn_stream_read_metadata = ctk.CTkButton(frame_meta, text="Leer", command=self._stream_admin_refresh_metadata, width=80, fg_color="#555555", hover_color="#666666")
+        self.btn_stream_read_metadata.grid(row=0, column=4, padx=4, pady=6)
+        self.btn_stream_suggest_metadata = ctk.CTkButton(frame_meta, text="Sugerir", command=self._stream_admin_suggest_metadata, width=85, fg_color="#2f5f8f", hover_color="#3670aa")
+        self.btn_stream_suggest_metadata.grid(row=0, column=5, padx=4, pady=6)
+        self.btn_stream_apply_metadata = ctk.CTkButton(frame_meta, text="Aplicar", command=self._stream_admin_apply_metadata, width=85, fg_color="#2a7d3f")
+        self.btn_stream_apply_metadata.grid(row=0, column=6, padx=4, pady=6)
+        self.btn_stream_reject_pending = ctk.CTkButton(frame_meta, text="Rechazar", command=self._stream_admin_reject_pending, width=85, fg_color="#7d2a2a")
+        self.btn_stream_reject_pending.grid(row=0, column=7, padx=4, pady=6)
         ctk.CTkLabel(frame_meta, text="Título:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
         self.entry_stream_title = ctk.CTkEntry(frame_meta, placeholder_text="Título del stream")
         self.entry_stream_title.grid(row=1, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
@@ -832,8 +829,10 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(frame_mod, text="Razón:").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         self.entry_stream_mod_reason = ctk.CTkEntry(frame_mod, placeholder_text="spam/toxicidad/etc.")
         self.entry_stream_mod_reason.grid(row=1, column=3, columnspan=2, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._stream_admin_propose_high_risk("timeout"), width=135, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, padx=4, pady=4)
-        ctk.CTkButton(frame_mod, text="Proponer Ban", command=lambda: self._stream_admin_propose_high_risk("ban"), width=115, fg_color="#7d2a2a").grid(row=1, column=6, padx=4, pady=4)
+        self.btn_stream_propose_timeout = ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._stream_admin_propose_high_risk("timeout"), width=135, fg_color="#555555", hover_color="#666666")
+        self.btn_stream_propose_timeout.grid(row=1, column=5, padx=4, pady=4)
+        self.btn_stream_propose_ban = ctk.CTkButton(frame_mod, text="Proponer Ban", command=lambda: self._stream_admin_propose_high_risk("ban"), width=115, fg_color="#7d2a2a")
+        self.btn_stream_propose_ban.grid(row=1, column=6, padx=4, pady=4)
 
         ctk.CTkLabel(frame_mod, text="Usuarios recientes", font=ctk.CTkFont(size=12, weight="bold")).grid(row=2, column=0, padx=8, pady=(8, 4), sticky="w")
         ctk.CTkButton(frame_mod, text="Actualizar lista", command=self._stream_admin_refresh_user_list, width=115, fg_color="#555555").grid(row=2, column=1, padx=4, pady=(8, 4), sticky="w")
@@ -855,7 +854,8 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkButton(frame_chat, text="Simular Chat", command=self._stream_admin_simulate_chat, width=115, fg_color="#555555", hover_color="#666666").grid(row=0, column=4, padx=8, pady=6)
         self.entry_stream_chat_message = ctk.CTkEntry(frame_chat, placeholder_text="Mensaje breve de Kira para el chat")
         self.entry_stream_chat_message.grid(row=1, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
-        ctk.CTkButton(frame_chat, text="Enviar al chat", command=self._stream_admin_send_chat, width=120).grid(row=1, column=3, padx=8, pady=4)
+        self.btn_stream_send_chat = ctk.CTkButton(frame_chat, text="Enviar al chat", command=self._stream_admin_send_chat, width=120)
+        self.btn_stream_send_chat.grid(row=1, column=3, padx=8, pady=4)
         ctk.CTkButton(frame_chat, text="Forzar Kira", command=self._stream_admin_force_kira_comment, width=115, fg_color="#555555", hover_color="#666666").grid(row=1, column=4, padx=8, pady=4)
 
         frame_bottom_admin = ctk.CTkFrame(tab_stream_status, fg_color="#151d26", corner_radius=14)
@@ -957,7 +957,7 @@ class VocalAIApp(ctk.CTk):
 
         if estado == "listening":
             self.after(0, lambda: self.barra_rms.grid())
-            self._animar_rms()
+            self.after(0, self._animar_rms)
         else:
             self.after(0, lambda: self.barra_rms.grid_remove())
 
@@ -1012,10 +1012,7 @@ class VocalAIApp(ctk.CTk):
     def _log_accion(self, msg):
         ts = time.strftime("%H:%M:%S")
         entrada = f"[{ts}] {msg}"
-        self.consola_acciones.configure(state="normal")
-        self.consola_acciones.insert("end", entrada + "\n")
-        self.consola_acciones.see("end")
-        self.consola_acciones.configure(state="disabled")
+        self._append_limited_textbox(self.consola_acciones, entrada, max_lines=1000)
         _guardar_accion(msg)
 
     def _on_tab_change(self):
@@ -1148,9 +1145,12 @@ class VocalAIApp(ctk.CTk):
 
         def worker():
             page_token = None
+            failures = 0
+            max_failures = 6
             while self.stream_admin_chat_connected and self._stream_admin_chat_stop and not self._stream_admin_chat_stop.is_set():
                 try:
                     result = self.stream_admin.provider.list_live_chat_messages(live_chat_id, page_token=page_token)
+                    failures = 0
                     page_token = result.get("next_page_token") or page_token
                     for message in result.get("messages", []):
                         msg_id = message.get("id")
@@ -1163,9 +1163,14 @@ class VocalAIApp(ctk.CTk):
                         self.smart_agg.process_message(message)
                     delay = max(1.0, float(result.get("polling_interval_millis", 5000)) / 1000.0)
                 except Exception as e:
+                    failures += 1
                     logger.warning(f"Chat autenticado YouTube fallo: {e}")
                     self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado aviso: {e}")
-                    delay = 5.0
+                    if failures >= max_failures or "Token" in str(e) or "Permisos" in str(e):
+                        self._on_stream_admin_log("[StreamAdmin] Chat autenticado detenido por fallos consecutivos. Reconecta cuando el proveedor esté estable.")
+                        self.after(0, self._stream_admin_disconnect_api_chat)
+                        break
+                    delay = min(60.0, 5.0 * (2 ** (failures - 1)))
                 if self._stream_admin_chat_stop:
                     self._stream_admin_chat_stop.wait(delay)
 
@@ -1201,6 +1206,9 @@ class VocalAIApp(ctk.CTk):
         self._run_stream_admin_task("Sugerir metadata", lambda: self.stream_admin.suggest_metadata(context))
 
     def _stream_admin_apply_metadata(self):
+        if not self._stream_admin_can_write():
+            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
+            return
         payload = self._stream_admin_metadata_payload_from_ui()
         if self.stream_admin and self.stream_admin.pending_action:
             action = lambda: self.stream_admin.apply_pending_action(payload, force=True)
@@ -1212,6 +1220,9 @@ class VocalAIApp(ctk.CTk):
         self._run_stream_admin_task("Rechazar acción", self.stream_admin.reject_pending_action)
 
     def _stream_admin_send_chat(self):
+        if not self._stream_admin_can_write():
+            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
+            return
         message = self.entry_stream_chat_message.get().strip()
         if not message:
             messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
@@ -1381,7 +1392,7 @@ class VocalAIApp(ctk.CTk):
             reason_entry.grid(row=row, column=2, padx=4, pady=3, sticky="ew")
             action_frame = ctk.CTkFrame(self.frame_stream_users, fg_color="transparent")
             action_frame.grid(row=row, column=3, padx=4, pady=3, sticky="w")
-            button_state = "disabled" if item.get("is_owner") else "normal"
+            button_state = "disabled" if item.get("is_owner") or not self._stream_admin_can_write() else "normal"
             ctk.CTkButton(
                 action_frame,
                 text="Timeout",
@@ -1409,6 +1420,9 @@ class VocalAIApp(ctk.CTk):
     def _stream_admin_moderate_user_from_list(self, action, channel_id, user, reason_entry):
         if not self.stream_admin:
             return
+        if not self._stream_admin_can_write():
+            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
+            return
         if not channel_id:
             messagebox.showwarning("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
             return
@@ -1434,6 +1448,50 @@ class VocalAIApp(ctk.CTk):
         self.stream_admin.moderation.mode = mod_cfg["mode"]
         if log:
             self._on_stream_admin_log(f"[StreamAdmin] Runtime: moderación={mod_cfg['enabled']} modo={mod_cfg['mode']} chat={chat_cfg['allow_kira_chat_messages']}")
+        self._sync_stream_admin_controls(self.stream_admin.status())
+
+    def _stream_admin_can_write(self):
+        if not self.stream_admin:
+            return False
+        try:
+            status = self.stream_admin.status()
+        except Exception:
+            return False
+        return bool(status.get("write_enabled") and status.get("write_scope_active"))
+
+    def _sync_stream_admin_controls(self, state):
+        connected = bool(state.get("connected"))
+        write_ready = bool(state.get("write_enabled") and state.get("write_scope_active"))
+        pending = bool(state.get("pending_action"))
+
+        widgets = {
+            "btn_stream_disconnect": connected,
+            "btn_stream_read_metadata": connected,
+            "btn_stream_suggest_metadata": connected,
+            "btn_stream_connect_chat": connected,
+            "btn_stream_apply_metadata": write_ready,
+            "btn_stream_send_chat": write_ready,
+            "switch_stream_chat_enabled": write_ready,
+            "switch_stream_announce": write_ready,
+            "btn_stream_reject_pending": pending,
+        }
+        for name, enabled in widgets.items():
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.configure(state="normal" if enabled else "disabled")
+                except Exception:
+                    pass
+
+        if not write_ready and hasattr(self, "switch_stream_chat_enabled"):
+            try:
+                self.switch_stream_chat_enabled.deselect()
+                self.switch_stream_announce.deselect()
+            except Exception:
+                pass
+
+        if hasattr(self, "frame_stream_users"):
+            self._stream_admin_refresh_user_list()
 
     def _stream_admin_metadata_payload_from_ui(self):
         tags = [t.strip() for t in self.entry_stream_tags.get().split(",") if t.strip()]
@@ -1453,10 +1511,7 @@ class VocalAIApp(ctk.CTk):
     def _append_stream_admin_log(self, msg):
         if not hasattr(self, "text_stream_admin_log"):
             return
-        self.text_stream_admin_log.configure(state="normal")
-        self.text_stream_admin_log.insert("end", msg + "\n")
-        self.text_stream_admin_log.see("end")
-        self.text_stream_admin_log.configure(state="disabled")
+        self._append_limited_textbox(self.text_stream_admin_log, msg, max_lines=1000)
 
     def _on_stream_admin_state(self, state):
         def update():
@@ -1479,6 +1534,7 @@ class VocalAIApp(ctk.CTk):
                     text=f"YouTube {connected} ({name}) · modo {mode}. Controles completos en Stream Admin.",
                     text_color="#44cc66" if state.get("connected") else "#8fa3b8"
                 )
+            self._sync_stream_admin_controls(state)
         self.after(0, update)
 
     def _on_stream_admin_metadata(self, metadata):
@@ -1508,6 +1564,8 @@ class VocalAIApp(ctk.CTk):
                     self.lbl_moderation_status_pill.configure(text="Moderación: sin pendientes", fg_color="#1b2633")
                 if hasattr(self, "lbl_moderation_side_status"):
                     self.lbl_moderation_side_status.configure(text="Sin acciones pendientes. Detalles en Stream Admin.", text_color="#8fa3b8")
+                if self.stream_admin:
+                    self._sync_stream_admin_controls(self.stream_admin.status())
                 return
             payload = pending.get("payload", {})
             label = payload.get("title") or payload.get("action") or pending.get("type")
@@ -1525,6 +1583,8 @@ class VocalAIApp(ctk.CTk):
                     "tags": payload.get("tags", []),
                     "video_id": self._stream_admin_last_metadata.get("video_id", ""),
                 })
+            if self.stream_admin:
+                self._sync_stream_admin_controls(self.stream_admin.status())
         self.after(0, update)
 
     def _on_stream_admin_analytics(self, snapshot):
@@ -1689,10 +1749,7 @@ class VocalAIApp(ctk.CTk):
     def _print_youtube_chat(self, user, text):
         if not hasattr(self, "consola_youtube") or self.consola_youtube is None:
             return
-        self.consola_youtube.configure(state="normal")
-        self.consola_youtube.insert("end", f"[{user}] {text}\n")
-        self.consola_youtube.see("end")
-        self.consola_youtube.configure(state="disabled")
+        self._append_limited_textbox(self.consola_youtube, f"[{user}] {text}", max_lines=1500)
 
     def _on_smart_source_error(self, error):
         self.log_queue.put(f"[SmartAggregator] Aviso YouTube: reconectando por fallo transitorio ({error})")
@@ -1995,10 +2052,20 @@ class VocalAIApp(ctk.CTk):
             self._print_log(f"[Grabación] ⏹️ Audio capturado (RMS: {rms:.4f})")
             logger.info(f"Grabación guardada: {filepath}, RMS={rms:.4f}")
 
-            usar_audio = messagebox.askyesno(
-                "Grabación Finalizada",
-                "Audio capturado correctamente.\n\n¿Usar como voz de referencia para la IA?"
-            )
+            response = {"use": False}
+            response_ready = threading.Event()
+
+            def ask_use_audio():
+                response["use"] = messagebox.askyesno(
+                    "Grabación Finalizada",
+                    "Audio capturado correctamente.\n\n¿Usar como voz de referencia para la IA?"
+                )
+                response_ready.set()
+
+            self.after(0, ask_use_audio)
+            if not response_ready.wait(timeout=120):
+                self._print_log("[Grabación] Confirmación agotó tiempo; audio descartado por seguridad.")
+            usar_audio = response["use"]
 
             if usar_audio:
                 self._print_log("[Sistema] Perfil de voz enviado a la IA.")
@@ -2404,10 +2471,20 @@ class VocalAIApp(ctk.CTk):
             return
         if self.consola is None:
             return
-        self.consola.configure(state="normal")
-        self.consola.insert("end", msg + "\n")
-        self.consola.see("end")
-        self.consola.configure(state="disabled")
+        self._append_limited_textbox(self.consola, msg, max_lines=1500)
+
+    def _append_limited_textbox(self, widget, line, max_lines=1000):
+        widget.configure(state="normal")
+        widget.insert("end", str(line) + "\n")
+        try:
+            total_lines = int(widget.index("end-1c").split(".")[0])
+            excess = total_lines - int(max_lines)
+            if excess > 0:
+                widget.delete("1.0", f"{excess + 1}.0")
+        except Exception:
+            pass
+        widget.see("end")
+        widget.configure(state="disabled")
 
     def _process_logs(self):
         while True:

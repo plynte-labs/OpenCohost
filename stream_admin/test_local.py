@@ -61,6 +61,13 @@ def run_tests():
         print("[OK] RF4.1 metadata suggestion requires approval")
 
         try:
+            manager.apply_pending_action(force=True)
+            raise AssertionError("Read-only mode should block metadata writes")
+        except Exception as exc:
+            assert "solo lectura" in str(exc)
+        print("[OK] RF4.1 read-only blocks writes")
+
+        try:
             manager.send_chat_message("hola chat")
             raise AssertionError("Chat message should be disabled")
         except Exception as exc:

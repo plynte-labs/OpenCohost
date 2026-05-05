@@ -2,6 +2,8 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 
 ---
 
+**[WorkerSeniorAI] Hardening seguridad/privacidad parcial — 2026-05-05:** En rama `feature/security-privacy-hardening` se aplicaron correcciones defensivas sin migrar aun OAuth/Client: `read_only` bloquea escritura en backend, la UI deshabilita controles de escritura cuando no hay modo/scope write, logs visuales tienen limite de lineas, redaccion de secretos fue reforzada, `VOICEAI_DEBUG=1` controla debug, RF3 ejecuta cleanup al iniciar/cerrar, chat autenticado corta con backoff tras fallos y los eventos demo de Kira Acciones ya no se persisten como auditoria real. Pendiente importante: migrar Tokens OAuth y OAuth Client fuera de JSON plano a Credential Manager/DPAPI/keyring.
+
 ## 📄 Especificación de Requerimientos del Sistema (SRS)
 
 ### 1. Módulo de Control de Entrada (Control & PTT)

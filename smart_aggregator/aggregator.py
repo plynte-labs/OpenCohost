@@ -30,6 +30,10 @@ class Aggregator:
             jl_path = os.path.join(base_dir, jl_path)
         
         self.history = SessionHistory(db_path, jl_path, retention)
+        try:
+            self.history.cleanup_old_sessions()
+        except Exception:
+            pass
         self.msg_filter = MessageFilter(self.config.get("filter", {}))
         self.thermometer = VibeThermometer(
             self.config.get("vibe", {}),
@@ -105,10 +109,18 @@ class Aggregator:
         if self._session_id is not None:
             self.history.end_session(self._session_id)
             self._session_id = None
+            try:
+                self.history.cleanup_old_sessions()
+            except Exception:
+                pass
     
     def disconnect(self):
         self.source.disconnect()
         self.end_session()
+        try:
+            self.history.cleanup_old_sessions()
+        except Exception:
+            pass
     
     def process_message(self, message: dict):
         filtered = self.msg_filter.filter(message)

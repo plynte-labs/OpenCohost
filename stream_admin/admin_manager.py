@@ -90,9 +90,14 @@ class AdminManager:
 
     def status(self) -> dict:
         status = self.provider.status()
+        token = self.oauth_store.load(self.active_provider_name) or {}
+        scopes = set(token.get("scopes", [])) if isinstance(token, dict) else set()
+        write_scope_active = "https://www.googleapis.com/auth/youtube.force-ssl" in scopes
         status.update({
             "active_provider": self.active_provider_name,
             "mode": self.config.get("provider", {}).get("mode", "read_only"),
+            "write_scope_active": write_scope_active,
+            "write_enabled": self._write_enabled(),
             "metadata_status": self.metadata.status,
             "pending_action": self.pending_action,
             "twitch_placeholder": True,
@@ -108,6 +113,7 @@ class AdminManager:
         if provider_name == "twitch":
             raise ProviderUnsupportedError("Twitch es placeholder en el MVP")
         status = self.provider.authenticate(request_write_scopes=request_write_scopes)
+        self.config.setdefault("provider", {})["mode"] = "write" if request_write_scopes else "read_only"
         self._emit_state()
         self._log(f"{provider_name} conectado. Escritura={'si' if request_write_scopes else 'no'}")
         return status
@@ -156,6 +162,7 @@ class AdminManager:
         return self.pending_action
 
     def apply_metadata(self, payload: dict) -> dict:
+        self._require_write_enabled("aplicar metadata")
         result = self.provider.update_metadata(payload).to_dict()
         self.metadata = StreamMetadata(**{k: v for k, v in result.items() if k in StreamMetadata.__dataclass_fields__})
         self._log(f"Metadata aplicada manualmente: {payload.get('title', '')}")
@@ -171,9 +178,11 @@ class AdminManager:
             raise ProviderError("La accion requiere confirmacion explicita")
         payload = edited_payload or action.get("payload", {})
         if action.get("type") == "metadata_update":
+            self._require_write_enabled("aplicar metadata")
             result = self.provider.update_metadata(payload).to_dict()
             self._log(f"Metadata aplicada: {payload.get('title', '')}")
         elif action.get("type") == "moderation":
+            self._require_write_enabled("aplicar moderacion")
             result = self._apply_moderation_payload(payload)
         else:
             raise ProviderError(f"Tipo de accion no soportado: {action.get('type')}")
@@ -191,6 +200,7 @@ class AdminManager:
     def send_chat_message(self, message: str) -> dict:
         if not self.config.get("chat", {}).get("allow_kira_chat_messages", False):
             raise ProviderError("Mensajes de Kira al chat desactivados en configuracion")
+        self._require_write_enabled("enviar mensajes al chat")
         result = self.provider.post_chat_message(message)
         self._log(f"Kira envio mensaje al chat: {message}")
         return result
@@ -210,6 +220,7 @@ class AdminManager:
         return self.pending_action
 
     def apply_high_risk_moderation(self, action: str, user_channel_id: str, reason: str, duration_seconds: int = 300) -> dict:
+        self._require_write_enabled("aplicar moderacion")
         payload = self.moderation.high_risk_action(action, user_channel_id, reason, duration_seconds)
         result = self._apply_moderation_payload(payload)
         self._log(f"Moderacion confirmada aplicada: {action} {user_channel_id}")
@@ -262,6 +273,7 @@ class AdminManager:
         self._emit_pending()
 
     def _apply_moderation_payload(self, payload: dict) -> dict:
+        self._require_write_enabled("aplicar moderacion")
         action = payload.get("action")
         if action == "slow_mode":
             result = self.provider.set_slow_mode(
@@ -360,6 +372,15 @@ class AdminManager:
             return False
         value = value.strip()
         return bool(value) and not (value.startswith("${") and value.endswith("}"))
+
+    def _write_enabled(self) -> bool:
+        return self.config.get("provider", {}).get("mode", "read_only") == "write"
+
+    def _require_write_enabled(self, action: str):
+        if not self._write_enabled():
+            raise ProviderAuthError(
+                f"Modo solo lectura activo: no se puede {action}. Reconecta escritura y habilita modo write."
+            )
 
     def _emit_state(self):
         if self.on_state:

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 from config.settings import LOG_DIR
@@ -11,6 +12,25 @@ log_formatter = logging.Formatter(
     datefmt="%H:%M:%S"
 )
 
+
+class SensitiveDataFilter(logging.Filter):
+    _patterns = [
+        re.compile(r"ya29\.[A-Za-z0-9._\-]+"),
+        re.compile(r"1//[A-Za-z0-9._\-]+"),
+        re.compile(r"GOCSPX-[A-Za-z0-9_\-]+"),
+        re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
+        re.compile(r"(?i)(access_token|refresh_token|client_secret|id_token)\s*[:=]\s*['\"]?[^'\",}\s]+"),
+        re.compile(r"(?i)(liveChatId|live_chat_id|channelId|author_channel_id)\s*[:=]\s*['\"]?[^'\",}\s]+"),
+    ]
+
+    def filter(self, record):
+        message = record.getMessage()
+        for pattern in self._patterns:
+            message = pattern.sub(lambda m: f"{m.group(1)}=<redacted>" if m.lastindex else "<redacted>", message)
+        record.msg = message
+        record.args = ()
+        return True
+
 file_handler = logging.FileHandler(
     os.path.join(LOG_DIR, f"voiceai_{time.strftime('%Y%m%d_%H%M%S')}.log"),
     encoding="utf-8"
@@ -21,7 +41,8 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 
 logger = logging.getLogger("VoiceAI")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG if os.getenv("VOICEAI_DEBUG") == "1" else logging.INFO)
+logger.addFilter(SensitiveDataFilter())
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from typing import Optional
 
@@ -62,6 +63,14 @@ def redact_token_text(value: str) -> str:
     if not value:
         return value
     redacted = str(value)
-    for marker in ("access_token", "refresh_token", "client_secret"):
-        redacted = redacted.replace(marker, f"{marker}_redacted")
+    patterns = [
+        r"ya29\.[A-Za-z0-9._\-]+",
+        r"1//[A-Za-z0-9._\-]+",
+        r"GOCSPX-[A-Za-z0-9_\-]+",
+        r"Bearer\s+[A-Za-z0-9._\-]+",
+        r"(?i)(access_token|refresh_token|client_secret|id_token)\s*[:=]\s*['\"]?[^'\",}\s]+",
+        r"(?i)(liveChatId|live_chat_id|channelId|author_channel_id)\s*[:=]\s*['\"]?[^'\",}\s]+",
+    ]
+    for pattern in patterns:
+        redacted = re.sub(pattern, lambda m: f"{m.group(1)}=<redacted>" if m.lastindex else "<redacted>", redacted)
     return redacted
