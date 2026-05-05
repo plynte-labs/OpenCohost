@@ -25,6 +25,7 @@ VoiceAI/
 ├── core/
 │   ├── llm_engine.py    # Motor IA: Ollama, memoria, pipeline TTS
 │   └── profiles.py      # Carga/guardado de perfiles de personalidad
+├── smart_aggregator/    # RF3: agregador inteligente de chat YouTube Live
 ├── ui/
 │   ├── app.py           # Interfaz principal (grabación, chat, WebSocket)
 │   └── profiles_window.py  # Editor visual de perfiles
@@ -56,17 +57,24 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 -   **Catálogo de modelos**: descarga y cambia entre 11 LLMs desde la interfaz
 -   **Estados de UI**: indicadores visuales (procesando / listo), bloqueo de botones
 -   **Logging estructurado**: archivos rotativos en `logs/`
+-   **Smart Chat Aggregator RF3**: conexión a YouTube Live Chat, filtros, anti-spam, vibe, triggers y pestaña `YT Chat`
+-   **Stream Admin RF4 MVP**: pestaña `Stream Admin`, YouTube OAuth/API preparado, Twitch placeholder, metadata, moderación, analíticas y mensajes al chat bajo permisos
 
 ## Roadmap (docs/changes.md)
 
+### Implementados
+
+-   **Push-to-Talk** con hotkey global (pynput) ✅
+-   **Indicadores de pipeline**: Escuchando / Procesando LLM / Sintetizando Voz ✅
+-   **Modo compacto** para minimizar espacio en monitor ✅
+-   **Panel de acciones Kira** con persistencia y mensajes simulados ✅
+-   **Smart Chat Aggregator** para YouTube Live Chat: filtrado, vibe, triggers, historial y UI separada ✅
+-   **RF4 Stream Admin MVP base**: módulo `stream_admin/`, UI, config YAML, OAuth local seguro MVP, YouTube provider y Twitch placeholder ✅
+
 ### Por Implementar
 
--   **Push-to-Talk** con hotkey global (pynput)
 -   **Silero VAD** como filtro de audio previo a Whisper
--   **Smart Chat Aggregator**: filtrado de mensajes cortos, análisis de sentimiento, triggers por actividad
--   **Indicadores de pipeline**: Escuchando / Procesando LLM / Sintetizando Voz
--   **Integración Twitch/YouTube API**: modificar metadata del stream
--   **Moderación automática**: Slow Mode / Emote Only basado en sentimiento
+-   **RF4 validación OAuth real**: configurar credenciales Google Cloud y probar lectura/escritura end-to-end con un canal real
 -   **RAG / Memoria a largo plazo**: ChromaDB para recordar streams anteriores
 -   **Avatar visual**: fuente de navegador OBS con boca animada
 -   **Entrenamiento de voz local**: finetuning de modelos VITS
@@ -80,7 +88,10 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 ## Dependencias
 
 **Cliente** (flux_env):
-`customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`
+`customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`, `pytchat`
+
+**RF4 OAuth YouTube**:
+OAuth/API oficial de YouTube usa `requests` y stdlib en el MVP. Las credenciales pueden guardarse desde la pestaña `Stream Admin` (`Client ID`, `Secret`, `Guardar OAuth`) y quedan en `data/stream_admin/oauth_client.json`, ignorado por git. También se soportan `YOUTUBE_OAUTH_CLIENT_ID` y `YOUTUBE_OAUTH_CLIENT_SECRET` por variables de entorno.
 
 **Servidor TTS** (xtts_env):
 `flask`, `torch`, `torchaudio`, `soundfile`, `qwen-tts`, `edge-tts`

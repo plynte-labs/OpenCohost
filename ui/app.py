@@ -4,6 +4,7 @@ import threading
 import json
 import asyncio
 import time
+import urllib.parse
 import numpy as np
 import websockets
 import soundfile as sf
@@ -25,6 +26,8 @@ from config.settings import (
 from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
 from core.llm_engine import MotorVocalIA
+from smart_aggregator import Aggregator
+from stream_admin import AdminManager
 from ui.profiles_window import ConfiguradorPerfiles
 
 # ── Mapeo de teclas PTT (display → pynput) ──
@@ -143,6 +146,22 @@ class VocalAIApp(ctk.CTk):
         self._ptt_target = None
         self._ptt_mapping = False
         self._ptt_mapping_listeners = []
+
+        self._ptt_buffer = []
+        self._ptt_buffer_lock = threading.Lock()
+        self.smart_agg = None
+        self.smart_agg_connected = False
+        self.smart_agg_connecting = False
+        self._smart_agg_manual_disconnect = False
+        self.stream_admin = None
+        self._stream_admin_last_metadata = {}
+        self.stream_admin_chat_connected = False
+        self._stream_admin_chat_stop = None
+        self._stream_admin_chat_thread = None
+        self._stream_admin_seen_chat_ids = set()
+        self._stream_admin_sim_round = 0
+        self._stream_admin_chat_users = {}
+        self._smart_agg_default_activity = None
         
         self.perfiles = cargar_perfiles()
 
@@ -154,6 +173,8 @@ class VocalAIApp(ctk.CTk):
 
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
         self.motor_ia.start()
+        self._init_smart_aggregator()
+        self._init_stream_admin()
 
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
@@ -169,13 +190,14 @@ class VocalAIApp(ctk.CTk):
         frame_top = ctk.CTkFrame(self)
         frame_top.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
 
+        # ── Grupo: Audio Input ──
         self.combo_dispositivos = ctk.CTkOptionMenu(
             frame_top,
             values=self.lista_dispositivos,
             command=self._al_seleccionar_dispositivo,
             width=250
         )
-        self.combo_dispositivos.pack(side="left", padx=5)
+        self.combo_dispositivos.pack(side="left", padx=(0, 5))
         if self.lista_dispositivos:
             self.combo_dispositivos.set(self.lista_dispositivos[0])
             self.dispositivo_seleccionado = int(self.lista_dispositivos[0].split(":")[0])
@@ -200,21 +222,48 @@ class VocalAIApp(ctk.CTk):
         )
         self.btn_ws.pack(side="left", padx=5)
 
+        # Separador
+        ctk.CTkLabel(frame_top, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
+
+        # ── Grupo: Acciones ──
         self.btn_clear = ctk.CTkButton(
             frame_top, text="🗑️ Limpiar Memoria", command=self._limpiar_historial,
             width=130, fg_color="#555555", hover_color="#777777"
         )
         self.btn_clear.pack(side="left", padx=5)
-        
+
+        self.switch_modo_ligero = ctk.CTkSwitch(
+            frame_top, text="🎛️ TTS: Ligero",
+            onvalue="ligero", offvalue="pesado",
+            command=self._al_cambiar_motor_tts
+        )
+        self.switch_modo_ligero.pack(side="left", padx=5)
+        self.switch_modo_ligero.select()
+
+        # Separador
+        ctk.CTkLabel(frame_top, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
+
+        # ── Grupo: Vista ──
         self.switch_logs = ctk.CTkSwitch(
             frame_top, text="Mostrar Logs",
             onvalue=True, offvalue=False
         )
-        self.switch_logs.pack(side="left", padx=10)
+        self.switch_logs.pack(side="left", padx=5)
         self.switch_logs.select()
 
+        self.switch_compacto = ctk.CTkSwitch(
+            frame_top, text="📺 Compacto",
+            command=self._toggle_modo_compacto,
+            onvalue=True, offvalue=False
+        )
+        self.switch_compacto.pack(side="left", padx=5)
+
+        # Espaciador
+        ctk.CTkLabel(frame_top, text="", width=50).pack(side="left")
+
+        # ── Status (derecha) ──
         self.lbl_status = ctk.CTkLabel(frame_top, text="🟢 En Espera", font=ctk.CTkFont(size=13, weight="bold"))
-        self.lbl_status.pack(side="right", padx=10)
+        self.lbl_status.pack(side="right", padx=(10, 0))
 
         # ── Barra de audio RMS ──
         self.barra_rms = ctk.CTkProgressBar(frame_top, width=120, height=8)
@@ -260,14 +309,6 @@ class VocalAIApp(ctk.CTk):
         self.lbl_modelo_info.pack(side="left", padx=10)
         self._actualizar_info_modelo(DEFAULT_MODEL)
 
-        self.switch_modo_ligero = ctk.CTkSwitch(
-            frame_model, text="🎮 Modo Juego Pesado",
-            onvalue="ligero", offvalue="pesado",
-            command=self._al_cambiar_motor_tts
-        )
-        self.switch_modo_ligero.pack(side="right", padx=10)
-        self.switch_modo_ligero.select()
-
         self.progress_download = ctk.CTkProgressBar(frame_model, width=150)
         self.progress_download.pack(side="right", padx=10)
         self.progress_download.set(0)
@@ -277,7 +318,7 @@ class VocalAIApp(ctk.CTk):
         frame_profile.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
 
         ctk.CTkLabel(frame_profile, text="🎭 Perfil/Prompt:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(5, 3))
-        
+
         self.combo_perfiles = ctk.CTkOptionMenu(
             frame_profile,
             values=list(self.perfiles.keys()),
@@ -328,6 +369,32 @@ class VocalAIApp(ctk.CTk):
         )
         self.lbl_ptt_status.pack(side="left", padx=10)
 
+        ctk.CTkLabel(frame_ptt, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
+        ctk.CTkLabel(frame_ptt, text="YouTube:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 3))
+
+        self.entry_youtube_video = ctk.CTkEntry(
+            frame_ptt,
+            placeholder_text="URL o video_id del live",
+            width=220
+        )
+        self.entry_youtube_video.pack(side="left", padx=3)
+        self.entry_youtube_video.bind("<Return>", lambda e: self._toggle_smart_aggregator())
+
+        self.btn_youtube_chat = ctk.CTkButton(
+            frame_ptt,
+            text="Conectar Chat",
+            command=self._toggle_smart_aggregator,
+            width=120,
+            fg_color=["#3B8ED0", "#1F6AA5"]
+        )
+        self.btn_youtube_chat.pack(side="left", padx=3)
+
+        ctk.CTkLabel(frame_ptt, text="Max/u:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(8, 3))
+        self.entry_youtube_user_limit = ctk.CTkEntry(frame_ptt, width=45)
+        self.entry_youtube_user_limit.insert(0, "10")
+        self.entry_youtube_user_limit.pack(side="left", padx=3)
+        self.entry_youtube_user_limit.bind("<Return>", lambda e: self._apply_smart_spam_limit())
+
         self.consola = None  # will be the Log tab textbox
 
         self.tabview = ctk.CTkTabview(
@@ -339,6 +406,8 @@ class VocalAIApp(ctk.CTk):
 
         tab_log = self.tabview.add("📋 Log General")
         tab_acciones = self.tabview.add("📝 Kira Acciones")
+        tab_youtube = self.tabview.add("💬 YT Chat")
+        tab_stream_admin = self.tabview.add("🛠 Stream Admin")
 
         self.consola = ctk.CTkTextbox(
             tab_log, font=ctk.CTkFont(family="Consolas", size=13),
@@ -352,11 +421,34 @@ class VocalAIApp(ctk.CTk):
         )
         self.consola_acciones.pack(fill="both", expand=True)
 
+        self.consola_youtube = ctk.CTkTextbox(
+            tab_youtube, font=ctk.CTkFont(family="Consolas", size=13),
+            state="disabled"
+        )
+        self.consola_youtube.pack(fill="both", expand=True)
+
+        self._build_stream_admin_tab(tab_stream_admin)
+
         for accion in _cargar_acciones():
             self.consola_acciones.configure(state="normal")
             self.consola_acciones.insert("end", accion + "\n")
             self.consola_acciones.configure(state="disabled")
         self.consola_acciones.see("end")
+
+        if not _cargar_acciones():
+            mensajes_demo = [
+                "🎮 [Sistema] Modo de juego detectado: Streaming",
+                "📺 [Kira] Título del stream actualizado a 'Jugando con la IA'",
+                "🔇 [Kira] Slow Mode activado (5 min)",
+                "🎵 [Sistema] Audio de fondo: OFF",
+                "📋 [Kira] Descripción actualizada en canal",
+            ]
+            for msg in mensajes_demo:
+                self.consola_acciones.configure(state="normal")
+                self.consola_acciones.insert("end", msg + "\n")
+                self.consola_acciones.configure(state="disabled")
+                _guardar_accion(msg.replace("🎮 [Sistema] ", "").replace("📺 [Kira] ", "").replace("🔇 [Kira] ", "").replace("🎵 [Sistema] ", "").replace("📋 [Kira] ", ""))
+            self.consola_acciones.see("end")
 
         frame_bottom = ctk.CTkFrame(self)
         frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
@@ -375,6 +467,131 @@ class VocalAIApp(ctk.CTk):
             width=100, state="disabled"
         )
         self.btn_enviar.grid(row=0, column=1, padx=(0, 5), pady=5)
+
+        self._frame_model = frame_model
+        self._frame_profile = frame_profile
+        self._frame_bottom = frame_bottom
+
+    def _build_stream_admin_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        scroll_parent = ctk.CTkScrollableFrame(parent)
+        scroll_parent.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        scroll_parent.grid_columnconfigure(0, weight=1)
+        parent = scroll_parent
+
+        frame_auth = ctk.CTkFrame(parent)
+        frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        frame_auth.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(frame_auth, text="OAuth / Proveedor", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.lbl_stream_admin_status = ctk.CTkLabel(frame_auth, text="RF4 iniciando...", text_color="#aaaaaa")
+        self.lbl_stream_admin_status.grid(row=0, column=1, padx=8, pady=6, sticky="w")
+
+        self.btn_stream_youtube_read = ctk.CTkButton(frame_auth, text="Conectar YouTube Lectura", command=lambda: self._stream_admin_connect(False), width=170)
+        self.btn_stream_youtube_read.grid(row=0, column=2, padx=4, pady=6)
+        self.btn_stream_youtube_write = ctk.CTkButton(frame_auth, text="Reconectar Escritura", command=lambda: self._stream_admin_connect(True), width=150, fg_color="#7551a6")
+        self.btn_stream_youtube_write.grid(row=0, column=3, padx=4, pady=6)
+        self.btn_stream_disconnect = ctk.CTkButton(frame_auth, text="Desconectar", command=self._stream_admin_disconnect, width=105, fg_color="#555555")
+        self.btn_stream_disconnect.grid(row=0, column=4, padx=4, pady=6)
+        self.btn_stream_twitch = ctk.CTkButton(frame_auth, text="Twitch Próximamente", state="disabled", width=145, fg_color="#444444")
+        self.btn_stream_twitch.grid(row=0, column=5, padx=4, pady=6)
+
+        ctk.CTkLabel(frame_auth, text="Client ID:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        self.entry_stream_client_id = ctk.CTkEntry(frame_auth, placeholder_text="tu_client_id.apps.googleusercontent.com")
+        self.entry_stream_client_id.grid(row=1, column=1, columnspan=2, padx=4, pady=4, sticky="ew")
+        ctk.CTkLabel(frame_auth, text="Secret:").grid(row=1, column=3, padx=8, pady=4, sticky="e")
+        self.entry_stream_client_secret = ctk.CTkEntry(frame_auth, placeholder_text="OAuth client secret", show="*")
+        self.entry_stream_client_secret.grid(row=1, column=4, padx=4, pady=4, sticky="ew")
+        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._stream_admin_save_oauth_client, width=125).grid(row=1, column=5, padx=4, pady=4)
+
+        frame_meta = ctk.CTkFrame(parent)
+        frame_meta.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        frame_meta.grid_columnconfigure(1, weight=1)
+        frame_meta.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.lbl_stream_metadata_state = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa")
+        self.lbl_stream_metadata_state.grid(row=0, column=1, columnspan=3, padx=8, pady=6, sticky="w")
+        ctk.CTkButton(frame_meta, text="Leer", command=self._stream_admin_refresh_metadata, width=80).grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(frame_meta, text="Sugerir", command=self._stream_admin_suggest_metadata, width=85).grid(row=0, column=5, padx=4, pady=6)
+        ctk.CTkButton(frame_meta, text="Aplicar", command=self._stream_admin_apply_metadata, width=85, fg_color="#2a7d3f").grid(row=0, column=6, padx=4, pady=6)
+        ctk.CTkButton(frame_meta, text="Rechazar", command=self._stream_admin_reject_pending, width=85, fg_color="#7d2a2a").grid(row=0, column=7, padx=4, pady=6)
+        self.btn_stream_connect_chat = ctk.CTkButton(frame_meta, text="Conectar Chat", command=self._stream_admin_connect_current_chat, width=115, fg_color="#1F6AA5")
+        self.btn_stream_connect_chat.grid(row=0, column=8, padx=4, pady=6)
+
+        ctk.CTkLabel(frame_meta, text="Título:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        self.entry_stream_title = ctk.CTkEntry(frame_meta, placeholder_text="Título del stream")
+        self.entry_stream_title.grid(row=1, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
+
+        ctk.CTkLabel(frame_meta, text="Categoría:").grid(row=2, column=0, padx=8, pady=4, sticky="e")
+        self.entry_stream_category = ctk.CTkEntry(frame_meta, placeholder_text="ID categoría YouTube, ej. 20")
+        self.entry_stream_category.grid(row=2, column=1, padx=8, pady=4, sticky="ew")
+        ctk.CTkLabel(frame_meta, text="Tags:").grid(row=2, column=2, padx=8, pady=4, sticky="e")
+        self.entry_stream_tags = ctk.CTkEntry(frame_meta, placeholder_text="tag1, tag2, tag3")
+        self.entry_stream_tags.grid(row=2, column=3, columnspan=5, padx=8, pady=4, sticky="ew")
+
+        ctk.CTkLabel(frame_meta, text="Descripción:").grid(row=3, column=0, padx=8, pady=4, sticky="ne")
+        self.text_stream_description = ctk.CTkTextbox(frame_meta, height=70)
+        self.text_stream_description.grid(row=3, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
+
+        frame_mod = ctk.CTkFrame(parent)
+        frame_mod.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        frame_mod.grid_columnconfigure(7, weight=1)
+
+        ctk.CTkLabel(frame_mod, text="Moderación", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.switch_stream_mod_enabled = ctk.CTkSwitch(frame_mod, text="AutoMod", command=self._stream_admin_apply_runtime_settings)
+        self.switch_stream_mod_enabled.grid(row=0, column=1, padx=4, pady=6)
+        self.combo_stream_mod_mode = ctk.CTkOptionMenu(frame_mod, values=["alerts_only", "confirm_required", "automatic"], command=lambda _: self._stream_admin_apply_runtime_settings(), width=150)
+        self.combo_stream_mod_mode.set("alerts_only")
+        self.combo_stream_mod_mode.grid(row=0, column=2, padx=4, pady=6)
+        self.switch_stream_announce = ctk.CTkSwitch(frame_mod, text="Anunciar al chat", command=self._stream_admin_apply_runtime_settings)
+        self.switch_stream_announce.grid(row=0, column=3, padx=4, pady=6)
+
+        ctk.CTkLabel(frame_mod, text="User Channel ID:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        self.entry_stream_mod_user = ctk.CTkEntry(frame_mod, width=180, placeholder_text="channelId del usuario")
+        self.entry_stream_mod_user.grid(row=1, column=1, padx=4, pady=4)
+        ctk.CTkLabel(frame_mod, text="Razón:").grid(row=1, column=2, padx=8, pady=4, sticky="e")
+        self.entry_stream_mod_reason = ctk.CTkEntry(frame_mod, placeholder_text="spam/toxicidad/etc.")
+        self.entry_stream_mod_reason.grid(row=1, column=3, columnspan=2, padx=4, pady=4, sticky="ew")
+        ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._stream_admin_propose_high_risk("timeout"), width=135).grid(row=1, column=5, padx=4, pady=4)
+        ctk.CTkButton(frame_mod, text="Proponer Ban", command=lambda: self._stream_admin_propose_high_risk("ban"), width=115, fg_color="#7d2a2a").grid(row=1, column=6, padx=4, pady=4)
+
+        ctk.CTkLabel(frame_mod, text="Usuarios recientes", font=ctk.CTkFont(size=12, weight="bold")).grid(row=2, column=0, padx=8, pady=(8, 4), sticky="w")
+        ctk.CTkButton(frame_mod, text="Actualizar lista", command=self._stream_admin_refresh_user_list, width=115, fg_color="#555555").grid(row=2, column=1, padx=4, pady=(8, 4), sticky="w")
+        self.frame_stream_users = ctk.CTkScrollableFrame(frame_mod, height=115)
+        self.frame_stream_users.grid(row=3, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+        self.frame_stream_users.grid_columnconfigure(2, weight=1)
+        self._stream_admin_refresh_user_list()
+
+        frame_chat = ctk.CTkFrame(parent)
+        frame_chat.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+        frame_chat.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(frame_chat, text="Kira Chat", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.switch_stream_chat_enabled = ctk.CTkSwitch(frame_chat, text="Permitir mensajes", command=self._stream_admin_apply_runtime_settings)
+        self.switch_stream_chat_enabled.grid(row=0, column=1, padx=4, pady=6, sticky="w")
+        self.switch_stream_small = ctk.CTkSwitch(frame_chat, text="Stream Chico", command=self._stream_admin_toggle_small_stream)
+        self.switch_stream_small.grid(row=0, column=2, padx=4, pady=6, sticky="w")
+        ctk.CTkButton(frame_chat, text="Simular Chat", command=self._stream_admin_simulate_chat, width=115, fg_color="#1f7a7a").grid(row=0, column=3, padx=8, pady=6)
+        self.entry_stream_chat_message = ctk.CTkEntry(frame_chat, placeholder_text="Mensaje breve de Kira para el chat")
+        self.entry_stream_chat_message.grid(row=1, column=0, columnspan=2, padx=8, pady=4, sticky="ew")
+        ctk.CTkButton(frame_chat, text="Enviar al chat", command=self._stream_admin_send_chat, width=120).grid(row=1, column=2, padx=8, pady=4)
+        ctk.CTkButton(frame_chat, text="Forzar Kira", command=self._stream_admin_force_kira_comment, width=115, fg_color="#7551a6").grid(row=1, column=3, padx=8, pady=4)
+
+        frame_bottom_admin = ctk.CTkFrame(parent)
+        frame_bottom_admin.grid(row=4, column=0, sticky="ew", padx=8, pady=(4, 8))
+        frame_bottom_admin.grid_columnconfigure(0, weight=1)
+        frame_bottom_admin.grid_columnconfigure(1, weight=1)
+        frame_bottom_admin.grid_rowconfigure(1, weight=1)
+
+        self.lbl_stream_analytics = ctk.CTkLabel(frame_bottom_admin, text="Analíticas: esperando RF3", anchor="w")
+        self.lbl_stream_analytics.grid(row=0, column=0, padx=8, pady=6, sticky="ew")
+        self.lbl_stream_pending = ctk.CTkLabel(frame_bottom_admin, text="Acción pendiente: ninguna", anchor="w", text_color="#aaaaaa")
+        self.lbl_stream_pending.grid(row=0, column=1, padx=8, pady=6, sticky="ew")
+
+        self.text_stream_admin_log = ctk.CTkTextbox(frame_bottom_admin, font=ctk.CTkFont(family="Consolas", size=12), height=130, state="disabled")
+        self.text_stream_admin_log.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="nsew")
 
     def _actualizar_pipeline(self, estado):
         self._pipeline_state = estado
@@ -406,6 +623,19 @@ class VocalAIApp(ctk.CTk):
         self.barra_rms.set(nivel)
         self.after(150, self._animar_rms)
 
+    def _toggle_modo_compacto(self):
+        self._modo_compacto = self.switch_compacto.get()
+        if self._modo_compacto:
+            self._frame_model.grid_forget()
+            self._frame_profile.grid_forget()
+            self._frame_bottom.grid_forget()
+            self.switch_compacto.configure(text="📺 Completo")
+        else:
+            self._frame_model.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+            self._frame_profile.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+            self._frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
+            self.switch_compacto.configure(text="📺 Compacto")
+
     def _log_accion(self, msg):
         ts = time.strftime("%H:%M:%S")
         entrada = f"[{ts}] {msg}"
@@ -417,6 +647,727 @@ class VocalAIApp(ctk.CTk):
 
     def _on_tab_change(self):
         pass
+
+    def _init_stream_admin(self):
+        try:
+            config_path = os.path.join(BASE_DIR, "config", "stream_admin.yaml")
+            self.stream_admin = AdminManager(
+                config_path=config_path,
+                llm_interface=self._smart_agg_llm_interface
+            )
+            self.stream_admin.on_log = self._on_stream_admin_log
+            self.stream_admin.on_state = self._on_stream_admin_state
+            self.stream_admin.on_metadata = self._on_stream_admin_metadata
+            self.stream_admin.on_pending_action = self._on_stream_admin_pending
+            self.stream_admin.on_analytics = self._on_stream_admin_analytics
+            self._stream_admin_apply_runtime_settings(log=False)
+            self._populate_stream_oauth_client_fields()
+            self._on_stream_admin_state(self.stream_admin.status())
+            self._on_stream_admin_log("[StreamAdmin] RF4 listo. YouTube read-only disponible; Twitch en placeholder.")
+        except Exception as e:
+            self.stream_admin = None
+            logger.exception("No se pudo inicializar Stream Admin")
+            self.log_queue.put(f"[StreamAdmin] No disponible: {e}")
+
+    def _run_stream_admin_task(self, action_name, func):
+        if not self.stream_admin:
+            messagebox.showwarning("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
+            return
+
+        def worker():
+            try:
+                result = func()
+                if result is not None:
+                    logger.debug(f"StreamAdmin {action_name}: {result}")
+            except Exception as e:
+                logger.exception(f"StreamAdmin fallo en {action_name}")
+                hint = ""
+                if "Falta scope de escritura" in str(e):
+                    hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
+                self.after(0, lambda err=e: messagebox.showerror("Stream Admin", str(err)))
+                self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stream_admin_connect(self, request_write):
+        self._run_stream_admin_task(
+            "OAuth YouTube",
+            lambda: self.stream_admin.authenticate("youtube", request_write_scopes=request_write)
+        )
+
+    def _stream_admin_save_oauth_client(self):
+        client_id = self.entry_stream_client_id.get().strip()
+        client_secret = self.entry_stream_client_secret.get().strip()
+        self._run_stream_admin_task(
+            "Guardar OAuth client",
+            lambda: self.stream_admin.save_oauth_client_config(client_id, client_secret)
+        )
+        self.entry_stream_client_secret.delete(0, "end")
+
+    def _populate_stream_oauth_client_fields(self):
+        if not self.stream_admin or not hasattr(self, "entry_stream_client_id"):
+            return
+        cfg = self.stream_admin.get_oauth_client_config()
+        client_id = cfg.get("client_id", "")
+        if client_id and not client_id.startswith("${"):
+            self.entry_stream_client_id.delete(0, "end")
+            self.entry_stream_client_id.insert(0, client_id)
+        if cfg.get("has_client_secret"):
+            self.entry_stream_client_secret.configure(placeholder_text="Secret guardado localmente; escribe uno nuevo para reemplazar")
+
+    def _stream_admin_disconnect(self):
+        self._run_stream_admin_task("Desconectar proveedor", self.stream_admin.disconnect)
+
+    def _stream_admin_refresh_metadata(self):
+        self._run_stream_admin_task("Leer metadata", self.stream_admin.refresh_metadata)
+
+    def _stream_admin_connect_current_chat(self):
+        metadata = self._stream_admin_last_metadata or {}
+        video_id = metadata.get("video_id")
+        live_chat_id = metadata.get("live_chat_id")
+        if not video_id and self.stream_admin:
+            video_id = getattr(getattr(self.stream_admin, "metadata", None), "video_id", "")
+            live_chat_id = getattr(getattr(self.stream_admin, "metadata", None), "live_chat_id", "")
+        if not video_id:
+            messagebox.showwarning("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
+            return
+
+        if self.stream_admin_chat_connected:
+            self._stream_admin_disconnect_api_chat()
+            return
+
+        if live_chat_id and self.stream_admin:
+            self._stream_admin_connect_api_chat(video_id, live_chat_id)
+            return
+
+        if self.smart_agg_connected or self.smart_agg_connecting:
+            current = self._extract_youtube_video_id(self.entry_youtube_video.get())
+            if current == video_id:
+                self._on_stream_admin_log(f"[StreamAdmin] Chat ya conectado al live {video_id}.")
+                return
+            messagebox.showwarning("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
+            return
+
+        self.entry_youtube_video.delete(0, "end")
+        self.entry_youtube_video.insert(0, video_id)
+        self._on_stream_admin_log(f"[StreamAdmin] Conectando RF3 al chat del live {video_id}.")
+        self._toggle_smart_aggregator()
+
+    def _stream_admin_connect_api_chat(self, video_id, live_chat_id):
+        if not self.smart_agg:
+            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            return
+        if self.smart_agg_connected or self.smart_agg_connecting:
+            messagebox.showwarning("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
+            return
+        self.stream_admin_chat_connected = True
+        self._stream_admin_chat_stop = threading.Event()
+        self._stream_admin_seen_chat_ids = set()
+        self.smart_agg.start_session("youtube", video_id)
+        self.entry_youtube_video.delete(0, "end")
+        self.entry_youtube_video.insert(0, video_id)
+        self.btn_stream_connect_chat.configure(text="Desconectar Chat", fg_color="darkred")
+        self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado conectado al live {video_id}.")
+
+        def worker():
+            page_token = None
+            while self.stream_admin_chat_connected and self._stream_admin_chat_stop and not self._stream_admin_chat_stop.is_set():
+                try:
+                    result = self.stream_admin.provider.list_live_chat_messages(live_chat_id, page_token=page_token)
+                    page_token = result.get("next_page_token") or page_token
+                    for message in result.get("messages", []):
+                        msg_id = message.get("id")
+                        if msg_id and msg_id in self._stream_admin_seen_chat_ids:
+                            continue
+                        if msg_id:
+                            self._stream_admin_seen_chat_ids.add(msg_id)
+                            if len(self._stream_admin_seen_chat_ids) > 2000:
+                                self._stream_admin_seen_chat_ids = set(list(self._stream_admin_seen_chat_ids)[-1000:])
+                        self.smart_agg.process_message(message)
+                    delay = max(1.0, float(result.get("polling_interval_millis", 5000)) / 1000.0)
+                except Exception as e:
+                    logger.warning(f"Chat autenticado YouTube fallo: {e}")
+                    self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado aviso: {e}")
+                    delay = 5.0
+                if self._stream_admin_chat_stop:
+                    self._stream_admin_chat_stop.wait(delay)
+
+        self._stream_admin_chat_thread = threading.Thread(target=worker, daemon=True)
+        self._stream_admin_chat_thread.start()
+
+    def _stream_admin_disconnect_api_chat(self):
+        self.stream_admin_chat_connected = False
+        if self._stream_admin_chat_stop:
+            self._stream_admin_chat_stop.set()
+        self._stream_admin_chat_stop = None
+        try:
+            if self.smart_agg:
+                self.smart_agg.end_session()
+        except Exception:
+            pass
+        if hasattr(self, "btn_stream_connect_chat"):
+            self.btn_stream_connect_chat.configure(text="Conectar Chat", fg_color="#1F6AA5")
+        self._on_stream_admin_log("[StreamAdmin] Chat autenticado desconectado.")
+
+    def _stream_admin_suggest_metadata(self):
+        context = ""
+        if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
+            try:
+                recent = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
+                context = "\n".join(f"{m.get('user', '')}: {m.get('text', '')}" for m in recent)
+            except Exception:
+                context = ""
+        self._run_stream_admin_task("Sugerir metadata", lambda: self.stream_admin.suggest_metadata(context))
+
+    def _stream_admin_apply_metadata(self):
+        payload = self._stream_admin_metadata_payload_from_ui()
+        if self.stream_admin and self.stream_admin.pending_action:
+            action = lambda: self.stream_admin.apply_pending_action(payload, force=True)
+        else:
+            action = lambda: self.stream_admin.apply_metadata(payload)
+        self._run_stream_admin_task("Aplicar metadata", action)
+
+    def _stream_admin_reject_pending(self):
+        self._run_stream_admin_task("Rechazar acción", self.stream_admin.reject_pending_action)
+
+    def _stream_admin_send_chat(self):
+        message = self.entry_stream_chat_message.get().strip()
+        if not message:
+            messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
+            return
+        self._run_stream_admin_task("Enviar mensaje al chat", lambda: self.stream_admin.send_chat_message(message))
+
+    def _stream_admin_force_kira_comment(self):
+        if self._smart_agg_is_busy():
+            self._on_stream_admin_log("[StreamAdmin] Forzar Kira omitido: Kira está ocupada.")
+            return
+        context = []
+        if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
+            try:
+                context = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
+            except Exception as e:
+                logger.warning(f"No se pudo obtener contexto RF3 para Forzar Kira: {e}")
+        if not context:
+            manual = self.entry_stream_chat_message.get().strip()
+            if manual:
+                context = [{"user": "Streamer", "text": manual}]
+            elif self._stream_admin_last_metadata:
+                context = [{
+                    "user": "Stream Admin",
+                    "text": f"Live actual: {self._stream_admin_last_metadata.get('title', '')}. Categoria {self._stream_admin_last_metadata.get('category_id', '')}."
+                }]
+        if not context:
+            messagebox.showwarning("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
+            return
+        self._on_smart_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
+        self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
+
+    def _stream_admin_toggle_small_stream(self):
+        if not self.smart_agg:
+            return
+        if self.switch_stream_small.get():
+            self.smart_agg.set_activity_limits(threshold_per_second=0.2, cooldown_seconds=20.0, reset=True)
+            self.smart_agg.set_spam_limits(max_messages_per_user=30)
+            self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico ON: Kira reaccionará con menos mensajes.")
+        else:
+            defaults = self._smart_agg_default_activity or {"threshold": 1.0, "cooldown": 45.0}
+            self.smart_agg.set_activity_limits(
+                threshold_per_second=defaults.get("threshold", 1.0),
+                cooldown_seconds=defaults.get("cooldown", 45.0),
+                reset=True,
+            )
+            self._apply_smart_spam_limit(log=False)
+            self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico OFF: umbrales RF3 restaurados.")
+
+    def _stream_admin_simulate_chat(self):
+        if not self.smart_agg:
+            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            return
+        if self._smart_agg_is_busy():
+            self._on_stream_admin_log("[StreamAdmin] Simular Chat omitido: Kira está ocupada.")
+            return
+
+        if getattr(self.smart_agg, "_session_id", None) is None:
+            channel = self._stream_admin_last_metadata.get("video_id") if self._stream_admin_last_metadata else "simulated"
+            self.smart_agg.start_session("youtube", channel or "simulated")
+
+        now = time.time()
+        sample_sets = [
+            [
+                ("TesterUno", "Kira comenta algo del Minecraft con mods ahora mismo"),
+                ("TesterDos", "El chat quiere saber si estos cultivos van a crecer rapido"),
+                ("TesterTres", "Esto se esta poniendo caotico con tantos mobs alrededor"),
+                ("TesterCuatro", "La base necesita nombre antes de que explote todo"),
+                ("TesterCinco", "Kira deberia burlarse un poquito del survival"),
+                ("TesterSeis", "Momento perfecto para que Kira diga algo divertido"),
+            ],
+            [
+                ("CreeperFan", "Ese mod se ve peligrosamente roto para un episodio uno"),
+                ("CultivosOP", "Si los cultivos no crecen rapido esto es estafa agricola"),
+                ("NetherPronto", "Fran va a morir antes de hacer una casa decente"),
+                ("ChatCaos", "Kira tiene que elegir si la base se llama rancho del desastre"),
+                ("ModWatcher", "Hay demasiadas cosas raras en pantalla y apenas empezamos"),
+                ("Ironia", "Survival con mods significa sufrir pero con pasos extra"),
+            ],
+            [
+                ("Aldeano", "Necesitamos una meta clara antes de que el chat se distraiga"),
+                ("DiamanteFake", "Eso no parece seguro pero si parece divertido"),
+                ("HornoLento", "Kira deberia exigir armadura antes de otra idea brillante"),
+                ("BiomeFan", "Explora ese bioma raro o no hay respeto"),
+                ("PicoRoto", "Este survival ya huele a inventario perdido"),
+                ("ChatPlan", "Objetivo del stream: no morir por una gallina mutante"),
+            ],
+        ]
+        samples = sample_sets[self._stream_admin_sim_round % len(sample_sets)]
+        self._stream_admin_sim_round += 1
+        for idx, (user, text) in enumerate(samples):
+            self.smart_agg.process_message({
+                "id": f"sim-{int(now)}-{idx}",
+                "user": user,
+                "text": text,
+                "timestamp": now + (idx * 0.05),
+                "source": "stream_admin_simulator",
+            })
+        self._on_stream_admin_log("[StreamAdmin] Chat simulado enviado a RF3.")
+
+    def _stream_admin_propose_high_risk(self, action):
+        user = self.entry_stream_mod_user.get().strip()
+        reason = self.entry_stream_mod_reason.get().strip() or "moderacion manual RF4"
+        if not user:
+            messagebox.showwarning("Stream Admin", "Ingresa el channelId del usuario a moderar.")
+            return
+        self._run_stream_admin_task(
+            f"Proponer {action}",
+            lambda: self.stream_admin.propose_high_risk_moderation(action, user, reason, 300)
+        )
+
+    def _stream_admin_track_chat_user(self, message):
+        channel_id = message.get("author_channel_id") or message.get("channel_id") or ""
+        if not channel_id:
+            return
+        user = message.get("user", "YouTube")
+        current = self._stream_admin_chat_users.get(channel_id, {})
+        current.update({
+            "user": user,
+            "channel_id": channel_id,
+            "last_message": message.get("text", ""),
+            "last_seen": time.time(),
+            "count": int(current.get("count", 0)) + 1,
+            "is_owner": bool(message.get("is_owner", False)),
+            "is_moderator": bool(message.get("is_moderator", False)),
+            "is_member": bool(message.get("is_member", False)),
+        })
+        self._stream_admin_chat_users[channel_id] = current
+        self.after(0, self._stream_admin_refresh_user_list)
+
+    def _stream_admin_refresh_user_list(self):
+        if not hasattr(self, "frame_stream_users"):
+            return
+        for child in self.frame_stream_users.winfo_children():
+            child.destroy()
+        users = sorted(
+            self._stream_admin_chat_users.values(),
+            key=lambda item: item.get("last_seen", 0),
+            reverse=True,
+        )[:10]
+        if not users:
+            ctk.CTkLabel(
+                self.frame_stream_users,
+                text="Sin usuarios recientes con channelId. Conecta chat autenticado y espera mensajes.",
+                text_color="#aaaaaa"
+            ).grid(row=0, column=0, padx=6, pady=6, sticky="w")
+            return
+
+        headers = ["Usuario", "Mensajes", "Razón", "Acción"]
+        for col, title in enumerate(headers):
+            ctk.CTkLabel(self.frame_stream_users, text=title, font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=col, padx=4, pady=2, sticky="w")
+
+        for row, item in enumerate(users, start=1):
+            user = item.get("user", "YouTube")
+            channel_id = item.get("channel_id", "")
+            badges = []
+            if item.get("is_owner"):
+                badges.append("owner")
+            if item.get("is_moderator"):
+                badges.append("mod")
+            if item.get("is_member"):
+                badges.append("member")
+            label = user if not badges else f"{user} ({', '.join(badges)})"
+            ctk.CTkLabel(self.frame_stream_users, text=label, anchor="w").grid(row=row, column=0, padx=4, pady=3, sticky="w")
+            ctk.CTkLabel(self.frame_stream_users, text=str(item.get("count", 0)), width=55).grid(row=row, column=1, padx=4, pady=3, sticky="w")
+            reason_entry = ctk.CTkEntry(self.frame_stream_users, placeholder_text="razón", width=260)
+            reason_entry.insert(0, self._stream_admin_default_mod_reason(item))
+            reason_entry.grid(row=row, column=2, padx=4, pady=3, sticky="ew")
+            action_frame = ctk.CTkFrame(self.frame_stream_users, fg_color="transparent")
+            action_frame.grid(row=row, column=3, padx=4, pady=3, sticky="w")
+            button_state = "disabled" if item.get("is_owner") else "normal"
+            ctk.CTkButton(
+                action_frame,
+                text="Timeout",
+                width=75,
+                state=button_state,
+                command=lambda cid=channel_id, u=user, e=reason_entry: self._stream_admin_moderate_user_from_list("timeout", cid, u, e)
+            ).pack(side="left", padx=(0, 4))
+            ctk.CTkButton(
+                action_frame,
+                text="Banear",
+                width=70,
+                fg_color="#7d2a2a",
+                state=button_state,
+                command=lambda cid=channel_id, u=user, e=reason_entry: self._stream_admin_moderate_user_from_list("ban", cid, u, e)
+            ).pack(side="left")
+
+    def _stream_admin_default_mod_reason(self, item):
+        text = (item.get("last_message") or "").strip()
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return f"Revisado desde Stream Admin: {text}" if text else "Moderación manual desde Stream Admin"
+
+    def _stream_admin_moderate_user_from_list(self, action, channel_id, user, reason_entry):
+        if not self.stream_admin:
+            return
+        if not channel_id:
+            messagebox.showwarning("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
+            return
+        reason = reason_entry.get().strip() or f"{action} manual desde Stream Admin"
+        verb = "banear" if action == "ban" else "aplicar timeout a"
+        if not messagebox.askyesno("Confirmar moderación", f"¿Seguro que quieres {verb} {user}?\n\nRazón: {reason}"):
+            return
+        self._run_stream_admin_task(
+            f"Moderación {action}",
+            lambda: self.stream_admin.apply_high_risk_moderation(action, channel_id, reason, 300)
+        )
+
+    def _stream_admin_apply_runtime_settings(self, log=True):
+        if not self.stream_admin:
+            return
+        mod_cfg = self.stream_admin.config.setdefault("moderation", {})
+        chat_cfg = self.stream_admin.config.setdefault("chat", {})
+        mod_cfg["enabled"] = bool(self.switch_stream_mod_enabled.get()) if hasattr(self, "switch_stream_mod_enabled") else False
+        mod_cfg["mode"] = self.combo_stream_mod_mode.get() if hasattr(self, "combo_stream_mod_mode") else "alerts_only"
+        mod_cfg["announce_actions_to_chat"] = bool(self.switch_stream_announce.get()) if hasattr(self, "switch_stream_announce") else False
+        chat_cfg["allow_kira_chat_messages"] = bool(self.switch_stream_chat_enabled.get()) if hasattr(self, "switch_stream_chat_enabled") else False
+        self.stream_admin.moderation.enabled = mod_cfg["enabled"]
+        self.stream_admin.moderation.mode = mod_cfg["mode"]
+        if log:
+            self._on_stream_admin_log(f"[StreamAdmin] Runtime: moderación={mod_cfg['enabled']} modo={mod_cfg['mode']} chat={chat_cfg['allow_kira_chat_messages']}")
+
+    def _stream_admin_metadata_payload_from_ui(self):
+        tags = [t.strip() for t in self.entry_stream_tags.get().split(",") if t.strip()]
+        description = self.text_stream_description.get("1.0", "end").strip()
+        return {
+            "title": self.entry_stream_title.get().strip(),
+            "category_id": self.entry_stream_category.get().strip(),
+            "description": description,
+            "tags": tags,
+        }
+
+    def _on_stream_admin_log(self, msg):
+        self.after(0, lambda m=msg: self._append_stream_admin_log(m))
+        clean = msg.replace("[StreamAdmin] ", "")
+        self.after(0, lambda m=clean: self._log_accion(m))
+
+    def _append_stream_admin_log(self, msg):
+        if not hasattr(self, "text_stream_admin_log"):
+            return
+        self.text_stream_admin_log.configure(state="normal")
+        self.text_stream_admin_log.insert("end", msg + "\n")
+        self.text_stream_admin_log.see("end")
+        self.text_stream_admin_log.configure(state="disabled")
+
+    def _on_stream_admin_state(self, state):
+        def update():
+            account = state.get("account") or {}
+            name = account.get("title") or "sin cuenta"
+            mode = state.get("mode", "read_only")
+            connected = "conectado" if state.get("connected") else "desconectado"
+            self.lbl_stream_admin_status.configure(
+                text=f"YouTube {connected} ({name}) · modo {mode} · OAuth client {'OK' if state.get('oauth_client_configured') else 'pendiente'} · Twitch placeholder",
+                text_color="#44cc66" if state.get("connected") else "#aaaaaa"
+            )
+        self.after(0, update)
+
+    def _on_stream_admin_metadata(self, metadata):
+        self._stream_admin_last_metadata = metadata or {}
+        self.after(0, lambda m=metadata: self._populate_stream_metadata(m))
+
+    def _populate_stream_metadata(self, metadata):
+        metadata = metadata or {}
+        self.lbl_stream_metadata_state.configure(
+            text=f"Estado: {metadata.get('status', 'unknown')} · Video: {metadata.get('video_id', '') or 'N/A'}",
+            text_color="#44cc66" if metadata.get("video_id") else "#ffaa00"
+        )
+        self.entry_stream_title.delete(0, "end")
+        self.entry_stream_title.insert(0, metadata.get("title", ""))
+        self.entry_stream_category.delete(0, "end")
+        self.entry_stream_category.insert(0, metadata.get("category_id", ""))
+        self.entry_stream_tags.delete(0, "end")
+        self.entry_stream_tags.insert(0, ", ".join(metadata.get("tags", []) or []))
+        self.text_stream_description.delete("1.0", "end")
+        self.text_stream_description.insert("1.0", metadata.get("description", ""))
+
+    def _on_stream_admin_pending(self, pending):
+        def update():
+            if not pending:
+                self.lbl_stream_pending.configure(text="Acción pendiente: ninguna", text_color="#aaaaaa")
+                return
+            payload = pending.get("payload", {})
+            label = payload.get("title") or payload.get("action") or pending.get("type")
+            self.lbl_stream_pending.configure(text=f"Acción pendiente: {pending.get('type')} · {label}", text_color="#ffaa00")
+            if pending.get("type") == "metadata_update":
+                self._populate_stream_metadata({
+                    "status": "suggested",
+                    "title": payload.get("title", ""),
+                    "category_id": payload.get("category_id", ""),
+                    "description": payload.get("description", ""),
+                    "tags": payload.get("tags", []),
+                    "video_id": self._stream_admin_last_metadata.get("video_id", ""),
+                })
+        self.after(0, update)
+
+    def _on_stream_admin_analytics(self, snapshot):
+        def update():
+            viewers = snapshot.get("viewers")
+            viewers = "N/A" if viewers is None else viewers
+            self.lbl_stream_analytics.configure(
+                text=(
+                    f"Analíticas: viewers={viewers} · uptime={snapshot.get('uptime_seconds', 0)//60}m · "
+                    f"chat={snapshot.get('chat_rate_avg', 0.0):.2f} msg/s · "
+                    f"vibe={snapshot.get('last_vibe_dominant', 'neutral')} {snapshot.get('last_vibe_temperature', 0):.0f}/100"
+                )
+            )
+        self.after(0, update)
+
+    def _stream_admin_ingest_rf3_event(self, event_type, payload):
+        if not self.stream_admin:
+            return
+        try:
+            self.stream_admin.ingest_rf3_event(event_type, payload)
+            context = self.stream_admin.analytics_context_if_due()
+            if context:
+                self._stream_admin_inject_silent_context(context)
+        except Exception as e:
+            logger.warning(f"Stream Admin no pudo consumir evento RF3 {event_type}: {e}")
+
+    def _stream_admin_inject_silent_context(self, context):
+        try:
+            if self.motor_ia and hasattr(self.motor_ia, "historial"):
+                self.motor_ia.historial.append({
+                    "role": "user",
+                    "content": f"[Contexto administrativo silencioso RF4, no responder directamente]: {context}"
+                })
+                self._on_stream_admin_log("[StreamAdmin] Analíticas inyectadas como contexto silencioso para Kira.")
+        except Exception as e:
+            logger.warning(f"No se pudo inyectar contexto RF4: {e}")
+
+    def _init_smart_aggregator(self):
+        try:
+            config_path = os.path.join(BASE_DIR, "config", "smart_aggregator.yaml")
+            self.smart_agg = Aggregator(
+                config_path=config_path,
+                llm_interface=self._smart_agg_llm_interface
+            )
+            self.smart_agg.set_busy_callback(self._smart_agg_is_busy)
+            self.smart_agg.on_filtered_message = self._on_smart_filtered_message
+            self.smart_agg.on_vibe_update = self._on_smart_vibe_update
+            self.smart_agg.on_activity_trigger = self._on_smart_activity_trigger
+            self.smart_agg.on_aggregated_context = self._on_smart_aggregated_context
+            self.smart_agg.on_source_error = self._on_smart_source_error
+            self.smart_agg.on_source_connect = self._on_smart_source_connect
+            self.smart_agg.on_source_disconnect = self._on_smart_source_disconnect
+            self._smart_agg_default_activity = {
+                "threshold": self.smart_agg.activity.threshold_per_second,
+                "cooldown": self.smart_agg.activity.cooldown_seconds,
+            }
+            self.log_queue.put("[SmartAggregator] RF3 listo. Ingresa un video_id/URL de YouTube Live para conectar chat.")
+        except Exception as e:
+            self.smart_agg = None
+            logger.exception("No se pudo inicializar Smart Aggregator")
+            self.log_queue.put(f"[SmartAggregator] No disponible: {e}")
+
+    def _smart_agg_is_busy(self):
+        if not self.motor_ia:
+            return True
+        return self.motor_ia.is_processing or self.motor_ia.is_speaking
+
+    def _smart_agg_llm_interface(self, prompt):
+        if self._smart_agg_is_busy():
+            raise RuntimeError("Motor IA ocupado")
+
+        ollama_client = getattr(self.motor_ia, "ollama", None)
+        if ollama_client is None:
+            import ollama as ollama_client
+
+        response = ollama_client.chat(
+            model=self.motor_ia.current_model,
+            messages=[{"role": "user", "content": prompt}],
+            keep_alive=-1,
+            options={"temperature": 0.2, "num_predict": 180}
+        )
+        msg_obj = response.get("message", {})
+        if isinstance(msg_obj, dict):
+            return msg_obj.get("content", "")
+        return getattr(msg_obj, "content", "")
+
+    def _extract_youtube_video_id(self, value):
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urllib.parse.urlparse(value)
+        if parsed.netloc:
+            if "youtu.be" in parsed.netloc:
+                return parsed.path.strip("/").split("/")[0]
+            query = urllib.parse.parse_qs(parsed.query)
+            if query.get("v"):
+                return query["v"][0]
+            parts = [p for p in parsed.path.split("/") if p]
+            if "live" in parts:
+                idx = parts.index("live")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+            if "shorts" in parts:
+                idx = parts.index("shorts")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+        return value
+
+    def _toggle_smart_aggregator(self):
+        if not self.smart_agg:
+            self._print_log("[SmartAggregator] No inicializado. Revisa config/smart_aggregator.yaml.")
+            return
+
+        if self.smart_agg_connected or self.smart_agg_connecting:
+            self._smart_agg_manual_disconnect = True
+            try:
+                self.smart_agg.disconnect()
+            finally:
+                self.smart_agg_connected = False
+                self.smart_agg_connecting = False
+                self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"])
+            return
+
+        video_id = self._extract_youtube_video_id(self.entry_youtube_video.get())
+        if not video_id:
+            messagebox.showwarning("YouTube Live", "Ingresa una URL o video_id de un live de YouTube.")
+            return
+
+        try:
+            self._apply_smart_spam_limit(log=False)
+            self._smart_agg_manual_disconnect = False
+            self.smart_agg_connecting = True
+            self.btn_youtube_chat.configure(text="Conectando...", fg_color="#a66a00")
+            self._print_log(f"[SmartAggregator] Conectando chat YouTube: {video_id}")
+            self.smart_agg.connect(video_id)
+        except Exception as e:
+            self.smart_agg_connecting = False
+            self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"])
+            logger.exception("Error conectando Smart Aggregator")
+            messagebox.showerror("YouTube Live", f"No se pudo conectar al chat: {e}")
+
+    def _apply_smart_spam_limit(self, log=True):
+        if not self.smart_agg:
+            return
+        raw_value = self.entry_youtube_user_limit.get().strip()
+        try:
+            limit = max(1, int(raw_value))
+        except ValueError:
+            limit = 10
+            self.entry_youtube_user_limit.delete(0, "end")
+            self.entry_youtube_user_limit.insert(0, str(limit))
+        self.smart_agg.set_spam_limits(max_messages_per_user=limit)
+        if log:
+            self._print_log(f"[SmartAggregator] Anti-spam actualizado: max {limit} mensajes/usuario por ventana.")
+
+    def _on_smart_filtered_message(self, message):
+        self._stream_admin_track_chat_user(message)
+        user = message.get("user", "")
+        text = message.get("text", "")
+        self.after(0, lambda u=user, t=text: self._print_youtube_chat(u, t))
+
+    def _print_youtube_chat(self, user, text):
+        if not hasattr(self, "consola_youtube") or self.consola_youtube is None:
+            return
+        self.consola_youtube.configure(state="normal")
+        self.consola_youtube.insert("end", f"[{user}] {text}\n")
+        self.consola_youtube.see("end")
+        self.consola_youtube.configure(state="disabled")
+
+    def _on_smart_source_error(self, error):
+        self.log_queue.put(f"[SmartAggregator] Aviso YouTube: reconectando por fallo transitorio ({error})")
+
+    def _on_smart_source_connect(self, info):
+        was_connected = self.smart_agg_connected
+        self.smart_agg_connecting = False
+        self.smart_agg_connected = True
+        self.after(0, lambda: self.btn_youtube_chat.configure(text="Desconectar Chat", fg_color="darkred"))
+        if not was_connected:
+            self.log_queue.put(f"[SmartAggregator] Chat YouTube conectado: {info.get('video_id', '')}")
+
+    def _on_smart_source_disconnect(self):
+        was_active = self.smart_agg_connected or self.smart_agg_connecting
+        self.smart_agg_connected = False
+        self.smart_agg_connecting = False
+        self.after(0, lambda: self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"]))
+        if was_active:
+            reason = "desconectado por usuario" if self._smart_agg_manual_disconnect else "desconectado tras agotar reconexiones"
+            self.log_queue.put(f"[SmartAggregator] Chat YouTube {reason}.")
+        self._smart_agg_manual_disconnect = False
+
+    def _on_smart_vibe_update(self, vibe):
+        self._stream_admin_ingest_rf3_event("vibe", vibe)
+        temp = vibe.get("temperature", 0.0)
+        emotions = vibe.get("emotions", {})
+        dominant = max(emotions, key=emotions.get) if emotions else "neutral"
+        note = vibe.get("note")
+        if note == "fallback_due_to_busy":
+            self.log_queue.put("[SmartAggregator] Vibe omitido: Kira ocupada.")
+        elif note in ("fallback_due_to_parse_error", "fallback_due_to_empty_llm_response", "fallback_due_to_llm_error"):
+            self.log_queue.put(f"[SmartAggregator] Vibe no interpretable; usando neutral ({note}).")
+        elif note:
+            self.log_queue.put(f"[SmartAggregator] Vibe: {temp:.0f}/100 ({dominant}) [{note}]")
+        else:
+            self.log_queue.put(f"[SmartAggregator] Vibe: {temp:.0f}/100 ({dominant})")
+
+    def _on_smart_activity_trigger(self, data):
+        self._stream_admin_ingest_rf3_event("activity", data)
+        rate = data.get("rate", 0.0)
+        self.log_queue.put(f"[SmartAggregator] Pico de actividad detectado: {rate:.2f} msg/s")
+
+    def _on_smart_aggregated_context(self, data):
+        if self._smart_agg_is_busy():
+            self.log_queue.put("[SmartAggregator] Contexto agregado omitido: Kira ocupada.")
+            return
+
+        context = data.get("context", [])[-12:]
+        if not context:
+            return
+
+        highlight = self._select_smart_highlight(context)
+        lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
+        prompt = (
+            "Estas viendo el chat de YouTube como co-host del stream. Di EXACTAMENTE lo que Kira diria al aire, "
+            "no describas lo que esta pasando ni prometas que vas a hablar. Reacciona con una broma, critica o comentario concreto. "
+            "Prohibido empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', 'Tengo que', 'El chat esta', "
+            "'energia del flujo', 'mensaje destacado', 'contexto reciente' o 'mantener la energia'. "
+            "No saludes ni preguntes 'que te trae por aqui'. No digas que Kira va a comentar: comenta directamente. "
+            "Responde en 1-2 frases cortas con personalidad de Kira. "
+            "Usa este mensaje solo como posible referencia interna, no lo nombres como destacado: "
+            f"{highlight}\n"
+            "Mensajes recientes del chat:\n" + "\n".join(lines)
+        )
+        self.motor_ia.command_queue.put(("process_context", prompt))
+        self.log_queue.put("[SmartAggregator] Contexto agregado enviado a Kira.")
+
+    def _select_smart_highlight(self, context):
+        candidates = []
+        for msg in context:
+            text = msg.get("text", "").strip()
+            if 20 <= len(text) <= 180:
+                candidates.append(msg)
+        if not candidates:
+            candidates = context
+        selected = max(candidates, key=lambda m: len(m.get("text", "")))
+        return f"{selected.get('user', '')}: {selected.get('text', '')}"
 
     def _on_motor_event(self, status):
         if status == "ready":
@@ -530,6 +1481,8 @@ class VocalAIApp(ctk.CTk):
     def _al_cambiar_motor_tts(self):
         motor_seleccionado = self.switch_modo_ligero.get()
         self.motor_ia.command_queue.put(("set_motor_tts", motor_seleccionado))
+        modo_texto = "Ligero" if motor_seleccionado == "ligero" else "Pesado"
+        self.switch_modo_ligero.configure(text=f"🎛️ TTS: {modo_texto}")
 
     def _al_seleccionar_perfil(self, nombre):
         if nombre in self.perfiles:
@@ -1014,6 +1967,18 @@ class VocalAIApp(ctk.CTk):
         self.ws_should_reconnect = False
 
         self._stop_ptt_listener()
+
+        try:
+            if self.smart_agg:
+                self.smart_agg.disconnect()
+        except Exception as e:
+            logger.warning(f"No se pudo desconectar Smart Aggregator: {e}")
+
+        try:
+            if self.stream_admin_chat_connected:
+                self._stream_admin_disconnect_api_chat()
+        except Exception as e:
+            logger.warning(f"No se pudo desconectar chat autenticado RF4: {e}")
 
         try:
             x = self.winfo_x()

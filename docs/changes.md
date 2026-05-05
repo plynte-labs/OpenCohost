@@ -33,18 +33,120 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 *   **RF2.3 - Registro de Acciones (Console Log):** Inclusión de un panel de actividad donde Kira confirme las acciones administrativas ejecutadas (ej: "Título de Twitch actualizado con éxito"). ✅ *Implementado — pestaña Kira Acciones + persistencia JSONL.*
 
 ### 3. Procesador Inteligente de Chat (Smart Aggregator)
-**Propósito:** Escalar la interacción para audiencias masivas mediante algoritmos de consolidación.
+**Propósito:** Escalar la interacción para audiencias masivas mediante algoritmos de consolidación. Modular, en `smart_aggregator/` independiente del core.
 
-*   **RF3.1 - Filtro de Longitud y Calidad:** Descarte automático de mensajes cortos (ej. "< 5 palabras") o mensajes que solo contengan emojis para limpiar el dataset de entrada.
-*   **RF3.2 - Análisis de Sentimiento (Vibe Thermometer):** Implementación de una ventana de tiempo (ej. 120s) donde el LLM evalúe la emoción predominante de la audiencia antes de generar una respuesta global.
-*   **RF3.3 - Trigger por Actividad:** Capacidad de activar una respuesta automática de Kira si la velocidad del chat supera un umbral configurable (Mensajes por Segundo), permitiéndole reaccionar a momentos de "Hype".
+*   **RF3.1 - Filtro de Longitud y Calidad:** Descarte automático de mensajes cortos, emojis puros, enlaces y menciones. Umbrales configurables. Whitelist de usuarios VIP/Mod. ✅ *Implementado en `smart_aggregator/message_filter.py`.*
+*   **RF3.2 - Vibe Thermometer:** Ventana de tiempo configurable (default 120s) con una sola inferencia LLM al final. Reutiliza el motor LLM existente mediante `llm_interface` inyectada y no llama Ollama directamente. Analiza: excitement, sadness, anger, joy, confusion, neutral. Retorna temperatura global. ✅ *Implementado en `smart_aggregator/vibe_thermometer.py`.*
+*   **RF3.3 - Trigger por Actividad:** Medición de mensajes/segundo en ventana deslizante usando timestamps del mensaje. Umbral configurable. Acciones: auto_reply (mensaje predefinido) y/o behavior_change (parámetro de excitación). ✅ *Implementado en `smart_aggregator/activity_trigger.py`.*
+*   **RF3.4 - Historial de Chat (Híbrido):** Persistencia por sesiones. SQLite para búsquedas rápidas, JSONL para audit trail. Retención configurable (default 7 días). ✅ *Implementado en `smart_aggregator/session_history.py`.*
+*   **RF3.5 - Chat Source (YouTube):** Fuente de chat via `pytchat`/`chatdownload`. Video ID configurable. Handle reconnects. ✅ *Implementado en `smart_aggregator/chat_source.py` (requiere instalar `pytchat`).*
+
+**[WorkerSeniorAI] Correcciones RF3 — 2026-05-04:** Se corrigió el contrato LLM para evitar cargas directas de Ollama, el cálculo de actividad por ventana, la limpieza JSONL por `session_id`, el flujo de reconexión de `YouTubeChatSource`, la orquestación headless de `Aggregator` y los tests locales TC3.1-TC3.6. Verificación realizada con el Python obligatorio `E:\Miniconda\envs\flux_env\python.exe`.
+
+**[WorkerSeniorAI] Integración RF3 UI — 2026-05-04:** Con autorización explícita del usuario, `ui/app.py` ahora instancia `Aggregator`, permite pegar URL/`video_id` de YouTube Live, usa un adapter `llm_interface` silencioso contra el modelo activo de `MotorVocalIA`, bloquea análisis cuando Kira está ocupada y envía a Kira solo contexto agregado ante picos de actividad. No se modificó `core/llm_engine.py`.
+
+**[WorkerSeniorAI] Manejo de errores YouTube — 2026-05-04:** La prueba con `video_id=-MtbPcNE8ls` recibió `429`/timeout SSL desde YouTube. Se agregaron callbacks de error/conexión/desconexión de fuente para que la UI registre el fallo y recupere el estado del botón si `pytchat` no logra conectar tras retries.
+
+**[WorkerSeniorAI] Fix `pytchat` thread UI — 2026-05-04:** Se corrigió el error `signal only works in main thread` configurando `pytchat.create(..., interruptable=False)` desde `YouTubeChatSource`, con `source.interruptable: false` en YAML.
+
+**[WorkerSeniorAI] Filtro emojis personalizados — 2026-05-04:** `MessageFilter` ahora reconoce aliases de emojis de YouTube tipo `:bird:`. Los mensajes solo con aliases se descartan y los aliases mezclados con texto se limpian antes de pasar callbacks/logs. También se reforzó la regex de menciones para handles con guiones/puntos.
+
+**[WorkerSeniorAI] Tuning live real — 2026-05-04:** Para que RF3 dispare en chats moderados, `activity.threshold_per_second` se bajó a `1.0`, `cooldown_seconds` subió a `45.0`, `vibe.window_seconds` bajó a `60` y el prompt de vibe se ajustó a chat bilingüe con JSON estricto. La UI ahora indica notas de fallback del vibe.
+
+**[WorkerSeniorAI] UI YT Chat + anti-spam — 2026-05-04:** Se agregó pestaña `YT Chat`, el Log General ya no recibe cada mensaje de YouTube, RF3 deduplica mensajes repetidos por usuario, aplica rate-limit configurable por usuario (`Max/u` en UI) y el contexto enviado a Kira ahora pide resumen del flujo con un solo mensaje destacado.
+
+**[WorkerSeniorAI] Logs operativos RF3 — 2026-05-04:** Se limpiaron duplicados de conexión/desconexión, errores transitorios de YouTube ahora aparecen como avisos de reconexión y los fallbacks de vibe se muestran en lenguaje operativo en vez de códigos internos crípticos.
+
+**[WorkerSeniorAI] Respuesta natural RF3 — 2026-05-04:** Se ajustó el prompt de picos para que Kira reaccione directo como co-host y no describa el análisis con frases técnicas como “energía del flujo” o “mensaje destacado”.
+
+**[WorkerSeniorAI] Cierre funcional RF3 — 2026-05-04:** RF3 queda cerrado satisfactoriamente como Smart Aggregator funcional integrado a VoiceAI. El detalle de funcionalidades, comportamiento esperado, casos cubiertos, configuración operativa y próximos pasos quedó documentado en `docs/RF3_Smart_Aggregator_Spec.md`, sección `[WorkerSeniorAI] Cierre Funcional RF3`.
+
+---
+
+## 📋 Resumen de Implementación
+
+| RF | Nombre | Estado |
+|---|---|---|
+| RF1.1 | Toggle PTT | ✅ |
+| RF1.2 | Hotkey Remap | ✅ |
+| RF1.3 | Half-Duplex | ✅ |
+| RF1.4 | Silero VAD Gate | ⏳ Pendiente |
+| RF2.1 | Multi-Monitor UI | ✅ |
+| RF2.2 | Pipeline Visual | ✅ |
+| RF2.3 | Panel Kira Acciones | ✅ |
+| RF3.1 | Filtro Longitud/Calidad | ✅ |
+| RF3.2 | Vibe Thermometer (1 LLM) | ✅ |
+| RF3.3 | Trigger por Actividad | ✅ |
+| RF3.4 | Historial Chat Híbrido | ✅ |
+| RF3.5 | Chat Source YouTube | ✅ |
+
+---
+
+## ❓ Preguntas para RF3 — Respuestas del Usuario
+
+| # | Pregunta | Respuesta |
+|---|---|---|
+| Q1 | Fuente de chat | YouTube (de momento). Selector de proveedor (futuro). |
+| Q2 | Filtro de calidad | Umbral configurable. Descartar: enlaces, menciones, emojis puros. Whitelist VIP/Mod. Automático. |
+| Q3 | Vibe Thermometer | **CRÍTICO**: Un solo modelo LLM en ejecución. NO crear segundo modelo. Ventana configurable. Todas las emociones. Afecta comportamiento internamente. |
+| Q4 | Trigger por Actividad | Responder + cambiar comportamiento. Umbral por definir (no especificado aún). |
+| Q5 | Historial | **Híbrido**: SQLite (búsquedas) + JSONL (audit). Por sesiones. Retención configurable. |
+
+**Restricción arquitectónica #1:** Todo debe ser **modular**. Módulo `smart_aggregator/` independiente del core (`ui/app.py`, `motor_ia.py`).
+
+**Restricción arquitectónica #2:** **Un solo LLM corriendo**. Si el core ya tiene Ollama activo, el aggregator lo reutiliza. No instancia nuevo.
+
+**Restricción arquitectónica #3:** **Configuración via YAML**. Sin valores hardcoded.
+
+**Restricción arquitectónica #4:** **Callbacks para comunicar con el core**. El aggregator NO modifica el código existente, solo emite eventos.
+
+---
+
+## 📋 Especificación para Agente IA
+
+Ver documento detallado: **`docs/RF3_Smart_Aggregator_Spec.md`**
+
+Este documento incluye:
+- Arquitectura modular (`smart_aggregator/` con 7 archivos)
+- Contrato de eventos (callbacks con el core)
+- Qué HACER y qué NO HACER para cada RF
+- Interfaz de cada clase
+- Configuración YAML completa
+- Dependencias permitidas vs prohibidas
+- Criterios de aceptación
+- Orden de implementación sugerido
 
 ### 4. Gestión de Stream (Admin Mode)
-**Propósito:** Automatizar tareas de producción mediante integración con APIs de terceros.
+**Propósito:** Automatizar tareas de producción mediante integración segura con APIs oficiales de plataformas de streaming, empezando por YouTube y dejando Twitch preparado como proveedor futuro.
 
-*   **RF4.1 - Integración Twitch/YouTube API:** Módulo para modificar metadatos del stream (Título, Categoría) mediante botones dedicados en la UI.
-*   **RF4.2 - Moderación Automática:** Capacidad del sistema para analizar el sentimiento negativo masivo y activar el "Slow Mode" o "Emote Only Mode" de forma autónoma si el usuario así lo configura.
-*   **RF4.3 - Reporte de Analíticas:** Acceso a datos de espectadores concurrentes y eventos de stream para ser inyectados en el contexto del LLM.
+**Estado:** Diseño refinado. Pendiente implementación. Primero debe implementarse modo **solo lectura** para validar OAuth 2.0 seguro antes de permitir acciones de escritura.
+
+*   **RF4.1 - Integración YouTube/Twitch API para Metadata:** Módulo para leer y modificar título, categoría, descripción y tags del stream. YouTube primero; Twitch futuro mediante interfaz de proveedor. Los cambios sugeridos por Kira requieren aprobación del streamer por defecto, salvo configuración explícita de auto-aprobación. El streamer puede editar sugerencias antes de aplicarlas. Incluye presets de títulos y categorías predeterminadas por el streamer.
+*   **RF4.2 - Moderación Automática y Asistida:** Capacidad configurable para operar en tres modos: `Solo alertas`, `Confirmación requerida` y `Automático`. La detección de toxicidad masiva registra primero un evento en logs de Kira. Slow Mode puede activarse/desactivarse manual o automáticamente si el streamer lo permite. Acciones como Emote-Only, Followers-Only, Subscribers-Only, timeout o ban dependen de soporte del proveedor y deben priorizar confirmación para acciones de alto riesgo. Kira puede anunciar acciones de moderación al chat solo si está configurado.
+*   **RF4.3 - Reporte de Analíticas:** Acceso configurable a viewers concurrentes, eventos de subs/follows/donaciones/bits, chat velocity, vibe trend y stream uptime. Las analíticas se muestran en UI y se inyectan como contexto resumido al LLM con frecuencia configurable. Kira puede reaccionar a hitos/eventos importantes, mientras que tendencias generales se usan como contexto silencioso.
+*   **RF4.4 - UI Stream Admin:** Nueva pestaña `Stream Admin` para estado OAuth, metadata, propuestas pendientes, presets, moderación, analíticas y acciones administrativas.
+
+**Documentos RF4:**
+- `docs/RF4_Functional_Requirements.md`
+- `docs/RF4_Quality_Requirements.md`
+- `docs/RF4_Test_Scenarios.md`
+- `docs/HANDOFF_RF4.md`
+
+**[WorkerSeniorAI] Refinamiento RF4 — 2026-05-04:** Se registraron las decisiones del usuario para RF4: YouTube primero, Twitch futuro, OAuth seguro con etapa inicial solo lectura, cambios de metadata con aprobación por defecto, presets, categorías sugeridas por Kira, tres modos de moderación, analíticas configurables desde UI y nueva pestaña `Stream Admin`. Se recomienda arquitectura `stream_admin/` separada, dependiente por contrato de RF3 para consumir vibe/chat velocity, sin modificar el core ni cargar otro LLM.
+
+**[WorkerSeniorAI] Cierre de dudas RF4 MVP — 2026-05-04:** Se cerraron decisiones MVP: tokens OAuth en archivo local ignorado por git como opción simple inicial, YouTube read-only real con placeholder Twitch, Kira puede escribir mensajes al chat si se habilita, `timeout`/`ban` entran en MVP con confirmación por defecto y presets en `config/stream_admin.yaml`.
+
+**[WorkerSeniorAI] Implementación RF4 MVP base — 2026-05-04:** Se creó `stream_admin/` con `AdminManager`, proveedor YouTube OAuth/API usando `requests`, placeholder Twitch, token store local, motor de moderación, tracker de analíticas, tests headless y `config/stream_admin.yaml`. `ui/app.py` integra una pestaña `Stream Admin` con OAuth YouTube lectura/escritura, metadata editable, sugerencias de Kira, acciones pendientes, moderación, mensajes al chat y analíticas RF3 como contexto silencioso. Pendiente prueba end-to-end con credenciales OAuth reales del usuario.
+
+**[WorkerSeniorAI] OAuth RF4 desde UI — 2026-05-04:** Se agregaron campos `Client ID` y `Secret` en `Stream Admin` para guardar credenciales OAuth YouTube localmente en `data/stream_admin/oauth_client.json`, archivo ignorado por git. Esto evita editar YAML o variables de entorno para el flujo MVP.
+
+**[WorkerSeniorAI] Operación RF4 para streams chicos — 2026-05-05:** Se agregaron controles `Stream Chico`, `Simular Chat` y `Forzar Kira` en `Stream Admin`. `Stream Chico` baja umbral/cooldown de RF3 en runtime para canales con poca audiencia, `Simular Chat` inyecta mensajes de prueba al agregador y `Forzar Kira` hace que Kira comente con contexto reciente aunque no haya pico automático.
+
+**[WorkerSeniorAI] Moderación por usuario RF4 — 2026-05-05:** `Stream Admin` ahora lista usuarios recientes del chat autenticado con `channelId`, contador de mensajes, campo de razón editable y botones `Timeout` / `Banear`. Las acciones piden confirmación antes de ejecutar y usan la API de YouTube con permisos de escritura; el owner aparece con acciones deshabilitadas.
+
+**[WorkerSeniorAI] Scroll global RF4 — 2026-05-05:** La pestaña `Stream Admin` ahora usa un `CTkScrollableFrame` global para que metadata, moderación, usuarios recientes, controles de Kira y logs sean accesibles en pantallas pequeñas o modo compacto.
+
+**[WorkerSeniorAI] Cierre funcional RF4 MVP — 2026-05-05:** RF4 queda funcional como MVP de Stream Admin para YouTube: OAuth desde UI, lectura de live privado/no listado, metadata editable, escritura con scope `youtube.force-ssl`, chat autenticado por `liveChatId`, envío de mensajes al chat, integración RF3/RF4, modo `Stream Chico`, simulación de chat, botón `Forzar Kira`, lista de usuarios recientes y acciones `Timeout`/`Banear` con confirmación. Twitch queda como placeholder futuro y Slow Mode/Emote-only dependen de soporte/API futura.
 
 ---
 

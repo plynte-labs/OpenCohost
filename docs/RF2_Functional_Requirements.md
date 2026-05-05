@@ -25,14 +25,18 @@ Optimizar la interfaz gráfica de VoiceAI para entornos de streaming multi-monit
 **Descripción:**  
 La ventana de VoiceAI debe poder moverse libremente a un segundo monitor sin degradar rendimiento ni requerir overlays. El sistema actual ya usa CustomTkinter (ventana desktop nativa, sin DirectX/Vulkan), por lo que el objetivo principal es persistir geometría y opcionalmente ofrecer modo compacto.
 
-**Sub-requerimientos propuestos:**
+**Sub-requerimientos:**
 
-- **RF2.1a — Persistencia de geometría:** Guardar posición (x, y) y tamaño (width, height) de la ventana al cerrar, restaurar al abrir. Archivo: `config/window_geometry.json`.
-- **RF2.1b — Modo compacto:** Alternar entre vista completa y vista reducida (solo consola + indicador de estado + PTT), para minimizar espacio en monitor principal.
-- **RF2.1c — Always on Top:** Opción para mantener la ventana siempre visible sobre otras aplicaciones.
+- **RF2.1a — Persistencia de geometría:** ✅ Implementado. Guardar posición (x, y) y tamaño (width, height) de la ventana al cerrar, restaurar al abrir. Archivo: `config/window_geometry.json`.
+- **RF2.1b — Modo compacto:** ✅ Implementado. Switch en `frame_top` que oculta/muestra `frame_model`, `frame_profile`, `frame_bottom`.
+- **RF2.1c — Always on Top:** ❌ No requerido por el usuario.
+
+**Respuestas del usuario:**
+- RF2.1b: **Sí** — implementar modo compacto
+- RF2.1c: **No** — no se necesita Always on Top
 
 **Archivos afectados:**
-- `ui/app.py` — `geometry()`, `wm_attributes()`, `on_closing()`.
+- `ui/app.py` — `geometry()`, `on_closing()`.
 
 ---
 
@@ -49,18 +53,26 @@ La UI debe mostrar indicadores visuales del estado actual del pipeline de proces
 | Estado | Significado | Trigger |
 |--------|-------------|---------|
 | **En Espera** | Sistema idle, sin actividad | `ui_callback("idle")` |
-| **Escuchando** | PTT presionado O WebSocket activo recibiendo | `ptt_pressed=True` o `ws_connected=True` |
+| **Escuchando** | PTT presionado O WebSocket activo recibiendo | `ptt_pressed=True` or `ws_connected=True` |
 | **Procesando LLM** | Ollama generando respuesta | `ui_callback("processing")` |
 | **Sintetizando Voz** | TTS generando audio | Motor `_speaking=True` |
+| **Hablando** | Reproduciendo audio | Motor reproduciendo |
+| **Descargando Modelo** | Descarga en progreso | `ui_callback("download_start")` |
 
-**Sub-requerimientos propuestos:**
+**Sub-requerimientos:**
 
-- **RF2.2a — Indicador de pipeline:** Reemplazar el label de estado actual por una barra con 4 estados visuales (texto + color).
-- **RF2.2b — Indicador de audio:** Mostrar nivel de audio en tiempo real (RMS en barra) cuando está en modo "Escuchando".
+- **RF2.2a — Indicador de pipeline:** ✅ Implementado. Label con texto + color para 7 estados.
+- **RF2.2b — Indicador de audio:** ✅ Implementado con animación fake. PTT es gate sobre WebSocket (no captura audio local), por lo que se usa animación simulada.
+- **RF2.2c — Barra RMS real:** ✅ Implementado.
+
+**Respuestas del usuario:**
+- Estilo: **Texto + color**
+- Estados a mostrar: **Todos** (En Espera, Escuchando, Procesando LLM, Sintetizando Voz, Hablando)
+- Barra RMS: **Sí** — mostrar nivel mientras está "Escuchando"
+- Ubicación: **Esquina superior derecha** (como ahora)
 
 **Archivos afectados:**
-- `ui/app.py` — `_on_motor_event`, `_set_ptt_status`.
-- `core/llm_engine.py` — `_hablar` (agregar callback `"speaking_start"` / `"speaking_end"`).
+- `ui/app.py` — `_on_motor_event`, `_actualizar_pipeline`, `_animar_rms`.
 
 ---
 
@@ -74,15 +86,21 @@ La UI debe mostrar indicadores visuales del estado actual del pipeline de proces
 **Descripción:**  
 Panel dedicado donde Kira confirme acciones administrativas ejecutadas, separado del log general de sistema. Ejemplos: "Título de Twitch actualizado a '...'", "Slow Mode activado por 5 min".
 
-**Sub-requerimientos propuestos:**
+**Sub-requerimientos:**
 
-- **RF2.3a — Panel de acciones:** `CTkTextbox` o `CTkScrollableFrame` separado, solo para mensajes de acción confirmada.
-- **RF2.3b — API de logging:** Método `_log_accion(msg)` que publique en el panel de acciones y en el log general.
-- **RF2.3c — Integración futura:** El panel queda listo para recibir callbacks de RF4.x (Twitch/YouTube API).
+- **RF2.3a — Panel de acciones:** ✅ Implementado. Tabview con pestana "📝 Kira Acciones" (`consola_acciones`).
+- **RF2.3b — API de logging:** ✅ Implementado. Método `_log_accion(msg)` persiste en `logs/acciones.jsonl`.
+- **RF2.3c — Mensajes simulados:** ✅ Implementado. Mensajes demo insertados en `_build_ui` cuando no hay historial.
+- **RF2.3d — Integración futura:** El panel queda listo para recibir callbacks de RF4.x (Twitch/YouTube API).
+
+**Respuestas del usuario:**
+- Separación: **Pestañas** (ya implementado así)
+- Contenido: **Mensajes simulados de prueba**
+- Tipo: **Todo** (acciones + eventos del sistema + transcripciones)
+- Persistencia: **Sí** — guardar en `logs/acciones.jsonl`
 
 **Archivos afectados:**
-- `ui/app.py` — nuevo panel en la UI.
-- `core/llm_engine.py` — opcional: nuevo comando `"log_action"`.
+- `ui/app.py` — `_log_accion`, `consola_acciones`.
 
 ---
 
@@ -96,6 +114,17 @@ Panel dedicado donde Kira confirme acciones administrativas ejecutadas, separado
 
 ---
 
-## 4. Preguntas abiertas para el usuario
+## 4. Preguntas — RESPUESTAS REGISTRADAS
 
-Ver sección 5 del documento `HANDOFF_RF2.md`.
+| Pregunta | Respuesta |
+|----------|-----------|
+| RF2.1b Modo compacto | **Sí** |
+| RF2.1c Always on Top | **No** |
+| RF2.2A Estilo indicador | **Texto + color** |
+| RF2.2B Estados a mostrar | **Todos** |
+| RF2.2C Barra RMS | **Sí** |
+| RF2.2D Ubicación | **Esquina superior derecha** |
+| RF2.3A Separación | **Pestañas** |
+| RF2.3B Contenido | **Mensajes simulados** |
+| RF2.3C Tipo | **Todo** (acciones + eventos + transcripciones) |
+| RF2.3D Persistencia | **Sí** |

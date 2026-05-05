@@ -1,0 +1,75 @@
+provider:
+  default: youtube
+  enabled_providers:
+    - youtube
+    - twitch
+  mode: read_only
+
+oauth:
+  token_storage: local_file_mvp
+  client_config_path: data/stream_admin/oauth_client.json
+  token_path: data/stream_admin/oauth_tokens.json
+  request_write_scopes: false
+  allow_token_export: false
+
+youtube:
+  client_id: "${YOUTUBE_OAUTH_CLIENT_ID}"
+  client_secret: "${YOUTUBE_OAUTH_CLIENT_SECRET}"
+  oauth_timeout_seconds: 120
+
+twitch:
+  enabled: false
+  placeholder: true
+
+metadata:
+  require_approval: true
+  auto_apply_metadata: false
+  allow_kira_suggestions: true
+  presets_enabled: true
+  presets:
+    - name: Gaming Base
+      title: "Kira Gaming Live - Jugando con el chat"
+      description: "Stream con Kira como co-host virtual. Jugamos, reaccionamos y leemos al chat en vivo."
+      tags:
+        - kira
+        - voiceai
+        - gaming
+    - name: Just Chatting
+      title: "Kira Live - Platicando con el chat"
+      description: "Stream casual con Kira como co-host virtual y el chat llevando el caos."
+      tags:
+        - kira
+        - just chatting
+        - live
+  categories:
+    - id: "20"
+      name: Gaming
+    - id: "22"
+      name: People & Blogs
+    - id: "24"
+      name: Entertainment
+    - id: "10"
+      name: Music
+
+moderation:
+  enabled: false
+  mode: alerts_only
+  announce_actions_to_chat: false
+  cooldown_seconds: 120
+  negative_temperature_threshold: 35
+  chat_rate_threshold: 2.0
+  high_risk_actions_require_confirmation: true
+  slow_mode:
+    enabled: true
+    default_seconds: 10
+    duration_minutes: 5
+
+analytics:
+  enabled: true
+  update_interval_seconds: 60
+  inject_context: true
+  react_to_milestones: true
+  react_to_subs_donations: true
+
+chat:
+  allow_kira_chat_messages: false

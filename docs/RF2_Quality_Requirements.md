@@ -60,8 +60,14 @@ La geometría de ventana y preferencias de UI deben persistir entre sesiones sin
 
 ## 2. Criterios de Aceptación
 
-- [ ] La ventana recuerda posición y tamaño al reiniciar la app.
-- [ ] El label de estado distingue visualmente entre ≥3 estados del pipeline.
-- [ ] El panel de acciones muestra al menos mensajes simulados de prueba.
-- [ ] La UI no introduce nuevas dependencias pesadas.
-- [ ] El rendimiento de la UI no degrada el FPS del juego/stream.
+- [x] La ventana recuerda posición y tamaño al reiniciar la app. ✅ Implementado
+- [x] El label de estado distingue visualmente entre ≥3 estados del pipeline. ✅ Implementado (7 estados)
+- [x] El panel de acciones muestra al menos mensajes simulados de prueba. ✅ Implementado
+- [x] La UI no introduce nuevas dependencias pesadas. ✅ Cumple (CustomTkinter ya usado)
+- [x] El rendimiento de la UI no degrada el FPS del juego/stream. ✅ Cumple (0% GPU overhead)
+
+### Criterios adicionales según respuestas del usuario
+
+- [x] Modo compacto: alternar vista completa/reducida. ✅ Implementado
+- [x] Barra RMS real muestra nivel de audio en "Escuchando". ⚠️ Implementado con animación fake (por usar WebSocket gate, no captura local)
+- [x] Mensajes simulados de prueba en panel de acciones. ✅ Implementado
