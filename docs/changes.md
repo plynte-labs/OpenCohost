@@ -148,6 +148,8 @@ Este documento incluye:
 
 **[WorkerSeniorAI] Cierre funcional RF4 MVP — 2026-05-05:** RF4 queda funcional como MVP de Stream Admin para YouTube: OAuth desde UI, lectura de live privado/no listado, metadata editable, escritura con scope `youtube.force-ssl`, chat autenticado por `liveChatId`, envío de mensajes al chat, integración RF3/RF4, modo `Stream Chico`, simulación de chat, botón `Forzar Kira`, lista de usuarios recientes y acciones `Timeout`/`Banear` con confirmación. Twitch queda como placeholder futuro y Slow Mode/Emote-only dependen de soporte/API futura.
 
+**[WorkerSeniorAI] Refactor UI/UX seguro — 2026-05-05:** Se reorganizó `ui/app.py` sin tocar backend ni contratos: la vista `Kira` quedó como experiencia principal con respuesta central, botón grande `Hablar`/`Detener`, estados de voz/PTT, TTS, memoria y chat; la configuración pasó a panel lateral con `Modelo/Perfil`, `Audio/TTS`, `PTT`, `YouTube` y `Admin`; `Stream Admin` quedó como workspace administrativo secundario con secciones internas; y los logs se mantienen abajo bajo el switch `Mostrar logs` con tabs `Log General`, `Kira Acciones`, `YT Chat` y `Stream Log`. El plan y riesgos quedaron documentados en `docs/UI_UX_REFACTOR_PLAN.md`.
+
 ---
 
 ## 🏗️ Arquitectura Sugerida (Modular Services)

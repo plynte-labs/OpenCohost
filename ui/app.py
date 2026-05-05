@@ -166,7 +166,7 @@ class VocalAIApp(ctk.CTk):
         self.perfiles = cargar_perfiles()
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         self.lista_dispositivos = self._obtener_dispositivos_entrada()
         self._build_ui()
@@ -187,94 +187,256 @@ class VocalAIApp(ctk.CTk):
             self.motor_ia.command_queue.put(("set_profile", self.perfiles[nombre]))
 
     def _build_ui(self):
-        frame_top = ctk.CTkFrame(self)
-        frame_top.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        self.configure(fg_color="#0b0f14")
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=0)
+        self.grid_rowconfigure(3, weight=0, minsize=0)
+        self.grid_rowconfigure(4, weight=0, minsize=0)
+        self.grid_rowconfigure(5, weight=0, minsize=0)
 
-        # ── Grupo: Audio Input ──
-        self.combo_dispositivos = ctk.CTkOptionMenu(
-            frame_top,
-            values=self.lista_dispositivos,
-            command=self._al_seleccionar_dispositivo,
-            width=250
+        status_bar = ctk.CTkFrame(self, fg_color="#111820", corner_radius=14)
+        status_bar.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+
+        self.lbl_status = ctk.CTkLabel(
+            status_bar,
+            text="Modelo cargando",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#ffaa00"
         )
-        self.combo_dispositivos.pack(side="left", padx=(0, 5))
-        if self.lista_dispositivos:
-            self.combo_dispositivos.set(self.lista_dispositivos[0])
-            self.dispositivo_seleccionado = int(self.lista_dispositivos[0].split(":")[0])
-        else:
-            self.combo_dispositivos.set("Sin dispositivos de audio")
+        self.lbl_status.pack(side="left", padx=(12, 8), pady=10)
 
-        self.btn_grabar = ctk.CTkButton(
-            frame_top, text="🎤 Grabar", command=self._iniciar_grabacion,
-            state="disabled", width=90
+        self.lbl_mic_status_pill = ctk.CTkLabel(status_bar, text="Mic: revisando", fg_color="#1b2633", corner_radius=12)
+        self.lbl_mic_status_pill.pack(side="left", padx=4, pady=8)
+        self.lbl_tts_status_pill = ctk.CTkLabel(status_bar, text="TTS: idle", fg_color="#1b2633", corner_radius=12)
+        self.lbl_tts_status_pill.pack(side="left", padx=4, pady=8)
+        self.lbl_chat_status_pill = ctk.CTkLabel(status_bar, text="Chat: desconectado", fg_color="#1b2633", corner_radius=12)
+        self.lbl_chat_status_pill.pack(side="left", padx=4, pady=8)
+        self.lbl_oauth_status_pill = ctk.CTkLabel(status_bar, text="OAuth: desconectado", fg_color="#1b2633", corner_radius=12)
+        self.lbl_oauth_status_pill.pack(side="left", padx=4, pady=8)
+        self.lbl_memory_status_pill = ctk.CTkLabel(status_bar, text="Memoria: disponible", fg_color="#1b2633", corner_radius=12)
+        self.lbl_memory_status_pill.pack(side="left", padx=4, pady=8)
+        self.lbl_moderation_status_pill = ctk.CTkLabel(status_bar, text="Moderación: sin pendientes", fg_color="#1b2633", corner_radius=12)
+        self.lbl_moderation_status_pill.pack(side="left", padx=4, pady=8)
+
+        self.switch_advanced = ctk.CTkSwitch(
+            status_bar,
+            text="Mostrar logs",
+            command=self._toggle_logs_panel,
+            onvalue=True,
+            offvalue=False
         )
-        self.btn_grabar.pack(side="left", padx=5)
-
-        self.btn_voz = ctk.CTkButton(
-            frame_top, text="📂 Cargar (.wav)", command=self._cargar_voz,
-            state="disabled", fg_color="gray", width=110
-        )
-        self.btn_voz.pack(side="left", padx=5)
-
-        self.btn_ws = ctk.CTkButton(
-            frame_top, text="Conectar LiveAudio", command=self._toggle_websocket,
-            fg_color="gray", state="disabled"
-        )
-        self.btn_ws.pack(side="left", padx=5)
-
-        # Separador
-        ctk.CTkLabel(frame_top, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
-
-        # ── Grupo: Acciones ──
-        self.btn_clear = ctk.CTkButton(
-            frame_top, text="🗑️ Limpiar Memoria", command=self._limpiar_historial,
-            width=130, fg_color="#555555", hover_color="#777777"
-        )
-        self.btn_clear.pack(side="left", padx=5)
-
-        self.switch_modo_ligero = ctk.CTkSwitch(
-            frame_top, text="🎛️ TTS: Ligero",
-            onvalue="ligero", offvalue="pesado",
-            command=self._al_cambiar_motor_tts
-        )
-        self.switch_modo_ligero.pack(side="left", padx=5)
-        self.switch_modo_ligero.select()
-
-        # Separador
-        ctk.CTkLabel(frame_top, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
-
-        # ── Grupo: Vista ──
-        self.switch_logs = ctk.CTkSwitch(
-            frame_top, text="Mostrar Logs",
-            onvalue=True, offvalue=False
-        )
-        self.switch_logs.pack(side="left", padx=5)
-        self.switch_logs.select()
+        self.switch_advanced.pack(side="right", padx=(8, 12), pady=8)
 
         self.switch_compacto = ctk.CTkSwitch(
-            frame_top, text="📺 Compacto",
+            status_bar,
+            text="Compacto",
             command=self._toggle_modo_compacto,
-            onvalue=True, offvalue=False
+            onvalue=True,
+            offvalue=False
         )
-        self.switch_compacto.pack(side="left", padx=5)
+        self.switch_compacto.pack(side="right", padx=8, pady=8)
 
-        # Espaciador
-        ctk.CTkLabel(frame_top, text="", width=50).pack(side="left")
+        app_shell = ctk.CTkFrame(self, fg_color="transparent")
+        app_shell.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        app_shell.grid_columnconfigure(0, weight=1)
+        app_shell.grid_columnconfigure(1, weight=0)
+        app_shell.grid_rowconfigure(0, weight=1)
 
-        # ── Status (derecha) ──
-        self.lbl_status = ctk.CTkLabel(frame_top, text="🟢 En Espera", font=ctk.CTkFont(size=13, weight="bold"))
-        self.lbl_status.pack(side="right", padx=(10, 0))
+        main_panel = ctk.CTkFrame(app_shell, fg_color="#10161d", corner_radius=18)
+        main_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+        main_panel.grid_columnconfigure(0, weight=0)
+        main_panel.grid_columnconfigure(1, weight=1)
+        main_panel.grid_rowconfigure(0, weight=1)
 
-        # ── Barra de audio RMS ──
-        self.barra_rms = ctk.CTkProgressBar(frame_top, width=120, height=8)
+        main_nav = ctk.CTkFrame(main_panel, width=140, fg_color="#0c1117", corner_radius=14)
+        main_nav.grid(row=0, column=0, sticky="ns", padx=(10, 6), pady=10)
+        main_nav.grid_propagate(False)
+        ctk.CTkLabel(main_nav, text="Vista", font=ctk.CTkFont(size=12, weight="bold"), text_color="#8fa3b8").pack(fill="x", padx=10, pady=(12, 6))
+
+        main_content = ctk.CTkFrame(main_panel, fg_color="transparent")
+        main_content.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=10)
+        main_content.grid_columnconfigure(0, weight=1)
+        main_content.grid_rowconfigure(0, weight=1)
+
+        tab_main_kira = ctk.CTkFrame(main_content, fg_color="transparent")
+        tab_main_stream_admin = ctk.CTkFrame(main_content, fg_color="transparent")
+        for frame in (tab_main_kira, tab_main_stream_admin):
+            frame.grid(row=0, column=0, sticky="nsew")
+
+        self._main_view_buttons = {}
+        self._main_view_frames = {
+            "Kira": tab_main_kira,
+            "Stream Admin": tab_main_stream_admin,
+        }
+        for name in self._main_view_frames:
+            btn = ctk.CTkButton(
+                main_nav,
+                text=name,
+                command=lambda view=name: self._show_main_view(view),
+                fg_color="#151d26",
+                hover_color="#1d2a38",
+                anchor="w"
+            )
+            btn.pack(fill="x", padx=8, pady=4)
+            self._main_view_buttons[name] = btn
+
+        tab_main_kira.grid_columnconfigure(0, weight=1)
+        tab_main_kira.grid_rowconfigure(1, weight=1)
+        tab_main_stream_admin.grid_columnconfigure(0, weight=1)
+        tab_main_stream_admin.grid_rowconfigure(0, weight=1)
+
+        kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
+        kira_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        kira_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            kira_header,
+            text="Kira",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            anchor="w"
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            kira_header,
+            text="Experiencia principal",
+            text_color="#8fa3b8",
+            anchor="e"
+        ).grid(row=0, column=1, sticky="e")
+
+        kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=18)
+        kira_response_shell.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
+        kira_response_shell.grid_columnconfigure(0, weight=1)
+        kira_response_shell.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            kira_response_shell,
+            text="Respuesta de Kira",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#d8e2ef",
+            anchor="w"
+        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+
+        self.text_kira_response = ctk.CTkTextbox(
+            kira_response_shell,
+            font=ctk.CTkFont(size=17),
+            fg_color="#090d12",
+            border_width=1,
+            border_color="#1f2b38",
+            state="disabled"
+        )
+        self.text_kira_response.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self.text_kira_response.configure(state="normal")
+        self.text_kira_response.insert("end", "La respuesta de Kira aparecerá aquí. Los logs completos se muestran abajo solo si activas Mostrar logs.\n")
+        self.text_kira_response.configure(state="disabled")
+
+        voice_panel = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
+        voice_panel.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        voice_panel.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            voice_panel,
+            text="Entrada de voz / PTT",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#d8e2ef"
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+
+        kira_state_strip = ctk.CTkFrame(voice_panel, fg_color="transparent")
+        kira_state_strip.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 6))
+        for col in range(4):
+            kira_state_strip.grid_columnconfigure(col, weight=1)
+        self.lbl_kira_voice_state = ctk.CTkLabel(kira_state_strip, text="Voz/PTT: listo", fg_color="#1b2633", corner_radius=12, anchor="w")
+        self.lbl_kira_voice_state.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=0)
+        self.lbl_kira_tts_state = ctk.CTkLabel(kira_state_strip, text="TTS: idle", fg_color="#1b2633", corner_radius=12, anchor="w")
+        self.lbl_kira_tts_state.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
+        self.lbl_kira_memory_state = ctk.CTkLabel(kira_state_strip, text="Memoria: disponible", fg_color="#1b2633", corner_radius=12, anchor="w")
+        self.lbl_kira_memory_state.grid(row=0, column=2, sticky="ew", padx=4, pady=0)
+        self.lbl_kira_chat_state = ctk.CTkLabel(kira_state_strip, text="Chat: desconectado", fg_color="#1b2633", corner_radius=12, anchor="w")
+        self.lbl_kira_chat_state.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=0)
+
+        self.lbl_voice_hint = ctk.CTkLabel(
+            voice_panel,
+            text="Usa LiveAudio o PTT. El botón principal conserva el comportamiento de Conectar LiveAudio.",
+            text_color="#8fa3b8",
+            anchor="w"
+        )
+        self.lbl_voice_hint.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+
+        voice_actions = ctk.CTkFrame(voice_panel, fg_color="transparent")
+        voice_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
+        voice_actions.grid_columnconfigure(0, weight=1)
+
+        self.btn_primary_voice = ctk.CTkButton(
+            voice_actions,
+            text="Hablar",
+            command=self._toggle_websocket,
+            state="disabled",
+            height=72,
+            font=ctk.CTkFont(size=21, weight="bold"),
+            fg_color="#1f7a5a",
+            hover_color="#24946c"
+        )
+        self.btn_primary_voice.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
+
+        self.barra_rms = ctk.CTkProgressBar(voice_actions, width=150, height=10)
         self.barra_rms.set(0)
-        self.barra_rms.pack(side="right", padx=5)
-        self.barra_rms.pack_forget()
+        self.barra_rms.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
+        self.barra_rms.grid_remove()
 
-        frame_model = ctk.CTkFrame(self)
-        frame_model.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+        frame_bottom = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
+        frame_bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
+        frame_bottom.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_model, text="🧠 Modelo:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(5, 3))
+        self.entry_chat = ctk.CTkEntry(
+            frame_bottom,
+            placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)..."
+        )
+        self.entry_chat.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=10)
+        self.entry_chat.bind("<Return>", lambda e: self._enviar_contexto_manual())
+
+        self.btn_enviar = ctk.CTkButton(
+            frame_bottom, text="Enviar a IA",
+            command=self._enviar_contexto_manual,
+            width=110, state="disabled",
+            fg_color="#555555",
+            hover_color="#666666"
+        )
+        self.btn_enviar.grid(row=0, column=1, padx=(0, 10), pady=10)
+
+        side_panel = ctk.CTkFrame(app_shell, width=390, fg_color="#0f151c", corner_radius=18)
+        side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
+        side_panel.grid_columnconfigure(0, weight=1)
+        side_panel.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            side_panel,
+            text="Configuración",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            anchor="w"
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+
+        config_tabs = ctk.CTkTabview(
+            side_panel,
+            width=370,
+            fg_color="#0f151c",
+            segmented_button_fg_color="#0c1117",
+            segmented_button_selected_color="#2f5f8f",
+            segmented_button_selected_hover_color="#3670aa",
+            segmented_button_unselected_color="#151d26",
+            segmented_button_unselected_hover_color="#1d2a38",
+            text_color="#d8e2ef"
+        )
+        config_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 12))
+        tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
+        tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
+        tab_cfg_ptt = config_tabs.add("PTT")
+        tab_cfg_youtube = config_tabs.add("YouTube")
+        tab_cfg_admin = config_tabs.add("Admin")
+        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_ptt, tab_cfg_youtube, tab_cfg_admin):
+            tab.grid_columnconfigure(0, weight=1)
+
+        frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
+        frame_model.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+
+        ctk.CTkLabel(frame_model, text="Modelo", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
 
         self._model_display_to_tag = {}
         self._model_tag_to_display = {}
@@ -291,123 +453,234 @@ class VocalAIApp(ctk.CTk):
             frame_model,
             values=model_display_list,
             command=self._al_seleccionar_modelo,
-            width=200
+            width=300
         )
         self.combo_modelos.set(default_display)
-        self.combo_modelos.pack(side="left", padx=3)
+        self.combo_modelos.pack(fill="x", padx=10, pady=4)
 
         self.btn_download = ctk.CTkButton(
             frame_model, text="⬇️ Descargar", command=self._descargar_modelo,
-            width=110, fg_color="#2d7d46", hover_color="#3a9e5a"
+            width=110, fg_color="#555555", hover_color="#666666"
         )
-        self.btn_download.pack(side="left", padx=3)
+        self.btn_download.pack(fill="x", padx=10, pady=4)
 
         self.lbl_modelo_info = ctk.CTkLabel(
             frame_model, text="", font=ctk.CTkFont(size=11),
-            text_color="#aaaaaa"
+            text_color="#aaaaaa",
+            anchor="w",
+            justify="left",
+            wraplength=300
         )
-        self.lbl_modelo_info.pack(side="left", padx=10)
+        self.lbl_modelo_info.pack(fill="x", padx=10, pady=4)
         self._actualizar_info_modelo(DEFAULT_MODEL)
 
         self.progress_download = ctk.CTkProgressBar(frame_model, width=150)
-        self.progress_download.pack(side="right", padx=10)
+        self.progress_download.pack(fill="x", padx=10, pady=(4, 10))
         self.progress_download.set(0)
         self.progress_download.pack_forget()
 
-        frame_profile = ctk.CTkFrame(self)
-        frame_profile.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
+        frame_profile.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
 
-        ctk.CTkLabel(frame_profile, text="🎭 Perfil/Prompt:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(5, 3))
+        ctk.CTkLabel(frame_profile, text="Perfil", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
 
         self.combo_perfiles = ctk.CTkOptionMenu(
             frame_profile,
             values=list(self.perfiles.keys()),
             command=self._al_seleccionar_perfil,
-            width=200
+            width=300
         )
         default_perfil = "Kira (Default)" if "Kira (Default)" in self.perfiles else list(self.perfiles.keys())[0]
         self.combo_perfiles.set(default_perfil)
-        self.combo_perfiles.pack(side="left", padx=3)
+        self.combo_perfiles.pack(fill="x", padx=10, pady=4)
 
         self.btn_editar_perfiles = ctk.CTkButton(
             frame_profile, text="✏️ Editar Perfiles", command=self._abrir_configurador_perfiles,
-            width=130, fg_color="#3B8ED0", hover_color="#1F6AA5"
+            width=130, fg_color="#555555", hover_color="#666666"
         )
-        self.btn_editar_perfiles.pack(side="left", padx=3)
+        self.btn_editar_perfiles.pack(fill="x", padx=10, pady=(4, 10))
 
-        # ── Frame PTT ──
-        frame_ptt = ctk.CTkFrame(self)
-        frame_ptt.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
+        frame_audio = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
+        frame_audio.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_audio, text="Dispositivo de audio", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
 
-        ctk.CTkLabel(frame_ptt, text="🎙️ PTT:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(5, 3))
+        self.combo_dispositivos = ctk.CTkOptionMenu(
+            frame_audio,
+            values=self.lista_dispositivos,
+            command=self._al_seleccionar_dispositivo,
+            width=300
+        )
+        self.combo_dispositivos.pack(fill="x", padx=10, pady=4)
+        if self.lista_dispositivos:
+            self.combo_dispositivos.set(self.lista_dispositivos[0])
+            self.dispositivo_seleccionado = int(self.lista_dispositivos[0].split(":")[0])
+            self.lbl_mic_status_pill.configure(text="Mic: conectado", fg_color="#1b2633")
+        else:
+            self.combo_dispositivos.set("Sin dispositivos de audio")
+            self.lbl_mic_status_pill.configure(text="Mic: desconectado", fg_color="#4a2630")
+
+        audio_buttons = ctk.CTkFrame(frame_audio, fg_color="transparent")
+        audio_buttons.pack(fill="x", padx=10, pady=4)
+
+        self.btn_grabar = ctk.CTkButton(
+            audio_buttons, text="🎤 Grabar", command=self._iniciar_grabacion,
+            state="disabled", width=90, fg_color="#555555", hover_color="#666666"
+        )
+        self.btn_grabar.pack(side="left", expand=True, fill="x", padx=(0, 4))
+
+        self.btn_voz = ctk.CTkButton(
+            audio_buttons, text="📂 Cargar WAV", command=self._cargar_voz,
+            state="disabled", fg_color="#555555", width=110
+        )
+        self.btn_voz.pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+        self.btn_ws = ctk.CTkButton(
+            frame_audio, text="Conectar LiveAudio", command=self._toggle_websocket,
+            fg_color="#555555", state="disabled"
+        )
+        self.btn_ws.pack(fill="x", padx=10, pady=(4, 10))
+
+        frame_tts_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
+        frame_tts_memory.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_tts_memory, text="TTS / Memoria", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+
+        self.switch_modo_ligero = ctk.CTkSwitch(
+            frame_tts_memory, text="🎛️ TTS: Ligero",
+            onvalue="ligero", offvalue="pesado",
+            command=self._al_cambiar_motor_tts
+        )
+        self.switch_modo_ligero.pack(fill="x", padx=10, pady=4)
+        self.switch_modo_ligero.select()
+
+        self.btn_clear = ctk.CTkButton(
+            frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial,
+            width=130, fg_color="#555555", hover_color="#777777"
+        )
+        self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
+
+        frame_ptt = ctk.CTkFrame(tab_cfg_ptt, fg_color="#151d26", corner_radius=14)
+        frame_ptt.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+
+        ctk.CTkLabel(frame_ptt, text="PTT", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
 
         self.switch_ptt = ctk.CTkSwitch(
             frame_ptt, text="PTT OFF",
             command=self._al_toggle_ptt,
             onvalue=True, offvalue=False
         )
-        self.switch_ptt.pack(side="left", padx=3)
+        self.switch_ptt.pack(fill="x", padx=10, pady=4)
 
-        ctk.CTkLabel(frame_ptt, text="Tecla:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(10, 3))
+        ptt_hotkey_row = ctk.CTkFrame(frame_ptt, fg_color="transparent")
+        ptt_hotkey_row.pack(fill="x", padx=10, pady=4)
+        ctk.CTkLabel(ptt_hotkey_row, text="Tecla:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
 
         self.lbl_hotkey = ctk.CTkLabel(
-            frame_ptt, text=self.ptt_hotkey,
+            ptt_hotkey_row, text=self.ptt_hotkey,
             font=ctk.CTkFont(size=13, weight="bold"),
             width=80
         )
         self.lbl_hotkey.pack(side="left", padx=3)
 
         self.btn_mapear = ctk.CTkButton(
-            frame_ptt, text="Mapear", command=self._mapear_hotkey,
-            width=70, fg_color=["#3B8ED0", "#1F6AA5"]
+            ptt_hotkey_row, text="Mapear", command=self._mapear_hotkey,
+            width=70, fg_color="#555555", hover_color="#666666"
         )
-        self.btn_mapear.pack(side="left", padx=3)
+        self.btn_mapear.pack(side="right", padx=3)
 
         self.lbl_ptt_status = ctk.CTkLabel(
             frame_ptt, text="", font=ctk.CTkFont(size=12),
-            text_color="#888888"
+            text_color="#888888",
+            anchor="w",
+            justify="left"
         )
-        self.lbl_ptt_status.pack(side="left", padx=10)
+        self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
 
-        ctk.CTkLabel(frame_ptt, text="│", text_color="#555555", font=ctk.CTkFont(size=14)).pack(side="left", padx=8)
-        ctk.CTkLabel(frame_ptt, text="YouTube:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 3))
+        frame_youtube = ctk.CTkFrame(tab_cfg_youtube, fg_color="#151d26", corner_radius=14)
+        frame_youtube.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_youtube, text="YouTube", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
 
         self.entry_youtube_video = ctk.CTkEntry(
-            frame_ptt,
+            frame_youtube,
             placeholder_text="URL o video_id del live",
-            width=220
+            width=300
         )
-        self.entry_youtube_video.pack(side="left", padx=3)
+        self.entry_youtube_video.pack(fill="x", padx=10, pady=4)
         self.entry_youtube_video.bind("<Return>", lambda e: self._toggle_smart_aggregator())
 
         self.btn_youtube_chat = ctk.CTkButton(
-            frame_ptt,
+            frame_youtube,
             text="Conectar Chat",
             command=self._toggle_smart_aggregator,
             width=120,
-            fg_color=["#3B8ED0", "#1F6AA5"]
+            fg_color="#2f5f8f",
+            hover_color="#3670aa"
         )
-        self.btn_youtube_chat.pack(side="left", padx=3)
+        self.btn_youtube_chat.pack(fill="x", padx=10, pady=4)
 
-        ctk.CTkLabel(frame_ptt, text="Max/u:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(8, 3))
-        self.entry_youtube_user_limit = ctk.CTkEntry(frame_ptt, width=45)
+        youtube_limit_row = ctk.CTkFrame(frame_youtube, fg_color="transparent")
+        youtube_limit_row.pack(fill="x", padx=10, pady=(4, 10))
+        ctk.CTkLabel(youtube_limit_row, text="Max/u:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+        self.entry_youtube_user_limit = ctk.CTkEntry(youtube_limit_row, width=60)
         self.entry_youtube_user_limit.insert(0, "10")
         self.entry_youtube_user_limit.pack(side="left", padx=3)
         self.entry_youtube_user_limit.bind("<Return>", lambda e: self._apply_smart_spam_limit())
 
+        frame_oauth = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
+        frame_oauth.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_oauth, text="OAuth", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        self.lbl_oauth_side_status = ctk.CTkLabel(frame_oauth, text="Configura YouTube en la pestaña Stream Admin.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=300)
+        self.lbl_oauth_side_status.pack(fill="x", padx=10, pady=(0, 10))
+
+        frame_moderation = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
+        frame_moderation.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_moderation, text="Moderación", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        self.lbl_moderation_side_status = ctk.CTkLabel(frame_moderation, text="Sin acciones pendientes. Detalles en Stream Admin.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=300)
+        self.lbl_moderation_side_status.pack(fill="x", padx=10, pady=(0, 10))
+
+        frame_view = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
+        frame_view.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_view, text="Vista", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+
+        self.switch_logs = ctk.CTkSwitch(
+            frame_view, text="Registrar logs en avanzado",
+            onvalue=True, offvalue=False
+        )
+        self.switch_logs.pack(fill="x", padx=10, pady=(4, 10))
+        self.switch_logs.select()
+
         self.consola = None  # will be the Log tab textbox
 
-        self.tabview = ctk.CTkTabview(
-            self,
-            command=self._on_tab_change,
-            height=1
-        )
-        self.tabview.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        stream_admin_panel = ctk.CTkFrame(tab_main_stream_admin, fg_color="#0f151c", corner_radius=18)
+        stream_admin_panel.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        stream_admin_panel.grid_columnconfigure(0, weight=1)
+        stream_admin_panel.grid_rowconfigure(0, weight=1)
 
-        tab_log = self.tabview.add("📋 Log General")
-        tab_acciones = self.tabview.add("📝 Kira Acciones")
-        tab_youtube = self.tabview.add("💬 YT Chat")
-        tab_stream_admin = self.tabview.add("🛠 Stream Admin")
+        self._build_stream_admin_tab(stream_admin_panel)
+
+        advanced_panel = ctk.CTkFrame(self, fg_color="#0f151c", corner_radius=18, height=260)
+        advanced_panel.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        advanced_panel.grid_propagate(False)
+        advanced_panel.grid_columnconfigure(0, weight=1)
+        advanced_panel.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            advanced_panel,
+            text="Logs / Terminales",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w"
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+
+        self.tabview = ctk.CTkTabview(
+            advanced_panel,
+            command=self._on_tab_change,
+            height=210
+        )
+        self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+        tab_log = self.tabview.add("Log General")
+        tab_acciones = self.tabview.add("Kira Acciones")
+        tab_youtube = self.tabview.add("YT Chat")
+        tab_stream_log = self.tabview.add("Stream Log")
 
         self.consola = ctk.CTkTextbox(
             tab_log, font=ctk.CTkFont(family="Consolas", size=13),
@@ -427,7 +700,10 @@ class VocalAIApp(ctk.CTk):
         )
         self.consola_youtube.pack(fill="both", expand=True)
 
-        self._build_stream_admin_tab(tab_stream_admin)
+        self.text_stream_admin_log = ctk.CTkTextbox(
+            tab_stream_log, font=ctk.CTkFont(family="Consolas", size=12), state="disabled"
+        )
+        self.text_stream_admin_log.pack(fill="both", expand=True)
 
         for accion in _cargar_acciones():
             self.consola_acciones.configure(state="normal")
@@ -450,38 +726,42 @@ class VocalAIApp(ctk.CTk):
                 _guardar_accion(msg.replace("🎮 [Sistema] ", "").replace("📺 [Kira] ", "").replace("🔇 [Kira] ", "").replace("🎵 [Sistema] ", "").replace("📋 [Kira] ", ""))
             self.consola_acciones.see("end")
 
-        frame_bottom = ctk.CTkFrame(self)
-        frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
-        frame_bottom.grid_columnconfigure(0, weight=1)
-
-        self.entry_chat = ctk.CTkEntry(
-            frame_bottom,
-            placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)..."
-        )
-        self.entry_chat.grid(row=0, column=0, sticky="ew", padx=(5, 5), pady=5)
-        self.entry_chat.bind("<Return>", lambda e: self._enviar_contexto_manual())
-
-        self.btn_enviar = ctk.CTkButton(
-            frame_bottom, text="Enviar a IA",
-            command=self._enviar_contexto_manual,
-            width=100, state="disabled"
-        )
-        self.btn_enviar.grid(row=0, column=1, padx=(0, 5), pady=5)
-
         self._frame_model = frame_model
         self._frame_profile = frame_profile
         self._frame_bottom = frame_bottom
+        self._app_shell = app_shell
+        self._main_interaction_panel = main_panel
+        self._side_config_panel = side_panel
+        self._advanced_mode_panel = advanced_panel
+        self._logs_panel_visible = True
+        self._show_main_view("Kira")
+        self._toggle_logs_panel()
 
     def _build_stream_admin_tab(self, parent):
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
 
-        scroll_parent = ctk.CTkScrollableFrame(parent)
-        scroll_parent.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        scroll_parent.grid_columnconfigure(0, weight=1)
-        parent = scroll_parent
+        stream_tabs = ctk.CTkTabview(
+            parent,
+            fg_color="#0f151c",
+            segmented_button_fg_color="#0c1117",
+            segmented_button_selected_color="#2f5f8f",
+            segmented_button_selected_hover_color="#3670aa",
+            segmented_button_unselected_color="#151d26",
+            segmented_button_unselected_hover_color="#1d2a38",
+            text_color="#d8e2ef"
+        )
+        stream_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_stream_connection = stream_tabs.add("Conexión")
+        tab_stream_metadata = stream_tabs.add("Metadata")
+        tab_stream_moderation = stream_tabs.add("Moderación")
+        tab_stream_chat = stream_tabs.add("Chat")
+        tab_stream_status = stream_tabs.add("Estado")
+        for tab in (tab_stream_connection, tab_stream_metadata, tab_stream_moderation, tab_stream_chat, tab_stream_status):
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
 
-        frame_auth = ctk.CTkFrame(parent)
+        frame_auth = ctk.CTkFrame(tab_stream_connection, fg_color="#151d26", corner_radius=14)
         frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         frame_auth.grid_columnconfigure(1, weight=1)
 
@@ -489,9 +769,9 @@ class VocalAIApp(ctk.CTk):
         self.lbl_stream_admin_status = ctk.CTkLabel(frame_auth, text="RF4 iniciando...", text_color="#aaaaaa")
         self.lbl_stream_admin_status.grid(row=0, column=1, padx=8, pady=6, sticky="w")
 
-        self.btn_stream_youtube_read = ctk.CTkButton(frame_auth, text="Conectar YouTube Lectura", command=lambda: self._stream_admin_connect(False), width=170)
+        self.btn_stream_youtube_read = ctk.CTkButton(frame_auth, text="Conectar YouTube Lectura", command=lambda: self._stream_admin_connect(False), width=170, fg_color="#2f5f8f", hover_color="#3670aa")
         self.btn_stream_youtube_read.grid(row=0, column=2, padx=4, pady=6)
-        self.btn_stream_youtube_write = ctk.CTkButton(frame_auth, text="Reconectar Escritura", command=lambda: self._stream_admin_connect(True), width=150, fg_color="#7551a6")
+        self.btn_stream_youtube_write = ctk.CTkButton(frame_auth, text="Reconectar Escritura", command=lambda: self._stream_admin_connect(True), width=150, fg_color="#555555", hover_color="#666666")
         self.btn_stream_youtube_write.grid(row=0, column=3, padx=4, pady=6)
         self.btn_stream_disconnect = ctk.CTkButton(frame_auth, text="Desconectar", command=self._stream_admin_disconnect, width=105, fg_color="#555555")
         self.btn_stream_disconnect.grid(row=0, column=4, padx=4, pady=6)
@@ -504,23 +784,20 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(frame_auth, text="Secret:").grid(row=1, column=3, padx=8, pady=4, sticky="e")
         self.entry_stream_client_secret = ctk.CTkEntry(frame_auth, placeholder_text="OAuth client secret", show="*")
         self.entry_stream_client_secret.grid(row=1, column=4, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._stream_admin_save_oauth_client, width=125).grid(row=1, column=5, padx=4, pady=4)
+        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._stream_admin_save_oauth_client, width=125, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, padx=4, pady=4)
 
-        frame_meta = ctk.CTkFrame(parent)
-        frame_meta.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        frame_meta = ctk.CTkFrame(tab_stream_metadata, fg_color="#151d26", corner_radius=14)
+        frame_meta.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_meta.grid_columnconfigure(1, weight=1)
         frame_meta.grid_columnconfigure(3, weight=1)
 
         ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
         self.lbl_stream_metadata_state = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa")
         self.lbl_stream_metadata_state.grid(row=0, column=1, columnspan=3, padx=8, pady=6, sticky="w")
-        ctk.CTkButton(frame_meta, text="Leer", command=self._stream_admin_refresh_metadata, width=80).grid(row=0, column=4, padx=4, pady=6)
-        ctk.CTkButton(frame_meta, text="Sugerir", command=self._stream_admin_suggest_metadata, width=85).grid(row=0, column=5, padx=4, pady=6)
+        ctk.CTkButton(frame_meta, text="Leer", command=self._stream_admin_refresh_metadata, width=80, fg_color="#555555", hover_color="#666666").grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(frame_meta, text="Sugerir", command=self._stream_admin_suggest_metadata, width=85, fg_color="#2f5f8f", hover_color="#3670aa").grid(row=0, column=5, padx=4, pady=6)
         ctk.CTkButton(frame_meta, text="Aplicar", command=self._stream_admin_apply_metadata, width=85, fg_color="#2a7d3f").grid(row=0, column=6, padx=4, pady=6)
         ctk.CTkButton(frame_meta, text="Rechazar", command=self._stream_admin_reject_pending, width=85, fg_color="#7d2a2a").grid(row=0, column=7, padx=4, pady=6)
-        self.btn_stream_connect_chat = ctk.CTkButton(frame_meta, text="Conectar Chat", command=self._stream_admin_connect_current_chat, width=115, fg_color="#1F6AA5")
-        self.btn_stream_connect_chat.grid(row=0, column=8, padx=4, pady=6)
-
         ctk.CTkLabel(frame_meta, text="Título:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
         self.entry_stream_title = ctk.CTkEntry(frame_meta, placeholder_text="Título del stream")
         self.entry_stream_title.grid(row=1, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
@@ -536,8 +813,8 @@ class VocalAIApp(ctk.CTk):
         self.text_stream_description = ctk.CTkTextbox(frame_meta, height=70)
         self.text_stream_description.grid(row=3, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
 
-        frame_mod = ctk.CTkFrame(parent)
-        frame_mod.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        frame_mod = ctk.CTkFrame(tab_stream_moderation, fg_color="#151d26", corner_radius=14)
+        frame_mod.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_mod.grid_columnconfigure(7, weight=1)
 
         ctk.CTkLabel(frame_mod, text="Moderación", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
@@ -555,7 +832,7 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(frame_mod, text="Razón:").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         self.entry_stream_mod_reason = ctk.CTkEntry(frame_mod, placeholder_text="spam/toxicidad/etc.")
         self.entry_stream_mod_reason.grid(row=1, column=3, columnspan=2, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._stream_admin_propose_high_risk("timeout"), width=135).grid(row=1, column=5, padx=4, pady=4)
+        ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._stream_admin_propose_high_risk("timeout"), width=135, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, padx=4, pady=4)
         ctk.CTkButton(frame_mod, text="Proponer Ban", command=lambda: self._stream_admin_propose_high_risk("ban"), width=115, fg_color="#7d2a2a").grid(row=1, column=6, padx=4, pady=4)
 
         ctk.CTkLabel(frame_mod, text="Usuarios recientes", font=ctk.CTkFont(size=12, weight="bold")).grid(row=2, column=0, padx=8, pady=(8, 4), sticky="w")
@@ -565,22 +842,24 @@ class VocalAIApp(ctk.CTk):
         self.frame_stream_users.grid_columnconfigure(2, weight=1)
         self._stream_admin_refresh_user_list()
 
-        frame_chat = ctk.CTkFrame(parent)
-        frame_chat.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+        frame_chat = ctk.CTkFrame(tab_stream_chat, fg_color="#151d26", corner_radius=14)
+        frame_chat.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         frame_chat.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(frame_chat, text="Kira Chat", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        self.btn_stream_connect_chat = ctk.CTkButton(frame_chat, text="Conectar Chat", command=self._stream_admin_connect_current_chat, width=125, fg_color="#2f5f8f")
+        self.btn_stream_connect_chat.grid(row=0, column=1, padx=4, pady=6, sticky="w")
         self.switch_stream_chat_enabled = ctk.CTkSwitch(frame_chat, text="Permitir mensajes", command=self._stream_admin_apply_runtime_settings)
-        self.switch_stream_chat_enabled.grid(row=0, column=1, padx=4, pady=6, sticky="w")
+        self.switch_stream_chat_enabled.grid(row=0, column=2, padx=4, pady=6, sticky="w")
         self.switch_stream_small = ctk.CTkSwitch(frame_chat, text="Stream Chico", command=self._stream_admin_toggle_small_stream)
-        self.switch_stream_small.grid(row=0, column=2, padx=4, pady=6, sticky="w")
-        ctk.CTkButton(frame_chat, text="Simular Chat", command=self._stream_admin_simulate_chat, width=115, fg_color="#1f7a7a").grid(row=0, column=3, padx=8, pady=6)
+        self.switch_stream_small.grid(row=0, column=3, padx=4, pady=6, sticky="w")
+        ctk.CTkButton(frame_chat, text="Simular Chat", command=self._stream_admin_simulate_chat, width=115, fg_color="#555555", hover_color="#666666").grid(row=0, column=4, padx=8, pady=6)
         self.entry_stream_chat_message = ctk.CTkEntry(frame_chat, placeholder_text="Mensaje breve de Kira para el chat")
-        self.entry_stream_chat_message.grid(row=1, column=0, columnspan=2, padx=8, pady=4, sticky="ew")
-        ctk.CTkButton(frame_chat, text="Enviar al chat", command=self._stream_admin_send_chat, width=120).grid(row=1, column=2, padx=8, pady=4)
-        ctk.CTkButton(frame_chat, text="Forzar Kira", command=self._stream_admin_force_kira_comment, width=115, fg_color="#7551a6").grid(row=1, column=3, padx=8, pady=4)
+        self.entry_stream_chat_message.grid(row=1, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+        ctk.CTkButton(frame_chat, text="Enviar al chat", command=self._stream_admin_send_chat, width=120).grid(row=1, column=3, padx=8, pady=4)
+        ctk.CTkButton(frame_chat, text="Forzar Kira", command=self._stream_admin_force_kira_comment, width=115, fg_color="#555555", hover_color="#666666").grid(row=1, column=4, padx=8, pady=4)
 
-        frame_bottom_admin = ctk.CTkFrame(parent)
-        frame_bottom_admin.grid(row=4, column=0, sticky="ew", padx=8, pady=(4, 8))
+        frame_bottom_admin = ctk.CTkFrame(tab_stream_status, fg_color="#151d26", corner_radius=14)
+        frame_bottom_admin.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_bottom_admin.grid_columnconfigure(0, weight=1)
         frame_bottom_admin.grid_columnconfigure(1, weight=1)
         frame_bottom_admin.grid_rowconfigure(1, weight=1)
@@ -590,30 +869,97 @@ class VocalAIApp(ctk.CTk):
         self.lbl_stream_pending = ctk.CTkLabel(frame_bottom_admin, text="Acción pendiente: ninguna", anchor="w", text_color="#aaaaaa")
         self.lbl_stream_pending.grid(row=0, column=1, padx=8, pady=6, sticky="ew")
 
-        self.text_stream_admin_log = ctk.CTkTextbox(frame_bottom_admin, font=ctk.CTkFont(family="Consolas", size=12), height=130, state="disabled")
-        self.text_stream_admin_log.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="nsew")
+        ctk.CTkLabel(
+            frame_bottom_admin,
+            text="El log detallado de Stream Admin está abajo en Logs / Terminales > Stream Log.",
+            text_color="#8fa3b8",
+            anchor="w"
+        ).grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+
+    def _show_main_view(self, name):
+        frames = getattr(self, "_main_view_frames", {})
+        if name not in frames:
+            return
+        frames[name].tkraise()
+        for view_name, button in getattr(self, "_main_view_buttons", {}).items():
+            if view_name == name:
+                button.configure(fg_color="#2f5f8f")
+            else:
+                button.configure(fg_color="#151d26")
+
+    def _show_stream_admin_view(self, name):
+        frames = getattr(self, "_stream_admin_view_frames", {})
+        if name not in frames:
+            return
+        frames[name].tkraise()
+        for view_name, button in getattr(self, "_stream_admin_view_buttons", {}).items():
+            if view_name == name:
+                button.configure(fg_color="#2f5f8f")
+            else:
+                button.configure(fg_color="#151d26")
 
     def _actualizar_pipeline(self, estado):
         self._pipeline_state = estado
         estados = {
-            "idle": ("🟢 En Espera", "#aaaaaa"),
-            "listening": ("🟢 Escuchando", "#44ff44"),
-            "processing": ("🟡 Procesando LLM", "#ffaa00"),
-            "speaking": ("🔵 Sintetizando Voz", "#4488ff"),
-            "playing": ("🔵 Hablando", "#44ccff"),
-            "downloading": ("📥 Descargando Modelo", "#ff8800"),
-            "init": ("⏳ Inicializando IA...", "#888888"),
+            "idle": ("Modelo listo", "#44cc66"),
+            "listening": ("Micrófono escuchando", "#44ff44"),
+            "processing": ("Modelo procesando", "#ffaa00"),
+            "speaking": ("TTS generando", "#4488ff"),
+            "playing": ("TTS hablando", "#44ccff"),
+            "downloading": ("Modelo cargando", "#ff8800"),
+            "init": ("Modelo cargando", "#888888"),
+            "error": ("Modelo error", "#ff5555"),
         }
         text, color = estados.get(estado, ("", "#aaaaaa"))
         self.after(0, lambda t=text, c=color: (
             self.lbl_status.configure(text=t, text_color=c)
         ))
 
+        def update_status_details():
+            if hasattr(self, "lbl_tts_status_pill"):
+                if estado == "speaking":
+                    self.lbl_tts_status_pill.configure(text="TTS: generando", fg_color="#1f3f6f")
+                    if hasattr(self, "lbl_kira_tts_state"):
+                        self.lbl_kira_tts_state.configure(text="TTS: generando", fg_color="#1f3f6f")
+                elif estado == "playing":
+                    self.lbl_tts_status_pill.configure(text="TTS: hablando", fg_color="#1f526f")
+                    if hasattr(self, "lbl_kira_tts_state"):
+                        self.lbl_kira_tts_state.configure(text="TTS: hablando", fg_color="#1f526f")
+                else:
+                    self.lbl_tts_status_pill.configure(text="TTS: idle", fg_color="#1b2633")
+                    if hasattr(self, "lbl_kira_tts_state"):
+                        self.lbl_kira_tts_state.configure(text="TTS: idle", fg_color="#1b2633")
+            if hasattr(self, "lbl_mic_status_pill"):
+                if estado == "listening":
+                    self.lbl_mic_status_pill.configure(text="Mic: escuchando", fg_color="#1f5a3a")
+                    if hasattr(self, "lbl_kira_voice_state"):
+                        self.lbl_kira_voice_state.configure(text="Voz/PTT: escuchando", fg_color="#1f5a3a")
+                elif self.dispositivo_seleccionado is None:
+                    self.lbl_mic_status_pill.configure(text="Mic: desconectado", fg_color="#4a2630")
+                    if hasattr(self, "lbl_kira_voice_state"):
+                        self.lbl_kira_voice_state.configure(text="Voz/PTT: sin mic", fg_color="#4a2630")
+                else:
+                    self.lbl_mic_status_pill.configure(text="Mic: conectado", fg_color="#1b2633")
+                    if hasattr(self, "lbl_kira_voice_state"):
+                        self.lbl_kira_voice_state.configure(text="Voz/PTT: listo", fg_color="#1b2633")
+            if hasattr(self, "btn_primary_voice"):
+                if estado == "listening":
+                    self.btn_primary_voice.configure(text="Detener", fg_color="darkred", hover_color="#8b1a1a")
+                elif estado == "processing":
+                    self.btn_primary_voice.configure(text="Pensando...", fg_color="#8a6400", hover_color="#a67800")
+                elif estado in ("speaking", "playing"):
+                    self.btn_primary_voice.configure(text="Detener voz", fg_color="#2f5f8f", hover_color="#3670aa")
+                elif estado == "downloading":
+                    self.btn_primary_voice.configure(text="Modelo cargando", fg_color="#555555", hover_color="#666666")
+                else:
+                    self.btn_primary_voice.configure(text="Hablar", fg_color="#1f7a5a", hover_color="#24946c")
+        self.after(0, update_status_details)
+
         if estado == "listening":
-            self.after(0, lambda: self.barra_rms.pack(side="right", padx=5))
+            self.after(0, lambda: self.barra_rms.grid())
             self._animar_rms()
         else:
-            self.after(0, lambda: self.barra_rms.pack_forget())
+            self.after(0, lambda: self.barra_rms.grid_remove())
 
     def _animar_rms(self):
         if self._pipeline_state != "listening":
@@ -626,15 +972,42 @@ class VocalAIApp(ctk.CTk):
     def _toggle_modo_compacto(self):
         self._modo_compacto = self.switch_compacto.get()
         if self._modo_compacto:
-            self._frame_model.grid_forget()
-            self._frame_profile.grid_forget()
-            self._frame_bottom.grid_forget()
-            self.switch_compacto.configure(text="📺 Completo")
+            if hasattr(self, "_side_config_panel"):
+                self._side_config_panel.grid_remove()
+            self._show_main_view("Kira")
+            if hasattr(self, "_advanced_mode_panel"):
+                self._set_logs_panel_visible(False)
+            self.switch_compacto.configure(text="Completo")
         else:
-            self._frame_model.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
-            self._frame_profile.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
-            self._frame_bottom.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
-            self.switch_compacto.configure(text="📺 Compacto")
+            if hasattr(self, "_side_config_panel"):
+                self._side_config_panel.grid()
+            self._toggle_logs_panel()
+            self.switch_compacto.configure(text="Compacto")
+
+    def _set_logs_panel_visible(self, visible):
+        if not hasattr(self, "_advanced_mode_panel"):
+            return
+        if getattr(self, "_logs_panel_visible", None) == visible:
+            return
+        self._logs_panel_visible = visible
+        if visible:
+            self.grid_rowconfigure(2, weight=0, minsize=260)
+            self._advanced_mode_panel.grid()
+        else:
+            self.grid_rowconfigure(2, weight=0, minsize=0)
+            self._advanced_mode_panel.grid_remove()
+
+    def _toggle_logs_panel(self):
+        if not hasattr(self, "_advanced_mode_panel"):
+            return
+        if hasattr(self, "switch_compacto") and self.switch_compacto.get():
+            self._set_logs_panel_visible(False)
+            return
+        visible = bool(hasattr(self, "switch_advanced") and self.switch_advanced.get())
+        self._set_logs_panel_visible(visible)
+
+    def _toggle_advanced_mode(self):
+        self._toggle_logs_panel()
 
     def _log_accion(self, msg):
         ts = time.strftime("%H:%M:%S")
@@ -767,6 +1140,10 @@ class VocalAIApp(ctk.CTk):
         self.entry_youtube_video.delete(0, "end")
         self.entry_youtube_video.insert(0, video_id)
         self.btn_stream_connect_chat.configure(text="Desconectar Chat", fg_color="darkred")
+        if hasattr(self, "lbl_chat_status_pill"):
+            self.lbl_chat_status_pill.configure(text="Chat: conectado", fg_color="#1f5a3a")
+        if hasattr(self, "lbl_kira_chat_state"):
+            self.lbl_kira_chat_state.configure(text="Chat: conectado", fg_color="#1f5a3a")
         self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado conectado al live {video_id}.")
 
         def worker():
@@ -806,7 +1183,11 @@ class VocalAIApp(ctk.CTk):
         except Exception:
             pass
         if hasattr(self, "btn_stream_connect_chat"):
-            self.btn_stream_connect_chat.configure(text="Conectar Chat", fg_color="#1F6AA5")
+            self.btn_stream_connect_chat.configure(text="Conectar Chat", fg_color="#2f5f8f")
+        if hasattr(self, "lbl_chat_status_pill"):
+            self.lbl_chat_status_pill.configure(text="Chat: desconectado", fg_color="#1b2633")
+        if hasattr(self, "lbl_kira_chat_state"):
+            self.lbl_kira_chat_state.configure(text="Chat: desconectado", fg_color="#1b2633")
         self._on_stream_admin_log("[StreamAdmin] Chat autenticado desconectado.")
 
     def _stream_admin_suggest_metadata(self):
@@ -1005,6 +1386,8 @@ class VocalAIApp(ctk.CTk):
                 action_frame,
                 text="Timeout",
                 width=75,
+                fg_color="#555555",
+                hover_color="#666666",
                 state=button_state,
                 command=lambda cid=channel_id, u=user, e=reason_entry: self._stream_admin_moderate_user_from_list("timeout", cid, u, e)
             ).pack(side="left", padx=(0, 4))
@@ -1081,10 +1464,21 @@ class VocalAIApp(ctk.CTk):
             name = account.get("title") or "sin cuenta"
             mode = state.get("mode", "read_only")
             connected = "conectado" if state.get("connected") else "desconectado"
+            oauth_text = "OAuth: desconectado"
+            if state.get("connected"):
+                oauth_text = "OAuth: escritura" if mode == "write" else "OAuth: lectura"
             self.lbl_stream_admin_status.configure(
                 text=f"YouTube {connected} ({name}) · modo {mode} · OAuth client {'OK' if state.get('oauth_client_configured') else 'pendiente'} · Twitch placeholder",
                 text_color="#44cc66" if state.get("connected") else "#aaaaaa"
             )
+            if hasattr(self, "lbl_oauth_status_pill"):
+                color = "#1f5a3a" if state.get("connected") and mode == "write" else "#1f3f6f" if state.get("connected") else "#1b2633"
+                self.lbl_oauth_status_pill.configure(text=oauth_text, fg_color=color)
+            if hasattr(self, "lbl_oauth_side_status"):
+                self.lbl_oauth_side_status.configure(
+                    text=f"YouTube {connected} ({name}) · modo {mode}. Controles completos en Stream Admin.",
+                    text_color="#44cc66" if state.get("connected") else "#8fa3b8"
+                )
         self.after(0, update)
 
     def _on_stream_admin_metadata(self, metadata):
@@ -1110,10 +1504,18 @@ class VocalAIApp(ctk.CTk):
         def update():
             if not pending:
                 self.lbl_stream_pending.configure(text="Acción pendiente: ninguna", text_color="#aaaaaa")
+                if hasattr(self, "lbl_moderation_status_pill"):
+                    self.lbl_moderation_status_pill.configure(text="Moderación: sin pendientes", fg_color="#1b2633")
+                if hasattr(self, "lbl_moderation_side_status"):
+                    self.lbl_moderation_side_status.configure(text="Sin acciones pendientes. Detalles en Stream Admin.", text_color="#8fa3b8")
                 return
             payload = pending.get("payload", {})
             label = payload.get("title") or payload.get("action") or pending.get("type")
             self.lbl_stream_pending.configure(text=f"Acción pendiente: {pending.get('type')} · {label}", text_color="#ffaa00")
+            if hasattr(self, "lbl_moderation_status_pill"):
+                self.lbl_moderation_status_pill.configure(text="Moderación: acción pendiente", fg_color="#5f461b")
+            if hasattr(self, "lbl_moderation_side_status"):
+                self.lbl_moderation_side_status.configure(text=f"Pendiente: {pending.get('type')} · {label}", text_color="#ffaa00")
             if pending.get("type") == "metadata_update":
                 self._populate_stream_metadata({
                     "status": "suggested",
@@ -1243,7 +1645,7 @@ class VocalAIApp(ctk.CTk):
             finally:
                 self.smart_agg_connected = False
                 self.smart_agg_connecting = False
-                self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"])
+                self.btn_youtube_chat.configure(text="Conectar Chat", fg_color="#2f5f8f")
             return
 
         video_id = self._extract_youtube_video_id(self.entry_youtube_video.get())
@@ -1260,7 +1662,7 @@ class VocalAIApp(ctk.CTk):
             self.smart_agg.connect(video_id)
         except Exception as e:
             self.smart_agg_connecting = False
-            self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"])
+            self.btn_youtube_chat.configure(text="Conectar Chat", fg_color="#2f5f8f")
             logger.exception("Error conectando Smart Aggregator")
             messagebox.showerror("YouTube Live", f"No se pudo conectar al chat: {e}")
 
@@ -1300,6 +1702,8 @@ class VocalAIApp(ctk.CTk):
         self.smart_agg_connecting = False
         self.smart_agg_connected = True
         self.after(0, lambda: self.btn_youtube_chat.configure(text="Desconectar Chat", fg_color="darkred"))
+        self.after(0, lambda: self.lbl_chat_status_pill.configure(text="Chat: conectado", fg_color="#1f5a3a") if hasattr(self, "lbl_chat_status_pill") else None)
+        self.after(0, lambda: self.lbl_kira_chat_state.configure(text="Chat: conectado", fg_color="#1f5a3a") if hasattr(self, "lbl_kira_chat_state") else None)
         if not was_connected:
             self.log_queue.put(f"[SmartAggregator] Chat YouTube conectado: {info.get('video_id', '')}")
 
@@ -1307,7 +1711,9 @@ class VocalAIApp(ctk.CTk):
         was_active = self.smart_agg_connected or self.smart_agg_connecting
         self.smart_agg_connected = False
         self.smart_agg_connecting = False
-        self.after(0, lambda: self.btn_youtube_chat.configure(text="Conectar Chat", fg_color=["#3B8ED0", "#1F6AA5"]))
+        self.after(0, lambda: self.btn_youtube_chat.configure(text="Conectar Chat", fg_color="#2f5f8f"))
+        self.after(0, lambda: self.lbl_chat_status_pill.configure(text="Chat: desconectado", fg_color="#1b2633") if hasattr(self, "lbl_chat_status_pill") else None)
+        self.after(0, lambda: self.lbl_kira_chat_state.configure(text="Chat: desconectado", fg_color="#1b2633") if hasattr(self, "lbl_kira_chat_state") else None)
         if was_active:
             reason = "desconectado por usuario" if self._smart_agg_manual_disconnect else "desconectado tras agotar reconexiones"
             self.log_queue.put(f"[SmartAggregator] Chat YouTube {reason}.")
@@ -1374,6 +1780,7 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.btn_grabar.configure(state="normal"))
             self.after(0, lambda: self.btn_voz.configure(state="normal"))
             self.after(0, lambda: self.btn_ws.configure(state="normal"))
+            self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             self._actualizar_pipeline("idle")
             self.after(0, self._refresh_modelo_instalado)
@@ -1408,14 +1815,16 @@ class VocalAIApp(ctk.CTk):
         elif status == "download_start":
             self.after(0, lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
             self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
-            self.after(0, lambda: self.progress_download.pack(side="right", padx=10))
+            self.after(0, lambda: self.progress_download.pack(fill="x", padx=10, pady=(4, 10)))
             self.after(0, lambda: self.progress_download.set(0))
+            self.after(0, lambda: self.btn_primary_voice.configure(state="disabled"))
             self._actualizar_pipeline("downloading")
         elif status == "download_done":
             model = self.motor_ia.current_model
             self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.progress_download.pack_forget())
+            self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
             self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
             self.after(0, lambda: self._actualizar_info_modelo(model))
             self._actualizar_pipeline("idle")
@@ -1424,7 +1833,8 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.progress_download.pack_forget())
-            self._actualizar_pipeline("idle")
+            self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
+            self._actualizar_pipeline("error")
 
     def _al_seleccionar_modelo(self, display_name):
         tag = self._model_display_to_tag.get(display_name, display_name)
@@ -1483,6 +1893,10 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia.command_queue.put(("set_motor_tts", motor_seleccionado))
         modo_texto = "Ligero" if motor_seleccionado == "ligero" else "Pesado"
         self.switch_modo_ligero.configure(text=f"🎛️ TTS: {modo_texto}")
+        if hasattr(self, "lbl_tts_status_pill"):
+            self.lbl_tts_status_pill.configure(text="TTS: idle", fg_color="#1b2633")
+        if hasattr(self, "lbl_kira_tts_state"):
+            self.lbl_kira_tts_state.configure(text="TTS: idle", fg_color="#1b2633")
 
     def _al_seleccionar_perfil(self, nombre):
         if nombre in self.perfiles:
@@ -1521,9 +1935,17 @@ class VocalAIApp(ctk.CTk):
     def _al_seleccionar_dispositivo(self, seleccion):
         try:
             self.dispositivo_seleccionado = int(seleccion.split(":")[0])
+            if hasattr(self, "lbl_mic_status_pill"):
+                self.lbl_mic_status_pill.configure(text="Mic: conectado", fg_color="#1b2633")
+            if hasattr(self, "lbl_kira_voice_state"):
+                self.lbl_kira_voice_state.configure(text="Voz/PTT: listo", fg_color="#1b2633")
             self._print_log(f"[Sistema] Fuente de audio: ID {self.dispositivo_seleccionado}")
         except (ValueError, IndexError):
             self.dispositivo_seleccionado = None
+            if hasattr(self, "lbl_mic_status_pill"):
+                self.lbl_mic_status_pill.configure(text="Mic: desconectado", fg_color="#4a2630")
+            if hasattr(self, "lbl_kira_voice_state"):
+                self.lbl_kira_voice_state.configure(text="Voz/PTT: sin mic", fg_color="#4a2630")
 
     def _iniciar_grabacion(self):
         if self.dispositivo_seleccionado is None:
@@ -1582,7 +2004,7 @@ class VocalAIApp(ctk.CTk):
                 self._print_log("[Sistema] Perfil de voz enviado a la IA.")
                 self.motor_ia.command_queue.put(("set_voice", filepath))
                 self.after(0, lambda: self.btn_ws.configure(
-                    state="normal", fg_color=["#3B8ED0", "#1F6AA5"]
+                    state="normal", fg_color="#555555"
                 ))
                 self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             else:
@@ -1595,7 +2017,7 @@ class VocalAIApp(ctk.CTk):
             logger.exception("Error durante grabación")
         finally:
             self.after(0, lambda: self.btn_grabar.configure(
-                state="normal", text="🎤 Grabar", fg_color=["#3B8ED0", "#1F6AA5"]
+                state="normal", text="🎤 Grabar", fg_color="#555555"
             ))
 
     def _cargar_voz(self):
@@ -1618,7 +2040,7 @@ class VocalAIApp(ctk.CTk):
                 return
 
             self.motor_ia.command_queue.put(("set_voice", filepath))
-            self.btn_ws.configure(state="normal", fg_color=["#3B8ED0", "#1F6AA5"])
+            self.btn_ws.configure(state="normal", fg_color="#555555")
             self.btn_enviar.configure(state="normal")
             self._print_log(f"[Sistema] Perfil de voz cargado ({duration:.1f}s).")
 
@@ -1630,8 +2052,14 @@ class VocalAIApp(ctk.CTk):
             self.entry_chat.delete(0, 'end')
 
     def _limpiar_historial(self):
+        if hasattr(self, "lbl_memory_status_pill"):
+            self.lbl_memory_status_pill.configure(text="Memoria: limpiando", fg_color="#5f461b")
+        if hasattr(self, "lbl_kira_memory_state"):
+            self.lbl_kira_memory_state.configure(text="Memoria: limpiando", fg_color="#5f461b")
         self.motor_ia.command_queue.put(("clear_history", None))
         self._print_log("[Sistema] 🗑️ Memoria de conversación limpiada.")
+        self.after(800, lambda: self.lbl_memory_status_pill.configure(text="Memoria: disponible", fg_color="#1b2633") if hasattr(self, "lbl_memory_status_pill") else None)
+        self.after(800, lambda: self.lbl_kira_memory_state.configure(text="Memoria: disponible", fg_color="#1b2633") if hasattr(self, "lbl_kira_memory_state") else None)
 
     # ──────────────────────────────────────────────
     # PTT — Push-to-Talk (gate sobre WebSocket)
@@ -1665,7 +2093,14 @@ class VocalAIApp(ctk.CTk):
             self._print_log("[PTT] Desactivado — modo continuo WebSocket")
 
     def _set_ptt_status(self, text, color):
-        self.after(0, lambda: self.lbl_ptt_status.configure(text=text, text_color=color))
+        def update():
+            self.lbl_ptt_status.configure(text=text, text_color=color)
+            if hasattr(self, "lbl_mic_status_pill") and text:
+                if "ESCUCHANDO" in text:
+                    self.lbl_mic_status_pill.configure(text="PTT: activo")
+                else:
+                    self.lbl_mic_status_pill.configure(text="PTT: listo")
+        self.after(0, update)
 
     def _mapear_hotkey(self):
         if self._ptt_mapping:
@@ -1707,7 +2142,7 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.lbl_hotkey.configure(text=hotkey))
         self.after(0, lambda: self.btn_mapear.configure(
             text="Mapear", state="normal",
-            fg_color=["#3B8ED0", "#1F6AA5"]
+            fg_color="#555555"
         ))
         self._print_log(f"[PTT] Tecla mapeada y guardada: {hotkey}")
 
@@ -1834,12 +2269,16 @@ class VocalAIApp(ctk.CTk):
             self.ws_connected = True
             self.ws_should_reconnect = True
             self.btn_ws.configure(text="Desconectar", fg_color="darkred")
+            if hasattr(self, "btn_primary_voice"):
+                self.btn_primary_voice.configure(text="Detener", fg_color="darkred", hover_color="#8b1a1a")
             self.ws_thread = threading.Thread(target=self._run_ws_client, daemon=True)
             self.ws_thread.start()
         else:
             self.ws_connected = False
             self.ws_should_reconnect = False
-            self.btn_ws.configure(text="Conectar LiveAudio", fg_color=["#3B8ED0", "#1F6AA5"])
+            self.btn_ws.configure(text="Conectar LiveAudio", fg_color="#555555")
+            if hasattr(self, "btn_primary_voice"):
+                self.btn_primary_voice.configure(text="Hablar", fg_color="#1f7a5a", hover_color="#24946c")
             self._print_log("[Red] Desconexión solicitada.")
 
     def _run_ws_client(self):
@@ -1879,8 +2318,11 @@ class VocalAIApp(ctk.CTk):
         self.ws_connected = False
         self.ws_should_reconnect = False
         self.after(0, lambda: self.btn_ws.configure(
-            text="Conectar LiveAudio", fg_color=["#3B8ED0", "#1F6AA5"]
+            text="Conectar LiveAudio", fg_color="#555555"
         ))
+        self.after(0, lambda: self.btn_primary_voice.configure(
+            text="Hablar", fg_color="#1f7a5a", hover_color="#24946c"
+        ) if hasattr(self, "btn_primary_voice") else None)
 
     async def _ws_listener(self):
         self.log_queue.put(f"[Red] Conectando a LiveAudio en {WS_URI}...")
@@ -1944,8 +2386,23 @@ class VocalAIApp(ctk.CTk):
                     logger.warning(f"WebSocket cerrado: {e}")
                     raise
 
+    def _update_kira_response_panel(self, msg):
+        if not hasattr(self, "text_kira_response") or self.text_kira_response is None:
+            return
+        if "[Kira]:" not in msg:
+            return
+        response = msg.strip()
+        response = response.replace("🧠 ", "")
+        self.text_kira_response.configure(state="normal")
+        self.text_kira_response.delete("1.0", "end")
+        self.text_kira_response.insert("end", response + "\n")
+        self.text_kira_response.configure(state="disabled")
+
     def _print_log(self, msg):
+        self._update_kira_response_panel(msg)
         if hasattr(self, 'switch_logs') and not self.switch_logs.get():
+            return
+        if self.consola is None:
             return
         self.consola.configure(state="normal")
         self.consola.insert("end", msg + "\n")

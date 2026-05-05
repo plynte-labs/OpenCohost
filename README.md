@@ -27,7 +27,7 @@ VoiceAI/
 │   └── profiles.py      # Carga/guardado de perfiles de personalidad
 ├── smart_aggregator/    # RF3: agregador inteligente de chat YouTube Live
 ├── ui/
-│   ├── app.py           # Interfaz principal (grabación, chat, WebSocket)
+│   ├── app.py           # Interfaz principal (Kira, configuración, Stream Admin, logs)
 │   └── profiles_window.py  # Editor visual de perfiles
 ├── perfiles.json        # Perfiles de personalidad de la IA
 ├── Grabaciones/         # Audios de referencia grabados
@@ -59,6 +59,7 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 -   **Logging estructurado**: archivos rotativos en `logs/`
 -   **Smart Chat Aggregator RF3**: conexión a YouTube Live Chat, filtros, anti-spam, vibe, triggers y pestaña `YT Chat`
 -   **Stream Admin RF4 MVP**: pestaña `Stream Admin`, YouTube OAuth/API preparado, Twitch placeholder, metadata, moderación, analíticas y mensajes al chat bajo permisos
+-   **UI/UX refactor seguro**: vista principal `Kira`, configuración lateral tabulada, `Stream Admin` administrativo y logs inferiores bajo `Mostrar logs`
 
 ## Roadmap (docs/changes.md)
 
@@ -70,11 +71,12 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 -   **Panel de acciones Kira** con persistencia y mensajes simulados ✅
 -   **Smart Chat Aggregator** para YouTube Live Chat: filtrado, vibe, triggers, historial y UI separada ✅
 -   **RF4 Stream Admin MVP base**: módulo `stream_admin/`, UI, config YAML, OAuth local seguro MVP, YouTube provider y Twitch placeholder ✅
+-   **Refactor UI/UX seguro**: jerarquía visual centrada en Kira, estados operativos claros y Stream Admin secundario ✅
 
 ### Por Implementar
 
 -   **Silero VAD** como filtro de audio previo a Whisper
--   **RF4 validación OAuth real**: configurar credenciales Google Cloud y probar lectura/escritura end-to-end con un canal real
+-   **Hardening RF4 OAuth/tokens**: migrar tokens locales a keyring/Windows Credential Manager y ampliar validaciones live reales
 -   **RAG / Memoria a largo plazo**: ChromaDB para recordar streams anteriores
 -   **Avatar visual**: fuente de navegador OBS con boca animada
 -   **Entrenamiento de voz local**: finetuning de modelos VITS
