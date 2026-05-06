@@ -71,15 +71,8 @@ class MotorVocalIA(threading.Thread):
             self._log(f"FATAL: No se pudo inicializar pygame.mixer: {e}", level="error")
             return
 
-        try:
-            self.ollama.show(self.current_model)
-            self._log(f"Modelo LLM verificado: {self.current_model}")
-        except Exception as e:
-            self._log(f"ADVERTENCIA: No se pudo verificar modelo '{self.current_model}': {e}", level="warning")
-
-        self.is_ready = True
-        self.ui_callback("ready")
-        self._log("Motor IA listo. Esperando comandos...")
+        self._check_ollama_service()
+        self._log("Motor IA inicializado. Esperando comandos...")
 
         while True:
             try:
@@ -99,7 +92,14 @@ class MotorVocalIA(threading.Thread):
                     self.voz_referencia = payload[0]
                 self._log(f"Perfil de voz configurado: {self.voz_referencia}")
 
+            elif tipo == "check_ollama":
+                self._check_ollama_service()
+
             elif tipo == "process_context":
+                if not self.is_ready:
+                    self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
+                    self.ui_callback("ollama_unavailable")
+                    continue
                 if self.motor_tts == "pesado" and not self.voz_referencia:
                     self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
                     continue
@@ -119,6 +119,10 @@ class MotorVocalIA(threading.Thread):
                 self._log("Historial de conversación limpiado.")
 
             elif tipo == "switch_model":
+                if not self.is_ready:
+                    self._log("No se puede cambiar modelo: Ollama no esta listo.", level="warning")
+                    self.ui_callback("ollama_unavailable")
+                    continue
                 new_model = payload
                 if self._processing or self._speaking:
                     self._log("No se puede cambiar modelo mientras la IA está activa.", level="warning")
@@ -147,6 +151,10 @@ class MotorVocalIA(threading.Thread):
                 self._log(f"Perfil actualizado (System Role: {self.use_system_role}). Memoria limpiada.")
 
             elif tipo == "download_model":
+                if not self.is_ready:
+                    self._log("No se puede descargar modelo: Ollama no esta listo.", level="warning")
+                    self.ui_callback("ollama_unavailable")
+                    continue
                 model_tag = payload
                 if self._downloading:
                     self._log("Ya hay una descarga en curso.", level="warning")
@@ -156,6 +164,20 @@ class MotorVocalIA(threading.Thread):
                     args=(model_tag,),
                     daemon=True
                 ).start()
+
+    def _check_ollama_service(self):
+        try:
+            self.ollama.list()
+        except Exception as e:
+            self.is_ready = False
+            self._log(f"Ollama no esta disponible: {e}", level="warning")
+            self.ui_callback("ollama_unavailable")
+            return False
+
+        self.is_ready = True
+        self.ui_callback("ready")
+        self._log("Ollama disponible. Motor IA listo.")
+        return True
 
     def _download_model_worker(self, model_tag):
         self._downloading = True

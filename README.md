@@ -55,6 +55,7 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 -   **Memoria conversacional**: sliding window de 10 turnos
 -   **Perfiles de personalidad**: 5 perfiles editables desde la UI
 -   **Catálogo de modelos**: descarga y cambia entre 11 LLMs desde la interfaz
+-   **Gestión de Ollama desde la UI**: detecta si Ollama falta, está apagado o listo; el mismo botón permite instalar, iniciar, descargar o activar modelos
 -   **Estados de UI**: indicadores visuales (procesando / listo), bloqueo de botones
 -   **Logging estructurado**: archivos rotativos en `logs/`
 -   **Smart Chat Aggregator RF3**: conexión a YouTube Live Chat, filtros, anti-spam, vibe, triggers y pestaña `YT Chat`
@@ -91,6 +92,18 @@ E:\Miniconda\envs\flux_env\python.exe main.py
 
 **Cliente** (flux_env):
 `customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`, `pytchat`
+
+## Ollama y Modelos
+
+La app valida Ollama al iniciar y mantiene desactivadas las acciones que dependen del LLM si el servicio no está disponible. En la configuración de modelos hay un único botón contextual:
+
+-   `Instalar Ollama`: abre la página oficial de descarga cuando no se encuentra el binario de Ollama.
+-   `Iniciar Ollama`: intenta ejecutar `ollama serve` cuando Ollama está instalado pero el servicio local no responde.
+-   `Descargar modelo`: descarga el modelo seleccionado cuando Ollama está listo pero el modelo no existe localmente.
+-   `Activar modelo`: cambia al modelo seleccionado cuando ya está instalado.
+-   `Instalar dependencia Python`: avisa que falta el paquete `ollama` en el entorno Python activo.
+
+El servicio se comprueba contra `http://127.0.0.1:11434/api/tags`. Si Ollama deja de estar disponible, el motor IA marca el estado como no listo y bloquea procesamiento, cambio de modelo y descargas hasta que el servicio vuelva a responder.
 
 **RF4 OAuth YouTube**:
 OAuth/API oficial de YouTube usa `requests` y stdlib en el MVP. Las credenciales pueden guardarse desde la pestaña `Stream Admin` (`Client ID`, `Secret`, `Guardar OAuth`) y quedan en `data/stream_admin/oauth_client.json`, ignorado por git. También se soportan `YOUTUBE_OAUTH_CLIENT_ID` y `YOUTUBE_OAUTH_CLIENT_SECRET` por variables de entorno.

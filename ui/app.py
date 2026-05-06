@@ -4,8 +4,12 @@ import threading
 import json
 import asyncio
 import time
+import subprocess
+import shutil
+import webbrowser
 import urllib.parse
 import numpy as np
+import requests
 import websockets
 import soundfile as sf
 import sounddevice as sd
@@ -138,6 +142,8 @@ class VocalAIApp(ctk.CTk):
         self.dispositivo_seleccionado = None
         self._ptt_lock = threading.RLock()
         self._pipeline_state = "idle"
+        self._ollama_state = "checking"
+        self._ollama_starting = False
 
         self.ptt_enabled = False
         self.ptt_hotkey = _cargar_ptt_config()
@@ -459,7 +465,7 @@ class VocalAIApp(ctk.CTk):
         self.combo_modelos.pack(fill="x", padx=10, pady=4)
 
         self.btn_download = ctk.CTkButton(
-            frame_model, text="⬇️ Descargar", command=self._descargar_modelo,
+            frame_model, text="Revisando Ollama...", command=self._accion_ollama_modelo,
             width=110, fg_color="#555555", hover_color="#666666"
         )
         self.btn_download.pack(fill="x", padx=10, pady=4)
@@ -478,6 +484,7 @@ class VocalAIApp(ctk.CTk):
         self.progress_download.pack(fill="x", padx=10, pady=(4, 10))
         self.progress_download.set(0)
         self.progress_download.pack_forget()
+        self.after(250, self._refresh_ollama_state)
 
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
@@ -1841,6 +1848,14 @@ class VocalAIApp(ctk.CTk):
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             self._actualizar_pipeline("idle")
             self.after(0, self._refresh_modelo_instalado)
+        elif status == "ollama_unavailable":
+            self.after(0, lambda: self.btn_grabar.configure(state="disabled"))
+            self.after(0, lambda: self.btn_voz.configure(state="disabled"))
+            self.after(0, lambda: self.btn_ws.configure(state="disabled"))
+            self.after(0, lambda: self.btn_primary_voice.configure(state="disabled"))
+            self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
+            self.after(0, self._refresh_ollama_state)
+            self._actualizar_pipeline("error")
         elif status == "processing":
             self._actualizar_pipeline("processing")
             self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
@@ -1852,7 +1867,7 @@ class VocalAIApp(ctk.CTk):
             self._actualizar_pipeline("idle")
             self.after(0, lambda: self.btn_enviar.configure(state="normal"))
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
-            self.after(0, lambda: self.btn_download.configure(state="normal"))
+            self.after(0, self._actualizar_boton_ollama_modelo)
             self.after(0, lambda: self.switch_ptt.configure(state="normal"))
             self.after(0, lambda: self.btn_mapear.configure(state="normal"))
             self._ensure_ptt_listener()
@@ -1878,7 +1893,7 @@ class VocalAIApp(ctk.CTk):
             self._actualizar_pipeline("downloading")
         elif status == "download_done":
             model = self.motor_ia.current_model
-            self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
+            self.after(0, self._actualizar_boton_ollama_modelo)
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.progress_download.pack_forget())
             self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
@@ -1887,7 +1902,7 @@ class VocalAIApp(ctk.CTk):
             self._actualizar_pipeline("idle")
             self.after(0, self._refresh_modelo_instalado)
         elif status == "download_error":
-            self.after(0, lambda: self.btn_download.configure(state="normal", text="⬇️ Descargar"))
+            self.after(0, self._actualizar_boton_ollama_modelo)
             self.after(0, lambda: self.combo_modelos.configure(state="normal"))
             self.after(0, lambda: self.progress_download.pack_forget())
             self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
@@ -1896,20 +1911,49 @@ class VocalAIApp(ctk.CTk):
     def _al_seleccionar_modelo(self, display_name):
         tag = self._model_display_to_tag.get(display_name, display_name)
         self._actualizar_info_modelo(tag)
+        self._actualizar_boton_ollama_modelo(tag)
 
-        if self._modelo_instalado(tag):
+        if self._ollama_state == "ready" and self._modelo_instalado(tag):
             self.motor_ia.command_queue.put(("switch_model", tag))
             self._print_log(f"[Sistema] Cambiando a modelo: {tag}")
+        elif self._ollama_state == "ready":
+            self._print_log(f"[Sistema] Modelo '{tag}' no instalado. Usa el boton de Ollama/modelo para obtenerlo.")
         else:
-            self._print_log(f"[Sistema] Modelo '{tag}' no instalado. Presiona '⬇️ Descargar' para obtenerlo.")
+            self._print_log("[Sistema] Ollama no esta listo. Usa el boton de Ollama/modelo para prepararlo.")
 
-    def _descargar_modelo(self):
+    def _accion_ollama_modelo(self):
+        self._refresh_ollama_state()
+
+        if self._ollama_state == "app_missing":
+            webbrowser.open("https://ollama.com/download")
+            self._print_log("[Sistema] Abriendo pagina de descarga de Ollama.")
+            return
+
+        if self._ollama_state == "package_missing":
+            messagebox.showwarning(
+                "Dependencia faltante",
+                "Falta el paquete Python 'ollama' en este entorno. Instala las dependencias del proyecto y vuelve a abrir la app."
+            )
+            return
+
+        if self._ollama_state == "service_stopped":
+            self._iniciar_ollama()
+            return
+
+        self._descargar_o_activar_modelo()
+
+    def _descargar_o_activar_modelo(self):
         display_name = self.combo_modelos.get()
         tag = self._model_display_to_tag.get(display_name, display_name)
+
+        if self._ollama_state != "ready":
+            self._print_log("[Sistema] Ollama no esta listo para gestionar modelos.")
+            return
 
         if self._modelo_instalado(tag):
             self.motor_ia.command_queue.put(("switch_model", tag))
             self._print_log(f"[Sistema] '{tag}' ya está instalado. Activado.")
+            self._actualizar_boton_ollama_modelo(tag)
             return
 
         info = MODELS_CATALOG.get(tag, {})
@@ -1920,6 +1964,111 @@ class VocalAIApp(ctk.CTk):
         )
         if confirmar:
             self.motor_ia.command_queue.put(("download_model", tag))
+
+    def _refresh_ollama_state(self):
+        state = self._detectar_estado_ollama()
+        self._ollama_state = state
+        self._actualizar_boton_ollama_modelo()
+
+        if state == "ready" and hasattr(self, "motor_ia"):
+            self.motor_ia.command_queue.put(("check_ollama", None))
+
+    def _detectar_estado_ollama(self):
+        try:
+            import ollama  # noqa: F401
+        except ImportError:
+            return "package_missing"
+
+        try:
+            requests.get("http://127.0.0.1:11434/api/tags", timeout=1.0).raise_for_status()
+            return "ready"
+        except Exception:
+            pass
+
+        return "service_stopped" if self._find_ollama_executable() else "app_missing"
+
+    def _find_ollama_executable(self):
+        ollama_exe = shutil.which("ollama")
+        if ollama_exe:
+            return ollama_exe
+
+        candidates = []
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(os.path.join(local_appdata, "Programs", "Ollama", "ollama.exe"))
+
+        program_files = os.environ.get("ProgramFiles")
+        if program_files:
+            candidates.append(os.path.join(program_files, "Ollama", "ollama.exe"))
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
+
+    def _actualizar_boton_ollama_modelo(self, model_tag=None):
+        if model_tag is None and hasattr(self, "combo_modelos"):
+            display_name = self.combo_modelos.get()
+            model_tag = self._model_display_to_tag.get(display_name, display_name)
+
+        if not hasattr(self, "btn_download"):
+            return
+
+        if self._ollama_starting:
+            self.btn_download.configure(state="disabled", text="Iniciando Ollama...")
+            return
+
+        if self._ollama_state == "checking":
+            self.btn_download.configure(state="disabled", text="Revisando Ollama...")
+        elif self._ollama_state == "package_missing":
+            self.btn_download.configure(state="normal", text="Instalar dependencia Python")
+        elif self._ollama_state == "app_missing":
+            self.btn_download.configure(state="normal", text="Instalar Ollama")
+        elif self._ollama_state == "service_stopped":
+            self.btn_download.configure(state="normal", text="Iniciar Ollama")
+        elif model_tag and self._modelo_instalado(model_tag):
+            self.btn_download.configure(state="normal", text="Activar modelo")
+        else:
+            self.btn_download.configure(state="normal", text="Descargar modelo")
+
+    def _iniciar_ollama(self):
+        if self._ollama_starting:
+            return
+
+        ollama_exe = self._find_ollama_executable()
+        if not ollama_exe:
+            self._ollama_state = "app_missing"
+            self._actualizar_boton_ollama_modelo()
+            return
+
+        self._ollama_starting = True
+        self._actualizar_boton_ollama_modelo()
+        self._print_log("[Sistema] Iniciando Ollama...")
+
+        def worker():
+            try:
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.Popen([ollama_exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+            except Exception as e:
+                self.log_queue.put(f"[Sistema] No se pudo iniciar Ollama: {e}")
+                self._ollama_starting = False
+                self.after(0, self._refresh_ollama_state)
+                return
+
+            for _ in range(20):
+                time.sleep(0.5)
+                if self._detectar_estado_ollama() == "ready":
+                    self._ollama_starting = False
+                    self.log_queue.put("[Sistema] Ollama iniciado correctamente.")
+                    self.after(0, self._refresh_ollama_state)
+                    return
+
+            self._ollama_starting = False
+            self.log_queue.put("[Sistema] Ollama no respondio despues de iniciar. Revisa la instalacion.")
+            self.after(0, self._refresh_ollama_state)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _modelo_instalado(self, model_tag):
         try:
