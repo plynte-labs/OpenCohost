@@ -169,4 +169,4 @@ Opciones posibles:
 - [x] Módulo `stream_admin/` creado.
 - [x] Pestaña `Stream Admin` integrada en UI.
 - [x] Tests locales RF4 agregados.
-- [ ] OAuth YouTube validado con credenciales reales.
+- [x] OAuth YouTube validado con credenciales reales.

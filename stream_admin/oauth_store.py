@@ -53,8 +53,25 @@ class OAuthStore:
             return {}
 
     def _restrict_permissions(self):
+        """Restrict token file permissions.
+
+        On Windows, os.chmod(0o600) is ineffective on NTFS.
+        We use icacls to strip inherited permissions and grant
+        only the current user read/write access.
+        """
         try:
-            os.chmod(self.token_path, 0o600)
+            if os.name == "nt":
+                import subprocess
+                username = os.environ.get("USERNAME", "")
+                if username:
+                    subprocess.run(
+                        ["icacls", self.token_path, "/inheritance:r",
+                         "/grant:r", f"{username}:(R,W)"],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+            else:
+                os.chmod(self.token_path, 0o600)
         except Exception:
             pass
 

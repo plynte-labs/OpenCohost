@@ -284,20 +284,18 @@ class YouTubeProvider(BaseStreamProvider):
         live_chat_id = live_chat_id or (self._last_metadata.live_chat_id if self._last_metadata else "")
         if not live_chat_id:
             raise ProviderError("No hay liveChatId activo para moderar")
+        # YouTube Data API liveChatBans.insert spec:
+        # snippet.liveChatId, snippet.type, snippet.bannedUserDetails.channelId
+        # snippet.banDurationSeconds only when type=temporary
         ban_type = "permanent" if action == "ban" else "temporary"
-        ban_resource = {"type": ban_type}
-        if ban_type == "temporary":
-            ban_resource["banDurationSeconds"] = int(duration_seconds)
-        payload = {
-            "snippet": {
-                "liveChatId": live_chat_id,
-                "type": ban_type,
-                "banDurationSeconds": int(duration_seconds) if ban_type == "temporary" else None,
-                "bannedUserDetails": {"channelId": user_channel_id},
-            }
+        snippet = {
+            "liveChatId": live_chat_id,
+            "type": ban_type,
+            "bannedUserDetails": {"channelId": user_channel_id},
         }
-        payload["snippet"] = {k: v for k, v in payload["snippet"].items() if v is not None}
-        payload["snippet"].update({"banDetails": ban_resource})
+        if ban_type == "temporary":
+            snippet["banDurationSeconds"] = max(1, int(duration_seconds))
+        payload = {"snippet": snippet}
         result = self._request("POST", f"{API_URL}/liveChat/bans", params={"part": "snippet"}, json_body=payload)
         if reason:
             self._log(f"Moderacion YouTube aplicada ({action}): {reason}")

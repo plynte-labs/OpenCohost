@@ -773,10 +773,12 @@ class VocalAIApp(ctk.CTk):
         self.btn_stream_youtube_read.grid(row=0, column=2, padx=4, pady=6)
         self.btn_stream_youtube_write = ctk.CTkButton(frame_auth, text="Reconectar Escritura", command=lambda: self._stream_admin_connect(True), width=150, fg_color="#555555", hover_color="#666666")
         self.btn_stream_youtube_write.grid(row=0, column=3, padx=4, pady=6)
+        self.btn_stream_revoke_write = ctk.CTkButton(frame_auth, text="Revocar Escritura", command=self._stream_admin_revoke_write, width=130, fg_color="#7d5a2a", hover_color="#a07030", state="disabled")
+        self.btn_stream_revoke_write.grid(row=0, column=4, padx=4, pady=6)
         self.btn_stream_disconnect = ctk.CTkButton(frame_auth, text="Desconectar", command=self._stream_admin_disconnect, width=105, fg_color="#555555")
-        self.btn_stream_disconnect.grid(row=0, column=4, padx=4, pady=6)
+        self.btn_stream_disconnect.grid(row=0, column=5, padx=4, pady=6)
         self.btn_stream_twitch = ctk.CTkButton(frame_auth, text="Twitch Próximamente", state="disabled", width=145, fg_color="#444444")
-        self.btn_stream_twitch.grid(row=0, column=5, padx=4, pady=6)
+        self.btn_stream_twitch.grid(row=0, column=6, padx=4, pady=6)
 
         ctk.CTkLabel(frame_auth, text="Client ID:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
         self.entry_stream_client_id = ctk.CTkEntry(frame_auth, placeholder_text="tu_client_id.apps.googleusercontent.com")
@@ -784,7 +786,7 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(frame_auth, text="Secret:").grid(row=1, column=3, padx=8, pady=4, sticky="e")
         self.entry_stream_client_secret = ctk.CTkEntry(frame_auth, placeholder_text="OAuth client secret", show="*")
         self.entry_stream_client_secret.grid(row=1, column=4, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._stream_admin_save_oauth_client, width=125, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, padx=4, pady=4)
+        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._stream_admin_save_oauth_client, width=125, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, columnspan=2, padx=4, pady=4)
 
         frame_meta = ctk.CTkFrame(tab_stream_metadata, fg_color="#151d26", corner_radius=14)
         frame_meta.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
@@ -1094,6 +1096,12 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_disconnect(self):
         self._run_stream_admin_task("Desconectar proveedor", self.stream_admin.disconnect)
+
+    def _stream_admin_revoke_write(self):
+        if not self.stream_admin:
+            return
+        self.stream_admin.revoke_write_mode()
+        self._on_stream_admin_log("[StreamAdmin] Escritura revocada manualmente. Solo lectura activo.")
 
     def _stream_admin_refresh_metadata(self):
         self._run_stream_admin_task("Leer metadata", self.stream_admin.refresh_metadata)
@@ -1481,6 +1489,9 @@ class VocalAIApp(ctk.CTk):
             "switch_stream_chat_enabled": write_ready,
             "switch_stream_announce": write_ready,
             "btn_stream_reject_pending": pending,
+            "btn_stream_revoke_write": write_ready,
+            "btn_stream_propose_timeout": write_ready,
+            "btn_stream_propose_ban": write_ready,
         }
         for name, enabled in widgets.items():
             widget = getattr(self, name, None)
@@ -1526,19 +1537,29 @@ class VocalAIApp(ctk.CTk):
             name = account.get("title") or "sin cuenta"
             mode = state.get("mode", "read_only")
             connected = "conectado" if state.get("connected") else "desconectado"
+            mode_display = mode
+            if mode == "write" and self.stream_admin and self.stream_admin._write_activated_at:
+                elapsed = time.time() - self.stream_admin._write_activated_at
+                remaining = max(0, int((900 - elapsed) / 60))
+                mode_display = f"write (~{remaining}min)"
             oauth_text = "OAuth: desconectado"
             if state.get("connected"):
-                oauth_text = "OAuth: escritura" if mode == "write" else "OAuth: lectura"
+                oauth_text = f"OAuth: {mode_display}" if mode == "write" else "OAuth: lectura"
             self.lbl_stream_admin_status.configure(
-                text=f"YouTube {connected} ({name}) · modo {mode} · OAuth client {'OK' if state.get('oauth_client_configured') else 'pendiente'} · Twitch placeholder",
+                text=f"YouTube {connected} ({name}) - modo {mode_display} - OAuth client {'OK' if state.get('oauth_client_configured') else 'pendiente'} · Twitch placeholder",
                 text_color="#44cc66" if state.get("connected") else "#aaaaaa"
             )
             if hasattr(self, "lbl_oauth_status_pill"):
-                color = "#1f5a3a" if state.get("connected") and mode == "write" else "#1f3f6f" if state.get("connected") else "#1b2633"
+                if state.get("connected") and mode == "write":
+                    color = "#5f3a1f"  # Amber for elevated privileges
+                elif state.get("connected"):
+                    color = "#1f3f6f"
+                else:
+                    color = "#1b2633"
                 self.lbl_oauth_status_pill.configure(text=oauth_text, fg_color=color)
             if hasattr(self, "lbl_oauth_side_status"):
                 self.lbl_oauth_side_status.configure(
-                    text=f"YouTube {connected} ({name}) · modo {mode}. Controles completos en Stream Admin.",
+                    text=f"YouTube {connected} ({name}) - modo {mode_display}. Controles en Stream Admin.",
                     text_color="#44cc66" if state.get("connected") else "#8fa3b8"
                 )
             self._sync_stream_admin_controls(state)

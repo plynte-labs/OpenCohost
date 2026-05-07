@@ -2,6 +2,7 @@ provider:
   default: youtube
   enabled_providers:
     - youtube
+  planned_providers:
     - twitch
   mode: read_only
 

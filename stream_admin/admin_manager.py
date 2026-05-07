@@ -3,6 +3,9 @@ import json
 import time
 from typing import Callable, Optional
 
+# Auto-revoke write mode after inactivity (seconds)
+WRITE_TIMEOUT_SECONDS = 900  # 15 minutes
+
 import yaml
 
 from .analytics import AnalyticsTracker
@@ -50,6 +53,7 @@ class AdminManager:
         self.moderation = ModerationEngine(self.config.get("moderation", {}))
         self._last_vibe = None
         self._last_activity = None
+        self._write_activated_at: float = 0.0
 
     @property
     def provider(self):
@@ -114,6 +118,8 @@ class AdminManager:
             raise ProviderUnsupportedError("Twitch es placeholder en el MVP")
         status = self.provider.authenticate(request_write_scopes=request_write_scopes)
         self.config.setdefault("provider", {})["mode"] = "write" if request_write_scopes else "read_only"
+        if request_write_scopes:
+            self._write_activated_at = time.time()
         self._emit_state()
         self._log(f"{provider_name} conectado. Escritura={'si' if request_write_scopes else 'no'}")
         return status
@@ -374,13 +380,36 @@ class AdminManager:
         return bool(value) and not (value.startswith("${") and value.endswith("}"))
 
     def _write_enabled(self) -> bool:
-        return self.config.get("provider", {}).get("mode", "read_only") == "write"
+        if self.config.get("provider", {}).get("mode", "read_only") != "write":
+            return False
+        # Auto-revoke write mode after timeout
+        if self._write_activated_at and (time.time() - self._write_activated_at) > WRITE_TIMEOUT_SECONDS:
+            self._log(f"Modo escritura expirado por inactividad ({WRITE_TIMEOUT_SECONDS // 60} min). Revocado automaticamente.")
+            self.revoke_write_mode()
+            return False
+        # Verify actual token scopes
+        token = self.oauth_store.load(self.active_provider_name) or {}
+        write_scope = "https://www.googleapis.com/auth/youtube.force-ssl"
+        return write_scope in set(token.get("scopes", []))
+
+    def revoke_write_mode(self):
+        """Downgrade to read_only without disconnecting OAuth."""
+        self.config.setdefault("provider", {})["mode"] = "read_only"
+        self._write_activated_at = 0.0
+        self._emit_state()
+        self._log("Modo escritura revocado. Solo lectura activo.")
+
+    def refresh_write_timeout(self):
+        """Reset the write mode timeout after a successful write action."""
+        if self._write_enabled():
+            self._write_activated_at = time.time()
 
     def _require_write_enabled(self, action: str):
         if not self._write_enabled():
             raise ProviderAuthError(
                 f"Modo solo lectura activo: no se puede {action}. Reconecta escritura y habilita modo write."
             )
+        self.refresh_write_timeout()
 
     def _emit_state(self):
         if self.on_state:
