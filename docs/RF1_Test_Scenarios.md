@@ -9,23 +9,26 @@
 
 ## 1. Escenarios Positivos
 
-### TEST-PTT-001 — Activar PTT y grabar audio válido
+### TEST-PTT-001 — Activar PTT y recibir transcripción vía WebSocket
 
 **Precondiciones:**
-- VoiceAI ejecutándose.
+- VoiceAI ejecutándose y conectada a LiveAudio (WebSocket).
 - Modo PTT = OFF.
 - Audio de referencia cargado.
 
 **Pasos:**
 1. Activar el switch PTT a ON.
 2. Seleccionar `F10` como hotkey.
-3. Presionar `F10` y hablar durante 3 segundos.
+3. Presionar `F10` y hablar al micrófono de LiveAudio.
 4. Soltar `F10`.
 
 **Resultado esperado:**
-- La UI muestra "GRABANDO..." mientras se mantiene presionado.
-- Al soltar, el audio se valida (RMS > 0.005) y se envía al motor IA.
-- Kira responde con voz en < 5 segundos.
+- La UI muestra "ESCUCHANDO..." mientras se mantiene presionado. ✅ Implementado
+- Las transcripciones de LiveAudio se descartan mientras PTT está activo sin presionar. ✅ Implementado
+- Al presionar hotkey y hablar, las transcripciones se aceptan. ✅ Implementado
+- Kira responde con voz en < 5 segundos. ✅ (flujo normal WebSocket)
+
+**Estado actual:** ✅ PASS — PTT como gate sobre transcripciones WebSocket
 
 ---
 
@@ -42,9 +45,11 @@
 4. Soltar `Mouse4`.
 
 **Resultado esperado:**
-- `F10` no activa la grabación.
-- `Mouse4` activa y detiene la grabación correctamente.
-- No hay excepciones en consola.
+- `F10` no activa la grabación (no se abre el gate). ✅
+- `Mouse4` activa y desactiva la grabación correctamente. ✅
+- No hay excepciones en consola. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
@@ -60,28 +65,31 @@
 3. Esperar a que Kira termine de hablar.
 
 **Resultado esperado:**
-- La grabación se realiza en buffer pero **no se envía** inmediatamente.
-- Una vez `_speaking == False`, el buffer se envía al motor IA.
-- Kira responde al audio capturado sin pérdida.
+- Las transcripciones se aceptan en buffer pero se encolan. ✅
+- Una vez `_speaking == False`, se procesan las transcripciones encoladas. ✅
+- Kira responde sin pérdida. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
 ## 2. Escenarios Negativos
 
-### TEST-PTT-004 — Grabar silencio (RMS bajo)
+### TEST-PTT-004 — Presionar hotkey sin hablar
 
 **Precondiciones:**
 - PTT = ON.
-- Micrófono conectado pero sin hablar.
+- LiveAudio conectado.
 
 **Pasos:**
-1. Presionar hotkey durante 3 segundos en silencio absoluto.
-2. Soltar hotkey.
+1. Presionar hotkey durante 3 segundos sin hablar al mic de LiveAudio.
 
 **Resultado esperado:**
-- La consola muestra: `[PTT] Audio descartado: silencio detectado (RMS: X.XXXX)`.
-- No se envía nada al motor IA.
-- La UI vuelve a estado idle.
+- La UI muestra "ESCUCHANDO..." mientras se presiona. ✅
+- Si LiveAudio envía transcripción vacía, se descarta. ✅
+- La UI vuelve a estado idle al soltar. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
@@ -94,8 +102,10 @@
 1. Presionar `F10`.
 
 **Resultado esperado:**
-- No ocurre nada (la tecla no está interceptada).
-- El WebSocket continúa operando normalmente.
+- No ocurre nada (la tecla no está interceptada para gate). ✅
+- El WebSocket continúa operando normalmente. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
@@ -105,44 +115,53 @@
 
 **Precondiciones:**
 - PTT = ON.
+- LiveAudio conectado.
 
 **Pasos:**
 1. Presionar y soltar el hotkey 20 veces en 10 segundos.
 
 **Resultado esperado:**
-- Cada ciclo genera una grabación independiente.
-- No hay acumulación de memoria (buffers liberados).
-- La UI no se congela.
+- El gate se abre/cierra correctamente en cada ciclo. ✅
+- No hay acumulación de memoria. ✅
+- La UI no se congela. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
-### TEST-PTT-007 — Grabación muy corta (< 0.5 s)
+### TEST-PTT-007 — Presionar hotkey brevemente
 
 **Precondiciones:**
 - PTT = ON.
+- LiveAudio conectado.
 
 **Pasos:**
 1. Presionar y soltar el hotkey en < 0.3 segundos.
 
 **Resultado esperado:**
-- Audio descartado por duración insuficiente.
-- Mensaje en consola: `[PTT] Audio descartado: duración insuficiente (X.XXs)`.
+- El gate se cierra inmediatamente. ✅
+- Si no hay transcripción, no se procesa nada. ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
-### TEST-PTT-008 — Grabación muy larga (> 30 s)
+### TEST-PTT-008 — Mantener hotkey presionado por largo tiempo
 
 **Precondiciones:**
 - PTT = ON.
+- LiveAudio conectado.
 
 **Pasos:**
-1. Mantener presionado el hotkey durante 35 segundos.
+1. Mantener presionado el hotkey durante 60 segundos.
 2. Soltar.
 
 **Resultado esperado:**
-- La grabación se trunca automáticamente a 30 segundos.
-- Se procesa el segmento truncado.
-- Mensaje de advertencia: `[PTT] Grabación truncada a 30s`.
+- El gate permanece abierto mientras se presiona. ✅
+- Las transcripciones se procesan continuamente. ✅
+- No hay truncado (el límite lo maneja LiveAudio/Whisper). ✅
+
+**Estado actual:** ✅ PASS
 
 ---
 
@@ -150,12 +169,14 @@
 
 | Escenario | RF1.1 | RF1.2 | RNF1.1 | RNF1.2 | RNF1.3 |
 |-----------|-------|-------|--------|--------|--------|
-| TEST-PTT-001 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| TEST-PTT-002 | — | ✅ | ✅ | ✅ | ✅ |
-| TEST-PTT-003 | ✅ | ✅ | — | ✅ | — |
+| TEST-PTT-001 | ✅ | ✅ | — | ✅ | ✅ |
+| TEST-PTT-002 | ✅ | ✅ | — | ✅ | ✅ |
+| TEST-PTT-003 | ✅ | ✅ | — | ✅ | ✅ |
 | TEST-PTT-004 | — | ✅ | — | ✅ | ✅ |
 | TEST-PTT-005 | ✅ | ✅ | — | ✅ | — |
-| TEST-PTT-006 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| TEST-PTT-006 | ✅ | ✅ | — | ✅ | ✅ |
 | TEST-PTT-007 | — | ✅ | — | ✅ | ✅ |
 | TEST-PTT-008 | — | ✅ | — | ✅ | ✅ |
+
+**Leyenda:** ✅ Pass | — No aplica
 

@@ -1,0 +1,57 @@
+filter:
+  min_words: 3
+  min_char_length: 10
+  discard_emojis_only: true
+  discard_links: true
+  discard_mentions: true
+  whitelist:
+    enabled: true
+    users: []
+
+vibe:
+  window_seconds: 60
+  emotions:
+    - excitement
+    - sadness
+    - anger
+    - joy
+    - confusion
+    - neutral
+  llm_prompt_template: "Analyze these YouTube live chat messages from the last {window}s. Messages may be Spanish, English, slang, memes, or gaming chat. Messages: {messages}. Return ONLY strict JSON with keys: emotions (object with excitement, sadness, anger, joy, confusion, neutral values from 0 to 1) and temperature (number from 0 to 100). No markdown, no explanation."
+  busy_fallback_temperature: 50.0
+  missing_llm_fallback_temperature: 50.0
+
+activity:
+  window_seconds: 5
+  threshold_per_second: 1.0
+  cooldown_seconds: 45.0
+  actions:
+    auto_reply:
+      enabled: false
+      message: "¡El chat esta que explota! 🔥"
+    behavior_change:
+      enabled: false
+      parameter: "excitement_multiplier"
+      value: 1.5
+
+spam:
+  enabled: true
+  user_window_seconds: 30
+  max_messages_per_user: 10
+  duplicate_window_seconds: 20
+  collapse_ui_duplicates: true
+
+history:
+  db_path: "data/smart_aggregator/sessions.db"
+  jsonl_path: "data/smart_aggregator/chat_log.jsonl"
+  retention_hours: 168
+
+source:
+  platform: youtube
+  reconnect_delay_seconds: 5
+  max_retries: 3
+  interruptable: false
+
+youtube_api:
+  api_key: "${YOUTUBE_API_KEY}"
+  channel_id: "${YOUTUBE_CHANNEL_ID}"

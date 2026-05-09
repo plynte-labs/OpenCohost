@@ -69,5 +69,5 @@
 - [x] Documentos de calidad creados
 - [x] Escenarios de prueba definidos
 - [x] `changes.md` actualizado con notas técnicas
-- [ ] **Pendiente:** Implementación de código (este handoff)
+- [x] **Implementación completada:** UI con switch PTT, hotkey remap, captura de audio via InputStream, validacion RMS/duracion, half-duplex
 

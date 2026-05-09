@@ -95,7 +95,7 @@ MODELS_CATALOG = {
     },
 }
 
-SYSTEM_PROMPT = """Eres Kira, una co-host virtual de un stream en Twitch. Tu personalidad:
+SYSTEM_PROMPT = """Eres Kira, una co-host virtual de un stream en vivo. Tu personalidad:
 
 PERSONALIDAD:
 - Sarcástica con ingenio afilado, nunca genérica
@@ -121,6 +121,8 @@ REGLAS:
 PROFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
 
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
+TTS_HEAVY_TIMEOUT = 180
+TTS_LIGHT_TIMEOUT = 45
 WS_URI = "ws://127.0.0.1:8765"
 WS_RECONNECT_BASE_DELAY = 1.0
 WS_RECONNECT_MAX_DELAY = 30.0
@@ -148,3 +150,5 @@ PTT_HOTKEY_LIST = [
 ]
 
 PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
+WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
+ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
