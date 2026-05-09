@@ -11,7 +11,8 @@ from collections import deque
 
 from config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
-    LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL
+    LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
+    TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 )
 from config.logger import get_logger
 
@@ -375,7 +376,7 @@ class MotorVocalIA(threading.Thread):
                             communicate = edge_tts.Communicate(oracion, "es-MX-DaliaNeural")
                             await communicate.save(archivo_chunk)
                         
-                        asyncio.run(generar_edge())
+                        asyncio.run(asyncio.wait_for(generar_edge(), timeout=TTS_LIGHT_TIMEOUT))
                         cola_audios.put((archivo_chunk, i, oracion))
                     else:
                         respuesta = requests.post(
@@ -385,7 +386,7 @@ class MotorVocalIA(threading.Thread):
                                 "referencia": ruta_absoluta_ref,
                                 "motor": self.motor_tts
                             },
-                            timeout=45
+                            timeout=TTS_HEAVY_TIMEOUT
                         )
                         if respuesta.status_code == 200:
                             with open(archivo_chunk, 'wb') as f:
@@ -413,6 +414,12 @@ class MotorVocalIA(threading.Thread):
                     error_count += 1
 
                 except Exception as e:
+                    if self.motor_tts == "ligero":
+                        self._log("ERROR: Edge-TTS requiere internet. Si estas offline usa Pesado (Qwen3-TTS).", level="error")
+                        logger.warning(f"TTS ligero fallo; timeout configurado {TTS_LIGHT_TIMEOUT}s: {e}")
+                        cola_audios.put(None)
+                        error_count += 1
+                        break
                     logger.exception(f"TTS chunk {i} error inesperado")
                     cola_audios.put(None)
                     error_count += 1
