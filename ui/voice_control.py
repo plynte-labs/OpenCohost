@@ -74,6 +74,7 @@ class VoiceControlPanel:
         on_motor_event: Callable[[str], None],
         on_pipeline_change: Callable[[str], None],
         dispositivo_seleccionado: Optional[int] = None,
+        schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
     ) -> None:
         """Initialize the voice control panel.
 
@@ -85,6 +86,7 @@ class VoiceControlPanel:
             on_motor_event: Callback for motor IA status events.
             on_pipeline_change: Callback invoked when pipeline state changes.
             dispositivo_seleccionado: Currently selected audio device ID.
+            schedule_ui_update: Callable to schedule UI updates on main thread.
         """
         self._parent = parent_frame
         self._ui_state = ui_state
@@ -93,6 +95,9 @@ class VoiceControlPanel:
         self._on_motor_event = on_motor_event
         self._on_pipeline_change = on_pipeline_change
         self._dispositivo_seleccionado = dispositivo_seleccionado
+        self._schedule_ui_update: Callable[[Callable[[], None]], None] = (
+            schedule_ui_update if schedule_ui_update is not None else (lambda fn: fn())
+        )
 
         # Internal state
         self._pipeline_state: str = "idle"
@@ -117,9 +122,6 @@ class VoiceControlPanel:
         self.lbl_kira_memory_state: Optional[ctk.CTkLabel] = None
         self.lbl_kira_chat_state: Optional[ctk.CTkLabel] = None
         self.lbl_voice_hint: Optional[ctk.CTkLabel] = None
-
-        # UI thread scheduling callback (wraps parent.after(0, fn))
-        self._schedule_ui_update: Callable[[Callable[[], None]], None] = lambda fn: fn()
 
         # Subscribe to UIState changes for state-driven UI updates
         self._state_sub_id: int = self._ui_state.subscribe(self._on_state_change)
