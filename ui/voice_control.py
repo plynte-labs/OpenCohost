@@ -332,9 +332,15 @@ class VoiceControlPanel:
                             f"{texto_transcrito[:60]}..."
                         )
 
-                    # PTT gate: filtering handled at higher level (WS listener in app.py
-                    # or via callback from PTTManager).  The previous tautology
-                    # (ptt_active and not ptt_active) has been removed.
+                    # PTT gate: when PTT is enabled, only accept transcriptions
+                    # while the hotkey is actively pressed. This prevents the AI
+                    # from auto-processing its own TTS output through live audio.
+                    if self._ui_state.ptt_enabled and not self._ui_state.ptt_active:
+                        if texto_transcrito:
+                            self._logger.debug(
+                                f"WS descartado (PTT inactivo): {texto_transcrito[:40]}..."
+                            )
+                        continue
 
                     # Motor IA busy check
                     if self._motor_ia and (getattr(self._motor_ia, 'is_speaking', False) or getattr(self._motor_ia, 'is_processing', False)):

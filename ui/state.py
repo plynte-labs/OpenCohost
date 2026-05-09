@@ -90,6 +90,7 @@ class UIState:
             "current_model": "",
             "current_profile": "",
             "ptt_active": False,
+            "ptt_enabled": False,
             "advanced_mode": False,
         }
 
@@ -310,6 +311,11 @@ class UIState:
             return self._state["ptt_active"]
 
     @property
+    def ptt_enabled(self) -> bool:
+        with self._lock:
+            return self._state["ptt_enabled"]
+
+    @property
     def advanced_mode(self) -> bool:
         with self._lock:
             return self._state["advanced_mode"]
@@ -438,6 +444,13 @@ class UIState:
         with self._lock:
             self._state["ptt_active"] = value
             self._notify_observers("ptt_active", value)
+            self._condition.notify_all()
+
+    @ptt_enabled.setter
+    def ptt_enabled(self, value: bool) -> None:
+        with self._lock:
+            self._state["ptt_enabled"] = value
+            self._notify_observers("ptt_enabled", value)
             self._condition.notify_all()
 
     @advanced_mode.setter

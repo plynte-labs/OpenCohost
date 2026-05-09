@@ -1236,6 +1236,7 @@ class VocalAIApp(ctk.CTk):
         if nuevo_estado == self.ptt.enabled:
             return
         self.ptt.enabled = nuevo_estado
+        self._ui_state.ptt_enabled = nuevo_estado
         if self.ptt.enabled:
             self.switch_ptt.configure(text="PTT ON")
             if not self.ptt.mapping:

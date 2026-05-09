@@ -151,7 +151,7 @@ class AdvancedModePanel:
 
         self.tabview = ctk.CTkTabview(
             self._frame,
-            command=lambda tab: None,
+            command=lambda: None,
             height=210,
         )
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
