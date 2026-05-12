@@ -18,6 +18,7 @@ import json
 import os
 import random
 import threading
+import time
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -111,6 +112,15 @@ class VoiceControlPanel:
         self._rms_animating: bool = False
         self._ptt_accept_logged: bool = False
 
+        # PTT transcription buffer with grace period
+        self._ptt_buffer: str = ""
+        self._ptt_max_chars: int = 500
+        self._ptt_grace_period: float = 2.0
+        self._ptt_grace_deadline: float = 0.0
+        self._ptt_prev_active: bool = False  # track press→release transition
+        self._ptt_flush_thread: Optional[threading.Thread] = None
+        self._ptt_flush_stop = threading.Event()
+
         # Motor IA reference (set after construction)
         self._motor_ia: Any = None
 
@@ -132,6 +142,66 @@ class VoiceControlPanel:
         Must be called before any WebSocket or recording operations.
         """
         self._motor_ia = motor_ia
+
+    def clear_ptt_buffer(self) -> None:
+        """Clear the PTT transcription buffer.
+
+        Called when PTT is pressed to start a new accumulation cycle.
+        """
+        self._ptt_buffer = ""
+        self._ptt_grace_deadline = 0.0
+        self._ptt_prev_active = False
+
+    def _start_ptt_flush_watcher(self) -> None:
+        """Start background thread that flushes PTT buffer when grace period expires."""
+        if self._ptt_flush_thread and self._ptt_flush_thread.is_alive():
+            return
+        self._ptt_flush_stop.clear()
+        self._ptt_flush_thread = threading.Thread(
+            target=self._ptt_flush_watcher, daemon=True
+        )
+        self._ptt_flush_thread.start()
+
+    def _ptt_flush_watcher(self) -> None:
+        """Watch for grace period expiration and flush buffer."""
+        while not self._ptt_flush_stop.is_set():
+            now = time.time()
+            deadline = self._ptt_grace_deadline
+            if deadline > 0 and now >= deadline and self._ptt_buffer:
+                self._flush_ptt_buffer()
+                self._ptt_grace_deadline = 0.0
+            self._ptt_flush_stop.wait(0.5)
+
+    def _flush_ptt_buffer(self) -> None:
+        """Flush accumulated PTT buffer to motor IA."""
+        texto = self._ptt_buffer.strip()
+        self._ptt_buffer = ""
+
+        if not texto:
+            return
+
+        self._logger.info(f"[PTT Flush] Enviando texto acumulado ({len(texto)} chars): {texto[:80]}...")
+
+        motor_busy = self._motor_ia and (
+            getattr(self._motor_ia, 'is_speaking', False)
+            or getattr(self._motor_ia, 'is_processing', False)
+        )
+
+        if motor_busy:
+            self._logger.debug("[PTT Flush] Motor ocupado → cola de acumulación")
+            self._motor_ia.enqueue_accumulation(texto, source="ptt")
+            return
+
+        palabras = texto.split()
+        if len(palabras) < 4:
+            self._logger.debug(f"[PTT Flush] Muy corto ({len(palabras)} palabras): {texto}")
+            return
+
+        self._on_log(f"[PTT]: {texto}")
+        self._motor_ia.command_queue.put((
+            "process_context",
+            f"El streamer acaba de decir (PTT): {texto}"
+        ))
 
     def set_dispositivo(self, device_id: Optional[int]) -> None:
         """Update the selected audio input device."""
@@ -332,18 +402,59 @@ class VoiceControlPanel:
                             f"{texto_transcrito[:60]}..."
                         )
 
-                    # PTT gate: when PTT is enabled, only accept transcriptions
-                    # while the hotkey is actively pressed. This prevents the AI
-                    # from auto-processing its own TTS output through live audio.
-                    if self._ui_state.ptt_enabled and not self._ui_state.ptt_active:
+                    # --- Anti-Loop Whisper Filter (Sanitización Agresiva) ---
+                    # Reduce frases o palabras repetidas consecutivamente 3 o más veces a una sola.
+                    import re
+                    texto_original = texto_transcrito
+                    texto_transcrito = re.sub(r'\b(.+?)(?:\s+\1\b){2,}', r'\1', texto_transcrito, flags=re.IGNORECASE).strip()
+                    
+                    if texto_transcrito != texto_original:
+                        self._logger.info(f"Filtro Anti-Loop aplicado. \nOriginal: {texto_original}\nLimpio: {texto_transcrito}")
+
+                    # PTT gate with buffer + grace period
+                    ptt_now = self._ui_state.ptt_active
+                    now = time.time()
+
+                    # Detect press→release transition: start grace period
+                    if self._ptt_prev_active and not ptt_now:
+                        self._ptt_grace_deadline = now + self._ptt_grace_period
+                        self._logger.debug(f"[PTT] Release → grace period {self._ptt_grace_period}s")
+
+                    self._ptt_prev_active = ptt_now
+
+                    in_grace = now < self._ptt_grace_deadline
+
+                    if self._ui_state.ptt_enabled and not ptt_now and not in_grace:
+                        # Outside PTT window and grace period → discard
                         if texto_transcrito:
                             self._logger.debug(
-                                f"WS descartado (PTT inactivo): {texto_transcrito[:40]}..."
+                                f"WS descartado (PTT inactivo, fuera de gracia): {texto_transcrito[:40]}..."
                             )
                         continue
 
-                    # Motor IA busy check
-                    if self._motor_ia and (getattr(self._motor_ia, 'is_speaking', False) or getattr(self._motor_ia, 'is_processing', False)):
+                    # When PTT is active or in grace period, accumulate to buffer
+                    if self._ui_state.ptt_enabled and (ptt_now or in_grace):
+                        if texto_transcrito:
+                            if len(self._ptt_buffer) < self._ptt_max_chars:
+                                if self._ptt_buffer:
+                                    self._ptt_buffer += " " + texto_transcrito
+                                else:
+                                    self._ptt_buffer = texto_transcrito
+                                self._logger.debug(
+                                    f"[PTT Buffer] Acumulado ({len(self._ptt_buffer)} chars): {self._ptt_buffer[:80]}..."
+                                )
+                            else:
+                                self._logger.warning(
+                                    f"[PTT Buffer] Límite de {self._ptt_max_chars} chars alcanzado. Truncando."
+                                )
+                        continue  # Don't send yet — flush watcher handles expiration
+
+                    # Non-PTT mode (continuous WebSocket) — original behavior
+                    motor_busy = self._motor_ia and (
+                        getattr(self._motor_ia, 'is_speaking', False)
+                        or getattr(self._motor_ia, 'is_processing', False)
+                    )
+                    if motor_busy:
                         if texto_transcrito:
                             self._logger.debug(
                                 f"WS descartado (IA ocupada): {texto_transcrito[:40]}..."
@@ -637,6 +748,9 @@ class VoiceControlPanel:
         Should be called during application shutdown to ensure clean
         termination of background threads and WebSocket connections.
         """
+        self._ptt_flush_stop.set()
+        if self._ptt_flush_thread and self._ptt_flush_thread.is_alive():
+            self._ptt_flush_thread.join(timeout=2)
         self.disconnect_ws()
         self.stop_rms_animation()
         self._ui_state.unsubscribe(self._state_sub_id)

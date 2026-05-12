@@ -73,109 +73,109 @@
 
 ## Phase 5: Extract Model + Profile Panels [checkpoint: pending]
 
-- [ ] Task: Write tests for model and profile panels
-    - [ ] Create `tests/test_model_panel.py`
-    - [ ] Test model catalog display and selection
-    - [ ] Test model download/activation state machine
-    - [ ] Create `tests/test_profile_panel.py`
-    - [ ] Test profile selection and editor dialog integration
-- [ ] Task: Extract model panel code from app.py
-    - [ ] Create `ui/model_panel.py` with `ModelPanel` class
-    - [ ] Move model catalog, download, activation logic
-    - [ ] Move Ollama status detection and management
-    - [ ] Update `app.py` to use `ModelPanel`
-    - [ ] Verify tests pass
-- [ ] Task: Extract profile panel code from app.py
-    - [ ] Create `ui/profile_panel.py` with `ProfilePanel` class
-    - [ ] Move profile selection logic
-    - [ ] Move profile editor dialog integration
-    - [ ] Update `app.py` to use `ProfilePanel`
-    - [ ] Verify tests pass
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: Extract Model + Profile Panels' (Protocol in workflow.md)
+- [x] Task: Write tests for model and profile panels
+    - [x] Create `tests/test_model_panel.py`
+    - [x] Test model catalog display and selection
+    - [x] Test model download/activation state machine
+    - [x] Create `tests/test_profile_panel.py`
+    - [x] Test profile selection and editor dialog integration
+- [x] Task: Extract model panel code from app.py
+    - [x] Create `ui/model_panel.py` with `ModelPanel` class
+    - [x] Move model catalog, download, activation logic
+    - [x] Move Ollama status detection and management
+    - [x] Update `app.py` to use `ModelPanel`
+    - [x] Verify tests pass
+- [x] Task: Extract profile panel code from app.py
+    - [x] Create `ui/profile_panel.py` with `ProfilePanel` class
+    - [x] Move profile selection logic
+    - [x] Move profile editor dialog integration
+    - [x] Update `app.py` to use `ProfilePanel`
+    - [x] Verify tests pass
+- [x] Task: Conductor - User Manual Verification 'Phase 5: Extract Model + Profile Panels' (Protocol in workflow.md)
 
 ## Phase 6: Extract Smart Aggregator UI [checkpoint: pending]
 
-- [ ] Task: Write tests for smart aggregator UI
-    - [ ] Create `tests/test_smart_aggregator_ui.py`
-    - [ ] Test YT chat tab creation and display
-    - [ ] Test callback integration with aggregator
-    - [ ] Test message display and filtering UI
-    - [ ] Test connection status display
-- [ ] Task: Extract smart aggregator UI code from app.py
-    - [ ] Create `ui/smart_aggregator_ui.py` with `SmartAggregatorUI` class
-    - [ ] Move YT chat tab creation
-    - [ ] Move callback handlers (with proper error logging, no `except: pass`)
-    - [ ] Move message display logic
-    - [ ] Update `app.py` to use `SmartAggregatorUI`
-    - [ ] Verify tests pass
-- [ ] Task: Conductor - User Manual Verification 'Phase 6: Extract Smart Aggregator UI' (Protocol in workflow.md)
+- [x] Task: Write tests for smart aggregator UI
+    - [x] Create `tests/test_smart_aggregator_ui.py`
+    - [x] Test YT chat tab creation and display
+    - [x] Test callback integration with aggregator
+    - [x] Test message display and filtering UI
+    - [x] Test connection status display
+- [x] Task: Extract smart aggregator UI code from app.py
+    - [x] Create `ui/smart_aggregator_ui.py` with `SmartAggregatorUI` class
+    - [x] Move YT chat tab creation
+    - [x] Move callback handlers (with proper error logging, no `except: pass`)
+    - [x] Move message display logic
+    - [x] Update `app.py` to use `SmartAggregatorUI`
+    - [x] Verify tests pass
+- [x] Task: Conductor - User Manual Verification 'Phase 6: Extract Smart Aggregator UI' (Protocol in workflow.md)
 
 ## Phase 7: Extract Stream Admin UI [checkpoint: pending]
 
-- [ ] Task: Write tests for stream admin UI
-    - [ ] Create `tests/test_stream_admin_ui.py`
-    - [ ] Test Stream Admin tab creation
-    - [ ] Test OAuth status display
-    - [ ] Test metadata management UI
-    - [ ] Test moderation controls UI
-    - [ ] Test analytics display
-- [ ] Task: Extract stream admin UI code from app.py
-    - [ ] Create `ui/stream_admin_ui.py` with `StreamAdminUI` class
-    - [ ] Move Stream Admin tab creation
-    - [ ] Move OAuth status and controls
-    - [ ] Move metadata, moderation, analytics UI
-    - [ ] Move callback handlers (with proper error logging)
-    - [ ] Update `app.py` to use `StreamAdminUI`
-    - [ ] Verify tests pass
-- [ ] Task: Conductor - User Manual Verification 'Phase 7: Extract Stream Admin UI' (Protocol in workflow.md)
+- [x] Task: Write tests for stream admin UI
+    - [x] Create `tests/test_stream_admin_ui.py`
+    - [x] Test Stream Admin tab creation
+    - [x] Test OAuth status display
+    - [x] Test metadata management UI
+    - [x] Test moderation controls UI
+    - [x] Test analytics display
+- [x] Task: Extract stream admin UI code from app.py
+    - [x] Create `ui/stream_admin_ui.py` with `StreamAdminUI` class
+    - [x] Move Stream Admin tab creation
+    - [x] Move OAuth status and controls
+    - [x] Move metadata, moderation, analytics UI
+    - [x] Move callback handlers (with proper error logging)
+    - [x] Update `app.py` to use `StreamAdminUI`
+    - [x] Verify tests pass
+- [x] Task: Conductor - User Manual Verification 'Phase 7: Extract Stream Admin UI' (Protocol in workflow.md)
 
 ## Phase 8: Extract Advanced Mode Panel [checkpoint: pending]
 
-- [ ] Task: Write tests for advanced panel
-    - [ ] Create `tests/test_advanced_panel.py`
-    - [ ] Test log viewer (toggle, display, monospaced font)
-    - [ ] Test debug controls visibility
-    - [ ] Test manual actions panel
-- [ ] Task: Extract advanced panel code from app.py
-    - [ ] Create `ui/advanced_panel.py` with `AdvancedModePanel` class
-    - [ ] Move log viewer (toggle, display, truncation)
-    - [ ] Move debug controls
-    - [ ] Move manual actions panel
-    - [ ] Update `app.py` to use `AdvancedModePanel`
-    - [ ] Verify tests pass
-- [ ] Task: Conductor - User Manual Verification 'Phase 8: Extract Advanced Panel' (Protocol in workflow.md)
+- [x] Task: Write tests for advanced panel
+    - [x] Create `tests/test_advanced_panel.py`
+    - [x] Test log viewer (toggle, display, monospaced font)
+    - [x] Test debug controls visibility
+    - [x] Test manual actions panel
+- [x] Task: Extract advanced panel code from app.py
+    - [x] Create `ui/advanced_panel.py` with `AdvancedModePanel` class
+    - [x] Move log viewer (toggle, display, truncation)
+    - [x] Move debug controls
+    - [x] Move manual actions panel
+    - [x] Update `app.py` to use `AdvancedModePanel`
+    - [x] Verify tests pass
+- [x] Task: Conductor - User Manual Verification 'Phase 8: Extract Advanced Panel' (Protocol in workflow.md)
 
 ## Phase 9: AppShell Composition + Cleanup [checkpoint: pending]
 
-- [ ] Task: Refactor app.py into thin AppShell
-    - [ ] Reduce `app.py` to <200 lines with only `VocalAIApp` (AppShell) class
-    - [ ] Compose all extracted panels in `__init__`
-    - [ ] Wire up state observer subscriptions
-    - [ ] Wire up panel inter-communication through state
-    - [ ] Fix all lambda closure capture bugs (use functools.partial)
-    - [ ] Remove all direct access to private attributes of other modules
-    - [ ] Verify `main.py` works without changes
-- [ ] Task: Integration tests
-    - [ ] Create `tests/test_integration.py`
-    - [ ] Test full app initialization
-    - [ ] Test panel composition and layout
-    - [ ] Test state propagation across panels
-    - [ ] Test shutdown sequence (on_closing)
-- [ ] Task: Final coverage verification
-    - [ ] Run `pytest tests/ -v --cov=ui --cov-report=term-missing`
-    - [ ] Verify >80% coverage for all `ui/` modules
-    - [ ] Fix any coverage gaps
-- [ ] Task: Conductor - User Manual Verification 'Phase 9: AppShell Composition' (Protocol in workflow.md)
+- [x] Task: Refactor app.py into thin AppShell
+    - [x] Reduce `app.py` to <200 lines with only `VocalAIApp` (AppShell) class
+    - [x] Compose all extracted panels in `__init__`
+    - [x] Wire up state observer subscriptions
+    - [x] Wire up panel inter-communication through state
+    - [x] Fix all lambda closure capture bugs (use functools.partial)
+    - [x] Remove all direct access to private attributes of other modules
+    - [x] Verify `main.py` works without changes
+- [x] Task: Integration tests
+    - [x] Create `tests/test_integration.py`
+    - [x] Test full app initialization
+    - [x] Test panel composition and layout
+    - [x] Test state propagation across panels
+    - [x] Test shutdown sequence (on_closing)
+- [x] Task: Final coverage verification
+    - [x] Run `pytest tests/ -v --cov=ui --cov-report=term-missing`
+    - [x] Verify >80% coverage for all `ui/` modules
+    - [x] Fix any coverage gaps
+- [x] Task: Conductor - User Manual Verification 'Phase 9: AppShell Composition' (Protocol in workflow.md)
 
 ## Phase 10: Documentation + Memory [checkpoint: pending]
 
-- [ ] Task: Update documentation
-    - [ ] Update `README.md` with new UI module structure
-    - [ ] Update `docs/SDD_SKILLS_USAGE.md` if needed
-    - [ ] Update `conductor/tech-stack.md` if needed
-    - [ ] Create `docs/UI_ARCHITECTURE.md` with module diagram and responsibilities
-- [ ] Task: Save Engram memories
-    - [ ] Save architecture decision with topic_key `architecture/ui-module-structure`
-    - [ ] Save patterns discovered with topic_key `pattern/ui-state-management`
-    - [ ] Save any bugfixes with appropriate topic_keys
-    - [ ] Save session summary with full accomplishments
+- [x] Task: Update documentation
+    - [x] Update `README.md` with new UI module structure
+    - [x] Update `docs/SDD_SKILLS_USAGE.md` if needed
+    - [x] Update `conductor/tech-stack.md` if needed
+    - [x] Create `docs/UI_ARCHITECTURE.md` with module diagram and responsibilities
+- [x] Task: Save Engram memories
+    - [x] Save architecture decision con topic_key `architecture/ui-module-structure`
+    - [x] Save patterns discovered con topic_key `pattern/ui-state-management`
+    - [x] Save any bugfixes with appropriate topic_keys
+    - [x] Save session summary with full accomplishments

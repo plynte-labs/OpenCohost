@@ -107,6 +107,7 @@ class VocalAIApp(ctk.CTk):
 
         # Shared UIState
         self._ui_state = UIState()
+        self._ui_state.subscribe(self._on_ui_state_change)
 
         # Callback dispatchers
         self._model_dispatcher = CallbackDispatcher(source="ModelPanel")
@@ -128,9 +129,10 @@ class VocalAIApp(ctk.CTk):
         # ── Build UI structure ──
         self._build_ui()
 
-        # Motor IA (must be after UI so advanced panel exists for logging)
+        # Motor IA (deferred until mainloop is running to avoid
+        # "main thread is not in main loop" race condition)
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
-        self.motor_ia.start()
+        self.after(100, self._start_motor)
 
         # Wire motor_ia to voice control panel
         if hasattr(self, "voice_panel"):
@@ -145,6 +147,24 @@ class VocalAIApp(ctk.CTk):
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
         logger.info("Aplicación VoiceAI iniciada.")
+
+    def _start_motor(self) -> None:
+        """Start the IA motor thread after mainloop is running.
+
+        Deferring this avoids 'main thread is not in main loop' errors
+        when the motor calls ui_callback before Tkinter's mainloop starts.
+        """
+        self.motor_ia.start()
+
+    def _on_ui_state_change(self, key: str, value: Any) -> None:
+        if key == "ws_connected":
+            def update_btn():
+                if hasattr(self, "btn_ws"):
+                    if value:
+                        self.btn_ws.configure(text="Desconectar LiveAudio", fg_color="darkred")
+                    else:
+                        self.btn_ws.configure(text="Conectar LiveAudio", fg_color="#555555")
+            self.after(0, update_btn)
 
     # ──────────────────────────────────────────────
     # UI Construction — delegates to panels
@@ -177,6 +197,7 @@ class VocalAIApp(ctk.CTk):
 
         self.switch_advanced = ctk.CTkSwitch(status_bar_frame, text="Mostrar logs", command=self._toggle_logs_panel, onvalue=True, offvalue=False)
         self.switch_advanced.pack(side="right", padx=(8, 12), pady=8)
+        self.switch_advanced.select()
 
         self.switch_compacto = ctk.CTkSwitch(status_bar_frame, text="Compacto", command=self._toggle_modo_compacto, onvalue=True, offvalue=False)
         self.switch_compacto.pack(side="right", padx=8, pady=8)
@@ -216,6 +237,9 @@ class VocalAIApp(ctk.CTk):
             btn = ctk.CTkButton(main_nav, text=name, command=lambda view=name: self._show_main_view(view), fg_color="#151d26", hover_color="#1d2a38", anchor="w")
             btn.pack(fill="x", padx=8, pady=4)
             self._main_view_buttons[name] = btn
+
+        lbl_autor = ctk.CTkLabel(main_nav, text="VoiceAI by Franguh", font=ctk.CTkFont(size=10, slant="italic"), text_color="#3a4b5c")
+        lbl_autor.pack(side="bottom", fill="x", pady=10)
 
         tab_main_kira.grid_columnconfigure(0, weight=1)
         tab_main_kira.grid_rowconfigure(1, weight=1)
@@ -627,6 +651,8 @@ class VocalAIApp(ctk.CTk):
         btn = self.stream_admin_ui._widget("btn_stream_connect_chat")
         if btn:
             btn.configure(text="Desconectar Chat", fg_color="darkred")
+        if hasattr(self, "btn_youtube_chat"):
+            self.btn_youtube_chat.configure(text="Desconectar Chat", fg_color="darkred")
         if self.status_bar:
             self.status_bar.update_chat_status("connected")
         if hasattr(self, "lbl_kira_chat_state"):
@@ -680,6 +706,8 @@ class VocalAIApp(ctk.CTk):
         btn = self.stream_admin_ui._widget("btn_stream_connect_chat")
         if btn:
             btn.configure(text="Conectar Chat", fg_color="#2f5f8f")
+        if hasattr(self, "btn_youtube_chat"):
+            self.btn_youtube_chat.configure(text="Conectar Chat", fg_color="#2f5f8f")
         if self.status_bar:
             self.status_bar.update_chat_status("disconnected")
         if hasattr(self, "lbl_kira_chat_state"):
@@ -1018,6 +1046,11 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.btn_enviar.configure(state="normal"))
         self._actualizar_pipeline("idle")
         self.after(0, lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
+        if hasattr(self.motor_ia, "current_model"):
+            self.after(0, lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
+        # Start PTT flush watcher thread
+        if hasattr(self, "voice_panel"):
+            self.voice_panel._start_ptt_flush_watcher()
 
     def _on_motor_ollama_unavailable(self) -> None:
         self.after(0, lambda: self.btn_grabar.configure(state="disabled"))
@@ -1059,6 +1092,7 @@ class VocalAIApp(ctk.CTk):
         model = self.motor_ia.current_model
         self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         self.after(0, lambda: self.model_panel.update_model_info(model))
+        self.after(0, lambda: self.model_panel.set_active_model(model))
         self._actualizar_pipeline("idle")
 
     def _on_motor_download_start(self) -> None:
@@ -1179,22 +1213,29 @@ class VocalAIApp(ctk.CTk):
     def _cargar_voz(self) -> None:
         filepath = filedialog.askopenfilename(title="Seleccionar muestra de voz", filetypes=[("Audio WAV", "*.wav")])
         if filepath:
+            self.btn_voz.configure(text="Cargando WAV...", fg_color="#cc8800")
+            self.update_idletasks()
             try:
                 data, sr = sf.read(filepath)
                 duration = len(data) / sr
                 if duration < 2.0:
                     messagebox.showwarning("Audio muy corto", "El audio debe durar al menos 2 segundos.")
+                    self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
                 if duration > 30.0:
                     messagebox.showwarning("Audio muy largo", "El audio no debe durar más de 30 segundos.")
+                    self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo de audio:\n{e}")
+                self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                 return
             self.motor_ia.command_queue.put(("set_voice", filepath))
             self.btn_ws.configure(state="normal", fg_color="#555555")
             self.btn_enviar.configure(state="normal")
+            self.btn_voz.configure(text="WAV Cargado ✅", fg_color="#1f5a3a")
             self._print_log(f"[Sistema] Perfil de voz cargado ({duration:.1f}s).")
+            self.after(2000, lambda: self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555"))
 
     def _enviar_contexto_manual(self) -> None:
         texto = self.entry_chat.get().strip()
@@ -1285,6 +1326,9 @@ class VocalAIApp(ctk.CTk):
         self.ptt.on_ptt_press(key)
         self._ui_state.ptt_active = True
         self._ptt_accept_logged = False
+        # Clear buffer for new accumulation cycle
+        if hasattr(self, "voice_panel"):
+            self.voice_panel.clear_ptt_buffer()
 
     def _on_ptt_release(self, key) -> None:
         self.ptt.on_ptt_release(key)

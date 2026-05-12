@@ -76,6 +76,9 @@ class ModelPanel:
 
         # Ollama starting flag
         self._ollama_starting: bool = False
+        
+        # Active model tracking
+        self._active_model_tag: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Model catalog
@@ -212,6 +215,11 @@ class ModelPanel:
     def get_selected_tag(self) -> str:
         """Return the model tag for the currently selected display."""
         return self.get_tag_for_display(self.get_selected_display())
+
+    def set_active_model(self, tag: str) -> None:
+        """Set the currently active model to update button state."""
+        self._active_model_tag = tag
+        self._update_button_for_ollama_state()
 
     def set_download_progress_visible(self, visible: bool) -> None:
         """Show or hide the download progress bar."""
@@ -368,6 +376,8 @@ class ModelPanel:
         if state in _OLLAMA_BUTTON_CONFIG:
             config = _OLLAMA_BUTTON_CONFIG[state]
             self.btn_download.configure(state=config["state"], text=config["text"])
+        elif model_tag and self._active_model_tag == model_tag:
+            self.btn_download.configure(state="disabled", text="Modelo Activo")
         elif model_tag and self._modelo_instalado(model_tag):
             self.btn_download.configure(state="normal", text="Activar modelo")
         else:
@@ -442,9 +452,9 @@ class ModelPanel:
             return
 
         if self._modelo_instalado(tag):
+            self.btn_download.configure(state="disabled", text="Activando...")
             self._dispatcher.dispatch("on_switch_model", tag)
-            self._on_log(f"[Sistema] '{tag}' ya está instalado. Activado.")
-            self._update_button_for_ollama_state(tag)
+            self._on_log(f"[Sistema] Activando '{tag}'...")
             return
 
         info = MODELS_CATALOG.get(tag, {})

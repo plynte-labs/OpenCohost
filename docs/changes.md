@@ -152,6 +152,16 @@ Este documento incluye:
 
 **[WorkerSeniorAI] Refactor UI/UX seguro — 2026-05-05:** Se reorganizó `ui/app.py` sin tocar backend ni contratos: la vista `Kira` quedó como experiencia principal con respuesta central, botón grande `Hablar`/`Detener`, estados de voz/PTT, TTS, memoria y chat; la configuración pasó a panel lateral con `Modelo/Perfil`, `Audio/TTS`, `PTT`, `YouTube` y `Admin`; `Stream Admin` quedó como workspace administrativo secundario con secciones internas; y los logs se mantienen abajo bajo el switch `Mostrar logs` con tabs `Log General`, `Kira Acciones`, `YT Chat` y `Stream Log`. El plan y riesgos quedaron documentados en `docs/UI_UX_REFACTOR_PLAN.md`.
 
+**[WorkerSeniorAI] Refinamiento de Feedback Visual UI — 2026-05-10:** Se corrigieron múltiples desfases de estado visual. Se implementó rastreo de "Modelo Activo" para desactivar botones de Ollama engañosos, se sincronizó el switch inicial de Logs, se vincularon los botones de LiveAudio a los cambios del WebSocket mediante el `UIState`, se añadió feedback transitorio para la carga de audio WAV ("Cargando..." y "WAV Cargado ✅") y se sincronizó bidireccionalmente el botón de YouTube Chat con el backend de Stream Admin.
+
+**[WorkerSeniorAI] Fix race condition motor/mainloop — 2026-05-11:** Se corrigió `RuntimeError: main thread is not in main loop` difiriendo `motor_ia.start()` con `self.after(100, self._start_motor)` en `ui/app_shell.py`. El hilo arrancaba en `__init__` antes de que `mainloop()` estuviera activo, y cuando `_check_ollama_service()` terminaba rápido llamaba `ui_callback("ready")` → `self.after(0, ...)` → crash.
+
+**[WorkerSeniorAI] Documentación de decisiones y troubleshooting — 2026-05-11:** Se crearon `docs/DECISIONS.md` (7 ADRs: local-first, PTT anti-loop, pausa Stream Admin, TTS ligero sin offline, filtro emotes, race condition fix, single LLM) y `docs/TROUBLESHOOTING.md` (10 bugs resueltos con causa raíz y fix). Se reescribió `docs/architecture.md` con estructura real, threading model completo y contratos de comunicación.
+
+**[WorkerSeniorAI] Cola prioritaria con buffer PTT y acumulación — 2026-05-12:** Se implementó ADR-008: buffer PTT con grace period de 2s, cola prioritaria (PTT > chat, máx 5 items), y buffer de acumulación (50 items, 2000 chars, TTL 2 min) que compacta mensajes descartados en 1 consulta cuando el motor queda libre. Fix del bug TSH-011: PTT no funcionaba porque las transcripciones llegaban después de soltar F8 y se descartaban. Archivos modificados: `ui/voice_control.py`, `core/llm_engine.py`, `ui/app_shell.py`, `ui/smart_aggregator_ui.py`.
+
+**[WorkerSeniorAI] Mitigación de Alucinaciones Whisper — 2026-05-10:** Se implementó una capa de sanitización agresiva (Filtro Anti-Loop) en `ui/voice_control.py` para detectar y deduplicar palabras o frases repetidas consecutivamente más de 3 veces. Esto mitiga el problema de "Secuestro de Atención" en el LLM causado por el bug clásico de transcripción de Whisper (ej. loopeo de ruido de fondo como "gracias gracias gracias"), protegiendo el pipeline conversacional sin matar por completo el contexto.
+
 ---
 
 ## 🏗️ Arquitectura Sugerida (Modular Services)

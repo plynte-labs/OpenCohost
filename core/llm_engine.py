@@ -8,6 +8,7 @@ import asyncio
 import requests
 import edge_tts
 from collections import deque
+from typing import Optional
 
 from config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
@@ -44,6 +45,19 @@ class MotorVocalIA(threading.Thread):
 
         self._lock = threading.Lock()
 
+        # Priority queue: (priority, timestamp, payload, source)
+        # priority: 0 = PTT (high), 1 = chat (normal)
+        self._priority_queue: list = []
+        self._pq_lock = threading.Lock()
+
+        # Accumulation buffer for discarded/overflowed messages
+        # (timestamp, payload, source)
+        self._accumulation_buffer: list = []
+        self._accum_max_items: int = 50
+        self._accum_max_chars: int = 2000
+        self._accum_ttl: float = 120.0  # 2 minutes
+        self._accum_lock = threading.Lock()
+
     @property
     def is_speaking(self):
         with self._lock:
@@ -79,6 +93,8 @@ class MotorVocalIA(threading.Thread):
             try:
                 comando = self.command_queue.get(timeout=1.0)
             except queue.Empty:
+                # Check priority queue and accumulation buffer when idle
+                self._process_priority_queue()
                 continue
 
             if comando is None:
@@ -105,7 +121,9 @@ class MotorVocalIA(threading.Thread):
                     self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
                     continue
                 if self._processing:
-                    self._log("Ya procesando una solicitud. Ignorando...", level="warning")
+                    # Motor busy — enqueue to priority queue instead of dropping
+                    self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
+                    self.enqueue(payload, priority=1, source="direct")
                     continue
                 self._processing = True
                 self.ui_callback("processing")
@@ -114,6 +132,8 @@ class MotorVocalIA(threading.Thread):
                 finally:
                     self._processing = False
                     self.ui_callback("idle")
+                    # After finishing, check priority queue and accumulation
+                    self._process_priority_queue()
 
             elif tipo == "clear_history":
                 self.historial.clear()
@@ -165,6 +185,129 @@ class MotorVocalIA(threading.Thread):
                     args=(model_tag,),
                     daemon=True
                 ).start()
+
+    def enqueue(self, payload: str, priority: int = 1, source: str = "chat") -> None:
+        """Add a message to the priority queue.
+
+        Args:
+            payload: The text to process.
+            priority: 0 = PTT (high), 1 = chat (normal).
+            source: Origin identifier for logging.
+        """
+        with self._pq_lock:
+            self._priority_queue.append((priority, time.time(), payload, source))
+            self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+            # Limit to 5 items — discard oldest if over limit
+            if len(self._priority_queue) > 5:
+                dropped = self._priority_queue.pop()
+                self._log(f"Cola prioritaria llena. Descartado (viejo): {dropped[3]}")
+                # Send to accumulation buffer instead of losing it
+                self.enqueue_accumulation(dropped[2], source=dropped[3])
+
+    def enqueue_accumulation(self, payload: str, source: str = "chat") -> None:
+        """Add a message to the accumulation buffer (discarded/overflowed).
+
+        These messages are compacted and sent as a single consultation
+        when the motor becomes idle after processing.
+
+        Args:
+            payload: The text to accumulate.
+            source: Origin identifier for grouping.
+        """
+        now = time.time()
+        with self._accum_lock:
+            self._accumulation_buffer.append((now, payload, source))
+            # Enforce item limit
+            if len(self._accumulation_buffer) > self._accum_max_items:
+                self._accumulation_buffer.pop(0)  # Drop oldest
+            # Enforce char limit — drop oldest until under limit
+            total_chars = sum(len(p) for _, p, _ in self._accumulation_buffer)
+            while total_chars > self._accum_max_chars and self._accumulation_buffer:
+                dropped = self._accumulation_buffer.pop(0)
+                total_chars -= len(dropped[1])
+
+    def _flush_accumulation(self) -> Optional[str]:
+        """Compact accumulated messages into a single consultation string.
+
+        Returns:
+            Compacted text string, or None if buffer is empty/expired.
+        """
+        now = time.time()
+        with self._accum_lock:
+            # Filter out expired messages (>2 minutes old)
+            fresh = [(ts, p, s) for ts, p, s in self._accumulation_buffer
+                     if now - ts < self._accum_ttl]
+            self._accumulation_buffer = fresh
+
+            if not fresh:
+                return None
+
+            # Group by source
+            by_source: dict = {}
+            for _, payload, source in fresh:
+                by_source.setdefault(source, []).append(payload)
+
+            # Build compacted message
+            parts = []
+            for source, messages in by_source.items():
+                if source == "ptt":
+                    parts.append(f"El streamer dijo (acumulado): {'; '.join(messages)}")
+                elif source == "chat":
+                    parts.append(f"Mientras procesabas, llegaron estos mensajes del chat: {' | '.join(messages)}")
+                else:
+                    parts.append(f"[{source}] {'; '.join(messages)}")
+
+            # Clear buffer after reading
+            self._accumulation_buffer.clear()
+
+            return "\n".join(parts)
+
+    def _process_priority_queue(self) -> None:
+        """Process next item from priority queue if motor is idle.
+
+        After processing, checks accumulation buffer and sends compacted
+        messages as a single consultation.
+        """
+        if self._processing or self._speaking:
+            return
+
+        with self._pq_lock:
+            if not self._priority_queue:
+                # No priority items — check accumulation buffer
+                accumulated = self._flush_accumulation()
+                if accumulated:
+                    self._log(f"Procesando acumulación ({len(self._accumulation_buffer) if hasattr(self, '_accumulation_buffer') else 0} mensajes compactados)...")
+                    self._processing = True
+                    self.ui_callback("processing")
+                    try:
+                        self._ejecutar_inferencia(accumulated)
+                    finally:
+                        self._processing = False
+                        self.ui_callback("idle")
+                return
+
+            priority, ts, payload, source = self._priority_queue.pop(0)
+
+        source_label = "PTT" if source == "ptt" else source
+        self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
+        self._processing = True
+        self.ui_callback("processing")
+        try:
+            self._ejecutar_inferencia(payload)
+        finally:
+            self._processing = False
+            self.ui_callback("idle")
+            # After processing, check accumulation buffer
+            accumulated = self._flush_accumulation()
+            if accumulated:
+                self._log(f"Procesando acumulación posterior...")
+                self._processing = True
+                self.ui_callback("processing")
+                try:
+                    self._ejecutar_inferencia(accumulated)
+                finally:
+                    self._processing = False
+                    self.ui_callback("idle")
 
     def _check_ollama_service(self):
         try:

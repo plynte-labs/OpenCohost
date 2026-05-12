@@ -339,7 +339,22 @@ class SmartAggregatorUI:
     def on_aggregated_context(self, data: dict) -> None:
         """Handle aggregated chat context — prompts Kira to react."""
         if self.is_busy():
-            self._on_log("[SmartAggregator] Contexto agregado omitido: Kira ocupada.")
+            # Motor busy — enqueue to priority queue instead of dropping
+            context = data.get("context", [])[-12:]
+            if not context:
+                return
+            lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
+            prompt = (
+                "Estas viendo el chat de YouTube como co-host del stream. Di EXACTAMENTE lo que Kira diria al aire, "
+                "no describas lo que esta pasando ni prometas que vas a hablar. Reacciona con una broma, critica o comentario concreto. "
+                "Prohibido empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', 'Tengo que', 'El chat esta', "
+                "'energia del flujo', 'mensaje destacado', 'contexto reciente' o 'mantener la energia'. "
+                "No saludes ni preguntes 'que te trae por aqui'. No digas que Kira va a comentar: comenta directamente. "
+                "Responde en 1-2 frases cortas con personalidad de Kira. "
+                f"Mensajes recientes del chat:\n" + "\n".join(lines)
+            )
+            self._motor_ia.enqueue(prompt, priority=1, source="chat")
+            self._on_log("[SmartAggregator] Kira ocupada — contexto encolado en cola prioritaria.")
             return
 
         context = data.get("context", [])[-12:]
