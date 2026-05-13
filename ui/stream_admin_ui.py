@@ -121,7 +121,8 @@ class StreamAdminUI:
                 ``btn_stream_propose_ban``, ``frame_stream_users``,
                 ``btn_stream_connect_chat``, ``switch_stream_chat_enabled``,
                 ``switch_stream_small``, ``entry_stream_chat_message``,
-                ``btn_stream_send_chat``, ``btn_stream_force_kira``,
+                ``btn_stream_send_chat``, ``btn_stream_simulate_chat``,
+                ``btn_stream_force_kira``,
                 ``lbl_stream_analytics``, ``lbl_stream_pending``,
                 ``text_stream_admin_log``, ``lbl_oauth_status_pill``,
                 ``lbl_moderation_status_pill``, ``lbl_oauth_side_status``,
@@ -140,9 +141,11 @@ class StreamAdminUI:
     def build(self, parent: Any) -> Any:
         """Build the Stream Admin tab UI within the given parent frame.
 
-        Creates all tabs (Conexión, Metadata, Moderación, Chat, Estado)
-        and their widgets.  Widget references are stored in ``_widgets``
-        for later UI updates.
+        Creates the streamlined Stream workspace tabs and their widgets.
+        Controls are grouped by operator intent instead of low-level feature
+        area: ``Emisión`` for setup/metadata, ``Acciones`` for chat and
+        moderation, and ``Estado`` for read-only stream feedback.  Widget
+        references are stored in ``_widgets`` for later UI updates.
 
         Args:
             parent: CTkFrame to build the UI inside.
@@ -164,19 +167,43 @@ class StreamAdminUI:
             text_color="#d8e2ef",
         )
         stream_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        tab_stream_connection = stream_tabs.add("Conexión")
-        tab_stream_metadata = stream_tabs.add("Metadata")
-        tab_stream_moderation = stream_tabs.add("Moderación")
-        tab_stream_chat = stream_tabs.add("Chat")
+        tab_stream_live = stream_tabs.add("Emisión")
+        tab_stream_actions = stream_tabs.add("Acciones")
         tab_stream_status = stream_tabs.add("Estado")
-        for tab in (tab_stream_connection, tab_stream_metadata, tab_stream_moderation, tab_stream_chat, tab_stream_status):
+        for tab in (tab_stream_live, tab_stream_actions, tab_stream_status):
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
 
-        self._build_connection_tab(tab_stream_connection)
-        self._build_metadata_tab(tab_stream_metadata)
-        self._build_moderation_tab(tab_stream_moderation)
-        self._build_chat_tab(tab_stream_chat)
+        # Stream uses vertical scrollable containment: cards stack instead of
+        # building cockpit-wide rows that can be clipped by the product shell.
+        live_sections = ctk.CTkScrollableFrame(tab_stream_live, fg_color="transparent")
+        live_sections.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        live_sections.grid_columnconfigure(0, weight=1)
+
+        actions_sections = ctk.CTkScrollableFrame(tab_stream_actions, fg_color="transparent")
+        actions_sections.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        actions_sections.grid_columnconfigure(0, weight=1)
+
+        connection_section = ctk.CTkFrame(live_sections, fg_color="transparent")
+        connection_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        connection_section.grid_columnconfigure(0, weight=1)
+        self._build_connection_tab(connection_section)
+
+        metadata_section = ctk.CTkFrame(live_sections, fg_color="transparent")
+        metadata_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        metadata_section.grid_columnconfigure(0, weight=1)
+        self._build_metadata_tab(metadata_section)
+
+        chat_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
+        chat_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        chat_section.grid_columnconfigure(0, weight=1)
+        self._build_chat_tab(chat_section)
+
+        moderation_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
+        moderation_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        moderation_section.grid_columnconfigure(0, weight=1)
+        self._build_moderation_tab(moderation_section)
+
         self._build_status_tab(tab_stream_status)
 
         return parent
@@ -184,182 +211,207 @@ class StreamAdminUI:
     def _build_connection_tab(self, tab: Any) -> None:
         frame_auth = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        frame_auth.grid_columnconfigure(1, weight=1)
+        frame_auth.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_auth, text="OAuth / Proveedor", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
-        lbl_status = ctk.CTkLabel(frame_auth, text="RF4 iniciando...", text_color="#aaaaaa")
-        lbl_status.grid(row=0, column=1, padx=8, pady=6, sticky="w")
+        header = ctk.CTkFrame(frame_auth, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="OAuth / Proveedor", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew")
+        lbl_status = ctk.CTkLabel(header, text="RF4 iniciando...", text_color="#aaaaaa", anchor="w", justify="left", wraplength=520)
+        lbl_status.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self._widgets["lbl_stream_admin_status"] = lbl_status
 
-        btn_read = ctk.CTkButton(frame_auth, text="Conectar YouTube Lectura", command=lambda: self._dispatch_connect(False), width=170, fg_color="#2f5f8f", hover_color="#3670aa")
-        btn_read.grid(row=0, column=2, padx=4, pady=6)
+        button_stack = ctk.CTkFrame(frame_auth, fg_color="transparent")
+        button_stack.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        button_stack.grid_columnconfigure(0, weight=1)
+        button_stack.grid_columnconfigure(1, weight=1)
+        btn_read = ctk.CTkButton(button_stack, text="Conectar YouTube Lectura", command=lambda: self._dispatch_connect(False), width=170, fg_color="#2f5f8f", hover_color="#3670aa")
+        btn_read.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_youtube_read"] = btn_read
 
-        btn_write = ctk.CTkButton(frame_auth, text="Reconectar Escritura", command=lambda: self._dispatch_connect(True), width=150, fg_color="#555555", hover_color="#666666")
-        btn_write.grid(row=0, column=3, padx=4, pady=6)
+        btn_write = ctk.CTkButton(button_stack, text="Reconectar Escritura", command=lambda: self._dispatch_connect(True), width=150, fg_color="#555555", hover_color="#666666")
+        btn_write.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_youtube_write"] = btn_write
 
-        btn_revoke = ctk.CTkButton(frame_auth, text="Revocar Escritura", command=self.revoke_write, width=130, fg_color="#7d5a2a", hover_color="#a07030", state="disabled")
-        btn_revoke.grid(row=0, column=4, padx=4, pady=6)
+        btn_revoke = ctk.CTkButton(button_stack, text="Revocar Escritura", command=self.revoke_write, width=130, fg_color="#7d5a2a", hover_color="#a07030", state="disabled")
+        btn_revoke.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_revoke_write"] = btn_revoke
 
-        btn_disconnect = ctk.CTkButton(frame_auth, text="Desconectar", command=lambda: self._dispatch_disconnect(), width=105, fg_color="#555555")
-        btn_disconnect.grid(row=0, column=5, padx=4, pady=6)
+        btn_disconnect = ctk.CTkButton(button_stack, text="Desconectar", command=lambda: self._dispatch_disconnect(), width=105, fg_color="#555555")
+        btn_disconnect.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_disconnect"] = btn_disconnect
 
-        btn_twitch = ctk.CTkButton(frame_auth, text="Twitch Próximamente", state="disabled", width=145, fg_color="#444444")
-        btn_twitch.grid(row=0, column=6, padx=4, pady=6)
+        btn_twitch = ctk.CTkButton(button_stack, text="Twitch Próximamente", state="disabled", width=145, fg_color="#444444")
+        btn_twitch.grid(row=2, column=0, columnspan=2, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_twitch"] = btn_twitch
 
-        ctk.CTkLabel(frame_auth, text="Client ID:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_auth, text="Client ID:", anchor="w").grid(row=2, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_id = ctk.CTkEntry(frame_auth, placeholder_text="tu_client_id.apps.googleusercontent.com")
-        entry_id.grid(row=1, column=1, columnspan=2, padx=4, pady=4, sticky="ew")
+        entry_id.grid(row=3, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_client_id"] = entry_id
 
-        ctk.CTkLabel(frame_auth, text="Secret:").grid(row=1, column=3, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_auth, text="Secret:", anchor="w").grid(row=4, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_secret = ctk.CTkEntry(frame_auth, placeholder_text="OAuth client secret", show="*")
-        entry_secret.grid(row=1, column=4, padx=4, pady=4, sticky="ew")
+        entry_secret.grid(row=5, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_client_secret"] = entry_secret
 
-        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._dispatch_save_oauth, width=125, fg_color="#555555", hover_color="#666666").grid(row=1, column=5, columnspan=2, padx=4, pady=4)
+        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._dispatch_save_oauth, width=125, fg_color="#555555", hover_color="#666666").grid(row=6, column=0, padx=10, pady=(8, 10), sticky="ew")
 
     def _build_metadata_tab(self, tab: Any) -> None:
         frame_meta = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_meta.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        frame_meta.grid_columnconfigure(1, weight=1)
-        frame_meta.grid_columnconfigure(3, weight=1)
+        frame_meta.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
-        lbl_meta = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa")
-        lbl_meta.grid(row=0, column=1, columnspan=3, padx=8, pady=6, sticky="w")
+        ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 2), sticky="ew")
+        lbl_meta = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa", anchor="w", justify="left", wraplength=520)
+        lbl_meta.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
         self._widgets["lbl_stream_metadata_state"] = lbl_meta
 
-        btn_read = ctk.CTkButton(frame_meta, text="Leer", command=lambda: self._dispatch_refresh_metadata(), width=80, fg_color="#555555", hover_color="#666666")
-        btn_read.grid(row=0, column=4, padx=4, pady=6)
+        meta_actions = ctk.CTkFrame(frame_meta, fg_color="transparent")
+        meta_actions.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        meta_actions.grid_columnconfigure(0, weight=1)
+        meta_actions.grid_columnconfigure(1, weight=1)
+        btn_read = ctk.CTkButton(meta_actions, text="Leer", command=lambda: self._dispatch_refresh_metadata(), width=80, fg_color="#555555", hover_color="#666666")
+        btn_read.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_read_metadata"] = btn_read
 
-        btn_suggest = ctk.CTkButton(frame_meta, text="Sugerir", command=lambda: self._dispatch_suggest_metadata(), width=85, fg_color="#2f5f8f", hover_color="#3670aa")
-        btn_suggest.grid(row=0, column=5, padx=4, pady=6)
+        btn_suggest = ctk.CTkButton(meta_actions, text="Sugerir", command=lambda: self._dispatch_suggest_metadata(), width=85, fg_color="#2f5f8f", hover_color="#3670aa")
+        btn_suggest.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_suggest_metadata"] = btn_suggest
 
-        btn_apply = ctk.CTkButton(frame_meta, text="Aplicar", command=lambda: self._dispatch_apply_metadata(), width=85, fg_color="#2a7d3f")
-        btn_apply.grid(row=0, column=6, padx=4, pady=6)
+        btn_apply = ctk.CTkButton(meta_actions, text="Aplicar", command=lambda: self._dispatch_apply_metadata(), width=85, fg_color="#2a7d3f")
+        btn_apply.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_apply_metadata"] = btn_apply
 
-        btn_reject = ctk.CTkButton(frame_meta, text="Rechazar", command=lambda: self._dispatch_reject_pending(), width=85, fg_color="#7d2a2a")
-        btn_reject.grid(row=0, column=7, padx=4, pady=6)
+        btn_reject = ctk.CTkButton(meta_actions, text="Rechazar", command=lambda: self._dispatch_reject_pending(), width=85, fg_color="#7d2a2a")
+        btn_reject.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_reject_pending"] = btn_reject
 
-        ctk.CTkLabel(frame_meta, text="Título:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_meta, text="Título:", anchor="w").grid(row=3, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_title = ctk.CTkEntry(frame_meta, placeholder_text="Título del stream")
-        entry_title.grid(row=1, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
+        entry_title.grid(row=4, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_title"] = entry_title
 
-        ctk.CTkLabel(frame_meta, text="Categoría:").grid(row=2, column=0, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_meta, text="Categoría:", anchor="w").grid(row=5, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_cat = ctk.CTkEntry(frame_meta, placeholder_text="ID categoría YouTube, ej. 20")
-        entry_cat.grid(row=2, column=1, padx=8, pady=4, sticky="ew")
+        entry_cat.grid(row=6, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_category"] = entry_cat
 
-        ctk.CTkLabel(frame_meta, text="Tags:").grid(row=2, column=2, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_meta, text="Tags:", anchor="w").grid(row=7, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_tags = ctk.CTkEntry(frame_meta, placeholder_text="tag1, tag2, tag3")
-        entry_tags.grid(row=2, column=3, columnspan=5, padx=8, pady=4, sticky="ew")
+        entry_tags.grid(row=8, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_tags"] = entry_tags
 
-        ctk.CTkLabel(frame_meta, text="Descripción:").grid(row=3, column=0, padx=8, pady=4, sticky="ne")
+        ctk.CTkLabel(frame_meta, text="Descripción:", anchor="w").grid(row=9, column=0, padx=10, pady=(8, 2), sticky="ew")
         text_desc = ctk.CTkTextbox(frame_meta, height=70)
-        text_desc.grid(row=3, column=1, columnspan=7, padx=8, pady=4, sticky="ew")
+        text_desc.grid(row=10, column=0, padx=10, pady=(2, 10), sticky="ew")
         self._widgets["text_stream_description"] = text_desc
 
     def _build_moderation_tab(self, tab: Any) -> None:
         frame_mod = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_mod.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        frame_mod.grid_columnconfigure(7, weight=1)
+        frame_mod.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_mod, text="Moderación", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
-        switch_mod = ctk.CTkSwitch(frame_mod, text="AutoMod", command=lambda: self._dispatch_apply_runtime_settings())
-        switch_mod.grid(row=0, column=1, padx=4, pady=6)
+        ctk.CTkLabel(frame_mod, text="Moderación", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        controls = ctk.CTkFrame(frame_mod, fg_color="transparent")
+        controls.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        controls.grid_columnconfigure(0, weight=1)
+        switch_mod = ctk.CTkSwitch(controls, text="AutoMod", command=lambda: self._dispatch_apply_runtime_settings())
+        switch_mod.grid(row=0, column=0, padx=4, pady=4, sticky="w")
         self._widgets["switch_stream_mod_enabled"] = switch_mod
 
-        combo_mode = ctk.CTkOptionMenu(frame_mod, values=["alerts_only", "confirm_required", "automatic"], command=lambda _: self._dispatch_apply_runtime_settings(), width=150)
+        combo_mode = ctk.CTkOptionMenu(controls, values=["alerts_only", "confirm_required", "automatic"], command=lambda _: self._dispatch_apply_runtime_settings(), width=150)
         combo_mode.set("alerts_only")
-        combo_mode.grid(row=0, column=2, padx=4, pady=6)
+        combo_mode.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["combo_stream_mod_mode"] = combo_mode
 
-        switch_announce = ctk.CTkSwitch(frame_mod, text="Anunciar al chat", command=lambda: self._dispatch_apply_runtime_settings())
-        switch_announce.grid(row=0, column=3, padx=4, pady=6)
+        switch_announce = ctk.CTkSwitch(controls, text="Anunciar al chat", command=lambda: self._dispatch_apply_runtime_settings())
+        switch_announce.grid(row=2, column=0, padx=4, pady=4, sticky="w")
         self._widgets["switch_stream_announce"] = switch_announce
 
-        ctk.CTkLabel(frame_mod, text="User Channel ID:").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_mod, text="User Channel ID:", anchor="w").grid(row=2, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_user = ctk.CTkEntry(frame_mod, width=180, placeholder_text="channelId del usuario")
-        entry_user.grid(row=1, column=1, padx=4, pady=4)
+        entry_user.grid(row=3, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_mod_user"] = entry_user
 
-        ctk.CTkLabel(frame_mod, text="Razón:").grid(row=1, column=2, padx=8, pady=4, sticky="e")
+        ctk.CTkLabel(frame_mod, text="Razón:", anchor="w").grid(row=4, column=0, padx=10, pady=(8, 2), sticky="ew")
         entry_reason = ctk.CTkEntry(frame_mod, placeholder_text="spam/toxicidad/etc.")
-        entry_reason.grid(row=1, column=3, columnspan=2, padx=4, pady=4, sticky="ew")
+        entry_reason.grid(row=5, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_mod_reason"] = entry_reason
 
-        btn_timeout = ctk.CTkButton(frame_mod, text="Proponer Timeout", command=lambda: self._dispatch_propose_high_risk("timeout"), width=135, fg_color="#555555", hover_color="#666666")
-        btn_timeout.grid(row=1, column=5, padx=4, pady=4)
+        mod_actions = ctk.CTkFrame(frame_mod, fg_color="transparent")
+        mod_actions.grid(row=6, column=0, sticky="ew", padx=10, pady=4)
+        mod_actions.grid_columnconfigure(0, weight=1)
+        mod_actions.grid_columnconfigure(1, weight=1)
+        btn_timeout = ctk.CTkButton(mod_actions, text="Proponer Timeout", command=lambda: self._dispatch_propose_high_risk("timeout"), width=135, fg_color="#555555", hover_color="#666666")
+        btn_timeout.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_propose_timeout"] = btn_timeout
 
-        btn_ban = ctk.CTkButton(frame_mod, text="Proponer Ban", command=lambda: self._dispatch_propose_high_risk("ban"), width=115, fg_color="#7d2a2a")
-        btn_ban.grid(row=1, column=6, padx=4, pady=4)
+        btn_ban = ctk.CTkButton(mod_actions, text="Proponer Ban", command=lambda: self._dispatch_propose_high_risk("ban"), width=115, fg_color="#7d2a2a")
+        btn_ban.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_propose_ban"] = btn_ban
 
-        ctk.CTkLabel(frame_mod, text="Usuarios recientes", font=ctk.CTkFont(size=12, weight="bold")).grid(row=2, column=0, padx=8, pady=(8, 4), sticky="w")
-        ctk.CTkButton(frame_mod, text="Actualizar lista", command=self.refresh_user_list, width=115, fg_color="#555555").grid(row=2, column=1, padx=4, pady=(8, 4), sticky="w")
+        ctk.CTkLabel(frame_mod, text="Usuarios recientes", font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(row=7, column=0, padx=10, pady=(8, 4), sticky="ew")
+        ctk.CTkButton(frame_mod, text="Actualizar lista", command=self.refresh_user_list, width=115, fg_color="#555555").grid(row=8, column=0, padx=10, pady=(0, 4), sticky="ew")
 
         frame_users = ctk.CTkScrollableFrame(frame_mod, height=115)
-        frame_users.grid(row=3, column=0, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
+        frame_users.grid(row=9, column=0, padx=10, pady=(0, 10), sticky="ew")
         frame_users.grid_columnconfigure(2, weight=1)
         self._widgets["frame_stream_users"] = frame_users
 
     def _build_chat_tab(self, tab: Any) -> None:
         frame_chat = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_chat.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        frame_chat.grid_columnconfigure(1, weight=1)
+        frame_chat.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_chat, text="Kira Chat", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
-        btn_connect_chat = ctk.CTkButton(frame_chat, text="Conectar Chat", command=self._dispatch_connect_current_chat, width=125, fg_color="#2f5f8f")
-        btn_connect_chat.grid(row=0, column=1, padx=4, pady=6, sticky="w")
+        ctk.CTkLabel(frame_chat, text="Kira Chat", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        chat_actions = ctk.CTkFrame(frame_chat, fg_color="transparent")
+        chat_actions.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        chat_actions.grid_columnconfigure(0, weight=1)
+        chat_actions.grid_columnconfigure(1, weight=1)
+        btn_connect_chat = ctk.CTkButton(chat_actions, text="Conectar Chat", command=self._dispatch_connect_current_chat, width=125, fg_color="#2f5f8f")
+        btn_connect_chat.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_connect_chat"] = btn_connect_chat
 
-        switch_chat = ctk.CTkSwitch(frame_chat, text="Permitir mensajes", command=lambda: self._dispatch_apply_runtime_settings())
-        switch_chat.grid(row=0, column=2, padx=4, pady=6, sticky="w")
+        switch_chat = ctk.CTkSwitch(chat_actions, text="Permitir mensajes", command=lambda: self._dispatch_apply_runtime_settings())
+        switch_chat.grid(row=0, column=1, padx=4, pady=4, sticky="w")
         self._widgets["switch_stream_chat_enabled"] = switch_chat
 
-        switch_small = ctk.CTkSwitch(frame_chat, text="Stream Chico", command=self._dispatch_toggle_small_stream)
-        switch_small.grid(row=0, column=3, padx=4, pady=6, sticky="w")
+        switch_small = ctk.CTkSwitch(chat_actions, text="Stream Chico", command=self._dispatch_toggle_small_stream)
+        switch_small.grid(row=1, column=0, padx=4, pady=4, sticky="w")
         self._widgets["switch_stream_small"] = switch_small
 
-        ctk.CTkButton(frame_chat, text="Simular Chat", command=self._dispatch_simulate_chat, width=115, fg_color="#555555", hover_color="#666666").grid(row=0, column=4, padx=8, pady=6)
+        btn_simulate = ctk.CTkButton(chat_actions, text="Simular Chat", command=self._dispatch_simulate_chat, width=115, fg_color="#555555", hover_color="#666666")
+        btn_simulate.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._widgets["btn_stream_simulate_chat"] = btn_simulate
 
         entry_msg = ctk.CTkEntry(frame_chat, placeholder_text="Mensaje breve de Kira para el chat")
-        entry_msg.grid(row=1, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+        entry_msg.grid(row=2, column=0, padx=10, pady=(8, 4), sticky="ew")
         self._widgets["entry_stream_chat_message"] = entry_msg
 
-        btn_send = ctk.CTkButton(frame_chat, text="Enviar al chat", command=lambda: self._dispatch_send_chat(), width=120)
-        btn_send.grid(row=1, column=3, padx=8, pady=4)
+        send_actions = ctk.CTkFrame(frame_chat, fg_color="transparent")
+        send_actions.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
+        send_actions.grid_columnconfigure(0, weight=1)
+        send_actions.grid_columnconfigure(1, weight=1)
+        btn_send = ctk.CTkButton(send_actions, text="Enviar al chat", command=lambda: self._dispatch_send_chat(), width=120)
+        btn_send.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_send_chat"] = btn_send
 
-        btn_force = ctk.CTkButton(frame_chat, text="Forzar Kira", command=self._dispatch_force_kira, width=115, fg_color="#555555", hover_color="#666666")
-        btn_force.grid(row=1, column=4, padx=8, pady=4)
+        btn_force = ctk.CTkButton(send_actions, text="Forzar Kira", command=self._dispatch_force_kira, width=115, fg_color="#555555", hover_color="#666666")
+        btn_force.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_force_kira"] = btn_force
 
     def _build_status_tab(self, tab: Any) -> None:
-        frame_bottom = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
+        frame_bottom = ctk.CTkScrollableFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_bottom.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_bottom.grid_columnconfigure(0, weight=1)
-        frame_bottom.grid_columnconfigure(1, weight=1)
-        frame_bottom.grid_rowconfigure(1, weight=1)
 
-        lbl_analytics = ctk.CTkLabel(frame_bottom, text="Analíticas: esperando RF3", anchor="w")
-        lbl_analytics.grid(row=0, column=0, padx=8, pady=6, sticky="ew")
+        lbl_analytics = ctk.CTkLabel(frame_bottom, text="Analíticas: esperando RF3", anchor="w", justify="left", wraplength=520)
+        lbl_analytics.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
         self._widgets["lbl_stream_analytics"] = lbl_analytics
 
-        lbl_pending = ctk.CTkLabel(frame_bottom, text="Acción pendiente: ninguna", anchor="w", text_color="#aaaaaa")
-        lbl_pending.grid(row=0, column=1, padx=8, pady=6, sticky="ew")
+        lbl_pending = ctk.CTkLabel(frame_bottom, text="Acción pendiente: ninguna", anchor="w", justify="left", text_color="#aaaaaa", wraplength=520)
+        lbl_pending.grid(row=1, column=0, padx=10, pady=6, sticky="ew")
         self._widgets["lbl_stream_pending"] = lbl_pending
 
         ctk.CTkLabel(
@@ -367,7 +419,9 @@ class StreamAdminUI:
             text="El log detallado de Stream Admin está abajo en Logs / Terminales > Stream Log.",
             text_color="#8fa3b8",
             anchor="w",
-        ).grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="ew")
+            justify="left",
+            wraplength=520,
+        ).grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
 
     # ------------------------------------------------------------------
     # Dispatch callbacks (wired by AppShell)
@@ -654,6 +708,10 @@ class StreamAdminUI:
             metadata: Dict with ``title``, ``category_id``, ``tags``,
                 ``description``, ``video_id``, ``status``.
         """
+        self._schedule_ui_update(lambda: self._populate_metadata_now(metadata))
+
+    def _populate_metadata_now(self, metadata: dict[str, Any]) -> None:
+        """Apply metadata values to widgets. Must run on the UI thread."""
         metadata = metadata or {}
         lbl = self._widget("lbl_stream_metadata_state")
         if lbl:
@@ -961,7 +1019,7 @@ class StreamAdminUI:
             metadata: Metadata dict from the provider.
         """
         self._last_metadata = metadata or {}
-        self.populate_metadata(metadata)
+        self._schedule_ui_update(lambda: self._populate_metadata_now(metadata))
 
     def on_pending(self, pending: dict[str, Any]) -> None:
         """Handle pending action update.
@@ -1006,7 +1064,7 @@ class StreamAdminUI:
                 )
 
             if pending.get("type") == "metadata_update":
-                self.populate_metadata({
+                self._populate_metadata_now({
                     "status": "suggested",
                     "title": payload.get("title", ""),
                     "category_id": payload.get("category_id", ""),

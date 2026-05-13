@@ -1,0 +1,20 @@
+avatar:
+  enabled: true
+  mode: image_states
+  assets_folder: C:\Users\tavo_\AppData\Local\Temp\pytest-of-tavo_\pytest-4\test_choose_image_copies_to_as0\avatars
+  state_images:
+    idle: C:\Users\tavo_\AppData\Local\Temp\pytest-of-tavo_\pytest-4\test_choose_image_copies_to_as0\avatars\idle.png
+    listening: E:\VoiceAI\assets\avatar\kira\listening.png
+    thinking: E:\VoiceAI\assets\avatar\kira\thinking.png
+    speaking: E:\VoiceAI\assets\avatar\kira\speaking.png
+    speaking_alt: E:\VoiceAI\assets\avatar\kira\speaking_alt.png
+    sleeping: E:\VoiceAI\assets\avatar\kira\sleeping.png
+    angry: E:\VoiceAI\assets\avatar\kira\angry.png
+    error: E:\VoiceAI\assets\avatar\kira\error.png
+  obs:
+    enabled: true
+    host: localhost
+    port: 4455
+    password: ''
+    source_name: KiraAvatar
+    scene_name: ''

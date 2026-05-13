@@ -4,6 +4,15 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 
 **[WorkerSeniorAI] Hardening seguridad/privacidad parcial — 2026-05-05:** En rama `feature/security-privacy-hardening` se aplicaron correcciones defensivas sin migrar aun OAuth/Client: `read_only` bloquea escritura en backend, la UI deshabilita controles de escritura cuando no hay modo/scope write, logs visuales tienen limite de lineas, redaccion de secretos fue reforzada, `VOICEAI_DEBUG=1` controla debug, RF3 ejecuta cleanup al iniciar/cerrar, chat autenticado corta con backoff tras fallos y los eventos demo de Kira Acciones ya no se persisten como auditoria real. Pendiente importante: migrar Tokens OAuth y OAuth Client fuera de JSON plano a Credential Manager/DPAPI/keyring.
 
+**[OBS WebSocket Avatar Integration] — 2026-05-12:** En rama `feature/kira-product-ui-redesign`:
+- **avatar/obs_client.py**: Cliente OBS WebSocket que se suscribe a `AvatarStateBridge` y actualiza fuentes de imagen en OBS vía `set_input_settings`. Cambio de estado del avatar (idle/listening/thinking/speaking/sleeping) → cambio automático de imagen en escena OBS.
+- **avatar/avatar_config.py**: Agregada dataclass `OBSConfig` (host, port, password, source_name, scene_name).
+- **config/avatar.yaml**: Nueva sección `obs:` con configuración de conexión.
+- **ui/avatar_panel.py**: Panel de configuración OBS con toggle habilitar/deshabilitar, campos host/puerto/password/fuente, botón "Probar conexión", estado de conexión.
+- **ui/app_shell.py**: Inicialización de `OBSClient` al arrancar, desconexión al cerrar.
+- **tests/test_obs_client.py**: 9 tests del cliente OBS.
+- **Clave técnica**: OBS WebSocket v5 requiere setear AMBOS campos `file` y `local_file` con `overlay=False` para que la fuente de imagen actualice y renderice correctamente.
+
 ## 📄 Especificación de Requerimientos del Sistema (SRS)
 
 ### 1. Módulo de Control de Entrada (Control & PTT)

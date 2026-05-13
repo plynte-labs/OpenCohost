@@ -17,15 +17,15 @@
 
 ## Phase 2: Product Layout Shell Without Behavior Changes
 
-- [ ] Task: Introduce product layout containers
-    - [ ] Create a persistent left `Kira` product area
-    - [ ] Create right-side classified panel area
-    - [ ] Preserve existing widgets by moving containers, not rewriting logic
-    - [ ] Keep StreamAdminUI internals untouched
-- [ ] Task: Move current Kira response/state into left panel
-    - [ ] Place Kira identity/header, last response, state labels, and quick manual input
-    - [ ] Keep current `text_kira_response` compatibility for logs/advanced panel
-    - [ ] Preserve status updates from `UIState`
+- [x] Task: Introduce product layout containers
+    - [x] Create a persistent left `Kira` product area
+    - [x] Create right-side classified panel area
+    - [x] Preserve existing widgets by moving containers, not rewriting logic
+    - [x] Keep StreamAdminUI internals untouched
+- [x] Task: Move current Kira response/state into left panel
+    - [x] Place Kira identity/header, last response, state labels, and quick manual input
+    - [x] Keep current `text_kira_response` compatibility for logs/advanced panel
+    - [x] Preserve status updates from `UIState`
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Product Layout Shell' (Protocol in workflow.md)
 
 ## Phase 3: Reclassify Existing Configuration Panels
@@ -54,19 +54,41 @@
 
 ## Phase 4: Avatar/OBS Module Boundary
 
-- [ ] Task: Add avatar configuration model
-    - [ ] Create `avatar/avatar_config.py` for mode and paths
-    - [ ] Support modes: `none`, `placeholder`, `image_2d`, `obs_overlay` as configuration values
-    - [ ] Mark unimplemented 3D/Live2D modes as future, not active controls
-- [ ] Task: Add avatar runtime state bridge
-    - [ ] Create `avatar/avatar_state.py` with states: idle, listening, thinking, speaking, error
-    - [ ] Provide API: `set_state()`, `set_speech_text()`, `show()`, `hide()`
-    - [ ] Keep it independent from Tkinter widgets
-- [ ] Task: Add Avatar/OBS UI placeholder
-    - [ ] Create `ui/avatar_panel.py`
-    - [ ] Show avatar preview/placeholder in left Kira panel
-    - [ ] Show configuration in right Avatar/OBS panel
-    - [ ] Add tests for config/state without requiring OBS
+- [x] Task: Add avatar configuration model
+    - [x] Create `config/avatar.yaml` with safe defaults and no hardcoded user paths
+    - [x] Create `avatar/avatar_config.py` for loading/saving avatar mode and state image paths
+    - [x] Support MVP mode: `image_states`
+    - [x] Support states: `idle`, `listening`, `thinking`, `speaking`, `speaking_alt`, `sleeping`, `angry`, `error`
+    - [x] Prefer copying selected images into a managed avatar asset folder instead of depending on `Downloads`
+    - [x] Mark OBS WebSocket, Live2D, and VRM as future/`Próximamente`, not active controls
+- [x] Task: Add avatar runtime state bridge
+    - [x] Create `avatar/avatar_state.py` with an enum/value object for all MVP states
+    - [x] Provide API: `set_state()`, `get_state()`, `set_speech_text()`, and `subscribe()`
+    - [x] Keep it independent from Tkinter widgets
+- [x] Task: Add Avatar/OBS UI for user-selected images
+    - [x] Create `ui/avatar_panel.py`
+    - [x] Add one row per state with current path/filename, `Elegir imagen`, and optional `Probar`
+    - [x] Use a file picker to assign/replace state images from the UI
+    - [x] Update preview immediately after image selection
+    - [x] Show avatar preview/placeholder in left Kira panel using the current avatar state
+    - [x] Show configuration in right Avatar/OBS panel
+    - [x] If no image exists for a state, fallback to `idle` or a clear placeholder instead of crashing
+    - [x] Add `Overlay OBS: Próximamente` copy if overlay is not implemented in this slice
+- [x] Task: Wire only safe automatic avatar transitions
+    - [x] App ready/normal state sets avatar to `idle`
+    - [x] LiveAudio/PTT active sets avatar to `listening` where that state is already reliable
+    - [x] Waiting for LLM response sets avatar to `thinking` only through an existing safe hook
+    - [x] TTS/playback or Kira speaking sets avatar to `speaking` only through an existing safe hook
+    - [x] Inactive/disconnected state sets avatar to `sleeping` where already detectable
+    - [x] Centralized error paths may set avatar to `error` or `angry`
+    - [x] Do not add fragile hooks just to force every transition in this slice
+- [x] Task: Add avatar MVP tests
+    - [x] Test avatar config load/save with temporary paths
+    - [x] Test missing image fallback does not crash startup
+    - [x] Test avatar state subscriptions notify UI listeners
+    - [x] Test AvatarPanel builds without real OBS or user Downloads assets
+    - [x] Test selecting/replacing an image updates config and preview through mocked file picker
+    - [x] Add tests for config/state without requiring OBS
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Avatar/OBS Module Boundary' (Protocol in workflow.md)
 
 ## Phase 5: Cleanup, Copy, and Regression Verification

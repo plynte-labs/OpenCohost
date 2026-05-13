@@ -18,7 +18,7 @@ import os
 import queue
 import threading
 import time
-from typing import Any
+from typing import Any, Optional
 
 import customtkinter as ctk
 import numpy as np
@@ -40,6 +40,10 @@ from ui.smart_aggregator_ui import SmartAggregatorUI
 from ui.stream_admin_ui import StreamAdminUI
 from ui.advanced_panel import AdvancedModePanel
 from ui.profiles_window import ConfiguradorPerfiles
+from ui.avatar_panel import AvatarPanel
+from avatar.obs_client import OBSClient, OBSConfig
+
+from avatar.avatar_state import AvatarState, AvatarStateBridge
 
 from config.settings import (
     DEFAULT_MODEL, MODELS_CATALOG, BASE_DIR, TEMP_DIR,
@@ -126,6 +130,16 @@ class VocalAIApp(ctk.CTk):
         self.ptt.set_state_callback(self._actualizar_pipeline)
         self.ptt.set_log_callback(lambda msg: self._print_log(msg))
 
+        # Avatar state bridge (independent from Tkinter)
+        self._avatar_bridge = AvatarStateBridge()
+        self._speaking_alt_timer_id: str | None = None
+        self._speaking_is_alt: bool = False
+        self._inactivity_timer_id: str | None = None
+        self._inactivity_timeout_ms: int = 2 * 60 * 1000  # 2 minutes to sleeping
+
+        # OBS WebSocket client (initialized after UI build to access config)
+        self._obs_client: Optional[OBSClient] = None
+
         # ── Build UI structure ──
         self._build_ui()
 
@@ -166,6 +180,40 @@ class VocalAIApp(ctk.CTk):
                         self.btn_ws.configure(text="Conectar LiveAudio", fg_color="#555555")
             self.after(0, update_btn)
 
+    def _on_avatar_state_for_preview(self, state: AvatarState) -> None:
+        """Update the left-panel avatar preview when bridge state changes."""
+        def update():
+            if self._kira_avatar_label is None:
+                return
+            from avatar.avatar_config import load_avatar_config
+            config = load_avatar_config()
+            image_path = config.get_image_for_state(state.value)
+            if image_path and os.path.isfile(image_path):
+                try:
+                    from PIL import Image
+                    img = Image.open(image_path)
+                    img.thumbnail((220, 220), Image.Resampling.LANCZOS)
+                    ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                    self._kira_avatar_label.configure(image=ctk_img, text="")
+                    self._kira_avatar_ref = ctk_img
+                except Exception as e:
+                    self._kira_avatar_ref = None
+                    self._kira_avatar_label.configure(
+                        image=None,
+                        text=f"Error al cargar avatar: {state.value}",
+                        text_color="#aa5555",
+                    )
+                    self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
+            else:
+                self._kira_avatar_ref = None
+                self._kira_avatar_label.configure(
+                    image=None,
+                    text=f"Sin imagen para: {state.value}",
+                    text_color="#6b7b8d",
+                )
+                self._print_log(f"[Avatar] Sin imagen configurada o accesible para '{state.value}'")
+        self.after(0, update)
+
     # ──────────────────────────────────────────────
     # UI Construction — delegates to panels
     # ──────────────────────────────────────────────
@@ -202,49 +250,35 @@ class VocalAIApp(ctk.CTk):
         self.switch_compacto = ctk.CTkSwitch(status_bar_frame, text="Compacto", command=self._toggle_modo_compacto, onvalue=True, offvalue=False)
         self.switch_compacto.pack(side="right", padx=8, pady=8)
 
-        # Main shell
+        # Product shell: Kira stays visible on the left; configuration and
+        # stream operations live on the right.  Phase 2 only moves containers,
+        # not callbacks or business logic.
         app_shell = ctk.CTkFrame(self, fg_color="transparent")
         app_shell.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        app_shell.grid_columnconfigure(0, weight=1)
-        app_shell.grid_columnconfigure(1, weight=0)
+        app_shell.grid_columnconfigure(0, weight=0, minsize=460)
+        app_shell.grid_columnconfigure(1, weight=1)
         app_shell.grid_rowconfigure(0, weight=1)
 
-        # Main panel with nav
+        # Persistent Kira panel
         main_panel = ctk.CTkFrame(app_shell, fg_color="#10161d", corner_radius=18)
         main_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
-        main_panel.grid_columnconfigure(0, weight=0)
-        main_panel.grid_columnconfigure(1, weight=1)
+        main_panel.grid_columnconfigure(0, weight=1)
         main_panel.grid_rowconfigure(0, weight=1)
 
-        main_nav = ctk.CTkFrame(main_panel, width=140, fg_color="#0c1117", corner_radius=14)
-        main_nav.grid(row=0, column=0, sticky="ns", padx=(10, 6), pady=10)
-        main_nav.grid_propagate(False)
-        ctk.CTkLabel(main_nav, text="Vista", font=ctk.CTkFont(size=12, weight="bold"), text_color="#8fa3b8").pack(fill="x", padx=10, pady=(12, 6))
-
         main_content = ctk.CTkFrame(main_panel, fg_color="transparent")
-        main_content.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=10)
+        main_content.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main_content.grid_columnconfigure(0, weight=1)
         main_content.grid_rowconfigure(0, weight=1)
 
         tab_main_kira = ctk.CTkFrame(main_content, fg_color="transparent")
-        tab_main_stream_admin = ctk.CTkFrame(main_content, fg_color="transparent")
-        for frame in (tab_main_kira, tab_main_stream_admin):
-            frame.grid(row=0, column=0, sticky="nsew")
+        tab_main_kira.grid(row=0, column=0, sticky="nsew")
 
         self._main_view_buttons: dict[str, Any] = {}
-        self._main_view_frames = {"Kira": tab_main_kira, "Stream Admin": tab_main_stream_admin}
-        for name in self._main_view_frames:
-            btn = ctk.CTkButton(main_nav, text=name, command=lambda view=name: self._show_main_view(view), fg_color="#151d26", hover_color="#1d2a38", anchor="w")
-            btn.pack(fill="x", padx=8, pady=4)
-            self._main_view_buttons[name] = btn
-
-        lbl_autor = ctk.CTkLabel(main_nav, text="VoiceAI by Franguh", font=ctk.CTkFont(size=10, slant="italic"), text_color="#3a4b5c")
-        lbl_autor.pack(side="bottom", fill="x", pady=10)
+        self._main_view_frames = {"Kira": tab_main_kira}
 
         tab_main_kira.grid_columnconfigure(0, weight=1)
         tab_main_kira.grid_rowconfigure(1, weight=1)
-        tab_main_stream_admin.grid_columnconfigure(0, weight=1)
-        tab_main_stream_admin.grid_rowconfigure(0, weight=1)
+        tab_main_kira.grid_rowconfigure(2, weight=0)
 
         # Kira header
         kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
@@ -253,22 +287,40 @@ class VocalAIApp(ctk.CTk):
         ctk.CTkLabel(kira_header, text="Kira", font=ctk.CTkFont(size=22, weight="bold"), anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(kira_header, text="Experiencia principal", text_color="#8fa3b8", anchor="e").grid(row=0, column=1, sticky="e")
 
-        # Kira response
+        # Avatar preview in left Kira panel
+        self._kira_avatar_label: ctk.CTkLabel | None = None
+        self._kira_avatar_ref: Any = None
+        avatar_preview_frame = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=12)
+        avatar_preview_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        avatar_preview_frame.grid_columnconfigure(0, weight=1)
+        avatar_preview_frame.grid_rowconfigure(0, weight=1)
+        self._kira_avatar_label = ctk.CTkLabel(
+            avatar_preview_frame, text="",
+            text_color="#6b7b8d",
+            font=ctk.CTkFont(size=12),
+            height=220,
+            corner_radius=8,
+        )
+        self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        # Subscribe avatar bridge to update left-panel preview
+        self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)
+
+        # Kira response: compact scrollable panel so the avatar remains the hero.
         kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=18)
-        kira_response_shell.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
+        kira_response_shell.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
         kira_response_shell.grid_columnconfigure(0, weight=1)
-        kira_response_shell.grid_rowconfigure(1, weight=1)
+        kira_response_shell.grid_rowconfigure(1, weight=0)
         ctk.CTkLabel(kira_response_shell, text="Respuesta de Kira", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef", anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
 
-        self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=17), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled")
-        self.text_kira_response.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=14), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled", height=130, wrap="word")
+        self.text_kira_response.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         self.text_kira_response.configure(state="normal")
         self.text_kira_response.insert("end", "La respuesta de Kira aparecerá aquí. Los logs completos se muestran abajo solo si activas Mostrar logs.\n")
         self.text_kira_response.configure(state="disabled")
 
         # Voice panel
         voice_panel_frame = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        voice_panel_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        voice_panel_frame.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 10))
         voice_panel_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
 
@@ -296,7 +348,7 @@ class VocalAIApp(ctk.CTk):
 
         # Bottom chat entry
         frame_bottom = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        frame_bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
+        frame_bottom.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
         frame_bottom.grid_columnconfigure(0, weight=1)
 
         self.entry_chat = ctk.CTkEntry(frame_bottom, placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)...")
@@ -306,21 +358,29 @@ class VocalAIApp(ctk.CTk):
         self.btn_enviar = ctk.CTkButton(frame_bottom, text="Enviar a IA", command=self._enviar_contexto_manual, width=110, state="disabled", fg_color="#555555", hover_color="#666666")
         self.btn_enviar.grid(row=0, column=1, padx=(0, 10), pady=10)
 
-        # Side panel
-        side_panel = ctk.CTkFrame(app_shell, width=390, fg_color="#0f151c", corner_radius=18)
+        # Product workspace: current configuration plus full Stream Admin.
+        side_panel = ctk.CTkFrame(app_shell, fg_color="#0f151c", corner_radius=18)
         side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
         side_panel.grid_columnconfigure(0, weight=1)
         side_panel.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(side_panel, text="Configuración", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        ctk.CTkLabel(side_panel, text="Paneles de producto", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
 
-        config_tabs = ctk.CTkTabview(side_panel, width=370, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
-        config_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 12))
+        product_tabs = ctk.CTkTabview(side_panel, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
+        product_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 12))
+        tab_product_config = product_tabs.add("Configuración")
+        tab_product_stream = product_tabs.add("Stream")
+        tab_product_avatar = product_tabs.add("Avatar / OBS")
+        for tab in (tab_product_config, tab_product_stream, tab_product_avatar):
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+
+        config_tabs = ctk.CTkTabview(tab_product_config, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
+        config_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
         tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
-        tab_cfg_ptt = config_tabs.add("PTT")
         tab_cfg_youtube = config_tabs.add("YouTube")
         tab_cfg_admin = config_tabs.add("Admin")
-        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_ptt, tab_cfg_youtube, tab_cfg_admin):
+        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_youtube, tab_cfg_admin):
             tab.grid_columnconfigure(0, weight=1)
 
         # Model panel
@@ -380,9 +440,9 @@ class VocalAIApp(ctk.CTk):
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
 
-        # PTT tab
-        frame_ptt = ctk.CTkFrame(tab_cfg_ptt, fg_color="#151d26", corner_radius=14)
-        frame_ptt.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        # PTT controls live with model/profile because they configure how Kira is operated.
+        frame_ptt = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
+        frame_ptt.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
         ctk.CTkLabel(frame_ptt, text="PTT", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
         self.switch_ptt = ctk.CTkSwitch(frame_ptt, text="PTT OFF", command=self._al_toggle_ptt, onvalue=True, offvalue=False)
         self.switch_ptt.pack(fill="x", padx=10, pady=4)
@@ -431,8 +491,9 @@ class VocalAIApp(ctk.CTk):
         self.switch_logs.pack(fill="x", padx=10, pady=(4, 10))
         self.switch_logs.select()
 
-        # Stream Admin tab — built via StreamAdminUI
-        stream_admin_panel = ctk.CTkFrame(tab_main_stream_admin, fg_color="#0f151c", corner_radius=18)
+        # Stream Admin panel — internals preserved, only the container moved
+        # into the Stream product workspace.
+        stream_admin_panel = ctk.CTkFrame(tab_product_stream, fg_color="#0f151c", corner_radius=18)
         stream_admin_panel.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         stream_admin_panel.grid_columnconfigure(0, weight=1)
         stream_admin_panel.grid_rowconfigure(0, weight=1)
@@ -445,6 +506,23 @@ class VocalAIApp(ctk.CTk):
         )
         self.stream_admin_ui.build(stream_admin_panel)
         self._wire_stream_admin_callbacks()
+
+        # Avatar / OBS panel
+        avatar_panel_frame = ctk.CTkFrame(tab_product_avatar, fg_color="#0f151c", corner_radius=18)
+        avatar_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        avatar_panel_frame.grid_columnconfigure(0, weight=1)
+        avatar_panel_frame.grid_rowconfigure(0, weight=1)
+
+        self._avatar_panel = AvatarPanel(
+            parent_frame=avatar_panel_frame,
+            on_log=lambda msg: self._print_log(msg),
+            schedule_ui_update=lambda fn: self.after(0, fn),
+        )
+        self._avatar_panel.build()
+        self._avatar_panel.set_state_bridge(self._avatar_bridge)
+
+        # OBS WebSocket client — initialize and connect if enabled
+        self._init_obs_client()
 
         # Advanced panel
         self._advanced_panel = AdvancedModePanel(
@@ -470,6 +548,8 @@ class VocalAIApp(ctk.CTk):
         self._app_shell = app_shell
         self._main_interaction_panel = main_panel
         self._side_config_panel = side_panel
+        self._product_workspace_panel = side_panel
+        self._product_tabs = product_tabs
 
         self._show_main_view("Kira")
         self._toggle_logs_panel()
@@ -970,6 +1050,17 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self, "voice_panel"):
             self.voice_panel.update_tts_label(estado)
 
+        # Safe automatic avatar transition from pipeline state.
+        # NOTE: "speaking" is handled by _on_motor_speaking_start + alternation timer,
+        # so we skip it here to avoid fighting with the timer.
+        if hasattr(self, "_avatar_bridge") and estado != "speaking":
+            avatar_state = AvatarStateBridge.from_pipeline_state(estado)
+            self._avatar_bridge.set_state(avatar_state)
+
+        # Reset inactivity timer on meaningful activity
+        if estado in ("listening", "processing", "idle"):
+            self._reset_inactivity_timer()
+
         def update_status_details():
             if estado == "listening":
                 if hasattr(self, "lbl_kira_voice_state"):
@@ -1060,6 +1151,8 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
         self.after(0, lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
         self._actualizar_pipeline("error")
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(AvatarState.ERROR)
 
     def _on_motor_processing(self) -> None:
         self._actualizar_pipeline("processing")
@@ -1081,12 +1174,98 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_speaking_start(self) -> None:
         self._actualizar_pipeline("speaking")
         self._log_accion("Kira comenzó a sintetizar respuesta")
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(AvatarState.SPEAKING)
+            self._start_speaking_alt_timer()
 
     def _on_motor_speaking_end(self) -> None:
+        self._stop_speaking_alt_timer()
         estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
         self._actualizar_pipeline(estado)
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(
+                AvatarState.LISTENING if estado == "listening" else AvatarState.IDLE
+            )
         self.after(0, lambda: self.switch_ptt.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
+
+    def _start_speaking_alt_timer(self) -> None:
+        """Start a timer that alternates between SPEAKING and SPEAKING_ALT."""
+        self._speaking_is_alt = False
+        self._tick_speaking_alt()
+
+    def _stop_speaking_alt_timer(self) -> None:
+        """Stop the speaking alternation timer."""
+        if self._speaking_alt_timer_id is not None:
+            self.after_cancel(self._speaking_alt_timer_id)
+            self._speaking_alt_timer_id = None
+
+    def _tick_speaking_alt(self) -> None:
+        """Toggle between SPEAKING and SPEAKING_ALT and reschedule."""
+        self._speaking_is_alt = not self._speaking_is_alt
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(
+                AvatarState.SPEAKING_ALT if self._speaking_is_alt else AvatarState.SPEAKING
+            )
+        # Alternate every 700ms — fast enough to look natural, slow enough to see both images
+        self._speaking_alt_timer_id = self.after(700, self._tick_speaking_alt)
+
+    def _reset_inactivity_timer(self) -> None:
+        """Reset the inactivity timer. If Kira is idle for too long, she goes to sleep."""
+        self._stop_inactivity_timer()
+        self._inactivity_timer_id = self.after(self._inactivity_timeout_ms, self._on_inactivity_timeout)
+
+    def _stop_inactivity_timer(self) -> None:
+        """Stop the inactivity timer."""
+        if self._inactivity_timer_id is not None:
+            self.after_cancel(self._inactivity_timer_id)
+            self._inactivity_timer_id = None
+
+    def _on_inactivity_timeout(self) -> None:
+        """Kira has been idle for too long — go to sleep."""
+        self._inactivity_timer_id = None
+        if hasattr(self, "_avatar_bridge"):
+            current = self._avatar_bridge.get_state()
+            if current in (AvatarState.IDLE,):
+                self._avatar_bridge.set_state(AvatarState.SLEEPING)
+                self._log_accion("Kira se durmió por inactividad")
+
+    def _init_obs_client(self) -> None:
+        """Initialize OBS WebSocket client if enabled in config."""
+        from avatar.avatar_config import load_avatar_config
+        avatar_cfg = load_avatar_config()
+
+        if not avatar_cfg.obs.enabled:
+            return
+
+        try:
+            self._obs_client = OBSClient(
+                config=OBSConfig(
+                    enabled=avatar_cfg.obs.enabled,
+                    host=avatar_cfg.obs.host,
+                    port=avatar_cfg.obs.port,
+                    password=avatar_cfg.obs.password,
+                    source_name=avatar_cfg.obs.source_name,
+                    scene_name=avatar_cfg.obs.scene_name,
+                ),
+                assets_folder=avatar_cfg.assets_folder,
+                state_images=avatar_cfg.state_images,
+                on_log=lambda msg: self._print_log(msg),
+            )
+            # Connect in background thread to avoid blocking UI
+            def connect_obs():
+                if self._obs_client.connect():
+                    self._obs_client.subscribe_bridge(self._avatar_bridge)
+                    # Safely schedule UI update on main thread
+                    try:
+                        if self.winfo_exists():
+                            self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
+                    except Exception:
+                        pass  # Main loop not ready yet
+
+            threading.Thread(target=connect_obs, daemon=True).start()
+        except Exception as e:
+            self._print_log(f"[OBS] Failed to initialize: {e}")
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
@@ -1120,6 +1299,8 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.progress_download.pack_forget())
         self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
         self._actualizar_pipeline("error")
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(AvatarState.ERROR)
 
     # ──────────────────────────────────────────────
     # Audio, TTS, Chat, PTT helpers
@@ -1268,8 +1449,12 @@ class VocalAIApp(ctk.CTk):
             if self.status_bar and text:
                 if "ESCUCHANDO" in text:
                     self.status_bar.update_mic_status("listening")
+                    if hasattr(self, "_avatar_bridge"):
+                        self._avatar_bridge.set_state(AvatarState.LISTENING)
                 else:
                     self.status_bar.update_mic_status("idle")
+            elif self.status_bar:
+                self.status_bar.update_mic_status("idle")
         self.after(0, update)
 
     def _al_toggle_ptt(self) -> None:
@@ -1389,8 +1574,21 @@ class VocalAIApp(ctk.CTk):
             self.smart_agg_ui.cleanup()
         if hasattr(self, "stream_admin_ui"):
             self.stream_admin_ui.cleanup()
+        if hasattr(self, "_avatar_panel"):
+            self._avatar_panel.cleanup()
+
+        self._stop_speaking_alt_timer()
+        self._stop_inactivity_timer()
+
+        # Disconnect OBS WebSocket
+        if self._obs_client is not None:
+            self._obs_client.disconnect()
 
         self.ptt.stop_listener()
+
+        # Set avatar to sleeping on close
+        if hasattr(self, "_avatar_bridge"):
+            self._avatar_bridge.set_state(AvatarState.SLEEPING)
 
         try:
             if self.smart_agg:

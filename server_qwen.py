@@ -23,7 +23,9 @@ QWEN_CACHE_DIR = HF_HUB_DIR / "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base"
 # Hugging Face debe buscar primero en el cache configurable de VoiceAI. Si la
 # snapshot local existe, activamos offline para evitar llamadas de red.
 
-from qwen_tts import Qwen3TTSModel
+os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
+os.environ.setdefault("HF_HUB_CACHE", str(HF_HUB_DIR))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_HUB_DIR))
 
 # ──────────────────────────────────────────────
 # CONFIGURACIÓN DEL AUDIO DE REFERENCIA
@@ -68,6 +70,15 @@ def _snapshot_from_local_cache():
     return max(snapshots, key=lambda p: p.stat().st_mtime)
 
 
+_LOCAL_MODEL_PATH_AT_IMPORT = _snapshot_from_local_cache()
+if _LOCAL_MODEL_PATH_AT_IMPORT:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+
+from qwen_tts import Qwen3TTSModel
+
+
 def _from_pretrained_kwargs(model_path, device):
     kwargs = {
         "device_map": device,
@@ -90,12 +101,10 @@ _tts_lock = threading.Lock()
 
 logger.info("Inicializando Motor Pesado (Qwen3-TTS 0.6B)...")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-LOCAL_MODEL_PATH = _snapshot_from_local_cache()
+LOCAL_MODEL_PATH = _LOCAL_MODEL_PATH_AT_IMPORT
 MODEL_SOURCE = str(LOCAL_MODEL_PATH) if LOCAL_MODEL_PATH else QWEN_REPO_ID
 
 if LOCAL_MODEL_PATH:
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
     logger.info(f"Usando Qwen3-TTS local: {LOCAL_MODEL_PATH}")
 else:
     logger.warning("Qwen3-TTS no esta en cache local; se intentara descargar desde Hugging Face.")

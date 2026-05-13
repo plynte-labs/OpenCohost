@@ -19,6 +19,11 @@ from config.logger import get_logger
 
 logger = get_logger()
 
+# The producer can legitimately spend the full heavy TTS HTTP timeout before
+# enqueuing a Qwen chunk. Keep the consumer bounded, but do not give up sooner
+# than the producer's configured request timeout.
+TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
+
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -575,7 +580,7 @@ class MotorVocalIA(threading.Thread):
         chunks_played = 0
         try:
             while True:
-                item = cola_audios.get(timeout=60)
+                item = cola_audios.get(timeout=TTS_AUDIO_QUEUE_TIMEOUT)
 
                 if item == "FIN":
                     break

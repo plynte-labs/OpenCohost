@@ -83,8 +83,11 @@ Use a stable two-zone layout:
    - Must group TTS, voice reference recording/loading, microphone, LiveAudio, and PTT.
 
 7. **Avatar / OBS panel**
-   - Must introduce config and UI placeholders for avatar mode and OBS output.
-   - Avatar runtime should expose a small API independent of the UI layer, e.g. `set_state()`, `set_speech_text()`, `show()`, `hide()`.
+   - Must introduce a simple image-state avatar MVP before any Live2D/VRM/OBS WebSocket work.
+   - The user must be able to choose/change images for avatar states from the UI; do not hardcode local asset paths such as `Downloads`.
+   - Must support state images for idle, listening, thinking, speaking, optional alternate speaking, sleeping, angry, and error/fallback.
+   - Avatar runtime should expose a small API independent of the UI layer, e.g. `set_state()`, `get_state()`, `set_speech_text()`, and `subscribe()`.
+   - OBS output beyond manual capture/placeholder remains future work unless implemented as a small optional overlay window.
 
 8. **No phantom options**
    - Disabled/future controls must clearly say `Próximamente` or be hidden behind a feature flag.
@@ -108,6 +111,7 @@ Use a stable two-zone layout:
 - [ ] Model, profile, and memory controls are grouped under Agent/Brain.
 - [ ] Voice recording/loading, TTS, LiveAudio, mic, and PTT are grouped under Voice/Input.
 - [ ] Avatar/OBS module has config structure and UI placeholder without breaking current app startup.
+- [ ] Avatar/OBS MVP lets the user assign state images through the UI and persists that mapping.
 - [ ] Advanced logs are hidden by default and still accessible.
 - [ ] Existing relevant tests pass.
 

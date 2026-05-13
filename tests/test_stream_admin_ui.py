@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -23,6 +24,14 @@ import pytest
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
 from ui.stream_admin_ui import StreamAdminUI
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STREAM_ADMIN_UI = ROOT / "ui" / "stream_admin_ui.py"
+
+
+def read_stream_admin_source() -> str:
+    return STREAM_ADMIN_UI.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +179,7 @@ def mock_widgets():
     widgets["btn_stream_reject_pending"] = MockButton()
     widgets["btn_stream_connect_chat"] = MockButton()
     widgets["btn_stream_send_chat"] = MockButton()
+    widgets["btn_stream_simulate_chat"] = MockButton()
     widgets["btn_stream_force_kira"] = MockButton()
     widgets["btn_stream_propose_timeout"] = MockButton()
     widgets["btn_stream_propose_ban"] = MockButton()
@@ -244,6 +254,112 @@ def stream_admin_ui(ui_state, dispatcher, mock_widgets, mock_stream_admin, mock_
     ui.set_widgets(mock_widgets)
     ui._log_messages = log_messages  # for test assertions
     return ui
+
+
+# ---------------------------------------------------------------------------
+# Test: Stream UI Layout Safety
+# ---------------------------------------------------------------------------
+
+
+class TestStreamAdminUILayoutSafety:
+    """Source-level safety checks for Stream UI visual reorganization."""
+
+    def test_stream_layout_uses_three_operator_tabs(self):
+        """Stream Admin groups controls into fewer user-facing tabs."""
+        source = read_stream_admin_source()
+
+        assert 'stream_tabs.add("Emisión")' in source
+        assert 'stream_tabs.add("Acciones")' in source
+        assert 'stream_tabs.add("Estado")' in source
+        assert 'stream_tabs.add("Conexión")' not in source
+        assert 'stream_tabs.add("Metadata")' not in source
+        assert 'stream_tabs.add("Moderación")' not in source
+        assert 'stream_tabs.add("Chat")' not in source
+
+    def test_stream_layout_preserves_key_widget_contracts(self):
+        """Reorganization must not rename controls used by AppShell/tests."""
+        source = read_stream_admin_source()
+
+        for widget_name in (
+            "lbl_stream_admin_status",
+            "btn_stream_youtube_read",
+            "btn_stream_youtube_write",
+            "btn_stream_revoke_write",
+            "btn_stream_disconnect",
+            "btn_stream_twitch",
+            "entry_stream_client_id",
+            "entry_stream_client_secret",
+            "lbl_stream_metadata_state",
+            "btn_stream_read_metadata",
+            "btn_stream_suggest_metadata",
+            "btn_stream_apply_metadata",
+            "btn_stream_reject_pending",
+            "entry_stream_title",
+            "entry_stream_category",
+            "entry_stream_tags",
+            "text_stream_description",
+            "switch_stream_mod_enabled",
+            "combo_stream_mod_mode",
+            "switch_stream_announce",
+            "entry_stream_mod_user",
+            "entry_stream_mod_reason",
+            "btn_stream_propose_timeout",
+            "btn_stream_propose_ban",
+            "frame_stream_users",
+            "btn_stream_connect_chat",
+            "switch_stream_chat_enabled",
+            "switch_stream_small",
+            "entry_stream_chat_message",
+            "btn_stream_send_chat",
+            "btn_stream_simulate_chat",
+            "btn_stream_force_kira",
+            "lbl_stream_analytics",
+            "lbl_stream_pending",
+        ):
+            assert f'"{widget_name}"' in source
+
+    def test_stream_layout_preserves_callback_dispatchers(self):
+        """Controls keep the same callback path after moving sections."""
+        source = read_stream_admin_source()
+
+        for callback in (
+            "self._dispatch_connect(False)",
+            "self._dispatch_connect(True)",
+            "self.revoke_write",
+            "self._dispatch_disconnect()",
+            "self._dispatch_save_oauth",
+            "self._dispatch_refresh_metadata()",
+            "self._dispatch_suggest_metadata()",
+            "self._dispatch_apply_metadata()",
+            "self._dispatch_reject_pending()",
+            "self._dispatch_apply_runtime_settings()",
+            "self._dispatch_propose_high_risk(\"timeout\")",
+            "self._dispatch_propose_high_risk(\"ban\")",
+            "self.refresh_user_list",
+            "self._dispatch_connect_current_chat",
+            "self._dispatch_toggle_small_stream",
+            "self._dispatch_simulate_chat",
+            "self._dispatch_send_chat()",
+            "self._dispatch_force_kira",
+        ):
+            assert callback in source
+
+    def test_stream_layout_uses_vertical_scrollable_containment(self):
+        """Stream cards should stack vertically inside scrollable containers."""
+        source = read_stream_admin_source()
+
+        assert "vertical scrollable containment" in source
+        assert source.count("CTkScrollableFrame") >= 4
+        assert 'sticky="ew", padx=10' in source
+        assert "columnspan=8" not in source
+        assert "columnspan=7" not in source
+
+    def test_stream_status_labels_wrap_instead_of_clipping(self):
+        """Long Stream status text must wrap inside cards."""
+        source = read_stream_admin_source()
+
+        assert "wraplength=520" in source
+        assert "justify=\"left\"" in source
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +697,27 @@ class TestStreamAdminUIMetadata:
         metadata = {"video_id": "xyz", "title": "Test"}
         stream_admin_ui.on_metadata(metadata)
         assert stream_admin_ui.last_metadata == metadata
+
+    def test_on_metadata_schedules_widget_updates(self, ui_state, dispatcher, mock_widgets):
+        """on_metadata must schedule widget mutation on the UI thread."""
+        scheduled = []
+        ui = StreamAdminUI(
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            schedule_ui_update=lambda fn: scheduled.append(fn),
+        )
+        ui.set_widgets(mock_widgets)
+
+        metadata = {"video_id": "xyz", "title": "Scheduled"}
+        ui.on_metadata(metadata)
+
+        assert ui.last_metadata == metadata
+        assert len(scheduled) == 1
+        assert ui._widget("entry_stream_title").get() == ""
+
+        scheduled[0]()
+
+        assert ui._widget("entry_stream_title").get() == "Scheduled"
 
 
 # ---------------------------------------------------------------------------
