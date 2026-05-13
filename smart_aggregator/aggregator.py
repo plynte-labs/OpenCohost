@@ -24,6 +24,8 @@ class Aggregator:
         db_path = hist_cfg.get("db_path", "data/smart_aggregator/sessions.db")
         jl_path = hist_cfg.get("jsonl_path", "data/smart_aggregator/chat_log.jsonl")
         retention = hist_cfg.get("retention_hours", 168)
+        self._persist_raw_messages = bool(hist_cfg.get("persist_raw_messages", False))
+        self._persist_rejected_messages = bool(hist_cfg.get("persist_rejected_messages", False))
         
         if not os.path.isabs(db_path):
             db_path = os.path.join(base_dir, db_path)
@@ -162,7 +164,7 @@ class Aggregator:
         if accepted:
             self.activity.on_message(filtered)
         
-        if self._session_id is not None:
+        if self._session_id is not None and self._persist_raw_messages and (accepted or self._persist_rejected_messages):
             self.history.add_message(self._session_id, message, accepted, vibe_temp)
     
     def _on_activity_trigger(self, data: dict):
@@ -172,15 +174,25 @@ class Aggregator:
             except Exception:
                 pass
 
-        if self.on_aggregated_context and self._session_id is not None:
+        if self._session_id is not None:
             try:
-                context = self.history.get_session_context(self._session_id, max_messages=20)
+                context = self.intent_aggregator.recent_messages(max_messages=20)
                 intent_summary = self.intent_aggregator.summarize()
-                self.on_aggregated_context({
-                    "trigger": data,
-                    "context": context,
-                    "intent_summary": intent_summary,
-                })
+                prompt = intent_summary.get("prompt", "")
+                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
+                    self.history.add_context_snapshot(
+                        self._session_id,
+                        prompt,
+                        message_count=int(intent_summary.get("total_messages", 0)),
+                        vibe=data.get("temperature"),
+                        metadata={"trigger": data, "top_intents": intent_summary.get("top_intents", [])},
+                    )
+                if self.on_aggregated_context:
+                    self.on_aggregated_context({
+                        "trigger": data,
+                        "context": context,
+                        "intent_summary": intent_summary,
+                    })
             except Exception:
                 pass
 

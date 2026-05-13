@@ -661,7 +661,11 @@ class VocalAIApp(ctk.CTk):
         if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
             try:
                 recent = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
-                context = "\n".join(f"{m.get('user', '')}: {m.get('text', '')}" for m in recent)
+                if recent:
+                    context = "\n".join(f"{m.get('user', '')}: {m.get('text', '')}" for m in recent)
+                else:
+                    snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=3)
+                    context = "\n\n".join(s.get("summary", "") for s in snapshots)
             except Exception:
                 context = ""
         self._run_stream_admin_task("Sugerir metadata", lambda: self.stream_admin.suggest_metadata(context))
@@ -813,6 +817,13 @@ class VocalAIApp(ctk.CTk):
         if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
             try:
                 context = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
+                if not context:
+                    snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=1)
+                    context = [
+                        {"user": "Resumen del chat", "text": s.get("summary", "")}
+                        for s in snapshots
+                        if s.get("summary")
+                    ]
             except Exception as e:
                 logger.warning(f"No se pudo obtener contexto RF3 para Forzar Kira: {e}")
         if not context:

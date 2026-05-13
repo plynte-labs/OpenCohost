@@ -477,3 +477,56 @@ VoiceAI aplica por proceso:
 - Si Ollama ya estaba corriendo antes de VoiceAI, puede seguir usando su ruta vieja hasta reiniciarlo
 - Mover caches existentes entre discos sigue siendo responsabilidad del usuario o de una futura herramienta de migración
 - El pagefile de Windows puede seguir usando C: si el sistema operativo está configurado así
+
+---
+
+## ADR-012: Smart Aggregator Guarda Contexto Compacto, No Chat Crudo
+
+**Fecha:** 2026-05-13  
+**Estado:** Activa
+
+### Contexto
+
+El Smart Aggregator acumuló 239.904 filas en `data/smart_aggregator/sessions.db` y un `chat_log.jsonl` de 51.681.730 bytes. La mayoría eran mensajes raw del chat, incluyendo basura ya rechazada por filtros. Kira, sin embargo, solo necesita el contexto compacto que se le entrega para reaccionar.
+
+### Decisión
+
+Producción persiste **snapshots compactos** en `context_snapshots`:
+
+- resumen/contexto privado enviado a Kira,
+- cantidad de mensajes considerados,
+- vibe/metadata relevante,
+- sesión y timestamp.
+
+El guardado de chat raw queda desactivado por defecto:
+
+```yaml
+history:
+  persist_raw_messages: false
+  persist_rejected_messages: false
+```
+
+Si hace falta debugging, se puede activar temporalmente `persist_raw_messages: true`.
+
+### Por qué
+
+1. **Memoria útil > ruido:** guardar 200k mensajes para usar 12/20 recientes es desperdicio.
+2. **Privacidad:** chat raw puede contener datos personales de usuarios.
+3. **Rendimiento:** SQLite y backups no deberían crecer por basura efímera.
+4. **Arquitectura correcta:** memoria operativa corta vive en RAM; memoria persistente guarda decisiones/contexto resumido.
+
+### Limpieza operacional
+
+Se agregó:
+
+```powershell
+E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
+```
+
+El script elimina `messages` raw y `chat_log.jsonl`, preservando `context_snapshots`.
+
+### Tradeoffs aceptados
+
+- Se pierde auditoría completa del chat salvo que raw logging se active explícitamente.
+- Algunos diagnósticos de spam requerirán reproducir con debug prendido.
+- Los historiales viejos raw no se migran automáticamente a summaries porque compactar 200k mensajes post-facto podría inventar contexto pobre.

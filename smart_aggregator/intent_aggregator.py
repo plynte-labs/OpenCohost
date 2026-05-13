@@ -245,6 +245,14 @@ class IntentAggregator:
             "prompt": self.to_prompt(ranked),
         }
 
+    def recent_messages(self, max_messages: int = 20) -> list[dict[str, Any]]:
+        """Return compact in-memory examples for the current Kira context."""
+        items = [item for item in self._items if not item.get("duplicate")]
+        return [
+            {"user": item.get("user", ""), "text": item.get("text", ""), "timestamp": item.get("timestamp")}
+            for item in items[-max_messages:]
+        ]
+
     def to_prompt(self, ranked: list[dict]) -> str:
         if not ranked:
             return "No hay un tema dominante claro en el chat filtrado."

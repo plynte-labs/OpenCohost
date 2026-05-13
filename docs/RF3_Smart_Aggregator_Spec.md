@@ -178,18 +178,19 @@ activity:
 
 ---
 
-## RF3.4 — Historial de Chat (Persistencia Híbrida por Sesiones)
+## RF3.4 — Historial de Contexto (Persistencia Compacta por Sesiones)
 
 ### Qué HACER:
 - Crear clase `SessionHistory` en `session_history.py`
-- SQLite para persistencia estructurada (buscas rápidas por sesión)
-- JSONL para logs completos (audit trail)
+- SQLite para persistencia estructurada por sesión
 - Una "sesión" = desde que se conecta YouTube hasta que se desconecta
-- Guardar: mensaje original, usuario, timestamp, si pasó filtros, vibe de ventana
+- Guardar por defecto **snapshots compactos**: el contexto resumido que Kira realmente recibió para hablar
+- Permitir chat raw solo como debug opt-in mediante configuración
 
 ### Qué NO HACER:
 - NO usar la misma base de datos que el core (si existe)
 - NO guardar todo indefinidamente — implementar retención configurable
+- NO persistir chat crudo masivo en producción; 12/20 mensajes recientes se resuelven en memoria y se compactan antes de persistir
 
 ### Interfaz:
 ```python
@@ -197,8 +198,10 @@ class SessionHistory:
     def __init__(self, db_path: str, jsonl_path: str, retention_hours: int)
     def start_session(self, platform: str, channel: str) -> int  # retorna session_id
     def end_session(self, session_id: int)
-    def add_message(self, session_id: int, message: dict, passed_filter: bool, vibe: float)
-    def get_session_context(self, session_id: int, max_messages: int) -> list
+    def add_context_snapshot(self, session_id: int, summary: str, message_count: int, vibe: float | None, metadata: dict)
+    def get_recent_context_snapshots(self, session_id: int, max_items: int) -> list
+    def add_message(self, session_id: int, message: dict, passed_filter: bool, vibe: float)  # solo debug opt-in
+    def get_session_context(self, session_id: int, max_messages: int) -> list  # raw debug/context legacy
     def cleanup_old_sessions(self)  # llamado periódicamente
 ```
 
@@ -222,7 +225,20 @@ CREATE TABLE messages (
     vibe_temperature REAL,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
+
+CREATE TABLE context_snapshots (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER,
+    summary TEXT,
+    timestamp REAL,
+    message_count INTEGER,
+    vibe_temperature REAL,
+    metadata_json TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
 ```
+
+`messages` existe para compatibilidad/debug, pero no se llena por defecto. La memoria útil de producción vive en `context_snapshots`.
 
 ### Configuración:
 ```yaml
@@ -230,7 +246,18 @@ history:
   db_path: "data/smart_aggregator/sessions.db"
   jsonl_path: "data/smart_aggregator/chat_log.jsonl"
   retention_hours: 168  # 7 días
+  persist_raw_messages: false
+  persist_rejected_messages: false
 ```
+
+### Limpieza de DB existente:
+
+```powershell
+E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --dry-run
+E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
+```
+
+El script borra filas raw de `messages` y el `chat_log.jsonl`; preserva `context_snapshots`.
 
 ---
 

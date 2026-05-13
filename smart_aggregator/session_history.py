@@ -39,6 +39,18 @@ class SessionHistory:
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS context_snapshots (
+                id INTEGER PRIMARY KEY,
+                session_id INTEGER,
+                summary TEXT,
+                timestamp REAL,
+                message_count INTEGER,
+                vibe_temperature REAL,
+                metadata_json TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
         conn.commit()
         conn.close()
     
@@ -88,6 +100,39 @@ class SessionHistory:
         }
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def add_context_snapshot(
+        self,
+        session_id: int,
+        summary: str,
+        message_count: int = 0,
+        vibe: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+    ):
+        """Persist the compact context actually sent to Kira.
+
+        This is the production history path. Raw chat is intentionally not
+        required for Kira memory; it is high-volume debug data.
+        """
+        summary = (summary or "").strip()
+        if not summary:
+            return
+        timestamp = timestamp if timestamp is not None else time.time()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO context_snapshots
+                (session_id, summary, timestamp, message_count, vibe_temperature, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, summary, timestamp, int(message_count or 0), vibe, metadata_json),
+        )
+        conn.commit()
+        conn.close()
     
     def get_session_context(self, session_id: int, max_messages: int) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self.db_path)
@@ -109,6 +154,37 @@ class SessionHistory:
                 "vibe_temperature": row[4]
             })
         return result
+
+    def get_recent_context_snapshots(self, session_id: int, max_items: int) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT summary, timestamp, message_count, vibe_temperature, metadata_json
+            FROM context_snapshots
+            WHERE session_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (session_id, max_items),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        result = []
+        for row in reversed(rows):
+            try:
+                metadata = json.loads(row[4] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            result.append({
+                "summary": row[0],
+                "timestamp": row[1],
+                "message_count": row[2],
+                "vibe_temperature": row[3],
+                "metadata": metadata,
+            })
+        return result
     
     def cleanup_old_sessions(self):
         cutoff = time.time() - (self.retention_hours * 3600)
@@ -118,6 +194,7 @@ class SessionHistory:
         old_sessions = [row[0] for row in cursor.fetchall()]
         
         for sid in old_sessions:
+            cursor.execute("DELETE FROM context_snapshots WHERE session_id = ?", (sid,))
             cursor.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
             cursor.execute("DELETE FROM sessions WHERE id = ?", (sid,))
         

@@ -13,6 +13,7 @@ Preserves all 7 test categories:
 import os
 import sqlite3
 import time
+from copy import deepcopy
 
 import pytest
 import yaml
@@ -418,14 +419,35 @@ class TestSessionHistory:
         context = history.get_session_context(sid, max_messages=10)
         assert len(context) == 10
 
+    def test_compact_context_snapshots_saved_and_retrieved(self, temp_dir):
+        """TC3.4.4b: Compact Kira contexts are persisted separately from raw chat."""
+        db_path = os.path.join(temp_dir, "sessions.db")
+        jl_path = os.path.join(temp_dir, "chat_log.jsonl")
+        history = SessionHistory(db_path, jl_path, retention_hours=1)
+        sid = history.start_session("youtube", "test_channel")
+
+        history.add_context_snapshot(
+            sid,
+            "CONTEXTO PRIVADO DEL CHAT PARA KIRA: tema dominante de prueba",
+            message_count=42,
+            vibe=66.0,
+            metadata={"top_intents": [{"intent": "game_question"}]},
+        )
+
+        snapshots = history.get_recent_context_snapshots(sid, max_items=5)
+        assert len(snapshots) == 1
+        assert snapshots[0]["message_count"] == 42
+        assert snapshots[0]["metadata"]["top_intents"][0]["intent"] == "game_question"
+
     def test_cleanup_removes_old_sessions(self, temp_dir):
-        """TC3.4.5: Cleanup must remove old sessions from SQLite and JSONL."""
+        """TC3.4.5: Cleanup must remove old sessions, raw chat, snapshots, and JSONL."""
         db_path = os.path.join(temp_dir, "sessions.db")
         jl_path = os.path.join(temp_dir, "chat_log.jsonl")
         history = SessionHistory(db_path, jl_path, retention_hours=1)
         sid = history.start_session("youtube", "test_channel")
         for msg in MOCK_MESSAGES_20:
             history.add_message(sid, msg, passed_filter=True, vibe=50.0)
+        history.add_context_snapshot(sid, "contexto compacto", message_count=20)
 
         conn = sqlite3.connect(db_path)
         conn.execute("UPDATE sessions SET start_time = ? WHERE id = ?", (time.time() - 7200, sid))
@@ -434,6 +456,8 @@ class TestSessionHistory:
         history.cleanup_old_sessions()
         context_after = history.get_session_context(sid, max_messages=100)
         assert len(context_after) == 0
+        snapshots_after = history.get_recent_context_snapshots(sid, max_items=100)
+        assert len(snapshots_after) == 0
         with open(jl_path, "r", encoding="utf-8") as f:
             remaining_lines = [l for l in f if l.strip()]
         assert len(remaining_lines) == 0
@@ -482,7 +506,7 @@ class TestAggregator:
 
     def test_filtered_messages_and_vibe_and_triggers(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.1-3: Filtered messages, vibe computation, and activity triggers."""
-        cfg = smart_aggregator_config.copy()
+        cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
         cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
@@ -517,7 +541,7 @@ class TestAggregator:
 
     def test_aggregated_context_includes_intent_summary(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.3b: Activity context should include ranked intent summary."""
-        cfg = smart_aggregator_config.copy()
+        cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
         cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
@@ -549,8 +573,8 @@ class TestAggregator:
         assert "CONTEXTO PRIVADO" in summary["prompt"]
 
     def test_session_persistence(self, smart_aggregator_config, mock_llm, temp_dir):
-        """TC3.6.4: Aggregator persists session messages."""
-        cfg = smart_aggregator_config.copy()
+        """TC3.6.4: Aggregator persists compact Kira contexts, not raw chat by default."""
+        cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
         cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
@@ -559,16 +583,43 @@ class TestAggregator:
 
         agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
         sid = agg.start_session("youtube", "headless_test")
-        for msg in MOCK_MESSAGES_200:
-            agg.process_message(msg)
+        base = time.time()
+        for i in range(60):
+            agg.process_message({
+                "user": f"spike{i}",
+                "text": "me saludas hoy es mi cumpleaños soy tu fan de Kira",
+                "timestamp": base + (i * 0.01),
+            })
 
-        context = agg.history.get_session_context(sid, max_messages=300)
-        assert len(context) > 0
+        raw_context = agg.history.get_session_context(sid, max_messages=300)
+        compact_context = agg.history.get_recent_context_snapshots(sid, max_items=10)
+        assert raw_context == []
+        assert len(compact_context) > 0
         agg.disconnect()
+
+    def test_raw_message_persistence_is_opt_in(self, smart_aggregator_config, mock_llm, temp_dir):
+        """TC3.6.4b: Raw chat can be enabled for debugging without storing rejected spam."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["history"]["persist_raw_messages"] = True
+        cfg["history"]["persist_rejected_messages"] = False
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        sid = agg.start_session("youtube", "headless_test")
+        agg.process_message({"user": "spam", "text": "😂", "timestamp": time.time()})
+        agg.process_message({"user": "ok", "text": "me saludas hoy es mi cumpleaños soy tu fan", "timestamp": time.time() + 1})
+
+        context = agg.history.get_session_context(sid, max_messages=10)
+        assert len(context) == 1
+        assert context[0]["user"] == "ok"
 
     def test_optional_callbacks_no_failure(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.5: Optional callbacks should not cause failures."""
-        cfg = smart_aggregator_config.copy()
+        cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
         cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
