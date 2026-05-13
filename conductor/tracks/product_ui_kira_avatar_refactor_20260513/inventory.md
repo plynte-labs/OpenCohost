@@ -35,6 +35,7 @@ This inventory is the safety net for the product UI refactor. Nothing should be 
 | PTT switch | `ui/app_shell.py`, `ui/ptt_manager.py` | Enables/disables PTT | Voice / Input | Yes | Preserve F8/transition fixes |
 | PTT hotkey label/map button | `ui/app_shell.py`, `ui/ptt_manager.py` | Shows/maps hotkey | Voice / Input | Yes | Global hotkey handling is high-risk; move container only first |
 | YouTube URL/video ID | `ui/app_shell.py`, `SmartAggregatorUI` | Configures live chat source | Stream | Yes | Should sit with Smart Aggregator/Stream Admin |
+| Smart Aggregator UI callbacks | `ui/smart_aggregator_ui.py` | Connects RF3 chat, handles vibe/activity, sends aggregated context to Kira | Stream / Agent / Brain | Yes | Preserve anti-summary-leak prompt rules |
 | `Conectar Chat` button | `ui/app_shell.py`, `SmartAggregatorUI` | Connects YouTube chat | Stream | Yes | Avoid duplicate with Stream Admin authenticated chat confusion |
 | Max messages/user | `ui/app_shell.py`, `SmartAggregatorUI` | Anti-spam user limit | Stream | Yes | Label needs product explanation |
 | Admin side OAuth summary | `ui/app_shell.py` | Status text pointing to Stream Admin | Stream | Maybe | Might become redundant once Stream panel is classified |

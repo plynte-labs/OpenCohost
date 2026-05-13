@@ -14,5 +14,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Product UI Refactor — Kira-Centered Layout + Avatar/OBS Module**
+- [~] **Track: Product UI Refactor — Kira-Centered Layout + Avatar/OBS Module**
   *Link: [./tracks/product_ui_kira_avatar_refactor_20260513/](./tracks/product_ui_kira_avatar_refactor_20260513/)*

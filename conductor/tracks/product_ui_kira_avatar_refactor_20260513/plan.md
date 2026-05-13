@@ -2,17 +2,17 @@
 
 ## Phase 1: Inventory and Safety Baseline
 
-- [ ] Task: Verify current UI inventory against code
-    - [ ] Review `ui/app_shell.py`, `ui/voice_control.py`, `ui/model_panel.py`, `ui/profile_panel.py`, `ui/smart_aggregator_ui.py`, `ui/stream_admin_ui.py`, `ui/advanced_panel.py`
-    - [ ] Update `inventory.md` with any missing controls/callbacks
-    - [ ] Mark every control as preserve, move, hide, future, or remove candidate
-    - [ ] Identify duplicate/confusing controls such as RF3 chat vs authenticated Stream Admin chat
-- [ ] Task: Add layout safety tests before moving UI
-    - [ ] Test AppShell creates the current panels without real external services
-    - [ ] Test model/profile callbacks are still wired
-    - [ ] Test voice/PTT callbacks are still wired
-    - [ ] Test StreamAdminUI can still build inside a supplied parent frame
-    - [ ] Test AdvancedModePanel remains hidden/shown through the existing switch
+- [x] Task: Verify current UI inventory against code
+    - [x] Review `ui/app_shell.py`, `ui/voice_control.py`, `ui/model_panel.py`, `ui/profile_panel.py`, `ui/smart_aggregator_ui.py`, `ui/stream_admin_ui.py`, `ui/advanced_panel.py`
+    - [x] Update `inventory.md` with any missing controls/callbacks
+    - [x] Mark every control as preserve, move, hide, future, or remove candidate
+    - [x] Identify duplicate/confusing controls such as RF3 chat vs authenticated Stream Admin chat
+- [x] Task: Add layout safety tests before moving UI
+    - [x] Test AppShell creates the current panels without real external services
+    - [x] Test model/profile callbacks are still wired
+    - [x] Test voice/PTT callbacks are still wired
+    - [x] Test StreamAdminUI can still build inside a supplied parent frame
+    - [x] Test AdvancedModePanel remains hidden/shown through the existing switch
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Inventory and Safety Baseline' (Protocol in workflow.md)
 
 ## Phase 2: Product Layout Shell Without Behavior Changes

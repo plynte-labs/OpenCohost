@@ -514,9 +514,11 @@ class TestDownloadModel:
         received = []
         dispatcher.subscribe("on_switch_model", lambda t: received.append(t))
 
-        with patch.object(model_panel, "_modelo_instalado", return_value=True):
-            with patch.object(model_panel, "_update_button_for_ollama_state"):
-                model_panel._on_download_model()
+        with patch.object(model_panel, "refresh_ollama_state"):
+            model_panel._ui_state.ollama_state = "ready"
+            with patch.object(model_panel, "_modelo_instalado", return_value=True):
+                with patch.object(model_panel, "_update_button_for_ollama_state"):
+                    model_panel._on_download_model()
 
         assert tag in received
 
