@@ -30,3 +30,10 @@
 
 - The worktree may contain user changes. Do not revert or overwrite existing changes unless explicitly requested.
 - Do not commit unless the user explicitly asks.
+
+## Feature Preservation Rule
+
+- Before modifying, extracting, or removing any existing feature, FIRST verify it works as intended in the current codebase.
+- If code looks like a bug but might be intentional feature logic, INFORM or ASK the user before changing it.
+- Never remove a feature gate, filter, or validation without confirming its purpose with the user.
+- When refactoring, preserve exact behavior of existing features — extract first, then fix bugs separately with user confirmation.

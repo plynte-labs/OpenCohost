@@ -41,13 +41,14 @@ ui/app.py (6 lines)
 - Manages layout and geometry
 - Handles application lifecycle (startup, shutdown, cleanup)
 
-### `ui/state.py` (245 lines)
+### `ui/state.py` (253 lines)
 **Responsibility**: Thread-safe UI state container with observer pattern.
 - `UIState` class with typed properties (connection status, model state, PTT state, etc.)
 - Internal `threading.Lock` for all property access
 - Observer pattern: `subscribe(key, callback)` / `unsubscribe(key, callback)`
 - `notify_observers(key)` triggers callbacks on state changes
 - All property getters/setters are lock-protected
+- Key properties: `ptt_active` (hotkey currently pressed), `ptt_enabled` (PTT toggle on/off)
 
 ### `ui/protocols.py` (68 lines)
 **Responsibility**: Protocol classes and callback dispatcher.
@@ -64,10 +65,11 @@ ui/app.py (6 lines)
 - Coordinates with `voice_control` for PTT state transitions
 - Thread-safe PTT state tracking
 
-### `ui/voice_control.py` (277 lines)
+### `ui/voice_control.py` (285 lines)
 **Responsibility**: WebSocket communication, audio recording, RMS calculation, state machine.
 - Audio input/output management
 - WebSocket connection to voice backend
+- **PTT gate**: When `ui_state.ptt_enabled` is True, only accepts transcriptions while `ui_state.ptt_active` is True (hotkey pressed). This prevents the AI from processing its own TTS output through live audio.
 - RMS (Root Mean Square) calculation for voice activity detection
 - State machine for recording/playback/idle states
 - Thread-safe audio buffer management
@@ -267,6 +269,22 @@ pytest tests/ -v --cov=ui --cov-report=term-missing
 - Each module was extracted with its own tests before moving to the next
 - TDD approach: write tests for the module's behavior, then extract
 - Verification pass after each extraction catches agent-introduced bugs
+
+### PTT Gate Behavior
+- **Purpose**: Prevent the AI from auto-processing its own TTS output through live audio
+- **How it works**: When PTT is enabled (`ui_state.ptt_enabled = True`), the WebSocket listener in `voice_control.py` only accepts transcriptions while the hotkey is actively pressed (`ui_state.ptt_active = True`)
+- **When PTT is OFF**: All transcriptions are accepted (continuous live audio mode)
+- **When PTT is ON but key not pressed**: Transcriptions are silently discarded
+- **Important**: This gate was accidentally removed during refactoring (the original code had a tautology bug). The fix restores the intended behavior.
+
+## Development Rules
+
+### Feature Preservation
+- Before modifying, extracting, or removing any existing feature, FIRST verify it works as intended in the current codebase
+- If code looks like a bug but might be intentional feature logic, INFORM or ASK the user before changing it
+- Never remove a feature gate, filter, or validation without confirming its purpose with the user
+- When refactoring, preserve exact behavior of existing features — extract first, then fix bugs separately with user confirmation
+- Always test full app startup, not just unit tests. Unit tests may not catch constructor signature mismatches.
 
 ## Migration Notes
 
