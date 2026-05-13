@@ -182,6 +182,7 @@ def test_tc3_4_history():
     jl_fd, jl_path = tempfile.mkstemp(suffix=".jsonl")
     os.close(db_fd)
     os.close(jl_fd)
+    os.unlink(jl_path)
     
     try:
         history = SessionHistory(db_path, jl_path, retention_hours=1)
@@ -192,24 +193,22 @@ def test_tc3_4_history():
         print(f"[OK] TC3.4.1: Sesion creada con id={sid}")
         
         # TC3.4.2
-        for msg in MOCK_MESSAGES_20:
-            history.add_message(sid, msg, passed_filter=True, vibe=50.0)
-        
+        assert not hasattr(history, "add_message"), "TC3.4.2: No debe existir persistencia raw"
         context = history.get_session_context(sid, max_messages=25)
-        assert len(context) == 20, "TC3.4.2: Debe haber 20 registros"
-        print("[OK] TC3.4.2: 20 mensajes guardados")
+        assert context == [], "TC3.4.2: El contexto raw legacy debe estar deshabilitado"
+        print("[OK] TC3.4.2: Persistencia raw deshabilitada")
         
         # TC3.4.3
-        assert os.path.exists(jl_path), "TC3.4.3: JSONL debe existir"
-        with open(jl_path, "r", encoding="utf-8") as f:
-            lines = [l for l in f if l.strip()]
-        assert len(lines) == 20, "TC3.4.3: JSONL debe tener 20 lineas"
-        print("[OK] TC3.4.3: JSONL contiene 20 lineas")
+        history.add_context_snapshot(sid, "contexto compacto", message_count=20)
+        assert not os.path.exists(jl_path), "TC3.4.3: No debe crearse JSONL raw"
+        print("[OK] TC3.4.3: Snapshot compacto sin JSONL raw")
         
         # TC3.4.4
-        context = history.get_session_context(sid, max_messages=10)
-        assert len(context) == 10, "TC3.4.4: Limita a max_messages"
-        print("[OK] TC3.4.4: Contexto limitado a 10 mensajes")
+        for i in range(20):
+            history.add_context_snapshot(sid, f"contexto compacto {i}", message_count=i)
+        context = history.get_recent_context_snapshots(sid, max_items=10)
+        assert len(context) == 10, "TC3.4.4: Limita snapshots compactos"
+        print("[OK] TC3.4.4: Contexto compacto limitado a 10 snapshots")
         
         # TC3.4.5 cleanup
         conn = sqlite3.connect(db_path)
@@ -219,10 +218,7 @@ def test_tc3_4_history():
         history.cleanup_old_sessions()
         context_after = history.get_session_context(sid, max_messages=100)
         assert len(context_after) == 0, "TC3.4.5: Sesiones antiguas deben borrarse"
-        with open(jl_path, "r", encoding="utf-8") as f:
-            remaining_lines = [l for l in f if l.strip()]
-        assert len(remaining_lines) == 0, "TC3.4.5: JSONL antiguo debe limpiarse"
-        print("[OK] TC3.4.5: Cleanup borra sesiones antiguas en SQLite y JSONL")
+        print("[OK] TC3.4.5: Cleanup borra sesiones antiguas y snapshots")
     finally:
         try:
             os.unlink(db_path)
@@ -308,7 +304,9 @@ def test_tc3_6_aggregator_full():
         
         # TC3.6.4 Sesion
         context = agg.history.get_session_context(sid, max_messages=300)
-        assert len(context) > 0, "TC3.6.4: La sesion debe persistir mensajes"
+        compact_context = agg.history.get_recent_context_snapshots(sid, max_items=10)
+        assert context == [], "TC3.6.4: La sesion no debe persistir mensajes raw"
+        assert compact_context, "TC3.6.4: La sesion debe persistir contexto compacto"
         agg.disconnect()
         print("[OK] TC3.6.4: Aggregator persiste y cierra sesion headless")
         

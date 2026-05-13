@@ -184,13 +184,13 @@ activity:
 - Crear clase `SessionHistory` en `session_history.py`
 - SQLite para persistencia estructurada por sesión
 - Una "sesión" = desde que se conecta YouTube hasta que se desconecta
-- Guardar por defecto **snapshots compactos**: el contexto resumido que Kira realmente recibió para hablar
-- Permitir chat raw solo como debug opt-in mediante configuración
+- Guardar solo **snapshots compactos**: el contexto resumido que Kira realmente recibió para hablar
+- Prohibir persistencia de chat raw por código, incluso para flags legacy de configuración
 
 ### Qué NO HACER:
 - NO usar la misma base de datos que el core (si existe)
 - NO guardar todo indefinidamente — implementar retención configurable
-- NO persistir chat crudo masivo en producción; 12/20 mensajes recientes se resuelven en memoria y se compactan antes de persistir
+- NO persistir chat crudo; 12/20 mensajes recientes se resuelven en memoria y se compactan antes de persistir
 
 ### Interfaz:
 ```python
@@ -200,8 +200,7 @@ class SessionHistory:
     def end_session(self, session_id: int)
     def add_context_snapshot(self, session_id: int, summary: str, message_count: int, vibe: float | None, metadata: dict)
     def get_recent_context_snapshots(self, session_id: int, max_items: int) -> list
-    def add_message(self, session_id: int, message: dict, passed_filter: bool, vibe: float)  # solo debug opt-in
-    def get_session_context(self, session_id: int, max_messages: int) -> list  # raw debug/context legacy
+    def get_session_context(self, session_id: int, max_messages: int) -> list  # legacy shim: siempre []
     def cleanup_old_sessions(self)  # llamado periódicamente
 ```
 
@@ -213,17 +212,6 @@ CREATE TABLE sessions (
     channel TEXT,
     start_time REAL,
     end_time REAL
-);
-
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY,
-    session_id INTEGER,
-    user TEXT,
-    text TEXT,
-    timestamp REAL,
-    passed_filter INTEGER,
-    vibe_temperature REAL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
 CREATE TABLE context_snapshots (
@@ -238,16 +226,13 @@ CREATE TABLE context_snapshots (
 );
 ```
 
-`messages` existe para compatibilidad/debug, pero no se llena por defecto. La memoria útil de producción vive en `context_snapshots`.
+La tabla legacy `messages` puede existir en bases viejas, pero el código nuevo no la crea ni la llena. La memoria útil de producción vive en `context_snapshots`.
 
 ### Configuración:
 ```yaml
 history:
   db_path: "data/smart_aggregator/sessions.db"
-  jsonl_path: "data/smart_aggregator/chat_log.jsonl"
   retention_hours: 168  # 7 días
-  persist_raw_messages: false
-  persist_rejected_messages: false
 ```
 
 ### Limpieza de DB existente:
@@ -257,7 +242,7 @@ E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --d
 E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
 ```
 
-El script borra filas raw de `messages` y el `chat_log.jsonl`; preserva `context_snapshots`.
+El script borra datos legacy raw de `messages` y el `chat_log.jsonl`; preserva `context_snapshots`.
 
 ---
 
@@ -539,11 +524,11 @@ def test_tc3_4_history():
     history = SessionHistory(db_path, jl_path, retention_hours=1)
 
     sid = history.start_session("youtube", "test_channel")
-    for msg in MOCK_MESSAGES_20:
-        history.add_message(sid, msg, passed_filter=True, vibe=50.0)
+    for i in range(20):
+        history.add_context_snapshot(sid, f"contexto compacto {i}", message_count=i)
 
-    context = history.get_session_context(sid, max_messages=10)
-    assert len(context) == 10, "TC3.4.4: Limita a max_messages"
+    context = history.get_recent_context_snapshots(sid, max_items=10)
+    assert len(context) == 10, "TC3.4.4: Limita snapshots compactos"
 
     os.unlink(db_path); os.unlink(jl_path)
 ```

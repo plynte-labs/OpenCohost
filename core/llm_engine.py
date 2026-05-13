@@ -41,6 +41,7 @@ class MotorVocalIA(threading.Thread):
         self._speaking = False
         self._downloading = False
         self.current_model = DEFAULT_MODEL
+        self._warmed_model: Optional[str] = None
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
         
         self.system_prompt = SYSTEM_PROMPT
@@ -153,18 +154,8 @@ class MotorVocalIA(threading.Thread):
                 if self._processing or self._speaking:
                     self._log("No se puede cambiar modelo mientras la IA está activa.", level="warning")
                     continue
-                self.historial.clear()
+                self._switch_and_prepare_model(new_model)
                 
-                self._log(f"Liberando memoria del modelo: {self.current_model}...")
-                try:
-                    self.ollama.generate(model=self.current_model, prompt='', keep_alive=0)
-                except Exception as e:
-                    logger.warning(f"No se pudo liberar modelo {self.current_model}: {e}")
-
-                self.current_model = new_model
-                self._log(f"🔄 Modelo cambiado a: {new_model}")
-                self.ui_callback("model_changed")
-
             elif tipo == "set_motor_tts":
                 self.motor_tts = payload
                 nombre = "Ligero (Edge-TTS)" if payload == "ligero" else "Pesado (Qwen3-TTS)"
@@ -324,8 +315,53 @@ class MotorVocalIA(threading.Thread):
             return False
 
         self.is_ready = True
+        self._log("Ollama disponible. Preparando modelo...")
+        self._prepare_model(self.current_model)
+        self._log("Motor IA listo.")
+        return True
+
+    def _switch_and_prepare_model(self, new_model: str) -> None:
+        previous_model = self.current_model
+        self.historial.clear()
+
+        if previous_model != new_model:
+            self._log(f"Liberando memoria del modelo: {previous_model}...")
+            try:
+                self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
+            except Exception as e:
+                logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
+
+        self.current_model = new_model
+        self._warmed_model = None
+        self._log(f"🔄 Modelo cambiado a: {new_model}")
+        self._prepare_model(new_model)
+        self.ui_callback("model_changed")
+
+    def _prepare_model(self, model: str) -> bool:
+        """Warm the selected Ollama model so first real response is not a cold load."""
+        if not self.is_ready or not model or self._warmed_model == model:
+            return self._warmed_model == model
+
+        self.ui_callback("model_warming")
+        self._log(f"Preparando modelo {model} en memoria...")
+        start = time.time()
+        try:
+            self.ollama.generate(
+                model=model,
+                prompt="Responde solo: ok",
+                keep_alive=-1,
+                options={"num_predict": 1, "temperature": 0},
+            )
+        except Exception as e:
+            self._log(f"No se pudo preparar modelo {model}: {e}", level="warning")
+            logger.warning("No se pudo preparar modelo %s: %s", model, e)
+            self.ui_callback("ready")
+            return False
+
+        elapsed = time.time() - start
+        self._warmed_model = model
         self.ui_callback("ready")
-        self._log("Ollama disponible. Motor IA listo.")
+        self._log(f"Modelo {model} preparado en {elapsed:.2f}s. Primera respuesta ya no deberia cargar en frio.")
         return True
 
     def _download_model_worker(self, model_tag):

@@ -65,11 +65,8 @@ intent:
 
 history:
   db_path: "data/smart_aggregator/sessions.db"
-  jsonl_path: "data/smart_aggregator/chat_log.jsonl"
   retention_hours: 168
-  # Production stores compact Kira contexts, not raw high-volume chat.
-  persist_raw_messages: false
-  persist_rejected_messages: false
+  # Production stores only compact Kira contexts. Raw chat persistence is prohibited.
 
 source:
   platform: youtube

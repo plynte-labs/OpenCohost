@@ -70,6 +70,7 @@ VoiceAI/
 │   ├── TROUBLESHOOTING.md      # Bugs conocidos y cómo se resolvieron
 │   ├── changes.md              # Changelog técnico con notas de implementación
 │   ├── UI_ARCHITECTURE.md      # Detalle de la refactorización UI
+│   ├── KIRA_COHOST_AGENDA_MODE.md # Diseño definitivo del modo co-host semi-autónomo
 │   └── HANDOFF_RF*.md          # Handoffs por feature (RF1-RF4)
 │
 ├── temp/                       # Audio temporal (chunks TTS, grabaciones)
@@ -136,6 +137,12 @@ PTT ──buffer + grace period──> voice_control.py ──flush──> Motor
 YouTube Chat ──enqueue──> Priority Queue ──pop──> MotorVocalIA
 Overflow ──enqueue_accumulation──> Accumulation Buffer ──compact──> MotorVocalIA
 ```
+
+### Dirección futura: Kira Co-host Agenda Mode
+
+El modo semi-autónomo definitivo no debe ser “Kira improvisa para siempre”. Debe ser un controlador determinista con agenda aprobada por el streamer: temas en cola, turnos cortos, PTT como prioridad máxima, chat compactado como señal secundaria, salidas seguras y stop de emergencia.
+
+Ver diseño completo en [`docs/KIRA_COHOST_AGENDA_MODE.md`](./KIRA_COHOST_AGENDA_MODE.md).
 
 ### Flujo de PTT con Buffer y Cola Prioritaria
 

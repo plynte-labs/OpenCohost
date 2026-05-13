@@ -498,15 +498,15 @@ Producción persiste **snapshots compactos** en `context_snapshots`:
 - vibe/metadata relevante,
 - sesión y timestamp.
 
-El guardado de chat raw queda desactivado por defecto:
+El guardado de chat raw queda **prohibido por código**. La configuración ya no ofrece `persist_raw_messages` ni `persist_rejected_messages`:
 
 ```yaml
 history:
-  persist_raw_messages: false
-  persist_rejected_messages: false
+  db_path: "data/smart_aggregator/sessions.db"
+  retention_hours: 168
 ```
 
-Si hace falta debugging, se puede activar temporalmente `persist_raw_messages: true`.
+Si hace falta debugging, debe hacerse con logs temporales explícitos fuera de `SessionHistory`; la memoria de Kira no persiste comentarios crudos.
 
 ### Por qué
 
@@ -523,10 +523,48 @@ Se agregó:
 E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
 ```
 
-El script elimina `messages` raw y `chat_log.jsonl`, preservando `context_snapshots`.
+El script elimina la tabla legacy `messages` y `chat_log.jsonl`, preservando `context_snapshots`.
 
 ### Tradeoffs aceptados
 
-- Se pierde auditoría completa del chat salvo que raw logging se active explícitamente.
-- Algunos diagnósticos de spam requerirán reproducir con debug prendido.
+- Se pierde auditoría completa del chat porque raw logging queda prohibido en `SessionHistory`.
+- Algunos diagnósticos de spam requerirán reproducir con logs temporales explícitos fuera de la memoria de Kira.
 - Los historiales viejos raw no se migran automáticamente a summaries porque compactar 200k mensajes post-facto podría inventar contexto pobre.
+
+---
+
+## ADR-013: Kira Co-host Agenda Mode sobre Autonomía Total
+
+**Fecha:** 2026-05-13  
+**Estado:** Propuesta aceptada para diseño; implementación pendiente
+
+### Contexto
+
+Un modo full autónomo donde Kira dirige el stream indefinidamente puede saturar Ollama/GPU, repetir ideas, filtrar texto interno del prompt o inventar dirección sin control humano. El objetivo de producto es que Kira pueda cubrir momentos donde el streamer se ausenta o necesita soporte, sin convertirla en un sistema impredecible.
+
+### Decisión
+
+Diseñar Kira como **co-host semi-autónoma con agenda aprobada**:
+
+- el streamer prepara o aprueba temas cortos,
+- Kira desarrolla un tema por turnos breves,
+- PTT del streamer tiene prioridad máxima,
+- chat filtrado/compactado puede influir como señal secundaria,
+- las sugerencias de futuros temas son borradores y requieren aprobación,
+- el modo tiene stop suave y stop de emergencia.
+
+El diseño completo vive en [`docs/KIRA_COHOST_AGENDA_MODE.md`](./KIRA_COHOST_AGENDA_MODE.md).
+
+### Por qué
+
+1. **Control humano:** la dirección editorial sigue siendo del streamer.
+2. **Determinismo:** una state machine evita loops caóticos.
+3. **Rendimiento:** no hay generación infinita ni precola agresiva.
+4. **Seguridad:** prompts, sanitizer y estados de salida reducen leaks/alucinaciones.
+5. **Producto atractivo:** Kira se siente como co-host real, no como bot aleatorio.
+
+### Tradeoffs aceptados
+
+- Requiere UI de agenda y más tests antes de implementación.
+- Kira será menos “libre”, pero mucho más confiable en vivo.
+- El MVP no incluirá vector DB ni escritura automática al chat.

@@ -28,18 +28,6 @@ class SessionHistory:
             )
         """)
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY,
-                session_id INTEGER,
-                user TEXT,
-                text TEXT,
-                timestamp REAL,
-                passed_filter INTEGER,
-                vibe_temperature REAL,
-                FOREIGN KEY (session_id) REFERENCES sessions(id)
-            )
-        """)
-        cursor.execute("""
             CREATE TABLE IF NOT EXISTS context_snapshots (
                 id INTEGER PRIMARY KEY,
                 session_id INTEGER,
@@ -76,31 +64,6 @@ class SessionHistory:
         conn.commit()
         conn.close()
     
-    def add_message(self, session_id: int, message: dict, passed_filter: bool, vibe: float):
-        timestamp = message.get("timestamp", time.time())
-        user = message.get("user", "")
-        text = message.get("text", "")
-        
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO messages (session_id, user, text, timestamp, passed_filter, vibe_temperature) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, user, text, timestamp, 1 if passed_filter else 0, vibe)
-        )
-        conn.commit()
-        conn.close()
-        
-        record = {
-            "session_id": session_id,
-            "user": user,
-            "text": text,
-            "timestamp": timestamp,
-            "passed_filter": passed_filter,
-            "vibe_temperature": vibe
-        }
-        with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
     def add_context_snapshot(
         self,
         session_id: int,
@@ -112,8 +75,9 @@ class SessionHistory:
     ):
         """Persist the compact context actually sent to Kira.
 
-        This is the production history path. Raw chat is intentionally not
-        required for Kira memory; it is high-volume debug data.
+        This is the only production history path. Raw chat persistence is
+        intentionally prohibited: chat is filtered, aggregated in memory, and
+        persisted only as compact context snapshots.
         """
         summary = (summary or "").strip()
         if not summary:
@@ -135,25 +99,8 @@ class SessionHistory:
         conn.close()
     
     def get_session_context(self, session_id: int, max_messages: int) -> List[Dict[str, Any]]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT user, text, timestamp, passed_filter, vibe_temperature FROM messages WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (session_id, max_messages)
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        
-        result = []
-        for row in reversed(rows):
-            result.append({
-                "user": row[0],
-                "text": row[1],
-                "timestamp": row[2],
-                "passed_filter": bool(row[3]),
-                "vibe_temperature": row[4]
-            })
-        return result
+        """Legacy compatibility shim: raw chat retrieval is disabled."""
+        return []
 
     def get_recent_context_snapshots(self, session_id: int, max_items: int) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self.db_path)
@@ -195,7 +142,8 @@ class SessionHistory:
         
         for sid in old_sessions:
             cursor.execute("DELETE FROM context_snapshots WHERE session_id = ?", (sid,))
-            cursor.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            if self._table_exists(cursor, "messages"):
+                cursor.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
             cursor.execute("DELETE FROM sessions WHERE id = ?", (sid,))
         
         conn.commit()
@@ -203,6 +151,14 @@ class SessionHistory:
         
         if old_sessions and os.path.exists(self.jsonl_path):
             self._cleanup_jsonl(old_sessions)
+
+    @staticmethod
+    def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
     
     def _cleanup_jsonl(self, old_sessions: List[int]):
         if not os.path.exists(self.jsonl_path):

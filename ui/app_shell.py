@@ -660,10 +660,11 @@ class VocalAIApp(ctk.CTk):
         context = ""
         if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
             try:
-                recent = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
-                if recent:
-                    context = "\n".join(f"{m.get('user', '')}: {m.get('text', '')}" for m in recent)
-                else:
+                intent_summary = self.smart_agg.intent_aggregator.summarize()
+                prompt = intent_summary.get("prompt", "")
+                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
+                    context = prompt
+                if not context:
                     snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=3)
                     context = "\n\n".join(s.get("summary", "") for s in snapshots)
             except Exception:
@@ -816,11 +817,14 @@ class VocalAIApp(ctk.CTk):
         context = []
         if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
             try:
-                context = self.smart_agg.history.get_session_context(self.smart_agg._session_id, max_messages=12)
+                intent_summary = self.smart_agg.intent_aggregator.summarize()
+                prompt = intent_summary.get("prompt", "")
+                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
+                    context = [{"user": "Contexto compacto", "text": prompt}]
                 if not context:
                     snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=1)
                     context = [
-                        {"user": "Resumen del chat", "text": s.get("summary", "")}
+                        {"user": "Contexto compacto", "text": s.get("summary", "")}
                         for s in snapshots
                         if s.get("summary")
                     ]
@@ -1126,6 +1130,7 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_event(self, status: str) -> None:
         handlers = {
             "ready": self._on_motor_ready,
+            "model_warming": self._on_motor_model_warming,
             "ollama_unavailable": self._on_motor_ollama_unavailable,
             "processing": self._on_motor_processing,
             "idle": self._on_motor_idle,
@@ -1153,6 +1158,11 @@ class VocalAIApp(ctk.CTk):
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
             self.voice_panel._start_ptt_flush_watcher()
+
+    def _on_motor_model_warming(self) -> None:
+        self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
+        self.after(0, lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
+        self._actualizar_pipeline("init")
 
     def _on_motor_ollama_unavailable(self) -> None:
         self.after(0, lambda: self.btn_grabar.configure(state="disabled"))
@@ -1263,16 +1273,33 @@ class VocalAIApp(ctk.CTk):
                 state_images=avatar_cfg.state_images,
                 on_log=lambda msg: self._print_log(msg),
             )
-            # Connect in background thread to avoid blocking UI
+            # Connect in background thread to avoid blocking UI. Keep retrying so
+            # non-technical users can open OBS after VoiceAI without breaking the
+            # avatar bridge for the whole session.
             def connect_obs():
-                if self._obs_client.connect():
-                    self._obs_client.subscribe_bridge(self._avatar_bridge)
-                    # Safely schedule UI update on main thread
-                    try:
-                        if self.winfo_exists():
-                            self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
-                    except Exception:
-                        pass  # Main loop not ready yet
+                max_attempts = 60
+                retry_delay = 5
+                for attempt in range(1, max_attempts + 1):
+                    if self._obs_client.connect():
+                        self._obs_client.subscribe_bridge(self._avatar_bridge)
+                        # Push the current state immediately; otherwise OBS can
+                        # stay asleep until the next state transition.
+                        self._obs_client.on_state_change(self._avatar_bridge.get_state())
+                        # Safely schedule UI update on main thread
+                        try:
+                            if self.winfo_exists():
+                                self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
+                        except Exception:
+                            pass  # Main loop not ready yet
+                        return
+
+                    if attempt == 1:
+                        self._print_log(
+                            "[OBS] No se pudo conectar. Abri OBS y VoiceAI reintentara automaticamente."
+                        )
+                    time.sleep(retry_delay)
+
+                self._print_log("[OBS] No se pudo conectar tras varios intentos. Revisa OBS WebSocket.")
 
             threading.Thread(target=connect_obs, daemon=True).start()
         except Exception as e:

@@ -11,6 +11,7 @@ Preserves all 7 test categories:
 """
 
 import os
+import json
 import sqlite3
 import time
 from copy import deepcopy
@@ -384,39 +385,33 @@ class TestSessionHistory:
         sid = history.start_session("youtube", "test_channel")
         assert sid > 0
 
-    def test_messages_saved_and_retrieved(self, temp_dir):
-        """TC3.4.2: All messages must be retrievable."""
+    def test_raw_message_persistence_api_is_removed(self, temp_dir):
+        """TC3.4.2: Raw chat persistence must be impossible from SessionHistory."""
         db_path = os.path.join(temp_dir, "sessions.db")
         jl_path = os.path.join(temp_dir, "chat_log.jsonl")
         history = SessionHistory(db_path, jl_path, retention_hours=1)
         sid = history.start_session("youtube", "test_channel")
-        for msg in MOCK_MESSAGES_20:
-            history.add_message(sid, msg, passed_filter=True, vibe=50.0)
-        context = history.get_session_context(sid, max_messages=25)
-        assert len(context) == 20
+        assert not hasattr(history, "add_message")
+        assert history.get_session_context(sid, max_messages=25) == []
 
-    def test_jsonl_contains_lines(self, temp_dir):
-        """TC3.4.3: JSONL file must contain correct number of lines."""
+    def test_snapshots_do_not_create_raw_jsonl(self, temp_dir):
+        """TC3.4.3: Compact snapshots must not create raw JSONL chat logs."""
         db_path = os.path.join(temp_dir, "sessions.db")
         jl_path = os.path.join(temp_dir, "chat_log.jsonl")
         history = SessionHistory(db_path, jl_path, retention_hours=1)
         sid = history.start_session("youtube", "test_channel")
-        for msg in MOCK_MESSAGES_20:
-            history.add_message(sid, msg, passed_filter=True, vibe=50.0)
-        assert os.path.exists(jl_path)
-        with open(jl_path, "r", encoding="utf-8") as f:
-            lines = [l for l in f if l.strip()]
-        assert len(lines) == 20
+        history.add_context_snapshot(sid, "contexto compacto", message_count=20)
+        assert not os.path.exists(jl_path)
 
-    def test_context_limited_by_max_messages(self, temp_dir):
-        """TC3.4.4: Context must be limited to max_messages."""
+    def test_compact_context_limited_by_max_items(self, temp_dir):
+        """TC3.4.4: Compact context must be limited to max_items."""
         db_path = os.path.join(temp_dir, "sessions.db")
         jl_path = os.path.join(temp_dir, "chat_log.jsonl")
         history = SessionHistory(db_path, jl_path, retention_hours=1)
         sid = history.start_session("youtube", "test_channel")
-        for msg in MOCK_MESSAGES_20:
-            history.add_message(sid, msg, passed_filter=True, vibe=50.0)
-        context = history.get_session_context(sid, max_messages=10)
+        for i in range(20):
+            history.add_context_snapshot(sid, f"contexto compacto {i}", message_count=i)
+        context = history.get_recent_context_snapshots(sid, max_items=10)
         assert len(context) == 10
 
     def test_compact_context_snapshots_saved_and_retrieved(self, temp_dir):
@@ -440,14 +435,14 @@ class TestSessionHistory:
         assert snapshots[0]["metadata"]["top_intents"][0]["intent"] == "game_question"
 
     def test_cleanup_removes_old_sessions(self, temp_dir):
-        """TC3.4.5: Cleanup must remove old sessions, raw chat, snapshots, and JSONL."""
+        """TC3.4.5: Cleanup must remove old sessions, snapshots, and legacy JSONL."""
         db_path = os.path.join(temp_dir, "sessions.db")
         jl_path = os.path.join(temp_dir, "chat_log.jsonl")
         history = SessionHistory(db_path, jl_path, retention_hours=1)
         sid = history.start_session("youtube", "test_channel")
-        for msg in MOCK_MESSAGES_20:
-            history.add_message(sid, msg, passed_filter=True, vibe=50.0)
         history.add_context_snapshot(sid, "contexto compacto", message_count=20)
+        with open(jl_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"session_id": sid, "text": "legacy raw"}, ensure_ascii=False) + "\n")
 
         conn = sqlite3.connect(db_path)
         conn.execute("UPDATE sessions SET start_time = ? WHERE id = ?", (time.time() - 7200, sid))
@@ -597,8 +592,8 @@ class TestAggregator:
         assert len(compact_context) > 0
         agg.disconnect()
 
-    def test_raw_message_persistence_is_opt_in(self, smart_aggregator_config, mock_llm, temp_dir):
-        """TC3.6.4b: Raw chat can be enabled for debugging without storing rejected spam."""
+    def test_raw_message_persistence_config_is_ignored(self, smart_aggregator_config, mock_llm, temp_dir):
+        """TC3.6.4b: Raw chat remains impossible even if legacy config flags exist."""
         cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
@@ -614,8 +609,8 @@ class TestAggregator:
         agg.process_message({"user": "ok", "text": "me saludas hoy es mi cumpleaños soy tu fan", "timestamp": time.time() + 1})
 
         context = agg.history.get_session_context(sid, max_messages=10)
-        assert len(context) == 1
-        assert context[0]["user"] == "ok"
+        assert context == []
+        assert not os.path.exists(cfg["history"]["jsonl_path"])
 
     def test_optional_callbacks_no_failure(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.5: Optional callbacks should not cause failures."""
