@@ -304,3 +304,176 @@ Cuando el motor queda libre:
 - Si se quiere interrupción real (PTT corta TTS de Kira), agregar comando `stop_speaking` al motor
 - Si el chat es muy activo, compactación más agresiva: agrupar por tema en vez de cronológico
 - Considerar un "modo streamer" donde el chat se pausa completamente mientras PTT está activo
+
+---
+
+## ADR-009: Filtros de Calidad de Chat — Basura No Llega al Modelo
+
+**Fecha:** 2026-05-12  
+**Estado:** Activa
+
+### Contexto
+
+En streams con chat activo (ej: Abraham), el Smart Aggregator recibía cientos de mensajes por minuto, la mayoría sin valor semántico:
+
+- `wwwwwwwwwwwwwwwwwwww` (100+ w's)
+- `feeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`
+- `HOLA YT HOLA YT HOLA YT` (repetido 20+ veces)
+- `╔╗ ╔╗╔═══╗╔╗` (ASCII art)
+- `jsklsbfkfofii` (gibberish sin vocales)
+- `hola me saludas` (3 palabras, sin contexto)
+
+El modelo LLM recibía todo esto y generaba respuestas genéricas repetitivas como *"¡Este chat es un poco loco! ¡Alguien aquí debe tener una gran cantidad de energía positiva en su vida!"* — **usando una escopeta para matar moscas**.
+
+### Decisión
+
+Agregar 5 filtros de calidad a `MessageFilter` que operan **después** de los filtros básicos (longitud, emotes, links, menciones):
+
+| Filtro | Qué detecta | Ejemplo descartado |
+|--------|------------|-------------------|
+| **Carácter repetitivo** | Un solo char >50% del mensaje | `wwwwwwwwww`, `feeeeeeeeee` |
+| **Palabras repetidas** | Misma palabra >3 veces o ratio único <25% | `fe fe fe fe fe fe` |
+| **Gibberish** | Ratio de vocales <10% | `jsklsbfkfofii`, `hsklsbfkfofii` |
+| **ASCII art** | Box-drawing chars o líneas de `===`/`---` | `╔╗ ╔╗╔═══╗`, `==========` |
+| **Quality score** | Penaliza mensajes cortos (≤4 palabras) o baja diversidad | `hola me saludas` → score 0.3 |
+
+El aggregator ahora rechaza mensajes con `quality < min_quality_score` (default 0.3).
+
+### Por qué
+
+1. **El modelo no es un filtro**: Llamar a Ollama con basura consume VRAM, tiempo y genera respuestas irrelevantes
+2. **Contexto importa**: Kira necesita contexto real del chat para reaccionar de forma genuina, no genérica
+3. **Rendimiento**: Filtrar antes del LLM es O(n) barato vs inferencia LLM que cuesta segundos
+
+### Tradeoffs aceptados
+
+- **Falsos negativos**: Un mensaje legítimo con muchas letras repetidas (ej: "holaaaaa") podría descartarse si el ratio supera el threshold
+- **Configuración necesaria**: Los thresholds (`repetitive_char_threshold: 0.50`, `min_vowel_ratio: 0.10`) pueden necesitar ajuste según el tipo de audiencia
+- **No es perfecto**: Algunos spam sofisticado podría pasar (ej: mensajes variados pero sin sentido)
+
+### Configuración
+
+```yaml
+filter:
+  discard_repetitive_chars: true
+  repetitive_char_threshold: 0.50
+  discard_repeated_words: true
+  repeated_word_max: 3
+  min_unique_word_ratio: 0.25
+  discard_gibberish: true
+  min_vowel_ratio: 0.10
+  discard_ascii_art: true
+  short_word_threshold: 4
+  min_quality_score: 0.3
+```
+
+---
+
+## ADR-010: Intent Aggregator Portable — Intenciones Sí, Nombres Hardcodeados No
+
+**Fecha:** 2026-05-12  
+**Estado:** Activa
+
+### Contexto
+
+Después de filtrar basura del chat, un directo grande seguía produciendo cientos de mensajes válidos pero repetitivos: saludos, pedidos para jugar, solicitudes de amistad, preguntas sobre el juego, pedidos de videos/collabs, tradeos y copypasta.
+
+La primera versión del agrupador de intenciones incluyó nombres de un canal específico como señales (`Abraham`, `Fede`, `Bros`, `Fernanfloo`, etc.). Eso funcionaba para ese stream, pero era **overfitting**: para otro streamer, esos nombres introducen sesgo y falsos positivos.
+
+### Decisión
+
+Separar **intención** de **entidad**:
+
+- **Intención**: qué quiere el chat (`saludo`, `jugar/unirse`, `collab/video`, `sugerencia`, `trade`, etc.)
+- **Entidad**: de quién o qué habla (`Fede`, `Bros`, `Coraline`, `garama`, etc.)
+
+`IntentClassifier` usa patrones estructurales genéricos:
+
+- `me saludas` → `greeting_request`
+- `me puedo unir` → `join_request`
+- `video con X` → `video_collab`, entidad `X`
+- `conoces a X` → `video_collab`, entidad `X`
+- `juega X` → `game_suggestion`, entidad `X`
+- `tradeas por X` → `trade_request`, entidad `X`
+
+Los nombres propios ya no son reglas globales. Si un nombre aparece muchas veces, se trata como entidad dinámica o tema frecuente, no como lógica hardcodeada.
+
+### Por qué
+
+1. **Portabilidad**: Kira debe servir para cualquier streamer, no solo para un canal específico
+2. **Menos falsos positivos**: Un nombre propio aislado no debería disparar una intención
+3. **Mejor contexto para LLM**: Kira recibe temas dominantes con entidades representativas, no mensajes crudos ni reglas sesgadas
+
+### Tradeoffs aceptados
+
+- **Menos detección específica**: Si el chat menciona solo un nombre sin estructura (`Fede`) queda como `other` hasta que sea tema frecuente
+- **Extracción imperfecta**: Las entidades se extraen con regex simple, no NLP pesado
+- **Reglas generales primero**: Diccionarios por canal pueden agregarse después, pero no como default global
+
+### Ejemplo de salida
+
+```text
+Resumen del chat por intenciones dominantes:
+- 32 mensajes: pedidos para jugar o unirse al servidor.
+- 18 mensajes: pedidos de videos o colaboraciones. Temas/personas: los bros, fede.
+- 12 mensajes: saludos, cumpleaños y pedidos de atención.
+```
+
+---
+
+## ADR-011: StorageConfig Portable — El Disco de Cache lo Decide el Usuario
+
+**Fecha:** 2026-05-13  
+**Estado:** Activa
+
+### Contexto
+
+VoiceAI usa modelos y audio temporal pesado: Ollama, Hugging Face/Qwen, Torch, chunks TTS y archivos temporales de librerías. En una PC concreta, mover todo a `E:` puede resolver disco C: al 100%, pero hardcodear `E:\...` rompería portabilidad en otra máquina.
+
+Además, aunque VoiceAI ya escribía muchos temporales en `E:\VoiceAI\temp`, las variables de Windows `TEMP`/`TMP` seguían apuntando a `C:\Users\...\AppData\Local\Temp`. Librerías como Torch, requests, soundfile o edge-tts pueden usar esas rutas sin pasar por nuestro `TEMP_DIR`.
+
+### Decisión
+
+Crear `config/storage.py` + `config/storage.yaml` como resolver central de almacenamiento:
+
+```yaml
+storage:
+  cache_root: "auto"
+  temp_root: "auto"
+  ollama_models: "auto"
+```
+
+`auto` mantiene compatibilidad:
+
+- `cache_root` → `modelos_f5` dentro del proyecto
+- `temp_root` → `temp` dentro del proyecto
+- `ollama_models` → respeta `OLLAMA_MODELS` existente o usa cache local
+
+El usuario puede forzar otro disco:
+
+```yaml
+storage:
+  cache_root: "D:/VoiceAI/cache"
+  temp_root: "D:/VoiceAI/temp"
+  ollama_models: "D:/OllamaStorage"
+```
+
+VoiceAI aplica por proceso:
+
+- `TEMP`, `TMP`
+- `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`
+- `TORCH_HOME`
+- `OLLAMA_MODELS`
+
+### Por qué
+
+1. **Portabilidad**: No asumir `E:` ni ninguna letra de disco
+2. **Menos presión sobre C:** mover temporales y caches de librerías fuera del perfil de usuario
+3. **Control explícito**: el usuario decide disco rápido/grande según su PC
+4. **Orden correcto**: las variables se aplican antes de importar modelos pesados
+
+### Tradeoffs aceptados
+
+- Si Ollama ya estaba corriendo antes de VoiceAI, puede seguir usando su ruta vieja hasta reiniciarlo
+- Mover caches existentes entre discos sigue siendo responsabilidad del usuario o de una futura herramienta de migración
+- El pagefile de Windows puede seguir usando C: si el sistema operativo está configurado así

@@ -9,6 +9,7 @@ from .message_filter import MessageFilter
 from .chat_source import YouTubeChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
+from .intent_aggregator import IntentAggregator
 
 class Aggregator:
     def __init__(self, config_path: str = "config/smart_aggregator.yaml", llm_interface: Optional[Callable] = None):
@@ -44,6 +45,7 @@ class Aggregator:
             self.config.get("activity", {}),
             callbacks={"on_trigger": self._on_activity_trigger}
         )
+        self.intent_aggregator = IntentAggregator(self.config.get("intent", {}))
         self.source = YouTubeChatSource(
             self.config.get("source", {}),
             callbacks={
@@ -126,8 +128,14 @@ class Aggregator:
         filtered = self.msg_filter.filter(message)
         accepted = False
         if filtered is not None:
-            filtered = self._apply_spam_filter(filtered)
-            accepted = filtered is not None
+            # Check quality score threshold
+            quality = filtered.get("quality", 1.0)
+            min_quality = getattr(self.msg_filter, "min_quality_score", 0.0)
+            if quality < min_quality:
+                accepted = False
+            else:
+                filtered = self._apply_spam_filter(filtered)
+                accepted = filtered is not None
         
         if accepted and self.on_filtered_message:
             try:
@@ -138,6 +146,7 @@ class Aggregator:
         vibe = None
         vibe_temp = 50.0
         if accepted:
+            self.intent_aggregator.add_message(filtered)
             self.thermometer.add_message(filtered)
             vibe = self.thermometer.compute_vibe()
             vibe_temp = vibe.get("temperature", 50.0) if vibe else 50.0
@@ -166,9 +175,11 @@ class Aggregator:
         if self.on_aggregated_context and self._session_id is not None:
             try:
                 context = self.history.get_session_context(self._session_id, max_messages=20)
+                intent_summary = self.intent_aggregator.summarize()
                 self.on_aggregated_context({
                     "trigger": data,
-                    "context": context
+                    "context": context,
+                    "intent_summary": intent_summary,
                 })
             except Exception:
                 pass

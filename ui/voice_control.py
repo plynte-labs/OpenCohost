@@ -115,7 +115,7 @@ class VoiceControlPanel:
         # PTT transcription buffer with grace period
         self._ptt_buffer: str = ""
         self._ptt_max_chars: int = 500
-        self._ptt_grace_period: float = 2.0
+        self._ptt_grace_period: float = 5.0
         self._ptt_grace_deadline: float = 0.0
         self._ptt_prev_active: bool = False  # track press→release transition
         self._ptt_flush_thread: Optional[threading.Thread] = None
@@ -150,7 +150,15 @@ class VoiceControlPanel:
         """
         self._ptt_buffer = ""
         self._ptt_grace_deadline = 0.0
+        self._ptt_prev_active = True  # Mark PTT as active; release will trigger grace
+        self._start_ptt_flush_watcher()
+
+    def on_ptt_release(self) -> None:
+        """Called when PTT key is released. Starts the grace period immediately."""
         self._ptt_prev_active = False
+        self._ptt_grace_deadline = time.time() + self._ptt_grace_period
+        self._logger.debug(f"[PTT] Release → grace period {self._ptt_grace_period}s (deadline set immediately)")
+        self._on_log(f"[PTT] Soltado — esperando transcripción final ({self._ptt_grace_period:.0f}s)...")
 
     def _start_ptt_flush_watcher(self) -> None:
         """Start background thread that flushes PTT buffer when grace period expires."""
@@ -167,8 +175,11 @@ class VoiceControlPanel:
         while not self._ptt_flush_stop.is_set():
             now = time.time()
             deadline = self._ptt_grace_deadline
-            if deadline > 0 and now >= deadline and self._ptt_buffer:
-                self._flush_ptt_buffer()
+            if deadline > 0 and now >= deadline:
+                if self._ptt_buffer:
+                    self._flush_ptt_buffer()
+                else:
+                    self._logger.debug("[PTT Flush] Grace period expiró sin transcripciones acumuladas")
                 self._ptt_grace_deadline = 0.0
             self._ptt_flush_stop.wait(0.5)
 
@@ -188,12 +199,16 @@ class VoiceControlPanel:
         )
 
         if motor_busy:
-            self._logger.debug("[PTT Flush] Motor ocupado → cola de acumulación")
-            self._motor_ia.enqueue_accumulation(texto, source="ptt")
+            self._logger.debug("[PTT Flush] Motor ocupado → cola prioritaria")
+            self._motor_ia.enqueue(
+                f"El streamer acaba de decir (PTT): {texto}",
+                priority=0,
+                source="ptt",
+            )
             return
 
         palabras = texto.split()
-        if len(palabras) < 4:
+        if len(palabras) < 2:
             self._logger.debug(f"[PTT Flush] Muy corto ({len(palabras)} palabras): {texto}")
             return
 
@@ -440,6 +455,8 @@ class VoiceControlPanel:
                                     self._ptt_buffer += " " + texto_transcrito
                                 else:
                                     self._ptt_buffer = texto_transcrito
+                                if in_grace and not ptt_now:
+                                    self._ptt_grace_deadline = now + self._ptt_grace_period
                                 self._logger.debug(
                                     f"[PTT Buffer] Acumulado ({len(self._ptt_buffer)} chars): {self._ptt_buffer[:80]}..."
                                 )

@@ -13,6 +13,8 @@ VoiceAI/
 ├── config/
 │   ├── __init__.py
 │   ├── settings.py             # Constantes globales, rutas, catálogo de modelos, timeouts
+│   ├── storage.py              # Resolver portable de cache/temp/Ollama (TEMP, HF, Torch)
+│   ├── storage.yaml            # Config editable de disco/cache por usuario
 │   ├── logger.py               # Logger estructurado (consola + archivo en logs/)
 │   ├── ptt_settings.json       # Configuración persistente de PTT (hotkey, estado)
 │   ├── window_geometry.json    # Posición/tamaño de ventana (persistencia multi-monitor)
@@ -45,7 +47,8 @@ VoiceAI/
 ├── smart_aggregator/           # RF3 — Procesador inteligente de chat
 │   ├── __init__.py
 │   ├── aggregator.py           # Orquestador headless del aggregator
-│   ├── message_filter.py       # Filtro: longitud, emotes, menciones, rate-limit
+│   ├── message_filter.py       # Filtro: longitud, emotes, menciones, repetitivo, gibberish, ASCII art, quality score
+│   ├── intent_aggregator.py    # Agrupa chat por intención + entidades dinámicas (sin nombres hardcodeados)
 │   ├── vibe_thermometer.py     # Análisis de sentimiento del chat (1 LLM call)
 │   ├── activity_trigger.py     # Detector de picos de actividad (msgs/sec)
 │   ├── session_history.py      # Persistencia: SQLite + JSONL por sesión

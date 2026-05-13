@@ -1,11 +1,16 @@
 import os
+from config.storage import STORAGE_PATHS
 
 # ──────────────────────────────────────────────
 # Configuración global
 # ──────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMP_DIR = os.path.join(BASE_DIR, "temp")
+TEMP_DIR = str(STORAGE_PATHS.temp_root)
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+HF_CACHE_DIR = str(STORAGE_PATHS.hf_home)
+HF_HUB_DIR = str(STORAGE_PATHS.hf_hub_cache)
+TORCH_CACHE_DIR = str(STORAGE_PATHS.torch_home)
+OLLAMA_MODELS_DIR = str(STORAGE_PATHS.ollama_models)
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)

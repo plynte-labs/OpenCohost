@@ -6,22 +6,22 @@ import threading
 import asyncio
 import inspect
 from pathlib import Path
+
+from config.storage import STORAGE_PATHS
+
 from flask import Flask, request, send_file, jsonify
 import torch
 import soundfile as sf
 import edge_tts
 
 BASE_DIR = Path(__file__).resolve().parent
-HF_CACHE_DIR = BASE_DIR / "modelos_f5"
-HF_HUB_DIR = HF_CACHE_DIR / "hub"
+HF_CACHE_DIR = STORAGE_PATHS.hf_home
+HF_HUB_DIR = STORAGE_PATHS.hf_hub_cache
 QWEN_REPO_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 QWEN_CACHE_DIR = HF_HUB_DIR / "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base"
 
-# Hugging Face debe buscar primero en E:\VoiceAI\modelos_f5. Si la snapshot
-# local existe, activamos offline para evitar llamadas de red innecesarias.
-os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HF_HUB_DIR))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_HUB_DIR))
+# Hugging Face debe buscar primero en el cache configurable de VoiceAI. Si la
+# snapshot local existe, activamos offline para evitar llamadas de red.
 
 from qwen_tts import Qwen3TTSModel
 
@@ -46,7 +46,7 @@ logger.setLevel(logging.DEBUG)
 if not logger.handlers:
     logger.addHandler(console_handler)
 
-TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+TEMP_DIR = str(STORAGE_PATHS.temp_root)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 

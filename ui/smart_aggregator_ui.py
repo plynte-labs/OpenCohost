@@ -338,44 +338,61 @@ class SmartAggregatorUI:
 
     def on_aggregated_context(self, data: dict) -> None:
         """Handle aggregated chat context — prompts Kira to react."""
+        intent_summary = data.get("intent_summary") or {}
+        intent_prompt = intent_summary.get("prompt")
+        top_intents = intent_summary.get("top_intents") or []
         if self.is_busy():
             # Motor busy — enqueue to priority queue instead of dropping
             context = data.get("context", [])[-12:]
-            if not context:
+            if not context and not intent_prompt:
                 return
             lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-            prompt = (
-                "Estas viendo el chat de YouTube como co-host del stream. Di EXACTAMENTE lo que Kira diria al aire, "
-                "no describas lo que esta pasando ni prometas que vas a hablar. Reacciona con una broma, critica o comentario concreto. "
-                "Prohibido empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', 'Tengo que', 'El chat esta', "
-                "'energia del flujo', 'mensaje destacado', 'contexto reciente' o 'mantener la energia'. "
-                "No saludes ni preguntes 'que te trae por aqui'. No digas que Kira va a comentar: comenta directamente. "
-                "Responde en 1-2 frases cortas con personalidad de Kira. "
-                f"Mensajes recientes del chat:\n" + "\n".join(lines)
-            )
+            chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
+            prompt = self._build_kira_chat_prompt(chat_context)
             self._motor_ia.enqueue(prompt, priority=1, source="chat")
             self._on_log("[SmartAggregator] Kira ocupada — contexto encolado en cola prioritaria.")
             return
 
         context = data.get("context", [])[-12:]
-        if not context:
+        if not context and not intent_prompt:
             return
 
         highlight = self._select_highlight(context)
         lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-        prompt = (
-            "Estas viendo el chat de YouTube como co-host del stream. Di EXACTAMENTE lo que Kira diria al aire, "
-            "no describas lo que esta pasando ni prometas que vas a hablar. Reacciona con una broma, critica o comentario concreto. "
-            "Prohibido empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', 'Tengo que', 'El chat esta', "
-            "'energia del flujo', 'mensaje destacado', 'contexto reciente' o 'mantener la energia'. "
-            "No saludes ni preguntes 'que te trae por aqui'. No digas que Kira va a comentar: comenta directamente. "
-            "Responde en 1-2 frases cortas con personalidad de Kira. "
-            "Usa este mensaje solo como posible referencia interna, no lo nombres como destacado: "
-            f"{highlight}\n"
-            "Mensajes recientes del chat:\n" + "\n".join(lines)
-        )
+        chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
+        prompt = self._build_kira_chat_prompt(chat_context, highlight)
         self._motor_ia.command_queue.put(("process_context", prompt))
+        if top_intents:
+            top = top_intents[0]
+            self._on_log(
+                f"[SmartAggregator] Tema dominante: {top.get('label')} ({top.get('count')} msgs)."
+            )
         self._on_log("[SmartAggregator] Contexto agregado enviado a Kira.")
+
+    @staticmethod
+    def _build_kira_chat_prompt(chat_context: str, highlight: str = "") -> str:
+        """Build a chat prompt that prevents internal summaries leaking on air."""
+        highlight_line = ""
+        if highlight:
+            highlight_line = (
+                "Referencia opcional privada; NO nombres al autor ni digas que es destacado:\n"
+                f"{highlight}\n\n"
+            )
+        return (
+            "TAREA: respondé al aire como Kira, co-host del stream.\n"
+            "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.\n"
+            "No expliques el resumen, no listes datos y no describas tu proceso.\n"
+            "PROHIBIDO mencionar cantidades de mensajes, autores, ejemplos, 'temas/personas', "
+            "'intención dominante', 'contexto privado', 'resumen', 'mensaje destacado' o 'el chat dice'.\n"
+            "PROHIBIDO empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', "
+            "'Tengo que', 'El chat esta', 'energia del flujo' o 'mantener la energia'.\n"
+            "Si el contexto interno es confuso o pobre, hacé una reacción general corta sin inventar detalles.\n"
+            "Respondé en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.\n\n"
+            f"{highlight_line}"
+            "--- CONTEXTO PRIVADO, NO LEER LITERAL ---\n"
+            f"{chat_context}\n"
+            "--- FIN CONTEXTO PRIVADO ---"
+        )
 
     # ------------------------------------------------------------------
     # Highlight selection

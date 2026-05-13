@@ -406,6 +406,7 @@ class ModelPanel:
         import subprocess
         import threading
         import time
+        from config.settings import OLLAMA_MODELS_DIR
 
         def worker() -> None:
             try:
@@ -415,6 +416,7 @@ class ModelPanel:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=creationflags,
+                    env={**os.environ, "OLLAMA_MODELS": OLLAMA_MODELS_DIR},
                 )
             except Exception as e:
                 self._on_log(f"[Sistema] No se pudo iniciar Ollama: {e}")

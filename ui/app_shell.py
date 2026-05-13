@@ -1323,7 +1323,10 @@ class VocalAIApp(ctk.CTk):
             self._on_ptt_status_change(f"Manten presionado [{hotkey}] para hablar", "#888888")
 
     def _on_ptt_press(self, key) -> None:
+        was_active = self.ptt.active
         self.ptt.on_ptt_press(key)
+        if was_active or not self.ptt.active:
+            return
         self._ui_state.ptt_active = True
         self._ptt_accept_logged = False
         # Clear buffer for new accumulation cycle
@@ -1331,14 +1334,28 @@ class VocalAIApp(ctk.CTk):
             self.voice_panel.clear_ptt_buffer()
 
     def _on_ptt_release(self, key) -> None:
+        was_active = self.ptt.active
         self.ptt.on_ptt_release(key)
+        if not was_active or self.ptt.active:
+            return
         self._ui_state.ptt_active = False
         self._ptt_accept_logged = False
+        # Start grace period immediately (don't wait for WS message)
+        if hasattr(self, "voice_panel"):
+            self.voice_panel.on_ptt_release()
 
     def _on_ptt_click(self, x, y, button, pressed) -> None:
+        was_active = self.ptt.active
         self.ptt.on_ptt_click(x, y, button, pressed)
-        self._ui_state.ptt_active = pressed
+        is_active = self.ptt.active
+        if was_active == is_active:
+            return
+        self._ui_state.ptt_active = is_active
         self._ptt_accept_logged = False
+        if is_active and hasattr(self, "voice_panel"):
+            self.voice_panel.clear_ptt_buffer()
+        elif hasattr(self, "voice_panel"):
+            self.voice_panel.on_ptt_release()
 
     # ──────────────────────────────────────────────
     # Logging

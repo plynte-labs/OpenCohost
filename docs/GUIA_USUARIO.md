@@ -109,6 +109,9 @@ Kira filtra automáticamente:
 - **Emotes puros**: `:bird: :bird: :pogChamp:` → se descartan
 - **Spam**: mismo mensaje repetido muchas veces → se descarta
 - **Mensajes muy cortos**: menos de 4 palabras → se descartan (no aportan contexto)
+- **Carácter repetitivo**: si una sola letra domina el mensaje (ej: `wwwwwwww`, `feeeeeeeee`) → se descarta
+- **Gibberish**: texto sin sentido aparente o sin vocales (ej: `jsklsbfkfofii`) → se descarta
+- **ASCII art**: dibujos con caracteres especiales → se descartan
 - **Mientras Kira habla**: nuevos mensajes se encolan, no se pierden
 
 ---
@@ -127,7 +130,46 @@ Botón **"Editar perfiles"** → ventana modal para crear/editar personalidades 
 
 ---
 
-## 7. Atajos Rápidos
+## 7. Disco, Cache y Temporales
+
+VoiceAI usa archivos pesados: modelos, audios temporales y caches de IA. Para no saturar el disco C:, podés elegir dónde guardar esos datos.
+
+Archivo:
+
+```txt
+config/storage.yaml
+```
+
+Por defecto usa `auto`, que mantiene los caches dentro del proyecto o respeta variables existentes del sistema:
+
+```yaml
+storage:
+  cache_root: "auto"
+  temp_root: "auto"
+  ollama_models: "auto"
+```
+
+Si querés forzar otro disco:
+
+```yaml
+storage:
+  cache_root: "D:/VoiceAI/cache"
+  temp_root: "D:/VoiceAI/temp"
+  ollama_models: "D:/OllamaStorage"
+```
+
+Esto configura por proceso:
+
+- `TEMP` / `TMP` → temporales de Python/TTS
+- `HF_HOME` / `HUGGINGFACE_HUB_CACHE` / `TRANSFORMERS_CACHE` → modelos Hugging Face / Qwen
+- `TORCH_HOME` → cache de Torch
+- `OLLAMA_MODELS` → modelos de Ollama
+
+**Importante:** si Ollama ya estaba abierto antes de iniciar VoiceAI, cerralo y volvé a iniciarlo desde VoiceAI para que tome la ruta configurada.
+
+---
+
+## 8. Atajos Rápidos
 
 | Acción | Cómo |
 |--------|------|
@@ -140,7 +182,7 @@ Botón **"Editar perfiles"** → ventana modal para crear/editar personalidades 
 
 ---
 
-## 8. Seguridad y Privacidad
+## 9. Seguridad y Privacidad
 
 - **Todo es local**: Ollama y Qwen3-TTS corren en tu máquina
 - **Sin API keys**: No enviás tu voz ni tus datos a servicios cloud (excepto edge-tts si usás modo ligero)
@@ -149,7 +191,7 @@ Botón **"Editar perfiles"** → ventana modal para crear/editar personalidades 
 
 ---
 
-## 9. Solución Rápida de Problemas
+## 10. Solución Rápida de Problemas
 
 | Problema | Qué hacer |
 |----------|-----------|
@@ -159,3 +201,4 @@ Botón **"Editar perfiles"** → ventana modal para crear/editar personalidades 
 | TTS timeout | Si usás modo pesado, verificá que `server_qwen.py` esté corriendo |
 | Chat YouTube no conecta | Verificá el video_id y que el stream esté en vivo |
 | Kira habla sola | Asegurate de que PTT esté ON y que no haya feedback micrófono-parlantes |
+| Disco C: al 100% | Configurá `config/storage.yaml` a otro disco y reiniciá VoiceAI/Ollama |

@@ -23,6 +23,7 @@ from smart_aggregator.chat_source import YouTubeChatSource
 from smart_aggregator.vibe_thermometer import VibeThermometer
 from smart_aggregator.activity_trigger import ActivityTrigger
 from smart_aggregator.aggregator import Aggregator
+from smart_aggregator.intent_aggregator import IntentAggregator, IntentClassifier
 
 MOCK_MESSAGES_20 = [
     {"user": f"user{i}", "text": f"Mensaje de prueba numero {i} para Kira", "timestamp": time.time() + i}
@@ -126,6 +127,36 @@ class TestMessageFilter:
         result = msg_filter.filter({"user": "a", "text": "stop saying YDBAF you'll get banned :bird::bird::bird:", "timestamp": time.time()})
         assert result is not None
         assert ":bird:" not in result["text"]
+
+    def test_long_keyboard_smash_discarded(self, smart_aggregator_config):
+        """TC3.1.5d: Long random-looking tokens should be discarded."""
+        cfg = smart_aggregator_config["filter"]
+        msg_filter = MessageFilter(cfg)
+        result = msg_filter.filter({
+            "user": "a",
+            "text": "bjbd x kxxbfjjbeldbdhdicvyckveyfkcjuhdkudnejxvdxvdjdhdjxbyeb uy febeurjwuthfbehuxjbdlbdbshkxo holaaaaaaaaa",
+            "timestamp": time.time(),
+        })
+        assert result is None
+
+    def test_repeated_pvp_spam_discarded(self, smart_aggregator_config):
+        """TC3.1.5e: Repeated syllable spam should be discarded."""
+        cfg = smart_aggregator_config["filter"]
+        msg_filter = MessageFilter(cfg)
+        result = msg_filter.filter({
+            "user": "a",
+            "text": "pvppvpvpvpvppvpvpvpvpvpvpvppvpvpvpvpvpvp soy buenisimo abran porfa pvp papapapapapappapapapap",
+            "timestamp": time.time(),
+        })
+        assert result is None
+
+    def test_short_low_context_message_has_low_quality(self, smart_aggregator_config):
+        """TC3.1.5f: Short low-context messages are scored below aggregator threshold."""
+        cfg = smart_aggregator_config["filter"]
+        msg_filter = MessageFilter(cfg)
+        result = msg_filter.filter({"user": "a", "text": "hola me saludas bro", "timestamp": time.time()})
+        assert result is not None
+        assert result["quality"] < cfg["min_quality_score"]
 
     def test_whitelist_bypasses_filter(self, smart_aggregator_config):
         """TC3.1.6: VIP users should bypass the filter."""
@@ -231,6 +262,112 @@ class TestActivityTrigger:
             activity.on_message({"user": f"u{i}", "text": "msg", "timestamp": base + (i * 0.2)})
         assert triggered[-1]["actions"]["auto_reply"] == "Chat en pico"
         assert triggered[-1]["actions"]["behavior_change"]["parameter"] == "excitement_multiplier"
+
+
+# --- TC3.3b — Intent Aggregation ---
+
+class TestIntentAggregator:
+    """TC3.3b: Rule-based intent classification and summary."""
+
+    def test_classifies_common_chat_intents(self):
+        classifier = IntentClassifier({})
+        assert classifier.classify("me saludas hoy es mi cumpleaños") == "greeting_request"
+        assert classifier.classify("me puedo unir al server privado") == "join_request"
+        assert classifier.classify("me mandas soli en roblox") == "roblox_friend"
+        assert classifier.classify("pa cuando video con alguien famoso") == "video_collab"
+        assert classifier.classify("que tradeas por un garama de 561M") == "trade_request"
+
+    def test_creator_names_do_not_drive_intent(self):
+        classifier = IntentClassifier({})
+        assert classifier.classify("Abraham") == "other"
+        assert classifier.classify("Fede") == "other"
+        assert classifier.classify("Bros") == "other"
+        assert classifier.classify("Fernanfloo") == "other"
+
+    def test_extracts_runtime_entities_from_generic_patterns(self):
+        classifier = IntentClassifier({})
+        collab = classifier.classify_message("pa cuando video con los bros y Fede")
+        suggestion = classifier.classify_message("deberías jugar Coraline")
+        trade = classifier.classify_message("que tradeas por un garama de 561M")
+
+        assert collab["intent"] == "video_collab"
+        assert collab["entity"] == "los bros y fede"
+        assert suggestion["intent"] == "game_suggestion"
+        assert suggestion["entity"] == "coraline"
+        assert trade["intent"] == "trade_request"
+        assert "garama" in trade["entity"]
+
+    def test_summarizes_top_intents_with_examples(self):
+        agg = IntentAggregator({"top_intents": 3, "min_count": 2, "window_seconds": 60})
+        base = time.time()
+        messages = [
+            "me saludas soy tu fan",
+            "me saludas hoy es mi cumpleaños",
+            "puedo jugar contigo porfa",
+            "me puedo unir al server privado",
+            "pa cuando video con los bros",
+            "cuando regresan los bros",
+        ]
+        for i, text in enumerate(messages):
+            agg.add_message({"user": f"u{i}", "text": text, "timestamp": base + i})
+
+        summary = agg.summarize(now=base + 10)
+        intents = [item["intent"] for item in summary["top_intents"]]
+        assert "greeting_request" in intents
+        assert "join_request" in intents
+        assert "video_collab" in intents
+        video_cluster = next(item for item in summary["top_intents"] if item["intent"] == "video_collab")
+        assert video_cluster["entities"]
+        assert "CONTEXTO PRIVADO" in summary["prompt"]
+        assert "Ej:" not in summary["prompt"]
+        assert "mensajes" not in summary["prompt"].lower()
+
+    def test_prompt_does_not_leak_internal_summary_metadata(self):
+        agg = IntentAggregator({"top_intents": 3, "min_count": 2, "window_seconds": 60})
+        base = time.time()
+        for i, text in enumerate([
+            "me saludas hoy es mi cumpleaños soy tu fan",
+            "me saludas soy tu fan desde pequeño por favor",
+            "puedo jugar contigo porfa en el servidor privado",
+            "me puedo unir al server privado para jugar contigo",
+        ]):
+            agg.add_message({"user": f"u{i}", "text": text, "timestamp": base + i})
+
+        prompt = agg.summarize(now=base + 10)["prompt"]
+
+        assert "CONTEXTO PRIVADO" in prompt
+        assert "Ej:" not in prompt
+        assert "Temas/personas" not in prompt
+        assert "u0" not in prompt
+        assert "mensajes" not in prompt.lower()
+
+    def test_other_bucket_is_not_sent_as_dominant_theme_by_default(self):
+        agg = IntentAggregator({"top_intents": 3, "min_count": 2, "window_seconds": 60})
+        base = time.time()
+        for i, text in enumerate([
+            "comentario largo random sobre vitaly y cosas sin pregunta clara",
+            "otra frase extensa mencionando vital pero sin una intención útil",
+            "me saludas hoy es mi cumpleaños soy tu fan",
+            "me saludas soy tu fan desde pequeño por favor",
+        ]):
+            agg.add_message({"user": f"u{i}", "text": text, "timestamp": base + i})
+
+        intents = [item["intent"] for item in agg.summarize(now=base + 10)["top_intents"]]
+
+        assert "greeting_request" in intents
+        assert "other" not in intents
+
+    def test_marks_duplicate_intent_messages(self):
+        agg = IntentAggregator({"min_count": 1, "duplicate_window_seconds": 45.0})
+        base = time.time()
+        text = "ADMIN ABUSE ZOO CON AMIGOS RIVALS CAPITULO 2"
+        agg.add_message({"user": "a", "text": text, "timestamp": base})
+        agg.add_message({"user": "b", "text": text, "timestamp": base + 1})
+
+        summary = agg.summarize(now=base + 2)
+        top = summary["top_intents"][0]
+        assert top["intent"] == "copypasta"
+        assert top["duplicates"] == 1
 
 
 # --- TC3.4 — Session History ---
@@ -367,7 +504,7 @@ class TestAggregator:
 
         spike_base = time.time()
         for i in range(60):
-            agg.process_message({"user": f"spike{i}", "text": "Mensaje valido de pico para probar actividad", "timestamp": spike_base + (i * 0.01)})
+            agg.process_message({"user": f"spike{i}", "text": "Mensaje valido de pico para probar actividad intensa del chat", "timestamp": spike_base + (i * 0.01)})
 
         assert len(filtered_msgs) > 0
 
@@ -377,6 +514,39 @@ class TestAggregator:
         assert len(vibes) > 0
 
         assert len(triggers) > 0
+
+    def test_aggregated_context_includes_intent_summary(self, smart_aggregator_config, mock_llm, temp_dir):
+        """TC3.6.3b: Activity context should include ranked intent summary."""
+        cfg = smart_aggregator_config.copy()
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        cfg["intent"]["min_count"] = 2
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        contexts = []
+        agg.on_aggregated_context = lambda data: contexts.append(data)
+        agg.start_session("youtube", "headless_test")
+
+        base = time.time()
+        for i, text in enumerate([
+            "me saludas hoy es mi cumpleaños soy tu fan",
+            "me saludas soy tu fan desde pequeño por favor",
+            "me puedo unir al server privado para jugar contigo",
+            "puedo jugar contigo porfa en el servidor privado",
+            "pa cuando video con los bros y con Fede",
+            "cuando regresan los bros para grabar otro video juntos",
+        ]):
+            agg.process_message({"user": f"u{i}", "text": text, "timestamp": base + (i * 0.01)})
+
+        assert contexts
+        summary = contexts[-1]["intent_summary"]
+        assert summary["top_intents"]
+        assert "CONTEXTO PRIVADO" in summary["prompt"]
 
     def test_session_persistence(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.4: Aggregator persists session messages."""

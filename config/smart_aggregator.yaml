@@ -4,6 +4,21 @@ filter:
   discard_emojis_only: true
   discard_links: true
   discard_mentions: true
+  # Quality filters
+  discard_repetitive_chars: true
+  repetitive_char_threshold: 0.50
+  discard_repeated_words: true
+  repeated_word_max: 3
+  min_unique_word_ratio: 0.25
+  discard_gibberish: true
+  min_vowel_ratio: 0.10
+  min_token_vowel_ratio: 0.22
+  max_token_length: 24
+  max_gibberish_token_ratio: 0.35
+  discard_ascii_art: true
+  short_word_threshold: 7
+  # Minimum quality score to accept (0.0-1.0)
+  min_quality_score: 0.5
   whitelist:
     enabled: true
     users: []
@@ -40,6 +55,13 @@ spam:
   max_messages_per_user: 10
   duplicate_window_seconds: 20
   collapse_ui_duplicates: true
+
+intent:
+  window_seconds: 60
+  top_intents: 5
+  min_count: 2
+  max_examples_per_intent: 3
+  duplicate_window_seconds: 45.0
 
 history:
   db_path: "data/smart_aggregator/sessions.db"
