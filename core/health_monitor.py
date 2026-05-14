@@ -1,0 +1,516 @@
+"""Health Monitor — system health daemon for VoiceAI.
+
+Provides real-time monitoring of:
+- GPU VRAM availability (via pynvml, graceful degradation)
+- Ollama service health (via /api/tags)
+- TTS Real-Time Factor (RTF) tracking
+- Qwen server subprocess lifecycle
+- Overall system health aggregation (green/yellow/red)
+
+All components are thread-safe. HealthMonitor runs as a daemon thread.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Optional
+
+import requests
+
+from config.settings import (
+    HEALTH_POLL_INTERVAL,
+    OLLAMA_FAILURE_THRESHOLD,
+    OLLAMA_POLL_INTERVAL,
+    OLLAMA_REQUEST_TIMEOUT,
+    QWEN_IDLE_TTL,
+    QWEN_STARTUP_TIMEOUT,
+    RTF_HIGH_THRESHOLD,
+    RTF_POLL_WINDOW,
+    RTF_RECOVERY_COUNT,
+    RTF_RECOVERY_THRESHOLD,
+    VRAM_CRITICAL_THRESHOLD_MB,
+    VRAM_LOW_THRESHOLD_MB,
+    VRAM_POLL_INTERVAL,
+)
+
+logger = logging.getLogger("HealthMonitor")
+
+
+# ──────────────────────────────────────────────
+# VRAM Guard
+# ──────────────────────────────────────────────
+
+class VRAMGuard:
+    """Polls GPU free VRAM via pynvml. Graceful degradation when unavailable."""
+
+    def __init__(self) -> None:
+        self._pynvml_available = False
+        self._free_mb: float = 0.0
+        self._status: str = "unavailable"
+        self._lock = threading.Lock()
+
+        # Try to import pynvml; fail gracefully
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self._pynvml = pynvml
+            self._pynvml_available = True
+            logger.info("VRAMGuard: pynvml initialized successfully")
+        except Exception:
+            logger.debug("VRAMGuard: pynvml not available; graceful degradation mode")
+
+    def poll(self) -> None:
+        """Poll current free VRAM and update status."""
+        if not self._pynvml_available:
+            with self._lock:
+                self._status = "unavailable"
+                self._free_mb = 0.0
+            return
+
+        try:
+            info = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle)
+            free_mb = info.free / (1024 * 1024)
+            with self._lock:
+                self._free_mb = free_mb
+                if free_mb < VRAM_CRITICAL_THRESHOLD_MB:
+                    self._status = "critical"
+                elif free_mb < VRAM_LOW_THRESHOLD_MB:
+                    self._status = "low"
+                else:
+                    self._status = "normal"
+        except Exception as e:
+            logger.warning(f"VRAMGuard: poll failed: {e}")
+            with self._lock:
+                self._status = "unavailable"
+                self._free_mb = 0.0
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    @property
+    def free_mb(self) -> float:
+        with self._lock:
+            return self._free_mb
+
+
+# ──────────────────────────────────────────────
+# Ollama Watchdog
+# ──────────────────────────────────────────────
+
+class OllamaWatchdog:
+    """Polls Ollama /api/tags to check service health."""
+
+    def __init__(self) -> None:
+        self._consecutive_failures = 0
+        self._status: str = "unknown"
+        self._lock = threading.Lock()
+        self._base_url = "http://127.0.0.1:11434"
+
+    def poll(self) -> None:
+        """Poll Ollama /api/tags endpoint."""
+        try:
+            resp = requests.get(
+                f"{self._base_url}/api/tags",
+                timeout=OLLAMA_REQUEST_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                with self._lock:
+                    self._consecutive_failures = 0
+                    self._status = "healthy"
+                return
+        except Exception:
+            pass
+
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= OLLAMA_FAILURE_THRESHOLD:
+                self._status = "down"
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    @property
+    def consecutive_failures(self) -> int:
+        with self._lock:
+            return self._consecutive_failures
+
+
+# ──────────────────────────────────────────────
+# RTF Tracker
+# ──────────────────────────────────────────────
+
+class RTFTracker:
+    """Tracks Real-Time Factor for TTS generation quality.
+
+    RTF = generation_time / audio_duration
+    Lower is better. RTF > 2.0 means generation is slower than real-time.
+    """
+
+    def __init__(self) -> None:
+        self._measurements: deque = deque(maxlen=RTF_POLL_WINDOW)
+        self._lock = threading.Lock()
+
+    def record(self, generation_time: float, audio_duration: float) -> None:
+        """Record an RTF measurement. Excludes audio_duration < 0.5s."""
+        if audio_duration < 0.5:
+            return
+        rtf = generation_time / audio_duration if audio_duration > 0 else 0.0
+        with self._lock:
+            self._measurements.append(rtf)
+
+    @property
+    def rolling_average(self) -> Optional[float]:
+        with self._lock:
+            if not self._measurements:
+                return None
+            return sum(self._measurements) / len(self._measurements)
+
+    @property
+    def status(self) -> str:
+        avg = self.rolling_average
+        if avg is None:
+            return "unknown"
+        if avg > RTF_HIGH_THRESHOLD:
+            return "degraded"
+        return "normal"
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._measurements)
+
+
+# ──────────────────────────────────────────────
+# Qwen Process Manager
+# ──────────────────────────────────────────────
+
+class QwenProcessManager:
+    """Manages the Qwen TTS server subprocess lifecycle.
+
+    Can start, stop, and attach to existing server processes.
+    Detects manually-started servers and avoids killing them.
+    """
+
+    XTTS_PYTHON = r"E:\Miniconda\envs\xtts_env\python.exe"
+    SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
+    HEALTH_URL = "http://127.0.0.1:5000/health"
+
+    def __init__(self) -> None:
+        self._process: Optional[subprocess.Popen] = None
+        self._is_manual: bool = False
+        self._last_health_time: float = 0.0
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        """Launch server_qwen.py via subprocess. Returns True if healthy."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                logger.debug("QwenProcessManager: server already running")
+                return True
+
+        cmd = [self.XTTS_PYTHON, self.SERVER_SCRIPT]
+        logger.info(f"QwenProcessManager: starting Qwen server: {' '.join(cmd)}")
+
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            self._is_manual = False
+        except Exception as e:
+            logger.error(f"QwenProcessManager: failed to start: {e}")
+            return False
+
+        # Wait for /health to respond
+        deadline = time.time() + QWEN_STARTUP_TIMEOUT
+        while time.time() < deadline:
+            if self._check_health():
+                with self._lock:
+                    self._last_health_time = time.time()
+                logger.info("QwenProcessManager: server started and healthy")
+                return True
+            time.sleep(1.0)
+
+        logger.error("QwenProcessManager: startup timeout waiting for /health")
+        self.stop()
+        return False
+
+    def stop(self) -> None:
+        """Stop the managed server process. Does NOT stop manual servers."""
+        with self._lock:
+            if self._is_manual:
+                logger.debug("QwenProcessManager: skipping stop of manual server")
+                return
+            if self._process is None:
+                return
+
+            proc = self._process
+            self._process = None
+
+        if proc.poll() is not None:
+            return  # Already exited
+
+        try:
+            if sys.platform == "win32":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.terminate()
+
+            # Wait up to 10s, then SIGKILL
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            logger.info("QwenProcessManager: server stopped")
+        except Exception as e:
+            logger.warning(f"QwenProcessManager: error stopping: {e}")
+
+    def attach_existing(self) -> bool:
+        """Check if a server is already running on port 5000 and attach to it."""
+        if self._is_port_in_use(5000):
+            if self._check_health():
+                with self._lock:
+                    self._is_manual = True
+                    self._process = None
+                    self._last_health_time = time.time()
+                logger.info("QwenProcessManager: attached to existing manual server")
+                return True
+        return False
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            if self._is_manual:
+                return self._is_port_in_use(5000)
+            if self._process is None:
+                return False
+            return self._process.poll() is None
+
+    @property
+    def is_healthy(self) -> bool:
+        if self._check_health():
+            with self._lock:
+                self._last_health_time = time.time()
+            return True
+        return False
+
+    @property
+    def is_manual(self) -> bool:
+        with self._lock:
+            return self._is_manual
+
+    @property
+    def idle_seconds(self) -> float:
+        with self._lock:
+            if self._last_health_time == 0.0:
+                return 0.0
+            return time.time() - self._last_health_time
+
+    def _check_health(self) -> bool:
+        try:
+            resp = requests.get(self.HEALTH_URL, timeout=3)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_port_in_use(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+# ──────────────────────────────────────────────
+# MonitorState
+# ──────────────────────────────────────────────
+
+@dataclass
+class MonitorState:
+    """Thread-safe snapshot of overall system health."""
+    vram_status: str = "unknown"
+    rtf_status: str = "unknown"
+    ollama_status: str = "unknown"
+    qwen_status: str = "unknown"
+    overall_status: str = "unknown"
+    free_vram_mb: float = 0.0
+    rtf_rolling_avg: Optional[float] = None
+    last_updated: float = 0.0
+
+
+# ──────────────────────────────────────────────
+# HealthMonitor Daemon
+# ──────────────────────────────────────────────
+
+class HealthMonitor(threading.Thread):
+    """Main health monitoring daemon.
+
+    Runs on its own thread, polls all sub-components, and exposes
+    thread-safe health state via the `state` property.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="HealthMonitor", daemon=True)
+        self._vram = VRAMGuard()
+        self._ollama = OllamaWatchdog()
+        self._rtf = RTFTracker()
+        self._qwen = QwenProcessManager()
+
+        self._state = MonitorState()
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        """Main polling loop. Runs until stop() is called."""
+        logger.info("HealthMonitor: daemon started")
+        while not self._stop_event.is_set():
+            self._poll_all()
+            self._stop_event.wait(HEALTH_POLL_INTERVAL)
+        logger.info("HealthMonitor: daemon stopped")
+
+    def stop(self) -> None:
+        """Signal the daemon to stop and clean up resources."""
+        self._stop_event.set()
+        self._qwen.stop()
+        self.join(timeout=5)
+
+    def _poll_all(self) -> None:
+        """Poll all sub-components and update state atomically."""
+        self._vram.poll()
+        self._ollama.poll()
+        self._qwen.is_healthy  # triggers health check + idle TTL reset
+
+        overall = self._compute_overall()
+
+        with self._lock:
+            self._state = MonitorState(
+                vram_status=self._vram.status,
+                rtf_status=self._rtf.status,
+                ollama_status=self._ollama.status,
+                qwen_status="healthy" if self._qwen.is_running else ("unknown" if not self._qwen.is_manual else "unavailable"),
+                overall_status=overall,
+                free_vram_mb=self._vram.free_mb,
+                rtf_rolling_avg=self._rtf.rolling_average,
+                last_updated=time.time(),
+            )
+
+    def _compute_overall(self) -> str:
+        """Compute overall health: green, yellow, or red."""
+        vram = self._vram.status
+        rtf = self._rtf.status
+        qwen_running = self._qwen.is_running
+        ollama = self._ollama.status
+
+        # RED conditions: any single critical factor
+        if vram == "critical":
+            return "red"
+        if ollama == "down":
+            return "red"
+        if not qwen_running and self._qwen.is_manual is False:
+            # We manage the server and it's not running
+            return "red"
+
+        # YELLOW conditions: any single degraded factor
+        if vram == "low":
+            return "yellow"
+        if rtf == "degraded":
+            return "yellow"
+
+        return "green"
+
+    @property
+    def state(self) -> MonitorState:
+        """Return a thread-safe snapshot of current health state."""
+        with self._lock:
+            return MonitorState(
+                vram_status=self._state.vram_status,
+                rtf_status=self._state.rtf_status,
+                ollama_status=self._state.ollama_status,
+                qwen_status=self._state.qwen_status,
+                overall_status=self._state.overall_status,
+                free_vram_mb=self._state.free_vram_mb,
+                rtf_rolling_avg=self._state.rtf_rolling_avg,
+                last_updated=self._state.last_updated,
+            )
+
+    def should_use_heavy_tts(self, auto_fallback_enabled: bool, manual_motor: str) -> bool:
+        """Decide whether heavy TTS (Qwen) should be used.
+
+        Args:
+            auto_fallback_enabled: Whether auto-fallback is active.
+            manual_motor: Current manual motor selection ("ligero" or "pesado").
+
+        Returns:
+            True if heavy TTS should be used, False if fallback to Edge-TTS.
+        """
+        if not auto_fallback_enabled:
+            # Backward compat: if auto-fallback disabled, always respect manual
+            return manual_motor == "pesado"
+
+        # Manual "ligero" always uses Edge-TTS regardless of health
+        if manual_motor == "ligero":
+            return False
+
+        # Check health gates
+        s = self.state
+        if s.vram_status in ("low", "critical"):
+            logger.info(f"HealthMonitor: heavy TTS blocked — vram_{s.vram_status}")
+            return False
+        if s.rtf_status == "degraded":
+            logger.info("HealthMonitor: heavy TTS blocked — rtf_degraded")
+            return False
+        if s.qwen_status not in ("healthy", "unavailable"):
+            logger.info(f"HealthMonitor: heavy TTS blocked — qwen_{s.qwen_status}")
+            return False
+
+        return True
+
+    def can_vibe_call(self) -> bool:
+        """Check if Vibe LLM calls are allowed.
+
+        Returns False when VRAM is low/critical or Ollama is down.
+        """
+        s = self.state
+        if s.vram_status in ("low", "critical"):
+            return False
+        if s.ollama_status == "down":
+            return False
+        return True
+
+    def record_ttf_measurement(self, generation_time: float, audio_duration: float) -> None:
+        """Record an RTF measurement from a completed TTS generation."""
+        try:
+            self._rtf.record(generation_time, audio_duration)
+        except Exception as e:
+            logger.warning(f"HealthMonitor: RTF measurement failed: {e}")
+
+    @property
+    def vram_guard(self) -> VRAMGuard:
+        return self._vram
+
+    @property
+    def ollama_watchdog(self) -> OllamaWatchdog:
+        return self._ollama
+
+    @property
+    def rtf_tracker(self) -> RTFTracker:
+        return self._rtf
+
+    @property
+    def qwen_manager(self) -> QwenProcessManager:
+        return self._qwen

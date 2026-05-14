@@ -116,6 +116,13 @@ except Exception as e:
     logger.error(f"Fallo al cargar Qwen3-TTS: {e}")
     model = None
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health probe for the HealthMonitor daemon."""
+    if model is not None:
+        return jsonify({"status": "ok", "model_loaded": True}), 200
+    return jsonify({"status": "error", "model_loaded": False}), 503
+
 @app.route('/generar', methods=['POST'])
 def generar_audio():
     data = request.json
