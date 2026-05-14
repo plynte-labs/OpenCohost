@@ -1527,6 +1527,19 @@ class VocalAIApp(ctk.CTk):
     # Motor event handler
     # ──────────────────────────────────────────────
 
+    def _safe_after(self, func) -> None:
+        """Schedule a UI update on the main thread, safely handling startup race conditions.
+
+        During startup the motor thread may fire events before Tkinter enters
+        mainloop().  ``self.after()`` raises RuntimeError in that case.  We
+        silently skip — the UI will be in its initial state and subsequent
+        events will update it once the loop is running.
+        """
+        try:
+            self.after(0, func)
+        except RuntimeError:
+            pass
+
     def _on_motor_event(self, status: str) -> None:
         handlers = {
             "ready": self._on_motor_ready,
@@ -1546,50 +1559,50 @@ class VocalAIApp(ctk.CTk):
             handler()
 
     def _on_motor_ready(self) -> None:
-        self.after(0, lambda: self.btn_grabar.configure(state="normal"))
-        self.after(0, lambda: self.btn_voz.configure(state="normal"))
-        self.after(0, lambda: self.btn_ws.configure(state="normal"))
-        self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
-        self.after(0, lambda: self.btn_enviar.configure(state="normal"))
+        self._safe_after(lambda: self.btn_grabar.configure(state="normal"))
+        self._safe_after(lambda: self.btn_voz.configure(state="normal"))
+        self._safe_after(lambda: self.btn_ws.configure(state="normal"))
+        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
+        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
         self._actualizar_pipeline("idle")
-        self.after(0, lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
+        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
         if hasattr(self.motor_ia, "current_model"):
-            self.after(0, lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
+            self._safe_after(lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
             self.voice_panel._start_ptt_flush_watcher()
 
     def _on_motor_model_warming(self) -> None:
-        self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
-        self.after(0, lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
+        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
         self._actualizar_pipeline("init")
 
     def _on_motor_ollama_unavailable(self) -> None:
-        self.after(0, lambda: self.btn_grabar.configure(state="disabled"))
-        self.after(0, lambda: self.btn_voz.configure(state="disabled"))
-        self.after(0, lambda: self.btn_ws.configure(state="disabled"))
-        self.after(0, lambda: self.btn_primary_voice.configure(state="disabled"))
-        self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
-        self.after(0, lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
+        self._safe_after(lambda: self.btn_grabar.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_voz.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_ws.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
+        self._safe_after(lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
         self._actualizar_pipeline("error")
         if hasattr(self, "_avatar_bridge"):
             self._avatar_bridge.set_state(AvatarState.ERROR)
 
     def _on_motor_processing(self) -> None:
         self._actualizar_pipeline("processing")
-        self.after(0, lambda: self.btn_enviar.configure(state="disabled"))
-        self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
-        self.after(0, lambda: self.btn_download.configure(state="disabled"))
-        self.after(0, lambda: self.switch_ptt.configure(state="disabled"))
-        self.after(0, lambda: self.btn_mapear.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
+        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_download.configure(state="disabled"))
+        self._safe_after(lambda: self.switch_ptt.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_mapear.configure(state="disabled"))
 
     def _on_motor_idle(self) -> None:
         self._actualizar_pipeline("idle")
-        self.after(0, lambda: self.btn_enviar.configure(state="normal"))
-        self.after(0, lambda: self.combo_modelos.configure(state="normal"))
-        self.after(0, lambda: self.model_panel.update_button_for_ollama_state())
-        self.after(0, lambda: self.switch_ptt.configure(state="normal"))
-        self.after(0, lambda: self.btn_mapear.configure(state="normal"))
+        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
+        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
+        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
+        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
+        self._safe_after(lambda: self.btn_mapear.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
         if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
             self._kira_agenda_schedule_tick(500)
@@ -1636,7 +1649,7 @@ class VocalAIApp(ctk.CTk):
             self._avatar_bridge.set_state(
                 AvatarState.LISTENING if estado == "listening" else AvatarState.IDLE
             )
-        self.after(0, lambda: self.switch_ptt.configure(state="normal"))
+        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
 
     def _start_speaking_alt_timer(self) -> None:
@@ -1736,35 +1749,35 @@ class VocalAIApp(ctk.CTk):
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
-        self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
-        self.after(0, lambda: self.model_panel.update_model_info(model))
-        self.after(0, lambda: self.model_panel.set_active_model(model))
+        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.model_panel.update_model_info(model))
+        self._safe_after(lambda: self.model_panel.set_active_model(model))
         self._actualizar_pipeline("idle")
 
     def _on_motor_download_start(self) -> None:
-        self.after(0, lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
-        self.after(0, lambda: self.combo_modelos.configure(state="disabled"))
-        self.after(0, lambda: self.progress_download.pack(fill="x", padx=10, pady=(4, 10)))
-        self.after(0, lambda: self.progress_download.set(0))
-        self.after(0, lambda: self.btn_primary_voice.configure(state="disabled"))
+        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
+        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
+        self._safe_after(lambda: self.progress_download.pack(fill="x", padx=10, pady=(4, 10)))
+        self._safe_after(lambda: self.progress_download.set(0))
+        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
         self._actualizar_pipeline("downloading")
 
     def _on_motor_download_done(self) -> None:
         model = self.motor_ia.current_model
-        self.after(0, lambda: self.model_panel.update_button_for_ollama_state())
-        self.after(0, lambda: self.combo_modelos.configure(state="normal"))
-        self.after(0, lambda: self.progress_download.pack_forget())
-        self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
-        self.after(0, lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
-        self.after(0, lambda: self.model_panel.update_model_info(model))
+        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
+        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
+        self._safe_after(lambda: self.progress_download.pack_forget())
+        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
+        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._actualizar_pipeline("idle")
-        self.after(0, lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
+        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
 
     def _on_motor_download_error(self) -> None:
-        self.after(0, lambda: self.model_panel.update_button_for_ollama_state())
-        self.after(0, lambda: self.combo_modelos.configure(state="normal"))
-        self.after(0, lambda: self.progress_download.pack_forget())
-        self.after(0, lambda: self.btn_primary_voice.configure(state="normal"))
+        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
+        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
+        self._safe_after(lambda: self.progress_download.pack_forget())
+        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
         self._actualizar_pipeline("error")
         if hasattr(self, "_avatar_bridge"):
             self._avatar_bridge.set_state(AvatarState.ERROR)
