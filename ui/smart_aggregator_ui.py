@@ -66,6 +66,7 @@ class SmartAggregatorUI:
         schedule_ui_update: Callable[[Callable[[], None]], None] | None = None,
         on_track_chat_user: Callable[[dict], None] | None = None,
         on_ingest_rf3: Callable[[str, dict], None] | None = None,
+        health_monitor: Any = None,
     ) -> None:
         self._ui_state = ui_state
         self._dispatcher = dispatcher
@@ -77,6 +78,7 @@ class SmartAggregatorUI:
         self._consola_youtube = consola_youtube
         self._lbl_kira_chat_state = lbl_kira_chat_state
         self._status_bar = status_bar
+        self._health_monitor = health_monitor
 
         self._on_log = on_log or (lambda msg: None)
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
@@ -130,6 +132,15 @@ class SmartAggregatorUI:
         """Call the LLM for vibe analysis.  Raises if motor is busy."""
         if self.is_busy():
             raise RuntimeError("Motor IA ocupado")
+
+        # Health gate: block Vibe calls when VRAM is low or Ollama is down
+        hm = getattr(self, "_health_monitor", None)
+        if hm is not None:
+            state = hm.state
+            if state.vram_status in ("low", "critical"):
+                raise RuntimeError("Vibe paused: low VRAM")
+            if state.ollama_status == "down":
+                raise RuntimeError("Vibe unavailable: Ollama not running")
 
         ollama_client = getattr(self._motor_ia, "ollama", None)
         if ollama_client is None:

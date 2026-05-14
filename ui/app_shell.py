@@ -38,6 +38,8 @@ from ui.profile_panel import ProfilePanel
 from ui.status_bar import StatusBar
 from ui.smart_aggregator_ui import SmartAggregatorUI
 from ui.stream_admin_ui import StreamAdminUI
+from ui.cohost_agenda_panel import CoHostAgendaPanel
+from ui.music_panel import MusicPanel
 from ui.advanced_panel import AdvancedModePanel
 from ui.profiles_window import ConfiguradorPerfiles
 from ui.avatar_panel import AvatarPanel
@@ -53,8 +55,12 @@ from config.settings import (
 )
 from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
+from core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
+from core.audio_bed import AudioBedEngine
 from core.llm_engine import MotorVocalIA
-from smart_aggregator import Aggregator
+from core.health_monitor import HealthMonitor
+from core.music_library import MusicLibrary
+from smart_aggregator import AgendaAction, AgendaState, Aggregator, KiraAgendaController
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -103,6 +109,11 @@ class VocalAIApp(ctk.CTk):
         self._stream_admin_manual_disconnect: bool = False
         self._logs_panel_visible: bool = True
         self.perfiles = cargar_perfiles()
+        self.cohost_profiles = load_cohost_profiles()
+        self._current_cohost_profile = "Natural" if "Natural" in self.cohost_profiles else next(iter(self.cohost_profiles), "")
+        self.music_library = MusicLibrary()
+        self.music_library.load()
+        self.audio_bed = AudioBedEngine(self.music_library, on_log=lambda msg: self._print_log(msg))
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -146,6 +157,23 @@ class VocalAIApp(ctk.CTk):
         # Motor IA (deferred until mainloop is running to avoid
         # "main thread is not in main loop" race condition)
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
+        self.kira_agenda = KiraAgendaController()
+        self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
+        self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
+
+        # Health Monitor — system health daemon (graceful if init fails)
+        self.health_monitor: HealthMonitor | None = None
+        try:
+            self.health_monitor = HealthMonitor()
+            self.motor_ia.health_monitor = self.health_monitor  # wire for TTS fallback
+        except Exception as e:
+            logger.warning(f"HealthMonitor init failed (non-fatal): {e}")
+
+        if self._current_cohost_profile:
+            self.kira_agenda.set_profile(self.cohost_profiles.get(self._current_cohost_profile, {}))
+        self._kira_agenda_tick_id: str | None = None
+        self._kira_agenda_prefetched_action: AgendaAction | None = None
+        self._kira_agenda_pending_compact_chat: str = ""
         self.after(100, self._start_motor)
 
         # Wire motor_ia to voice control panel
@@ -169,6 +197,29 @@ class VocalAIApp(ctk.CTk):
         when the motor calls ui_callback before Tkinter's mainloop starts.
         """
         self.motor_ia.start()
+
+        # Start health monitor daemon
+        if self.health_monitor:
+            # Try to attach to manually-started Qwen server first
+            try:
+                self.health_monitor.qwen_manager.attach_existing()
+            except Exception as e:
+                logger.debug(f"HealthMonitor: could not attach existing server: {e}")
+            self.health_monitor.start()
+            # Begin UI health status polling
+            self._poll_health_status()
+
+    def _poll_health_status(self) -> None:
+        """Poll health monitor state and push to UI state (thread-safe via after)."""
+        if not self.health_monitor:
+            return
+        try:
+            state = self.health_monitor.state
+            self._ui_state.health_status = state.overall_status
+        except Exception:
+            pass
+        # Reschedule every 2 seconds for UI responsiveness
+        self.after(2000, self._poll_health_status)
 
     def _on_ui_state_change(self, key: str, value: Any) -> None:
         if key == "ws_connected":
@@ -369,8 +420,10 @@ class VocalAIApp(ctk.CTk):
         product_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 12))
         tab_product_config = product_tabs.add("Configuración")
         tab_product_stream = product_tabs.add("Stream")
+        tab_product_cohost = product_tabs.add("Co-host")
+        tab_product_music = product_tabs.add("Música")
         tab_product_avatar = product_tabs.add("Avatar / OBS")
-        for tab in (tab_product_config, tab_product_stream, tab_product_avatar):
+        for tab in (tab_product_config, tab_product_stream, tab_product_cohost, tab_product_music, tab_product_avatar):
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
 
@@ -507,6 +560,38 @@ class VocalAIApp(ctk.CTk):
         self.stream_admin_ui.build(stream_admin_panel)
         self._wire_stream_admin_callbacks()
 
+        cohost_panel_frame = ctk.CTkFrame(tab_product_cohost, fg_color="#0f151c", corner_radius=18)
+        cohost_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        cohost_panel_frame.grid_columnconfigure(0, weight=1)
+        cohost_panel_frame.grid_rowconfigure(0, weight=1)
+        self.cohost_agenda_panel = CoHostAgendaPanel(
+            on_add_topic=lambda title, angle, constraints, priority, length, turns: self._kira_agenda_add_topic(title, angle, constraints, priority, length, turns),
+            on_remove_topic=lambda index: self._kira_agenda_remove_topic(index),
+            on_move_topic=lambda index, direction: self._kira_agenda_move_topic(index, direction),
+            on_select_profile=lambda name: self._kira_agenda_select_profile(name),
+            on_save_profile=lambda name, style, priority, length: self._kira_agenda_save_profile(name, style, priority, length),
+            on_session_settings=lambda turns, rhythm, length, safety_mode: self._kira_agenda_set_session_settings(turns, rhythm, length, safety_mode),
+            on_enable=lambda: self._kira_agenda_enable(),
+            on_soft_stop=lambda: self._kira_agenda_soft_stop(),
+            on_emergency_stop=lambda: self._kira_agenda_emergency_stop(),
+        )
+        self.cohost_agenda_panel.build(cohost_panel_frame)
+        self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
+
+        music_panel_frame = ctk.CTkFrame(tab_product_music, fg_color="#0f151c", corner_radius=18)
+        music_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        music_panel_frame.grid_columnconfigure(0, weight=1)
+        music_panel_frame.grid_rowconfigure(0, weight=1)
+        self.music_panel = MusicPanel(
+            on_import=lambda mood: self._music_import_track(mood),
+            on_play_mood=lambda mood: self._music_play_mood(mood),
+            on_stop=lambda: self._music_stop(),
+            on_cleanup_missing=lambda: self._music_cleanup_missing(),
+            on_delete_track=lambda track_id: self._music_delete_track(track_id),
+        )
+        self.music_panel.build(music_panel_frame)
+        self._music_update_panel()
+
         # Avatar / OBS panel
         avatar_panel_frame = ctk.CTkFrame(tab_product_avatar, fg_color="#0f151c", corner_radius=18)
         avatar_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
@@ -555,6 +640,77 @@ class VocalAIApp(ctk.CTk):
         self._toggle_logs_panel()
 
     # ──────────────────────────────────────────────
+    # Music bed wiring
+    # ──────────────────────────────────────────────
+
+    def _music_import_track(self, mood: str) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Elegir música para mood",
+            filetypes=[("Audio", "*.mp3 *.wav")],
+        )
+        if not paths:
+            return
+        imported = 0
+        errors: list[str] = []
+        for path in paths:
+            try:
+                track = self.music_library.add_file(path, mood)
+                imported += 1
+                self._print_log(f"[Música] Importado como {track.label}: {track.original_name}")
+            except ValueError as exc:
+                errors.append(f"{os.path.basename(path)}: {exc}")
+        self._music_update_panel()
+        if errors:
+            messagebox.showwarning("Música", "\n".join(errors[:6]))
+        elif imported:
+            self._print_log(f"[Música] {imported} track(s) importados para {mood}.")
+
+    def _music_play_mood(self, mood: str) -> None:
+        if self.audio_bed.request_mood(mood, force=True, boundary=True):
+            self._music_update_panel()
+
+    def _music_stop(self) -> None:
+        self.audio_bed.stop()
+        self._print_log("[Música] Fade out solicitado.")
+
+    def _music_cleanup_missing(self) -> None:
+        if not messagebox.askyesno(
+            "Limpiar faltantes",
+            "¿Quitar de la biblioteca todos los tracks cuyo archivo ya no existe?\n\nNo borra archivos de música; solo limpia metadata faltante.",
+        ):
+            return
+        removed = self.music_library.cleanup_missing()
+        self._music_update_panel()
+        self._print_log(f"[Música] Tracks faltantes limpiados: {removed}.")
+
+    def _music_delete_track(self, track_id: str) -> None:
+        track = self.music_library.tracks.get(track_id)
+        if not track:
+            self._music_update_panel()
+            self._print_log("[Música] El track ya no existe en la biblioteca.")
+            return
+        if not messagebox.askyesno(
+            "Eliminar track",
+            f"¿Eliminar '{track.original_name}' de la biblioteca de música?\n\n"
+            "Se borrará la metadata y, si el archivo importado está dentro de la carpeta administrada por la app, también ese archivo interno. "
+            "No se borran archivos fuente externos.",
+        ):
+            return
+        removed = self.music_library.remove(track_id, delete_file=True)
+        self._music_update_panel()
+        if removed:
+            self._print_log(f"[Música] Track eliminado: {track.label} — {track.original_name}")
+        else:
+            self._print_log("[Música] No se pudo eliminar: el track ya no existe.")
+
+    def _music_update_panel(self) -> None:
+        if hasattr(self, "music_panel"):
+            self.music_panel.update_library(
+                self.music_library.counts_by_mood(),
+                list(self.music_library.all_tracks()),
+            )
+
+    # ──────────────────────────────────────────────
     # Stream Admin wiring
     # ──────────────────────────────────────────────
 
@@ -575,6 +731,226 @@ class VocalAIApp(ctk.CTk):
         sa.set_simulate_chat_callback(lambda: self._stream_admin_simulate_chat())
         sa.set_force_kira_callback(lambda: self._stream_admin_force_kira_comment())
         sa.set_refresh_user_list_callback(lambda: self._stream_admin_refresh_user_list())
+        sa.set_agenda_add_topic_callback(lambda title, angle, constraints: self._kira_agenda_add_topic(title, angle, constraints))
+        sa.set_agenda_enable_callback(lambda: self._kira_agenda_enable())
+        sa.set_agenda_soft_stop_callback(lambda: self._kira_agenda_soft_stop())
+        sa.set_agenda_emergency_stop_callback(lambda: self._kira_agenda_emergency_stop())
+
+    def _kira_agenda_add_topic(self, title: str, angle: str, constraints: list[str], priority: str = "normal", response_length: str = "normal", max_turns: int | None = None) -> None:
+        title = (title or "").strip()
+        try:
+            if max_turns is not None:
+                self.kira_agenda.set_session_settings(max_turns_per_topic=max_turns, response_length=response_length)
+            topic = self.kira_agenda.add_topic(title, angle, constraints, approved=True, priority=priority, response_length=response_length)
+            self.kira_agenda.queue_topic(topic.id)
+        except ValueError as e:
+            messagebox.showwarning("Kira Agenda", str(e))
+            return
+        self._on_stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}, {self.kira_agenda.max_turns_per_topic} turnos globales)")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_set_session_settings(self, turns: int, rhythm: str, response_length: str, safety_mode: str = "live_safe") -> None:
+        self.kira_agenda.set_session_settings(max_turns_per_topic=turns, rhythm=rhythm, response_length=response_length, safety_mode=safety_mode)
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_select_profile(self, name: str) -> None:
+        if name not in self.cohost_profiles:
+            return
+        self._current_cohost_profile = name
+        self.kira_agenda.set_profile(self.cohost_profiles[name])
+        self._on_stream_admin_log(f"[Kira Agenda] Perfil Co-host activo: {name}")
+
+    def _kira_agenda_save_profile(self, name: str, style: str, priority: str, response_length: str) -> None:
+        safe_name = sanitize_profile_name(name)
+        if not safe_name:
+            messagebox.showwarning("Kira Agenda", "El perfil necesita un nombre.")
+            return
+        try:
+            normalized = normalize_cohost_profile({
+                "style": self.kira_agenda.sanitize_topic_text(style, field="profile_style", required=True),
+                "default_priority": priority,
+                "default_response_length": response_length,
+            })
+            self.kira_agenda.set_profile(normalized)
+        except ValueError as e:
+            messagebox.showwarning("Kira Agenda", str(e))
+            return
+        self.cohost_profiles[safe_name] = normalized
+        self._current_cohost_profile = safe_name
+        save_cohost_profiles(self.cohost_profiles)
+        self.cohost_agenda_panel.set_profiles(self.cohost_profiles, safe_name)
+        self._on_stream_admin_log(f"[Kira Agenda] Perfil Co-host guardado: {safe_name}")
+
+    def _kira_agenda_topic_by_queue_index(self, index: int):
+        queued = self.kira_agenda.queued_topics()
+        if index < 1 or index > len(queued):
+            messagebox.showwarning("Kira Agenda", "Elegí un número válido de la cola.")
+            return None
+        return queued[index - 1]
+
+    def _kira_agenda_remove_topic(self, index: int) -> None:
+        topic = self._kira_agenda_topic_by_queue_index(index)
+        if not topic:
+            return
+        if not messagebox.askyesno(
+            "Eliminar tema de agenda",
+            f"¿Eliminar de la cola el tema '{topic.title}'?\n\nLa acción no borra perfiles ni historial, solo este tema pendiente.",
+        ):
+            return
+        self.kira_agenda.remove_queued_topic(topic.id)
+        self._on_stream_admin_log(f"[Kira Agenda] Tema eliminado de la cola: {topic.title}")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_move_topic(self, index: int, direction: int) -> None:
+        topic = self._kira_agenda_topic_by_queue_index(index)
+        if not topic:
+            return
+        self.kira_agenda.move_queued_topic(topic.id, direction)
+        self._on_stream_admin_log(f"[Kira Agenda] Tema reordenado: {topic.title}")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_enable(self) -> None:
+        if not self.kira_agenda.queued_topics() and not self.kira_agenda.active_topic:
+            self._on_stream_admin_log("[Kira Agenda] No se activa: no hay temas en cola.")
+            self._kira_agenda_update_status()
+            return
+        self.kira_agenda.enable()
+        self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
+        self._kira_agenda_update_status()
+        self._kira_agenda_tick()
+
+    def _kira_agenda_soft_stop(self) -> None:
+        action = self.kira_agenda.soft_stop()
+        self._enqueue_kira_agenda_action(action)
+        self._on_stream_admin_log("[Kira Agenda] Stop suave solicitado.")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_emergency_stop(self) -> None:
+        self._kira_agenda_prefetched_action = None
+        self.kira_agenda.emergency_stop()
+        if self._kira_agenda_tick_id is not None:
+            try:
+                self.after_cancel(self._kira_agenda_tick_id)
+            except Exception:
+                pass
+            self._kira_agenda_tick_id = None
+        if hasattr(self.motor_ia, "drop_pending_sources"):
+            self.motor_ia.drop_pending_sources(("kira-agenda",))
+        self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_tick(self) -> None:
+        if not hasattr(self, "kira_agenda"):
+            return
+        action = self.kira_agenda.next_action(
+            motor_busy=getattr(self.motor_ia, "is_processing", False),
+            kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+        )
+        self._enqueue_kira_agenda_action(action)
+        self._kira_agenda_update_status()
+        self._kira_agenda_schedule_tick(4500)
+
+    def _kira_agenda_schedule_tick(self, delay_ms: int) -> None:
+        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+            return
+        if self._kira_agenda_tick_id is not None:
+            try:
+                self.after_cancel(self._kira_agenda_tick_id)
+            except Exception:
+                pass
+        self._kira_agenda_tick_id = self.after(delay_ms, self._kira_agenda_tick)
+
+    def _enqueue_kira_agenda_action(self, action: AgendaAction) -> None:
+        if action.kind != "enqueue" or not action.prompt:
+            return
+        self._kira_agenda_prefetched_action = None
+        if hasattr(self.motor_ia, "clear_prefetched_agenda"):
+            self.motor_ia.clear_prefetched_agenda()
+        if action.source.startswith("kira-agenda") and hasattr(self.motor_ia, "replace_pending"):
+            self.motor_ia.replace_pending(action.prompt, priority=action.priority, source=action.source)
+        else:
+            self.motor_ia.enqueue(action.prompt, priority=action.priority, source=action.source)
+
+    def _kira_agenda_has_higher_priority_pending(self, action: AgendaAction) -> bool:
+        if not hasattr(self.motor_ia, "has_pending_priority_before"):
+            return False
+        return bool(self.motor_ia.has_pending_priority_before(action.priority))
+
+    def _kira_agenda_consume_pending_chat_if_due(self) -> bool:
+        compact_chat = getattr(self, "_kira_agenda_pending_compact_chat", "").strip()
+        if not compact_chat or not hasattr(self, "kira_agenda"):
+            return False
+        if not hasattr(self.kira_agenda, "chat_signal_due") or not self.kira_agenda.chat_signal_due():
+            return False
+        action = self.kira_agenda.next_action(compact_chat=compact_chat)
+        if action.kind != "enqueue":
+            return False
+        self._kira_agenda_pending_compact_chat = ""
+        self._enqueue_kira_agenda_action(action)
+        self._kira_agenda_update_status()
+        return True
+
+    def _kira_agenda_prefetch_while_speaking(self) -> None:
+        if not hasattr(self, "kira_agenda") or not hasattr(self.motor_ia, "prefetch_agenda"):
+            return
+        if not self._is_kira_agenda_speech_source():
+            return
+        action = self.kira_agenda.prefetch_action_after_current_speech()
+        if action.kind != "enqueue" or not action.prompt:
+            return
+        if self.motor_ia.prefetch_agenda(action.prompt, priority=action.priority, source=action.source):
+            self._kira_agenda_prefetched_action = action
+
+    def _kira_agenda_play_prefetched_if_ready(self) -> bool:
+        action = getattr(self, "_kira_agenda_prefetched_action", None)
+        if not action or not hasattr(self.motor_ia, "wait_prefetched_agenda"):
+            return False
+        if self._kira_agenda_has_higher_priority_pending(action):
+            self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
+            self._kira_agenda_clear_prefetch()
+            return False
+        if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
+            return False
+        self.kira_agenda.start_prefetched_action(action)
+        self._kira_agenda_prefetched_action = None
+        if self.motor_ia.play_prefetched_agenda():
+            self._kira_agenda_update_status()
+            return True
+        return False
+
+    def _kira_agenda_clear_prefetch(self) -> None:
+        self._kira_agenda_prefetched_action = None
+        if hasattr(self.motor_ia, "clear_prefetched_agenda"):
+            self.motor_ia.clear_prefetched_agenda()
+
+    def _is_kira_agenda_speech_source(self) -> bool:
+        source = getattr(self.motor_ia, "current_speech_source", "") or ""
+        return str(source).startswith("kira-agenda")
+
+    def _kira_agenda_update_status(self) -> None:
+        if not hasattr(self, "stream_admin_ui") or not hasattr(self, "kira_agenda"):
+            return
+        active = self.kira_agenda.active_topic
+        queued = len(self.kira_agenda.queued_topics())
+        if active:
+            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}/{self.kira_agenda.safety_mode}\nTurnos hablados: {active.turns_spoken}/{self.kira_agenda.max_turns_per_topic}"
+        else:
+            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            current_topic = "Sin tema activo"
+        color = "#ffaa00" if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR else "#8fa3b8"
+        self.after(0, lambda: self.stream_admin_ui.set_agenda_status(text, color))
+        if hasattr(self, "cohost_agenda_panel"):
+            queue_lines = [
+                f"{idx}. [{topic.priority}] {topic.title}"
+                for idx, topic in enumerate(self.kira_agenda.queued_topics(), start=1)
+            ]
+            self.after(0, lambda: self.cohost_agenda_panel.update_status(
+                state=self.kira_agenda.state.value,
+                current_topic=current_topic,
+                queue_lines=queue_lines,
+                failures=self.kira_agenda.failure_count,
+            ))
 
     def _init_stream_admin(self) -> None:
         try:
@@ -1018,6 +1394,7 @@ class VocalAIApp(ctk.CTk):
             schedule_ui_update=lambda fn: self.after(0, fn),
             on_track_chat_user=lambda msg: self._stream_admin_track_chat_user(msg),
             on_ingest_rf3=lambda evt, data: self._stream_admin_ingest_rf3_event(evt, data),
+            health_monitor=self.health_monitor,
         )
         self.smart_agg_ui.initialize()
 
@@ -1026,7 +1403,8 @@ class VocalAIApp(ctk.CTk):
         self.smart_agg.on_filtered_message = self.smart_agg_ui.on_filtered_message
         self.smart_agg.on_vibe_update = self.smart_agg_ui.on_vibe_update
         self.smart_agg.on_activity_trigger = self.smart_agg_ui.on_activity_trigger
-        self.smart_agg.on_aggregated_context = self.smart_agg_ui.on_aggregated_context
+        self.smart_agg.on_aggregated_context = self._on_smart_aggregated_context
+        self.smart_agg.on_live_safety_log = self._on_stream_admin_log
         self.smart_agg.on_source_error = self.smart_agg_ui.on_source_error
         self.smart_agg.on_source_connect = self.smart_agg_ui.on_source_connect
         self.smart_agg.on_source_disconnect = self.smart_agg_ui.on_source_disconnect
@@ -1038,6 +1416,28 @@ class VocalAIApp(ctk.CTk):
             "cooldown": self.smart_agg.activity.cooldown_seconds,
         })
         self.log_queue.put("[SmartAggregator] RF3 listo. Ingresa un video_id/URL de YouTube Live para conectar chat.")
+
+    def _on_smart_aggregated_context(self, data: dict) -> None:
+        """Route compact chat either to Agenda Mode or the existing RF3 reaction."""
+        if getattr(self, "kira_agenda", None) and self.kira_agenda.state != AgendaState.OFF:
+            intent_summary = data.get("intent_summary") or {}
+            compact_chat = intent_summary.get("prompt") or ""
+            if not compact_chat:
+                context = data.get("context", [])[-6:]
+                compact_chat = "\n".join(m.get("text", "") for m in context if m.get("text"))
+            if getattr(self.motor_ia, "is_processing", False) or getattr(self.motor_ia, "is_speaking", False):
+                self._kira_agenda_pending_compact_chat = compact_chat.strip()
+                self._kira_agenda_update_status()
+                return
+            action = self.kira_agenda.next_action(
+                motor_busy=getattr(self.motor_ia, "is_processing", False),
+                kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+                compact_chat=compact_chat,
+            )
+            self._enqueue_kira_agenda_action(action)
+            self._kira_agenda_update_status()
+            return
+        self.smart_agg_ui.on_aggregated_context(data)
 
     # ──────────────────────────────────────────────
     # View switching
@@ -1191,8 +1591,18 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.switch_ptt.configure(state="normal"))
         self.after(0, lambda: self.btn_mapear.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
+        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+            self._kira_agenda_schedule_tick(500)
 
     def _on_motor_speaking_start(self) -> None:
+        if hasattr(self, "audio_bed"):
+            self.audio_bed.duck()
+        if hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source():
+            self.kira_agenda.mark_generation_accepted()
+            self._kira_agenda_update_status()
+            self._kira_agenda_prefetch_while_speaking()
+        elif hasattr(self, "kira_agenda"):
+            self._kira_agenda_clear_prefetch()
         self._actualizar_pipeline("speaking")
         self._log_accion("Kira comenzó a sintetizar respuesta")
         if hasattr(self, "_avatar_bridge"):
@@ -1200,7 +1610,23 @@ class VocalAIApp(ctk.CTk):
             self._start_speaking_alt_timer()
 
     def _on_motor_speaking_end(self) -> None:
+        prefetched_started = False
+        agenda_speech = hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source()
+        if agenda_speech:
+            self.kira_agenda.mark_speech_complete()
+            self._kira_agenda_update_status()
+            if self._kira_agenda_consume_pending_chat_if_due():
+                prefetched_started = True
+            else:
+                prefetched_started = self._kira_agenda_play_prefetched_if_ready()
+            if not prefetched_started and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+                self._kira_agenda_schedule_tick(1200)
+        elif hasattr(self, "kira_agenda"):
+            self._kira_agenda_clear_prefetch()
         self._stop_speaking_alt_timer()
+        if hasattr(self, "audio_bed"):
+            self.audio_bed.unduck()
+            self.audio_bed.on_boundary()
         estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
         self._actualizar_pipeline(estado)
         if hasattr(self, "_avatar_bridge"):
@@ -1623,6 +2049,13 @@ class VocalAIApp(ctk.CTk):
             self._obs_client.disconnect()
 
         self.ptt.stop_listener()
+
+        # Stop health monitor daemon
+        if self.health_monitor:
+            try:
+                self.health_monitor.stop()
+            except Exception as e:
+                logger.warning(f"HealthMonitor cleanup error: {e}")
 
         # Set avatar to sleeping on close
         if hasattr(self, "_avatar_bridge"):

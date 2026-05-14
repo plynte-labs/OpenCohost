@@ -47,6 +47,13 @@ _CHAT_STATUS_COLORS: dict[str, str] = {
     "error": "#cc3333",
 }
 
+_HEALTH_STATUS_COLORS: dict[str, str] = {
+    "unknown": "#666666",
+    "green": "#22cc66",
+    "yellow": "#cc8800",
+    "red": "#cc3333",
+}
+
 # ---------------------------------------------------------------------------
 # Pipeline state → display text + main label color
 # ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ class StatusBar:
         self.lbl_mic_status_pill: ctk.CTkLabel | None = None
         self.lbl_tts_status_pill: ctk.CTkLabel | None = None
         self.lbl_chat_status_pill: ctk.CTkLabel | None = None
+        self.lbl_health_status_pill: ctk.CTkLabel | None = None
 
     # ------------------------------------------------------------------
     # Pill creation
@@ -136,6 +144,12 @@ class StatusBar:
             fg_color="#1b2633", corner_radius=12,
         )
         self.lbl_chat_status_pill.pack(side="left", padx=4, pady=8)
+
+        self.lbl_health_status_pill = ctk.CTkLabel(
+            self._parent, text="Health: --",
+            fg_color="#666666", corner_radius=12,
+        )
+        self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
 
         # Subscribe to UIState observer for automatic pill updates
         if self._observer_id is not None:
@@ -193,6 +207,18 @@ class StatusBar:
         color = self._get_status_color("chat_status", status)
         text = self._get_status_text("chat_status", status)
         self.lbl_chat_status_pill.configure(text=text, fg_color=color)
+
+    def update_health_status(self, status: str) -> None:
+        """Update the health status pill.
+
+        Args:
+            status: One of ``unknown``, ``green``, ``yellow``, ``red``.
+        """
+        if self.lbl_health_status_pill is None:
+            return
+        color = _HEALTH_STATUS_COLORS.get(status, "#666666")
+        label = status if status != "unknown" else "--"
+        self.lbl_health_status_pill.configure(text=f"Health: {label}", fg_color=color)
 
     def update_pipeline_state(self, state: str) -> None:
         """Update the main status label based on pipeline state.
@@ -280,6 +306,7 @@ class StatusBar:
             "mic_status": self.update_mic_status,
             "tts_status": self.update_tts_status,
             "chat_status": self.update_chat_status,
+            "health_status": self.update_health_status,
         }
         handler = handlers.get(key)
         if handler and isinstance(value, str):

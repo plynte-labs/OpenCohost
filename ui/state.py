@@ -31,6 +31,7 @@ VALID_PIPELINE_STATES = frozenset(
 VALID_OLLAMA_STATES = frozenset(
     {"checking", "ready", "app_missing", "package_missing", "service_stopped"}
 )
+VALID_HEALTH_STATUSES = frozenset({"unknown", "green", "yellow", "red"})
 
 # ---------------------------------------------------------------------------
 # Observer callback type
@@ -92,6 +93,7 @@ class UIState:
             "ptt_active": False,
             "ptt_enabled": False,
             "advanced_mode": False,
+            "health_status": "unknown",
         }
 
         # Observer registry: subscription_id -> callback
@@ -458,6 +460,22 @@ class UIState:
         with self._lock:
             self._state["advanced_mode"] = value
             self._notify_observers("advanced_mode", value)
+            self._condition.notify_all()
+
+    @property
+    def health_status(self) -> str:
+        with self._lock:
+            return self._state["health_status"]
+
+    @health_status.setter
+    def health_status(self, value: str) -> None:
+        if value not in VALID_HEALTH_STATUSES:
+            raise ValueError(
+                f"Invalid health_status '{value}'. Must be one of {sorted(VALID_HEALTH_STATUSES)}"
+            )
+        with self._lock:
+            self._state["health_status"] = value
+            self._notify_observers("health_status", value)
             self._condition.notify_all()
 
     # ------------------------------------------------------------------

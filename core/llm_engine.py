@@ -39,10 +39,14 @@ class MotorVocalIA(threading.Thread):
         self.is_ready = False
         self._processing = False
         self._speaking = False
+        self._current_speech_source: Optional[str] = None
         self._downloading = False
         self.current_model = DEFAULT_MODEL
         self._warmed_model: Optional[str] = None
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
+
+        # Optional health monitor for auto-fallback (set externally, None = backward compat)
+        self.health_monitor = None
         
         self.system_prompt = SYSTEM_PROMPT
         self.use_system_role = False
@@ -64,6 +68,14 @@ class MotorVocalIA(threading.Thread):
         self._accum_ttl: float = 120.0  # 2 minutes
         self._accum_lock = threading.Lock()
 
+        # Text-only agenda prefetch: Ollama can think while TTS is speaking.
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_done = threading.Event()
+        self._prefetch_thread: Optional[threading.Thread] = None
+        self._prefetched_agenda: Optional[dict] = None
+        self.agenda_output_validator = None
+        self.agenda_output_transformer = None
+
     @property
     def is_speaking(self):
         with self._lock:
@@ -73,6 +85,11 @@ class MotorVocalIA(threading.Thread):
     def is_processing(self):
         with self._lock:
             return self._processing
+
+    @property
+    def current_speech_source(self):
+        with self._lock:
+            return self._current_speech_source
 
     def run(self):
         self._log("Inicializando cliente ligero...")
@@ -134,7 +151,7 @@ class MotorVocalIA(threading.Thread):
                 self._processing = True
                 self.ui_callback("processing")
                 try:
-                    self._ejecutar_inferencia(payload)
+                    self._ejecutar_inferencia(payload, source="direct")
                 finally:
                     self._processing = False
                     self.ui_callback("idle")
@@ -199,6 +216,119 @@ class MotorVocalIA(threading.Thread):
                 self._log(f"Cola prioritaria llena. Descartado (viejo): {dropped[3]}")
                 # Send to accumulation buffer instead of losing it
                 self.enqueue_accumulation(dropped[2], source=dropped[3])
+
+    def replace_pending(self, payload: str, priority: int = 1, source: str = "chat") -> None:
+        """Replace stale pending items from the same source and enqueue a fresh one.
+
+        This keeps product features such as Agenda Mode from stacking old
+        autonomous turns while preserving unrelated higher-priority items.
+        """
+        with self._pq_lock:
+            self._priority_queue = [item for item in self._priority_queue if item[3] != source]
+        if source.startswith("kira-agenda"):
+            self.clear_prefetched_agenda()
+        self.enqueue(payload, priority=priority, source=source)
+
+    def prefetch_agenda(self, payload: str, priority: int = 2, source: str = "kira-agenda") -> bool:
+        """Generate agenda text in the background without starting TTS."""
+        if not payload or not source.startswith("kira-agenda"):
+            return False
+        with self._prefetch_lock:
+            if self._prefetched_agenda is not None:
+                return False
+            if self._prefetch_thread and self._prefetch_thread.is_alive():
+                return False
+            self._prefetch_done.clear()
+
+        def worker() -> None:
+            try:
+                dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix="Agenda prefetch")
+                if dialogo:
+                    with self._prefetch_lock:
+                        self._prefetched_agenda = {
+                            "payload": payload,
+                            "dialogo": dialogo,
+                            "priority": priority,
+                            "source": source,
+                        }
+            finally:
+                self._prefetch_done.set()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        with self._prefetch_lock:
+            self._prefetch_thread = thread
+        thread.start()
+        return True
+
+    def wait_prefetched_agenda(self, timeout: float = 0.0) -> bool:
+        if timeout > 0:
+            self._prefetch_done.wait(timeout)
+        with self._prefetch_lock:
+            return self._prefetched_agenda is not None
+
+    def has_pending_priority_before(self, priority: int) -> bool:
+        """Return True when queued work should run before a cached agenda draft."""
+        with self._pq_lock:
+            return any(item[0] < priority for item in self._priority_queue)
+
+    def clear_prefetched_agenda(self) -> None:
+        with self._prefetch_lock:
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+
+    def play_prefetched_agenda(self) -> bool:
+        """Speak cached agenda text, if available, without another LLM call."""
+        with self._prefetch_lock:
+            item = self._prefetched_agenda
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+        if not item:
+            return False
+
+        def speaker() -> None:
+            payload = item["payload"]
+            dialogo = item["dialogo"]
+            self._commit_history(payload, dialogo, source=item.get("source", "kira-agenda"))
+            self._log("Agenda: usando respuesta prefabricada durante el audio anterior.")
+            self._hablar(dialogo, source=item.get("source", "kira-agenda"))
+
+        threading.Thread(target=speaker, daemon=True).start()
+        return True
+
+    def drop_pending_sources(self, prefixes: tuple[str, ...]) -> int:
+        """Drop pending priority/accumulation items whose source matches prefixes.
+
+        Args:
+            prefixes: Source prefixes to remove, e.g. ("kira-agenda",).
+
+        Returns:
+            Number of pending items removed.
+        """
+        removed = 0
+        with self._pq_lock:
+            kept = []
+            for item in self._priority_queue:
+                if str(item[3]).startswith(prefixes):
+                    removed += 1
+                    continue
+                kept.append(item)
+            self._priority_queue = kept
+
+        with self._accum_lock:
+            kept_accum = []
+            for item in self._accumulation_buffer:
+                if str(item[2]).startswith(prefixes):
+                    removed += 1
+                    continue
+                kept_accum.append(item)
+            self._accumulation_buffer = kept_accum
+
+        if any("kira-agenda".startswith(prefix) or prefix.startswith("kira-agenda") for prefix in prefixes):
+            self.clear_prefetched_agenda()
+
+        if removed:
+            self._log(f"Cola: descartados {removed} pendientes de {', '.join(prefixes)}.")
+        return removed
 
     def enqueue_accumulation(self, payload: str, source: str = "chat") -> None:
         """Add a message to the accumulation buffer (discarded/overflowed).
@@ -276,7 +406,7 @@ class MotorVocalIA(threading.Thread):
                     self._processing = True
                     self.ui_callback("processing")
                     try:
-                        self._ejecutar_inferencia(accumulated)
+                        self._ejecutar_inferencia(accumulated, source="accumulated")
                     finally:
                         self._processing = False
                         self.ui_callback("idle")
@@ -289,7 +419,7 @@ class MotorVocalIA(threading.Thread):
         self._processing = True
         self.ui_callback("processing")
         try:
-            self._ejecutar_inferencia(payload)
+            self._ejecutar_inferencia(payload, source=source)
         finally:
             self._processing = False
             self.ui_callback("idle")
@@ -300,7 +430,7 @@ class MotorVocalIA(threading.Thread):
                 self._processing = True
                 self.ui_callback("processing")
                 try:
-                    self._ejecutar_inferencia(accumulated)
+                    self._ejecutar_inferencia(accumulated, source="accumulated")
                 finally:
                     self._processing = False
                     self.ui_callback("idle")
@@ -404,7 +534,7 @@ class MotorVocalIA(threading.Thread):
         finally:
             self._downloading = False
 
-    def _ejecutar_inferencia(self, contexto):
+    def _generar_dialogo(self, contexto, source: str = "direct", *, commit_history: bool = True, log_prefix: str = "LLM") -> str:
         self._log(f"Analizando contexto con {self.current_model}...")
         try:
             messages = []
@@ -469,30 +599,91 @@ class MotorVocalIA(threading.Thread):
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
 
+            if source.startswith("kira-agenda"):
+                dialogo = self._sanitize_agenda_output(dialogo)
+                transformer = getattr(self, "agenda_output_transformer", None)
+                if transformer is not None:
+                    try:
+                        dialogo = transformer(dialogo)
+                    except Exception:
+                        logger.exception("Agenda output transformer failed")
+
             if not dialogo:
                 self._log(f"⚠️ {self.current_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
-                return
+                return ""
+
+            if source.startswith("kira-agenda") and not self._accept_agenda_output(dialogo):
+                self._log("Agenda: salida rechazada por guardrails del controlador.", level="warning")
+                return ""
 
             self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
-            logger.info(f"LLM response ({elapsed:.2f}s): {dialogo[:200]}")
+            logger.info(f"{log_prefix} response ({elapsed:.2f}s): {dialogo[:200]}")
 
-            self.historial.append({'role': 'user', 'content': contexto})
-            self.historial.append({'role': 'assistant', 'content': dialogo})
-            
-            max_mensajes = HISTORY_MAX_TURNS * 2
-            if len(self.historial) > max_mensajes:
-                self.historial = self.historial[-max_mensajes:]
+            if commit_history:
+                self._commit_history(contexto, dialogo, source=source)
 
-            self._hablar(dialogo)
+            return dialogo
 
         except Exception as e:
             self._log(f"ERROR Ollama: {e}", level="error")
             logger.exception("Error en inferencia LLM")
+            return ""
 
-    def _hablar(self, texto_a_generar):
+    def _accept_agenda_output(self, dialogo: str) -> bool:
+        validator = getattr(self, "agenda_output_validator", None)
+        if validator is None:
+            return True
+        try:
+            return bool(validator(dialogo))
+        except Exception:
+            logger.exception("Agenda output validator failed")
+            return False
+
+    def _commit_history(self, contexto: str, dialogo: str, *, source: str = "direct") -> None:
+        if source.startswith("kira-agenda"):
+            safe_context = "[agenda segura: prompt interno omitido]"
+        else:
+            safe_context = contexto
+        self.historial.append({'role': 'user', 'content': safe_context})
+        self.historial.append({'role': 'assistant', 'content': dialogo})
+        max_mensajes = HISTORY_MAX_TURNS * 2
+        if len(self.historial) > max_mensajes:
+            self.historial = self.historial[-max_mensajes:]
+
+    def _ejecutar_inferencia(self, contexto, source: str = "direct"):
+        dialogo = self._generar_dialogo(contexto, source=source, commit_history=True)
+        if dialogo:
+
+            self._hablar(dialogo, source=source)
+
+    def _sanitize_agenda_output(self, text: str) -> str:
+        """Last line of defense for autonomous agenda speech."""
+        clean = " ".join((text or "").strip().split())
+        if not clean:
+            return ""
+        lowered = clean.lower()
+        banned = (
+            "hasta luego",
+            "próximo episodio",
+            "proximo episodio",
+            "eso es todo",
+            "siguiente tema",
+            "finaliza",
+            "cerrar el tema",
+            "abordando este tema",
+            "voy a hablar",
+            "vamos a seguir hablando",
+        )
+        if any(term in lowered for term in banned):
+            self._log("Agenda: salida con cierre artificial detectada; usando fallback natural.", level="warning")
+            return "Me quedo con una idea: esto da para mirarlo con más matices, porque no es tan simple como parece a primera vista."
+        return clean
+
+    def _hablar(self, texto_a_generar, source: str = "direct"):
         with self._lock:
             self._speaking = True
+            self._current_speech_source = source
         self.ui_callback("speaking_start")
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
@@ -548,34 +739,60 @@ class MotorVocalIA(threading.Thread):
 
         def productor():
             nonlocal error_count
+            # Determine effective motor for this request
+            effective_motor = self.motor_tts
+            fallback_reason = ""
+
+            # Health-based auto-fallback: check before heavy TTS
+            if effective_motor == "pesado":
+                hm = getattr(self, "health_monitor", None)
+                if hm is not None:
+                    if not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
+                        fallback_reason = "health_gate"
+                        effective_motor = "ligero"
+                        self._log(f"Auto-fallback to Edge-TTS (health gate triggered)")
+
             for i, oracion in enumerate(oraciones):
                 if not self._speaking:
                     break
 
-                ext = ".mp3" if self.motor_tts == "ligero" else ".wav"
+                ext = ".mp3" if effective_motor == "ligero" else ".wav"
                 archivo_chunk = os.path.join(TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}{ext}")
                 try:
-                    if self.motor_tts == "ligero":
+                    if effective_motor == "ligero":
                         async def generar_edge():
                             communicate = edge_tts.Communicate(oracion, "es-MX-DaliaNeural")
                             await communicate.save(archivo_chunk)
-                        
+
                         asyncio.run(asyncio.wait_for(generar_edge(), timeout=TTS_LIGHT_TIMEOUT))
                         cola_audios.put((archivo_chunk, i, oracion))
                     else:
+                        # Heavy TTS path — measure generation time for RTF
+                        gen_start = time.time()
                         respuesta = requests.post(
                             TTS_SERVER_URL,
                             json={
-                                "texto": oracion, 
+                                "texto": oracion,
                                 "referencia": ruta_absoluta_ref,
-                                "motor": self.motor_tts
+                                "motor": effective_motor
                             },
                             timeout=TTS_HEAVY_TIMEOUT
                         )
+                        gen_elapsed = time.time() - gen_start
                         if respuesta.status_code == 200:
                             with open(archivo_chunk, 'wb') as f:
                                 f.write(respuesta.content)
                             cola_audios.put((archivo_chunk, i, oracion))
+
+                            # Record RTF measurement
+                            hm = getattr(self, "health_monitor", None)
+                            if hm is not None:
+                                try:
+                                    # Estimate audio duration: ~15 chars/sec for Spanish
+                                    estimated_duration = len(oracion) / 15.0
+                                    hm.record_ttf_measurement(gen_elapsed, estimated_duration)
+                                except Exception:
+                                    pass  # Never break TTS for measurement failure
                         else:
                             error_detail = "desconocido"
                             try:
@@ -598,7 +815,7 @@ class MotorVocalIA(threading.Thread):
                     error_count += 1
 
                 except Exception as e:
-                    if self.motor_tts == "ligero":
+                    if effective_motor == "ligero":
                         self._log("ERROR: Edge-TTS requiere internet. Si estas offline usa Pesado (Qwen3-TTS).", level="error")
                         logger.warning(f"TTS ligero fallo; timeout configurado {TTS_LIGHT_TIMEOUT}s: {e}")
                         cola_audios.put(None)
