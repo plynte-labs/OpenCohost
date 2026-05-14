@@ -1597,6 +1597,9 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_speaking_start(self) -> None:
         if hasattr(self, "audio_bed"):
             self.audio_bed.duck()
+            # Auto-start music bed on first Kira response if nothing is playing yet
+            if self.audio_bed.current_track is None and self.audio_bed.enabled:
+                self.audio_bed.request_mood("normal", force=True, boundary=True)
         if hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source():
             self.kira_agenda.mark_generation_accepted()
             self._kira_agenda_update_status()

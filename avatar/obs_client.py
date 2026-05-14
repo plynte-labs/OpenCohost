@@ -138,7 +138,6 @@ class OBSClient:
 
     def on_state_change(self, state: AvatarState) -> None:
         """Called when avatar state changes. Pushes update to OBS."""
-        self.on_log(f"[OBS] State change received: {state.value} (connected={self.is_connected})")
         if not self.is_connected:
             return
         self._update_obs_image(state)
@@ -176,7 +175,6 @@ class OBSClient:
                 settings=new_settings,
                 overlay=False,
             )
-            self.on_log(f"[OBS] Avatar updated: {state_key} -> {file_path}")
             logger.debug("OBS avatar update: %s -> %s", state_key, file_path)
         except Exception as e:
             self.on_log(f"[OBS] Error updating image for '{state_key}': {e}")
