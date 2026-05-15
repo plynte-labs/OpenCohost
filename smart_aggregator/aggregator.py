@@ -60,6 +60,7 @@ class Aggregator:
         self.on_vibe_update: Optional[Callable] = None
         self.on_activity_trigger: Optional[Callable] = None
         self.on_aggregated_context: Optional[Callable] = None
+        self.on_live_safety_log: Optional[Callable[[str], None]] = None
         self.on_source_error: Optional[Callable] = None
         self.on_source_connect: Optional[Callable] = None
         self.on_source_disconnect: Optional[Callable] = None
@@ -67,6 +68,7 @@ class Aggregator:
         self._session_id: Optional[int] = None
         self._busy_callback: Optional[Callable[[], bool]] = None
         self._load_spam_config()
+        self._load_live_safety_config()
     
     def set_busy_callback(self, callback: Callable[[], bool]):
         self._busy_callback = callback
@@ -125,6 +127,8 @@ class Aggregator:
             pass
     
     def process_message(self, message: dict):
+        now = self._message_timestamp(message)
+        self._note_seen_message(now)
         filtered = self.msg_filter.filter(message)
         accepted = False
         if filtered is not None:
@@ -146,23 +150,25 @@ class Aggregator:
         vibe = None
         vibe_temp = 50.0
         if accepted:
-            self.intent_aggregator.add_message(filtered)
-            self.thermometer.add_message(filtered)
-            vibe = self.thermometer.compute_vibe()
+            current_rate = max(self.activity.get_current_rate(), self._raw_seen_rate())
+            if self._should_sample_for_context(current_rate):
+                self.intent_aggregator.add_message(filtered)
+
+            if self._should_consider_vibe(current_rate):
+                self.thermometer.add_message(filtered)
+                vibe = self.thermometer.compute_vibe()
             vibe_temp = vibe.get("temperature", 50.0) if vibe else 50.0
             
             if vibe is not None:
+                self._record_vibe_result(vibe)
                 if self.on_vibe_update:
                     try:
                         self.on_vibe_update(vibe)
                     except Exception:
                         pass
                 self.thermometer.reset()
-        
-        if accepted:
             self.activity.on_message(filtered)
         
-
     def _on_activity_trigger(self, data: dict):
         if self.on_activity_trigger:
             try:
@@ -189,6 +195,90 @@ class Aggregator:
                         "context": context,
                         "intent_summary": intent_summary,
                     })
+            except Exception:
+                pass
+
+    def _load_live_safety_config(self):
+        cfg = self.config.get("live_safety", {})
+        self._live_safety_enabled = bool(cfg.get("enabled", True))
+        self._live_safety_threshold = max(0.01, float(cfg.get("high_traffic_threshold_per_second", 10.0)))
+        self._live_safety_sample_every = max(1, int(cfg.get("high_traffic_sample_every", 10)))
+        self._live_safety_empty_limit = max(1, int(cfg.get("empty_vibe_backoff_after", 2)))
+        self._live_safety_backoff_seconds = max(0.0, float(cfg.get("empty_vibe_backoff_seconds", 60.0)))
+        self._live_safety_log_interval = max(1.0, float(cfg.get("state_log_interval_seconds", 30.0)))
+        self._live_seen_window_seconds = max(1.0, float(cfg.get("seen_window_seconds", self.activity.window_seconds)))
+        self._live_seen_timestamps = deque()
+        self._live_sample_counter = 0
+        self._live_high_traffic = False
+        self._live_empty_vibe_count = 0
+        self._live_vibe_backoff_until = 0.0
+        self._live_last_state_log = 0.0
+
+    def _message_timestamp(self, message: dict) -> float:
+        try:
+            return float(message.get("timestamp", time.time()))
+        except (TypeError, ValueError):
+            return time.time()
+
+    def _note_seen_message(self, timestamp: float) -> None:
+        if not self._live_safety_enabled:
+            return
+        self._live_seen_timestamps.append(timestamp)
+        cutoff = timestamp - self._live_seen_window_seconds
+        while self._live_seen_timestamps and self._live_seen_timestamps[0] < cutoff:
+            self._live_seen_timestamps.popleft()
+
+    def _raw_seen_rate(self) -> float:
+        if not self._live_safety_enabled or not self._live_seen_timestamps:
+            return 0.0
+        return len(self._live_seen_timestamps) / self._live_seen_window_seconds
+
+    def _should_sample_for_context(self, current_rate: float) -> bool:
+        if not self._live_safety_enabled:
+            return True
+        high = max(current_rate, self._raw_seen_rate()) >= self._live_safety_threshold
+        if high != self._live_high_traffic:
+            self._live_high_traffic = high
+            state = "ON" if high else "OFF"
+            self._log_live_safety(f"[SmartAggregator] Live-safe high traffic {state}: compactando chat (rate={max(current_rate, self._raw_seen_rate()):.2f} msg/s, umbral={self._live_safety_threshold:.2f}).", force=True)
+        if not high:
+            return True
+        self._live_sample_counter += 1
+        return self._live_sample_counter % self._live_safety_sample_every == 0
+
+    def _should_consider_vibe(self, current_rate: float) -> bool:
+        if not self._live_safety_enabled:
+            return True
+        now = time.time()
+        if now < self._live_vibe_backoff_until:
+            self._log_live_safety(f"[SmartAggregator] Vibe en backoff por respuestas vacías ({int(self._live_vibe_backoff_until - now)}s restantes).")
+            return False
+        if max(current_rate, self._raw_seen_rate()) >= self._live_safety_threshold:
+            return False
+        source_has_live_target = bool(getattr(self.source, "_video_id", None))
+        if source_has_live_target and hasattr(self.source, "is_connected") and not self.source.is_connected():
+            return False
+        return True
+
+    def _record_vibe_result(self, vibe: dict) -> None:
+        note = vibe.get("note")
+        if note in {"fallback_due_to_empty_llm_response", "fallback_due_to_parse_error", "fallback_due_to_llm_error"}:
+            self._live_empty_vibe_count += 1
+            if self._live_empty_vibe_count >= self._live_safety_empty_limit:
+                self._live_vibe_backoff_until = time.time() + self._live_safety_backoff_seconds
+                self._live_empty_vibe_count = 0
+                self._log_live_safety(f"[SmartAggregator] Vibe en cooldown: {self._live_safety_empty_limit} respuestas vacías/no interpretables; pausa {int(self._live_safety_backoff_seconds)}s.", force=True)
+        else:
+            self._live_empty_vibe_count = 0
+
+    def _log_live_safety(self, message: str, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._live_last_state_log) < self._live_safety_log_interval:
+            return
+        self._live_last_state_log = now
+        if self.on_live_safety_log:
+            try:
+                self.on_live_safety_log(message)
             except Exception:
                 pass
 
