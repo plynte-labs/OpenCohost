@@ -613,14 +613,8 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
                 return ""
 
-            if source.startswith("kira-agenda") and not self._accept_agenda_output(dialogo):
+            if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log("Agenda: salida rechazada por guardrails del controlador.", level="warning")
-                # Cancel any TTS pipeline that may have started before the guardrails check.
-                if self._speaking:
-                    self._log("Agenda: cancelando pipeline TTS tras rechazo de guardrails.", level="warning")
-                    with self._lock:
-                        self._speaking = False
-                    self.ui_callback("speaking_end")
                 return ""
 
             self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
