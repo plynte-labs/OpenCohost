@@ -507,11 +507,27 @@ class KiraAgendaController:
             return
         self.state = AgendaState.PAUSED_NEEDS_OPERATOR if self.failure_count >= self.max_failures else AgendaState.REGENERATING_SAFE
 
+    def preview_accept_output(self, output: str) -> bool:
+        """Validate speculative prefetch output without mutating agenda state."""
+        return self._validate_output(output, mutate=False)
+
     def accept_output(self, output: str) -> bool:
         """Validate an LLM output before TTS."""
+        return self._validate_output(output, mutate=True)
+
+    def record_accepted_output(self, output: str) -> None:
+        """Record already accepted/spoken agenda output for future anti-loop checks."""
         clean = " ".join((output or "").strip().split())
         if not clean:
-            self.register_failure()
+            return
+        self.last_outputs.append(clean.lower())
+        self.last_outputs = self.last_outputs[-5:]
+
+    def _validate_output(self, output: str, *, mutate: bool) -> bool:
+        clean = " ".join((output or "").strip().split())
+        if not clean:
+            if mutate:
+                self.register_failure()
             return False
         if (
             self.contains_internal_leak(clean)
@@ -522,11 +538,12 @@ class KiraAgendaController:
             or self.reuses_looping_opening(clean)
             or self.claims_inner_life(clean)
         ):
-            self.register_failure()
+            if mutate:
+                self.register_failure()
             return False
-        self.failure_count = 0
-        self.last_outputs.append(clean.lower())
-        self.last_outputs = self.last_outputs[-5:]
+        if mutate:
+            self.failure_count = 0
+            self.record_accepted_output(clean)
         return True
 
     def enforce_live_safety_cap(self, output: str) -> str:

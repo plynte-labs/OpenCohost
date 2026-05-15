@@ -56,9 +56,11 @@ class MotorVocalIA(threading.Thread):
         self._lock = threading.Lock()
 
         # Priority queue: (priority, timestamp, payload, source)
-        # priority: 0 = PTT (high), 1 = chat (normal)
+        # priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest)
         self._priority_queue: list = []
         self._pq_lock = threading.Lock()
+        self._pq_max_items: int = 5
+        self._pq_ttl_seconds: float = 30.0  # non-PTT items expire after this delay
 
         # Accumulation buffer for discarded/overflowed messages
         # (timestamp, payload, source)
@@ -74,6 +76,8 @@ class MotorVocalIA(threading.Thread):
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetched_agenda: Optional[dict] = None
         self.agenda_output_validator = None
+        self.agenda_output_preview_validator = None
+        self.agenda_output_recorder = None
         self.agenda_output_transformer = None
 
     @property
@@ -204,17 +208,18 @@ class MotorVocalIA(threading.Thread):
 
         Args:
             payload: The text to process.
-            priority: 0 = PTT (high), 1 = chat (normal).
+            priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest).
             source: Origin identifier for logging.
         """
         with self._pq_lock:
             self._priority_queue.append((priority, time.time(), payload, source))
             self._priority_queue.sort(key=lambda x: (x[0], x[1]))
-            # Limit to 5 items — discard oldest if over limit
-            if len(self._priority_queue) > 5:
+            # Enforce max items — drop lowest priority (highest number) first,
+            # breaking ties by newest timestamp. PTT (0) is always preserved over
+            # chat (1) and agenda (2).
+            while len(self._priority_queue) > self._pq_max_items:
                 dropped = self._priority_queue.pop()
-                self._log(f"Cola prioritaria llena. Descartado (viejo): {dropped[3]}")
-                # Send to accumulation buffer instead of losing it
+                self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
                 self.enqueue_accumulation(dropped[2], source=dropped[3])
 
     def replace_pending(self, payload: str, priority: int = 1, source: str = "chat") -> None:
@@ -244,6 +249,9 @@ class MotorVocalIA(threading.Thread):
             try:
                 dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix="Agenda prefetch")
                 if dialogo:
+                    if not self._preview_accept_agenda_output(dialogo):
+                        self._log("Agenda: prefetch rechazado por repetición o guardrails.", level="warning")
+                        return
                     with self._prefetch_lock:
                         self._prefetched_agenda = {
                             "payload": payload,
@@ -289,7 +297,9 @@ class MotorVocalIA(threading.Thread):
             payload = item["payload"]
             dialogo = item["dialogo"]
             self._commit_history(payload, dialogo, source=item.get("source", "kira-agenda"))
+            self._record_accepted_agenda_output(dialogo)
             self._log("Agenda: usando respuesta prefabricada durante el audio anterior.")
+            self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
             self._hablar(dialogo, source=item.get("source", "kira-agenda"))
 
         threading.Thread(target=speaker, daemon=True).start()
@@ -391,6 +401,9 @@ class MotorVocalIA(threading.Thread):
     def _process_priority_queue(self) -> None:
         """Process next item from priority queue if motor is idle.
 
+        Non-PTT items older than _pq_ttl_seconds are discarded before selection
+        to prevent stale reactions after long delays.
+
         After processing, checks accumulation buffer and sends compacted
         messages as a single consultation.
         """
@@ -398,6 +411,17 @@ class MotorVocalIA(threading.Thread):
             return
 
         with self._pq_lock:
+            # Expire stale non-PTT items before selecting next work
+            now = time.time()
+            kept = []
+            for item in self._priority_queue:
+                prio, ts, payload, source = item
+                if prio > 0 and (now - ts) > self._pq_ttl_seconds:
+                    self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
+                else:
+                    kept.append(item)
+            self._priority_queue = kept
+
             if not self._priority_queue:
                 # No priority items — check accumulation buffer
                 accumulated = self._flush_accumulation()
@@ -617,7 +641,8 @@ class MotorVocalIA(threading.Thread):
                 self._log("Agenda: salida rechazada por guardrails del controlador.", level="warning")
                 return ""
 
-            self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
+            if commit_history:
+                self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
             logger.info(f"{log_prefix} response ({elapsed:.2f}s): {dialogo[:200]}")
 
             if commit_history:
@@ -639,6 +664,27 @@ class MotorVocalIA(threading.Thread):
         except Exception:
             logger.exception("Agenda output validator failed")
             return False
+
+    def _preview_accept_agenda_output(self, dialogo: str) -> bool:
+        validator = getattr(self, "agenda_output_preview_validator", None)
+        if validator is None:
+            validator = getattr(self, "agenda_output_validator", None)
+        if validator is None:
+            return True
+        try:
+            return bool(validator(dialogo))
+        except Exception:
+            logger.exception("Agenda preview output validator failed")
+            return False
+
+    def _record_accepted_agenda_output(self, dialogo: str) -> None:
+        recorder = getattr(self, "agenda_output_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder(dialogo)
+        except Exception:
+            logger.exception("Agenda output recorder failed")
 
     def _commit_history(self, contexto: str, dialogo: str, *, source: str = "direct") -> None:
         if source.startswith("kira-agenda"):

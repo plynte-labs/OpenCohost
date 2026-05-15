@@ -936,7 +936,7 @@ class TestOnActivityTrigger:
 class TestOnAggregatedContext:
     """Tests for on_aggregated_context()."""
 
-    def test_skips_when_busy(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
+    def test_enqueues_when_busy(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
         log_messages = []
         mock_motor_ia.is_processing = True
         ui = SmartAggregatorUI(
@@ -947,7 +947,8 @@ class TestOnAggregatedContext:
             on_log=lambda msg: log_messages.append(msg),
         )
         ui.on_aggregated_context({"context": [{"user": "A", "text": "hello"}]})
-        assert any("omitido" in m for m in log_messages)
+        assert any("encolado" in m for m in log_messages)
+        mock_motor_ia.enqueue.assert_called_once()
         assert mock_motor_ia.command_queue.empty()
 
     def test_skips_when_empty_context(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
@@ -1014,38 +1015,50 @@ class TestOnAggregatedContext:
 class TestSelectHighlight:
     """Tests for the _select_highlight() static method."""
 
-    def test_selects_longest_in_range(self):
+    def test_selects_question_over_boring_long_text(self):
         context = [
-            {"user": "A", "text": "short"},
-            {"user": "B", "text": "This is a medium length message that fits"},
-            {"user": "C", "text": "Another medium length message here"},
+            {"user": "A", "text": "This is a very long boring message with no interesting content at all and it goes on and on"},
+            {"user": "B", "text": "¿Cuándo empieza el stream?"},
+        ]
+        result = SmartAggregatorUI._select_highlight(context)
+        assert "B" in result
+        assert "¿Cuándo empieza" in result
+
+    def test_selects_humor_over_plain_text(self):
+        context = [
+            {"user": "A", "text": "The weather is nice today and I think we should talk about it"},
+            {"user": "B", "text": "jajaja eso fue genial 😂"},
         ]
         result = SmartAggregatorUI._select_highlight(context)
         assert "B" in result
 
-    def test_falls_back_to_all_when_none_in_range(self):
+    def test_selects_emoji_heavy_message(self):
         context = [
-            {"user": "A", "text": "hi"},
-            {"user": "B", "text": "ok"},
-        ]
-        result = SmartAggregatorUI._select_highlight(context)
-        assert "A" in result or "B" in result
-
-    def test_falls_back_to_longest_when_all_too_long(self):
-        context = [
-            {"user": "A", "text": "x" * 200},
-            {"user": "B", "text": "x" * 300},
+            {"user": "A", "text": "Just a normal message here without any flair"},
+            {"user": "B", "text": "Increíble 🔥🔥🔥"},
         ]
         result = SmartAggregatorUI._select_highlight(context)
         assert "B" in result
 
-    def test_handles_empty_text(self):
+    def test_selects_unusual_mixed_content(self):
         context = [
-            {"user": "A", "text": ""},
-            {"user": "B", "text": "Valid message here for selection"},
+            {"user": "A", "text": "This is a standard comment about the topic"},
+            {"user": "B", "text": "El tema 42 tiene algo raro con el modelo v3"},
         ]
         result = SmartAggregatorUI._select_highlight(context)
         assert "B" in result
+
+    def test_falls_back_to_longest_when_no_joyita_signals(self):
+        context = [
+            {"user": "A", "text": "Short msg"},
+            {"user": "B", "text": "This is a longer message without any special signals"},
+        ]
+        result = SmartAggregatorUI._select_highlight(context)
+        assert "B" in result
+
+    def test_handles_empty_context(self):
+        result = SmartAggregatorUI._select_highlight([])
+        assert result == ""
 
     def test_formats_output(self):
         context = [{"user": "TestUser", "text": "Hello world"}]
@@ -1055,7 +1068,33 @@ class TestSelectHighlight:
     def test_handles_missing_keys(self):
         context = [{}]
         result = SmartAggregatorUI._select_highlight(context)
-        assert result == ": "
+        assert result == ""
+
+    def test_disqualifies_too_short_text(self):
+        context = [
+            {"user": "A", "text": "hi"},
+            {"user": "B", "text": "ok"},
+        ]
+        result = SmartAggregatorUI._select_highlight(context)
+        # Both too short, should pick one anyway (max with negative score)
+        assert "A" in result or "B" in result
+
+    def test_question_mark_scores_higher_than_emoji(self):
+        context = [
+            {"user": "A", "text": "jajaja 😂😂😂"},
+            {"user": "B", "text": "¿Cómo funciona el sistema de agenda?"},
+        ]
+        result = SmartAggregatorUI._select_highlight(context)
+        assert "B" in result
+
+    def test_selects_longest_in_range_when_all_plain(self):
+        context = [
+            {"user": "A", "text": "short"},
+            {"user": "B", "text": "This is a medium length message that fits"},
+            {"user": "C", "text": "Another medium length message here"},
+        ]
+        result = SmartAggregatorUI._select_highlight(context)
+        assert "B" in result
 
 
 # ---------------------------------------------------------------------------

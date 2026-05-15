@@ -411,16 +411,64 @@ class SmartAggregatorUI:
 
     @staticmethod
     def _select_highlight(context: list[dict]) -> str:
-        """Pick the best message to highlight from recent context."""
+        """Pick the best 'joyita' message to highlight from recent context.
+
+        Scoring prefers: questions, humor/emoji, unusual/out-of-context
+        messages, then falls back to longest valid-length text.
+        Deterministic and cheap — no LLM calls.
+        """
+        if not context:
+            return ""
+
         candidates = []
         for msg in context:
             text = msg.get("text", "").strip()
-            if 20 <= len(text) <= 180:
-                candidates.append(msg)
+            if not text:
+                continue
+            candidates.append(msg)
+
         if not candidates:
-            candidates = context
-        selected = max(candidates, key=lambda m: len(m.get("text", "")))
-        return f"{selected.get('user', '')}: {selected.get('text', '')}"
+            return ""
+
+        def _joyita_score(msg: dict) -> int:
+            text = msg.get("text", "")
+            length = len(text)
+            if length < 10 or length > 180:
+                return -1  # disqualify too short or too long
+
+            score = 0
+            lowered = text.lower()
+
+            # Questions get highest priority
+            if "?" in text or "¿" in text:
+                score += 100
+
+            # Humor / emoji signals
+            emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
+            score += min(emoji_count * 10, 30)
+            for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "😆", "jajaja"):
+                if marker in lowered:
+                    score += 15
+                    break
+
+            # Unusual / out-of-context: numbers mixed with text, rare chars
+            has_digits = any(c.isdigit() for c in text)
+            has_alpha = any(c.isalpha() for c in text)
+            if has_digits and has_alpha:
+                score += 8
+
+            for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
+                if marker in lowered:
+                    score += 5
+
+            # Small bonus for being in the sweet-spot length range
+            if 30 <= length <= 120:
+                score += 3
+
+            return score
+
+        best = max(candidates, key=_joyita_score)
+        return f"{best.get('user', '')}: {best.get('text', '')}"
 
     # ------------------------------------------------------------------
     # Internal helpers

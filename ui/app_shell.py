@@ -159,6 +159,8 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
         self.kira_agenda = KiraAgendaController()
         self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
+        self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
+        self.motor_ia.agenda_output_recorder = self.kira_agenda.record_accepted_output
         self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
 
         # Health Monitor — system health daemon (graceful if init fails)

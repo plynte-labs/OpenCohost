@@ -444,6 +444,26 @@ def test_output_sanitizer_rejects_internal_leaks_and_repetition():
     assert controller.accept_output("Vamos con una idea simple para arrancar.") is False
 
 
+def test_preview_accept_output_rejects_without_mutating_state():
+    controller = KiraAgendaController()
+    controller.state = AgendaState.SPEAKING
+    controller.failure_count = 0
+
+    assert controller.preview_accept_output("Según el resumen, el chat dice que...") is False
+
+    assert controller.state == AgendaState.SPEAKING
+    assert controller.failure_count == 0
+    assert controller.last_outputs == []
+
+
+def test_record_accepted_output_updates_repetition_memory():
+    controller = KiraAgendaController()
+
+    controller.record_accepted_output("Texto cacheado que ya salió al aire.")
+
+    assert controller.preview_accept_output("Texto cacheado que ya salió al aire.") is False
+
+
 def test_output_sanitizer_rejects_repeated_last_line_loop():
     controller = KiraAgendaController()
 

@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 from unittest.mock import MagicMock
 
 from core import llm_engine
@@ -103,6 +104,8 @@ def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     spoken = []
     spoke = threading.Event()
     motor._generar_dialogo = MagicMock(return_value="Texto cacheado")
+    motor.agenda_output_preview_validator = MagicMock(return_value=True)
+    motor.agenda_output_recorder = MagicMock()
 
     def fake_hablar(text, source="direct"):
         spoken.append(text)
@@ -112,15 +115,27 @@ def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
 
     assert motor.prefetch_agenda("prompt agenda", source="kira-agenda") is True
     assert motor.wait_prefetched_agenda(timeout=1.0) is True
+    motor.agenda_output_preview_validator.assert_called_once_with("Texto cacheado")
     assert spoken == []
 
     assert motor.play_prefetched_agenda() is True
     assert spoke.wait(1.0) is True
     assert spoken == ["Texto cacheado"]
+    motor.agenda_output_recorder.assert_called_once_with("Texto cacheado")
     assert list(motor.historial)[-2:] == [
         {"role": "user", "content": "[agenda segura: prompt interno omitido]"},
         {"role": "assistant", "content": "Texto cacheado"},
     ]
+
+
+def test_agenda_prefetch_rejects_repeated_text_before_caching():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._generar_dialogo = MagicMock(return_value="Texto repetido")
+    motor.agenda_output_preview_validator = MagicMock(return_value=False)
+
+    assert motor.prefetch_agenda("prompt agenda", source="kira-agenda") is True
+    assert motor.wait_prefetched_agenda(timeout=1.0) is False
+    assert motor.play_prefetched_agenda() is False
 
 
 def test_agenda_prefetch_is_cleared_when_agenda_pending_is_replaced():
@@ -171,3 +186,91 @@ def test_agenda_history_redacts_raw_compact_prompt_when_committed():
     assert "CHAT COMPACTO FILTRADO" not in history_text
     assert "usuario dice algo" not in history_text
     assert "Salida segura" in history_text
+
+
+def test_ptt_priority_wins_over_chat_and_agenda():
+    """PTT (priority 0) must always be processed before chat (1) and agenda (2)."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    motor.enqueue("agenda topic", priority=2, source="kira-agenda")
+    motor.enqueue("chat comment", priority=1, source="chat")
+    motor.enqueue("ptt input", priority=0, source="ptt")
+
+    # Queue is sorted by priority ascending: PTT first
+    items = motor._priority_queue
+    assert items[0][3] == "ptt"
+    assert items[0][0] == 0
+    assert items[1][3] == "chat"
+    assert items[1][0] == 1
+    assert items[2][3] == "kira-agenda"
+    assert items[2][0] == 2
+
+
+def test_overflow_drops_lowest_priority_preserving_ptt():
+    """When queue exceeds max, lowest priority items are dropped first."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._pq_max_items = 3
+
+    motor.enqueue("agenda 1", priority=2, source="kira-agenda")
+    motor.enqueue("agenda 2", priority=2, source="kira-agenda")
+    motor.enqueue("chat 1", priority=1, source="chat")
+    motor.enqueue("ptt 1", priority=0, source="ptt")
+
+    # Should have 3 items: PTT, chat, and one agenda (the newest agenda)
+    sources = [item[3] for item in motor._priority_queue]
+    assert "ptt" in sources
+    assert "chat" in sources
+    # One agenda should remain (the one that wasn't dropped)
+    assert sources.count("kira-agenda") == 1
+    assert len(motor._priority_queue) == 3
+
+
+def test_overflow_drops_agenda_before_chat():
+    """Agenda (priority 2) must be dropped before chat (priority 1)."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._pq_max_items = 3
+
+    motor.enqueue("agenda 1", priority=2, source="kira-agenda")
+    motor.enqueue("chat 1", priority=1, source="chat")
+    motor.enqueue("chat 2", priority=1, source="chat")
+    motor.enqueue("ptt 1", priority=0, source="ptt")
+
+    sources = [item[3] for item in motor._priority_queue]
+    assert "ptt" in sources
+    # Both chats should survive over agenda
+    assert sources.count("chat") == 2
+    assert sources.count("kira-agenda") <= 1
+
+
+def test_stale_chat_expires_before_processing():
+    """Expired chat should be discarded, not reacted to later as accumulation."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._pq_ttl_seconds = 0.01  # 10ms TTL for fast test
+    motor._ejecutar_inferencia = MagicMock()
+
+    motor.enqueue("old chat", priority=1, source="chat")
+    time.sleep(0.02)  # Wait for TTL to expire
+
+    motor._processing = False
+    motor._speaking = False
+    motor._process_priority_queue()
+
+    assert motor._priority_queue == []
+    assert motor._accumulation_buffer == []
+    motor._ejecutar_inferencia.assert_not_called()
+
+
+def test_ptt_items_never_expire_via_ttl():
+    """PTT (priority 0) items must not be expired by TTL check."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._pq_ttl_seconds = 0.01
+    motor._ejecutar_inferencia = MagicMock()
+
+    motor.enqueue("ptt important", priority=0, source="ptt")
+    time.sleep(0.02)
+
+    motor._processing = False
+    motor._speaking = False
+    motor._process_priority_queue()
+
+    motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt")
