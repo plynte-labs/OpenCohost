@@ -157,6 +157,9 @@ def mock_widgets():
     widgets["entry_stream_mod_user"] = MockEntry()
     widgets["entry_stream_mod_reason"] = MockEntry()
     widgets["entry_stream_chat_message"] = MockEntry()
+    widgets["entry_kira_agenda_title"] = MockEntry()
+    widgets["entry_kira_agenda_angle"] = MockEntry()
+    widgets["entry_kira_agenda_constraints"] = MockEntry()
     widgets["text_stream_description"] = MockText()
     widgets["text_stream_admin_log"] = MockText()
     widgets["lbl_stream_admin_status"] = MockLabel()
@@ -168,6 +171,7 @@ def mock_widgets():
     widgets["lbl_oauth_side_status"] = MockLabel()
     widgets["lbl_moderation_side_status"] = MockLabel()
     widgets["lbl_kira_chat_state"] = MockLabel()
+    widgets["lbl_kira_agenda_state"] = MockLabel()
     widgets["btn_stream_youtube_read"] = MockButton()
     widgets["btn_stream_youtube_write"] = MockButton()
     widgets["btn_stream_revoke_write"] = MockButton()
@@ -181,6 +185,10 @@ def mock_widgets():
     widgets["btn_stream_send_chat"] = MockButton()
     widgets["btn_stream_simulate_chat"] = MockButton()
     widgets["btn_stream_force_kira"] = MockButton()
+    widgets["btn_kira_agenda_add_topic"] = MockButton()
+    widgets["btn_kira_agenda_enable"] = MockButton()
+    widgets["btn_kira_agenda_soft_stop"] = MockButton()
+    widgets["btn_kira_agenda_emergency_stop"] = MockButton()
     widgets["btn_stream_propose_timeout"] = MockButton()
     widgets["btn_stream_propose_ban"] = MockButton()
     widgets["switch_stream_mod_enabled"] = MockSwitch(False)
@@ -313,6 +321,14 @@ class TestStreamAdminUILayoutSafety:
             "btn_stream_send_chat",
             "btn_stream_simulate_chat",
             "btn_stream_force_kira",
+            "lbl_kira_agenda_state",
+            "entry_kira_agenda_title",
+            "entry_kira_agenda_angle",
+            "entry_kira_agenda_constraints",
+            "btn_kira_agenda_add_topic",
+            "btn_kira_agenda_enable",
+            "btn_kira_agenda_soft_stop",
+            "btn_kira_agenda_emergency_stop",
             "lbl_stream_analytics",
             "lbl_stream_pending",
         ):
@@ -341,6 +357,10 @@ class TestStreamAdminUILayoutSafety:
             "self._dispatch_simulate_chat",
             "self._dispatch_send_chat()",
             "self._dispatch_force_kira",
+            "self._dispatch_agenda_add_topic",
+            "self._dispatch_agenda_enable",
+            "self._dispatch_agenda_soft_stop",
+            "self._dispatch_agenda_emergency_stop",
         ):
             assert callback in source
 
@@ -360,6 +380,45 @@ class TestStreamAdminUILayoutSafety:
 
         assert "wraplength=520" in source
         assert "justify=\"left\"" in source
+
+
+class TestKiraAgendaControls:
+    def test_agenda_add_topic_dispatches_compact_form(self, ui_state, dispatcher, mock_widgets):
+        ui = StreamAdminUI(ui_state=ui_state, dispatcher=dispatcher)
+        ui.set_widgets(mock_widgets)
+        received = []
+        ui.set_agenda_add_topic_callback(lambda title, angle, constraints: received.append((title, angle, constraints)))
+
+        mock_widgets["entry_kira_agenda_title"].insert(0, " Minecraft industria ")
+        mock_widgets["entry_kira_agenda_angle"].insert(0, " simple y divertido ")
+        mock_widgets["entry_kira_agenda_constraints"].insert(0, " no académico ; 1 frase ")
+
+        ui._dispatch_agenda_add_topic()
+
+        assert received == [("Minecraft industria", "simple y divertido", ["no académico", "1 frase"])]
+
+    def test_agenda_control_dispatchers(self, ui_state, dispatcher, mock_widgets):
+        ui = StreamAdminUI(ui_state=ui_state, dispatcher=dispatcher)
+        ui.set_widgets(mock_widgets)
+        calls = []
+        ui.set_agenda_enable_callback(lambda: calls.append("enable"))
+        ui.set_agenda_soft_stop_callback(lambda: calls.append("soft"))
+        ui.set_agenda_emergency_stop_callback(lambda: calls.append("emergency"))
+
+        ui._dispatch_agenda_enable()
+        ui._dispatch_agenda_soft_stop()
+        ui._dispatch_agenda_emergency_stop()
+
+        assert calls == ["enable", "soft", "emergency"]
+
+    def test_agenda_status_updates_operator_label(self, ui_state, dispatcher, mock_widgets):
+        ui = StreamAdminUI(ui_state=ui_state, dispatcher=dispatcher)
+        ui.set_widgets(mock_widgets)
+
+        ui.set_agenda_status("Kira está esperando PTT", "#ffaa00")
+
+        assert mock_widgets["lbl_kira_agenda_state"].text == "Kira está esperando PTT"
+        assert mock_widgets["lbl_kira_agenda_state"].text_color == "#ffaa00"
 
 
 # ---------------------------------------------------------------------------

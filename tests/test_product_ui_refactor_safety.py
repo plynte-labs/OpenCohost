@@ -73,6 +73,8 @@ def test_app_shell_still_composes_all_existing_panels() -> None:
         "ProfilePanel",
         "SmartAggregatorUI",
         "StreamAdminUI",
+        "CoHostAgendaPanel",
+        "MusicPanel",
         "AdvancedModePanel",
         "StatusBar",
     ):
@@ -88,6 +90,8 @@ def test_phase2_product_shell_uses_persistent_kira_and_workspace() -> None:
     assert "Paneles de producto" in source
     assert "product_tabs.add(\"Configuración\")" in source
     assert "product_tabs.add(\"Stream\")" in source
+    assert "product_tabs.add(\"Co-host\")" in source
+    assert "product_tabs.add(\"Música\")" in source
     assert "self._product_workspace_panel" in source
     assert "self._product_tabs" in source
 
@@ -141,6 +145,85 @@ def test_stream_and_logs_callbacks_remain_wired() -> None:
     assert "self._wire_stream_admin_callbacks()" in source
     assert "command=self._toggle_logs_panel" in source
     assert "AdvancedModePanel(" in source
+
+
+def test_kira_agenda_mode_wiring_stays_out_of_llm_engine() -> None:
+    """Agenda orchestration belongs in AppShell/controller, not core LLM engine."""
+    source = read_text(APP_SHELL)
+
+    assert "KiraAgendaController" in source
+    assert "CoHostAgendaPanel" in source
+    assert "load_cohost_profiles" in source
+    assert "save_cohost_profiles" in source
+    assert "on_remove_topic" in source
+    assert "on_move_topic" in source
+    assert "set_agenda_add_topic_callback" in source
+    assert "set_agenda_enable_callback" in source
+    assert "set_agenda_soft_stop_callback" in source
+    assert "set_agenda_emergency_stop_callback" in source
+    assert "self.smart_agg.on_aggregated_context = self._on_smart_aggregated_context" in source
+    assert "drop_pending_sources((\"kira-agenda\",))" in source
+    assert "_kira_agenda_has_higher_priority_pending" in source
+    assert "Prefetch pausado: hay PTT/chat pendiente" in source
+    assert "_kira_agenda_pending_compact_chat" in source
+
+
+def test_music_mood_tab_is_wired_next_to_avatar_obs() -> None:
+    """Music is a separate production module, not part of LLM/agenda logic."""
+    source = read_text(APP_SHELL)
+
+    assert "MusicLibrary" in source
+    assert "AudioBedEngine" in source
+    assert "MusicPanel" in source
+    assert "tab_product_music = product_tabs.add(\"Música\")" in source
+    assert "tab_product_avatar = product_tabs.add(\"Avatar / OBS\")" in source
+    assert "self.music_panel = MusicPanel(" in source
+    assert "on_delete_track=lambda track_id: self._music_delete_track(track_id)" in source
+    assert "def _music_delete_track" in source
+    assert "messagebox.askyesno" in source
+    assert "self.audio_bed.duck()" in source
+    assert "self.audio_bed.unduck()" in source
+
+
+def test_music_panel_exposes_list_and_confirmed_delete_source_wiring() -> None:
+    """Music panel must list imported tracks and expose a delete control through AppShell confirmation."""
+    music_panel = read_text(ROOT / "ui" / "music_panel.py")
+    app_shell = read_text(APP_SHELL)
+
+    assert "combo_delete_track" in music_panel
+    assert "Eliminar track" in music_panel
+    assert "_dispatch_delete_track" in music_panel
+    assert "_on_delete_track(track.id)" in music_panel
+    assert "No se borran archivos fuente externos" in app_shell
+
+
+def test_agenda_lifecycle_is_source_gated_and_prefetch_invalidates_on_interrupt() -> None:
+    """Agenda state must only advance for agenda-origin speech, never PTT/chat/direct."""
+    source = read_text(APP_SHELL)
+
+    assert "def _is_kira_agenda_speech_source" in source
+    assert "current_speech_source" in source
+    assert "startswith(\"kira-agenda\")" in source
+    assert "mark_generation_accepted()" in source
+    assert "and self._is_kira_agenda_speech_source()" in source
+    assert "agenda_speech = hasattr(self, \"kira_agenda\") and self._is_kira_agenda_speech_source()" in source
+    assert "self._kira_agenda_clear_prefetch()" in source
+
+
+def test_destructive_music_and_agenda_cleanup_require_confirmation() -> None:
+    source = read_text(APP_SHELL)
+
+    assert "Limpiar faltantes" in source
+    assert "messagebox.askyesno" in source
+    assert "Eliminar tema de agenda" in source
+    assert "¿Eliminar de la cola" in source
+
+
+def test_audio_bed_state_mutation_is_locked() -> None:
+    source = read_text(ROOT / "core" / "audio_bed.py")
+
+    assert "threading.RLock()" in source
+    assert "with self._lock:" in source
 
 
 def test_avatar_panel_is_gridded_into_its_parent() -> None:

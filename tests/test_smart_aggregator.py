@@ -567,6 +567,66 @@ class TestAggregator:
         assert summary["top_intents"]
         assert "CONTEXTO PRIVADO" in summary["prompt"]
 
+    def test_high_traffic_samples_context_and_skips_vibe_llm(self, smart_aggregator_config, temp_dir):
+        """Massive streams should compact/sample instead of calling vibe LLM per spike."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["vibe"]["window_seconds"] = 60
+        cfg["activity"]["threshold_per_second"] = 10.0
+        cfg["live_safety"] = {
+            "enabled": True,
+            "high_traffic_threshold_per_second": 10.0,
+            "high_traffic_sample_every": 10,
+            "state_log_interval_seconds": 0.0,
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        llm_calls = []
+        agg = Aggregator(config_path=config_path, llm_interface=lambda prompt: llm_calls.append(prompt) or {"emotions": {"neutral": 1.0}, "temperature": 50})
+        logs = []
+        agg.on_live_safety_log = logs.append
+        base = time.time()
+
+        for i in range(70):
+            agg.process_message({"user": f"u{i}", "text": "mensaje valido con suficiente contexto para directo masivo", "timestamp": base + (i * 0.01)})
+
+        assert llm_calls == []
+        assert agg.intent_aggregator.summarize(now=base + 1)["total_messages"] < 70
+        assert any("high traffic ON" in line for line in logs)
+
+    def test_empty_vibe_responses_enter_backoff(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["vibe"]["window_seconds"] = 0
+        cfg["activity"]["threshold_per_second"] = 99.0
+        cfg["live_safety"] = {
+            "enabled": True,
+            "high_traffic_threshold_per_second": 99.0,
+            "empty_vibe_backoff_after": 2,
+            "empty_vibe_backoff_seconds": 120.0,
+            "state_log_interval_seconds": 0.0,
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        calls = []
+        agg = Aggregator(config_path=config_path, llm_interface=lambda prompt: calls.append(prompt) or "")
+        logs = []
+        agg.on_live_safety_log = logs.append
+        base = time.time()
+
+        for i in range(3):
+            agg.process_message({"user": f"u{i}", "text": "mensaje valido para probar backoff de respuestas vacias", "timestamp": base})
+
+        assert len(calls) == 2
+        assert agg._live_vibe_backoff_until > time.time()
+        assert any("Vibe en cooldown" in line for line in logs)
+
     def test_session_persistence(self, smart_aggregator_config, mock_llm, temp_dir):
         """TC3.6.4: Aggregator persists compact Kira contexts, not raw chat by default."""
         cfg = deepcopy(smart_aggregator_config)
