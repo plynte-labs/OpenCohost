@@ -37,6 +37,7 @@ _TTS_STATUS_COLORS: dict[str, str] = {
     "idle": "#1b2633",
     "generating": "#1f3f6f",
     "speaking": "#1f526f",
+    "paused": "#ffaa00",
     "error": "#cc3333",
 }
 
@@ -288,6 +289,7 @@ class StatusBar:
                 "idle": "TTS: inactivo",
                 "generating": "TTS: renderizando",
                 "speaking": "TTS: hablando",
+                "paused": "TTS: pausado · Kira espera operador",
                 "error": "TTS: error",
             },
             "chat_status": {

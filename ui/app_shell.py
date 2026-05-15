@@ -960,6 +960,16 @@ class VocalAIApp(ctk.CTk):
                 queue_lines=queue_lines,
                 failures=self.kira_agenda.failure_count,
             ))
+        # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
+        # Only update on state transitions to avoid overwriting pipeline-driven TTS state
+        was_paused = getattr(self, "_agenda_was_paused", False)
+        is_paused = self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR
+        if self.status_bar and was_paused != is_paused:
+            if is_paused:
+                self.after(0, lambda: self.status_bar.update_tts_status("paused"))
+            else:
+                self.after(0, lambda: self.status_bar.update_tts_status("idle"))
+        self._agenda_was_paused = is_paused
 
     def _init_stream_admin(self) -> None:
         try:
@@ -1602,7 +1612,6 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
         self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
         self._safe_after(lambda: self.btn_download.configure(state="disabled"))
-        self._safe_after(lambda: self.switch_ptt.configure(state="disabled"))
         self._safe_after(lambda: self.btn_mapear.configure(state="disabled"))
 
     def _on_motor_idle(self) -> None:

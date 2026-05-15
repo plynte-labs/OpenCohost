@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tkinter.messagebox as messagebox
 from typing import Any, Callable, Optional
 
 import customtkinter as ctk
@@ -168,6 +169,9 @@ class CoHostAgendaPanel:
         btn_emergency = ctk.CTkButton(session_controls, text="Emergencia", command=self._on_emergency_stop, fg_color="#8f2f2f", state="disabled")
         btn_emergency.grid(row=1, column=2, padx=(4, 14), pady=(4, 14), sticky="ew")
         self._widgets["btn_agenda_emergency"] = btn_emergency
+        lbl_activation_hint = ctk.CTkLabel(session_controls, text="", text_color="#8fa3b8", anchor="w", wraplength=760)
+        lbl_activation_hint.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 12))
+        self._widgets["lbl_activation_hint"] = lbl_activation_hint
 
         form = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
         form.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
@@ -444,18 +448,25 @@ class CoHostAgendaPanel:
         index = self._queue_index()
         if index is not None:
             self._on_remove_topic(index)
+        else:
+            messagebox.showwarning("Índice inválido", "Ingresá un número de tema válido (la cola es 1-indexada).")
 
     def _dispatch_move_topic(self, direction: int) -> None:
         index = self._queue_index()
         if index is not None:
             self._on_move_topic(index, direction)
+        else:
+            messagebox.showwarning("Índice inválido", "Ingresá un número de tema válido (la cola es 1-indexada).")
 
     def _queue_index(self) -> int | None:
         raw = self._get("entry_queue_index")
+        if not raw:
+            return None
         try:
-            return max(1, int(raw))
+            value = int(raw)
         except ValueError:
             return None
+        return value if value >= 1 else None
 
     def _get(self, name: str) -> str:
         widget = self._widgets.get(name)
@@ -514,3 +525,17 @@ class CoHostAgendaPanel:
             widget = self._widgets.get(name)
             if widget is not None:
                 widget.configure(state=desired)
+        # BUG-010: show WHY Activar is disabled
+        hint = self._widgets.get("lbl_activation_hint")
+        if hint is not None:
+            if enable_state == "disabled":
+                reasons = []
+                if not has_queue:
+                    reasons.append("la cola de temas está vacía")
+                if state != "OFF":
+                    reasons.append(f"la agenda está en estado {state}")
+                if has_current:
+                    reasons.append("ya hay un tema activo")
+                hint.configure(text="Activar deshabilitado: " + "; ".join(reasons) + "." if reasons else "")
+            else:
+                hint.configure(text="")
