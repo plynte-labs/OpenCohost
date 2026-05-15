@@ -96,6 +96,10 @@ class StreamAdminUI:
         self._simulate_chat_cb: Optional[Callable] = None
         self._force_kira_cb: Optional[Callable] = None
         self._refresh_user_list_cb: Optional[Callable] = None
+        self._agenda_add_topic_cb: Optional[Callable] = None
+        self._agenda_enable_cb: Optional[Callable] = None
+        self._agenda_soft_stop_cb: Optional[Callable] = None
+        self._agenda_emergency_stop_cb: Optional[Callable] = None
 
     # ------------------------------------------------------------------
     # Widget injection
@@ -401,6 +405,62 @@ class StreamAdminUI:
         btn_force.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_force_kira"] = btn_force
 
+    def _build_agenda_tab(self, tab: Any) -> None:
+        frame_agenda = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
+        frame_agenda.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        frame_agenda.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            frame_agenda,
+            text="Kira Co-host Agenda",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=10, pady=(10, 2), sticky="ew")
+
+        lbl_state = ctk.CTkLabel(
+            frame_agenda,
+            text="Agenda apagada. Kira espera temas aprobados.",
+            text_color="#8fa3b8",
+            anchor="w",
+            justify="left",
+            wraplength=520,
+        )
+        lbl_state.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
+        self._widgets["lbl_kira_agenda_state"] = lbl_state
+
+        entry_title = ctk.CTkEntry(frame_agenda, placeholder_text="Tema aprobado para Kira")
+        entry_title.grid(row=2, column=0, padx=10, pady=(4, 4), sticky="ew")
+        self._widgets["entry_kira_agenda_title"] = entry_title
+
+        entry_angle = ctk.CTkEntry(frame_agenda, placeholder_text="Ángulo breve: cómo debe tratarlo")
+        entry_angle.grid(row=3, column=0, padx=10, pady=4, sticky="ew")
+        self._widgets["entry_kira_agenda_angle"] = entry_angle
+
+        entry_constraints = ctk.CTkEntry(frame_agenda, placeholder_text="Restricciones separadas por ;")
+        entry_constraints.grid(row=4, column=0, padx=10, pady=4, sticky="ew")
+        self._widgets["entry_kira_agenda_constraints"] = entry_constraints
+
+        actions = ctk.CTkFrame(frame_agenda, fg_color="transparent")
+        actions.grid(row=5, column=0, sticky="ew", padx=10, pady=(4, 10))
+        for col in range(4):
+            actions.grid_columnconfigure(col, weight=1)
+
+        btn_add = ctk.CTkButton(actions, text="Agregar tema", command=self._dispatch_agenda_add_topic, width=110, fg_color="#2f5f8f")
+        btn_add.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+        self._widgets["btn_kira_agenda_add_topic"] = btn_add
+
+        btn_enable = ctk.CTkButton(actions, text="Activar agenda", command=self._dispatch_agenda_enable, width=110, fg_color="#2f7d50")
+        btn_enable.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        self._widgets["btn_kira_agenda_enable"] = btn_enable
+
+        btn_soft_stop = ctk.CTkButton(actions, text="Stop suave", command=self._dispatch_agenda_soft_stop, width=100, fg_color="#7d5a2a")
+        btn_soft_stop.grid(row=0, column=2, padx=4, pady=4, sticky="ew")
+        self._widgets["btn_kira_agenda_soft_stop"] = btn_soft_stop
+
+        btn_emergency = ctk.CTkButton(actions, text="Emergencia", command=self._dispatch_agenda_emergency_stop, width=100, fg_color="#8f2f2f")
+        btn_emergency.grid(row=0, column=3, padx=4, pady=4, sticky="ew")
+        self._widgets["btn_kira_agenda_emergency_stop"] = btn_emergency
+
     def _build_status_tab(self, tab: Any) -> None:
         frame_bottom = ctk.CTkScrollableFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_bottom.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
@@ -472,6 +532,18 @@ class StreamAdminUI:
     def set_refresh_user_list_callback(self, cb: Callable) -> None:
         self._refresh_user_list_cb = cb
 
+    def set_agenda_add_topic_callback(self, cb: Callable) -> None:
+        self._agenda_add_topic_cb = cb
+
+    def set_agenda_enable_callback(self, cb: Callable) -> None:
+        self._agenda_enable_cb = cb
+
+    def set_agenda_soft_stop_callback(self, cb: Callable) -> None:
+        self._agenda_soft_stop_cb = cb
+
+    def set_agenda_emergency_stop_callback(self, cb: Callable) -> None:
+        self._agenda_emergency_stop_cb = cb
+
     def _dispatch_connect(self, request_write: bool) -> None:
         if self._connect_cb is not None:
             self._connect_cb(request_write)
@@ -531,6 +603,32 @@ class StreamAdminUI:
     def refresh_user_list(self) -> None:
         if self._refresh_user_list_cb is not None:
             self._refresh_user_list_cb()
+
+    def _dispatch_agenda_add_topic(self) -> None:
+        if self._agenda_add_topic_cb is None:
+            return
+        title = (self._widget("entry_kira_agenda_title").get() if self._widget("entry_kira_agenda_title") else "").strip()
+        angle = (self._widget("entry_kira_agenda_angle").get() if self._widget("entry_kira_agenda_angle") else "").strip()
+        constraints_raw = (self._widget("entry_kira_agenda_constraints").get() if self._widget("entry_kira_agenda_constraints") else "").strip()
+        constraints = [part.strip() for part in constraints_raw.split(";") if part.strip()]
+        self._agenda_add_topic_cb(title, angle, constraints)
+
+    def _dispatch_agenda_enable(self) -> None:
+        if self._agenda_enable_cb is not None:
+            self._agenda_enable_cb()
+
+    def _dispatch_agenda_soft_stop(self) -> None:
+        if self._agenda_soft_stop_cb is not None:
+            self._agenda_soft_stop_cb()
+
+    def _dispatch_agenda_emergency_stop(self) -> None:
+        if self._agenda_emergency_stop_cb is not None:
+            self._agenda_emergency_stop_cb()
+
+    def set_agenda_status(self, text: str, color: str = "#8fa3b8") -> None:
+        label = self._widget("lbl_kira_agenda_state")
+        if label is not None:
+            label.configure(text=text, text_color=color)
 
     # ------------------------------------------------------------------
     # Stream admin reference management
