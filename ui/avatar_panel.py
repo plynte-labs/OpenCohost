@@ -444,7 +444,7 @@ class AvatarPanel:
 
     def _update_preview(self) -> None:
         """Update the preview image based on the current state."""
-        if self._preview_label is None:
+        if self._preview_label is None or not self._preview_label.winfo_exists():
             return
 
         image_path = self.config.get_image_for_state(self._current_state)
@@ -455,16 +455,22 @@ class AvatarPanel:
                 img = Image.open(image_path)
                 # Resize maintaining aspect ratio
                 img.thumbnail((_PREVIEW_SIZE, _PREVIEW_SIZE), Image.Resampling.LANCZOS)
+                # Keep BOTH references alive to prevent Tkinter image GC.
+                self._preview_image_pil = img
                 ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
                 self._preview_label.configure(image=ctk_img, text="")
-                self._preview_image_ref = ctk_img  # Keep reference
+                self._preview_image_ref = ctk_img
             except Exception as e:
                 logger.warning(f"[Avatar] No se pudo cargar preview: {e}")
+                self._preview_image_pil = None
+                self._preview_image_ref = None
                 self._preview_label.configure(
                     image=None, text="Error al cargar imagen", text_color="#aa5555"
                 )
         else:
             state_label = _STATE_LABELS.get(self._current_state, self._current_state)
+            self._preview_image_pil = None
+            self._preview_image_ref = None
             self._preview_label.configure(
                 image=None, text=f"Sin imagen para: {state_label}", text_color="#6b7b8d"
             )

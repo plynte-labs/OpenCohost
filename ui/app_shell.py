@@ -234,7 +234,7 @@ class VocalAIApp(ctk.CTk):
     def _on_avatar_state_for_preview(self, state: AvatarState) -> None:
         """Update the left-panel avatar preview when bridge state changes."""
         def update():
-            if self._kira_avatar_label is None:
+            if self._kira_avatar_label is None or not self._kira_avatar_label.winfo_exists():
                 return
             from avatar.avatar_config import load_avatar_config
             config = load_avatar_config()
@@ -244,10 +244,16 @@ class VocalAIApp(ctk.CTk):
                     from PIL import Image
                     img = Image.open(image_path)
                     img.thumbnail((220, 220), Image.Resampling.LANCZOS)
+                    # Keep BOTH references alive to prevent Tkinter image GC.
+                    # CTkImage wraps the PIL Image but doesn't always hold a
+                    # strong reference to it — if the PIL Image is collected,
+                    # Tkinter raises "image pyimageN doesn't exist".
+                    self._kira_avatar_pil = img
                     ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-                    self._kira_avatar_label.configure(image=ctk_img, text="")
                     self._kira_avatar_ref = ctk_img
+                    self._kira_avatar_label.configure(image=ctk_img, text="")
                 except Exception as e:
+                    self._kira_avatar_pil = None
                     self._kira_avatar_ref = None
                     self._kira_avatar_label.configure(
                         image=None,
@@ -256,6 +262,7 @@ class VocalAIApp(ctk.CTk):
                     )
                     self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
             else:
+                self._kira_avatar_pil = None
                 self._kira_avatar_ref = None
                 self._kira_avatar_label.configure(
                     image=None,
