@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -266,7 +267,7 @@ class VoiceControlPanel:
         # Hint label
         self.lbl_voice_hint = ctk.CTkLabel(
             self._parent,
-            text="Usa LiveAudio o PTT. El botón principal conserva el comportamiento de Conectar LiveAudio.",
+            text="Conecta el reconocimiento de voz en tiempo real. PTT requiere LiveAudio activo.",
             text_color="#8fa3b8", anchor="w"
         )
         self.lbl_voice_hint.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
@@ -419,7 +420,6 @@ class VoiceControlPanel:
 
                     # --- Anti-Loop Whisper Filter (Sanitización Agresiva) ---
                     # Reduce frases o palabras repetidas consecutivamente 3 o más veces a una sola.
-                    import re
                     texto_original = texto_transcrito
                     texto_transcrito = re.sub(r'\b(.+?)(?:\s+\1\b){2,}', r'\1', texto_transcrito, flags=re.IGNORECASE).strip()
                     

@@ -46,7 +46,6 @@ class CoHostAgendaPanel:
         self._on_move_topic = on_move_topic or (lambda index, direction: None)
         self._on_select_profile = on_select_profile or (lambda name: None)
         self._on_save_profile = on_save_profile or (lambda name, style, priority, length: None)
-        self._on_session_settings = on_session_settings or (lambda turns, rhythm, length, safety_mode: None)
         self._on_enable = on_enable or (lambda: None)
         self._on_soft_stop = on_soft_stop or (lambda: None)
         self._on_emergency_stop = on_emergency_stop or (lambda: None)

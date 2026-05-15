@@ -109,6 +109,17 @@
       "enabled": true,
       "missing": false,
       "invalid": false
+    },
+    {
+      "id": "5d1ec0afdcdd44e780a0638976235bfa",
+      "original_name": "yt1s.com - Lies Of P  Fascination HQ.mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt2_ee3b599f.mp3",
+      "mood": "normal",
+      "label": "normal_alt2",
+      "variant_index": 2,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
     }
   ]
 }
