@@ -46,3 +46,21 @@ env/
 Thumbs.db
 .DS_Store
 Desktop.ini
+
+# ── SDD / Conductor artifacts ──
+.atl/
+openspec/
+sdd/
+conductor/tracks/
+
+# ── Session notes and drafts ──
+session-*.md
+.pr_body.md
+
+# ── Debug scripts ──
+debug_*.py
+
+# ── User assets ──
+assets/music/
+config/music_library.json
+Documents/
