@@ -348,50 +348,50 @@ class TestGAP004EmergencyStopVsPrefetchThread:
                         if str(item[3]).startswith("kira-agenda")]
         assert agenda_items == []
 
-    def test_prefetch_thread_writes_after_clear_is_race_condition(self):
-        """PROVES the race condition: prefetch thread completes AFTER
-        clear_prefetched_agenda is called, writing a zombie.
+    def test_prefetch_thread_write_after_clear_is_prevented_by_epoch(self):
+        """The epoch fix prevents the zombie: worker checks epoch under lock
+        before writing. If epoch changed (clear was called), result is discarded.
 
-        This test documents the existing race condition. If this test
-        FAILS in the future, it means the race was fixed (good!).
+        Sequence:
+        1. prefetch_agenda() starts, captures epoch=0
+        2. Worker calls _generar_dialogo (slow — blocks on barrier)
+        3. Main thread calls clear_prefetched_agenda() → epoch becomes 1
+        4. Worker unblocks, checks epoch: 0 != 1 → discards result
         """
         motor = _build_motor()
-        write_barrier = threading.Event()
-        clear_barrier = threading.Event()
+        generation_barrier = threading.Event()
 
-        original_prefetch_lock = motor._prefetch_lock
+        def slow_generar(payload, **kwargs):
+            """Simulates slow LLM generation that blocks on a barrier."""
+            generation_barrier.wait(timeout=3.0)
+            return "zombie response that should be discarded"
 
-        def delayed_worker():
-            """Simulates a prefetch thread that completes slowly."""
-            # Wait until the main thread has called clear_prefetched_agenda
-            clear_barrier.wait(timeout=2.0)
-            time.sleep(0.01)  # Small delay after clear
+        def always_accept(text):
+            return True
 
-            # Now write the "zombie" result
-            with original_prefetch_lock:
-                motor._prefetched_agenda = {
-                    "payload": "zombie",
-                    "dialogo": "I should not exist",
-                    "priority": 2,
-                    "source": "kira-agenda",
-                }
-            write_barrier.set()
+        # Wire mocks
+        motor._generar_dialogo = slow_generar
+        motor._preview_accept_agenda_output = always_accept
 
-        # Start the delayed worker
-        thread = threading.Thread(target=delayed_worker, daemon=True)
-        thread.start()
+        # Start prefetch — worker will block on barrier
+        assert motor.prefetch_agenda("test prompt", priority=2, source="kira-agenda")
 
-        # Emergency stop clears prefetch
+        # Give thread time to start
+        time.sleep(0.05)
+
+        # Emergency stop clears prefetch — epoch increments
         motor.clear_prefetched_agenda()
-        clear_barrier.set()  # Let the worker proceed
+        assert motor._prefetch_epoch == 1
 
-        # Wait for worker to write
-        write_barrier.wait(timeout=2.0)
+        # Now release the worker
+        generation_barrier.set()
 
-        # The zombie survives because clear happened BEFORE write
-        assert motor._prefetched_agenda is not None, \
-            "Race condition confirmed: prefetch thread wrote AFTER clear"
-        assert motor._prefetched_agenda["dialogo"] == "I should not exist"
+        # Wait for worker to finish
+        motor._prefetch_done.wait(timeout=3.0)
+
+        # The zombie must NOT survive because epoch check prevents write
+        assert motor._prefetched_agenda is None, \
+            "Epoch fix must prevent zombie write after clear"
 
     def test_play_prefetched_agenda_returns_false_when_cleared(self):
         """After emergency stop, play_prefetched_agenda must return False."""

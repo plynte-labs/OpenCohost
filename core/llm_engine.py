@@ -75,6 +75,7 @@ class MotorVocalIA(threading.Thread):
         self._prefetch_done = threading.Event()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetched_agenda: Optional[dict] = None
+        self._prefetch_epoch: int = 0
         self.agenda_output_validator = None
         self.agenda_output_preview_validator = None
         self.agenda_output_recorder = None
@@ -244,6 +245,7 @@ class MotorVocalIA(threading.Thread):
             if self._prefetch_thread and self._prefetch_thread.is_alive():
                 return False
             self._prefetch_done.clear()
+            epoch = self._prefetch_epoch
 
         def worker() -> None:
             try:
@@ -253,6 +255,9 @@ class MotorVocalIA(threading.Thread):
                         self._log("Agenda: prefetch rechazado por repetición o guardrails.", level="warning")
                         return
                     with self._prefetch_lock:
+                        if self._prefetch_epoch != epoch:
+                            self._log("Agenda: prefetch descartado (invalidado por clear/stop).", level="warning")
+                            return
                         self._prefetched_agenda = {
                             "payload": payload,
                             "dialogo": dialogo,
@@ -283,6 +288,7 @@ class MotorVocalIA(threading.Thread):
         with self._prefetch_lock:
             self._prefetched_agenda = None
             self._prefetch_done.clear()
+            self._prefetch_epoch += 1
 
     def play_prefetched_agenda(self) -> bool:
         """Speak cached agenda text, if available, without another LLM call."""
