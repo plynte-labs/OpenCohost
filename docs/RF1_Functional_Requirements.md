@@ -30,16 +30,16 @@ La interfaz gráfica debe incluir un control tipo switch (`CTkSwitch`) que permi
 
 **Comportamiento:**
 - **OFF (default):** El sistema opera en modo continuo (comportamiento actual). El WebSocket de LiveAudio permanece activo y recibe transcripciones en tiempo real.
-- **ON:** El sistema entra en modo PTT. El WebSocket se pausa (no se desconecta, pero las transcripciones entrantes se descartan). La captura de audio solo se realiza cuando el usuario mantiene presionada la tecla configurada.
+- **ON:** El sistema entra en modo PTT. El WebSocket se pausa (no se desconecta, pero las transcripciones entrantes se descartan si no hay hotkey presionado). La captura de audio solo se realiza cuando el usuario mantiene presionada la tecla configurada.
 
 **Reglas de negocio:**
-1. El cambio de modo debe ser inmediato (< 100 ms) y no requerir reinicio de la aplicación.
-2. Si el motor TTS está hablando (`_speaking == True`), el toggle debe estar deshabilitado para evitar cambios de modo durante la reproducción.
-3. El estado del toggle debe visualizarse claramente en la UI (color + etiqueta).
+1. El cambio de modo debe ser inmediato (< 100 ms) y no requerir reinicio de la aplicación. ✅ Implementado
+2. Si el motor TTS está hablando (`_speaking == True`), el toggle debe estar deshabilitado para evitar cambios de modo durante la reproducción. ✅ Implementado
+3. El estado del toggle debe visualizarse claramente en la UI (color + etiqueta). ✅ Implementado
 
 **Dependencias:**
-- `ui/app.py` — agregar widget.
-- `core/llm_engine.py` — respetar flag `_speaking`.
+- `ui/app.py` — ✅ Implementado (switch + label)
+- `core/llm_engine.py` — ✅ Respetado (bloqueo en líneas 967-970)
 
 ---
 
@@ -56,20 +56,23 @@ La interfaz gráfica debe incluir un control tipo switch (`CTkSwitch`) que permi
 El usuario debe poder configurar una tecla o botón de mouse que actúe como disparador del PTT, detectable globalmente (incluso cuando la ventana de VoiceAI no tiene el foco).
 
 **Comportamiento:**
-- Un dropdown en la UI lista las teclas predefinidas: `F1`–`F12`, `Mouse4`, `Mouse5`, `ScrollLock`, `Insert`.
-- Al seleccionar una tecla, el sistema inicia un listener global en un hilo daemon usando `pynput`.
-- `on_press`: inicia la grabación de audio (float32, 24000 Hz, mono) en un buffer en memoria.
-- `on_release`: detiene la grabación, valida el buffer (RMS mínimo, duración > 0.5 s) y lo envía al motor IA como comando `process_context`.
+- Un dropdown en la UI lista las teclas predefinidas: `F1`–`F12`, `Mouse4`, `Mouse5`, `ScrollLock`, `Insert`. ✅ Implementado
+- Al seleccionar una tecla, el sistema inicia un listener global en un hilo daemon usando `pynput`. ✅ Implementado
+- `on_press`: Setea flag `ptt_pressed=True`, actualiza UI a "Escuchando". ✅ Implementado
+- `on_release`: Setea flag `ptt_pressed=False`, actualiza UI a idle. ✅ Implementado
+- El gate en `_ws_listener` descarta transcripciones si `ptt_enabled=True` y `ptt_pressed=False`. ✅ Implementado
 
 **Reglas de negocio:**
-1. El listener debe correr en un hilo independiente del mixer de pygame para evitar latencia en la detección.
-2. Si el motor TTS está hablando (`_speaking == True`), el evento `on_release` debe encolar el buffer y procesarlo **solo** cuando `_speaking` pase a `False` (half-duplex).
-3. El listener debe ser detenido y recreado cada vez que se cambia la tecla configurada.
-4. No debe capturar la tecla si la aplicación está minimizada o en segundo plano (comportamiento global esperado).
+1. El listener debe correr en un hilo independiente del mixer de pygame para evitar latencia en la detección. ✅ Implementado (daemon=True)
+2. Si el motor TTS está hablando (`_speaking == True`), las transcripciones se descartan (half-duplex). ✅ Implementado
+3. El listener debe ser detenido y recreado cada vez que se cambia la tecla configurada. ✅ Implementado
+4. No debe capturar la tecla si la aplicación está minimizada o en segundo plano (comportamiento global esperado). ✅ Implementado
+
+**Nota:** El PTT es un **gate sobre transcripciones WebSocket** de LiveAudio (que tiene Whisper). No captura audio local.
 
 **Dependencias:**
-- Librería `pynput` (ya instalada en `flux_env`).
-- `sounddevice` para captura de audio bajo demanda.
+- Librería `pynput` (ya instalada en `flux_env`). ✅
+- `sounddevice` (usado para grabación de referencia, no para PTT)
 
 ---
 

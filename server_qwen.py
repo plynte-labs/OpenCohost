@@ -4,11 +4,28 @@ import time
 import logging
 import threading
 import asyncio
+import inspect
+from pathlib import Path
+
+from config.storage import STORAGE_PATHS
+
 from flask import Flask, request, send_file, jsonify
 import torch
 import soundfile as sf
 import edge_tts
-from qwen_tts import Qwen3TTSModel
+
+BASE_DIR = Path(__file__).resolve().parent
+HF_CACHE_DIR = STORAGE_PATHS.hf_home
+HF_HUB_DIR = STORAGE_PATHS.hf_hub_cache
+QWEN_REPO_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+QWEN_CACHE_DIR = HF_HUB_DIR / "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base"
+
+# Hugging Face debe buscar primero en el cache configurable de VoiceAI. Si la
+# snapshot local existe, activamos offline para evitar llamadas de red.
+
+os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
+os.environ.setdefault("HF_HUB_CACHE", str(HF_HUB_DIR))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_HUB_DIR))
 
 # ──────────────────────────────────────────────
 # CONFIGURACIÓN DEL AUDIO DE REFERENCIA
@@ -28,10 +45,53 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 logger = logging.getLogger("MultiTTS-Server")
 logger.setLevel(logging.DEBUG)
-logger.addHandler(console_handler)
+if not logger.handlers:
+    logger.addHandler(console_handler)
 
-TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+TEMP_DIR = str(STORAGE_PATHS.temp_root)
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def _snapshot_from_local_cache():
+    refs_main = QWEN_CACHE_DIR / "refs" / "main"
+    if refs_main.exists():
+        revision = refs_main.read_text(encoding="utf-8").strip()
+        snapshot = QWEN_CACHE_DIR / "snapshots" / revision
+        if snapshot.exists():
+            return snapshot
+
+    snapshots_dir = QWEN_CACHE_DIR / "snapshots"
+    if not snapshots_dir.exists():
+        return None
+
+    snapshots = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+    if not snapshots:
+        return None
+    return max(snapshots, key=lambda p: p.stat().st_mtime)
+
+
+_LOCAL_MODEL_PATH_AT_IMPORT = _snapshot_from_local_cache()
+if _LOCAL_MODEL_PATH_AT_IMPORT:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+
+from qwen_tts import Qwen3TTSModel
+
+
+def _from_pretrained_kwargs(model_path, device):
+    kwargs = {
+        "device_map": device,
+        "dtype": torch.bfloat16 if device == "cuda:0" else torch.float32,
+    }
+    try:
+        signature = inspect.signature(Qwen3TTSModel.from_pretrained)
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+        if accepts_kwargs or "local_files_only" in signature.parameters:
+            kwargs["local_files_only"] = Path(str(model_path)).exists()
+    except (TypeError, ValueError):
+        pass
+    return kwargs
 
 # ──────────────────────────────────────────────
 # Inicialización del Servidor y Modelos
@@ -41,18 +101,27 @@ _tts_lock = threading.Lock()
 
 logger.info("Inicializando Motor Pesado (Qwen3-TTS 0.6B)...")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
+LOCAL_MODEL_PATH = _LOCAL_MODEL_PATH_AT_IMPORT
+MODEL_SOURCE = str(LOCAL_MODEL_PATH) if LOCAL_MODEL_PATH else QWEN_REPO_ID
+
+if LOCAL_MODEL_PATH:
+    logger.info(f"Usando Qwen3-TTS local: {LOCAL_MODEL_PATH}")
+else:
+    logger.warning("Qwen3-TTS no esta en cache local; se intentara descargar desde Hugging Face.")
 
 try:
-    # Carga nativa del modelo usando la API oficial
-    model = Qwen3TTSModel.from_pretrained(
-        "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        device_map=device,
-        dtype=torch.bfloat16 if device == "cuda:0" else torch.float32,
-    )
+    model = Qwen3TTSModel.from_pretrained(MODEL_SOURCE, **_from_pretrained_kwargs(MODEL_SOURCE, device))
     logger.info(f"✅ Qwen3-TTS cargado exitosamente en {device.upper()}")
 except Exception as e:
     logger.error(f"Fallo al cargar Qwen3-TTS: {e}")
     model = None
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health probe for the HealthMonitor daemon."""
+    if model is not None:
+        return jsonify({"status": "ok", "model_loaded": True}), 200
+    return jsonify({"status": "error", "model_loaded": False}), 503
 
 @app.route('/generar', methods=['POST'])
 def generar_audio():
@@ -80,6 +149,8 @@ def generar_audio():
 
         # ── RUTA 2: MOTOR PESADO (Qwen3-TTS | Clonación Zero-Shot) ──
         else:
+            if model is None:
+                return jsonify({"error": "Qwen3-TTS no esta cargado; revisa el log del servidor."}), 503
             if not referencia or not os.path.exists(referencia):
                 return jsonify({"error": "Falta referencia válida para Qwen3-TTS"}), 400
                 

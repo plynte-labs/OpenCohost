@@ -1,0 +1,89 @@
+filter:
+  min_words: 3
+  min_char_length: 10
+  discard_emojis_only: true
+  discard_links: true
+  discard_mentions: true
+  # Quality filters
+  discard_repetitive_chars: true
+  repetitive_char_threshold: 0.50
+  discard_repeated_words: true
+  repeated_word_max: 3
+  min_unique_word_ratio: 0.25
+  discard_gibberish: true
+  min_vowel_ratio: 0.10
+  min_token_vowel_ratio: 0.22
+  max_token_length: 24
+  max_gibberish_token_ratio: 0.35
+  discard_ascii_art: true
+  short_word_threshold: 7
+  # Minimum quality score to accept (0.0-1.0)
+  min_quality_score: 0.5
+  whitelist:
+    enabled: true
+    users: []
+
+vibe:
+  window_seconds: 60
+  emotions:
+    - excitement
+    - sadness
+    - anger
+    - joy
+    - confusion
+    - neutral
+  llm_prompt_template: "Analyze these YouTube live chat messages from the last {window}s. Messages may be Spanish, English, slang, memes, or gaming chat. Messages: {messages}. Return ONLY strict JSON with keys: emotions (object with excitement, sadness, anger, joy, confusion, neutral values from 0 to 1) and temperature (number from 0 to 100). No markdown, no explanation."
+  busy_fallback_temperature: 50.0
+  missing_llm_fallback_temperature: 50.0
+
+activity:
+  window_seconds: 5
+  threshold_per_second: 10.0
+  cooldown_seconds: 45.0
+  actions:
+    auto_reply:
+      enabled: false
+      message: "¡El chat esta que explota! 🔥"
+    behavior_change:
+      enabled: false
+      parameter: "excitement_multiplier"
+      value: 1.5
+
+spam:
+  enabled: true
+  user_window_seconds: 30
+  max_messages_per_user: 10
+  duplicate_window_seconds: 20
+  collapse_ui_duplicates: true
+
+live_safety:
+  enabled: true
+  # Meaningful live default from the first massive-stream test: 10 msg/s.
+  high_traffic_threshold_per_second: 10.0
+  high_traffic_sample_every: 10
+  empty_vibe_backoff_after: 2
+  empty_vibe_backoff_seconds: 60.0
+  state_log_interval_seconds: 30.0
+  seen_window_seconds: 5.0
+
+intent:
+  window_seconds: 60
+  top_intents: 5
+  min_count: 2
+  max_examples_per_intent: 3
+  duplicate_window_seconds: 45.0
+
+history:
+  db_path: "data/smart_aggregator/sessions.db"
+  retention_hours: 168
+  # Production stores only compact Kira contexts. Raw chat persistence is prohibited.
+
+source:
+  platform: youtube
+  reconnect_delay_seconds: 5
+  max_retries: 3
+  interruptable: false
+
+youtube_api:
+  api_key: "${YOUTUBE_API_KEY}"
+  channel_id: "${YOUTUBE_CHANNEL_ID}"

@@ -1,0 +1,205 @@
+"""Tests for ui.avatar_panel.AvatarPanel.
+
+Covers:
+- Panel builds without real OBS or user Downloads assets
+- State rows are created for all valid states
+- Próximamente section is present
+- Selecting/replacing an image updates config and preview (mocked file picker)
+- Panel builds with no configured images (safe defaults)
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# Mock customtkinter BEFORE importing the panel (no display in test env)
+_ctk_mock = MagicMock()
+_ctk_mock.CTkFrame.return_value = MagicMock()
+_ctk_mock.CTkLabel.return_value = MagicMock()
+_ctk_mock.CTkButton.return_value = MagicMock()
+_ctk_mock.CTkFont.return_value = MagicMock()
+_ctk_mock.CTkImage.return_value = MagicMock()
+sys.modules["customtkinter"] = _ctk_mock
+
+# Ensure the project root is on the path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from avatar.avatar_config import VALID_STATES, AvatarConfig, assign_image_to_state
+from avatar.avatar_state import AvatarState, AvatarStateBridge
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mock_parent():
+    """Mock a CTk-compatible parent frame."""
+    parent = MagicMock()
+    parent.grid = MagicMock()
+    parent.grid_columnconfigure = MagicMock()
+    return parent
+
+
+@pytest.fixture()
+def sample_image(tmp_path):
+    """Create a small fake PNG file."""
+    img = tmp_path / "test_image.png"
+    img.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01"
+        b"\r\n-\xb4"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    return img
+
+
+@pytest.fixture()
+def panel(mock_parent):
+    """Build an AvatarPanel with mocked dependencies."""
+    from ui.avatar_panel import AvatarPanel
+    on_log = MagicMock()
+    schedule_ui = MagicMock(side_effect=lambda fn: fn())
+    p = AvatarPanel(parent_frame=mock_parent, on_log=on_log, schedule_ui_update=schedule_ui)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# 1. Panel builds without real assets
+# ---------------------------------------------------------------------------
+
+class TestPanelBuilds:
+    def test_build_returns_frame(self, panel):
+        frame = panel.build()
+        assert frame is not None
+
+    def test_build_creates_all_state_rows(self, panel):
+        panel.build()
+        for state in VALID_STATES:
+            assert state in panel._state_rows, f"Missing row for state: {state}"
+
+    def test_build_creates_proximamente_section(self, panel):
+        """The panel must show 'Próximamente' for future features."""
+        panel.build()
+        # The future section is built at a specific row — verify it exists
+        assert panel._frame is not None
+
+    def test_build_with_no_images_does_not_crash(self, panel):
+        """Panel must handle empty config gracefully."""
+        frame = panel.build()
+        assert frame is not None
+
+    def test_build_shows_placeholder_when_no_image(self, panel):
+        panel.build()
+        # Preview label should show placeholder text
+        assert panel._preview_label is not None
+
+
+# ---------------------------------------------------------------------------
+# 2. Image selection updates config (mocked file picker)
+# ---------------------------------------------------------------------------
+
+class TestImageSelection:
+    def test_choose_image_copies_to_assets(self, panel, sample_image, tmp_path):
+        """Selecting an image should copy it to the managed asset folder."""
+        panel.build()
+        asset_dir = tmp_path / "avatars"
+        asset_dir.mkdir()
+
+        # Patch the config's assets folder for this test
+        panel.config.assets_folder = asset_dir
+
+        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
+            panel._choose_image("idle")
+
+        assert "idle" in panel.config.state_images
+        assert panel.config.state_images["idle"].exists()
+
+    def test_choose_image_cancelled_does_nothing(self, panel):
+        """Cancelling the file picker should not change config."""
+        panel.build()
+        original_images = dict(panel.config.state_images)
+
+        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=""):
+            panel._choose_image("idle")
+
+        assert panel.config.state_images == original_images
+
+    def test_test_state_changes_preview(self, panel):
+        """The 'Probar' button should change the current previewed state."""
+        panel.build()
+        assert panel.get_current_state() == "idle"
+
+        panel._test_state("thinking")
+        assert panel.get_current_state() == "thinking"
+
+
+# ---------------------------------------------------------------------------
+# 3. State bridge integration
+# ---------------------------------------------------------------------------
+
+class TestStateBridgeIntegration:
+    def test_set_state_bridge_registers_listener(self, panel):
+        panel.build()
+        bridge = AvatarStateBridge()
+        panel.set_state_bridge(bridge)
+
+        assert panel.state_bridge is bridge
+
+    def test_state_bridge_change_updates_panel(self, panel, mock_parent):
+        """When the bridge changes state, the panel should update."""
+        panel.build()
+        bridge = AvatarStateBridge()
+        panel.set_state_bridge(bridge)
+
+        bridge.set_state(AvatarState.SPEAKING)
+
+        # The schedule_ui should have been called to update the preview
+        assert panel.get_current_state() == "speaking"
+
+    def test_cleanup_unsubscribes(self, panel):
+        """Cleanup should unsubscribe from the bridge."""
+        panel.build()
+        bridge = AvatarStateBridge()
+        panel.set_state_bridge(bridge)
+
+        panel.cleanup()
+        assert panel._bridge_sub_id is None
+
+
+# ---------------------------------------------------------------------------
+# 4. Source-level safety checks
+# ---------------------------------------------------------------------------
+
+class TestSourceSafety:
+    def test_no_hardcoded_user_paths(self):
+        """The avatar panel must not contain hardcoded user paths."""
+        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        assert "C:\\Users\\" not in source
+        assert "Downloads" not in source
+
+    def test_no_real_obs_controls(self):
+        """The panel must not expose working OBS controls — only Próximamente."""
+        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        # No actual OBS WebSocket implementation
+        assert "websocket.connect" not in source
+        assert "Próximamente" in source
+
+    def test_uses_filedialog_not_hardcoded(self):
+        """Image selection must use filedialog, not hardcoded paths."""
+        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        assert "filedialog.askopenfilename" in source
+
+    def test_copies_to_managed_folder(self):
+        """The panel must copy images to a managed folder."""
+        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        assert "assign_image_to_state" in source

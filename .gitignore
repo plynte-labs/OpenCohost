@@ -1,5 +1,4 @@
 # ── Directorios del proyecto ──
-docs/
 logs/
 Grabaciones/
 __pycache__/
@@ -11,6 +10,15 @@ test/
 # ── Archivos específicos ──
 result.txt
 result_predict.txt
+
+# ── Configuración generada en runtime ──
+config/ptt_settings.json
+config/window_geometry.json
+logs/acciones.jsonl
+data/smart_aggregator/
+data/stream_admin/oauth_client.json
+data/stream_admin/oauth_tokens.json
+data/stream_admin/tokens/
 
 # ── Python ──
 *.py[cod]
@@ -38,3 +46,21 @@ env/
 Thumbs.db
 .DS_Store
 Desktop.ini
+
+# ── SDD / Conductor artifacts ──
+.atl/
+openspec/
+sdd/
+conductor/tracks/
+
+# ── Session notes and drafts ──
+session-*.md
+.pr_body.md
+
+# ── Debug scripts ──
+debug_*.py
+
+# ── User assets ──
+assets/music/
+config/music_library.json
+Documents/

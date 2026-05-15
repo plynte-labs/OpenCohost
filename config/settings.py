@@ -1,11 +1,16 @@
 import os
+from config.storage import STORAGE_PATHS
 
 # ──────────────────────────────────────────────
 # Configuración global
 # ──────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMP_DIR = os.path.join(BASE_DIR, "temp")
+TEMP_DIR = str(STORAGE_PATHS.temp_root)
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+HF_CACHE_DIR = str(STORAGE_PATHS.hf_home)
+HF_HUB_DIR = str(STORAGE_PATHS.hf_hub_cache)
+TORCH_CACHE_DIR = str(STORAGE_PATHS.torch_home)
+OLLAMA_MODELS_DIR = str(STORAGE_PATHS.ollama_models)
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -95,7 +100,7 @@ MODELS_CATALOG = {
     },
 }
 
-SYSTEM_PROMPT = """Eres Kira, una co-host virtual de un stream en Twitch. Tu personalidad:
+SYSTEM_PROMPT = """Eres Kira, una co-host virtual de un stream en vivo. Tu personalidad:
 
 PERSONALIDAD:
 - Sarcástica con ingenio afilado, nunca genérica
@@ -121,6 +126,8 @@ REGLAS:
 PROFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
 
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
+TTS_HEAVY_TIMEOUT = 180
+TTS_LIGHT_TIMEOUT = 45
 WS_URI = "ws://127.0.0.1:8765"
 WS_RECONNECT_BASE_DELAY = 1.0
 WS_RECONNECT_MAX_DELAY = 30.0
@@ -148,3 +155,22 @@ PTT_HOTKEY_LIST = [
 ]
 
 PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
+WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
+ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
+
+# ──────────────────────────────────────────────
+# Health Monitor configuration
+# ──────────────────────────────────────────────
+QWEN_IDLE_TTL = 300          # seconds of idle before auto-shutdown
+QWEN_STARTUP_TIMEOUT = 60    # max seconds to wait for /health after start
+VRAM_POLL_INTERVAL = 10      # seconds between VRAM polls
+VRAM_LOW_THRESHOLD_MB = 2048 # MB free VRAM considered "low"
+VRAM_CRITICAL_THRESHOLD_MB = 1024  # MB free VRAM considered "critical"
+RTF_POLL_WINDOW = 10         # rolling window size for RTF measurements
+RTF_HIGH_THRESHOLD = 2.0     # RTF above this is "degraded"
+RTF_RECOVERY_THRESHOLD = 1.0 # RTF below this is recovery
+RTF_RECOVERY_COUNT = 3       # consecutive measurements below threshold to recover
+OLLAMA_POLL_INTERVAL = 15    # seconds between Ollama health polls
+OLLAMA_FAILURE_THRESHOLD = 3 # consecutive failures before "down"
+OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
+HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
