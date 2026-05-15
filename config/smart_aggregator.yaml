@@ -38,7 +38,7 @@ vibe:
 
 activity:
   window_seconds: 5
-  threshold_per_second: 1.0
+  threshold_per_second: 10.0
   cooldown_seconds: 45.0
   actions:
     auto_reply:
@@ -55,6 +55,16 @@ spam:
   max_messages_per_user: 10
   duplicate_window_seconds: 20
   collapse_ui_duplicates: true
+
+live_safety:
+  enabled: true
+  # Meaningful live default from the first massive-stream test: 10 msg/s.
+  high_traffic_threshold_per_second: 10.0
+  high_traffic_sample_every: 10
+  empty_vibe_backoff_after: 2
+  empty_vibe_backoff_seconds: 60.0
+  state_log_interval_seconds: 30.0
+  seen_window_seconds: 5.0
 
 intent:
   window_seconds: 60
