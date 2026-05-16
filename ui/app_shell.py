@@ -122,19 +122,25 @@ def _install_crash_handler() -> None:
     """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
     os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
 
-    def _handler(exc_type, exc_value, exc_tb):
-        tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    def _write_crash(tb_text: str) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"CRASH at {now}\n")
             f.write(f"Thread: {threading.current_thread().name}\n")
             f.write(tb_text)
-        # Also write to stderr so console users see it
         sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
+
+    def _handler(exc_type, exc_value, exc_tb):
+        _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
+    def _thread_handler(args):
+        _write_crash("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
+
     sys.excepthook = _handler
+    threading.excepthook = _thread_handler
     # Tkinter swallows exceptions by default — make it loud
     import tkinter as _tk
     _tk.Tk.report_callback_exception = _handler
