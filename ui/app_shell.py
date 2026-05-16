@@ -60,7 +60,7 @@ from core.audio_bed import AudioBedEngine
 from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.music_library import MusicLibrary
-from smart_aggregator import AgendaAction, AgendaState, Aggregator, generate_suggestions, KiraAgendaController, TopicStatus
+from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -894,6 +894,29 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_tick(self) -> None:
         if not hasattr(self, "kira_agenda"):
             return
+
+        # Auto-recovery: if PAUSED, check if the recovery policy permits a retry
+        if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
+            if self.kira_agenda.can_auto_resume():
+                self._on_stream_admin_log(
+                    f"[Kira Agenda] Auto-recuperación: intento {self.kira_agenda.recovery.retry_attempt}"
+                    f" de {len(RecoveryPolicy.RETRY_DELAYS_SECONDS)}"
+                    f" | Error: {self.kira_agenda.recovery.error_code.human()}"
+                )
+                # Fall through to next_action — state is now IDLE
+            elif self.kira_agenda.state == AgendaState.HARD_PAUSED:
+                self._on_stream_admin_log(
+                    "[Kira Agenda] HARD_PAUSED: se requiere intervención del streamer. "
+                    f"Motivo: {self.kira_agenda.recovery.last_failure_reason or 'fallos repetidos'}"
+                )
+                self._kira_agenda_update_status()
+                return  # No tick for HARD_PAUSED
+            else:
+                # Timer not ready — reschedule and wait
+                self._kira_agenda_update_status()
+                self._kira_agenda_schedule_tick(4500)
+                return
+
         action = self.kira_agenda.next_action(
             motor_busy=getattr(self.motor_ia, "is_processing", False),
             kira_speaking=getattr(self.motor_ia, "is_speaking", False),
@@ -932,7 +955,7 @@ class VocalAIApp(ctk.CTk):
         self._kira_agenda_schedule_tick(4500)
 
     def _kira_agenda_schedule_tick(self, delay_ms: int) -> None:
-        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             return
         if self._kira_agenda_tick_id is not None:
             try:
@@ -1013,13 +1036,22 @@ class VocalAIApp(ctk.CTk):
             return
         active = self.kira_agenda.active_topic
         queued = len(self.kira_agenda.queued_topics())
+        recovery = self.kira_agenda.recovery
+        error_info = ""
+        if recovery.error_code != ErrorCode.NONE:
+            error_info = f" · ⚠ {recovery.error_code.human()} (intento {recovery.retry_attempt}/{len(RecoveryPolicy.RETRY_DELAYS_SECONDS)})"
         if active:
-            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
             current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}/{self.kira_agenda.safety_mode}\nTurnos hablados: {active.turns_spoken}/{self.kira_agenda.max_turns_per_topic}"
         else:
-            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
             current_topic = "Sin tema activo"
-        color = "#ffaa00" if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR else "#8fa3b8"
+        if self.kira_agenda.state == AgendaState.HARD_PAUSED:
+            color = "#cc3333"
+        elif self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
+            color = "#ffaa00"
+        else:
+            color = "#8fa3b8"
         self.after(0, lambda: self.stream_admin_ui.set_agenda_status(text, color))
         if hasattr(self, "cohost_agenda_panel"):
             queue_lines = [
@@ -1031,6 +1063,8 @@ class VocalAIApp(ctk.CTk):
                 current_topic=current_topic,
                 queue_lines=queue_lines,
                 failures=self.kira_agenda.failure_count,
+                error_code=recovery.error_code.human(),
+                error_reasons=recovery.last_reasons,
             ))
             # Forward DRAFTED suggestions to the panel
             drafted = self.kira_agenda.drafted_topics()
@@ -1808,7 +1842,7 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
         self._safe_after(lambda: self.btn_mapear.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
-        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             self._kira_agenda_schedule_tick(500)
 
     def _on_motor_speaking_start(self) -> None:

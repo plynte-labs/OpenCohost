@@ -1,5 +1,5 @@
 from .aggregator import Aggregator
-from .kira_agenda_controller import AgendaAction, AgendaState, AgendaTopic, KiraAgendaController, TopicStatus
+from .kira_agenda_controller import AgendaAction, AgendaState, AgendaTopic, ErrorCode, KiraAgendaController, RecoveryPolicy, TopicStatus
 from .topic_suggester import generate_suggestions
 
 __all__ = [
@@ -7,7 +7,9 @@ __all__ = [
     "AgendaAction",
     "AgendaState",
     "AgendaTopic",
+    "ErrorCode",
     "generate_suggestions",
     "KiraAgendaController",
+    "RecoveryPolicy",
     "TopicStatus",
 ]

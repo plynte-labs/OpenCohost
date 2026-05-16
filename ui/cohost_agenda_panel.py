@@ -521,13 +521,16 @@ class CoHostAgendaPanel:
         if length is not None:
             length.set(str(profile.get("default_response_length", "normal")).capitalize())
 
-    def update_status(self, *, state: str, current_topic: str, queue_lines: list[str], failures: int) -> None:
+    def update_status(self, *, state: str, current_topic: str, queue_lines: list[str], failures: int, error_code: str = "", error_reasons: list[str] | None = None) -> None:
         current = self._widgets.get("lbl_current_topic")
         if current is not None:
             current.configure(text=current_topic or "Sin tema activo")
         state_label = self._widgets.get("lbl_state")
         if state_label is not None:
-            state_label.configure(text=f"Estado: {state} · fallos: {failures}")
+            base = f"Estado: {state} · fallos: {failures}"
+            if error_code:
+                base += f" · ⚠ {error_code}"
+            state_label.configure(text=base)
         queue = self._widgets.get("text_queue")
         if queue is not None:
             queue.configure(state="normal")

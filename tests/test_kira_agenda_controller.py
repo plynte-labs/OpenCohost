@@ -4,6 +4,7 @@ import pytest
 
 from smart_aggregator.kira_agenda_controller import (
     AgendaState,
+    ErrorCode,
     KiraAgendaController,
     TopicStatus,
 )
@@ -534,16 +535,64 @@ def test_prompt_strengthens_loop_prevention_rules():
     assert "NO digas que estás viva" in action.prompt
 
 
-def test_three_failures_pause_mode():
-    controller = KiraAgendaController(max_failures=3)
+def test_recovery_policy_pause_after_five_failures():
+    """RecoveryPolicy requires 5 failures before PAUSED (was 3 before)."""
+    controller = KiraAgendaController()
     controller.enable()
 
-    controller.register_failure()
-    controller.register_failure()
-    controller.register_failure()
+    # Failures 1-3: REGENERATING_SAFE + degradation
+    controller.register_failure(error=ErrorCode.GUARDRAIL_LOOPING, reason="test")
+    assert controller.state == AgendaState.REGENERATING_SAFE
+    assert controller.recovery.failure_count == 1
 
+    controller.register_failure(error=ErrorCode.GUARDRAIL_LOOPING)
+    controller.register_failure(error=ErrorCode.GUARDRAIL_LOOPING)
+    assert controller.recovery.failure_count == 3
+    # should_degrade() is True at 3, state still REGENERATING_SAFE
+    assert controller.state == AgendaState.REGENERATING_SAFE
+
+    # Failure 4: still regenerating
+    controller.register_failure(error=ErrorCode.GUARDRAIL_LOOPING)
+    assert controller.state == AgendaState.REGENERATING_SAFE
+
+    # Failure 5: PAUSED
+    controller.register_failure(error=ErrorCode.GUARDRAIL_LOOPING)
     assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
     assert controller.next_action().kind == "none"
+
+
+def test_recovery_policy_degradation():
+    """At 3 failures, response_length degrades (normal → corta)."""
+    controller = KiraAgendaController(response_length="normal")
+    controller.enable()
+    assert controller.response_length == "normal"
+
+    controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR)
+    controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR)
+    controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR)
+    # should_degrade → response_length lowered
+    assert controller.response_length == "corta"
+
+
+def test_recovery_policy_auto_retry():
+    """After PAUSED + cooldown, can_auto_resume returns True."""
+    from time import time as _now
+    controller = KiraAgendaController()
+    controller.enable()
+
+    # Force 5 failures
+    for _ in range(5):
+        controller.register_failure(error=ErrorCode.GUARDRAIL_EMPTY)
+    assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
+
+    # Too soon: timer not elapsed
+    assert not controller.can_auto_resume()
+
+    # Simulate 61 seconds later
+    controller.recovery._last_failure_time = _now() - 61.0
+    assert controller.can_auto_resume()
+    assert controller.state == AgendaState.IDLE
+    assert controller.recovery.retry_attempt == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
