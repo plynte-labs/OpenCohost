@@ -17,6 +17,7 @@ import logging
 import os
 import queue
 import threading
+import traceback
 import time
 from typing import Any, Optional
 
@@ -110,6 +111,35 @@ class _ButtonStub:
 
     def pack(self, **kw: object) -> None:
         pass
+
+
+# ── Global crash handler: log unhandled exceptions before the process dies ──
+_CRASH_LOG = Path(os.environ.get("VOICEAI_CRASH_LOG", "logs/crash.log"))
+
+
+def _install_crash_handler() -> None:
+    """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
+    _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    def _handler(exc_type, exc_value, exc_tb):
+        tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"CRASH at {now}\n")
+            f.write(f"Thread: {threading.current_thread().name}\n")
+            f.write(tb_text)
+        # Also write to stderr so console users see it
+        sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _handler
+    # Tkinter swallows exceptions by default — make it loud
+    import tkinter as _tk
+    _tk.Tk.report_callback_exception = _handler
+
+
+_install_crash_handler()
 
 
 class VocalAIApp(ctk.CTk):
@@ -1994,29 +2024,26 @@ class VocalAIApp(ctk.CTk):
             # non-technical users can open OBS after VoiceAI without breaking the
             # avatar bridge for the whole session.
             def connect_obs():
-                max_attempts = 60
+                logged_once = False
                 retry_delay = 5
-                for attempt in range(1, max_attempts + 1):
+                while getattr(self, "_obs_client", None) is not None:
                     if self._obs_client.connect():
                         self._obs_client.subscribe_bridge(self._avatar_bridge)
-                        # Push the current state immediately; otherwise OBS can
-                        # stay asleep until the next state transition.
                         self._obs_client.on_state_change(self._avatar_bridge.get_state())
-                        # Safely schedule UI update on main thread
                         try:
                             if self.winfo_exists():
                                 self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
                         except Exception:
-                            pass  # Main loop not ready yet
+                            pass
                         return
-
-                    if attempt == 1:
+                    if not logged_once:
                         self._print_log(
-                            "[OBS] No se pudo conectar. Abri OBS y VoiceAI reintentara automaticamente."
+                            "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                            "Abrí OBS y la conexión se restablecerá automáticamente."
                         )
+                        logged_once = True
                     time.sleep(retry_delay)
-
-                self._print_log("[OBS] No se pudo conectar tras varios intentos. Revisa OBS WebSocket.")
+                # Client was destroyed (app closing)
 
             threading.Thread(target=connect_obs, daemon=True).start()
         except Exception as e:
