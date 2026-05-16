@@ -60,7 +60,7 @@ from core.audio_bed import AudioBedEngine
 from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.music_library import MusicLibrary
-from smart_aggregator import AgendaAction, AgendaState, Aggregator, KiraAgendaController
+from smart_aggregator import AgendaAction, AgendaState, Aggregator, generate_suggestions, KiraAgendaController, TopicStatus
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -203,6 +203,7 @@ class VocalAIApp(ctk.CTk):
             self.kira_agenda.set_profile(self.cohost_profiles.get(self._current_cohost_profile, {}))
         self._kira_agenda_tick_id: str | None = None
         self._kira_agenda_prefetched_action: AgendaAction | None = None
+        self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
         self.after(100, self._start_motor)
 
@@ -601,6 +602,8 @@ class VocalAIApp(ctk.CTk):
             on_enable=lambda: self._kira_agenda_enable(),
             on_soft_stop=lambda: self._kira_agenda_soft_stop(),
             on_emergency_stop=lambda: self._kira_agenda_emergency_stop(),
+            on_approve_suggestion=lambda topic_id: self._kira_agenda_approve_suggestion(topic_id),
+            on_reject_suggestion=lambda topic_id: self._kira_agenda_reject_suggestion(topic_id),
         )
         self.cohost_agenda_panel.build(cohost_panel_frame)
         self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
@@ -869,6 +872,25 @@ class VocalAIApp(ctk.CTk):
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
         self._kira_agenda_update_status()
 
+    def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
+        """Approve a DRAFTED suggestion: mark APPROVED then QUEUED."""
+        try:
+            self.kira_agenda.approve_topic(topic_id)
+            self.kira_agenda.queue_topic(topic_id)
+        except (ValueError, KeyError):
+            pass
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_reject_suggestion(self, topic_id: str) -> None:
+        """Reject a DRAFTED suggestion: mark SKIPPED."""
+        try:
+            topic = next((t for t in self.kira_agenda.topics if t.id == topic_id), None)
+            if topic is not None and topic.status == TopicStatus.DRAFTED:
+                topic.status = TopicStatus.SKIPPED
+        except (ValueError, KeyError, AttributeError):
+            pass
+        self._kira_agenda_update_status()
+
     def _kira_agenda_tick(self) -> None:
         if not hasattr(self, "kira_agenda"):
             return
@@ -877,6 +899,35 @@ class VocalAIApp(ctk.CTk):
             kira_speaking=getattr(self.motor_ia, "is_speaking", False),
         )
         self._enqueue_kira_agenda_action(action)
+
+        # Auto-suggestion trigger: on 3rd consecutive IDLE+empty-queue tick (~13.5s)
+        if self.kira_agenda.state == AgendaState.IDLE and not self.kira_agenda.queued_topics():
+            self._idle_ticks += 1
+            if self._idle_ticks >= 3 and self.kira_agenda.can_suggest():
+                # Rich-context gate: skip if aggregator has no data
+                if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
+                    try:
+                        intent_summary = self.smart_agg.intent_aggregator.summarize()
+                        vibe_data = self.smart_agg.vibe_thermometer.compute_vibe()
+                        vibe_temp = vibe_data.get("temperature", 50) if isinstance(vibe_data, dict) else 50
+                        snapshots = self.smart_agg.history.get_recent_context_snapshots(
+                            self.smart_agg._session_id, max_items=3,
+                        )
+                        suggestions = generate_suggestions(
+                            intent_summary=intent_summary,
+                            snapshots=snapshots,
+                            vibe_temperature=vibe_temp,
+                            existing_topics=self.kira_agenda.topics,
+                            last_outputs=self.kira_agenda.last_outputs,
+                        )
+                        if suggestions:
+                            self.kira_agenda.suggest_topics(suggestions)
+                    except Exception:
+                        pass  # Swallow to avoid breaking the tick loop
+                self._idle_ticks = 0
+        else:
+            self._idle_ticks = 0
+
         self._kira_agenda_update_status()
         self._kira_agenda_schedule_tick(4500)
 
@@ -981,6 +1032,19 @@ class VocalAIApp(ctk.CTk):
                 queue_lines=queue_lines,
                 failures=self.kira_agenda.failure_count,
             ))
+            # Forward DRAFTED suggestions to the panel
+            drafted = self.kira_agenda.drafted_topics()
+            suggestions_list = [
+                {
+                    "title": t.title,
+                    "angle": t.angle,
+                    "confidence": getattr(t, "confidence", "LOW"),
+                    "source": getattr(t, "source", ""),
+                    "topic_id": t.id,
+                }
+                for t in drafted
+            ]
+            self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
         # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
         # Only update on state transitions to avoid overwriting pipeline-driven TTS state
         was_paused = getattr(self, "_agenda_was_paused", False)

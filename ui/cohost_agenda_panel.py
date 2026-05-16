@@ -40,6 +40,8 @@ class CoHostAgendaPanel:
         on_enable: Optional[Callable[[], None]] = None,
         on_soft_stop: Optional[Callable[[], None]] = None,
         on_emergency_stop: Optional[Callable[[], None]] = None,
+        on_approve_suggestion: Optional[Callable[[str], None]] = None,
+        on_reject_suggestion: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._on_add_topic = on_add_topic or (lambda title, angle, constraints, priority, length, turns: None)
         self._on_session_settings = on_session_settings or (lambda turns, rhythm, length, safety_mode: None)
@@ -50,9 +52,12 @@ class CoHostAgendaPanel:
         self._on_enable = on_enable or (lambda: None)
         self._on_soft_stop = on_soft_stop or (lambda: None)
         self._on_emergency_stop = on_emergency_stop or (lambda: None)
+        self._on_approve_suggestion = on_approve_suggestion or (lambda topic_id: None)
+        self._on_reject_suggestion = on_reject_suggestion or (lambda topic_id: None)
         self._widgets: dict[str, Any] = {}
         self._constraint_tags: list[str] = []
         self._profiles: dict[str, dict[str, Any]] = {}
+        self._suggestion_widgets: list[dict[str, Any]] = []
 
     def build(self, parent: Any) -> Any:
         parent.grid_columnconfigure(0, weight=1)
@@ -154,6 +159,26 @@ class CoHostAgendaPanel:
         ctk.CTkButton(queue_controls, text="Subir", command=lambda: self._dispatch_move_topic(-1), fg_color="#555555").grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         ctk.CTkButton(queue_controls, text="Bajar", command=lambda: self._dispatch_move_topic(1), fg_color="#555555").grid(row=0, column=2, padx=4, pady=4, sticky="ew")
         ctk.CTkButton(queue_controls, text="Eliminar", command=self._dispatch_remove_topic, fg_color="#8f2f2f").grid(row=0, column=3, padx=4, pady=4, sticky="ew")
+
+        # Sugerencias de Kira — auto-generated topic suggestions
+        suggestions_frame = ctk.CTkFrame(queue, fg_color="#101923", corner_radius=12)
+        suggestions_frame.grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 12))
+        suggestions_frame.grid_columnconfigure(0, weight=1)
+        self._widgets["suggestions_frame"] = suggestions_frame
+        suggestions_header = ctk.CTkLabel(
+            suggestions_frame,
+            text="Sugerencias de Kira",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        )
+        suggestions_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        self._widgets["suggestions_header"] = suggestions_header
+        suggestions_container = ctk.CTkFrame(suggestions_frame, fg_color="transparent")
+        suggestions_container.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 6))
+        suggestions_container.grid_columnconfigure(0, weight=1)
+        self._widgets["suggestions_container"] = suggestions_container
+        # Initially hidden until suggestions arrive
+        suggestions_frame.grid_remove()
 
         session_controls = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
         session_controls.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
@@ -510,6 +535,128 @@ class CoHostAgendaPanel:
             queue.insert("end", "\n".join(queue_lines) if queue_lines else "No hay temas en cola todavía.\n")
             queue.configure(state="disabled")
         self._update_session_buttons(state=state, has_queue=bool(queue_lines), has_current=bool(current_topic and current_topic != "Sin tema activo"))
+
+    # ------------------------------------------------------------------
+    # Sugerencias de Kira — auto-generated topic suggestions
+    # ------------------------------------------------------------------
+
+    _CONFIDENCE_COLORS: dict[str, str] = {
+        "HIGH": "#2f7d50",
+        "MEDIUM": "#7d5a2a",
+        "LOW": "#555555",
+    }
+    _CONFIDENCE_LABELS: dict[str, str] = {
+        "HIGH": "ALTA",
+        "MEDIUM": "MEDIA",
+        "LOW": "BAJA",
+    }
+
+    def update_suggestions(self, suggestions: list[dict]) -> None:
+        """Render the 'Sugerencias de Kira' section with confidence badges."""
+        frame = self._widgets.get("suggestions_frame")
+        container = self._widgets.get("suggestions_container")
+        if frame is None or container is None:
+            return
+
+        # Clear existing suggestion widgets
+        for child in container.winfo_children():
+            child.destroy()
+        self._suggestion_widgets.clear()
+
+        if not suggestions:
+            frame.grid_remove()
+            return
+
+        frame.grid()
+        # Sort by confidence: HIGH first
+        conf_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+        sorted_suggestions = sorted(suggestions, key=lambda s: conf_order.get(s.get("confidence", "LOW"), 3))
+        for row_idx, suggestion in enumerate(sorted_suggestions):
+            self._render_suggestion(container, suggestion, row_idx)
+
+    def _render_suggestion(self, parent: Any, suggestion: dict, row: int) -> None:
+        """Render a single suggestion row: title, angle, confidence badge, buttons."""
+        title = suggestion.get("title", "")
+        angle = suggestion.get("angle", "")
+        confidence = suggestion.get("confidence", "LOW")
+        source = suggestion.get("source", "")
+        topic_id = suggestion.get("topic_id", "")
+
+        frame = ctk.CTkFrame(parent, fg_color="#0f151c", corner_radius=10)
+        frame.grid(row=row, column=0, sticky="ew", padx=4, pady=2)
+        frame.grid_columnconfigure(0, weight=1)
+
+        # Row 0: confidence badge + source label
+        badge_row = ctk.CTkFrame(frame, fg_color="transparent")
+        badge_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
+        badge_color = self._CONFIDENCE_COLORS.get(confidence, "#555555")
+        badge_text = self._CONFIDENCE_LABELS.get(confidence, "BAJA")
+        badge = ctk.CTkLabel(
+            badge_row,
+            text=f"● {badge_text}",
+            text_color=badge_color,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            anchor="w",
+        )
+        badge.grid(row=0, column=0, sticky="w")
+        if source:
+            source_label = ctk.CTkLabel(
+                badge_row,
+                text=source,
+                text_color="#8fa3b8",
+                font=ctk.CTkFont(size=11),
+                anchor="e",
+            )
+            source_label.grid(row=0, column=1, sticky="e")
+
+        # Row 1: title (bold)
+        title_label = ctk.CTkLabel(
+            frame,
+            text=title[:90],
+            text_color="#d8e2ef",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+            justify="left",
+        )
+        title_label.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 0))
+
+        # Row 2: angle preview (truncated 60 chars)
+        angle_preview = angle[:60] + ("…" if len(angle) > 60 else "")
+        angle_label = ctk.CTkLabel(
+            frame,
+            text=angle_preview or "Sin ángulo",
+            text_color="#8fa3b8",
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+            justify="left",
+            wraplength=340,
+        )
+        angle_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+
+        # Row 3: approve + reject buttons
+        button_row = ctk.CTkFrame(frame, fg_color="transparent")
+        button_row.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        button_row.grid_columnconfigure(0, weight=1)
+        button_row.grid_columnconfigure(1, weight=1)
+        tid = topic_id  # capture for lambda
+        ctk.CTkButton(
+            button_row,
+            text="Aprobar",
+            command=lambda t=tid: self._on_approve_suggestion(t),
+            fg_color="#2f7d50",
+            height=28,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkButton(
+            button_row,
+            text="Rechazar",
+            command=lambda t=tid: self._on_reject_suggestion(t),
+            fg_color="#8f2f2f",
+            height=28,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self._suggestion_widgets.append({"frame": frame, "topic_id": topic_id})
 
     def _update_session_buttons(self, *, state: str, has_queue: bool, has_current: bool) -> None:
         active_states = {"IDLE", "SELECT_TOPIC", "OPEN_TOPIC", "GENERATING", "REGENERATING_SAFE", "SPEAKING", "WAITING_SIGNAL", "HANDLE_STREAMER", "HANDLE_CHAT", "CONTINUE_TOPIC", "TOPIC_CLOSING"}

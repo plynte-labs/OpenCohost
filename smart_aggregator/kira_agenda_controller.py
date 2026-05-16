@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import re
+import time as _time_module
 from typing import Iterable, Optional
 from uuid import uuid4
 
@@ -50,6 +51,8 @@ class AgendaTopic:
     id: str = field(default_factory=lambda: f"topic-{uuid4()}")
     status: TopicStatus = TopicStatus.DRAFTED
     turns_spoken: int = 0
+    confidence: str = "LOW"   # Suggester metadata: HIGH | MEDIUM | LOW
+    source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,11 @@ class KiraAgendaController:
         self.topics: list[AgendaTopic] = []
         self.active_topic: Optional[AgendaTopic] = None
         self.last_outputs: list[str] = []
+        # Cooldown / suggestion tracking (used by TopicSuggester integration)
+        self._last_suggestion_time: float = 0.0
+        self._session_suggestion_count: int = 0
+        self._suggestion_cooldown_seconds: float = 120.0
+        self._suggestion_session_cap: int = 5
         self.profile: dict[str, str] = {
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
@@ -329,6 +337,55 @@ class KiraAgendaController:
     def queued_topics(self) -> list[AgendaTopic]:
         queued = [t for t in self.topics if t.status == TopicStatus.QUEUED]
         return sorted(queued, key=lambda topic: (self.PRIORITY_ORDER.get(topic.priority, 1), self.topics.index(topic)))
+
+    def can_suggest(self, now: float | None = None) -> bool:
+        """True if cooldown and session cap allow a new suggestion batch.
+
+        Cooldown: ≥120 s since last suggestion.
+        Session cap: <5 suggestion batches this session.
+        """
+        if now is None:
+            now = _time_module.time()
+        if self._session_suggestion_count >= self._suggestion_session_cap:
+            return False
+        if self._last_suggestion_time > 0 and (now - self._last_suggestion_time) < self._suggestion_cooldown_seconds:
+            return False
+        return True
+
+    def drafted_topics(self) -> list[AgendaTopic]:
+        """Return all topics whose status is DRAFTED, for UI rendering."""
+        return [t for t in self.topics if t.status == TopicStatus.DRAFTED]
+
+    def suggest_topics(self, suggestions: list[dict]) -> list[AgendaTopic]:
+        """Create DRAFTED AgendaTopic entries from raw suggestion dicts.
+
+        Sanitizes titles and angles via the existing sanitizer, enforces
+        cooldown tracking, and returns the created topics.
+        """
+        now = _time_module.time()
+        created: list[AgendaTopic] = []
+        for suggestion in suggestions:
+            try:
+                title = self.sanitize_topic_text(str(suggestion.get("title", "")), field="title")
+                angle = self.sanitize_topic_text(str(suggestion.get("angle", "")), field="angle", required=False)
+            except ValueError:
+                # Skip malformed suggestions silently — rule-based source can be noisy
+                continue
+            topic = AgendaTopic(
+                title=title,
+                angle=angle,
+                priority="normal",
+                response_length="normal",
+                status=TopicStatus.DRAFTED,
+                confidence=suggestion.get("confidence", "LOW"),
+                source=suggestion.get("source", ""),
+            )
+            self.topics.append(topic)
+            created.append(topic)
+        if created:
+            self._last_suggestion_time = now
+            self._session_suggestion_count += 1
+        return created
 
     def remove_queued_topic(self, topic_id: str) -> None:
         topic = self._topic(topic_id)

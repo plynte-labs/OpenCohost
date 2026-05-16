@@ -544,3 +544,240 @@ def test_three_failures_pause_mode():
 
     assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
     assert controller.next_action().kind == "none"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TopicSuggester integration — cooldown / suggestion methods
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_can_suggest_allows_when_fresh():
+    controller = KiraAgendaController()
+    # No suggestions yet, time is 0 / fresh
+    assert controller.can_suggest(now=0.0) is True
+
+
+def test_can_suggest_blocks_during_cooldown():
+    controller = KiraAgendaController()
+    # Simulate a recent suggestion
+    controller._last_suggestion_time = 100.0
+    assert controller.can_suggest(now=100.0 + 45) is False  # 45 s < 120 s
+
+
+def test_can_suggest_allows_after_cooldown():
+    controller = KiraAgendaController()
+    controller._last_suggestion_time = 100.0
+    assert controller.can_suggest(now=100.0 + 120) is True
+
+
+def test_can_suggest_allows_well_after_cooldown():
+    controller = KiraAgendaController()
+    controller._last_suggestion_time = 100.0
+    assert controller.can_suggest(now=100.0 + 300) is True
+
+
+def test_can_suggest_blocks_at_session_cap():
+    controller = KiraAgendaController()
+    controller._session_suggestion_count = 5  # cap is 5
+    assert controller.can_suggest(now=999.0) is False
+
+
+def test_can_suggest_blocks_above_session_cap():
+    controller = KiraAgendaController()
+    controller._session_suggestion_count = 6
+    assert controller.can_suggest(now=999.0) is False
+
+
+def test_can_suggest_allows_below_cap_even_recently():
+    controller = KiraAgendaController()
+    controller._session_suggestion_count = 3
+    controller._last_suggestion_time = 200.0
+    assert controller.can_suggest(now=200.0 + 200) is True
+
+
+def test_suggest_topics_creates_drafted():
+    controller = KiraAgendaController()
+    suggestions = [
+        {"title": "Mods vs texturas vanilla", "angle": "Comparar pros y contras", "confidence": "HIGH", "source": "entity:mods"},
+        {"title": "El dilema de shaders", "angle": "Rendimiento vs belleza", "confidence": "MEDIUM", "source": "entity:shaders"},
+    ]
+
+    created = controller.suggest_topics(suggestions)
+
+    assert len(created) == 2
+    for topic in created:
+        assert topic.status == TopicStatus.DRAFTED
+    assert created[0].title == "Mods vs texturas vanilla"
+    assert created[1].title == "El dilema de shaders"
+
+
+def test_suggest_topics_sanitizes_and_rejects_bad_titles():
+    controller = KiraAgendaController()
+    suggestions = [
+        {"title": "x" * 91, "angle": "ok", "confidence": "HIGH", "source": "entity:long"},
+        {"title": "Tema válido", "angle": "Ángulo ok", "confidence": "LOW", "source": "entity:valid"},
+    ]
+
+    created = controller.suggest_topics(suggestions)
+
+    assert len(created) == 1
+    assert created[0].title == "Tema válido"
+
+
+def test_suggest_topics_updates_cooldown_tracking():
+    controller = KiraAgendaController()
+    before_count = controller._session_suggestion_count
+    before_time = controller._last_suggestion_time
+
+    created = controller.suggest_topics([{"title": "Un tema nuevo", "angle": "algo", "confidence": "LOW", "source": "entity:x"}])
+
+    assert created
+    assert controller._session_suggestion_count == before_count + 1
+    assert controller._last_suggestion_time > before_time
+
+
+def test_suggest_topics_no_change_on_empty_list():
+    controller = KiraAgendaController()
+    before_count = controller._session_suggestion_count
+    before_time = controller._last_suggestion_time
+
+    created = controller.suggest_topics([])
+
+    assert created == []
+    assert controller._session_suggestion_count == before_count
+    assert controller._last_suggestion_time == before_time
+
+
+def test_drafted_topics_filters_correctly():
+    controller = KiraAgendaController()
+    # Add topics with mixed statuses
+    d1 = controller.add_topic("Draft 1")                                    # DRAFTED
+    d2 = controller.add_topic("Draft 2")                                    # DRAFTED
+    approved = controller.add_topic("Approved", approved=True)              # APPROVED
+    controller.queue_topic(approved.id)                                     # → QUEUED
+
+    drafted = controller.drafted_topics()
+
+    assert len(drafted) == 2
+    drafted_ids = {t.id for t in drafted}
+    assert d1.id in drafted_ids
+    assert d2.id in drafted_ids
+    assert approved.id not in drafted_ids
+
+
+def test_drafted_topics_empty_when_none_drafted():
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Queued", approved=True)
+    controller.queue_topic(topic.id)
+
+    assert controller.drafted_topics() == []
+
+
+def test_select_next_topic_excludes_drafted():
+    """DRAFTED topics must never be auto-selected by the state machine."""
+    controller = KiraAgendaController()
+    # A DRAFTED topic should not be pickable
+    controller.add_topic("Draft no seleccionable")
+    controller.enable()
+
+    action = controller.next_action()
+
+    assert action.kind == "none"
+    assert controller.state == AgendaState.IDLE
+
+
+def test_select_next_topic_ignores_drafted_when_queued_exists():
+    controller = KiraAgendaController()
+    controller.add_topic("Borrador ignorado")  # DRAFTED
+    queued = controller.add_topic("Tema en cola", approved=True)
+    controller.queue_topic(queued.id)
+    controller.enable()
+
+    action = controller.next_action()
+
+    assert action.kind == "enqueue"
+    assert action.topic_id == queued.id
+
+
+# ---------------------------------------------------------------------------
+# Integration: suggestion lifecycle (approve → queue, reject → skipped)
+# ---------------------------------------------------------------------------
+
+
+def test_suggestion_approve_then_queue_flow():
+    """Full flow: DRAFTED suggestion → approve → queue → appears in queue."""
+    controller = KiraAgendaController()
+
+    created = controller.suggest_topics([{"title": "Shaders vs texturas vanilla", "angle": "Comparar", "confidence": "HIGH", "source": "entity:shaders"}])
+    assert len(created) == 1
+    topic = created[0]
+    assert topic.status == TopicStatus.DRAFTED
+
+    # DRAFTED cannot be queued directly
+    with pytest.raises(ValueError):
+        controller.queue_topic(topic.id)
+
+    # Approve then queue
+    controller.approve_topic(topic.id)
+    assert topic.status == TopicStatus.APPROVED
+    controller.queue_topic(topic.id)
+    assert topic.status == TopicStatus.QUEUED
+
+    # Should now appear in queued_topics()
+    queued = controller.queued_topics()
+    assert len(queued) == 1
+    assert queued[0].id == topic.id
+
+    # And be selectable by next_action()
+    controller.enable()
+    action = controller.next_action()
+    assert action.kind == "enqueue"
+    assert action.topic_id == topic.id
+
+
+def test_suggestion_reject_marks_skipped():
+    """Rejecting a DRAFTED suggestion marks it SKIPPED."""
+    controller = KiraAgendaController()
+
+    created = controller.suggest_topics([{"title": "El dilema de mods", "angle": "Debate", "confidence": "MEDIUM", "source": "entity:mods"}])
+    assert len(created) == 1
+    topic = created[0]
+    assert topic.status == TopicStatus.DRAFTED
+
+    # Reject: set to SKIPPED
+    topic.status = TopicStatus.SKIPPED
+    assert topic.status == TopicStatus.SKIPPED
+
+    # SKIPPED should NOT appear in drafted_topics()
+    assert topic not in controller.drafted_topics()
+
+    # SKIPPED should NOT appear in queued_topics()
+    assert topic not in controller.queued_topics()
+
+    # SKIPPED should NOT be auto-selected
+    controller.enable()
+    action = controller.next_action()
+    assert action.kind == "none"
+
+
+def test_suggestion_approve_reject_preserves_confidence_metadata():
+    """Confidence and source metadata from the suggester survive through suggest_topics."""
+    controller = KiraAgendaController()
+
+    created = controller.suggest_topics([
+        {"title": "Tema con datos", "angle": "Ángulo", "confidence": "HIGH", "source": "entity:minecraft"},
+        {"title": "Otro tema", "angle": "Otro ángulo", "confidence": "LOW", "source": "transition"},
+    ])
+    assert len(created) == 2
+    assert getattr(created[0], "confidence", "LOW") == "HIGH"
+    assert getattr(created[0], "source", "") == "entity:minecraft"
+    assert getattr(created[1], "confidence", "LOW") == "LOW"
+    assert getattr(created[1], "source", "") == "transition"
+
+
+def test_confidence_and_source_defaults_on_agenda_topic():
+    """AgendaTopic defaults confidence to LOW and source to empty string."""
+    from smart_aggregator.kira_agenda_controller import AgendaTopic
+
+    topic = AgendaTopic(title="Test")
+    assert topic.confidence == "LOW"
+    assert topic.source == ""
