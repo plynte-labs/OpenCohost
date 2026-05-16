@@ -696,12 +696,35 @@ class MotorVocalIA(threading.Thread):
         if source.startswith("kira-agenda"):
             safe_context = "[agenda segura: prompt interno omitido]"
         else:
-            safe_context = contexto
+            safe_context = self._sanitize_history_context(contexto)
         self.historial.append({'role': 'user', 'content': safe_context})
         self.historial.append({'role': 'assistant', 'content': dialogo})
         max_mensajes = HISTORY_MAX_TURNS * 2
         if len(self.historial) > max_mensajes:
             self.historial = self.historial[-max_mensajes:]
+
+    @staticmethod
+    def _sanitize_history_context(context: str) -> str:
+        """Strip obvious prompt-injection attempts from chat context."""
+        import re
+        lowered = context.lower()
+        injection_markers = (
+            "ignore all previous",
+            "you are now",
+            "new system prompt",
+            "pretend you are",
+            "forget everything",
+            "disregard previous",
+            "do not follow",
+            "your new role is",
+            "you must now",
+            "act as if",
+            "from now on you are",
+        )
+        for marker in injection_markers:
+            if marker in lowered:
+                return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:300]
+        return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:800]
 
     def _ejecutar_inferencia(self, contexto, source: str = "direct"):
         dialogo = self._generar_dialogo(contexto, source=source, commit_history=True)

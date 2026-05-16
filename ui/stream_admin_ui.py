@@ -95,6 +95,9 @@ class StreamAdminUI:
         self._toggle_small_stream_cb: Optional[Callable] = None
         self._simulate_chat_cb: Optional[Callable] = None
         self._force_kira_cb: Optional[Callable] = None
+        self._connect_chat_live_cb: Optional[Callable] = None
+        self._threshold_preset_cb: Optional[Callable] = None
+        self._cooldown_preset_cb: Optional[Callable] = None
         self._refresh_user_list_cb: Optional[Callable] = None
         self._agenda_add_topic_cb: Optional[Callable] = None
         self._agenda_enable_cb: Optional[Callable] = None
@@ -198,13 +201,18 @@ class StreamAdminUI:
         metadata_section.grid_columnconfigure(0, weight=1)
         self._build_metadata_tab(metadata_section)
 
+        chat_live_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
+        chat_live_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        chat_live_section.grid_columnconfigure(0, weight=1)
+        self._build_chat_live_tab(chat_live_section)
+
         chat_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        chat_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        chat_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
         chat_section.grid_columnconfigure(0, weight=1)
         self._build_chat_tab(chat_section)
 
         moderation_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        moderation_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        moderation_section.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
         moderation_section.grid_columnconfigure(0, weight=1)
         self._build_moderation_tab(moderation_section)
 
@@ -405,6 +413,96 @@ class StreamAdminUI:
         btn_force.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_force_kira"] = btn_force
 
+    def _build_chat_live_tab(self, tab: Any) -> None:
+        frame_live = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
+        frame_live.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        frame_live.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(frame_live, text="Chat Live (RF3)", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+
+        entry_url = ctk.CTkEntry(frame_live, placeholder_text="URL de YouTube Live o twitch.tv/...")
+        entry_url.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+        self._widgets["entry_stream_chat_url"] = entry_url
+
+        btn_row = ctk.CTkFrame(frame_live, fg_color="transparent")
+        btn_row.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        btn_row.grid_columnconfigure(0, weight=1)
+        btn_connect = ctk.CTkButton(btn_row, text="Conectar Chat Live", command=self._dispatch_connect_chat_live, fg_color="#2f5f8f")
+        btn_connect.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._widgets["btn_stream_chat_live_connect"] = btn_connect
+
+        lbl_status = ctk.CTkLabel(btn_row, text="", font=ctk.CTkFont(size=12), text_color="#aaaaaa", anchor="w")
+        lbl_status.grid(row=0, column=1, padx=(4, 0), sticky="w")
+        self._widgets["lbl_stream_chat_live_status"] = lbl_status
+
+        tune_row = ctk.CTkFrame(frame_live, fg_color="transparent")
+        tune_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 2))
+        ctk.CTkLabel(tune_row, text="Reacciona si el chat supera", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(0, 4))
+        entry_threshold = ctk.CTkEntry(tune_row, width=50)
+        entry_threshold.insert(0, "1.0")
+        entry_threshold.pack(side="left", padx=2)
+        self._widgets["entry_stream_chat_threshold"] = entry_threshold
+        ctk.CTkLabel(tune_row, text="msg/s", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
+        for label, value in (("0.5", "0.5"), ("1", "1.0"), ("3", "3.0")):
+            btn = ctk.CTkButton(
+                tune_row, text=label, width=36, height=24,
+                fg_color="#3a5f3f", hover_color="#4a7f4f",
+                command=lambda v=value: self._dispatch_threshold_preset(v),
+            )
+            btn.pack(side="left", padx=1)
+
+        cooldown_row = ctk.CTkFrame(frame_live, fg_color="transparent")
+        cooldown_row.grid(row=4, column=0, sticky="ew", padx=10, pady=2)
+        ctk.CTkLabel(cooldown_row, text="Esperar al menos", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(0, 4))
+        entry_cooldown = ctk.CTkEntry(cooldown_row, width=50)
+        entry_cooldown.insert(0, "45")
+        entry_cooldown.pack(side="left", padx=2)
+        self._widgets["entry_stream_chat_cooldown"] = entry_cooldown
+        ctk.CTkLabel(cooldown_row, text="s entre reacciones", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
+        for label, value in (("30", "30"), ("60", "60"), ("120", "120")):
+            btn = ctk.CTkButton(
+                cooldown_row, text=label, width=36, height=24,
+                fg_color="#5f4a3a", hover_color="#7f6a4a",
+                command=lambda v=value: self._dispatch_cooldown_preset(v),
+            )
+            btn.pack(side="left", padx=1)
+
+        spam_row = ctk.CTkFrame(frame_live, fg_color="transparent")
+        spam_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(2, 10))
+        ctk.CTkLabel(spam_row, text="Máximo", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(0, 4))
+        entry_spam = ctk.CTkEntry(spam_row, width=50)
+        entry_spam.insert(0, "10")
+        entry_spam.pack(side="left", padx=2)
+        self._widgets["entry_stream_chat_spam"] = entry_spam
+        ctk.CTkLabel(spam_row, text="msgs/usuario en 30s", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
+
+    @staticmethod
+    def sanitize_live_url(value: str) -> str:
+        """Extract a video ID from YouTube/Twitch URLs; reject invalid input."""
+        import re
+        value = value.strip()
+        if not value:
+            return ""
+        lowered = value.lower()
+        for domain in ("facebook.com", "dlive.tv", "vk.com", "tiktok.com", "kick.com", "rumble.com"):
+            if domain in lowered:
+                return ""
+        yt_patterns = [
+            r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([\w-]{11})",
+            r"(?:https?://)?(?:www\.)?youtube\.com/live/([\w-]{11})",
+            r"(?:https?://)?youtu\.be/([\w-]{11})",
+        ]
+        for pattern in yt_patterns:
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        if re.match(r"^[\w-]{11}$", value):
+            return value
+        twitch_match = re.match(r"(?:https?://)?(?:www\.)?twitch\.tv/(\w+)", value, re.IGNORECASE)
+        if twitch_match:
+            return twitch_match.group(1)
+        return ""
+
     def _build_agenda_tab(self, tab: Any) -> None:
         frame_agenda = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_agenda.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
@@ -529,6 +627,15 @@ class StreamAdminUI:
     def set_force_kira_callback(self, cb: Callable) -> None:
         self._force_kira_cb = cb
 
+    def set_connect_chat_live_callback(self, cb: Callable) -> None:
+        self._connect_chat_live_cb = cb
+
+    def set_threshold_preset_callback(self, cb: Callable) -> None:
+        self._threshold_preset_cb = cb
+
+    def set_cooldown_preset_callback(self, cb: Callable) -> None:
+        self._cooldown_preset_cb = cb
+
     def set_refresh_user_list_callback(self, cb: Callable) -> None:
         self._refresh_user_list_cb = cb
 
@@ -599,6 +706,26 @@ class StreamAdminUI:
     def _dispatch_force_kira(self) -> None:
         if self._force_kira_cb is not None:
             self._force_kira_cb()
+
+    def _dispatch_connect_chat_live(self) -> None:
+        if self._connect_chat_live_cb is not None:
+            self._connect_chat_live_cb()
+
+    def _dispatch_threshold_preset(self, value: str) -> None:
+        entry = self._widget("entry_stream_chat_threshold")
+        if entry:
+            entry.delete(0, "end")
+            entry.insert(0, value)
+        if self._threshold_preset_cb is not None:
+            self._threshold_preset_cb(value)
+
+    def _dispatch_cooldown_preset(self, value: str) -> None:
+        entry = self._widget("entry_stream_chat_cooldown")
+        if entry:
+            entry.delete(0, "end")
+            entry.insert(0, value)
+        if self._cooldown_preset_cb is not None:
+            self._cooldown_preset_cb(value)
 
     def refresh_user_list(self) -> None:
         if self._refresh_user_list_cb is not None:

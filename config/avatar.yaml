@@ -1,7 +1,7 @@
 avatar:
   enabled: true
   mode: image_states
-  assets_folder: E:\VoiceAI\assets\avatar\kira
+  assets_folder: ''
   state_images:
     idle: E:\VoiceAI\assets\avatar\kira\idle.png
     listening: E:\VoiceAI\assets\avatar\kira\listening.png

@@ -59,6 +59,7 @@ class SmartAggregatorUI:
         entry_youtube_video: Optional[ctk.CTkEntry] = None,
         btn_youtube_chat: Optional[ctk.CTkButton] = None,
         entry_youtube_user_limit: Optional[ctk.CTkEntry] = None,
+        entry_youtube_threshold: Optional[ctk.CTkEntry] = None,
         consola_youtube: Optional[ctk.CTkTextbox] = None,
         lbl_kira_chat_state: Optional[ctk.CTkLabel] = None,
         status_bar: Any = None,
@@ -66,6 +67,7 @@ class SmartAggregatorUI:
         schedule_ui_update: Callable[[Callable[[], None]], None] | None = None,
         on_track_chat_user: Callable[[dict], None] | None = None,
         on_ingest_rf3: Callable[[str, dict], None] | None = None,
+        on_joyita: Callable[[str], None] | None = None,
         health_monitor: Any = None,
     ) -> None:
         self._ui_state = ui_state
@@ -75,6 +77,7 @@ class SmartAggregatorUI:
         self._entry_youtube_video = entry_youtube_video
         self._btn_youtube_chat = btn_youtube_chat
         self._entry_youtube_user_limit = entry_youtube_user_limit
+        self._entry_youtube_threshold = entry_youtube_threshold
         self._consola_youtube = consola_youtube
         self._lbl_kira_chat_state = lbl_kira_chat_state
         self._status_bar = status_bar
@@ -84,6 +87,7 @@ class SmartAggregatorUI:
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
         self._on_track_chat_user = on_track_chat_user or (lambda msg: None)
         self._on_ingest_rf3 = on_ingest_rf3 or (lambda evt, data: None)
+        self._on_joyita = on_joyita or (lambda text: None)
 
         self._manual_disconnect: bool = False
         self._default_activity: dict[str, Any] = {}
@@ -98,6 +102,7 @@ class SmartAggregatorUI:
         if self._observer_id is not None:
             self._ui_state.unsubscribe(self._observer_id)
         self._observer_id = self._ui_state.subscribe(self._on_state_change)
+        self._bind_threshold_events()
 
     def cleanup(self) -> None:
         """Unsubscribe from UIState observer."""
@@ -163,27 +168,44 @@ class SmartAggregatorUI:
 
     @staticmethod
     def extract_youtube_video_id(value: str) -> str:
-        """Extract a YouTube video ID from a URL or return the raw value."""
+        """Extract a YouTube video ID from a URL or return the raw value.
+
+        Only accepts youtube.com / youtu.be URLs and bare 11-char IDs.
+        Rejects other platforms and unsafe schemes.
+        """
+        import re
         value = value.strip()
         if not value:
             return ""
+        lowered = value.lower()
+        for domain in ("facebook.com", "dlive.tv", "vk.com", "tiktok.com", "kick.com", "rumble.com"):
+            if domain in lowered:
+                return ""
         parsed = urllib.parse.urlparse(value)
         if parsed.netloc:
-            if "youtu.be" in parsed.netloc:
-                return parsed.path.strip("/").split("/")[0]
-            query = urllib.parse.parse_qs(parsed.query)
-            if query.get("v"):
-                return query["v"][0]
-            parts = [p for p in parsed.path.split("/") if p]
-            if "live" in parts:
-                idx = parts.index("live")
-                if idx + 1 < len(parts):
-                    return parts[idx + 1]
-            if "shorts" in parts:
-                idx = parts.index("shorts")
-                if idx + 1 < len(parts):
-                    return parts[idx + 1]
-        return value
+            if parsed.scheme and parsed.scheme not in ("http", "https"):
+                return ""
+            if "youtube.com" in parsed.netloc:
+                query = urllib.parse.parse_qs(parsed.query)
+                if query.get("v"):
+                    return str(query["v"][0])[:32]
+                parts = [p for p in parsed.path.split("/") if p]
+                if "live" in parts:
+                    idx = parts.index("live")
+                    if idx + 1 < len(parts):
+                        return str(parts[idx + 1])[:32]
+                if "shorts" in parts:
+                    idx = parts.index("shorts")
+                    if idx + 1 < len(parts):
+                        return str(parts[idx + 1])[:32]
+                return ""
+            if parsed.netloc == "youtu.be" or parsed.netloc.endswith(".youtu.be"):
+                vid = parsed.path.strip("/").split("/")[0]
+                return str(vid)[:32] if vid else ""
+            return ""
+        if re.match(r"^[a-zA-Z0-9_-]{6,}$", value):
+            return value[:32]
+        return ""
 
     # ------------------------------------------------------------------
     # Toggle connection
@@ -213,8 +235,27 @@ class SmartAggregatorUI:
             )
             return
 
+        self._do_connect(video_id)
+
+    def connect_to(self, video_id: str) -> bool:
+        """Connect to a YouTube chat by pre-sanitized video_id. Returns True on success."""
+        if not self._smart_agg:
+            self._on_log("[SmartAggregator] No inicializado.")
+            return False
+        if not video_id:
+            return False
+        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
+            return False
+        try:
+            self._do_connect(video_id)
+            return True
+        except Exception:
+            return False
+
+    def _do_connect(self, video_id: str) -> None:
         try:
             self._apply_spam_limit(log=False)
+            self._apply_threshold(log=False)
             self._manual_disconnect = False
             self._ui_state.smart_agg_connecting = True
             self._set_chat_button("Conectando...", "#a66a00")
@@ -247,6 +288,34 @@ class SmartAggregatorUI:
             self._on_log(
                 f"[SmartAggregator] Anti-spam actualizado: max {limit} mensajes/usuario por ventana."
             )
+
+    def apply_threshold(self, log: bool = True) -> None:
+        """Read the threshold entry and apply it to the activity trigger."""
+        self._apply_threshold(log=log)
+
+    def _apply_threshold(self, log: bool = True) -> None:
+        if not self._smart_agg:
+            return
+        raw_value = self._get_threshold_text()
+        try:
+            threshold = max(0.1, float(raw_value))
+        except (ValueError, TypeError):
+            threshold = 1.0
+        self._smart_agg.set_activity_limits(threshold_per_second=threshold, reset=True)
+        self._on_log(
+            f"[SmartAggregator] Umbral de actividad: {threshold:.1f} msg/s."
+        ) if log else None
+
+    def _bind_threshold_events(self) -> None:
+        """Apply threshold on every keystroke so the user sees immediate effect."""
+        if self._entry_youtube_threshold is None:
+            return
+        if not hasattr(self._entry_youtube_threshold, "bind"):
+            return
+        def on_change(*_args: Any) -> None:
+            self._apply_threshold(log=True)
+        self._entry_youtube_threshold.bind("<KeyRelease>", on_change)
+        self._entry_youtube_threshold.bind("<FocusOut>", on_change)
 
     # ------------------------------------------------------------------
     # Message handling
@@ -359,7 +428,8 @@ class SmartAggregatorUI:
                 return
             lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
             chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
-            prompt = self._build_kira_chat_prompt(chat_context)
+            last_lines = self._recent_kira_lines(3)
+            prompt = self._build_kira_chat_prompt(chat_context, last_kira_lines=last_lines)
             self._motor_ia.enqueue(prompt, priority=1, source="chat")
             self._on_log("[SmartAggregator] Kira ocupada — contexto encolado en cola prioritaria.")
             return
@@ -369,9 +439,17 @@ class SmartAggregatorUI:
             return
 
         highlight = self._select_highlight(context)
+        if highlight:
+            lowered = highlight.lower()
+            has_question = "?" in highlight or "¿" in highlight
+            has_emoji = any(ord(c) > 0x1F000 for c in highlight)
+            has_humor = any(m in lowered for m in ("jaja", "jeje", "lol", "xd", "😂", "🤣"))
+            if has_question or has_emoji or has_humor:
+                self._on_joyita(highlight)
         lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
         chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
-        prompt = self._build_kira_chat_prompt(chat_context, highlight)
+        last_lines = self._recent_kira_lines(3)
+        prompt = self._build_kira_chat_prompt(chat_context, highlight, last_lines)
         self._motor_ia.command_queue.put(("process_context", prompt))
         if top_intents:
             top = top_intents[0]
@@ -380,8 +458,22 @@ class SmartAggregatorUI:
             )
         self._on_log("[SmartAggregator] Contexto agregado enviado a Kira.")
 
+    def _recent_kira_lines(self, count: int = 3) -> str:
+        """Extract Kira's last N responses from motor IA history for anti-repeat."""
+        if not self._motor_ia:
+            return ""
+        historial = getattr(self._motor_ia, "historial", None)
+        if not historial:
+            return ""
+        items = list(historial)
+        kira_msgs = [
+            m.get("content", "") for m in items[-20:]
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ][-count:]
+        return "\n".join(f"- {msg[:120]}" for msg in kira_msgs if msg)
+
     @staticmethod
-    def _build_kira_chat_prompt(chat_context: str, highlight: str = "") -> str:
+    def _build_kira_chat_prompt(chat_context: str, highlight: str = "", last_kira_lines: str = "") -> str:
         """Build a chat prompt that prevents internal summaries leaking on air."""
         highlight_line = ""
         if highlight:
@@ -389,16 +481,27 @@ class SmartAggregatorUI:
                 "Referencia opcional privada; NO nombres al autor ni digas que es destacado:\n"
                 f"{highlight}\n\n"
             )
+        anti_repeat = ""
+        if last_kira_lines:
+            anti_repeat = (
+                "ÚLTIMAS RESPUESTAS DE KIRA (NO repetir estructura ni fraseo):\n"
+                f"{last_kira_lines}\n\n"
+            )
         return (
-            "TAREA: respondé al aire como Kira, co-host del stream.\n"
+            "TAREA: respondé al aire como Kira, co-host del stream con actitud.\n"
             "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.\n"
+            "PERSONALIDAD: sarcasmo seco, humor ácido, cero condescendencia. No seas predecible.\n"
+            "Si el chat repite lo mismo de siempre, señalalo con ironía, no con queja genérica.\n"
             "No expliques el resumen, no listes datos y no describas tu proceso.\n"
             "PROHIBIDO mencionar cantidades de mensajes, autores, ejemplos, 'temas/personas', "
             "'intención dominante', 'contexto privado', 'resumen', 'mensaje destacado' o 'el chat dice'.\n"
             "PROHIBIDO empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', "
             "'Tengo que', 'El chat esta', 'energia del flujo' o 'mantener la energia'.\n"
+            "PROHIBIDO usar fórmulas repetitivas como 'es como decir que', 'es como si', 'eso es como'. NUNCA uses símiles forzados.\n"
             "Si el contexto interno es confuso o pobre, hacé una reacción general corta sin inventar detalles.\n"
-            "Respondé en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.\n\n"
+            "Respondé en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.\n"
+            "NO repitas el mismo tipo de reacción del turno anterior. Variá entre burla, reflexión, dato curioso.\n\n"
+            f"{anti_repeat}"
             f"{highlight_line}"
             "--- CONTEXTO PRIVADO, NO LEER LITERAL ---\n"
             f"{chat_context}\n"
@@ -486,6 +589,12 @@ class SmartAggregatorUI:
             return ""
         return self._entry_youtube_user_limit.get().strip()
 
+    def _get_threshold_text(self) -> str:
+        """Read the activity-threshold entry text."""
+        if self._entry_youtube_threshold is None:
+            return ""
+        return self._entry_youtube_threshold.get().strip()
+
     def _set_chat_button(self, text: str, color: str) -> None:
         """Update the YouTube chat connect/disconnect button."""
         if self._btn_youtube_chat is not None:
@@ -504,8 +613,9 @@ class SmartAggregatorUI:
     @staticmethod
     def _append_textbox(widget: ctk.CTkTextbox, line: str, max_lines: int = 1000) -> None:
         """Append a line to a textbox, trimming to max_lines."""
+        safe_line = str(line).replace("\r", " ").replace("\n", " ")
         widget.configure(state="normal")
-        widget.insert("end", str(line) + "\n")
+        widget.insert("end", safe_line + "\n")
         try:
             total_lines = int(widget.index("end-1c").split(".")[0])
             excess = total_lines - int(max_lines)

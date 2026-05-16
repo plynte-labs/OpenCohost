@@ -277,8 +277,9 @@ class AdvancedModePanel:
             line: Content to append (converted to string).
             max_lines: Maximum number of lines to keep.
         """
+        safe_line = str(line).replace("\r", " ").replace("\n", " ")
         widget.configure(state="normal")
-        widget.insert("end", str(line) + "\n")
+        widget.insert("end", safe_line + "\n")
         try:
             total_lines = int(widget.index("end-1c").split(".")[0])
             excess = total_lines - int(max_lines)

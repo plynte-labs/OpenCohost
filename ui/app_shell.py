@@ -85,6 +85,33 @@ def _guardar_geometria(x: int, y: int, w: int, h: int) -> None:
         pass
 
 
+class _EntryStub:
+    """Stand-in for CTkEntry widgets removed from sidebar (moved to Stream Admin)."""
+    def __init__(self, default: str = "") -> None:
+        self._text = default
+
+    def get(self) -> str:
+        return self._text
+
+    def delete(self, first: object, last: object = None) -> None:
+        self._text = ""
+
+    def insert(self, index: object, value: str) -> None:
+        self._text = value
+
+    def pack(self, **kw: object) -> None:
+        pass
+
+
+class _ButtonStub:
+    """Stand-in for CTkButton widgets removed from sidebar."""
+    def configure(self, **kw: object) -> None:
+        pass
+
+    def pack(self, **kw: object) -> None:
+        pass
+
+
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
 
@@ -146,6 +173,7 @@ class VocalAIApp(ctk.CTk):
         self._speaking_alt_timer_id: str | None = None
         self._speaking_is_alt: bool = False
         self._inactivity_timer_id: str | None = None
+        self._joyita_obs_timer_id: str | None = None
         self._inactivity_timeout_ms: int = 2 * 60 * 1000  # 2 minutes to sleeping
 
         # OBS WebSocket client (initialized after UI build to access config)
@@ -440,9 +468,8 @@ class VocalAIApp(ctk.CTk):
         config_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
         tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
-        tab_cfg_youtube = config_tabs.add("YouTube")
         tab_cfg_admin = config_tabs.add("Admin")
-        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_youtube, tab_cfg_admin):
+        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_admin):
             tab.grid_columnconfigure(0, weight=1)
 
         # Model panel
@@ -518,22 +545,13 @@ class VocalAIApp(ctk.CTk):
         self.lbl_ptt_status = ctk.CTkLabel(frame_ptt, text="", font=ctk.CTkFont(size=12), text_color="#888888", anchor="w", justify="left")
         self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
 
-        # YouTube tab
-        frame_youtube = ctk.CTkFrame(tab_cfg_youtube, fg_color="#151d26", corner_radius=14)
-        frame_youtube.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_youtube, text="YouTube", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-        self.entry_youtube_video = ctk.CTkEntry(frame_youtube, placeholder_text="URL o video_id del live", width=300)
-        self.entry_youtube_video.pack(fill="x", padx=10, pady=4)
-        self.btn_youtube_chat = ctk.CTkButton(frame_youtube, text="Conectar Chat", command=lambda: self.smart_agg_ui.toggle_connection(), width=120, fg_color="#2f5f8f", hover_color="#3670aa")
-        self.btn_youtube_chat.pack(fill="x", padx=10, pady=4)
-        youtube_limit_row = ctk.CTkFrame(frame_youtube, fg_color="transparent")
-        youtube_limit_row.pack(fill="x", padx=10, pady=(4, 10))
-        ctk.CTkLabel(youtube_limit_row, text="Max/u:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
-        self.entry_youtube_user_limit = ctk.CTkEntry(youtube_limit_row, width=60)
-        self.entry_youtube_user_limit.insert(0, "10")
-        self.entry_youtube_user_limit.pack(side="left", padx=3)
-
         # Admin tab
+        # YouTube chat controls moved to Stream Admin > Acciones > Chat Live (RF3).
+        # These stubs preserve backward compat with existing methods that reference them.
+        self.entry_youtube_video = _EntryStub()
+        self.btn_youtube_chat = _ButtonStub()
+        self.entry_youtube_user_limit = _EntryStub("10")
+        self.entry_youtube_threshold = _EntryStub("1.0")
         frame_oauth = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
         frame_oauth.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
         ctk.CTkLabel(frame_oauth, text="OAuth", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
@@ -739,6 +757,9 @@ class VocalAIApp(ctk.CTk):
         sa.set_toggle_small_stream_callback(lambda: self._stream_admin_toggle_small_stream())
         sa.set_simulate_chat_callback(lambda: self._stream_admin_simulate_chat())
         sa.set_force_kira_callback(lambda: self._stream_admin_force_kira_comment())
+        sa.set_connect_chat_live_callback(lambda: self._on_stream_admin_connect_chat_live())
+        sa.set_threshold_preset_callback(lambda v: self._on_stream_admin_threshold_preset(v))
+        sa.set_cooldown_preset_callback(lambda v: self._on_stream_admin_cooldown_preset(v))
         sa.set_refresh_user_list_callback(lambda: self._stream_admin_refresh_user_list())
         sa.set_agenda_add_topic_callback(lambda title, angle, constraints: self._kira_agenda_add_topic(title, angle, constraints))
         sa.set_agenda_enable_callback(lambda: self._kira_agenda_enable())
@@ -851,9 +872,23 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_tick(self) -> None:
         if not hasattr(self, "kira_agenda"):
             return
+        compact_chat = ""
+        if (
+            self.kira_agenda.state == AgendaState.WAITING_SIGNAL
+            and self.kira_agenda._chat_due()
+            and self.smart_agg is not None
+        ):
+            try:
+                intent_summary = self.smart_agg.intent_aggregator.summarize()
+                prompt = intent_summary.get("prompt", "")
+                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
+                    compact_chat = prompt
+            except Exception:
+                pass
         action = self.kira_agenda.next_action(
             motor_busy=getattr(self.motor_ia, "is_processing", False),
             kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+            compact_chat=compact_chat,
         )
         self._enqueue_kira_agenda_action(action)
         self._kira_agenda_update_status()
@@ -1080,6 +1115,64 @@ class VocalAIApp(ctk.CTk):
     def _stream_admin_reject_pending(self) -> None:
         self._run_stream_admin_task("Rechazar acción", self.stream_admin.reject_pending_action)
 
+    def _on_stream_admin_connect_chat_live(self) -> None:
+        entry_url = self.stream_admin_ui._widget("entry_stream_chat_url")
+        if not entry_url:
+            return
+        raw = entry_url.get().strip()
+        raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
+        video_id = SmartAggregatorUI.extract_youtube_video_id(raw)
+        if not video_id and raw:
+            messagebox.showwarning("Chat Live", "Ingresa una URL válida de YouTube Live o Twitch.")
+            return
+        if not video_id:
+            messagebox.showwarning("Chat Live", "Ingresa una URL o video_id del live.")
+            return
+
+        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
+            self.smart_agg_ui.toggle_connection()
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text="Desconectado", text_color="#aa4444")
+            return
+
+        threshold_entry = self.stream_admin_ui._widget("entry_stream_chat_threshold")
+        cooldown_entry = self.stream_admin_ui._widget("entry_stream_chat_cooldown")
+        if threshold_entry or cooldown_entry:
+            import math
+            try:
+                thr = float(threshold_entry.get().strip()) if threshold_entry else 1.0
+                if not math.isfinite(thr):
+                    thr = 1.0
+                thr = max(0.1, min(thr, 100.0))
+            except (ValueError, TypeError):
+                thr = 1.0
+            try:
+                cd = float(cooldown_entry.get().strip()) if cooldown_entry else 45.0
+                if not math.isfinite(cd):
+                    cd = 45.0
+                cd = max(5.0, min(cd, 3600.0))
+            except (ValueError, TypeError):
+                cd = 45.0
+            self.smart_agg.set_activity_limits(threshold_per_second=thr, cooldown_seconds=cd, reset=True)
+
+        spam_entry = self.stream_admin_ui._widget("entry_stream_chat_spam")
+        if spam_entry:
+            try:
+                raw = spam_entry.get().strip()[:4]
+                sp = max(1, min(int(raw), 9999))
+            except (ValueError, TypeError):
+                sp = 10
+            self.smart_agg.set_spam_limits(max_messages_per_user=sp)
+
+        if self.smart_agg_ui.connect_to(video_id):
+            self.entry_youtube_video.delete(0, "end")
+            self.entry_youtube_video.insert(0, video_id)
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text=f"Conectado: {video_id}", text_color="#44aa44")
+            self._on_stream_admin_log(f"[StreamAdmin] Chat Live conectado: {video_id}")
+
     def _stream_admin_connect_current_chat(self) -> None:
         metadata = self.stream_admin_ui.last_metadata or {}
         video_id = metadata.get("video_id")
@@ -1203,6 +1296,8 @@ class VocalAIApp(ctk.CTk):
         if not message:
             messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
             return
+        import re
+        message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", message)[:500]
         self._run_stream_admin_task("Enviar mensaje al chat", lambda: self.stream_admin.send_chat_message(message))
 
     def _stream_admin_force_kira_comment(self) -> None:
@@ -1238,6 +1333,32 @@ class VocalAIApp(ctk.CTk):
         self.smart_agg_ui.on_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
         self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
 
+    def _on_stream_admin_threshold_preset(self, value: str) -> None:
+        import math
+        try:
+            thr = float(value)
+            if not math.isfinite(thr):
+                thr = 1.0
+            thr = max(0.1, min(thr, 100.0))
+        except (ValueError, TypeError):
+            thr = 1.0
+        if self.smart_agg:
+            self.smart_agg.set_activity_limits(threshold_per_second=thr, reset=True)
+            self._on_stream_admin_log(f"[StreamAdmin] Umbral de actividad: {thr:.1f} msg/s.")
+
+    def _on_stream_admin_cooldown_preset(self, value: str) -> None:
+        import math
+        try:
+            cd = float(value)
+            if not math.isfinite(cd):
+                cd = 45.0
+            cd = max(5.0, min(cd, 3600.0))
+        except (ValueError, TypeError):
+            cd = 45.0
+        if self.smart_agg:
+            self.smart_agg.set_activity_limits(cooldown_seconds=cd, reset=True)
+            self._on_stream_admin_log(f"[StreamAdmin] Cooldown de actividad: {int(cd)}s.")
+
     def _stream_admin_toggle_small_stream(self) -> None:
         if not self.smart_agg:
             return
@@ -1251,6 +1372,13 @@ class VocalAIApp(ctk.CTk):
             self.smart_agg.set_activity_limits(threshold_per_second=defaults.get("threshold", 1.0), cooldown_seconds=defaults.get("cooldown", 45.0), reset=True)
             self.smart_agg_ui.apply_spam_limit(log=False)
             self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico OFF: umbrales RF3 restaurados.")
+
+    def _on_threshold_preset(self, value: str) -> None:
+        if hasattr(self, "entry_youtube_threshold"):
+            self.entry_youtube_threshold.delete(0, "end")
+            self.entry_youtube_threshold.insert(0, value)
+        if hasattr(self, "smart_agg_ui"):
+            self.smart_agg_ui.apply_threshold(log=True)
 
     def _stream_admin_simulate_chat(self) -> None:
         if not self.smart_agg:
@@ -1406,6 +1534,7 @@ class VocalAIApp(ctk.CTk):
             entry_youtube_video=self.entry_youtube_video,
             btn_youtube_chat=self.btn_youtube_chat,
             entry_youtube_user_limit=self.entry_youtube_user_limit,
+            entry_youtube_threshold=self.entry_youtube_threshold,
             consola_youtube=self.consola_youtube,
             lbl_kira_chat_state=self.lbl_kira_chat_state,
             status_bar=self.status_bar,
@@ -1413,6 +1542,7 @@ class VocalAIApp(ctk.CTk):
             schedule_ui_update=lambda fn: self.after(0, fn),
             on_track_chat_user=lambda msg: self._stream_admin_track_chat_user(msg),
             on_ingest_rf3=lambda evt, data: self._stream_admin_ingest_rf3_event(evt, data),
+            on_joyita=lambda text: self._on_joyita_to_obs(text),
             health_monitor=self.health_monitor,
         )
         self.smart_agg_ui.initialize()
@@ -1710,6 +1840,31 @@ class VocalAIApp(ctk.CTk):
             if current in (AvatarState.IDLE,):
                 self._avatar_bridge.set_state(AvatarState.SLEEPING)
                 self._log_accion("Kira se durmió por inactividad")
+
+    def _on_joyita_to_obs(self, text: str) -> None:
+        """Send the joyita message to an OBS Text source named 'KiraJoyita'.
+
+        Clears it after 120 seconds unless a new joyita arrives sooner.
+        """
+        if not text:
+            return
+        obs = getattr(self, "_obs_client", None)
+        if not obs or not obs.is_connected:
+            return
+        source_name = "KiraJoyita"
+        if obs.set_obs_text(source_name, text):
+            if self._joyita_obs_timer_id is not None:
+                try:
+                    self.after_cancel(self._joyita_obs_timer_id)
+                except Exception:
+                    pass
+            self._joyita_obs_timer_id = self.after(120_000, lambda: self._clear_obs_joyita(source_name))
+
+    def _clear_obs_joyita(self, source_name: str) -> None:
+        self._joyita_obs_timer_id = None
+        obs = getattr(self, "_obs_client", None)
+        if obs and obs.is_connected:
+            obs.set_obs_text(source_name, "")
 
     def _init_obs_client(self) -> None:
         """Initialize OBS WebSocket client if enabled in config."""

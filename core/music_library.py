@@ -131,7 +131,7 @@ class MusicLibrary:
     def valid_tracks(self) -> list[MusicTrack]:
         return [self._refresh_track_state(track) for track in self.tracks.values() if track.enabled and not self._refresh_track_state(track).missing and not self._refresh_track_state(track).invalid]
 
-    def select_for_mood(self, mood: str, *, avoid_track_id: str | None = None) -> MusicTrack | None:
+    def select_for_mood(self, mood: str, *, avoid_track_id: str | None = None, prefer_after_index: int = -1) -> MusicTrack | None:
         mood_key = normalize_mood(mood)
         valid = self.valid_tracks()
         for bucket in (mood_key, "normal", "__any__"):
@@ -139,6 +139,11 @@ class MusicLibrary:
             if avoid_track_id and len(candidates) > 1:
                 candidates = [track for track in candidates if track.id != avoid_track_id]
             if candidates:
+                if prefer_after_index >= 0 and len(candidates) > 1:
+                    candidates.sort(key=lambda track: (track.variant_index, track.label))
+                    after = [t for t in candidates if t.variant_index > prefer_after_index]
+                    if after:
+                        return after[0]
                 return sorted(candidates, key=lambda track: (track.variant_index, track.label))[0]
         return None
 
