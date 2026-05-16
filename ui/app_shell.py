@@ -907,6 +907,7 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self.motor_ia, "drop_pending_sources"):
             self.motor_ia.drop_pending_sources(("kira-agenda",))
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
+        self._clear_obs_joyita("KiraJoyita")
         self._kira_agenda_update_status()
 
     def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
@@ -953,6 +954,21 @@ class VocalAIApp(ctk.CTk):
                 self._kira_agenda_update_status()
                 self._kira_agenda_schedule_tick(4500)
                 return
+
+        # Auto-exit: when IDLE with no active topic and nothing queued,
+        # co-host has exhausted all planned work.  Transition to OFF so
+        # the tick stops, the UI reflects reality, and chat flows through
+        # the standalone RF3 path without overhead.
+        if (
+            self.kira_agenda.state == AgendaState.IDLE
+            and self.kira_agenda.active_topic is None
+            and not self.kira_agenda.queued_topics()
+        ):
+            self.kira_agenda.state = AgendaState.OFF
+            self._on_stream_admin_log("[Kira Agenda] Sesión completada: sin temas pendientes.")
+            self._kira_agenda_update_status()
+            self._clear_obs_joyita("KiraJoyita")
+            return
 
         action = self.kira_agenda.next_action(
             motor_busy=getattr(self.motor_ia, "is_processing", False),
