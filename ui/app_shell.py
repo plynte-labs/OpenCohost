@@ -1694,7 +1694,16 @@ class VocalAIApp(ctk.CTk):
         # responses are silently dropped while the operator sees a frozen UI.
         if (
             getattr(self, "kira_agenda", None)
-            and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}
+            and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}
+            # When IDLE with no active topic and nothing queued, co-host has
+            # exhausted all planned topics.  Let chat fall through to the
+            # standalone RF3 reaction path instead of being silently consumed
+            # by next_action() which returns none() in IDLE+empty state.
+            and not (
+                self.kira_agenda.state == AgendaState.IDLE
+                and self.kira_agenda.active_topic is None
+                and not self.kira_agenda.queued_topics()
+            )
         ):
             intent_summary = data.get("intent_summary") or {}
             compact_chat = intent_summary.get("prompt") or ""
