@@ -37,6 +37,7 @@ _TTS_STATUS_COLORS: dict[str, str] = {
     "idle": "#1b2633",
     "generating": "#1f3f6f",
     "speaking": "#1f526f",
+    "paused": "#ffaa00",
     "error": "#cc3333",
 }
 
@@ -62,7 +63,7 @@ _PIPELINE_DISPLAY: dict[str, tuple[str, str]] = {
     "idle": ("Modelo listo", "#44cc66"),
     "listening": ("Micrófono escuchando", "#44ff44"),
     "processing": ("Modelo procesando", "#ffaa00"),
-    "speaking": ("TTS generando", "#4488ff"),
+    "speaking": ("TTS renderizando voz", "#4488ff"),
     "playing": ("TTS hablando", "#44ccff"),
     "downloading": ("Modelo cargando", "#ff8800"),
     "init": ("Modelo cargando", "#888888"),
@@ -134,7 +135,7 @@ class StatusBar:
         self.lbl_mic_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_tts_status_pill = ctk.CTkLabel(
-            self._parent, text="TTS: idle",
+            self._parent, text="TTS: inactivo",
             fg_color="#1b2633", corner_radius=12,
         )
         self.lbl_tts_status_pill.pack(side="left", padx=4, pady=8)
@@ -147,7 +148,7 @@ class StatusBar:
 
         self.lbl_health_status_pill = ctk.CTkLabel(
             self._parent, text="Health: --",
-            fg_color="#666666", corner_radius=12,
+            fg_color="#1b2633", corner_radius=12,
         )
         self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
 
@@ -285,9 +286,10 @@ class StatusBar:
                 "recording": "Mic: grabando",
             },
             "tts_status": {
-                "idle": "TTS: idle",
-                "generating": "TTS: generando",
+                "idle": "TTS: inactivo",
+                "generating": "TTS: renderizando",
                 "speaking": "TTS: hablando",
+                "paused": "TTS: pausado · Kira espera operador",
                 "error": "TTS: error",
             },
             "chat_status": {

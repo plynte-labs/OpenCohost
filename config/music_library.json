@@ -109,6 +109,83 @@
       "enabled": true,
       "missing": false,
       "invalid": false
+    },
+    {
+      "id": "5d1ec0afdcdd44e780a0638976235bfa",
+      "original_name": "yt1s.com - Lies Of P  Fascination HQ.mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt2_ee3b599f.mp3",
+      "mood": "normal",
+      "label": "normal_alt2",
+      "variant_index": 2,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "a3fabe9ba11d40d693bea96c4fb417db",
+      "original_name": "Wii Shop Channel Main Theme (HQ).mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt3_d47d3f9d.mp3",
+      "mood": "normal",
+      "label": "normal_alt3",
+      "variant_index": 3,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "5565c65af63f49ed8be8b4159feafa3e",
+      "original_name": "Wii Play - Main Theme.mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt4_76cfea09.mp3",
+      "mood": "normal",
+      "label": "normal_alt4",
+      "variant_index": 4,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "864f0774088141d2bd881cc8c194e61b",
+      "original_name": "Cooking Mama 4_ Kitchen Magic OST – Menu.mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\comedy_69c5592a.mp3",
+      "mood": "comedy",
+      "label": "comedy",
+      "variant_index": 0,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "8672ab3139454fa19a6524c882efca43",
+      "original_name": "Rooftop Run (Classic) - Sonic Generations [OST].mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\hype_alt3_7f0bf82f.mp3",
+      "mood": "hype",
+      "label": "hype_alt3",
+      "variant_index": 3,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "eaf46867c1674172bd1c9b18e387dd41",
+      "original_name": "The Legend of Zelda_ The Wind Waker - Outset Island [Remix].mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt5_504d28d0.mp3",
+      "mood": "normal",
+      "label": "normal_alt5",
+      "variant_index": 5,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
+    },
+    {
+      "id": "bdcbe7bfe35e4756bf0d7697bb516eea",
+      "original_name": "Goron City - Night (The Legend of Zelda_ Breath of the Wild OST).mp3",
+      "path": "E:\\VoiceAI\\assets\\music\\normal_alt6_5e85ce89.mp3",
+      "mood": "normal",
+      "label": "normal_alt6",
+      "variant_index": 6,
+      "enabled": true,
+      "missing": false,
+      "invalid": false
     }
   ]
 }

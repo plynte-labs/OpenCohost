@@ -38,7 +38,7 @@ vibe:
 
 activity:
   window_seconds: 5
-  threshold_per_second: 10.0
+  threshold_per_second: 1.0
   cooldown_seconds: 45.0
   actions:
     auto_reply:
@@ -58,7 +58,7 @@ spam:
 
 live_safety:
   enabled: true
-  # Meaningful live default from the first massive-stream test: 10 msg/s.
+  # Live traffic threshold for compacting/sampling chat: 10 msg/s.
   high_traffic_threshold_per_second: 10.0
   high_traffic_sample_every: 10
   empty_vibe_backoff_after: 2

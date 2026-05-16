@@ -1,9 +1,9 @@
 avatar:
   enabled: true
   mode: image_states
-  assets_folder: C:\Users\tavo_\AppData\Local\Temp\pytest-of-tavo_\pytest-4\test_choose_image_copies_to_as0\avatars
+  assets_folder: ''
   state_images:
-    idle: C:\Users\tavo_\AppData\Local\Temp\pytest-of-tavo_\pytest-4\test_choose_image_copies_to_as0\avatars\idle.png
+    idle: E:\VoiceAI\assets\avatar\kira\idle.png
     listening: E:\VoiceAI\assets\avatar\kira\listening.png
     thinking: E:\VoiceAI\assets\avatar\kira\thinking.png
     speaking: E:\VoiceAI\assets\avatar\kira\speaking.png

@@ -119,7 +119,24 @@ class TestImageSelection:
         panel.config.assets_folder = asset_dir
 
         with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
-            panel._choose_image("idle")
+            with patch("ui.avatar_panel.save_avatar_config") as save_config:
+                panel._choose_image("idle")
+
+        save_config.assert_called_once_with(panel.config)
+
+        assert "idle" in panel.config.state_images
+        assert panel.config.state_images["idle"].exists()
+
+    def test_choose_image_does_not_write_real_avatar_config(self, panel, sample_image, tmp_path):
+        """Avatar selection tests must not persist pytest temp paths to real config."""
+        panel.build()
+        panel.config.assets_folder = tmp_path / "avatars"
+
+        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
+            with patch("ui.avatar_panel.save_avatar_config") as save_config:
+                panel._choose_image("idle")
+
+        save_config.assert_called_once_with(panel.config)
 
         assert "idle" in panel.config.state_images
         assert panel.config.state_images["idle"].exists()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import random
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -14,7 +15,7 @@ from core.music_library import MusicLibrary, MusicTrack, normalize_mood
 class AudioBedPolicy:
     min_play_seconds: float = 90.0
     max_play_seconds: float = 300.0
-    fade_ms: int = 1800
+    fade_ms: int = 6000
     base_volume: float = 0.28
     ducked_volume: float = 0.08
 
@@ -36,6 +37,7 @@ class AudioBedEngine:
         self.started_at: float = 0.0
         self.transition_pending: bool = False
         self.enabled: bool = True
+        self._mood_last_index: dict[str, int] = {}
         self._pygame = None
         self._channel = None
         self._sound = None
@@ -90,28 +92,62 @@ class AudioBedEngine:
 
     def _play_selected(self, mood: str) -> bool:
         with self._lock:
-            track = self.library.select_for_mood(mood, avoid_track_id=self.current_track.id if self.current_track else None)
-            if not track:
+            mood_key = normalize_mood(mood)
+            valid = self.library.valid_tracks()
+            candidates: list[MusicTrack] = []
+            for bucket in (mood_key, "normal"):
+                bucket_tracks = [t for t in valid if t.mood == bucket]
+                if bucket_tracks:
+                    bucket_tracks.sort(key=lambda t: (t.variant_index, t.label))
+                    candidates = bucket_tracks
+                    break
+            if not candidates:
+                candidates = sorted(valid, key=lambda t: (t.variant_index, t.label))
+
+            avoid_id = self.current_track.id if self.current_track else None
+            if avoid_id and len(candidates) > 1:
+                filtered = [t for t in candidates if t.id != avoid_id]
+                if filtered:
+                    candidates = filtered
+
+            if not candidates:
                 self.on_log("[Música] No hay tracks válidos; se mantiene silencio.")
                 return False
+
+            last_pos = self._mood_last_index.get(mood_key)
+            if last_pos is not None and last_pos >= len(candidates):
+                last_pos = None
+            if last_pos is None:
+                pos = random.randint(0, len(candidates) - 1)
+            else:
+                jump = random.randint(1, min(3, len(candidates) - 1)) if len(candidates) > 1 else 0
+                pos = (last_pos + jump) % len(candidates)
+                if len(candidates) > 1 and pos == last_pos:
+                    pos = (pos + 1) % len(candidates)
+
+            track = candidates[pos]
+            self._mood_last_index[mood_key] = pos
             if self.current_track and track.id == self.current_track.id:
                 return True
             try:
                 self._ensure_pygame()
                 sound = self._pygame.mixer.Sound(track.path)
-                if self._channel:
-                    self._channel.fadeout(self.policy.fade_ms)
-                self._sound = sound
-                self._channel = self._pygame.mixer.Channel(7)
+                old_channel = self._channel
+                self._channel = self._pygame.mixer.find_channel(force=True)
+                if self._channel is None:
+                    self._channel = self._pygame.mixer.Channel(7)
                 self._channel.set_volume(self.policy.base_volume)
                 self._channel.play(sound, loops=-1, fade_ms=self.policy.fade_ms)
+                if old_channel and old_channel is not self._channel:
+                    old_channel.fadeout(self.policy.fade_ms)
+                self._sound = sound
             except Exception as exc:  # pragma: no cover - depends on local audio backend
                 self.on_log(f"[Música] No se pudo reproducir {track.original_name}: {exc}")
                 return False
             self.current_track = track
             self.current_mood = track.mood
             self.started_at = time.time()
-            if track.mood != mood:
+            if track.mood != mood_key:
                 self.on_log(f"[Música] No hay tracks para {mood}; usando {track.label} como fallback.")
             else:
                 self.on_log(f"[Música] Reproduciendo {track.label}: {track.original_name}")

@@ -43,6 +43,15 @@ class MessageFilter:
             r'[\u2500-\u257F\u2580-\u259F\u25E2-\u25E5\u2B0C-\u2B1B]'
         )
 
+    @staticmethod
+    def _sanitize_chat_text(text: str) -> str:
+        """Strip ANSI escapes, control chars, and null bytes from chat text."""
+        import re
+        text = text.replace("\x00", "")
+        text = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+        text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+        return " ".join(text.split())
+
     def filter(self, message: dict) -> Optional[dict]:
         user = message.get("user", "")
         text = message.get("text", "")
@@ -52,6 +61,11 @@ class MessageFilter:
             return None
 
         text_stripped = text.strip()
+        if not text_stripped:
+            return None
+
+        text_stripped = self._sanitize_chat_text(text_stripped)
+        text_stripped = text_stripped[:500]
         if not text_stripped:
             return None
 

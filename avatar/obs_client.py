@@ -224,3 +224,24 @@ class OBSClient:
             return False, f"Conexión rechazada en {self.config.host}:{self.config.port}"
         except Exception as e:
             return False, str(e)
+
+    def set_obs_text(self, source_name: str, text: str) -> bool:
+        """Update an OBS Text (GDI+) source with new content.
+
+        The user must create a Text (GDI+) source in OBS with the given name.
+        Returns True on success.
+        """
+        if not self._client or not self.is_connected:
+            return False
+        try:
+            current = self._client.get_input_settings(name=source_name)
+            new_settings = dict(current.input_settings)
+            new_settings["text"] = text
+            self._client.set_input_settings(
+                name=source_name,
+                settings=new_settings,
+                overlay=False,
+            )
+            return True
+        except Exception:
+            return False

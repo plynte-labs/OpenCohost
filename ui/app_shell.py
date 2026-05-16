@@ -16,7 +16,9 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
+import traceback
 import time
 from typing import Any, Optional
 
@@ -60,7 +62,7 @@ from core.audio_bed import AudioBedEngine
 from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.music_library import MusicLibrary
-from smart_aggregator import AgendaAction, AgendaState, Aggregator, KiraAgendaController
+from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -83,6 +85,68 @@ def _guardar_geometria(x: int, y: int, w: int, h: int) -> None:
             json.dump({"x": x, "y": y, "width": w, "height": h}, f)
     except Exception:
         pass
+
+
+class _EntryStub:
+    """Stand-in for CTkEntry widgets removed from sidebar (moved to Stream Admin)."""
+    def __init__(self, default: str = "") -> None:
+        self._text = default
+
+    def get(self) -> str:
+        return self._text
+
+    def delete(self, first: object, last: object = None) -> None:
+        self._text = ""
+
+    def insert(self, index: object, value: str) -> None:
+        self._text = value
+
+    def pack(self, **kw: object) -> None:
+        pass
+
+
+class _ButtonStub:
+    """Stand-in for CTkButton widgets removed from sidebar."""
+    def configure(self, **kw: object) -> None:
+        pass
+
+    def pack(self, **kw: object) -> None:
+        pass
+
+
+# ── Global crash handler: log unhandled exceptions before the process dies ──
+_CRASH_LOG = os.environ.get("VOICEAI_CRASH_LOG", os.path.join("logs", "crash.log"))
+
+
+def _install_crash_handler() -> None:
+    """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
+    os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+
+    def _write_crash(tb_text: str) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"CRASH at {now}\n")
+            f.write(f"Thread: {threading.current_thread().name}\n")
+            f.write(tb_text)
+        sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
+
+    def _handler(exc_type, exc_value, exc_tb):
+        _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_handler(args):
+        _write_crash("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
+
+    sys.excepthook = _handler
+    threading.excepthook = _thread_handler
+    # Tkinter swallows exceptions by default — make it loud
+    import tkinter as _tk
+    _tk.Tk.report_callback_exception = _handler
+
+
+_install_crash_handler()
 
 
 class VocalAIApp(ctk.CTk):
@@ -146,6 +210,7 @@ class VocalAIApp(ctk.CTk):
         self._speaking_alt_timer_id: str | None = None
         self._speaking_is_alt: bool = False
         self._inactivity_timer_id: str | None = None
+        self._joyita_obs_timer_id: str | None = None
         self._inactivity_timeout_ms: int = 2 * 60 * 1000  # 2 minutes to sleeping
 
         # OBS WebSocket client (initialized after UI build to access config)
@@ -159,6 +224,8 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
         self.kira_agenda = KiraAgendaController()
         self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
+        self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
+        self.motor_ia.agenda_output_recorder = self.kira_agenda.record_accepted_output
         self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
 
         # Health Monitor — system health daemon (graceful if init fails)
@@ -173,6 +240,7 @@ class VocalAIApp(ctk.CTk):
             self.kira_agenda.set_profile(self.cohost_profiles.get(self._current_cohost_profile, {}))
         self._kira_agenda_tick_id: str | None = None
         self._kira_agenda_prefetched_action: AgendaAction | None = None
+        self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
         self.after(100, self._start_motor)
 
@@ -438,9 +506,8 @@ class VocalAIApp(ctk.CTk):
         config_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
         tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
-        tab_cfg_youtube = config_tabs.add("YouTube")
         tab_cfg_admin = config_tabs.add("Admin")
-        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_youtube, tab_cfg_admin):
+        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_admin):
             tab.grid_columnconfigure(0, weight=1)
 
         # Model panel
@@ -516,22 +583,13 @@ class VocalAIApp(ctk.CTk):
         self.lbl_ptt_status = ctk.CTkLabel(frame_ptt, text="", font=ctk.CTkFont(size=12), text_color="#888888", anchor="w", justify="left")
         self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
 
-        # YouTube tab
-        frame_youtube = ctk.CTkFrame(tab_cfg_youtube, fg_color="#151d26", corner_radius=14)
-        frame_youtube.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_youtube, text="YouTube", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-        self.entry_youtube_video = ctk.CTkEntry(frame_youtube, placeholder_text="URL o video_id del live", width=300)
-        self.entry_youtube_video.pack(fill="x", padx=10, pady=4)
-        self.btn_youtube_chat = ctk.CTkButton(frame_youtube, text="Conectar Chat", command=lambda: self.smart_agg_ui.toggle_connection(), width=120, fg_color="#2f5f8f", hover_color="#3670aa")
-        self.btn_youtube_chat.pack(fill="x", padx=10, pady=4)
-        youtube_limit_row = ctk.CTkFrame(frame_youtube, fg_color="transparent")
-        youtube_limit_row.pack(fill="x", padx=10, pady=(4, 10))
-        ctk.CTkLabel(youtube_limit_row, text="Max/u:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
-        self.entry_youtube_user_limit = ctk.CTkEntry(youtube_limit_row, width=60)
-        self.entry_youtube_user_limit.insert(0, "10")
-        self.entry_youtube_user_limit.pack(side="left", padx=3)
-
         # Admin tab
+        # YouTube chat controls moved to Stream Admin > Acciones > Chat Live (RF3).
+        # These stubs preserve backward compat with existing methods that reference them.
+        self.entry_youtube_video = _EntryStub()
+        self.btn_youtube_chat = _ButtonStub()
+        self.entry_youtube_user_limit = _EntryStub("10")
+        self.entry_youtube_threshold = _EntryStub("1.0")
         frame_oauth = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
         frame_oauth.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
         ctk.CTkLabel(frame_oauth, text="OAuth", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
@@ -581,6 +639,8 @@ class VocalAIApp(ctk.CTk):
             on_enable=lambda: self._kira_agenda_enable(),
             on_soft_stop=lambda: self._kira_agenda_soft_stop(),
             on_emergency_stop=lambda: self._kira_agenda_emergency_stop(),
+            on_approve_suggestion=lambda topic_id: self._kira_agenda_approve_suggestion(topic_id),
+            on_reject_suggestion=lambda topic_id: self._kira_agenda_reject_suggestion(topic_id),
         )
         self.cohost_agenda_panel.build(cohost_panel_frame)
         self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
@@ -737,6 +797,9 @@ class VocalAIApp(ctk.CTk):
         sa.set_toggle_small_stream_callback(lambda: self._stream_admin_toggle_small_stream())
         sa.set_simulate_chat_callback(lambda: self._stream_admin_simulate_chat())
         sa.set_force_kira_callback(lambda: self._stream_admin_force_kira_comment())
+        sa.set_connect_chat_live_callback(lambda: self._on_stream_admin_connect_chat_live())
+        sa.set_threshold_preset_callback(lambda v: self._on_stream_admin_threshold_preset(v))
+        sa.set_cooldown_preset_callback(lambda v: self._on_stream_admin_cooldown_preset(v))
         sa.set_refresh_user_list_callback(lambda: self._stream_admin_refresh_user_list())
         sa.set_agenda_add_topic_callback(lambda title, angle, constraints: self._kira_agenda_add_topic(title, angle, constraints))
         sa.set_agenda_enable_callback(lambda: self._kira_agenda_enable())
@@ -844,21 +907,108 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self.motor_ia, "drop_pending_sources"):
             self.motor_ia.drop_pending_sources(("kira-agenda",))
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
+        self._clear_obs_joyita("KiraJoyita")
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
+        """Approve a DRAFTED suggestion: mark APPROVED then QUEUED."""
+        try:
+            self.kira_agenda.approve_topic(topic_id)
+            self.kira_agenda.queue_topic(topic_id)
+        except (ValueError, KeyError):
+            pass
+        self._kira_agenda_update_status()
+
+    def _kira_agenda_reject_suggestion(self, topic_id: str) -> None:
+        """Reject a DRAFTED suggestion: mark SKIPPED."""
+        try:
+            topic = next((t for t in self.kira_agenda.topics if t.id == topic_id), None)
+            if topic is not None and topic.status == TopicStatus.DRAFTED:
+                topic.status = TopicStatus.SKIPPED
+        except (ValueError, KeyError, AttributeError):
+            pass
         self._kira_agenda_update_status()
 
     def _kira_agenda_tick(self) -> None:
         if not hasattr(self, "kira_agenda"):
             return
+
+        # Auto-recovery: if PAUSED, check if the recovery policy permits a retry
+        if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
+            if self.kira_agenda.can_auto_resume():
+                self._on_stream_admin_log(
+                    f"[Kira Agenda] Auto-recuperación: intento {self.kira_agenda.recovery.retry_attempt}"
+                    f" de {len(RecoveryPolicy.RETRY_DELAYS_SECONDS)}"
+                    f" | Error: {self.kira_agenda.recovery.error_code.human()}"
+                )
+                # Fall through to next_action — state is now IDLE
+            elif self.kira_agenda.state == AgendaState.HARD_PAUSED:
+                self._on_stream_admin_log(
+                    "[Kira Agenda] HARD_PAUSED: se requiere intervención del streamer. "
+                    f"Motivo: {self.kira_agenda.recovery.last_failure_reason or 'fallos repetidos'}"
+                )
+                self._kira_agenda_update_status()
+                return  # No tick for HARD_PAUSED
+            else:
+                # Timer not ready — reschedule and wait
+                self._kira_agenda_update_status()
+                self._kira_agenda_schedule_tick(4500)
+                return
+
+        # Auto-exit: when IDLE with no active topic and nothing queued,
+        # co-host has exhausted all planned work.  Transition to OFF so
+        # the tick stops, the UI reflects reality, and chat flows through
+        # the standalone RF3 path without overhead.
+        if (
+            self.kira_agenda.state == AgendaState.IDLE
+            and self.kira_agenda.active_topic is None
+            and not self.kira_agenda.queued_topics()
+        ):
+            self.kira_agenda.state = AgendaState.OFF
+            self._on_stream_admin_log("[Kira Agenda] Sesión completada: sin temas pendientes.")
+            self._kira_agenda_update_status()
+            self._clear_obs_joyita("KiraJoyita")
+            return
+
         action = self.kira_agenda.next_action(
             motor_busy=getattr(self.motor_ia, "is_processing", False),
             kira_speaking=getattr(self.motor_ia, "is_speaking", False),
         )
         self._enqueue_kira_agenda_action(action)
+
+        # Auto-suggestion trigger: on 3rd consecutive IDLE+empty-queue tick (~13.5s)
+        if self.kira_agenda.state == AgendaState.IDLE and not self.kira_agenda.queued_topics():
+            self._idle_ticks += 1
+            if self._idle_ticks >= 3 and self.kira_agenda.can_suggest():
+                # Rich-context gate: skip if aggregator has no data
+                if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
+                    try:
+                        intent_summary = self.smart_agg.intent_aggregator.summarize()
+                        vibe_data = self.smart_agg.vibe_thermometer.compute_vibe()
+                        vibe_temp = vibe_data.get("temperature", 50) if isinstance(vibe_data, dict) else 50
+                        snapshots = self.smart_agg.history.get_recent_context_snapshots(
+                            self.smart_agg._session_id, max_items=3,
+                        )
+                        suggestions = generate_suggestions(
+                            intent_summary=intent_summary,
+                            snapshots=snapshots,
+                            vibe_temperature=vibe_temp,
+                            existing_topics=self.kira_agenda.topics,
+                            last_outputs=self.kira_agenda.last_outputs,
+                        )
+                        if suggestions:
+                            self.kira_agenda.suggest_topics(suggestions)
+                    except Exception:
+                        pass  # Swallow to avoid breaking the tick loop
+                self._idle_ticks = 0
+        else:
+            self._idle_ticks = 0
+
         self._kira_agenda_update_status()
         self._kira_agenda_schedule_tick(4500)
 
     def _kira_agenda_schedule_tick(self, delay_ms: int) -> None:
-        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             return
         if self._kira_agenda_tick_id is not None:
             try:
@@ -939,13 +1089,22 @@ class VocalAIApp(ctk.CTk):
             return
         active = self.kira_agenda.active_topic
         queued = len(self.kira_agenda.queued_topics())
+        recovery = self.kira_agenda.recovery
+        error_info = ""
+        if recovery.error_code != ErrorCode.NONE:
+            error_info = f" · ⚠ {recovery.error_code.human()} (intento {recovery.retry_attempt}/{len(RecoveryPolicy.RETRY_DELAYS_SECONDS)})"
         if active:
-            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
             current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}/{self.kira_agenda.safety_mode}\nTurnos hablados: {active.turns_spoken}/{self.kira_agenda.max_turns_per_topic}"
         else:
-            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}"
+            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
             current_topic = "Sin tema activo"
-        color = "#ffaa00" if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR else "#8fa3b8"
+        if self.kira_agenda.state == AgendaState.HARD_PAUSED:
+            color = "#cc3333"
+        elif self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
+            color = "#ffaa00"
+        else:
+            color = "#8fa3b8"
         self.after(0, lambda: self.stream_admin_ui.set_agenda_status(text, color))
         if hasattr(self, "cohost_agenda_panel"):
             queue_lines = [
@@ -957,7 +1116,32 @@ class VocalAIApp(ctk.CTk):
                 current_topic=current_topic,
                 queue_lines=queue_lines,
                 failures=self.kira_agenda.failure_count,
+                error_code=recovery.error_code.human(),
+                error_reasons=recovery.last_reasons,
             ))
+            # Forward DRAFTED suggestions to the panel
+            drafted = self.kira_agenda.drafted_topics()
+            suggestions_list = [
+                {
+                    "title": t.title,
+                    "angle": t.angle,
+                    "confidence": getattr(t, "confidence", "LOW"),
+                    "source": getattr(t, "source", ""),
+                    "topic_id": t.id,
+                }
+                for t in drafted
+            ]
+            self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
+        # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
+        # Only update on state transitions to avoid overwriting pipeline-driven TTS state
+        was_paused = getattr(self, "_agenda_was_paused", False)
+        is_paused = self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR
+        if self.status_bar and was_paused != is_paused:
+            if is_paused:
+                self.after(0, lambda: self.status_bar.update_tts_status("paused"))
+            else:
+                self.after(0, lambda: self.status_bar.update_tts_status("idle"))
+        self._agenda_was_paused = is_paused
 
     def _init_stream_admin(self) -> None:
         try:
@@ -1067,6 +1251,64 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_reject_pending(self) -> None:
         self._run_stream_admin_task("Rechazar acción", self.stream_admin.reject_pending_action)
+
+    def _on_stream_admin_connect_chat_live(self) -> None:
+        entry_url = self.stream_admin_ui._widget("entry_stream_chat_url")
+        if not entry_url:
+            return
+        raw = entry_url.get().strip()
+        raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
+        video_id = SmartAggregatorUI.extract_youtube_video_id(raw)
+        if not video_id and raw:
+            messagebox.showwarning("Chat Live", "Ingresa una URL válida de YouTube Live o Twitch.")
+            return
+        if not video_id:
+            messagebox.showwarning("Chat Live", "Ingresa una URL o video_id del live.")
+            return
+
+        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
+            self.smart_agg_ui.toggle_connection()
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text="Desconectado", text_color="#aa4444")
+            return
+
+        threshold_entry = self.stream_admin_ui._widget("entry_stream_chat_threshold")
+        cooldown_entry = self.stream_admin_ui._widget("entry_stream_chat_cooldown")
+        if threshold_entry or cooldown_entry:
+            import math
+            try:
+                thr = float(threshold_entry.get().strip()) if threshold_entry else 1.0
+                if not math.isfinite(thr):
+                    thr = 1.0
+                thr = max(0.1, min(thr, 100.0))
+            except (ValueError, TypeError):
+                thr = 1.0
+            try:
+                cd = float(cooldown_entry.get().strip()) if cooldown_entry else 45.0
+                if not math.isfinite(cd):
+                    cd = 45.0
+                cd = max(5.0, min(cd, 3600.0))
+            except (ValueError, TypeError):
+                cd = 45.0
+            self.smart_agg.set_activity_limits(threshold_per_second=thr, cooldown_seconds=cd, reset=True)
+
+        spam_entry = self.stream_admin_ui._widget("entry_stream_chat_spam")
+        if spam_entry:
+            try:
+                raw = spam_entry.get().strip()[:4]
+                sp = max(1, min(int(raw), 9999))
+            except (ValueError, TypeError):
+                sp = 10
+            self.smart_agg.set_spam_limits(max_messages_per_user=sp)
+
+        if self.smart_agg_ui.connect_to(video_id):
+            self.entry_youtube_video.delete(0, "end")
+            self.entry_youtube_video.insert(0, video_id)
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text=f"Conectado: {video_id}", text_color="#44aa44")
+            self._on_stream_admin_log(f"[StreamAdmin] Chat Live conectado: {video_id}")
 
     def _stream_admin_connect_current_chat(self) -> None:
         metadata = self.stream_admin_ui.last_metadata or {}
@@ -1191,6 +1433,8 @@ class VocalAIApp(ctk.CTk):
         if not message:
             messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
             return
+        import re
+        message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", message)[:500]
         self._run_stream_admin_task("Enviar mensaje al chat", lambda: self.stream_admin.send_chat_message(message))
 
     def _stream_admin_force_kira_comment(self) -> None:
@@ -1226,6 +1470,32 @@ class VocalAIApp(ctk.CTk):
         self.smart_agg_ui.on_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
         self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
 
+    def _on_stream_admin_threshold_preset(self, value: str) -> None:
+        import math
+        try:
+            thr = float(value)
+            if not math.isfinite(thr):
+                thr = 1.0
+            thr = max(0.1, min(thr, 100.0))
+        except (ValueError, TypeError):
+            thr = 1.0
+        if self.smart_agg:
+            self.smart_agg.set_activity_limits(threshold_per_second=thr, reset=True)
+            self._on_stream_admin_log(f"[StreamAdmin] Umbral de actividad: {thr:.1f} msg/s.")
+
+    def _on_stream_admin_cooldown_preset(self, value: str) -> None:
+        import math
+        try:
+            cd = float(value)
+            if not math.isfinite(cd):
+                cd = 45.0
+            cd = max(5.0, min(cd, 3600.0))
+        except (ValueError, TypeError):
+            cd = 45.0
+        if self.smart_agg:
+            self.smart_agg.set_activity_limits(cooldown_seconds=cd, reset=True)
+            self._on_stream_admin_log(f"[StreamAdmin] Cooldown de actividad: {int(cd)}s.")
+
     def _stream_admin_toggle_small_stream(self) -> None:
         if not self.smart_agg:
             return
@@ -1239,6 +1509,13 @@ class VocalAIApp(ctk.CTk):
             self.smart_agg.set_activity_limits(threshold_per_second=defaults.get("threshold", 1.0), cooldown_seconds=defaults.get("cooldown", 45.0), reset=True)
             self.smart_agg_ui.apply_spam_limit(log=False)
             self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico OFF: umbrales RF3 restaurados.")
+
+    def _on_threshold_preset(self, value: str) -> None:
+        if hasattr(self, "entry_youtube_threshold"):
+            self.entry_youtube_threshold.delete(0, "end")
+            self.entry_youtube_threshold.insert(0, value)
+        if hasattr(self, "smart_agg_ui"):
+            self.smart_agg_ui.apply_threshold(log=True)
 
     def _stream_admin_simulate_chat(self) -> None:
         if not self.smart_agg:
@@ -1394,6 +1671,7 @@ class VocalAIApp(ctk.CTk):
             entry_youtube_video=self.entry_youtube_video,
             btn_youtube_chat=self.btn_youtube_chat,
             entry_youtube_user_limit=self.entry_youtube_user_limit,
+            entry_youtube_threshold=self.entry_youtube_threshold,
             consola_youtube=self.consola_youtube,
             lbl_kira_chat_state=self.lbl_kira_chat_state,
             status_bar=self.status_bar,
@@ -1401,6 +1679,7 @@ class VocalAIApp(ctk.CTk):
             schedule_ui_update=lambda fn: self.after(0, fn),
             on_track_chat_user=lambda msg: self._stream_admin_track_chat_user(msg),
             on_ingest_rf3=lambda evt, data: self._stream_admin_ingest_rf3_event(evt, data),
+            on_joyita=lambda text: self._on_joyita_to_obs(text),
             health_monitor=self.health_monitor,
         )
         self.smart_agg_ui.initialize()
@@ -1426,7 +1705,22 @@ class VocalAIApp(ctk.CTk):
 
     def _on_smart_aggregated_context(self, data: dict) -> None:
         """Route compact chat either to Agenda Mode or the existing RF3 reaction."""
-        if getattr(self, "kira_agenda", None) and self.kira_agenda.state != AgendaState.OFF:
+        # When the controller is PAUSED_NEEDS_OPERATOR, chat must fall
+        # through to the standalone RF3 reaction path — otherwise chat
+        # responses are silently dropped while the operator sees a frozen UI.
+        if (
+            getattr(self, "kira_agenda", None)
+            and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}
+            # When IDLE with no active topic and nothing queued, co-host has
+            # exhausted all planned topics.  Let chat fall through to the
+            # standalone RF3 reaction path instead of being silently consumed
+            # by next_action() which returns none() in IDLE+empty state.
+            and not (
+                self.kira_agenda.state == AgendaState.IDLE
+                and self.kira_agenda.active_topic is None
+                and not self.kira_agenda.queued_topics()
+            )
+        ):
             intent_summary = data.get("intent_summary") or {}
             compact_chat = intent_summary.get("prompt") or ""
             if not compact_chat:
@@ -1600,7 +1894,6 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
         self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
         self._safe_after(lambda: self.btn_download.configure(state="disabled"))
-        self._safe_after(lambda: self.switch_ptt.configure(state="disabled"))
         self._safe_after(lambda: self.btn_mapear.configure(state="disabled"))
 
     def _on_motor_idle(self) -> None:
@@ -1611,7 +1904,7 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
         self._safe_after(lambda: self.btn_mapear.configure(state="normal"))
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
-        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             self._kira_agenda_schedule_tick(500)
 
     def _on_motor_speaking_start(self) -> None:
@@ -1620,7 +1913,15 @@ class VocalAIApp(ctk.CTk):
             # Auto-start music bed on first Kira response if nothing is playing yet
             if self.audio_bed.current_track is None and self.audio_bed.enabled:
                 self.audio_bed.request_mood("normal", force=True, boundary=True)
-        if hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source():
+        # Use controller state, not motor source, to decide if this speech
+        # was initiated by the agenda state machine.  The controller may
+        # emit chat/PTT/stop actions whose motor source does not start
+        # with "kira-agenda"; the state check is the authoritative signal.
+        controller_generated = (
+            hasattr(self, "kira_agenda")
+            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
+        )
+        if controller_generated:
             self.kira_agenda.mark_generation_accepted()
             self._kira_agenda_update_status()
             self._kira_agenda_prefetch_while_speaking()
@@ -1634,7 +1935,11 @@ class VocalAIApp(ctk.CTk):
 
     def _on_motor_speaking_end(self) -> None:
         prefetched_started = False
-        agenda_speech = hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source()
+        # Use controller state, not motor source (see _on_motor_speaking_start).
+        agenda_speech = (
+            hasattr(self, "kira_agenda")
+            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
+        )
         if agenda_speech:
             self.kira_agenda.mark_speech_complete()
             self._kira_agenda_update_status()
@@ -1700,6 +2005,31 @@ class VocalAIApp(ctk.CTk):
                 self._avatar_bridge.set_state(AvatarState.SLEEPING)
                 self._log_accion("Kira se durmió por inactividad")
 
+    def _on_joyita_to_obs(self, text: str) -> None:
+        """Send the joyita message to an OBS Text source named 'KiraJoyita'.
+
+        Clears it after 120 seconds unless a new joyita arrives sooner.
+        """
+        if not text:
+            return
+        obs = getattr(self, "_obs_client", None)
+        if not obs or not obs.is_connected:
+            return
+        source_name = "KiraJoyita"
+        if obs.set_obs_text(source_name, text):
+            if self._joyita_obs_timer_id is not None:
+                try:
+                    self.after_cancel(self._joyita_obs_timer_id)
+                except Exception:
+                    pass
+            self._joyita_obs_timer_id = self.after(120_000, lambda: self._clear_obs_joyita(source_name))
+
+    def _clear_obs_joyita(self, source_name: str) -> None:
+        self._joyita_obs_timer_id = None
+        obs = getattr(self, "_obs_client", None)
+        if obs and obs.is_connected:
+            obs.set_obs_text(source_name, "")
+
     def _init_obs_client(self) -> None:
         """Initialize OBS WebSocket client if enabled in config."""
         from avatar.avatar_config import load_avatar_config
@@ -1726,29 +2056,26 @@ class VocalAIApp(ctk.CTk):
             # non-technical users can open OBS after VoiceAI without breaking the
             # avatar bridge for the whole session.
             def connect_obs():
-                max_attempts = 60
+                logged_once = False
                 retry_delay = 5
-                for attempt in range(1, max_attempts + 1):
+                while getattr(self, "_obs_client", None) is not None:
                     if self._obs_client.connect():
                         self._obs_client.subscribe_bridge(self._avatar_bridge)
-                        # Push the current state immediately; otherwise OBS can
-                        # stay asleep until the next state transition.
                         self._obs_client.on_state_change(self._avatar_bridge.get_state())
-                        # Safely schedule UI update on main thread
                         try:
                             if self.winfo_exists():
                                 self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
                         except Exception:
-                            pass  # Main loop not ready yet
+                            pass
                         return
-
-                    if attempt == 1:
+                    if not logged_once:
                         self._print_log(
-                            "[OBS] No se pudo conectar. Abri OBS y VoiceAI reintentara automaticamente."
+                            "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                            "Abrí OBS y la conexión se restablecerá automáticamente."
                         )
+                        logged_once = True
                     time.sleep(retry_delay)
-
-                self._print_log("[OBS] No se pudo conectar tras varios intentos. Revisa OBS WebSocket.")
+                # Client was destroyed (app closing)
 
             threading.Thread(target=connect_obs, daemon=True).start()
         except Exception as e:

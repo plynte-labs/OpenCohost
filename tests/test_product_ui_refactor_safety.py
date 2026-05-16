@@ -205,8 +205,9 @@ def test_agenda_lifecycle_is_source_gated_and_prefetch_invalidates_on_interrupt(
     assert "current_speech_source" in source
     assert "startswith(\"kira-agenda\")" in source
     assert "mark_generation_accepted()" in source
-    assert "and self._is_kira_agenda_speech_source()" in source
-    assert "agenda_speech = hasattr(self, \"kira_agenda\") and self._is_kira_agenda_speech_source()" in source
+    # Post-fix: checks use controller state (SPEAKING/GENERATING), not motor source
+    assert "AgendaState.SPEAKING, AgendaState.GENERATING" in source
+    assert "agenda_speech = " in source
     assert "self._kira_agenda_clear_prefetch()" in source
 
 

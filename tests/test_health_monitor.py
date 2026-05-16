@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -187,6 +188,34 @@ class TestQwenProcessManager:
         """stop() is safe when no process is running."""
         mgr = QwenProcessManager()
         mgr.stop()  # Should not raise
+
+    def test_windows_start_uses_new_process_group_for_ctrl_break(self):
+        """Windows managed Qwen must be in its own group for CTRL_BREAK_EVENT."""
+        mgr = QwenProcessManager()
+
+        with patch("core.health_monitor.sys.platform", "win32"):
+            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch.object(mgr, "_check_health", return_value=True):
+                    mock_popen.return_value.poll.return_value = None
+
+                    assert mgr.start() is True
+
+        flags = mock_popen.call_args.kwargs["creationflags"]
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+
+    def test_stop_kills_when_graceful_signal_fails(self):
+        """A failed CTRL_BREAK_EVENT must fall back to kill() to release VRAM."""
+        mgr = QwenProcessManager()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.send_signal.side_effect = RuntimeError("signal failed")
+        mgr._process = proc
+
+        with patch("core.health_monitor.sys.platform", "win32"):
+            mgr.stop()
+
+        proc.kill.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=5)
 
     def test_attach_existing_no_server(self):
         """attach_existing returns False when no server on port 5000."""

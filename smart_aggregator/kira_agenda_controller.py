@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import re
+import time as _time_module
 from typing import Iterable, Optional
 from uuid import uuid4
 
@@ -28,6 +29,140 @@ class AgendaState(str, Enum):
     CONTINUE_TOPIC = "CONTINUE_TOPIC"
     TOPIC_CLOSING = "TOPIC_CLOSING"
     PAUSED_NEEDS_OPERATOR = "PAUSED_NEEDS_OPERATOR"
+    HARD_PAUSED = "HARD_PAUSED"
+
+
+class ErrorCode(str, Enum):
+    """Machine-readable error codes surfaced to the streamer UI."""
+    NONE = ""
+    GUARDRAIL_LOOPING = "ERR_GUARDRAIL_LOOPING"
+    GUARDRAIL_LEAK = "ERR_GUARDRAIL_LEAK"
+    GUARDRAIL_SIMILAR = "ERR_GUARDRAIL_SIMILAR"
+    GUARDRAIL_EMPTY = "ERR_GUARDRAIL_EMPTY"
+    LLM_TIMEOUT = "ERR_LLM_TIMEOUT"
+    OLLAMA_DOWN = "ERR_OLLAMA_DOWN"
+
+    def human(self) -> str:
+        _MAP = {
+            ErrorCode.NONE: "",
+            ErrorCode.GUARDRAIL_LOOPING: "Respuesta repetitiva",
+            ErrorCode.GUARDRAIL_LEAK: "Frase interna filtrada",
+            ErrorCode.GUARDRAIL_SIMILAR: "Respuesta muy parecida a la anterior",
+            ErrorCode.GUARDRAIL_EMPTY: "El modelo no generó respuesta",
+            ErrorCode.LLM_TIMEOUT: "El modelo tardó demasiado",
+            ErrorCode.OLLAMA_DOWN: "Ollama no está respondiendo",
+        }
+        return _MAP.get(self, str(self.value))
+
+
+class RecoveryPolicy:
+    """Degradation ladder for autonomous recovery when guardrails reject output.
+
+    The controller calls :meth:`record_failure` on every rejection and
+    :meth:`record_success` when a response passes.  Between calls the policy
+    tells the controller whether to degrade, auto-retry, or hard-pause.
+
+    Design invariants:
+    - Never infinite-loop: after 3 spaced auto-retries the policy enters
+      HARD_PAUSED and demands operator intervention.
+    - Before PAUSED, degrade response ambition (expandida → normal → corta)
+      so simpler prompts have a better chance of passing guardrails.
+    - Pending chat is preserved during pauses so Kira resumes with context.
+    """
+
+    # ── configuration ──────────────────────────────────────────────────
+    MAX_FAILURES_BEFORE_DEGRADE = 3       # failures before lowering ambition
+    DEGRADE_FALLBACKS = ("corta",)        # response_length fallback chain
+    MAX_FAILURES_BEFORE_PAUSE = 5         # failures before entering PAUSED
+    RETRY_DELAYS_SECONDS = (60, 120, 240) # escalating cooldowns per retry attempt
+    MAX_HISTORY = 20                      # how many failure reasons to keep
+
+    def __init__(self) -> None:
+        self._failures: int = 0
+        self._retry_attempt: int = 0
+        self._last_failure_time: float = 0.0
+        self._last_error: ErrorCode = ErrorCode.NONE
+        self._reasons: list[str] = []     # human-readable, max MAX_HISTORY
+
+    # ── public API ─────────────────────────────────────────────────────
+
+    def record_failure(self, error: ErrorCode, reason: str = "") -> None:
+        self._failures += 1
+        self._last_failure_time = _time_module.time()
+        self._last_error = error
+        if reason:
+            self._reasons.append(reason)
+            self._reasons = self._reasons[-self.MAX_HISTORY:]
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._retry_attempt = 0
+        self._last_error = ErrorCode.NONE
+
+    @property
+    def error_code(self) -> ErrorCode:
+        return self._last_error
+
+    @property
+    def last_failure_reason(self) -> str:
+        return self._reasons[-1] if self._reasons else ""
+
+    @property
+    def last_reasons(self) -> list[str]:
+        return list(self._reasons)
+
+    @property
+    def failure_count(self) -> int:
+        return self._failures
+
+    @property
+    def retry_attempt(self) -> int:
+        return self._retry_attempt
+
+    def should_degrade(self) -> bool:
+        """Return True when the response_length should be lowered one step."""
+        return self._failures > 0 and self._failures % self.MAX_FAILURES_BEFORE_DEGRADE == 0
+
+    def should_auto_retry(self) -> bool:
+        """Return True when the policy permits one more retry attempt."""
+        if self._retry_attempt >= len(self.RETRY_DELAYS_SECONDS):
+            return False
+        delay = self.RETRY_DELAYS_SECONDS[self._retry_attempt]
+        elapsed = _time_module.time() - self._last_failure_time
+        return elapsed >= delay
+
+    def is_hard_paused(self) -> bool:
+        """Return True when all retry attempts are exhausted."""
+        return self._retry_attempt >= len(self.RETRY_DELAYS_SECONDS) and self._failures >= self.MAX_FAILURES_BEFORE_PAUSE
+
+    def consume_retry(self) -> None:
+        """Mark a retry attempt as consumed (caller decided to auto-resume)."""
+        self._retry_attempt += 1
+        self._last_failure_time = 0.0  # reset timer for next cooldown
+
+    def should_pause(self) -> bool:
+        """Return True when failures exceed the PAUSED threshold."""
+        return self._failures >= self.MAX_FAILURES_BEFORE_PAUSE
+
+    @property
+    def next_retry_seconds(self) -> float:
+        """Estimated seconds until the next retry is allowed, or 0 if ready."""
+        if self._retry_attempt >= len(self.RETRY_DELAYS_SECONDS):
+            return -1.0  # exhausted
+        delay = self.RETRY_DELAYS_SECONDS[self._retry_attempt]
+        elapsed = _time_module.time() - self._last_failure_time
+        return max(0.0, delay - elapsed)
+
+    def degraded_length(self, current: str) -> str:
+        """Return the next response_length in the degradation chain, or current."""
+        if not self.should_degrade():
+            return current
+        known = ("expandida", "normal", "corta")
+        if current in known:
+            idx = known.index(current)
+            if idx + 1 < len(known):
+                return known[idx + 1]
+        return "corta"  # unknown or already at minimum → shortest
 
 
 class TopicStatus(str, Enum):
@@ -50,6 +185,8 @@ class AgendaTopic:
     id: str = field(default_factory=lambda: f"topic-{uuid4()}")
     status: TopicStatus = TopicStatus.DRAFTED
     turns_spoken: int = 0
+    confidence: str = "LOW"   # Suggester metadata: HIGH | MEDIUM | LOW
+    source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
 
 
 @dataclass(frozen=True)
@@ -169,7 +306,8 @@ class KiraAgendaController:
     ) -> None:
         self.state = AgendaState.OFF
         self.stop_requested = False
-        self.failure_count = 0
+        self.recovery = RecoveryPolicy()
+        self.failure_count = 0  # legacy — prefer self.recovery.failure_count
         self.max_failures = max_failures
         self.max_turns_per_topic = self.clamp_turn_limit(max_turns_per_topic)
         self.response_length = self.normalize_response_length(response_length)
@@ -183,6 +321,11 @@ class KiraAgendaController:
         self.topics: list[AgendaTopic] = []
         self.active_topic: Optional[AgendaTopic] = None
         self.last_outputs: list[str] = []
+        # Cooldown / suggestion tracking (used by TopicSuggester integration)
+        self._last_suggestion_time: float = 0.0
+        self._session_suggestion_count: int = 0
+        self._suggestion_cooldown_seconds: float = 120.0
+        self._suggestion_session_cap: int = 5
         self.profile: dict[str, str] = {
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
@@ -330,6 +473,55 @@ class KiraAgendaController:
         queued = [t for t in self.topics if t.status == TopicStatus.QUEUED]
         return sorted(queued, key=lambda topic: (self.PRIORITY_ORDER.get(topic.priority, 1), self.topics.index(topic)))
 
+    def can_suggest(self, now: float | None = None) -> bool:
+        """True if cooldown and session cap allow a new suggestion batch.
+
+        Cooldown: ≥120 s since last suggestion.
+        Session cap: <5 suggestion batches this session.
+        """
+        if now is None:
+            now = _time_module.time()
+        if self._session_suggestion_count >= self._suggestion_session_cap:
+            return False
+        if self._last_suggestion_time > 0 and (now - self._last_suggestion_time) < self._suggestion_cooldown_seconds:
+            return False
+        return True
+
+    def drafted_topics(self) -> list[AgendaTopic]:
+        """Return all topics whose status is DRAFTED, for UI rendering."""
+        return [t for t in self.topics if t.status == TopicStatus.DRAFTED]
+
+    def suggest_topics(self, suggestions: list[dict]) -> list[AgendaTopic]:
+        """Create DRAFTED AgendaTopic entries from raw suggestion dicts.
+
+        Sanitizes titles and angles via the existing sanitizer, enforces
+        cooldown tracking, and returns the created topics.
+        """
+        now = _time_module.time()
+        created: list[AgendaTopic] = []
+        for suggestion in suggestions:
+            try:
+                title = self.sanitize_topic_text(str(suggestion.get("title", "")), field="title")
+                angle = self.sanitize_topic_text(str(suggestion.get("angle", "")), field="angle", required=False)
+            except ValueError:
+                # Skip malformed suggestions silently — rule-based source can be noisy
+                continue
+            topic = AgendaTopic(
+                title=title,
+                angle=angle,
+                priority="normal",
+                response_length="normal",
+                status=TopicStatus.DRAFTED,
+                confidence=suggestion.get("confidence", "LOW"),
+                source=suggestion.get("source", ""),
+            )
+            self.topics.append(topic)
+            created.append(topic)
+        if created:
+            self._last_suggestion_time = now
+            self._session_suggestion_count += 1
+        return created
+
     def remove_queued_topic(self, topic_id: str) -> None:
         topic = self._topic(topic_id)
         if topic.status != TopicStatus.QUEUED:
@@ -372,10 +564,25 @@ class KiraAgendaController:
         self.stop_requested = False
         self.state = AgendaState.OFF
         self.active_topic = None
+        self.recovery.record_success()
         self.failure_count = 0
 
+    def can_auto_resume(self) -> bool:
+        """Return True when the recovery policy permits an automatic retry."""
+        if self.state != AgendaState.PAUSED_NEEDS_OPERATOR:
+            return False
+        if self.recovery.is_hard_paused():
+            self.state = AgendaState.HARD_PAUSED
+            return False
+        if not self.recovery.should_auto_retry():
+            return False
+        self.recovery.consume_retry()
+        self.state = AgendaState.IDLE
+        return True
+
     def resume(self) -> None:
-        if self.state == AgendaState.PAUSED_NEEDS_OPERATOR:
+        if self.state in {AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
+            self.recovery.record_success()
             self.failure_count = 0
             self.state = AgendaState.IDLE
 
@@ -392,10 +599,14 @@ class KiraAgendaController:
         compact_chat: str = "",
     ) -> AgendaAction:
         """Return the next agenda action without touching external systems."""
-        if self.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
+        if self.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             return AgendaAction.none()
         if motor_busy or kira_speaking or self.state in {AgendaState.GENERATING, AgendaState.SPEAKING}:
             return AgendaAction.none()
+        # Recovery: REGENERATING_SAFE means the last generation was rejected.
+        # Transition to WAITING_SIGNAL so the tick retries with a fresh prompt.
+        if self.state == AgendaState.REGENERATING_SAFE:
+            self.state = AgendaState.WAITING_SIGNAL
         if self.stop_requested:
             return self._closing_action()
 
@@ -496,37 +707,85 @@ class KiraAgendaController:
                 self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
                 self.stop_requested = False
                 return
-        if self.state == AgendaState.SPEAKING:
+        # Transition to WAITING_SIGNAL from any speaking-related state.
+        # GENERATING is included as a safety net: if mark_generation_accepted
+        # was never called (e.g. a fire-and-forget controller action), the
+        # state machine still recovers.
+        if self.state in {AgendaState.SPEAKING, AgendaState.GENERATING}:
             self.state = AgendaState.WAITING_SIGNAL
 
-    def register_failure(self) -> None:
-        self.failure_count += 1
-        if self.active_topic and self.failure_count >= 2:
+    def register_failure(self, error: ErrorCode = ErrorCode.NONE, reason: str = "") -> None:
+        self.recovery.record_failure(error, reason)
+        self.failure_count = self.recovery.failure_count  # keep legacy counter in sync
+        # Force-complete: if the topic is already closing and we've failed
+        # to generate a closing line 3+ times, just mark it done silently.
+        # Prevents the infinite kira-agenda-stop retry cascade seen under
+        # heavy chat + guardrail stress (20+ LLM calls in a row).
+        if self.active_topic and self.active_topic.status == TopicStatus.CLOSING and self.recovery.failure_count >= 3:
+            self.active_topic.status = TopicStatus.COMPLETED
+            self.active_topic = None
+            self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
+            self.stop_requested = False
+            self.recovery.record_success()  # reset counter for next topic
+            return
+        if self.active_topic and self.recovery.failure_count >= 2:
             self.active_topic.turns_spoken = self.max_turns_per_topic
             self.state = AgendaState.WAITING_SIGNAL
             return
-        self.state = AgendaState.PAUSED_NEEDS_OPERATOR if self.failure_count >= self.max_failures else AgendaState.REGENERATING_SAFE
+        # Degradation: lower response_length before pausing
+        if self.recovery.should_degrade():
+            self.response_length = self.recovery.degraded_length(self.response_length)
+        if self.recovery.should_pause():
+            self.state = AgendaState.PAUSED_NEEDS_OPERATOR
+        else:
+            self.state = AgendaState.REGENERATING_SAFE
+
+    def preview_accept_output(self, output: str) -> bool:
+        """Validate speculative prefetch output without mutating agenda state."""
+        return self._validate_output(output, mutate=False)
 
     def accept_output(self, output: str) -> bool:
         """Validate an LLM output before TTS."""
+        return self._validate_output(output, mutate=True)
+
+    def record_accepted_output(self, output: str) -> None:
+        """Record already accepted/spoken agenda output for future anti-loop checks."""
         clean = " ".join((output or "").strip().split())
         if not clean:
-            self.register_failure()
-            return False
-        if (
-            self.contains_internal_leak(clean)
-            or self.is_repetition(clean)
-            or self.has_looping_lines(output)
-            or self.repeats_recent_line(clean)
-            or self.is_too_similar_to_recent(clean)
-            or self.reuses_looping_opening(clean)
-            or self.claims_inner_life(clean)
-        ):
-            self.register_failure()
-            return False
-        self.failure_count = 0
+            return
         self.last_outputs.append(clean.lower())
         self.last_outputs = self.last_outputs[-5:]
+
+    def _validate_output(self, output: str, *, mutate: bool) -> bool:
+        clean = " ".join((output or "").strip().split())
+        if not clean:
+            if mutate:
+                self.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="El modelo devolvió vacío")
+            return False
+        error: ErrorCode = ErrorCode.NONE
+        reason: str = ""
+        if self.contains_internal_leak(clean):
+            error, reason = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')"
+        elif self.is_repetition(clean):
+            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior"
+        elif self.has_looping_lines(output):
+            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repetía líneas dentro de la misma respuesta"
+        elif self.repeats_recent_line(clean):
+            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Repitió una frase de respuestas recientes"
+        elif self.is_too_similar_to_recent(clean):
+            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3"
+        elif self.reuses_looping_opening(clean):
+            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'"
+        elif self.claims_inner_life(clean):
+            error, reason = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva"
+        if error != ErrorCode.NONE:
+            if mutate:
+                self.register_failure(error=error, reason=reason)
+            return False
+        if mutate:
+            self.recovery.record_success()
+            self.failure_count = 0
+            self.record_accepted_output(clean)
         return True
 
     def enforce_live_safety_cap(self, output: str) -> str:

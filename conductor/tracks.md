@@ -16,3 +16,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [~] **Track: Product UI Refactor — Kira-Centered Layout + Avatar/OBS Module**
   *Link: [./tracks/product_ui_kira_avatar_refactor_20260513/](./tracks/product_ui_kira_avatar_refactor_20260513/)*
+
+---
+
+- [ ] **Track: Hardening & Failure Testing for Kira Agenda, Interruptions, Chat Load, and Installer Readiness**
+  *Link: [./tracks/hardening_failure_testing_20260515/](./tracks/hardening_failure_testing_20260515/)*

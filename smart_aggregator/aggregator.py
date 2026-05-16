@@ -240,7 +240,13 @@ class Aggregator:
         if high != self._live_high_traffic:
             self._live_high_traffic = high
             state = "ON" if high else "OFF"
-            self._log_live_safety(f"[SmartAggregator] Live-safe high traffic {state}: compactando chat (rate={max(current_rate, self._raw_seen_rate()):.2f} msg/s, umbral={self._live_safety_threshold:.2f}).", force=True)
+            accepted_rate = self.activity.get_current_rate()
+            self._log_live_safety(
+                f"[SmartAggregator] Live-safe high traffic {state}: compactando chat "
+                f"(crudo={max(current_rate, self._raw_seen_rate()):.1f}, aceptado={accepted_rate:.1f}, "
+                f"umbral_act={self.activity.threshold_per_second:.1f} msg/s).",
+                force=True,
+            )
         if not high:
             return True
         self._live_sample_counter += 1

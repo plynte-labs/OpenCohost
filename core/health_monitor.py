@@ -226,11 +226,15 @@ class QwenProcessManager:
         logger.info(f"QwenProcessManager: starting Qwen server: {' '.join(cmd)}")
 
         try:
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                creationflags=creationflags,
             )
             self._is_manual = False
         except Exception as e:
@@ -271,16 +275,23 @@ class QwenProcessManager:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
                 proc.terminate()
-
-            # Wait up to 10s, then SIGKILL
+        except Exception as e:
+            logger.warning(f"QwenProcessManager: graceful stop failed, killing server: {e}")
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
-            logger.info("QwenProcessManager: server stopped")
-        except Exception as e:
-            logger.warning(f"QwenProcessManager: error stopping: {e}")
+                logger.info("QwenProcessManager: server killed after graceful stop failure")
+            except Exception as kill_error:
+                logger.warning(f"QwenProcessManager: forced kill failed: {kill_error}")
+            return
+
+        # Wait up to 10s, then force-kill.
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        logger.info("QwenProcessManager: server stopped")
 
     def attach_existing(self) -> bool:
         """Check if a server is already running on port 5000 and attach to it."""
