@@ -595,6 +595,39 @@ def test_recovery_policy_auto_retry():
     assert controller.recovery.retry_attempt == 1
 
 
+def test_regenerating_safe_transitions_to_waiting_signal():
+    """REGENERATING_SAFE → WAITING_SIGNAL so the next tick retries."""
+    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=1)
+    topic = controller.add_topic("Tema", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    # Start a normal turn
+    controller.next_action(motor_busy=False, kira_speaking=False)
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+    assert controller.state == AgendaState.WAITING_SIGNAL
+
+    # Next tick generates turn 2
+    action = controller.next_action(motor_busy=False, kira_speaking=False)
+    assert action.kind == "enqueue"
+    assert action.source.startswith("kira-agenda")
+
+    # Simulate guardrail rejection — accept_output calls register_failure
+    controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR, reason="muy parecida")
+    assert controller.state == AgendaState.REGENERATING_SAFE, (
+        f"Expected REGENERATING_SAFE after 1 guardrail rejection, got {controller.state}"
+    )
+
+    # The tick fires — must recover and generate a new action
+    action = controller.next_action(motor_busy=False, kira_speaking=False)
+    assert action.kind == "enqueue", (
+        f"REGENERATING_SAFE must transition to WAITING_SIGNAL and retry, "
+        f"got {action.kind} in state {controller.state}"
+    )
+    assert action.source.startswith("kira-agenda")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # TopicSuggester integration — cooldown / suggestion methods
 # ──────────────────────────────────────────────────────────────────────────────

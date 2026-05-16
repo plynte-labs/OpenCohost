@@ -603,6 +603,10 @@ class KiraAgendaController:
             return AgendaAction.none()
         if motor_busy or kira_speaking or self.state in {AgendaState.GENERATING, AgendaState.SPEAKING}:
             return AgendaAction.none()
+        # Recovery: REGENERATING_SAFE means the last generation was rejected.
+        # Transition to WAITING_SIGNAL so the tick retries with a fresh prompt.
+        if self.state == AgendaState.REGENERATING_SAFE:
+            self.state = AgendaState.WAITING_SIGNAL
         if self.stop_requested:
             return self._closing_action()
 
