@@ -1618,7 +1618,13 @@ class VocalAIApp(ctk.CTk):
 
     def _on_smart_aggregated_context(self, data: dict) -> None:
         """Route compact chat either to Agenda Mode or the existing RF3 reaction."""
-        if getattr(self, "kira_agenda", None) and self.kira_agenda.state != AgendaState.OFF:
+        # When the controller is PAUSED_NEEDS_OPERATOR, chat must fall
+        # through to the standalone RF3 reaction path — otherwise chat
+        # responses are silently dropped while the operator sees a frozen UI.
+        if (
+            getattr(self, "kira_agenda", None)
+            and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}
+        ):
             intent_summary = data.get("intent_summary") or {}
             compact_chat = intent_summary.get("prompt") or ""
             if not compact_chat:
