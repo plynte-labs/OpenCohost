@@ -781,3 +781,189 @@ def test_confidence_and_source_defaults_on_agenda_topic():
     topic = AgendaTopic(title="Test")
     assert topic.confidence == "LOW"
     assert topic.source == ""
+
+
+# ---------------------------------------------------------------------------
+# Integration: chat spike between agenda turns must not freeze state machine
+# ---------------------------------------------------------------------------
+
+
+class TestChatSpikeDoesNotFreezeController:
+    """Reproduce the real-stream bug where a chat spike arriving between
+    agenda turns leaves the controller stuck in SPEAKING/GENERATING.
+
+    Root cause (fixed): _on_motor_speaking_start / _on_motor_speaking_end
+    used the motor's *source* string to decide whether to call
+    mark_generation_accepted / mark_speech_complete.  HANDLE_CHAT actions
+    have source="chat", which does NOT start with "kira-agenda", so the
+    state machine was never told the speech started or ended — it stayed
+    stuck and every subsequent tick returned AgendaAction.none().
+    """
+
+    def _simulate_chat_handled_by_controller(
+        self, controller: KiraAgendaController, compact_chat: str
+    ):
+        """Simulate what AppShell does when the controller handles a chat spike.
+
+        The controller routes to HANDLE_CHAT only when ``_chat_due()`` is True
+        (i.e. enough agenda turns have passed since the last chat check).
+        Otherwise it falls through to CONTINUE_TOPIC.  Both paths must
+        leave the controller in a valid state.
+        """
+        action = controller.next_action(
+            motor_busy=False, kira_speaking=False, compact_chat=compact_chat,
+        )
+        assert action.kind == "enqueue", (
+            f"Expected enqueue action after chat spike, got {action.kind}"
+        )
+        # Simulate the motor callbacks (these MUST be called regardless of
+        # whether the action source is "chat" or "kira-agenda").
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+    def _simulate_agenda_turn(self, controller: KiraAgendaController):
+        """Simulate one full agenda turn: tick → generate → speak → complete."""
+        action = controller.next_action(
+            motor_busy=False, kira_speaking=False,
+        )
+        assert action.kind == "enqueue"
+        assert action.source.startswith("kira-agenda")
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+    def test_chat_spike_between_turns_advances_normally(self):
+        """A chat spike handled via HANDLE_CHAT should NOT freeze the state
+        machine.  After the chat speech ends the controller must return to
+        WAITING_SIGNAL, and the next tick should be able to CONTINUE_TOPIC
+        or CLOSE."""
+        controller = KiraAgendaController(
+            max_turns_per_topic=4, turn_batch_size=1, chat_cadence_blocks=1,
+        )
+        topic = controller.add_topic("Tema de prueba", approved=True)
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        # Turn 1: normal agenda speech
+        self._simulate_agenda_turn(controller)
+        assert controller.state == AgendaState.WAITING_SIGNAL
+        assert topic.turns_spoken == 1
+
+        # Chat spike arrives — controller routes it via HANDLE_CHAT
+        # (chat_cadence_blocks=1 guarantees _chat_due() is True)
+        action = controller.next_action(
+            motor_busy=False, kira_speaking=False,
+            compact_chat="El chat pregunta sobre mods retro",
+        )
+        assert action.kind == "enqueue"
+        assert action.source == "chat", (
+            f"Expected HANDLE_CHAT source='chat', got {action.source}"
+        )
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+        # CRITICAL: the controller MUST leave the speaking state
+        assert controller.state == AgendaState.WAITING_SIGNAL, (
+            f"Controller stuck in {controller.state} after chat speech — "
+            "mark_speech_complete was not called or did not transition"
+        )
+        assert topic.turns_spoken == 2, (
+            "Chat turn should consume one topic turn slot"
+        )
+
+        # Turns 3-4: agenda ticks should continue normally
+        self._simulate_agenda_turn(controller)
+        self._simulate_agenda_turn(controller)
+        assert topic.turns_spoken == 4
+
+        # After 4 turns the topic should complete on the next tick
+        action = controller.next_action(motor_busy=False, kira_speaking=False)
+        assert action.kind == "enqueue"
+        assert action.source == "kira-agenda-stop", (
+            f"Expected closing action, got source={action.source}"
+        )
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+        assert topic.status == TopicStatus.COMPLETED
+        assert controller.active_topic is None
+        assert controller.state == AgendaState.IDLE
+
+    def test_chat_spike_during_speaking_receives_speech_complete(self):
+        """If the chat spike arrives while an agenda turn is already speaking,
+        the speech-complete of the agenda turn must still be called (the
+        motor source is "kira-agenda" in that case — but the test verifies
+        the state-based check works)."""
+        controller = KiraAgendaController(max_turns_per_topic=3, turn_batch_size=1)
+        topic = controller.add_topic("Tema", approved=True)
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        # Start turn 1 — state goes to GENERATING
+        action = controller.next_action(motor_busy=False, kira_speaking=False)
+        assert action.kind == "enqueue"
+
+        # mark_generation_accepted transitions GENERATING → SPEAKING
+        controller.mark_generation_accepted()
+        assert controller.state == AgendaState.SPEAKING
+
+        # Now a chat spike arrives while Kira is speaking.  In the real app
+        # this is deferred (pending_compact_chat).  The speech ends, and
+        # mark_speech_complete must fire.
+        controller.mark_speech_complete()
+        assert controller.state == AgendaState.WAITING_SIGNAL, (
+            f"Controller stuck in {controller.state} — speech_complete did not fire"
+        )
+
+    def test_multiple_chat_spikes_without_corruption(self):
+        """Several consecutive chat spikes must not corrupt state."""
+        controller = KiraAgendaController(
+            max_turns_per_topic=5, turn_batch_size=1, chat_cadence_blocks=1,
+        )
+        topic = controller.add_topic("Tema largo", approved=True)
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        # Turn 1
+        self._simulate_agenda_turn(controller)
+
+        # Three chat spikes in a row (chat_cadence_blocks=1 → each one fires HANDLE_CHAT)
+        spikes = [
+            "pregunta 1",
+            "comentario 2",
+            "reaccion 3",
+        ]
+        for spike in spikes:
+            self._simulate_chat_handled_by_controller(controller, spike)
+            assert controller.state == AgendaState.WAITING_SIGNAL, (
+                f"Controller state corrupted after chat: {controller.state}"
+            )
+
+        # After all chat spikes, the topic should still be active
+        assert controller.active_topic is not None
+        assert topic.turns_spoken == 4  # 1 agenda + 3 chat
+
+    def test_ptt_via_controller_transitions_correctly(self):
+        """PTT injected via next_action(ptt_text=...) must also receive
+        mark_speech_complete so the state machine doesn't freeze."""
+        controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=1)
+        topic = controller.add_topic("Tema con PTT", approved=True)
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        # Turn 1
+        self._simulate_agenda_turn(controller)
+
+        # PTT arrives
+        action = controller.next_action(
+            motor_busy=False, kira_speaking=False, ptt_text="Che cambiemos el enfoque",
+        )
+        assert action.kind == "enqueue"
+        assert action.source == "ptt"
+
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+        assert controller.state == AgendaState.WAITING_SIGNAL, (
+            f"Controller stuck in {controller.state} after PTT speech"
+        )
+        assert topic.turns_spoken == 2

@@ -1811,7 +1811,15 @@ class VocalAIApp(ctk.CTk):
             # Auto-start music bed on first Kira response if nothing is playing yet
             if self.audio_bed.current_track is None and self.audio_bed.enabled:
                 self.audio_bed.request_mood("normal", force=True, boundary=True)
-        if hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source():
+        # Use controller state, not motor source, to decide if this speech
+        # was initiated by the agenda state machine.  The controller may
+        # emit chat/PTT/stop actions whose motor source does not start
+        # with "kira-agenda"; the state check is the authoritative signal.
+        controller_generated = (
+            hasattr(self, "kira_agenda")
+            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
+        )
+        if controller_generated:
             self.kira_agenda.mark_generation_accepted()
             self._kira_agenda_update_status()
             self._kira_agenda_prefetch_while_speaking()
@@ -1825,7 +1833,11 @@ class VocalAIApp(ctk.CTk):
 
     def _on_motor_speaking_end(self) -> None:
         prefetched_started = False
-        agenda_speech = hasattr(self, "kira_agenda") and self._is_kira_agenda_speech_source()
+        # Use controller state, not motor source (see _on_motor_speaking_start).
+        agenda_speech = (
+            hasattr(self, "kira_agenda")
+            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
+        )
         if agenda_speech:
             self.kira_agenda.mark_speech_complete()
             self._kira_agenda_update_status()

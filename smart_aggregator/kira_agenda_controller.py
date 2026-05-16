@@ -553,7 +553,11 @@ class KiraAgendaController:
                 self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
                 self.stop_requested = False
                 return
-        if self.state == AgendaState.SPEAKING:
+        # Transition to WAITING_SIGNAL from any speaking-related state.
+        # GENERATING is included as a safety net: if mark_generation_accepted
+        # was never called (e.g. a fire-and-forget controller action), the
+        # state machine still recovers.
+        if self.state in {AgendaState.SPEAKING, AgendaState.GENERATING}:
             self.state = AgendaState.WAITING_SIGNAL
 
     def register_failure(self) -> None:
