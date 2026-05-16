@@ -872,23 +872,9 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_tick(self) -> None:
         if not hasattr(self, "kira_agenda"):
             return
-        compact_chat = ""
-        if (
-            self.kira_agenda.state == AgendaState.WAITING_SIGNAL
-            and self.kira_agenda._chat_due()
-            and self.smart_agg is not None
-        ):
-            try:
-                intent_summary = self.smart_agg.intent_aggregator.summarize()
-                prompt = intent_summary.get("prompt", "")
-                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
-                    compact_chat = prompt
-            except Exception:
-                pass
         action = self.kira_agenda.next_action(
             motor_busy=getattr(self.motor_ia, "is_processing", False),
             kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-            compact_chat=compact_chat,
         )
         self._enqueue_kira_agenda_action(action)
         self._kira_agenda_update_status()
