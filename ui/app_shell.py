@@ -114,12 +114,12 @@ class _ButtonStub:
 
 
 # ── Global crash handler: log unhandled exceptions before the process dies ──
-_CRASH_LOG = Path(os.environ.get("VOICEAI_CRASH_LOG", "logs/crash.log"))
+_CRASH_LOG = os.environ.get("VOICEAI_CRASH_LOG", os.path.join("logs", "crash.log"))
 
 
 def _install_crash_handler() -> None:
     """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
-    _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
 
     def _handler(exc_type, exc_value, exc_tb):
         tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
