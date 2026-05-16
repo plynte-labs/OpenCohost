@@ -717,6 +717,17 @@ class KiraAgendaController:
     def register_failure(self, error: ErrorCode = ErrorCode.NONE, reason: str = "") -> None:
         self.recovery.record_failure(error, reason)
         self.failure_count = self.recovery.failure_count  # keep legacy counter in sync
+        # Force-complete: if the topic is already closing and we've failed
+        # to generate a closing line 3+ times, just mark it done silently.
+        # Prevents the infinite kira-agenda-stop retry cascade seen under
+        # heavy chat + guardrail stress (20+ LLM calls in a row).
+        if self.active_topic and self.active_topic.status == TopicStatus.CLOSING and self.recovery.failure_count >= 3:
+            self.active_topic.status = TopicStatus.COMPLETED
+            self.active_topic = None
+            self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
+            self.stop_requested = False
+            self.recovery.record_success()  # reset counter for next topic
+            return
         if self.active_topic and self.recovery.failure_count >= 2:
             self.active_topic.turns_spoken = self.max_turns_per_topic
             self.state = AgendaState.WAITING_SIGNAL
