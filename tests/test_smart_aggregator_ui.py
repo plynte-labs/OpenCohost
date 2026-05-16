@@ -1289,3 +1289,100 @@ class TestConnectionLifecycle:
         ui.toggle_connection()
         assert ui._manual_disconnect is True
         assert ui_state.smart_agg_connected is False
+
+
+# ---------------------------------------------------------------------------
+# Joyita content safety and OBS formatting
+# ---------------------------------------------------------------------------
+
+
+class TestJoyitaContentSafety:
+    """Content safety gates for _is_joyita_unsafe."""
+
+    def test_rejects_url_https(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "mira https://youtu.be/abc123", "mira https://youtu.be/abc123"
+        )
+
+    def test_rejects_url_www(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "visita www.twitch.tv/canal", "visita www.twitch.tv/canal"
+        )
+
+    def test_rejects_url_tld(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "chequea discord.gg/invite", "chequea discord.gg/invite"
+        )
+
+    def test_rejects_at_mention(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "sigan a @streamer1 !", "sigan a @streamer1 !"
+        )
+
+    def test_allows_at_without_username(self):
+        """Plain @ symbol (no following word) is not a mention."""
+        assert not SmartAggregatorUI._is_joyita_unsafe(
+            "que @#$%! paso aca", "que @#$%! paso aca"
+        )
+
+    def test_rejects_payment_keywords(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "pagame por PayPal", "pagame por paypal"
+        )
+
+    def test_rejects_advertising(self):
+        assert SmartAggregatorUI._is_joyita_unsafe(
+            "suscríbete a mi canal!", "suscríbete a mi canal!"
+        )
+
+    def test_allows_normal_message(self):
+        assert not SmartAggregatorUI._is_joyita_unsafe(
+            "¿cuándo jugamos minecraft?", "¿cuándo jugamos minecraft?"
+        )
+
+    def test_allows_emoji_question(self):
+        assert not SmartAggregatorUI._is_joyita_unsafe(
+            "jajaja qué buena esa 😂", "jajaja qué buena esa 😂"
+        )
+
+
+class TestJoyitaOBSFormatting:
+    """Word-wrap and score-threshold formatting for OBS display."""
+
+    def test_short_message_not_wrapped(self):
+        result = SmartAggregatorUI._format_joyita_for_obs(
+            "user: jaja qué crack"
+        )
+        assert "\n" not in result
+
+    def test_long_message_wrapped(self):
+        long_msg = "user: este es un mensaje bastante largo que debería dividirse en varias líneas para que se vea bien en OBS"
+        result = SmartAggregatorUI._format_joyita_for_obs(long_msg)
+        assert "\n" in result
+        lines = result.split("\n")
+        assert len(lines) >= 2
+
+    def test_capped_at_three_lines(self):
+        very_long = "user: " + "palabras " * 20
+        result = SmartAggregatorUI._format_joyita_for_obs(very_long)
+        lines = result.split("\n")
+        assert len(lines) <= 3
+        assert "…" in lines[-1], f"Last line should have ellipsis: {lines[-1]}"
+
+    def test_score_question_is_high(self):
+        score = SmartAggregatorUI._joyita_score_raw(
+            "user: ¿cuándo sale el próximo video?"
+        )
+        assert score >= 100
+
+    def test_score_url_is_rejected(self):
+        score = SmartAggregatorUI._joyita_score_raw(
+            "user: mira www.streamer.com"
+        )
+        assert score == -1
+
+    def test_score_advertising_is_rejected(self):
+        score = SmartAggregatorUI._joyita_score_raw(
+            "user: suscríbete a mi canal porfa"
+        )
+        assert score == -1

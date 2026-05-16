@@ -444,8 +444,10 @@ class SmartAggregatorUI:
             has_question = "?" in highlight or "¿" in highlight
             has_emoji = any(ord(c) > 0x1F000 for c in highlight)
             has_humor = any(m in lowered for m in ("jaja", "jeje", "lol", "xd", "😂", "🤣"))
-            if has_question or has_emoji or has_humor:
-                self._on_joyita(highlight)
+            score = self._joyita_score_raw(highlight)
+            if (has_question or has_emoji or has_humor) and score >= 100:
+                formatted = self._format_joyita_for_obs(highlight)
+                self._on_joyita(formatted)
         lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
         chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
         last_lines = self._recent_kira_lines(3)
@@ -539,8 +541,13 @@ class SmartAggregatorUI:
             if length < 10 or length > 180:
                 return -1  # disqualify too short or too long
 
-            score = 0
             lowered = text.lower()
+
+            # ---- Content safety gates: reject immediately ----
+            if SmartAggregatorUI._is_joyita_unsafe(text, lowered):
+                return -1
+
+            score = 0
 
             # Questions get highest priority
             if "?" in text or "¿" in text:
@@ -572,6 +579,125 @@ class SmartAggregatorUI:
 
         best = max(candidates, key=_joyita_score)
         return f"{best.get('user', '')}: {best.get('text', '')}"
+
+    @staticmethod
+    def _is_joyita_unsafe(text: str, lowered: str) -> bool:
+        """Reject messages containing links, @mentions, or advertising.
+
+        These signals indicate the message is promotional, a call-to-action,
+        or otherwise inappropriate for on-stream highlighting.
+        """
+        # URLs / links — any protocol, bare domain, or tld
+        url_patterns = (
+            "http://", "https://", "www.", ".com", ".net", ".org",
+            ".gg/", ".tv/", ".live/", "youtu.be/", "twitch.tv/",
+            "discord.gg/", "tiktok.com/",
+        )
+        if any(p in lowered for p in url_patterns):
+            return True
+
+        # @mentions — directing viewers to another account
+        if "@" in text:
+            words = lowered.split()
+            for w in words:
+                # Only treat as mention if @ is followed by a letter/number
+                if w.startswith("@") and len(w) > 1 and w[1].isalnum():
+                    return True
+
+        # Payment / advertising / hidden promotion
+        ad_patterns = (
+            "paga", "pagá", "pagame", "donación", "donacion", "dona",
+            "subscribe", "suscribete", "suscríbete", "follow",
+            "sígueme", "sigueme", "regalame", "regálame",
+            "compra", "comprá", "vendo", "vendes", "barato",
+            "promo", "sorteo", "giveaway", "sponsor",
+            "bit.ly", "linktr.ee", "onlyfans",
+        )
+        if any(p in lowered for p in ad_patterns):
+            return True
+
+        return False
+
+    @staticmethod
+    def _joyita_score_raw(highlight: str) -> int:
+        """Re-compute the joyita score from a formatted highlight string.
+
+        Used by the OBS gateway to enforce the score ≥100 threshold without
+        re-parsing the raw context dicts.
+        """
+        # highlight format: "user: text"
+        if ":" in highlight:
+            text = highlight.split(":", 1)[1].strip()
+        else:
+            text = highlight
+
+        length = len(text)
+        if length < 10 or length > 180:
+            return -1
+
+        lowered = text.lower()
+        if SmartAggregatorUI._is_joyita_unsafe(text, lowered):
+            return -1
+
+        score = 0
+        if "?" in text or "¿" in text:
+            score += 100
+        emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
+        score += min(emoji_count * 10, 30)
+        for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "jajaja"):
+            if marker in lowered:
+                score += 15
+                break
+        has_digits = any(c.isdigit() for c in text)
+        has_alpha = any(c.isalpha() for c in text)
+        if has_digits and has_alpha:
+            score += 8
+        for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
+            if marker in lowered:
+                score += 5
+        if 30 <= length <= 120:
+            score += 3
+        return score
+
+    @staticmethod
+    def _format_joyita_for_obs(highlight: str) -> str:
+        """Format a joyita for OBS display: word-wrap into 2–3 lines.
+
+        Without wrapping, OBS renders long text in a single line, forcing
+        the streamer to use huge font sizes that blow up the scene layout.
+        """
+        # Already clean: strip control chars, null bytes
+        text = highlight.replace("\x00", "").strip()
+        if not text:
+            return ""
+
+        MAX_CHARS_PER_LINE = 38
+        MIN_CHARS_TO_WRAP = 42
+
+        if len(text) <= MIN_CHARS_TO_WRAP:
+            return text
+
+        # Try to split on word boundaries
+        words = text.split()
+        lines = []
+        current = ""
+        for word in words:
+            if current and len(current) + 1 + len(word) > MAX_CHARS_PER_LINE:
+                lines.append(current)
+                current = word
+            else:
+                current = f"{current} {word}".strip()
+        if current:
+            lines.append(current)
+
+        # Cap at 3 lines — drop excess words
+        if len(lines) > 3:
+            lines = lines[:3]
+            # Add "…" to last line to indicate truncation
+            if not lines[-1].endswith("…"):
+                lines[-1] = lines[-1].rstrip()[:-3].rstrip() + "…"
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Internal helpers
