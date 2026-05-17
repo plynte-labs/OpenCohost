@@ -886,6 +886,9 @@ class VocalAIApp(ctk.CTk):
             return
         self.kira_agenda.enable()
         self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
+        # Start music bed when co-host mode activates — it's an intentional segment
+        if hasattr(self, "audio_bed") and self.audio_bed.current_track is None and self.audio_bed.enabled:
+            self.audio_bed.request_mood("normal", force=True, boundary=True)
         self._kira_agenda_update_status()
         self._kira_agenda_tick()
 
@@ -1926,9 +1929,6 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_speaking_start(self) -> None:
         if hasattr(self, "audio_bed"):
             self.audio_bed.duck()
-            # Auto-start music bed on first Kira response if nothing is playing yet
-            if self.audio_bed.current_track is None and self.audio_bed.enabled and not self.audio_bed._idle_stopped:
-                self.audio_bed.request_mood("normal", force=True, boundary=True)
         # Use controller state, not motor source, to decide if this speech
         # was initiated by the agenda state machine.  The controller may
         # emit chat/PTT/stop actions whose motor source does not start
