@@ -49,11 +49,13 @@ class AudioBedEngine:
         self._idle_loop_count: int = 0
         self._last_looping_track_id: str | None = None
         self._idle_check_timer: threading.Timer | None = None
+        self._idle_stopped: bool = False
 
     def request_mood(self, mood: str, *, force: bool = False, boundary: bool = False) -> bool:
         """Request a mood; current songs keep inertia unless forced or safe."""
         with self._lock:
             self._mark_interaction()
+            self._idle_stopped = False  # user action clears idle-stop block
             self.desired_mood = normalize_mood(mood)
             if not self.enabled:
                 return False
@@ -131,7 +133,7 @@ class AudioBedEngine:
             if not self._channel.get_busy():
                 return  # nothing playing
 
-            elapsed = time.time() - self.started_at
+            elapsed = time.time() - self._last_interaction
             max_allowed = self.policy.max_play_seconds * self.policy.idle_loop_limit
 
             if elapsed < max_allowed:
@@ -139,8 +141,9 @@ class AudioBedEngine:
                 self._start_idle_check()
                 return
 
-            # Exceeded idle loop limit — fade out and remember to skip this track
+            # Exceeded idle loop limit — fade out, remember track, block auto-restart
             self._last_looping_track_id = self.current_track.id
+            self._idle_stopped = True
             self.on_log(
                 f"[Música] Límite de loop inactivo alcanzado ({self.policy.idle_loop_limit}x). "
                 f"Deteniendo {self.current_track.label}."

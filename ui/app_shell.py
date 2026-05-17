@@ -1927,7 +1927,7 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self, "audio_bed"):
             self.audio_bed.duck()
             # Auto-start music bed on first Kira response if nothing is playing yet
-            if self.audio_bed.current_track is None and self.audio_bed.enabled:
+            if self.audio_bed.current_track is None and self.audio_bed.enabled and not self.audio_bed._idle_stopped:
                 self.audio_bed.request_mood("normal", force=True, boundary=True)
         # Use controller state, not motor source, to decide if this speech
         # was initiated by the agenda state machine.  The controller may
