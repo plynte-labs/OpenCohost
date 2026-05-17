@@ -64,3 +64,4 @@ debug_*.py
 assets/music/
 config/music_library.json
 Documents/
+WhatIs.md
