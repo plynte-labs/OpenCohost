@@ -18,6 +18,8 @@ class AudioBedPolicy:
     fade_ms: int = 6000
     base_volume: float = 0.28
     ducked_volume: float = 0.08
+    idle_loop_limit: int = 2        # max loops with no Kira interaction before stopping
+    idle_check_interval: float = 30.0  # seconds between idle checks
 
 
 class AudioBedEngine:
@@ -42,10 +44,16 @@ class AudioBedEngine:
         self._channel = None
         self._sound = None
         self._lock = threading.RLock()
+        # Idle loop tracking
+        self._last_interaction: float = time.time()
+        self._idle_loop_count: int = 0
+        self._last_looping_track_id: str | None = None
+        self._idle_check_timer: threading.Timer | None = None
 
     def request_mood(self, mood: str, *, force: bool = False, boundary: bool = False) -> bool:
         """Request a mood; current songs keep inertia unless forced or safe."""
         with self._lock:
+            self._mark_interaction()
             self.desired_mood = normalize_mood(mood)
             if not self.enabled:
                 return False
@@ -56,6 +64,7 @@ class AudioBedEngine:
 
     def on_boundary(self) -> bool:
         with self._lock:
+            self._mark_interaction()
             if self.transition_pending or self._can_transition_now():
                 self.transition_pending = False
                 return self._play_selected(self.desired_mood)
@@ -63,6 +72,7 @@ class AudioBedEngine:
 
     def duck(self) -> None:
         with self._lock:
+            self._mark_interaction()
             channel = self._channel
             if channel:
                 channel.set_volume(self.policy.ducked_volume)
@@ -83,6 +93,59 @@ class AudioBedEngine:
                     channel.fadeout(self.policy.fade_ms)
             self.current_track = None
             self.transition_pending = False
+            self._cancel_idle_check()
+
+    def shutdown(self) -> None:
+        """Cancel timers and stop. Call before destroying the engine."""
+        self.stop(emergency=True)
+        self._cancel_idle_check()
+
+    # ── idle / anti-infinite-loop ────────────────────────────────────────
+
+    def _mark_interaction(self) -> None:
+        """Reset the idle loop counter — Kira or the streamer did something."""
+        self._last_interaction = time.time()
+        self._idle_loop_count = 0
+        self._start_idle_check()
+
+    def _start_idle_check(self) -> None:
+        """Schedule next idle loop check in a background timer."""
+        self._cancel_idle_check()
+        self._idle_check_timer = threading.Timer(
+            self.policy.idle_check_interval, self._check_idle,
+        )
+        self._idle_check_timer.daemon = True
+        self._idle_check_timer.start()
+
+    def _cancel_idle_check(self) -> None:
+        if self._idle_check_timer is not None:
+            self._idle_check_timer.cancel()
+            self._idle_check_timer = None
+
+    def _check_idle(self) -> None:
+        """Background timer: if music has looped too long without interaction, stop."""
+        with self._lock:
+            self._idle_check_timer = None
+            if not self.current_track or not self._channel:
+                return
+            if not self._channel.get_busy():
+                return  # nothing playing
+
+            elapsed = time.time() - self.started_at
+            max_allowed = self.policy.max_play_seconds * self.policy.idle_loop_limit
+
+            if elapsed < max_allowed:
+                # Still within limit — reschedule
+                self._start_idle_check()
+                return
+
+            # Exceeded idle loop limit — fade out and remember to skip this track
+            self._last_looping_track_id = self.current_track.id
+            self.on_log(
+                f"[Música] Límite de loop inactivo alcanzado ({self.policy.idle_loop_limit}x). "
+                f"Deteniendo {self.current_track.label}."
+            )
+            self.stop(emergency=False)
 
     def _can_transition_now(self) -> bool:
         if not self.current_track:
@@ -109,6 +172,12 @@ class AudioBedEngine:
                 filtered = [t for t in candidates if t.id != avoid_id]
                 if filtered:
                     candidates = filtered
+            # Skip the track that was looping before silence (if any)
+            if self._last_looping_track_id and len(candidates) > 1:
+                filtered = [t for t in candidates if t.id != self._last_looping_track_id]
+                if filtered:
+                    candidates = filtered
+                self._last_looping_track_id = None  # consumed
 
             if not candidates:
                 self.on_log("[Música] No hay tracks válidos; se mantiene silencio.")
