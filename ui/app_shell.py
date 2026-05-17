@@ -962,10 +962,22 @@ class VocalAIApp(ctk.CTk):
         # Moved AFTER next_action() so _select_next_topic() has a chance
         # to pick the next queued topic before we declare the session done.
 
-        action = self.kira_agenda.next_action(
-            motor_busy=getattr(self.motor_ia, "is_processing", False),
-            kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-        )
+        try:
+            action = self.kira_agenda.next_action(
+                motor_busy=getattr(self.motor_ia, "is_processing", False),
+                kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+            )
+        except Exception:
+            # Safety net: if next_action ever throws (shouldn't — it's
+            # deterministic and runs on internal state only), log, skip
+            # this tick, and reschedule so Kira doesn't go permanently
+            # silent on a live stream.
+            logger.exception("KiraAgendaController.next_action() raised")
+            self._on_stream_admin_log(
+                "[Kira Agenda] Error interno en next_action; reintentando en el siguiente tick."
+            )
+            action = AgendaAction.none()
+
         self._enqueue_kira_agenda_action(action)
 
         if (
