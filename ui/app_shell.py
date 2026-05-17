@@ -959,8 +959,18 @@ class VocalAIApp(ctk.CTk):
         # co-host has exhausted all planned work.  Transition to OFF so
         # the tick stops, the UI reflects reality, and chat flows through
         # the standalone RF3 path without overhead.
+        # Moved AFTER next_action() so _select_next_topic() has a chance
+        # to pick the next queued topic before we declare the session done.
+
+        action = self.kira_agenda.next_action(
+            motor_busy=getattr(self.motor_ia, "is_processing", False),
+            kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+        )
+        self._enqueue_kira_agenda_action(action)
+
         if (
-            self.kira_agenda.state == AgendaState.IDLE
+            action.kind == "none"
+            and self.kira_agenda.state == AgendaState.IDLE
             and self.kira_agenda.active_topic is None
             and not self.kira_agenda.queued_topics()
         ):
@@ -969,12 +979,6 @@ class VocalAIApp(ctk.CTk):
             self._kira_agenda_update_status()
             self._clear_obs_joyita("KiraJoyita")
             return
-
-        action = self.kira_agenda.next_action(
-            motor_busy=getattr(self.motor_ia, "is_processing", False),
-            kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-        )
-        self._enqueue_kira_agenda_action(action)
 
         # Auto-suggestion trigger: on 3rd consecutive IDLE+empty-queue tick (~13.5s)
         if self.kira_agenda.state == AgendaState.IDLE and not self.kira_agenda.queued_topics():

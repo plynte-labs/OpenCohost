@@ -216,6 +216,7 @@ class AudioBedEngine:
             self.current_track = track
             self.current_mood = track.mood
             self.started_at = time.time()
+            self._start_idle_check()  # schedule idle loop detection for new track
             if track.mood != mood_key:
                 self.on_log(f"[Música] No hay tracks para {mood}; usando {track.label} como fallback.")
             else:
