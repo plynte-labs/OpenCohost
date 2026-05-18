@@ -230,6 +230,7 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
         self.motor_ia.agenda_output_recorder = self.kira_agenda.record_accepted_output
         self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
+        self.motor_ia.agenda_controller = self.kira_agenda            # Phase 0: metrics access
 
         # Health Monitor — system health daemon (graceful if init fails)
         self.health_monitor: HealthMonitor | None = None
@@ -2213,7 +2214,7 @@ class VocalAIApp(ctk.CTk):
         # with "kira-agenda"; the state check is the authoritative signal.
         controller_generated = (
             hasattr(self, "kira_agenda")
-            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
+            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING, AgendaState.TOPIC_CLOSING}
         )
         if controller_generated:
             self.kira_agenda.mark_generation_accepted()

@@ -321,6 +321,10 @@ class KiraAgendaController:
         self.topics: list[AgendaTopic] = []
         self.active_topic: Optional[AgendaTopic] = None
         self.last_outputs: list[str] = []
+        # ── Metrics / audit (Phase 0: zero behaviour change) ────────
+        self.rejection_log: list[dict[str, object]] = []
+        self._last_similarity_overlap: float = 0.0
+        self._last_matched_phrase: str = ""
         # Cooldown / suggestion tracking (used by TopicSuggester integration)
         self._last_suggestion_time: float = 0.0
         self._session_suggestion_count: int = 0
@@ -764,29 +768,75 @@ class KiraAgendaController:
             return False
         error: ErrorCode = ErrorCode.NONE
         reason: str = ""
+        guardrail: str = ""                         # Phase 0a: specific sub-type
+        extra: dict[str, object] = {}               # Phase 0a: sub-type metadata
         if self.contains_internal_leak(clean):
-            error, reason = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')", "contains_internal_leak"
         elif self.is_repetition(clean):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior", "exact_repetition"
         elif self.has_looping_lines(output):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repetía líneas dentro de la misma respuesta"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Repetía líneas dentro de la misma respuesta", "looping_lines"
         elif self.repeats_recent_line(clean):
-            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Repitió una frase de respuestas recientes"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Repitió una frase de respuestas recientes", "repeats_recent_line"
+            if self._last_matched_phrase:
+                extra["matched_phrase"] = self._last_matched_phrase[:80]
         elif self.is_too_similar_to_recent(clean):
-            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3", "token_overlap"
+            extra["overlap_pct"] = round(self._last_similarity_overlap * 100, 1)
         elif self.reuses_looping_opening(clean):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'", "reused_opening"
         elif self.claims_inner_life(clean):
-            error, reason = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva", "claims_inner_life"
         if error != ErrorCode.NONE:
             if mutate:
                 self.register_failure(error=error, reason=reason)
+            # ── Phase 0a metrics: record every rejection with sub-type ──
+            record: dict[str, object] = {
+                "error": error.value,
+                "guardrail": guardrail,
+                "reason": reason,
+                "length": self.response_length,
+                "state": self.state.value,
+            }
+            record.update(extra)
+            self.rejection_log.append(record)
             return False
         if mutate:
             self.recovery.record_success()
             self.failure_count = 0
             self.record_accepted_output(clean)
         return True
+
+    # ── Phase 0: Metrics (zero behaviour change) ────────────────────
+
+    def get_metrics(self) -> dict[str, object]:
+        """Return aggregated rejection metrics for causal audit / dashboard."""
+        total = len(self.rejection_log)
+        by_type: dict[str, int] = {}
+        by_subtype: dict[str, int] = {}
+        total_overlap: float = 0.0
+        overlap_count: int = 0
+        for r in self.rejection_log:
+            err = str(r.get("error", "UNKNOWN"))
+            by_type[err] = by_type.get(err, 0) + 1
+            grd = str(r.get("guardrail", err))
+            by_subtype[grd] = by_subtype.get(grd, 0) + 1
+            ov = r.get("overlap_pct")
+            if isinstance(ov, (int, float)):
+                total_overlap += float(ov)
+                overlap_count += 1
+        return {
+            "total_rejections": total,
+            "by_error_code": by_type,
+            "by_guardrail": by_subtype,
+            "avg_similarity_overlap_pct": round(total_overlap / overlap_count, 1) if overlap_count else None,
+            "current_state": self.state.value,
+            "failure_count": self.recovery.failure_count,
+            "response_length": self.response_length,
+            "active_topic": self.active_topic.title if self.active_topic else None,
+            "topics_queued": len([t for t in self.topics if t.status == TopicStatus.QUEUED]),
+            "last_outputs_count": len(self.last_outputs),
+        }
 
     def enforce_live_safety_cap(self, output: str) -> str:
         """Trim agenda output to the configured live-safety cap on sentence boundaries."""
@@ -833,7 +883,9 @@ class KiraAgendaController:
         if not current_sentences:
             return False
         for recent in self.last_outputs[-5:]:
-            if current_sentences.intersection({s for s in self._sentences(recent) if len(s) > 24}):
+            matches = current_sentences.intersection({s for s in self._sentences(recent) if len(s) > 24})
+            if matches:
+                self._last_matched_phrase = next(iter(matches))
                 return True
         return False
 
@@ -851,6 +903,7 @@ class KiraAgendaController:
                 continue
             overlap = len(tokens & recent_tokens) / max(1, min(len(tokens), len(recent_tokens)))
             if overlap >= 0.78:
+                self._last_similarity_overlap = overlap
                 return True
         return False
 

@@ -80,6 +80,7 @@ class MotorVocalIA(threading.Thread):
         self.agenda_output_preview_validator = None
         self.agenda_output_recorder = None
         self.agenda_output_transformer = None
+        self.agenda_controller = None               # Phase 0: metrics access
 
     @property
     def is_speaking(self):
@@ -252,7 +253,7 @@ class MotorVocalIA(threading.Thread):
                 dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix="Agenda prefetch")
                 if dialogo:
                     if not self._preview_accept_agenda_output(dialogo):
-                        self._log("Agenda: prefetch rechazado por repetición o guardrails.", level="warning")
+                        self._log(f"Agenda: prefetch rechazado ({self._format_agenda_rejection()}).", level="warning")
                         return
                     with self._prefetch_lock:
                         if self._prefetch_epoch != epoch:
@@ -644,7 +645,7 @@ class MotorVocalIA(threading.Thread):
                 return ""
 
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
-                self._log("Agenda: salida rechazada por guardrails del controlador.", level="warning")
+                self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
                 return ""
 
             if commit_history:
@@ -682,6 +683,21 @@ class MotorVocalIA(threading.Thread):
         except Exception:
             logger.exception("Agenda preview output validator failed")
             return False
+
+    def _format_agenda_rejection(self) -> str:
+        """Return a compact rejection reason string for logging (Phase 0a)."""
+        ctl = getattr(self, "agenda_controller", None)
+        if ctl is None or not ctl.rejection_log:
+            return "guardrails"
+        last = ctl.rejection_log[-1]
+        grd = last.get("guardrail", last.get("error", "UNKNOWN"))
+        ov = last.get("overlap_pct")
+        phrase = last.get("matched_phrase")
+        if ov is not None:
+            return f"{grd} (overlap {ov}%)"
+        if phrase:
+            return f"{grd} (\"{phrase[:50]}...\")"
+        return str(grd)
 
     def _record_accepted_agenda_output(self, dialogo: str) -> None:
         recorder = getattr(self, "agenda_output_recorder", None)
