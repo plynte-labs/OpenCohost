@@ -585,15 +585,65 @@ class VocalAIApp(ctk.CTk):
         tab_product_avatar.grid_remove()
         self._product_tab_data["avatar"]["frame"] = tab_product_avatar
 
-        config_tabs = ctk.CTkTabview(tab_product_config, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
-        config_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
-        tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
-        tab_cfg_admin = config_tabs.add("Ayuda")
-        for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_admin):
-            tab.grid_columnconfigure(0, weight=1)
-            tab.grid_rowconfigure(0, weight=1)
+        # Config sub-tabs — custom buttons (darker, smaller than product tabs)
+        cfg_tab_bar = ctk.CTkFrame(tab_product_config, fg_color="transparent")
+        cfg_tab_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        for col in range(3):
+            cfg_tab_bar.grid_columnconfigure(col, weight=1, uniform="cfg_subtab")
+
+        cfg_content = ctk.CTkFrame(tab_product_config, fg_color="transparent")
+        cfg_content.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        cfg_content.grid_columnconfigure(0, weight=1)
+        cfg_content.grid_rowconfigure(0, weight=1)
+
+        tab_product_config.grid_rowconfigure(1, weight=1)
+
+        self._cfg_subtab_data: dict[str, dict] = {}
+        self._active_cfg_subtab: str = "modelo_perfil"
+
+        CFG_SUBTABS = [
+            ("modelo_perfil", "Modelo/Perfil"),
+            ("audio_tts", "Audio/TTS"),
+            ("ayuda", "Ayuda"),
+        ]
+
+        for idx, (key, label) in enumerate(CFG_SUBTABS):
+            is_active = (key == self._active_cfg_subtab)
+            btn = ctk.CTkButton(
+                cfg_tab_bar,
+                text=label,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#1e4060" if is_active else "#0f151c",
+                hover_color="#255478" if is_active else "#151d26",
+                text_color="#d8e2ef" if is_active else "#6b7b8d",
+                corner_radius=6,
+                height=30,
+            )
+            btn.grid(row=0, column=idx, sticky="ew", padx=1, pady=2)
+            btn.configure(command=lambda k=key: self._switch_cfg_subtab(k))
+            self._cfg_subtab_data[key] = {"button": btn}
+
+        # Content frames — only active one visible
+        tab_cfg_model_profile = ctk.CTkFrame(cfg_content, fg_color="transparent")
+        tab_cfg_model_profile.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_cfg_model_profile.grid_columnconfigure(0, weight=1)
         tab_cfg_model_profile.grid_columnconfigure(1, weight=1)
+        tab_cfg_model_profile.grid_rowconfigure(0, weight=1)
+        self._cfg_subtab_data["modelo_perfil"]["frame"] = tab_cfg_model_profile
+
+        tab_cfg_audio_voice = ctk.CTkFrame(cfg_content, fg_color="transparent")
+        tab_cfg_audio_voice.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_cfg_audio_voice.grid_columnconfigure(0, weight=1)
+        tab_cfg_audio_voice.grid_rowconfigure(0, weight=1)
+        tab_cfg_audio_voice.grid_remove()
+        self._cfg_subtab_data["audio_tts"]["frame"] = tab_cfg_audio_voice
+
+        tab_cfg_admin = ctk.CTkFrame(cfg_content, fg_color="transparent")
+        tab_cfg_admin.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_cfg_admin.grid_columnconfigure(0, weight=1)
+        tab_cfg_admin.grid_rowconfigure(0, weight=1)
+        tab_cfg_admin.grid_remove()
+        self._cfg_subtab_data["ayuda"]["frame"] = tab_cfg_admin
 
         # Model panel
         frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
@@ -2019,6 +2069,20 @@ class VocalAIApp(ctk.CTk):
             curr["button"].configure(fg_color="#2f5f8f", hover_color="#3670aa", text_color="#ffffff")
             curr["frame"].grid()
         self._active_product_tab = key
+
+    def _switch_cfg_subtab(self, key: str) -> None:
+        """Switch the active Configuración sub-tab."""
+        if key == self._active_cfg_subtab:
+            return
+        prev = self._cfg_subtab_data.get(self._active_cfg_subtab)
+        if prev:
+            prev["button"].configure(fg_color="#0f151c", hover_color="#151d26", text_color="#6b7b8d")
+            prev["frame"].grid_remove()
+        curr = self._cfg_subtab_data.get(key)
+        if curr:
+            curr["button"].configure(fg_color="#1e4060", hover_color="#255478", text_color="#d8e2ef")
+            curr["frame"].grid()
+        self._active_cfg_subtab = key
 
     def _log_accion(self, msg: str) -> None:
         self._advanced_panel.log_action(msg)

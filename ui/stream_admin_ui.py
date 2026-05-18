@@ -170,22 +170,56 @@ class StreamAdminUI:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
 
-        stream_tabs = ctk.CTkTabview(
-            parent,
-            fg_color="#0f151c",
-            segmented_button_fg_color="#0c1117",
-            segmented_button_selected_color="#2f5f8f",
-            segmented_button_selected_hover_color="#3670aa",
-            segmented_button_unselected_color="#151d26",
-            segmented_button_unselected_hover_color="#1d2a38",
-            text_color="#d8e2ef",
-        )
-        stream_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        tab_stream_live = stream_tabs.add("Emisión")
-        tab_stream_actions = stream_tabs.add("Acciones")
-        for tab in (tab_stream_live, tab_stream_actions):
-            tab.grid_columnconfigure(0, weight=1)
-            tab.grid_rowconfigure(0, weight=1)
+        # Stream sub-tabs — custom buttons (matching Configuración style)
+        stream_tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        stream_tab_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        for col in range(2):
+            stream_tab_bar.grid_columnconfigure(col, weight=1, uniform="stream_subtab")
+
+        stream_content = ctk.CTkFrame(parent, fg_color="transparent")
+        stream_content.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        stream_content.grid_columnconfigure(0, weight=1)
+        stream_content.grid_rowconfigure(0, weight=1)
+
+        parent.grid_rowconfigure(1, weight=1)
+
+        self._stream_subtab_data: dict[str, dict] = {}
+        self._active_stream_subtab: str = "emision"
+
+        STREAM_SUBTABS = [
+            ("emision", "Emisión"),
+            ("acciones", "Acciones"),
+        ]
+
+        for idx, (key, label) in enumerate(STREAM_SUBTABS):
+            is_active = (key == self._active_stream_subtab)
+            btn = ctk.CTkButton(
+                stream_tab_bar,
+                text=label,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#1e4060" if is_active else "#0f151c",
+                hover_color="#255478" if is_active else "#151d26",
+                text_color="#d8e2ef" if is_active else "#6b7b8d",
+                corner_radius=6,
+                height=30,
+            )
+            btn.grid(row=0, column=idx, sticky="ew", padx=1, pady=2)
+            btn.configure(command=lambda k=key: self._switch_stream_subtab(k))
+            self._stream_subtab_data[key] = {"button": btn}
+
+        # Content frames — only active one visible
+        tab_stream_live = ctk.CTkFrame(stream_content, fg_color="transparent")
+        tab_stream_live.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_stream_live.grid_columnconfigure(0, weight=1)
+        tab_stream_live.grid_rowconfigure(0, weight=1)
+        self._stream_subtab_data["emision"]["frame"] = tab_stream_live
+
+        tab_stream_actions = ctk.CTkFrame(stream_content, fg_color="transparent")
+        tab_stream_actions.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_stream_actions.grid_columnconfigure(0, weight=1)
+        tab_stream_actions.grid_rowconfigure(0, weight=1)
+        tab_stream_actions.grid_remove()
+        self._stream_subtab_data["acciones"]["frame"] = tab_stream_actions
 
         # Stream uses vertical scrollable containment: cards stack instead of
         # building cockpit-wide rows that can be clipped by the product shell.
@@ -255,6 +289,20 @@ class StreamAdminUI:
             frame.grid_remove()
             current = button.cget("text")
             button.configure(text=current.replace("▼", "▶"))
+
+    def _switch_stream_subtab(self, key: str) -> None:
+        """Switch the active Stream sub-tab (custom button tabs)."""
+        if key == self._active_stream_subtab:
+            return
+        prev = self._stream_subtab_data.get(self._active_stream_subtab)
+        if prev:
+            prev["button"].configure(fg_color="#0f151c", hover_color="#151d26", text_color="#6b7b8d")
+            prev["frame"].grid_remove()
+        curr = self._stream_subtab_data.get(key)
+        if curr:
+            curr["button"].configure(fg_color="#1e4060", hover_color="#255478", text_color="#d8e2ef")
+            curr["frame"].grid()
+        self._active_stream_subtab = key
 
     def _toggle_oauth_section(self, content: Any, button: Any) -> None:
         self._oauth_expanded = not self._oauth_expanded
