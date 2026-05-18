@@ -172,12 +172,12 @@ class StreamAdminUI:
 
         # Stream sub-tabs — custom buttons (matching Configuración style)
         stream_tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
-        stream_tab_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        stream_tab_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         for col in range(2):
             stream_tab_bar.grid_columnconfigure(col, weight=1, uniform="stream_subtab")
 
         stream_content = ctk.CTkFrame(parent, fg_color="transparent")
-        stream_content.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        stream_content.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
         stream_content.grid_columnconfigure(0, weight=1)
         stream_content.grid_rowconfigure(0, weight=1)
 

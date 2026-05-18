@@ -514,7 +514,7 @@ class VocalAIApp(ctk.CTk):
 
         # Product tabs — custom buttons (full-width, clear active state)
         product_tab_bar = ctk.CTkFrame(side_panel, fg_color="transparent")
-        product_tab_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        product_tab_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 6))
         for col in range(5):
             product_tab_bar.grid_columnconfigure(col, weight=1, uniform="product_tab")
 
@@ -587,12 +587,12 @@ class VocalAIApp(ctk.CTk):
 
         # Config sub-tabs — custom buttons (darker, smaller than product tabs)
         cfg_tab_bar = ctk.CTkFrame(tab_product_config, fg_color="transparent")
-        cfg_tab_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        cfg_tab_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         for col in range(3):
             cfg_tab_bar.grid_columnconfigure(col, weight=1, uniform="cfg_subtab")
 
         cfg_content = ctk.CTkFrame(tab_product_config, fg_color="transparent")
-        cfg_content.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+        cfg_content.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
         cfg_content.grid_columnconfigure(0, weight=1)
         cfg_content.grid_rowconfigure(0, weight=1)
 
@@ -619,7 +619,7 @@ class VocalAIApp(ctk.CTk):
                 corner_radius=6,
                 height=30,
             )
-            btn.grid(row=0, column=idx, sticky="ew", padx=1, pady=2)
+            btn.grid(row=0, column=idx, sticky="ew", padx=2, pady=2)
             btn.configure(command=lambda k=key: self._switch_cfg_subtab(k))
             self._cfg_subtab_data[key] = {"button": btn}
 
