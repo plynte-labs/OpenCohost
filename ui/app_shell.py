@@ -518,7 +518,7 @@ class VocalAIApp(ctk.CTk):
         for col in range(5):
             product_tab_bar.grid_columnconfigure(col, weight=1, uniform="product_tab")
 
-        product_content = ctk.CTkScrollableFrame(side_panel, fg_color="#0f151c", corner_radius=18, scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
+        product_content = ctk.CTkFrame(side_panel, fg_color="#0f151c", corner_radius=18)
         product_content.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 12))
         product_content.grid_columnconfigure(0, weight=1)
         product_content.grid_rowconfigure(0, weight=1)
@@ -623,18 +623,16 @@ class VocalAIApp(ctk.CTk):
             btn.configure(command=lambda k=key: self._switch_cfg_subtab(k))
             self._cfg_subtab_data[key] = {"button": btn}
 
-        # Content frames — only active one visible
-        tab_cfg_model_profile = ctk.CTkFrame(cfg_content, fg_color="transparent")
+        # Content frames — only active one visible, individually scrollable
+        tab_cfg_model_profile = ctk.CTkScrollableFrame(cfg_content, fg_color="transparent", scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
         tab_cfg_model_profile.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile.grid_columnconfigure(0, weight=1)
         tab_cfg_model_profile.grid_columnconfigure(1, weight=1)
-        tab_cfg_model_profile.grid_rowconfigure(0, weight=1)
         self._cfg_subtab_data["modelo_perfil"]["frame"] = tab_cfg_model_profile
 
-        tab_cfg_audio_voice = ctk.CTkFrame(cfg_content, fg_color="transparent")
+        tab_cfg_audio_voice = ctk.CTkScrollableFrame(cfg_content, fg_color="transparent", scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
         tab_cfg_audio_voice.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_audio_voice.grid_columnconfigure(0, weight=1)
-        tab_cfg_audio_voice.grid_rowconfigure(0, weight=1)
         tab_cfg_audio_voice.grid_remove()
         self._cfg_subtab_data["audio_tts"]["frame"] = tab_cfg_audio_voice
 
