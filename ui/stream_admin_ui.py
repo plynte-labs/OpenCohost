@@ -155,79 +155,31 @@ class StreamAdminUI:
     def build(self, parent: Any) -> Any:
         """Build the Stream Admin tab UI within the given parent frame.
 
-        Creates the streamlined Stream workspace tabs and their widgets.
-        Controls are grouped by operator intent instead of low-level feature
-        area: ``Emisión`` for setup/metadata/status, and ``Acciones`` for chat and
-        moderation.  Widget
-        references are stored in ``_widgets`` for later UI updates.
-
-        Args:
-            parent: CTkFrame to build the UI inside.
-
-        Returns:
-            The parent frame (for chaining).
+        Creates two content frames (Emisión, Acciones) directly — sub-tab
+        switching is managed at the side_panel level by app_shell.py.
         """
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
 
-        # Stream sub-tabs — custom buttons (matching Configuración style)
-        stream_tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
-        stream_tab_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        for col in range(2):
-            stream_tab_bar.grid_columnconfigure(col, weight=1, uniform="stream_subtab")
+        # Emisión content
+        self.tab_stream_live = ctk.CTkFrame(parent, fg_color="transparent")
+        self.tab_stream_live.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.tab_stream_live.grid_columnconfigure(0, weight=1)
+        self.tab_stream_live.grid_rowconfigure(0, weight=1)
 
-        stream_content = ctk.CTkFrame(parent, fg_color="transparent")
-        stream_content.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
-        stream_content.grid_columnconfigure(0, weight=1)
-        stream_content.grid_rowconfigure(0, weight=1)
+        # Acciones content (initially hidden)
+        self.tab_stream_actions = ctk.CTkFrame(parent, fg_color="transparent")
+        self.tab_stream_actions.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.tab_stream_actions.grid_columnconfigure(0, weight=1)
+        self.tab_stream_actions.grid_rowconfigure(0, weight=1)
+        self.tab_stream_actions.grid_remove()
 
-        parent.grid_rowconfigure(1, weight=1)
-
-        self._stream_subtab_data: dict[str, dict] = {}
-        self._active_stream_subtab: str = "emision"
-
-        STREAM_SUBTABS = [
-            ("emision", "Emisión"),
-            ("acciones", "Acciones"),
-        ]
-
-        for idx, (key, label) in enumerate(STREAM_SUBTABS):
-            is_active = (key == self._active_stream_subtab)
-            btn = ctk.CTkButton(
-                stream_tab_bar,
-                text=label,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                fg_color="#1e4060" if is_active else "#0f151c",
-                hover_color="#255478" if is_active else "#151d26",
-                text_color="#d8e2ef" if is_active else "#6b7b8d",
-                corner_radius=6,
-                height=30,
-            )
-            btn.grid(row=0, column=idx, sticky="ew", padx=1, pady=2)
-            btn.configure(command=lambda k=key: self._switch_stream_subtab(k))
-            self._stream_subtab_data[key] = {"button": btn}
-
-        # Content frames — only active one visible
-        tab_stream_live = ctk.CTkFrame(stream_content, fg_color="transparent")
-        tab_stream_live.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        tab_stream_live.grid_columnconfigure(0, weight=1)
-        tab_stream_live.grid_rowconfigure(0, weight=1)
-        self._stream_subtab_data["emision"]["frame"] = tab_stream_live
-
-        tab_stream_actions = ctk.CTkFrame(stream_content, fg_color="transparent")
-        tab_stream_actions.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
-        tab_stream_actions.grid_columnconfigure(0, weight=1)
-        tab_stream_actions.grid_rowconfigure(0, weight=1)
-        tab_stream_actions.grid_remove()
-        self._stream_subtab_data["acciones"]["frame"] = tab_stream_actions
-
-        # Stream uses vertical scrollable containment: cards stack instead of
-        # building cockpit-wide rows that can be clipped by the product shell.
-        live_sections = ctk.CTkScrollableFrame(tab_stream_live, fg_color="transparent")
+        # Stream uses vertical scrollable containment
+        live_sections = ctk.CTkScrollableFrame(self.tab_stream_live, fg_color="transparent")
         live_sections.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         live_sections.grid_columnconfigure(0, weight=1)
 
-        actions_sections = ctk.CTkScrollableFrame(tab_stream_actions, fg_color="transparent")
+        actions_sections = ctk.CTkScrollableFrame(self.tab_stream_actions, fg_color="transparent")
         actions_sections.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         actions_sections.grid_columnconfigure(0, weight=1)
 
@@ -289,20 +241,6 @@ class StreamAdminUI:
             frame.grid_remove()
             current = button.cget("text")
             button.configure(text=current.replace("▼", "▶"))
-
-    def _switch_stream_subtab(self, key: str) -> None:
-        """Switch the active Stream sub-tab (custom button tabs)."""
-        if key == self._active_stream_subtab:
-            return
-        prev = self._stream_subtab_data.get(self._active_stream_subtab)
-        if prev:
-            prev["button"].configure(fg_color="#0f151c", hover_color="#151d26", text_color="#6b7b8d")
-            prev["frame"].grid_remove()
-        curr = self._stream_subtab_data.get(key)
-        if curr:
-            curr["button"].configure(fg_color="#1e4060", hover_color="#255478", text_color="#d8e2ef")
-            curr["frame"].grid()
-        self._active_stream_subtab = key
 
     def _toggle_oauth_section(self, content: Any, button: Any) -> None:
         self._oauth_expanded = not self._oauth_expanded
