@@ -2,7 +2,7 @@
 
 ## Overview
 
-The VoiceAI UI has been refactored from a 2722-line God class (`ui/app.py`) into a modular architecture with 12 modules, totaling ~3500 lines across well-defined boundaries.
+The VoiceAI UI has been refactored from a 2722-line God class (`ui/app.py`) into a modular architecture with 16 modules, totaling ~4000 lines across well-defined boundaries. A presentation-only refinement pass (2026-05-17) added collapsible card patterns and custom product tabs.
 
 ## Module Diagram
 
@@ -12,19 +12,51 @@ ui/app.py (6 lines)
     └── re-exports create_vocalai_app from:
             │
             ▼
-    ui/app_shell.py (~1375 lines) ──── Composition Root
+    ui/app_shell.py (~2635 lines) ──── Composition Root
             │
             ├── ui/state.py (245 lines) ────────────── UIState container
             ├── ui/protocols.py (68 lines) ─────────── CallbackDispatcher + Protocols
             ├── ui/ptt_manager.py (246 lines) ──────── PTT hotkey management
-            ├── ui/voice_control.py (277 lines) ────── WebSocket, audio, state machine
+            ├── ui/voice_control.py (285 lines) ────── WebSocket, audio, state machine
             ├── ui/model_panel.py (234 lines) ──────── Model selection panel
             ├── ui/profile_panel.py (83 lines) ─────── Profile selection panel
             ├── ui/status_bar.py (95 lines) ────────── Status pills + observer
             ├── ui/smart_aggregator_ui.py (222 lines) ─ YouTube chat, vibe, activity
-            ├── ui/stream_admin_ui.py (613 lines) ──── OAuth, metadata, moderation
-            └── ui/advanced_panel.py (155 lines) ───── Log viewer, debug controls
+            ├── ui/stream_admin_ui.py (~1570 lines) ── OAuth, metadata, moderation, collapsible cards
+            ├── ui/cohost_agenda_panel.py (~780 lines) ─ Co-host agenda, collapsible sections
+            ├── ui/music_panel.py (133 lines) ──────── Music bed controls (gold standard)
+            ├── ui/avatar_panel.py (~655 lines) ────── Avatar/OBS, collapsible + mode spinner
+            ├── ui/advanced_panel.py (~420 lines) ──── Log viewer, debug controls
+            └── ui/profiles_window.py ──────────────── Profile configurator window
 ```
+
+## Layout Structure
+
+```
+┌─ StatusBar (pills + Mostrar logs + Compacto) ──────────────────┐
+│ Kira Panel (left, fixed)  │ Product Tabs (right, custom)       │
+│  - Header "Kira"          │  [Configuración][Stream][Co-host]  │
+│  - Avatar preview (140px) │  [Música][Avatar / OBS]            │
+│  - [🎤 HABLAR] (72px)     │  ┌─ Active tab content ──────────┐ │
+│  - Respuesta (130px)      │  │  Nested sub-tabs or panels    │ │
+│  - Voz/PTT (compacto)     │  │  Collapsible cards (▼/▶)      │ │
+│  - Chat entry + Enviar    │  └───────────────────────────────┘ │
+└─ AdvancedPanel (logs, toggle) ─────────────────────────────────┘
+```
+
+## UI Patterns (post-refactor)
+
+### Custom Product Tabs
+Replaced `CTkTabview` with 5 full-width `CTkButton` tabs. Active: blue bg `#2f5f8f` / white text. Inactive: dark `#151d26` / muted `#6b7b8d`. Content frames toggle via `_switch_product_tab()`.
+
+### Collapsible Cards (Gold Standard)
+Pattern used across Stream Acciones, Ayuda, Co-host, Avatar/OBS:
+- Header: `CTkButton` with `▼ Section` / `▶ Section` text, `fg_color="transparent"`, `text_color="#d8e2ef"`
+- Content: `CTkFrame` with `fg_color="#101923"`, toggled via `grid()` / `grid_remove()`
+- Arrow swaps on click
+
+### Extracted Primary Button
+`btn_primary_voice` ("Hablar") extracted from `VoiceControlPanel` to Kira panel level. `VoiceControlPanel` accepts optional `external_primary_button` parameter. Voice actions area is compact when external button is used.
 
 ## Module Responsibilities
 

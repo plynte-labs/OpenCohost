@@ -75,7 +75,14 @@ class StreamAdminUI:
         self._seen_chat_ids: set[str] = set()
         self._sim_round: int = 0
         self._chat_users: dict[str, dict[str, Any]] = {}
+        # Fix: audit/ui-security-perf-2026-05-17 — _chat_users, _seen_chat_ids, _chat_connected
+        # are accessed from chat daemon threads AND UI main thread with zero sync.
+        # Single lock prevents RuntimeError on dict iteration and torn reads.
+        self._chat_lock = threading.Lock()
         self._smart_agg_default_activity: Optional[dict[str, float]] = None
+        self._oauth_expanded: bool = True
+        self._metadata_expanded: bool = False
+        self._client_id_visible: bool = False
 
         # Widget references (set via set_widgets or build)
         self._widgets: dict[str, Any] = {}
@@ -150,8 +157,8 @@ class StreamAdminUI:
 
         Creates the streamlined Stream workspace tabs and their widgets.
         Controls are grouped by operator intent instead of low-level feature
-        area: ``Emisión`` for setup/metadata, ``Acciones`` for chat and
-        moderation, and ``Estado`` for read-only stream feedback.  Widget
+        area: ``Emisión`` for setup/metadata/status, and ``Acciones`` for chat and
+        moderation.  Widget
         references are stored in ``_widgets`` for later UI updates.
 
         Args:
@@ -176,8 +183,7 @@ class StreamAdminUI:
         stream_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_stream_live = stream_tabs.add("Emisión")
         tab_stream_actions = stream_tabs.add("Acciones")
-        tab_stream_status = stream_tabs.add("Estado")
-        for tab in (tab_stream_live, tab_stream_actions, tab_stream_status):
+        for tab in (tab_stream_live, tab_stream_actions):
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
 
@@ -201,40 +207,115 @@ class StreamAdminUI:
         metadata_section.grid_columnconfigure(0, weight=1)
         self._build_metadata_tab(metadata_section)
 
+        # Build sections first so toggle lambdas can reference them
         chat_live_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        chat_live_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        chat_live_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
         chat_live_section.grid_columnconfigure(0, weight=1)
         self._build_chat_live_tab(chat_live_section)
 
         chat_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        chat_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        chat_section.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
         chat_section.grid_columnconfigure(0, weight=1)
         self._build_chat_tab(chat_section)
 
         moderation_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        moderation_section.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+        moderation_section.grid(row=3, column=0, sticky="ew", padx=0, pady=0)
         moderation_section.grid_columnconfigure(0, weight=1)
         self._build_moderation_tab(moderation_section)
 
-        self._build_status_tab(tab_stream_status)
+        # Collapsible section toggles — placed above sections at row 0
+        self._sections_expanded = {"chat_live": True, "chat": True, "moderation": True}
+
+        toggle_row = ctk.CTkFrame(actions_sections, fg_color="transparent")
+        toggle_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
+        toggle_row.grid_columnconfigure(0, weight=1)
+        toggle_row.grid_columnconfigure(1, weight=1)
+        toggle_row.grid_columnconfigure(2, weight=1)
+
+        btn_live = ctk.CTkButton(toggle_row, text="▼ Chat Live (RF3)", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("chat_live", chat_live_section, btn_live))
+        btn_live.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+
+        btn_chat = ctk.CTkButton(toggle_row, text="▼ Kira Chat", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("chat", chat_section, btn_chat))
+        btn_chat.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+
+        btn_mod = ctk.CTkButton(toggle_row, text="▼ Moderación", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("moderation", moderation_section, btn_mod))
+        btn_mod.grid(row=0, column=2, padx=2, pady=2, sticky="ew")
 
         return parent
+
+    def _toggle_section(self, key: str, frame: Any, button: Any) -> None:
+        """Toggle visibility of an Acciones card section."""
+        expanded = not self._sections_expanded.get(key, True)
+        self._sections_expanded[key] = expanded
+        if expanded:
+            frame.grid()
+            current = button.cget("text")
+            button.configure(text=current.replace("▶", "▼"))
+        else:
+            frame.grid_remove()
+            current = button.cget("text")
+            button.configure(text=current.replace("▼", "▶"))
+
+    def _toggle_oauth_section(self, content: Any, button: Any) -> None:
+        self._oauth_expanded = not self._oauth_expanded
+        if self._oauth_expanded:
+            content.grid()
+            button.configure(text="▼ OAuth / Proveedor")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ OAuth / Proveedor")
+
+    def _toggle_metadata_section(self, content: Any, button: Any) -> None:
+        self._metadata_expanded = not self._metadata_expanded
+        if self._metadata_expanded:
+            content.grid()
+            button.configure(text="▼ Metadata")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ Metadata")
+
+    def _toggle_client_id_visibility(self, entry: Any, button: Any) -> None:
+        self._client_id_visible = not self._client_id_visible
+        entry.configure(show="" if self._client_id_visible else "*")
+        button.configure(text="👁" if not self._client_id_visible else "🔒")
 
     def _build_connection_tab(self, tab: Any) -> None:
         frame_auth = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         frame_auth.grid_columnconfigure(0, weight=1)
 
+        # Toggle header
         header = ctk.CTkFrame(frame_auth, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="OAuth / Proveedor", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew")
+
+        self._oauth_expanded = True
+        btn_toggle_oauth = ctk.CTkButton(
+            header, text="▼ OAuth / Proveedor",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        btn_toggle_oauth.grid(row=0, column=0, sticky="w")
+
         lbl_status = ctk.CTkLabel(header, text="RF4 iniciando...", text_color="#aaaaaa", anchor="w", justify="left", wraplength=520)
         lbl_status.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self._widgets["lbl_stream_admin_status"] = lbl_status
 
-        button_stack = ctk.CTkFrame(frame_auth, fg_color="transparent")
-        button_stack.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        # Content frame (collapsible)
+        oauth_content = ctk.CTkFrame(frame_auth, fg_color="#101923", corner_radius=12)
+        oauth_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        oauth_content.grid_columnconfigure(0, weight=1)
+
+        # Wire toggle — collapse content on click
+        btn_toggle_oauth.configure(
+            command=lambda: self._toggle_oauth_section(oauth_content, btn_toggle_oauth)
+        )
+
+        # BUTTON STACK goes inside oauth_content
+        button_stack = ctk.CTkFrame(oauth_content, fg_color="transparent")
+        button_stack.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
         button_stack.grid_columnconfigure(0, weight=1)
         button_stack.grid_columnconfigure(1, weight=1)
         btn_read = ctk.CTkButton(button_stack, text="Conectar YouTube Lectura", command=lambda: self._dispatch_connect(False), width=170, fg_color="#2f5f8f", hover_color="#3670aa")
@@ -257,30 +338,73 @@ class StreamAdminUI:
         btn_twitch.grid(row=2, column=0, columnspan=2, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_twitch"] = btn_twitch
 
-        ctk.CTkLabel(frame_auth, text="Client ID:", anchor="w").grid(row=2, column=0, padx=10, pady=(8, 2), sticky="ew")
-        entry_id = ctk.CTkEntry(frame_auth, placeholder_text="tu_client_id.apps.googleusercontent.com")
-        entry_id.grid(row=3, column=0, padx=10, pady=2, sticky="ew")
+        # Client ID row with show/hide toggle
+        client_id_header = ctk.CTkFrame(oauth_content, fg_color="transparent")
+        client_id_header.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 2))
+        client_id_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(client_id_header, text="Client ID:", anchor="w").grid(row=0, column=0, sticky="w")
+
+        entry_id = ctk.CTkEntry(oauth_content, placeholder_text="tu_client_id.apps.googleusercontent.com", show="*")
+        entry_id.grid(row=2, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_client_id"] = entry_id
 
-        ctk.CTkLabel(frame_auth, text="Secret:", anchor="w").grid(row=4, column=0, padx=10, pady=(8, 2), sticky="ew")
-        entry_secret = ctk.CTkEntry(frame_auth, placeholder_text="OAuth client secret", show="*")
-        entry_secret.grid(row=5, column=0, padx=10, pady=2, sticky="ew")
+        self._client_id_visible = False
+        btn_toggle_id = ctk.CTkButton(
+            client_id_header, text="👁",
+            width=30, height=24,
+            fg_color="transparent", text_color="#8fa3b8",
+            hover_color="#1d2a38", font=ctk.CTkFont(size=12),
+            command=lambda: self._toggle_client_id_visibility(entry_id, btn_toggle_id),
+        )
+        btn_toggle_id.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkLabel(oauth_content, text="Secret:", anchor="w").grid(row=3, column=0, padx=10, pady=(8, 2), sticky="ew")
+        entry_secret = ctk.CTkEntry(oauth_content, placeholder_text="OAuth client secret", show="*")
+        entry_secret.grid(row=4, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_client_secret"] = entry_secret
 
-        ctk.CTkButton(frame_auth, text="Guardar OAuth", command=self._dispatch_save_oauth, width=125, fg_color="#555555", hover_color="#666666").grid(row=6, column=0, padx=10, pady=(8, 10), sticky="ew")
+        ctk.CTkButton(oauth_content, text="Guardar OAuth", command=self._dispatch_save_oauth, width=125, fg_color="#555555", hover_color="#666666").grid(row=5, column=0, padx=10, pady=(8, 6), sticky="ew")
+
+        lbl_analytics = ctk.CTkLabel(oauth_content, text="Analíticas: esperando datos...", anchor="w", justify="left", text_color="#8fa3b8", wraplength=520)
+        lbl_analytics.grid(row=6, column=0, padx=10, pady=(2, 2), sticky="ew")
+        self._widgets["lbl_stream_analytics"] = lbl_analytics
+
+        lbl_pending = ctk.CTkLabel(oauth_content, text="Acción pendiente: ninguna", anchor="w", justify="left", text_color="#8fa3b8", wraplength=520)
+        lbl_pending.grid(row=7, column=0, padx=10, pady=(2, 10), sticky="ew")
+        self._widgets["lbl_stream_pending"] = lbl_pending
 
     def _build_metadata_tab(self, tab: Any) -> None:
         frame_meta = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_meta.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_meta.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_meta, text="Metadata", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 2), sticky="ew")
+        # Toggle header
+        self._metadata_expanded = False
+        btn_toggle_meta = ctk.CTkButton(
+            frame_meta, text="▶ Metadata",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        btn_toggle_meta.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 2))
+
         lbl_meta = ctk.CTkLabel(frame_meta, text="Sin metadata", text_color="#aaaaaa", anchor="w", justify="left", wraplength=520)
         lbl_meta.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
         self._widgets["lbl_stream_metadata_state"] = lbl_meta
 
-        meta_actions = ctk.CTkFrame(frame_meta, fg_color="transparent")
-        meta_actions.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        # Content frame (initially hidden)
+        meta_content = ctk.CTkFrame(frame_meta, fg_color="#101923", corner_radius=12)
+        meta_content.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+        meta_content.grid_remove()
+        meta_content.grid_columnconfigure(0, weight=1)
+
+        btn_toggle_meta.configure(
+            command=lambda: self._toggle_metadata_section(meta_content, btn_toggle_meta)
+        )
+
+        meta_actions = ctk.CTkFrame(meta_content, fg_color="transparent")
+        meta_actions.grid(row=0, column=0, sticky="ew", padx=10, pady=4)
         meta_actions.grid_columnconfigure(0, weight=1)
         meta_actions.grid_columnconfigure(1, weight=1)
         btn_read = ctk.CTkButton(meta_actions, text="Leer", command=lambda: self._dispatch_refresh_metadata(), width=80, fg_color="#555555", hover_color="#666666")
@@ -299,24 +423,24 @@ class StreamAdminUI:
         btn_reject.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_reject_pending"] = btn_reject
 
-        ctk.CTkLabel(frame_meta, text="Título:", anchor="w").grid(row=3, column=0, padx=10, pady=(8, 2), sticky="ew")
-        entry_title = ctk.CTkEntry(frame_meta, placeholder_text="Título del stream")
-        entry_title.grid(row=4, column=0, padx=10, pady=2, sticky="ew")
+        ctk.CTkLabel(meta_content, text="Título:", anchor="w").grid(row=1, column=0, padx=10, pady=(8, 2), sticky="ew")
+        entry_title = ctk.CTkEntry(meta_content, placeholder_text="Título del stream")
+        entry_title.grid(row=2, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_title"] = entry_title
 
-        ctk.CTkLabel(frame_meta, text="Categoría:", anchor="w").grid(row=5, column=0, padx=10, pady=(8, 2), sticky="ew")
-        entry_cat = ctk.CTkEntry(frame_meta, placeholder_text="ID categoría YouTube, ej. 20")
-        entry_cat.grid(row=6, column=0, padx=10, pady=2, sticky="ew")
+        ctk.CTkLabel(meta_content, text="Categoría:", anchor="w").grid(row=3, column=0, padx=10, pady=(8, 2), sticky="ew")
+        entry_cat = ctk.CTkEntry(meta_content, placeholder_text="ID categoría YouTube, ej. 20")
+        entry_cat.grid(row=4, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_category"] = entry_cat
 
-        ctk.CTkLabel(frame_meta, text="Tags:", anchor="w").grid(row=7, column=0, padx=10, pady=(8, 2), sticky="ew")
-        entry_tags = ctk.CTkEntry(frame_meta, placeholder_text="tag1, tag2, tag3")
-        entry_tags.grid(row=8, column=0, padx=10, pady=2, sticky="ew")
+        ctk.CTkLabel(meta_content, text="Tags:", anchor="w").grid(row=5, column=0, padx=10, pady=(8, 2), sticky="ew")
+        entry_tags = ctk.CTkEntry(meta_content, placeholder_text="tag1, tag2, tag3")
+        entry_tags.grid(row=6, column=0, padx=10, pady=2, sticky="ew")
         self._widgets["entry_stream_tags"] = entry_tags
 
-        ctk.CTkLabel(frame_meta, text="Descripción:", anchor="w").grid(row=9, column=0, padx=10, pady=(8, 2), sticky="ew")
-        text_desc = ctk.CTkTextbox(frame_meta, height=70)
-        text_desc.grid(row=10, column=0, padx=10, pady=(2, 10), sticky="ew")
+        ctk.CTkLabel(meta_content, text="Descripción:", anchor="w").grid(row=7, column=0, padx=10, pady=(8, 2), sticky="ew")
+        text_desc = ctk.CTkTextbox(meta_content, height=70)
+        text_desc.grid(row=8, column=0, padx=10, pady=(2, 10), sticky="ew")
         self._widgets["text_stream_description"] = text_desc
 
     def _build_moderation_tab(self, tab: Any) -> None:
@@ -559,28 +683,6 @@ class StreamAdminUI:
         btn_emergency.grid(row=0, column=3, padx=4, pady=4, sticky="ew")
         self._widgets["btn_kira_agenda_emergency_stop"] = btn_emergency
 
-    def _build_status_tab(self, tab: Any) -> None:
-        frame_bottom = ctk.CTkScrollableFrame(tab, fg_color="#151d26", corner_radius=14)
-        frame_bottom.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        frame_bottom.grid_columnconfigure(0, weight=1)
-
-        lbl_analytics = ctk.CTkLabel(frame_bottom, text="Analíticas: esperando RF3", anchor="w", justify="left", wraplength=520)
-        lbl_analytics.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
-        self._widgets["lbl_stream_analytics"] = lbl_analytics
-
-        lbl_pending = ctk.CTkLabel(frame_bottom, text="Acción pendiente: ninguna", anchor="w", justify="left", text_color="#aaaaaa", wraplength=520)
-        lbl_pending.grid(row=1, column=0, padx=10, pady=6, sticky="ew")
-        self._widgets["lbl_stream_pending"] = lbl_pending
-
-        ctk.CTkLabel(
-            frame_bottom,
-            text="El log detallado de Stream Admin está abajo en Logs / Terminales > Stream Log.",
-            text_color="#8fa3b8",
-            anchor="w",
-            justify="left",
-            wraplength=520,
-        ).grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
-
     # ------------------------------------------------------------------
     # Dispatch callbacks (wired by AppShell)
     # ------------------------------------------------------------------
@@ -784,11 +886,17 @@ class StreamAdminUI:
     @property
     def chat_connected(self) -> bool:
         """Whether the stream admin chat is currently connected."""
-        return self._chat_connected
+        # Fix: audit/ui-security-perf-2026-05-17 — lock prevents torn read
+        # when chat daemon thread mutates _chat_connected concurrently.
+        with self._chat_lock:
+            return self._chat_connected
 
     @chat_connected.setter
     def chat_connected(self, value: bool) -> None:
-        self._chat_connected = value
+        # Fix: audit/ui-security-perf-2026-05-17 — lock protects write
+        # against concurrent reads from polling thread.
+        with self._chat_lock:
+            self._chat_connected = value
 
     @property
     def last_metadata(self) -> dict[str, Any]:
@@ -807,7 +915,12 @@ class StreamAdminUI:
     @property
     def chat_users(self) -> dict[str, dict[str, Any]]:
         """Return the tracked chat users dictionary."""
-        return self._chat_users
+        # Fix: audit/ui-security-perf-2026-05-17 — return shallow copy.
+        # Callers must NOT mutate the original dict directly; use track_chat_user()
+        # (which also locks) for mutations. Copy prevents RuntimeError if the
+        # chat daemon modifies _chat_users during iteration.
+        with self._chat_lock:
+            return dict(self._chat_users)
 
     # ------------------------------------------------------------------
     # OAuth / Connection
@@ -996,18 +1109,29 @@ class StreamAdminUI:
         if not channel_id:
             return
         user = message.get("user", "YouTube")
-        current = self._chat_users.get(channel_id, {})
-        current.update({
-            "user": user,
-            "channel_id": channel_id,
-            "last_message": message.get("text", ""),
-            "last_seen": time.time(),
-            "count": int(current.get("count", 0)) + 1,
-            "is_owner": bool(message.get("is_owner", False)),
-            "is_moderator": bool(message.get("is_moderator", False)),
-            "is_member": bool(message.get("is_member", False)),
-        })
-        self._chat_users[channel_id] = current
+        # Fix: audit/ui-security-perf-2026-05-17 — lock protects _chat_users
+        # against concurrent reads from UI thread (chat_users property, refresh).
+        with self._chat_lock:
+            current = self._chat_users.get(channel_id, {})
+            current.update({
+                "user": user,
+                "channel_id": channel_id,
+                "last_message": message.get("text", ""),
+                "last_seen": time.time(),
+                "count": int(current.get("count", 0)) + 1,
+                "is_owner": bool(message.get("is_owner", False)),
+                "is_moderator": bool(message.get("is_moderator", False)),
+                "is_member": bool(message.get("is_member", False)),
+            })
+            self._chat_users[channel_id] = current
+
+            # Fix: audit/ui-security-perf-2026-05-17 — cap _chat_users to 1000 entries
+            # to prevent unbounded memory growth over long streaming sessions.
+            # Python 3.7+ dict preserves insertion order — evict oldest first.
+            if len(self._chat_users) > 1000:
+                excess = len(self._chat_users) - 1000
+                for key in list(self._chat_users.keys())[:excess]:
+                    del self._chat_users[key]
 
     def default_mod_reason(self, item: dict[str, Any]) -> str:
         """Generate a default moderation reason from a user item.
@@ -1122,15 +1246,21 @@ class StreamAdminUI:
             live_chat_id: Live chat ID.
             connect_func: Callable that starts the chat polling loop.
         """
-        self._chat_connected = True
-        self._seen_chat_ids = set()
+        # Fix: audit/ui-security-perf-2026-05-17 — lock shared state mutation
+        # so polling daemon thread sees consistent _seen_chat_ids + _chat_connected.
+        with self._chat_lock:
+            self._chat_connected = True
+            self._seen_chat_ids = set()
         if self._smart_agg:
             self._smart_agg.start_session("youtube", video_id)
         connect_func(video_id, live_chat_id)
 
     def disconnect_chat(self, disconnect_func: Callable) -> None:
         """Disconnect from the live chat."""
-        self._chat_connected = False
+        # Fix: audit/ui-security-perf-2026-05-17 — lock shared state mutation
+        # so polling thread doesn't see inconsistent _chat_connected.
+        with self._chat_lock:
+            self._chat_connected = False
         if self._smart_agg:
             try:
                 self._smart_agg.end_session()
@@ -1457,7 +1587,10 @@ class StreamAdminUI:
 
     def cleanup(self) -> None:
         """Disconnect chat and release resources."""
-        self._chat_connected = False
+        # Fix: audit/ui-security-perf-2026-05-17 — lock prevents torn read
+        # if polling daemon thread is still accessing _chat_connected during shutdown.
+        with self._chat_lock:
+            self._chat_connected = False
         if self._chat_stop:
             self._chat_stop.set()
             self._chat_stop = None

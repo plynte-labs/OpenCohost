@@ -58,6 +58,7 @@ class CoHostAgendaPanel:
         self._constraint_tags: list[str] = []
         self._profiles: dict[str, dict[str, Any]] = {}
         self._suggestion_widgets: list[dict[str, Any]] = []
+        self._profile_expanded = False
 
     def build(self, parent: Any) -> Any:
         parent.grid_columnconfigure(0, weight=1)
@@ -81,26 +82,44 @@ class CoHostAgendaPanel:
             wraplength=760,
         ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
 
-        profile = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
-        profile.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
-        profile.grid_columnconfigure(0, weight=1)
-        profile.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(profile, text="Perfil Co-host", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(12, 4))
-        combo_profile = ctk.CTkOptionMenu(profile, values=["Natural"], command=self._dispatch_select_profile)
+        card_profile = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        card_profile.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
+        card_profile.grid_columnconfigure(0, weight=1)
+
+        btn_toggle_profile = ctk.CTkButton(
+            card_profile, text="▶ Perfil Co-host",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        btn_toggle_profile.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+
+        profile_content = ctk.CTkFrame(card_profile, fg_color="#101923", corner_radius=14)
+        profile_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        profile_content.grid_remove()
+        profile_content.grid_columnconfigure(0, weight=1)
+        profile_content.grid_columnconfigure(1, weight=1)
+
+        btn_toggle_profile.configure(
+            command=lambda: self._toggle_profile_section(profile_content, btn_toggle_profile)
+        )
+
+        combo_profile = ctk.CTkOptionMenu(profile_content, values=["Natural"], command=self._dispatch_select_profile)
         combo_profile.set("Natural")
-        combo_profile.grid(row=1, column=0, sticky="ew", padx=(14, 6), pady=4)
+        combo_profile.grid(row=0, column=0, sticky="ew", padx=(14, 6), pady=4)
         self._widgets["combo_profile"] = combo_profile
-        entry_profile_name = ctk.CTkEntry(profile, placeholder_text="Nombre del perfil Co-host")
-        entry_profile_name.grid(row=1, column=1, sticky="ew", padx=(6, 14), pady=4)
+        entry_profile_name = ctk.CTkEntry(profile_content, placeholder_text="Nombre del perfil Co-host")
+        entry_profile_name.grid(row=0, column=1, sticky="ew", padx=(6, 14), pady=4)
         self._widgets["entry_profile_name"] = entry_profile_name
-        style_text = ctk.CTkTextbox(profile, height=88, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
-        style_text.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
+        style_text = ctk.CTkTextbox(profile_content, height=88, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
+        style_text.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
         style_text.insert("end", "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.")
         self._widgets["text_profile_style"] = style_text
-        ctk.CTkButton(profile, text="Guardar perfil Co-host", command=self._dispatch_save_profile, fg_color="#555555").grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
+        ctk.CTkButton(profile_content, text="Guardar perfil Co-host", command=self._dispatch_save_profile, fg_color="#555555").grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
 
-        session = ctk.CTkFrame(profile, fg_color="#101923", corner_radius=12)
-        session.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
+        session = ctk.CTkFrame(profile_content, fg_color="#101923", corner_radius=12)
+        session.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
         for col in range(4):
             session.grid_columnconfigure(col, weight=1)
         ctk.CTkLabel(session, text="Configuración de sesión", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=4, sticky="ew", padx=12, pady=(10, 2))
@@ -198,69 +217,138 @@ class CoHostAgendaPanel:
         lbl_activation_hint.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 12))
         self._widgets["lbl_activation_hint"] = lbl_activation_hint
 
-        form = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
-        form.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
-        form.grid_columnconfigure(0, weight=2)
-        form.grid_columnconfigure(1, weight=1)
-        form.grid_columnconfigure(2, weight=1)
-        form.grid_columnconfigure(3, weight=1)
-        ctk.CTkLabel(form, text="Nuevo tema aprobado", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=4, sticky="ew", padx=14, pady=(12, 4))
+        # Collapsible: Nuevo tema aprobado
+        card_nuevo = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        card_nuevo.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
+        card_nuevo.grid_columnconfigure(0, weight=1)
 
-        entry_title = ctk.CTkEntry(form, placeholder_text="Tema claro, máximo 90 caracteres")
-        entry_title.grid(row=1, column=0, sticky="ew", padx=(14, 6), pady=4)
+        self._topic_form_expanded = False
+        btn_toggle_nuevo = ctk.CTkButton(
+            card_nuevo, text="▶ Nuevo tema aprobado",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        btn_toggle_nuevo.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+
+        # Content frame for nuevo tema
+        content_nuevo = ctk.CTkFrame(card_nuevo, fg_color="#101923", corner_radius=14)
+        content_nuevo.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        content_nuevo.grid_remove()
+        content_nuevo.grid_columnconfigure(0, weight=2)
+        content_nuevo.grid_columnconfigure(1, weight=1)
+        content_nuevo.grid_columnconfigure(2, weight=1)
+        content_nuevo.grid_columnconfigure(3, weight=1)
+
+        # Wire toggle
+        btn_toggle_nuevo.configure(
+            command=lambda: self._toggle_topic_form(content_nuevo, btn_toggle_nuevo)
+        )
+
+        entry_title = ctk.CTkEntry(content_nuevo, placeholder_text="Tema claro, máximo 90 caracteres")
+        entry_title.grid(row=0, column=0, sticky="ew", padx=(14, 6), pady=4)
         self._widgets["entry_title"] = entry_title
 
-        ctk.CTkLabel(form, text="Prioridad en cola", text_color="#a9bdd3", anchor="w").grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 0))
+        ctk.CTkLabel(content_nuevo, text="Prioridad en cola", text_color="#a9bdd3", anchor="w").grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 0))
 
-        priority = ctk.CTkOptionMenu(form, values=self.PRIORITIES)
+        priority = ctk.CTkOptionMenu(content_nuevo, values=self.PRIORITIES)
         priority.set("Normal")
-        priority.grid(row=2, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
+        priority.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
         self._widgets["combo_priority"] = priority
 
-        entry_angle = ctk.CTkEntry(form, placeholder_text="Ángulo: cómo querés que Kira lo trate")
-        entry_angle.grid(row=3, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
+        entry_angle = ctk.CTkEntry(content_nuevo, placeholder_text="Ángulo: cómo querés que Kira lo trate")
+        entry_angle.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
         self._widgets["entry_angle"] = entry_angle
 
-        tag_row = ctk.CTkFrame(form, fg_color="transparent")
-        tag_row.grid(row=4, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
+        tag_row = ctk.CTkFrame(content_nuevo, fg_color="transparent")
+        tag_row.grid(row=3, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
         tag_row.grid_columnconfigure(0, weight=1)
         entry_constraint = ctk.CTkEntry(tag_row, placeholder_text="Pegar hashtags/tags: #sinDespedidas, humor seco; no spoilers")
         entry_constraint.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=0)
         self._widgets["entry_constraint_tag"] = entry_constraint
         ctk.CTkButton(tag_row, text="Agregar tag", command=self._dispatch_add_constraint_tag, width=110, fg_color="#555555").grid(row=0, column=1, sticky="ew")
-        tags = ctk.CTkLabel(form, text="Tags: —", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
-        tags.grid(row=5, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 4))
+        tags = ctk.CTkLabel(content_nuevo, text="Tags: —", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
+        tags.grid(row=4, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 4))
         self._widgets["lbl_constraint_tags"] = tags
 
-        actions = ctk.CTkFrame(form, fg_color="transparent")
-        actions.grid(row=6, column=0, columnspan=4, sticky="ew", padx=14, pady=(6, 14))
+        actions = ctk.CTkFrame(content_nuevo, fg_color="transparent")
+        actions.grid(row=5, column=0, columnspan=4, sticky="ew", padx=14, pady=(6, 14))
         for col in range(4):
             actions.grid_columnconfigure(col, weight=1)
         ctk.CTkButton(actions, text="Agregar a cola", command=self._dispatch_add_topic, fg_color="#2f5f8f").grid(row=0, column=0, padx=4, pady=4, sticky="ew")
 
-        bulk = ctk.CTkFrame(form, fg_color="#101923", corner_radius=14)
-        bulk.grid(row=7, column=0, columnspan=4, sticky="ew", padx=14, pady=(2, 10))
-        bulk.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(bulk, text="Importar temas en lote", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-        bulk_text = ctk.CTkTextbox(bulk, height=120, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
-        bulk_text.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        # Collapsible: Importar temas en lote
+        card_bulk = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        card_bulk.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
+        card_bulk.grid_columnconfigure(0, weight=1)
+
+        self._bulk_expanded = False
+        btn_toggle_bulk = ctk.CTkButton(
+            card_bulk, text="▶ Importar temas en lote",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        btn_toggle_bulk.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+
+        # Content frame for bulk import
+        content_bulk = ctk.CTkFrame(card_bulk, fg_color="#101923", corner_radius=14)
+        content_bulk.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        content_bulk.grid_remove()
+        content_bulk.grid_columnconfigure(0, weight=1)
+
+        btn_toggle_bulk.configure(
+            command=lambda: self._toggle_bulk_section(content_bulk, btn_toggle_bulk)
+        )
+
+        bulk_text = ctk.CTkTextbox(content_bulk, height=120, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
+        bulk_text.grid(row=0, column=0, sticky="ew", padx=12, pady=4)
         bulk_text.insert("end", "1. Sociedad Latam\nTema: La nostalgia noventera en internet\nÁngulo: Por qué volvemos a símbolos viejos cuando el presente pesa.\nPrioridad: alta\nRitmo: normal\nTags: #Latam #Nostalgia #Internet\n\n2. Gaming\nTema: Mods como cultura popular\nÁngulo: Comunidades chicas que terminan definiendo gustos enormes.\nLongitud: expandida\nPrioridad: baja\nTags: #Gaming #Mods")
         self._widgets["text_bulk_topics"] = bulk_text
-        ctk.CTkButton(bulk, text="Importar temas", command=self._dispatch_bulk_import, fg_color="#2f5f8f").grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 4))
-        bulk_status = ctk.CTkLabel(bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los turnos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
-        bulk_status.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkButton(content_bulk, text="Importar temas", command=self._dispatch_bulk_import, fg_color="#2f5f8f").grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 4))
+        bulk_status = ctk.CTkLabel(content_bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los turnos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
+        bulk_status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
         self._widgets["lbl_bulk_status"] = bulk_status
 
         guardrails = ctk.CTkLabel(
-            form,
+            root,
             text="Guardrails: se rechazan textos larguísimos, código, HTML, emojis/símbolos raros y demasiadas restricciones. Modos: Live_safe ≈25-40s/cap 1100; Monologue permite monólogos largos interruptibles/cap 3000; Test permite 60-90s/cap 6000. Longitud global: Corta ≈450 chars; Normal ≈1500 chars mini monólogo; Expandida = monólogo largo de prueba con cap 6000. Turnos globales 1-20.",
             text_color="#8fa3b8",
             anchor="w",
             justify="left",
             wraplength=760,
         )
-        guardrails.grid(row=8, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 12))
+        guardrails.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
         return root
+
+    def _toggle_topic_form(self, content: Any, button: Any) -> None:
+        self._topic_form_expanded = not self._topic_form_expanded
+        if self._topic_form_expanded:
+            content.grid()
+            button.configure(text="▼ Nuevo tema aprobado")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ Nuevo tema aprobado")
+
+    def _toggle_bulk_section(self, content: Any, button: Any) -> None:
+        self._bulk_expanded = not self._bulk_expanded
+        if self._bulk_expanded:
+            content.grid()
+            button.configure(text="▼ Importar temas en lote")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ Importar temas en lote")
+
+    def _toggle_profile_section(self, content: Any, button: Any) -> None:
+        self._profile_expanded = not self._profile_expanded
+        if self._profile_expanded:
+            content.grid()
+            button.configure(text="▼ Perfil Co-host")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ Perfil Co-host")
 
     def _dispatch_add_constraint_tag(self) -> None:
         raw = self._get("entry_constraint_tag")

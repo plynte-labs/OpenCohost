@@ -186,7 +186,10 @@ class VocalAIApp(ctk.CTk):
 
         # Shared UIState
         self._ui_state = UIState()
-        self._ui_state.subscribe(self._on_ui_state_change)
+        # Fix: audit/ui-security-perf-2026-05-17 — store subscription ID for cleanup.
+        # Without unsubscribe, UIState holds a reference to VocalAIApp preventing GC
+        # after destroy(). Same pattern used by StatusBar, ModelPanel, etc.
+        self._ui_state_sub_id = self._ui_state.subscribe(self._on_ui_state_change)
 
         # Callback dispatchers
         self._model_dispatcher = CallbackDispatcher(source="ModelPanel")
@@ -405,6 +408,7 @@ class VocalAIApp(ctk.CTk):
         tab_main_kira.grid_columnconfigure(0, weight=1)
         tab_main_kira.grid_rowconfigure(1, weight=1)
         tab_main_kira.grid_rowconfigure(2, weight=0)
+        tab_main_kira.grid_rowconfigure(3, weight=1)
 
         # Kira header
         kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
@@ -424,16 +428,29 @@ class VocalAIApp(ctk.CTk):
             avatar_preview_frame, text="",
             text_color="#6b7b8d",
             font=ctk.CTkFont(size=12),
-            height=220,
+            height=140,
             corner_radius=8,
         )
         self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         # Subscribe avatar bridge to update left-panel preview
         self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)
 
+        # Primary action button — Hablar (prominent, at Kira level)
+        self._primary_speak_btn = ctk.CTkButton(
+            tab_main_kira,
+            text="Hablar",
+            command=None,  # Wired after VoiceControlPanel is created
+            state="disabled",
+            height=72,
+            font=ctk.CTkFont(size=21, weight="bold"),
+            fg_color="#1f7a5a",
+            hover_color="#24946c",
+        )
+        self._primary_speak_btn.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+
         # Kira response: compact scrollable panel so the avatar remains the hero.
         kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=18)
-        kira_response_shell.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        kira_response_shell.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 10))
         kira_response_shell.grid_columnconfigure(0, weight=1)
         kira_response_shell.grid_rowconfigure(1, weight=0)
         ctk.CTkLabel(kira_response_shell, text="Respuesta de Kira", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef", anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
@@ -444,11 +461,11 @@ class VocalAIApp(ctk.CTk):
         self.text_kira_response.insert("end", "La respuesta de Kira aparecerá aquí. Los logs completos se muestran abajo solo si activas Mostrar logs.\n")
         self.text_kira_response.configure(state="disabled")
 
-        # Voice panel
+        # Voice panel (compact — primary button is at Kira level)
         voice_panel_frame = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        voice_panel_frame.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 10))
+        voice_panel_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
         voice_panel_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
 
         self.voice_panel = VoiceControlPanel(
             parent_frame=voice_panel_frame,
@@ -459,6 +476,7 @@ class VocalAIApp(ctk.CTk):
             on_pipeline_change=self._actualizar_pipeline,
             dispositivo_seleccionado=self.dispositivo_seleccionado,
             schedule_ui_update=lambda fn: self.after(0, fn),
+            external_primary_button=self._primary_speak_btn,
         )
         self.voice_panel.create_voice_panel()
 
@@ -472,9 +490,12 @@ class VocalAIApp(ctk.CTk):
         self.barra_rms = self.voice_panel.barra_rms
         self.voice_panel._schedule_rms_frame = lambda: self.after(150, self.voice_panel._animar_rms)
 
+        # Wire primary button to VoiceControlPanel's toggle
+        self._primary_speak_btn.configure(command=self.voice_panel._toggle_websocket)
+
         # Bottom chat entry
         frame_bottom = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        frame_bottom.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
+        frame_bottom.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 16))
         frame_bottom.grid_columnconfigure(0, weight=1)
 
         self.entry_chat = ctk.CTkEntry(frame_bottom, placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)...")
@@ -488,31 +509,95 @@ class VocalAIApp(ctk.CTk):
         side_panel = ctk.CTkFrame(app_shell, fg_color="#0f151c", corner_radius=18)
         side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
         side_panel.grid_columnconfigure(0, weight=1)
-        side_panel.grid_rowconfigure(1, weight=1)
+        side_panel.grid_rowconfigure(2, weight=1)
         ctk.CTkLabel(side_panel, text="Paneles de producto", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
 
-        product_tabs = ctk.CTkTabview(side_panel, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
-        product_tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 12))
-        tab_product_config = product_tabs.add("Configuración")
-        tab_product_stream = product_tabs.add("Stream")
-        tab_product_cohost = product_tabs.add("Co-host")
-        tab_product_music = product_tabs.add("Música")
-        tab_product_avatar = product_tabs.add("Avatar / OBS")
-        for tab in (tab_product_config, tab_product_stream, tab_product_cohost, tab_product_music, tab_product_avatar):
-            tab.grid_columnconfigure(0, weight=1)
-            tab.grid_rowconfigure(0, weight=1)
+        # Product tabs — custom buttons (full-width, clear active state)
+        product_tab_bar = ctk.CTkFrame(side_panel, fg_color="transparent")
+        product_tab_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        for col in range(5):
+            product_tab_bar.grid_columnconfigure(col, weight=1, uniform="product_tab")
+
+        product_content = ctk.CTkFrame(side_panel, fg_color="#0f151c", corner_radius=18)
+        product_content.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 12))
+        product_content.grid_columnconfigure(0, weight=1)
+        product_content.grid_rowconfigure(0, weight=1)
+
+        self._product_tab_data: dict[str, dict] = {}
+        self._active_product_tab: str = "config"
+
+        TAB_DEFS = [
+            ("config", "Configuración"),
+            ("stream", "Stream"),
+            ("cohost", "Co-host"),
+            ("music", "Música"),
+            ("avatar", "Avatar / OBS"),
+        ]
+
+        for idx, (key, label) in enumerate(TAB_DEFS):
+            is_active = (key == self._active_product_tab)
+            btn = ctk.CTkButton(
+                product_tab_bar,
+                text=label,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                fg_color="#2f5f8f" if is_active else "#151d26",
+                hover_color="#3670aa" if is_active else "#1d2a38",
+                text_color="#ffffff" if is_active else "#6b7b8d",
+                corner_radius=8,
+                height=36,
+            )
+            btn.grid(row=0, column=idx, sticky="ew", padx=2, pady=2)
+            btn.configure(command=lambda k=key: self._switch_product_tab(k))
+            self._product_tab_data[key] = {"button": btn}
+
+        # Content frames — only active one visible
+        tab_product_config = ctk.CTkFrame(product_content, fg_color="transparent")
+        tab_product_config.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_product_config.grid_columnconfigure(0, weight=1)
+        tab_product_config.grid_rowconfigure(0, weight=1)
+        self._product_tab_data["config"]["frame"] = tab_product_config
+
+        tab_product_stream = ctk.CTkFrame(product_content, fg_color="transparent")
+        tab_product_stream.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_product_stream.grid_columnconfigure(0, weight=1)
+        tab_product_stream.grid_rowconfigure(0, weight=1)
+        tab_product_stream.grid_remove()
+        self._product_tab_data["stream"]["frame"] = tab_product_stream
+
+        tab_product_cohost = ctk.CTkFrame(product_content, fg_color="transparent")
+        tab_product_cohost.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_product_cohost.grid_columnconfigure(0, weight=1)
+        tab_product_cohost.grid_rowconfigure(0, weight=1)
+        tab_product_cohost.grid_remove()
+        self._product_tab_data["cohost"]["frame"] = tab_product_cohost
+
+        tab_product_music = ctk.CTkFrame(product_content, fg_color="transparent")
+        tab_product_music.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_product_music.grid_columnconfigure(0, weight=1)
+        tab_product_music.grid_rowconfigure(0, weight=1)
+        tab_product_music.grid_remove()
+        self._product_tab_data["music"]["frame"] = tab_product_music
+
+        tab_product_avatar = ctk.CTkFrame(product_content, fg_color="transparent")
+        tab_product_avatar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        tab_product_avatar.grid_columnconfigure(0, weight=1)
+        tab_product_avatar.grid_rowconfigure(0, weight=1)
+        tab_product_avatar.grid_remove()
+        self._product_tab_data["avatar"]["frame"] = tab_product_avatar
 
         config_tabs = ctk.CTkTabview(tab_product_config, fg_color="#0f151c", segmented_button_fg_color="#0c1117", segmented_button_selected_color="#2f5f8f", segmented_button_selected_hover_color="#3670aa", segmented_button_unselected_color="#151d26", segmented_button_unselected_hover_color="#1d2a38", text_color="#d8e2ef")
         config_tabs.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile = config_tabs.add("Modelo/Perfil")
         tab_cfg_audio_voice = config_tabs.add("Audio/TTS")
-        tab_cfg_admin = config_tabs.add("Admin")
+        tab_cfg_admin = config_tabs.add("Ayuda")
         for tab in (tab_cfg_model_profile, tab_cfg_audio_voice, tab_cfg_admin):
             tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+        tab_cfg_model_profile.grid_columnconfigure(1, weight=1)
 
         # Model panel
         frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
-        frame_model.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        frame_model.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
         self.model_panel = ModelPanel(parent_frame=frame_model, ui_state=self._ui_state, dispatcher=self._model_dispatcher, on_log=self._print_log, schedule_ui_update=lambda fn: self.after(0, fn))
         self.model_panel.build()
         self.combo_modelos = self.model_panel.combo_modelos
@@ -525,7 +610,7 @@ class VocalAIApp(ctk.CTk):
 
         # Profile panel
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
-        frame_profile.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+        frame_profile.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=lambda fn: self.after(0, fn))
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
@@ -554,8 +639,25 @@ class VocalAIApp(ctk.CTk):
         self.btn_grabar.pack(side="left", expand=True, fill="x", padx=(0, 4))
         self.btn_voz = ctk.CTkButton(audio_buttons, text="📂 Cargar WAV", command=self._cargar_voz, state="disabled", fg_color="#555555", width=110)
         self.btn_voz.pack(side="left", expand=True, fill="x", padx=(4, 0))
-        self.btn_ws = ctk.CTkButton(frame_audio, text="Conectar LiveAudio", command=self._toggle_websocket, fg_color="#555555", state="disabled")
-        self.btn_ws.pack(fill="x", padx=10, pady=(4, 10))
+        # LiveAudio section
+        frame_liveaudio = ctk.CTkFrame(frame_audio, fg_color="#101923", corner_radius=10)
+        frame_liveaudio.pack(fill="x", padx=10, pady=(8, 0))
+        ctk.CTkLabel(
+            frame_liveaudio,
+            text="LiveAudio es el motor que permite a Kira escuchar tu voz en tiempo real.",
+            font=ctk.CTkFont(size=10),
+            text_color="#8fa3b8",
+            anchor="w",
+            justify="left",
+            wraplength=400,
+        ).pack(fill="x", padx=10, pady=(8, 4))
+        self.btn_ws = ctk.CTkButton(
+            frame_liveaudio, text="Conectar LiveAudio",
+            command=self._toggle_websocket,
+            fg_color="#2f5f8f", hover_color="#3670aa",
+            state="disabled",
+        )
+        self.btn_ws.pack(fill="x", padx=10, pady=(0, 10))
 
         # TTS / Memory
         frame_tts_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
@@ -564,13 +666,16 @@ class VocalAIApp(ctk.CTk):
         self.switch_modo_ligero = ctk.CTkSwitch(frame_tts_memory, text="🎛️ TTS: Ligero", onvalue="ligero", offvalue="pesado", command=self._al_cambiar_motor_tts)
         self.switch_modo_ligero.pack(fill="x", padx=10, pady=4)
         self.switch_modo_ligero.select()
+        ctk.CTkLabel(frame_tts_memory, text="Ligero: rápido, usa Edge-TTS (cloud). Pesado: Qwen3-TTS local, requiere descarga previa del modelo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
+        ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
 
         # PTT controls live with model/profile because they configure how Kira is operated.
         frame_ptt = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
-        frame_ptt.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_ptt, text="PTT", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        frame_ptt.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_ptt, text="PTT (Push-to-Talk)", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 2))
+        ctk.CTkLabel(frame_ptt, text="Activá PTT y mantené presionada la tecla para hablar. Soltá para que Kira procese y responda. Con PTT OFF, Kira escucha continuamente (modo LiveAudio).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
         self.switch_ptt = ctk.CTkSwitch(frame_ptt, text="PTT OFF", command=self._al_toggle_ptt, onvalue=True, offvalue=False)
         self.switch_ptt.pack(fill="x", padx=10, pady=4)
         ptt_hotkey_row = ctk.CTkFrame(frame_ptt, fg_color="transparent")
@@ -583,31 +688,83 @@ class VocalAIApp(ctk.CTk):
         self.lbl_ptt_status = ctk.CTkLabel(frame_ptt, text="", font=ctk.CTkFont(size=12), text_color="#888888", anchor="w", justify="left")
         self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
 
-        # Admin tab
+        # Ayuda tab — contextual help for each product tab
         # YouTube chat controls moved to Stream Admin > Acciones > Chat Live (RF3).
         # These stubs preserve backward compat with existing methods that reference them.
         self.entry_youtube_video = _EntryStub()
         self.btn_youtube_chat = _ButtonStub()
         self.entry_youtube_user_limit = _EntryStub("10")
         self.entry_youtube_threshold = _EntryStub("1.0")
-        frame_oauth = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
-        frame_oauth.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_oauth, text="OAuth", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-        self.lbl_oauth_side_status = ctk.CTkLabel(frame_oauth, text="Configura YouTube en la pestaña Stream Admin.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=300)
-        self.lbl_oauth_side_status.pack(fill="x", padx=10, pady=(0, 10))
 
-        frame_moderation = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
-        frame_moderation.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_moderation, text="Moderación", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-        self.lbl_moderation_side_status = ctk.CTkLabel(frame_moderation, text="Sin acciones pendientes. Detalles en Stream Admin.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=300)
-        self.lbl_moderation_side_status.pack(fill="x", padx=10, pady=(0, 10))
+        # Backward compat stubs (stream_admin_ui references them via _widget lookup; skips when None)
+        self.lbl_oauth_side_status = None
+        self.lbl_moderation_side_status = None
 
-        frame_view = ctk.CTkFrame(tab_cfg_admin, fg_color="#151d26", corner_radius=14)
+        # Ayuda tab — collapsible help cards per section
+        frame_ayuda = ctk.CTkScrollableFrame(tab_cfg_admin, fg_color="transparent")
+        frame_ayuda.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        frame_ayuda.grid_columnconfigure(0, weight=1)
+
+        # Keep the Vista card at the top
+        frame_view = ctk.CTkFrame(frame_ayuda, fg_color="#151d26", corner_radius=14)
         frame_view.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         ctk.CTkLabel(frame_view, text="Vista", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
         self.switch_logs = ctk.CTkSwitch(frame_view, text="Registrar logs en avanzado", onvalue=True, offvalue=False)
         self.switch_logs.pack(fill="x", padx=10, pady=(4, 10))
         self.switch_logs.select()
+
+        # Help sections — one per product tab, collapsible
+        help_sections = [
+            ("Configuración", "Modelo/Perfil: elegí el modelo LLM (Ollama) y el perfil de personalidad de Kira.\n\nAudio/TTS: seleccioná dispositivo de entrada, alterná entre TTS Ligero (Edge-TTS cloud, rápido) y Pesado (Qwen3-TTS local, mayor calidad).\n\nPTT (Push-to-Talk): mantené presionada la tecla asignada para hablar; soltá para que Kira responda."),
+            ("Stream", "Emisión: conectá tu cuenta de YouTube (OAuth), gestioná metadata del stream (título, categoría, tags, descripción).\n\nAcciones: monitoreá el chat en vivo (Chat Live RF3), enviá mensajes como Kira, moderá usuarios (timeout/ban)."),
+            ("Co-host", "Creá una agenda de temas aprobados para que Kira los desarrolle en vivo. Importá temas en lote desde texto estructurado. Controlá la sesión: Activar, Stop suave, Emergencia."),
+            ("Música", "Importá loops de audio .mp3/.wav etiquetados por mood (Normal, Calmo, Épico, etc.). Probá cada mood con un clic. El sistema hace fade, ducking y fallback automático."),
+            ("Avatar / OBS", "Cambiá la imagen de Kira para cada estado (idle, hablando, escuchando, etc.). Conectá con OBS Studio vía WebSocket para reflejar los cambios en vivo."),
+        ]
+
+        self._help_expanded = {}
+        row_num = 1
+        for title, description in help_sections:
+            key = title.lower().replace(" ", "_").replace("/", "_")
+
+            # Card frame
+            card = ctk.CTkFrame(frame_ayuda, fg_color="#151d26", corner_radius=14)
+            card.grid(row=row_num, column=0, sticky="ew", padx=8, pady=(0, 8))
+            card.grid_columnconfigure(0, weight=1)
+
+            # Toggle header
+            btn = ctk.CTkButton(
+                card, text=f"▶ {title}",
+                anchor="w",
+                fg_color="transparent", text_color="#d8e2ef",
+                hover_color="#1d2a38",
+                font=ctk.CTkFont(size=13, weight="bold"),
+            )
+            btn.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+
+            # Content frame
+            content = ctk.CTkFrame(card, fg_color="#101923", corner_radius=12)
+            content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+            content.grid_columnconfigure(0, weight=1)
+            content.grid_remove()
+
+            # Use CTkTextbox instead of CTkLabel — guarantees text is always visible
+            textbox = ctk.CTkTextbox(
+                content,
+                font=ctk.CTkFont(size=11),
+                fg_color="#101923",
+                text_color="#a9bdd3",
+                wrap="word",
+                height=100,
+                border_width=0,
+            )
+            textbox.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+            textbox.insert("end", description)
+            textbox.configure(state="disabled")
+
+            self._help_expanded[key] = False
+            btn.configure(command=lambda k=key, c=content, b=btn: self._toggle_help_section(k, c, b))
+            row_num += 1
 
         # Stream Admin panel — internals preserved, only the container moved
         # into the Stream product workspace.
@@ -701,7 +858,6 @@ class VocalAIApp(ctk.CTk):
         self._main_interaction_panel = main_panel
         self._side_config_panel = side_panel
         self._product_workspace_panel = side_panel
-        self._product_tabs = product_tabs
 
         self._show_main_view("Kira")
         self._toggle_logs_panel()
@@ -1840,6 +1996,30 @@ class VocalAIApp(ctk.CTk):
         visible = bool(hasattr(self, "switch_advanced") and self.switch_advanced.get())
         self._set_logs_panel_visible(visible)
 
+    def _toggle_help_section(self, key: str, frame: Any, button: Any) -> None:
+        expanded = not self._help_expanded.get(key, False)
+        self._help_expanded[key] = expanded
+        if expanded:
+            frame.grid()
+            button.configure(text=button.cget("text").replace("▶", "▼"))
+        else:
+            frame.grid_remove()
+            button.configure(text=button.cget("text").replace("▼", "▶"))
+
+    def _switch_product_tab(self, key: str) -> None:
+        """Switch the active product tab (custom button tabs)."""
+        if key == self._active_product_tab:
+            return
+        prev = self._product_tab_data.get(self._active_product_tab)
+        if prev:
+            prev["button"].configure(fg_color="#151d26", hover_color="#1d2a38", text_color="#6b7b8d")
+            prev["frame"].grid_remove()
+        curr = self._product_tab_data.get(key)
+        if curr:
+            curr["button"].configure(fg_color="#2f5f8f", hover_color="#3670aa", text_color="#ffffff")
+            curr["frame"].grid()
+        self._active_product_tab = key
+
     def _log_accion(self, msg: str) -> None:
         self._advanced_panel.log_action(msg)
 
@@ -2393,6 +2573,11 @@ class VocalAIApp(ctk.CTk):
 
     def on_closing(self) -> None:
         logger.info("Cerrando aplicación...")
+
+        # Fix: audit/ui-security-perf-2026-05-17 — unsubscribe UIState observer to
+        # release GC reference. Matches pattern used by all panel cleanup methods.
+        if hasattr(self, "_ui_state_sub_id"):
+            self._ui_state.unsubscribe(self._ui_state_sub_id)
 
         if hasattr(self, "voice_panel"):
             self.voice_panel.cleanup()
