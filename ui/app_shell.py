@@ -518,7 +518,7 @@ class VocalAIApp(ctk.CTk):
         for col in range(5):
             product_tab_bar.grid_columnconfigure(col, weight=1, uniform="product_tab")
 
-        product_content = ctk.CTkFrame(side_panel, fg_color="#0f151c", corner_radius=18)
+        product_content = ctk.CTkScrollableFrame(side_panel, fg_color="#0f151c", corner_radius=18, scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
         product_content.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 12))
         product_content.grid_columnconfigure(0, weight=1)
         product_content.grid_rowconfigure(0, weight=1)
