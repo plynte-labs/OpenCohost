@@ -1133,3 +1133,281 @@ class TestPausedControllerDoesNotBlockChat:
         assert controller.active_topic is not None, (
             "Active topic must survive resume+PAUSED cycle"
         )
+
+
+# ============================================================================
+# Phase 1 TDD — Character Contract Validator
+# These tests are EXPECTED TO FAIL (red phase).
+# Implementation (Phase 2) will add:
+#   - CharacterContractResult dataclass
+#   - breaks_character() static method
+#   - GUARDRAIL_BREAKS_CHARACTER ErrorCode
+#   - CHARACTER_CONTRACT_ENABLED class constant
+#   - _character_repair_needed instance variable
+# ============================================================================
+
+# ── T1.1: Must-reject parametrized test ───────────────────────────────
+
+MUST_REJECT_CASES = [
+    # (phrase, expected_subtype)
+    ("He procesado la reflexión que has compartido sobre la nostalgia.", "processing_leak"),
+    ("Es un tema muy profundo. Estoy lista para continuar.", "assistant_offer"),
+    ("¿Quieres que sigamos con otro tema o prefieres cerrar este?", "meta_question"),
+    ("He analizado el contexto de la sesión y creo que podemos profundizar.", "prompt_leak"),
+    ("Soy una IA diseñada para acompañarte. Mis instrucciones dicen que...", "assistant_identity"),
+    ("He procesado la reflexión y puedo continuar con el tema.", "processing_leak"),
+    ("Me encuentro lista para seguir con la conversación.", "assistant_offer"),
+    ("Recibí el contexto de la sesión y este tema es interesante.", "processing_leak"),
+    ("¿De qué más podríamos hablar? Tengo varias ideas.", "meta_question"),
+    ("Como asistente, estoy preparada para ayudarte con lo que necesites.", "assistant_identity"),
+    ("He revisado la sesión y según mis instrucciones debo acompañarte.", "prompt_leak"),
+    ("Estoy disponible para colaborar en lo que quieras desarrollar.", "assistant_offer"),
+]
+
+
+@pytest.mark.parametrize("phrase, expected_subtype", MUST_REJECT_CASES)
+def test_breaks_character_must_reject(phrase, expected_subtype):
+    """T1.1: Character-breaking phrases MUST be detected with correct subtype."""
+    result = KiraAgendaController.breaks_character(phrase)
+    assert result is not None, (
+        f"Expected rejection for: {phrase!r}\n"
+        f"Got None — breaks_character() did not detect the break."
+    )
+    assert result.subtype == expected_subtype, (
+        f"Wrong subtype for: {phrase!r}\n"
+        f"Expected: {expected_subtype!r}, got: {result.subtype!r}"
+    )
+
+
+# ── T1.2: Must-accept parametrized test ───────────────────────────────
+
+MUST_ACCEPT_PHRASES = [
+    "Lo curioso es que la nostalgia no siempre habla del pasado.",
+    "Ese tipo de comunidad no se construye solo con mods, se construye con rituales.",
+    "¿Se imaginan lo que era internet en los 90?",
+    "Y justo ahí está el truco, ¿no crees?",
+    "Mira, si nos ponemos a pensar en esto desde la perspectiva de las comunidades...",
+    (
+        "La nostalgia es un asunto curioso. "
+        "Parece que cuando el presente se vuelve pesado..."
+    ),
+    "A ver, es que esta cosa de la nostalgia noventera en internet es súper jodida.",
+    "Es como si el presente fuera un filtro demasiado ruidoso, ¿vieron?",
+    (
+        "No es solo una nostalgia por lo que fue, "
+        "sino por la forma en que seleccionamos."
+    ),
+    (
+        "Y al final del día, todo se reduce a esa danza constante "
+        "entre lo que es y lo que construimos."
+    ),
+    "Lo que compartiste toca algo raro de la nostalgia.",
+    "Es un tema profundo, pero lo curioso es cómo lo convertimos en costumbre.",
+]
+
+
+@pytest.mark.parametrize("phrase", MUST_ACCEPT_PHRASES)
+def test_breaks_character_must_accept(phrase):
+    """T1.2: Natural co-host phrases MUST be accepted (return None)."""
+    result = KiraAgendaController.breaks_character(phrase)
+    assert result is None, (
+        f"Expected accept (None) for: {phrase!r}\n"
+        f"Got rejection with subtype={result.subtype!r}"
+    )
+
+
+# ── T1.3: Ambiguous cases with explicit verdicts ──────────────────────
+
+AMBIGUOUS_CASES = [
+    # (phrase, should_reject, expected_subtype_or_none)
+    (
+        "Es un tema profundo, pero lo curioso es cómo lo convertimos en costumbre.",
+        False,
+        None,
+    ),
+    (
+        "Es un tema muy profundo. ¿Quieres que sigamos?",
+        True,
+        "meta_question",
+    ),
+    (
+        "Lo que compartiste toca algo raro de la nostalgia.",
+        False,
+        None,
+    ),
+    (
+        "He procesado lo que compartiste y puedo continuar.",
+        False,
+        None,
+    ),
+    (
+        "Esa comunidad toca un tema profundo: pertenecer a algo.",
+        False,
+        None,
+    ),
+    (
+        "En el contexto de los 90, esto era impensable.",
+        False,
+        None,
+    ),
+    (
+        "¿Se imaginan el contexto en que surgió todo esto?",
+        False,
+        None,
+    ),
+    (
+        "Estoy lista para el siguiente tema, pero antes quiero decir algo.",
+        False,
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize("phrase, should_reject, expected_subtype", AMBIGUOUS_CASES)
+def test_breaks_character_ambiguous(phrase, should_reject, expected_subtype):
+    """T1.3: Ambiguous phrases with explicit accept/reject verdicts.
+
+    Verifies that border cases are classified correctly:
+    - Natural uses of 'contexto', 'compartiste', 'tema profundo' are accepted.
+    - Assistant-mode phrasing (meta questions, processing verbs) are rejected.
+    """
+    result = KiraAgendaController.breaks_character(phrase)
+
+    if should_reject:
+        assert result is not None, (
+            f"Expected REJECT ({expected_subtype}) for: {phrase!r}\n"
+            f"Got None — phrase was incorrectly accepted."
+        )
+        assert result.subtype == expected_subtype, (
+            f"Wrong subtype for: {phrase!r}\n"
+            f"Expected: {expected_subtype!r}, got: {result.subtype!r}"
+        )
+    else:
+        assert result is None, (
+            f"Expected ACCEPT for: {phrase!r}\n"
+            f"Got rejection with subtype={result.subtype!r}"
+        )
+
+
+# ── T1.4: Recovery flow tests ─────────────────────────────────────────
+
+class TestCharacterRecoveryFlow:
+    """T1.4: Character break → repair → fallback → close topic flow.
+
+    These tests depend on Phase 3 integration:
+    - _validate_output must call breaks_character()
+    - register_failure must handle GUARDRAIL_BREAKS_CHARACTER
+    - _build_prompt must inject repair prefix via _character_repair_needed
+    - Force-close topic when failure_count >= 2
+
+    EXPECTED TO FAIL in Phase 1 — implementation does not exist yet.
+    """
+
+    def test_character_repair_needed_defaults_to_false(self):
+        """The _character_repair_needed flag should exist and default to False."""
+        controller = KiraAgendaController()
+        assert hasattr(controller, "_character_repair_needed"), (
+            "_character_repair_needed instance variable not found. "
+            "Expected to be added in Phase 2 (T2.3)."
+        )
+        assert controller._character_repair_needed is False, (
+            "_character_repair_needed should default to False."
+        )
+
+    def test_first_character_break_triggers_regenerating_safe(self):
+        """After 1 character break rejection, state → REGENERATING_SAFE."""
+        controller = KiraAgendaController(max_turns_per_topic=4, max_failures=3)
+        topic = controller.add_topic(
+            "Test topic", angle="test angle", approved=True,
+        )
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        # Advance to a state where _validate_output would be called
+        controller.next_action(motor_busy=False, kira_speaking=False)
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+        assert controller.state == AgendaState.WAITING_SIGNAL
+
+        # Simulate a character-breaking rejection via register_failure
+        controller.register_failure(
+            error=ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+            reason="Kira rompió contrato de personaje: processing_leak",
+        )
+
+        assert controller.state == AgendaState.REGENERATING_SAFE, (
+            f"Expected REGENERATING_SAFE after 1 character break, "
+            f"got {controller.state}"
+        )
+        assert controller._character_repair_needed is True, (
+            "Expected repair flag to be set after character break."
+        )
+
+    def test_second_character_break_closes_topic(self):
+        """After 2 character break rejections, topic is force-closed."""
+        controller = KiraAgendaController(max_turns_per_topic=4, max_failures=3)
+        topic = controller.add_topic(
+            "Test topic", angle="test angle", approved=True,
+        )
+        controller.queue_topic(topic.id)
+        controller.enable()
+
+        controller.next_action(motor_busy=False, kira_speaking=False)
+        controller.mark_generation_accepted()
+        controller.mark_speech_complete()
+
+        # First break
+        controller.register_failure(
+            error=ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+            reason="First character break",
+        )
+        assert controller.state == AgendaState.REGENERATING_SAFE
+
+        # Advance state so second rejection can be registered
+        controller.state = AgendaState.WAITING_SIGNAL
+
+        # Second break
+        controller.register_failure(
+            error=ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+            reason="Second character break",
+        )
+
+        # Topic should be force-closed: turns_spoken reaches max_turns
+        assert topic.turns_spoken >= controller.max_turns_per_topic, (
+            f"Expected topic force-closed (turns_spoken >= {controller.max_turns_per_topic}), "
+            f"got turns_spoken={topic.turns_spoken}"
+        )
+
+
+# ── T1.5: Feature flag off test ───────────────────────────────────────
+
+def test_character_contract_feature_flag_off():
+    """T1.5: With CHARACTER_CONTRACT_ENABLED=False, character breaks pass through.
+
+    EXPECTED TO FAIL — flag and validator integration don't exist yet.
+    """
+    controller = KiraAgendaController()
+
+    # The flag should exist as a class constant
+    assert hasattr(KiraAgendaController, "CHARACTER_CONTRACT_ENABLED"), (
+        "CHARACTER_CONTRACT_ENABLED class constant not found. "
+        "Expected to be added in Phase 2 (T2.3)."
+    )
+
+    # Disable the feature
+    original = KiraAgendaController.CHARACTER_CONTRACT_ENABLED
+    try:
+        KiraAgendaController.CHARACTER_CONTRACT_ENABLED = False
+
+        # Character-breaking text should pass through _validate_output
+        result = controller._validate_output(
+            "He procesado la reflexión que has compartido.",
+            mutate=False,
+        )
+        assert result is True, (
+            f"Expected pass-through (True) when feature flag is off, "
+            f"got {result}. Character contract check should be skipped."
+        )
+    finally:
+        KiraAgendaController.CHARACTER_CONTRACT_ENABLED = original

@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     GUARDRAIL_EMPTY = "ERR_GUARDRAIL_EMPTY"
     LLM_TIMEOUT = "ERR_LLM_TIMEOUT"
     OLLAMA_DOWN = "ERR_OLLAMA_DOWN"
+    GUARDRAIL_BREAKS_CHARACTER = "ERR_GUARDRAIL_BREAKS_CHARACTER"
 
     def human(self) -> str:
         _MAP = {
@@ -51,8 +52,18 @@ class ErrorCode(str, Enum):
             ErrorCode.GUARDRAIL_EMPTY: "El modelo no generó respuesta",
             ErrorCode.LLM_TIMEOUT: "El modelo tardó demasiado",
             ErrorCode.OLLAMA_DOWN: "Ollama no está respondiendo",
+            ErrorCode.GUARDRAIL_BREAKS_CHARACTER: "Kira rompió el contrato de personaje",
         }
         return _MAP.get(self, str(self.value))
+
+
+@dataclass(frozen=True)
+class CharacterContractResult:
+    """Carries metadata about a detected character contract break."""
+    ok: bool
+    subtype: str
+    matched_pattern: str
+    matched_text: str
 
 
 class RecoveryPolicy:
@@ -293,6 +304,52 @@ class KiraAgendaController:
         r"=>",
     )
 
+    CHARACTER_CONTRACT_ENABLED: bool = True
+
+    # ── Character Contract Validator: precompiled regex patterns ──
+    # Order matters: most specific → least specific. Short-circuits on first match.
+
+    _PROMPT_LEAK_RE = re.compile(
+        r"\b(he|has)\s+(procesado|recibido|analizado|revisado)\s+(el|la|lo)\s+(contexto|sesi[oó]n|instrucci[oó]n|prompt)"
+        r"|"
+        r"\b(seg[uú]n|como\s+dicen|de\s+acuerdo\s+a)\s+(mis|las)\s+(instrucciones|indicaciones|directrices)",
+        re.IGNORECASE,
+    )
+
+    _PROCESSING_LEAK_RE = re.compile(
+        r"\b(he|has)\s+(procesado|recibido|analizado|revisado)\s+(el|la|lo|tu|su)\s+(contexto|sesi[oó]n|reflexi[oó]n|tema|informaci[oó]n)"
+        r"|"
+        r"\b(recib[ií]|proces[eé]|analic[eé]|revis[eé])\s+(el|la|lo|tu|su)\s+(contexto|sesi[oó]n|reflexi[oó]n|informaci[oó]n)",
+        re.IGNORECASE,
+    )
+
+    _ASSISTANT_IDENTITY_RE = re.compile(
+        r"\b(soy|yo\s+soy)\s+(una|un)\s+(ia|inteligencia\s+artificial|asistente|asistente\s+virtual|modelo\s+de\s+lenguaje|llm|chatbot)"
+        r"|"
+        r"\b(como|en\s+mi\s+calidad\s+de)\s+(ia|asistente|modelo)",
+        re.IGNORECASE,
+    )
+
+    _ASSISTANT_OFFER_RE = re.compile(
+        r"\b(estoy|me\s+encuentro)\s+(lista|listo|preparada|preparado|disponible)\s+para\s+(continuar|seguir|desarrollar|ayudarte|ayudar|colaborar|asistirte)",
+        re.IGNORECASE,
+    )
+
+    _META_QUESTION_RE = re.compile(
+        r"\b(quieres|quer[eé]s|deseas|prefieres)\s+que\s+(sigamos|continuemos|hablemos|profundicemos|cambiemos)"
+        r"|"
+        r"\bde\s+qu[eé]\s+(m[aá]s|otro)\s+(podr[ií]amos|quisieras|te\s+gustar[ií]a)\s+hablar",
+        re.IGNORECASE,
+    )
+
+    _CHARACTER_PATTERNS: tuple = (
+        ("prompt_leak",        _PROMPT_LEAK_RE),
+        ("processing_leak",    _PROCESSING_LEAK_RE),
+        ("assistant_identity", _ASSISTANT_IDENTITY_RE),
+        ("assistant_offer",    _ASSISTANT_OFFER_RE),
+        ("meta_question",      _META_QUESTION_RE),
+    )
+
     def __init__(
         self,
         *,
@@ -330,6 +387,7 @@ class KiraAgendaController:
         self._session_suggestion_count: int = 0
         self._suggestion_cooldown_seconds: float = 120.0
         self._suggestion_session_cap: int = 5
+        self._character_repair_needed: bool = False
         self.profile: dict[str, str] = {
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
@@ -623,6 +681,7 @@ class KiraAgendaController:
             if not selected:
                 return AgendaAction.none()
             self.active_topic = selected
+            self._character_repair_needed = False
             selected.status = TopicStatus.ACTIVE
             self.state = AgendaState.OPEN_TOPIC
             return self._topic_action("Entrá al tema como comentario orgánico de stream. No anuncies que estás abriendo un tema.")
@@ -721,6 +780,8 @@ class KiraAgendaController:
     def register_failure(self, error: ErrorCode = ErrorCode.NONE, reason: str = "") -> None:
         self.recovery.record_failure(error, reason)
         self.failure_count = self.recovery.failure_count  # keep legacy counter in sync
+        if error == ErrorCode.GUARDRAIL_BREAKS_CHARACTER:
+            self._character_repair_needed = True
         # Force-complete: if the topic is already closing and we've failed
         # to generate a closing line 3+ times, just mark it done silently.
         # Prevents the infinite kira-agenda-stop retry cascade seen under
@@ -734,6 +795,7 @@ class KiraAgendaController:
             return
         if self.active_topic and self.recovery.failure_count >= 2:
             self.active_topic.turns_spoken = self.max_turns_per_topic
+            self._character_repair_needed = False
             self.state = AgendaState.WAITING_SIGNAL
             return
         # Degradation: lower response_length before pausing
@@ -787,6 +849,21 @@ class KiraAgendaController:
             error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'", "reused_opening"
         elif self.claims_inner_life(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva", "claims_inner_life"
+        elif self.CHARACTER_CONTRACT_ENABLED:
+            result = self.breaks_character(clean)
+            if result is not None:
+                error, reason, guardrail = (
+                    ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+                    f"Kira rompió contrato de personaje: {result.subtype}",
+                    "breaks_character",
+                )
+                extra = {
+                    "subtype": result.subtype,
+                    "matched_pattern": result.matched_pattern,
+                    "matched_text": result.matched_text,
+                }
+                if mutate:
+                    self._character_repair_needed = True
         if error != ErrorCode.NONE:
             if mutate:
                 self.register_failure(error=error, reason=reason)
@@ -929,6 +1006,27 @@ class KiraAgendaController:
         )
         return any(phrase in lowered for phrase in forbidden)
 
+    @staticmethod
+    def breaks_character(text: str) -> CharacterContractResult | None:
+        """Return CharacterContractResult if text breaks character contract, else None.
+
+        Iterates all precompiled CHARACTER_PATTERNS in priority order.
+        Short-circuits on the first match.  Returns None for empty/whitespace-only input.
+        """
+        if not text or not text.strip():
+            return None
+        lowered = text.lower()
+        for category, pattern in KiraAgendaController._CHARACTER_PATTERNS:
+            m = pattern.search(lowered)
+            if m:
+                return CharacterContractResult(
+                    ok=False,
+                    subtype=category,
+                    matched_pattern=category,
+                    matched_text=m.group(0)[:80],
+                )
+        return None
+
     def _topic_action(self, instruction: str) -> AgendaAction:
         self._pending_turns_spoken = self._next_block_size()
         self._pending_action_source = "kira-agenda"
@@ -976,6 +1074,16 @@ class KiraAgendaController:
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
     def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "") -> str:
+        repair_prefix = ""
+        if self.CHARACTER_CONTRACT_ENABLED and self._character_repair_needed:
+            self._character_repair_needed = False
+            repair_prefix = (
+                "REESCRIBE: hablá como Kira, la co-host. "
+                "No menciones contexto, sesión, reflexión, procesamiento. "
+                "No preguntes qué hacer ni ofrezcas ayuda. "
+                "No digas que sos una IA. "
+                "Solo hablá natural como co-host de stream.\n\n"
+            )
         topic = self.active_topic
         title = topic.title if topic else "sin tema activo"
         angle = topic.angle if topic and topic.angle else "mantenerlo concreto, entretenido y seguro"
@@ -986,7 +1094,7 @@ class KiraAgendaController:
         block_size = self._pending_turns_spoken if topic else 1
         last = "\n".join(f"- {line}" for line in self.last_outputs[-3:]) or "- nada todavía"
         style = self.profile.get("style") or "Soná natural, como co-host de stream."
-        return (
+        return repair_prefix + (
             "TAREA: respondé al aire como Kira, co-host del stream, no como streamer.\n"
             "SALIDA PERMITIDA: solo la frase final que Kira diría por TTS.\n"
             "Debe sonar como una intervención natural en vivo, no como guion de presentación ni cierre de episodio.\n"
