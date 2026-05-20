@@ -100,7 +100,7 @@ _VALID_AWAY_BEHAVIORS: frozenset[str] = frozenset(a.value for a in AwayBehavior)
 _VALID_CHAT_EVENTS: frozenset[str] = frozenset(c.value for c in ChatEvent)
 VALID_MAX_RESPONSE_LENGTHS: frozenset[int] = frozenset({40, 80, 120, 200, 300})
 _VALID_RESPONSE_FREQUENCIES: frozenset[str] = frozenset({"low", "medium", "high"})
-_VALID_PRIORITIES: frozenset[str] = frozenset({"low", "medium", "high"})
+VALID_PRIORITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 # Ordered priority → numeric weight for comparisons
 _PRIORITY_WEIGHT: dict[str, int] = {"low": 1, "medium": 2, "high": 3}
@@ -126,9 +126,9 @@ class EventAction:
             raise ValueError(
                 "voice_allowed and ignore cannot both be True"
             )
-        if self.priority not in _VALID_PRIORITIES:
+        if self.priority not in VALID_PRIORITIES:
             raise ValueError(
-                f"priority must be one of {set(_VALID_PRIORITIES)}, "
+                f"priority must be one of {set(VALID_PRIORITIES)}, "
                 f"got {self.priority!r}"
             )
 
