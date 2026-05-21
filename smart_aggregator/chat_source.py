@@ -1,12 +1,66 @@
 import threading
 import time
-from typing import Optional, Dict, Any
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any, TypedDict
 
 try:
     import pytchat
     _PYTCHAT_AVAILABLE = True
 except ImportError:
     _PYTCHAT_AVAILABLE = False
+
+
+class NormalizedChatMessage(TypedDict, total=False):
+    """Normalized chat message emitted by every ChatSource implementation.
+
+    Required for on_message callbacks. Platform-agnostic shape.
+    """
+
+    platform: str
+    source_id: str
+    user: str
+    text: str
+    timestamp: float
+
+
+class ChatSource(ABC):
+    """Abstract base class for platform-specific chat sources.
+
+    Subclasses MUST implement connect(), disconnect(), is_connected(),
+    and platform property. Concrete __init__ handles shared state
+    (lock, running flag, disconnect-notified flag, config, callbacks).
+    """
+
+    def __init__(self, config: dict, callbacks: dict):
+        self.config = config
+        self.callbacks = callbacks
+        self._source_id: Optional[str] = None
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._disconnect_notified = False
+
+    @abstractmethod
+    def connect(self, source_id: str):
+        """Start the chat source connection for the given source_id."""
+        ...
+
+    @abstractmethod
+    def disconnect(self):
+        """Stop the chat source connection and clean up resources."""
+        ...
+
+    @abstractmethod
+    def is_connected(self) -> bool:
+        """Return True if the source is currently connected and receiving."""
+        ...
+
+    @property
+    @abstractmethod
+    def platform(self) -> str:
+        """Return the platform identifier (e.g. 'youtube', 'twitch')."""
+        ...
+
 
 class YouTubeChatSource:
     def __init__(self, config: dict, callbacks: dict):
