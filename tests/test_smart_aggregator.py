@@ -15,13 +15,14 @@ import json
 import sqlite3
 import time
 from copy import deepcopy
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from smart_aggregator.session_history import SessionHistory
 from smart_aggregator.message_filter import MessageFilter
-from smart_aggregator.chat_source import YouTubeChatSource
+from smart_aggregator.chat_source import YouTubeChatSource, TwitchChatSource
 from smart_aggregator.vibe_thermometer import VibeThermometer
 from smart_aggregator.activity_trigger import ActivityTrigger
 from smart_aggregator.aggregator import Aggregator
@@ -684,6 +685,118 @@ class TestAggregator:
         agg2 = Aggregator(config_path=config_path, llm_interface=mock_llm)
         for msg in MOCK_MESSAGES_20[:5]:
             agg2.process_message(msg)
+
+    # --- Aggregator Factory Tests (T-14, REQ-17..20) ---
+
+    def test_factory_creates_youtube_source(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-17/18: connect() with default platform creates YouTubeChatSource."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(YouTubeChatSource, "connect") as mock_connect:
+            agg.connect("test123")
+            assert isinstance(agg.source, YouTubeChatSource)
+            mock_connect.assert_called_once_with("test123")
+
+    def test_factory_creates_twitch_source(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-17/18: connect() with platform='twitch' creates TwitchChatSource."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(TwitchChatSource, "connect") as mock_connect:
+            agg.connect("testchannel", platform="twitch")
+            assert isinstance(agg.source, TwitchChatSource)
+            mock_connect.assert_called_once_with("testchannel")
+
+    def test_factory_rejects_unknown_platform(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-18: connect() with unknown platform raises ValueError."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        with pytest.raises(ValueError, match="Plataforma no soportada"):
+            agg.connect("test", platform="kick")
+
+    def test_should_consider_vibe_without_video_id(self, smart_aggregator_config, temp_dir):
+        """REQ-20: _should_consider_vibe works without _video_id attribute."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+
+        # No source connected — should consider vibe
+        assert agg._should_consider_vibe(1.0) is True
+
+        # Source connected — should consider vibe
+        mock_source = MagicMock()
+        mock_source.is_connected.return_value = True
+        agg._source = mock_source
+        assert agg._should_consider_vibe(1.0) is True
+
+        # Source disconnected — should NOT consider vibe
+        mock_source.is_connected.return_value = False
+        assert agg._should_consider_vibe(1.0) is False
+
+    def test_youtube_backward_compat_still_works(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Backward compat: connect() without platform still works for YouTube."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(YouTubeChatSource, "connect") as mock_connect:
+            agg.connect("dQw4w9WgXcQ")
+            assert isinstance(agg.source, YouTubeChatSource)
+            mock_connect.assert_called_once_with("dQw4w9WgXcQ")
+
+    def test_disconnect_handles_no_source(self, smart_aggregator_config, temp_dir):
+        """REQ-17: disconnect() does not crash when no source exists."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        # No source — disconnect should not crash
+        agg.disconnect()
+
+    def test_source_property_returns_none_initially(self, smart_aggregator_config, temp_dir):
+        """source property returns None when no source is connected."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        assert agg.source is None
 
 
 # --- TC3.7 — YouTube API (placeholder) ---

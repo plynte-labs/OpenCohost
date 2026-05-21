@@ -6,7 +6,7 @@ from typing import Optional, Callable
 
 from .session_history import SessionHistory
 from .message_filter import MessageFilter
-from .chat_source import YouTubeChatSource
+from .chat_source import YouTubeChatSource, TwitchChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
 from .intent_aggregator import IntentAggregator
@@ -51,16 +51,12 @@ class Aggregator:
             callbacks={"on_trigger": self._on_activity_trigger}
         )
         self.intent_aggregator = IntentAggregator(self.config.get("intent", {}))
-        self.source = YouTubeChatSource(
-            self.config.get("source", {}),
-            callbacks={
-                "on_message": self.process_message,
-                "on_error": self._on_source_error,
-                "on_connect": self._on_source_connect,
-                "on_disconnect": self._on_source_disconnect
-            }
-        )
-        
+        self._source = None
+        self._source_factory = {
+            "youtube": YouTubeChatSource,
+            "twitch": TwitchChatSource,
+        }
+
         self.on_filtered_message: Optional[Callable] = None
         self.on_vibe_update: Optional[Callable] = None
         self.on_activity_trigger: Optional[Callable] = None
@@ -78,6 +74,11 @@ class Aggregator:
     def set_busy_callback(self, callback: Callable[[], bool]):
         self._busy_callback = callback
         self.thermometer._is_busy_callback = callback
+
+    @property
+    def source(self):
+        """Return the current chat source (backward-compat property)."""
+        return self._source
 
     def set_llm_interface(self, llm_interface: Optional[Callable]):
         self.thermometer.set_llm_interface(llm_interface)
@@ -104,10 +105,33 @@ class Aggregator:
                 return False
         return False
     
-    def connect(self, video_id: str):
-        self.source.connect(video_id)
+    def connect(self, source_id: str, platform: str = "youtube"):
+        if self._source is not None:
+            self._source.disconnect()
+
+        source_cls = self._source_factory.get(platform)
+        if source_cls is None:
+            raise ValueError(f"Plataforma no soportada: {platform}")
+
+        source_config = (
+            self.config.get("source", {})
+            if platform == "youtube"
+            else self.config.get("twitch", {})
+        )
+
+        self._source = source_cls(
+            source_config,
+            callbacks={
+                "on_message": self.process_message,
+                "on_error": self._on_source_error,
+                "on_connect": self._on_source_connect,
+                "on_disconnect": self._on_source_disconnect,
+            },
+        )
+        self._source.connect(source_id)
+
         if self._session_id is None:
-            self._session_id = self.history.start_session("youtube", video_id)
+            self._session_id = self.history.start_session(platform, source_id)
 
     def start_session(self, platform: str = "youtube", channel: str = "headless") -> int:
         if self._session_id is None:
@@ -124,7 +148,8 @@ class Aggregator:
                 pass
     
     def disconnect(self):
-        self.source.disconnect()
+        if self._source is not None:
+            self._source.disconnect()
         self.end_session()
         try:
             self.history.cleanup_old_sessions()
@@ -277,8 +302,7 @@ class Aggregator:
             return False
         if max(current_rate, self._raw_seen_rate()) >= self._live_safety_threshold:
             return False
-        source_has_live_target = bool(getattr(self.source, "_video_id", None))
-        if source_has_live_target and hasattr(self.source, "is_connected") and not self.source.is_connected():
+        if self._source is not None and not self._source.is_connected():
             return False
         return True
 
