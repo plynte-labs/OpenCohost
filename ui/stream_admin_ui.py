@@ -586,6 +586,39 @@ class StreamAdminUI:
         self._widgets["entry_stream_chat_spam"] = entry_spam
         ctk.CTkLabel(spam_row, text="msgs/usuario en 30s", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
 
+        # ── Input Contract toggle ──────────────────────────────────────
+        input_row = ctk.CTkFrame(frame_live, fg_color="transparent")
+        input_row.grid(row=6, column=0, sticky="ew", padx=10, pady=(2, 10))
+        switch_input = ctk.CTkSwitch(
+            input_row,
+            text="🧠 Input Contract (contexto real)",
+            command=self._toggle_input_contract,
+            onvalue=True,
+            offvalue=False,
+        )
+        switch_input.pack(side="left", padx=(0, 4))
+        self._widgets["switch_input_contract"] = switch_input
+        # Sync with current flag state
+        try:
+            from smart_aggregator.chat_input_contract import USE_INPUT_CONTRACT_PROMPT
+            if USE_INPUT_CONTRACT_PROMPT:
+                switch_input.select()
+            else:
+                switch_input.deselect()
+        except Exception:
+            switch_input.deselect()
+
+    def _toggle_input_contract(self) -> None:
+        """Toggle the USE_INPUT_CONTRACT_PROMPT flag from UI."""
+        import smart_aggregator.chat_input_contract as ic
+        switch = self._widgets.get("switch_input_contract")
+        if switch is None:
+            return
+        enabled = switch.get()
+        ic.USE_INPUT_CONTRACT_PROMPT = bool(enabled)
+        state = "ON" if enabled else "OFF"
+        self._log(f"[StreamAdmin] Input Contract: {state} (ChatContextPacket como fuente de contexto)")
+
     @staticmethod
     def sanitize_live_url(value: str) -> str:
         """Extract a video ID from YouTube/Twitch URLs; reject invalid input."""
