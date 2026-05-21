@@ -1023,6 +1023,7 @@ class VocalAIApp(ctk.CTk):
         sa.set_simulate_chat_callback(lambda: self._stream_admin_simulate_chat())
         sa.set_force_kira_callback(lambda: self._stream_admin_force_kira_comment())
         sa.set_connect_chat_live_callback(lambda: self._on_stream_admin_connect_chat_live())
+        sa.set_connect_chat_twitch_callback(lambda: self._on_stream_admin_button_twitch())
         sa.set_threshold_preset_callback(lambda v: self._on_stream_admin_threshold_preset(v))
         sa.set_cooldown_preset_callback(lambda v: self._on_stream_admin_cooldown_preset(v))
         sa.set_refresh_user_list_callback(lambda: self._stream_admin_refresh_user_list())
@@ -1502,13 +1503,17 @@ class VocalAIApp(ctk.CTk):
             return
         raw = entry_url.get().strip()
         raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
-        video_id = SmartAggregatorUI.extract_youtube_video_id(raw)
-        if not video_id and raw:
-            messagebox.showwarning("Chat Live", "Ingresa una URL válida de YouTube Live o Twitch.")
+
+        from smart_aggregator.url_parser import parse_chat_url
+
+        try:
+            parsed = parse_chat_url(raw)
+        except ValueError:
+            messagebox.showwarning("Chat Live", "URL no valida o no soportada")
             return
-        if not video_id:
-            messagebox.showwarning("Chat Live", "Ingresa una URL o video_id del live.")
-            return
+
+        platform = parsed["platform"]
+        source_id = parsed["source_id"]
 
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
             self.smart_agg_ui.toggle_connection()
@@ -1540,19 +1545,60 @@ class VocalAIApp(ctk.CTk):
         spam_entry = self.stream_admin_ui._widget("entry_stream_chat_spam")
         if spam_entry:
             try:
-                raw = spam_entry.get().strip()[:4]
-                sp = max(1, min(int(raw), 9999))
+                raw_sp = spam_entry.get().strip()[:4]
+                sp = max(1, min(int(raw_sp), 9999))
             except (ValueError, TypeError):
                 sp = 10
             self.smart_agg.set_spam_limits(max_messages_per_user=sp)
 
-        if self.smart_agg_ui.connect_to(video_id):
+        if self.smart_agg_ui.connect_to(source_id, platform=platform):
             self.entry_youtube_video.delete(0, "end")
-            self.entry_youtube_video.insert(0, video_id)
+            self.entry_youtube_video.insert(0, source_id)
             lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
             if lbl:
-                lbl.configure(text=f"Conectado: {video_id}", text_color="#44aa44")
-            self._on_stream_admin_log(f"[StreamAdmin] Chat Live conectado: {video_id}")
+                lbl.configure(text=f"Conectado [{platform}]: {source_id}", text_color="#44aa44")
+            self._on_stream_admin_log(f"[StreamAdmin] Chat Live conectado [{platform}]: {source_id}")
+
+    def _on_stream_admin_button_twitch(self) -> None:
+        """Connect to a Twitch chat live using the URL entry."""
+        from smart_aggregator.url_parser import parse_chat_url
+
+        entry_url = self.stream_admin_ui._widget("entry_stream_chat_url")
+        if not entry_url:
+            return
+
+        raw = entry_url.get().strip()
+        raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
+
+        if not raw:
+            messagebox.showwarning("Twitch Chat", "Ingresa una URL de Twitch (twitch.tv/canal).")
+            return
+
+        try:
+            parsed = parse_chat_url(raw)
+        except ValueError:
+            messagebox.showwarning("Twitch Chat", "URL no valida o no soportada")
+            return
+
+        if parsed["platform"] != "twitch":
+            messagebox.showwarning("Twitch Chat", "La URL no es de Twitch. Usa un enlace twitch.tv/canal.")
+            return
+
+        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
+            self.smart_agg_ui.toggle_connection()
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text="Desconectado", text_color="#aa4444")
+            return
+
+        source_id = parsed["source_id"]
+        if self.smart_agg_ui.connect_to(source_id, platform="twitch"):
+            self.entry_youtube_video.delete(0, "end")
+            self.entry_youtube_video.insert(0, source_id)
+            lbl = self.stream_admin_ui._widget("lbl_stream_chat_live_status")
+            if lbl:
+                lbl.configure(text=f"Conectado [twitch]: {source_id}", text_color="#44aa44")
+            self._on_stream_admin_log(f"[StreamAdmin] Chat Live Twitch conectado: {source_id}")
 
     def _stream_admin_connect_current_chat(self) -> None:
         metadata = self.stream_admin_ui.last_metadata or {}

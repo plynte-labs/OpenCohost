@@ -103,6 +103,7 @@ class StreamAdminUI:
         self._simulate_chat_cb: Optional[Callable] = None
         self._force_kira_cb: Optional[Callable] = None
         self._connect_chat_live_cb: Optional[Callable] = None
+        self._connect_chat_twitch_cb: Optional[Callable] = None
         self._threshold_preset_cb: Optional[Callable] = None
         self._cooldown_preset_cb: Optional[Callable] = None
         self._refresh_user_list_cb: Optional[Callable] = None
@@ -320,7 +321,7 @@ class StreamAdminUI:
         btn_disconnect.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_disconnect"] = btn_disconnect
 
-        btn_twitch = ctk.CTkButton(button_stack, text="Twitch Próximamente", state="disabled", width=145, fg_color="#444444")
+        btn_twitch = ctk.CTkButton(button_stack, text="Twitch", command=lambda: self._dispatch_connect_chat_twitch(), width=145, fg_color="#2f5f8f", hover_color="#3670aa")
         btn_twitch.grid(row=2, column=0, columnspan=2, padx=4, pady=4, sticky="ew")
         self._widgets["btn_stream_twitch"] = btn_twitch
 
@@ -530,7 +531,7 @@ class StreamAdminUI:
 
         ctk.CTkLabel(frame_live, text="Chat Live (RF3)", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
 
-        entry_url = ctk.CTkEntry(frame_live, placeholder_text="URL de YouTube Live o twitch.tv/...")
+        entry_url = ctk.CTkEntry(frame_live, placeholder_text="URL del directo (YouTube o Twitch)")
         entry_url.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
         self._widgets["entry_stream_chat_url"] = entry_url
 
@@ -757,6 +758,9 @@ class StreamAdminUI:
     def set_connect_chat_live_callback(self, cb: Callable) -> None:
         self._connect_chat_live_cb = cb
 
+    def set_connect_chat_twitch_callback(self, cb: Callable) -> None:
+        self._connect_chat_twitch_cb = cb
+
     def set_threshold_preset_callback(self, cb: Callable) -> None:
         self._threshold_preset_cb = cb
 
@@ -837,6 +841,10 @@ class StreamAdminUI:
     def _dispatch_connect_chat_live(self) -> None:
         if self._connect_chat_live_cb is not None:
             self._connect_chat_live_cb()
+
+    def _dispatch_connect_chat_twitch(self) -> None:
+        if self._connect_chat_twitch_cb is not None:
+            self._connect_chat_twitch_cb()
 
     def _dispatch_threshold_preset(self, value: str) -> None:
         entry = self._widget("entry_stream_chat_threshold")

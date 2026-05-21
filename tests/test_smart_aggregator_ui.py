@@ -436,14 +436,14 @@ class TestToggleConnection:
     def test_connect_with_video_id(self, smart_agg_ui, mock_aggregator, mock_widgets, ui_state):
         mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         smart_agg_ui.toggle_connection()
-        mock_aggregator.connect.assert_called_once_with("dQw4w9WgXcQ")
+        mock_aggregator.connect.assert_called_once_with("dQw4w9WgXcQ", platform="youtube")
         assert ui_state.smart_agg_connecting is True
         assert smart_agg_ui._manual_disconnect is False
 
     def test_connect_with_url(self, smart_agg_ui, mock_aggregator, mock_widgets, ui_state):
-        mock_widgets["entry_video"].get.return_value = "https://www.youtube.com/live/abc123"
+        mock_widgets["entry_video"].get.return_value = "https://www.youtube.com/live/dQw4w9WgXcQ"
         smart_agg_ui.toggle_connection()
-        mock_aggregator.connect.assert_called_once_with("abc123")
+        mock_aggregator.connect.assert_called_once_with("dQw4w9WgXcQ", platform="youtube")
 
     def test_connect_warns_when_no_video_id(self, smart_agg_ui, mock_widgets):
         mock_widgets["entry_video"].get.return_value = ""
@@ -452,7 +452,7 @@ class TestToggleConnection:
             mock_mb.showwarning.assert_called_once()
 
     def test_connect_shows_error_on_exception(self, smart_agg_ui, mock_aggregator, mock_widgets):
-        mock_widgets["entry_video"].get.return_value = "abc123"
+        mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         mock_aggregator.connect.side_effect = Exception("network error")
         with patch("ui.smart_aggregator_ui.messagebox") as mock_mb:
             smart_agg_ui.toggle_connection()
@@ -472,7 +472,7 @@ class TestToggleConnection:
         assert "No inicializado" in log_messages[0]
 
     def test_connect_applies_spam_limit(self, smart_agg_ui, mock_aggregator, mock_widgets):
-        mock_widgets["entry_video"].get.return_value = "abc123"
+        mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         smart_agg_ui.toggle_connection()
         mock_aggregator.set_spam_limits.assert_called()
 
@@ -484,7 +484,7 @@ class TestToggleConnection:
         )
 
     def test_connect_updates_button_to_connecting(self, smart_agg_ui, mock_widgets):
-        mock_widgets["entry_video"].get.return_value = "abc123"
+        mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         smart_agg_ui.toggle_connection()
         mock_widgets["btn_chat"].configure.assert_called_with(
             text="Conectando...", fg_color="#a66a00"
@@ -1152,12 +1152,13 @@ class TestAppendTextbox:
 class TestInternalHelpers:
     """Tests for internal helper methods."""
 
-    def test_get_video_id_from_entry(self, smart_agg_ui, mock_widgets):
-        mock_widgets["entry_video"].get.return_value = "https://youtu.be/abc123"
-        result = smart_agg_ui._get_video_id_from_entry()
-        assert result == "abc123"
+    def test_get_chat_url_info(self, smart_agg_ui, mock_widgets):
+        mock_widgets["entry_video"].get.return_value = "https://youtu.be/dQw4w9WgXcQ"
+        platform, source_id = smart_agg_ui._get_chat_url_info()
+        assert platform == "youtube"
+        assert source_id == "dQw4w9WgXcQ"
 
-    def test_get_video_id_from_none_entry(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
+    def test_get_chat_url_info_from_none_entry(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
         ui = SmartAggregatorUI(
             ui_state=ui_state,
             dispatcher=dispatcher,
@@ -1165,7 +1166,9 @@ class TestInternalHelpers:
             motor_ia=mock_motor_ia,
             entry_youtube_video=None,
         )
-        assert ui._get_video_id_from_entry() == ""
+        platform, source_id = ui._get_chat_url_info()
+        assert platform is None
+        assert source_id is None
 
     def test_get_user_limit_text(self, smart_agg_ui, mock_widgets):
         mock_widgets["entry_limit"].get.return_value = "5"
@@ -1276,12 +1279,12 @@ class TestConnectionLifecycle:
         ui.initialize()
 
         # Connect
-        mock_widgets["entry_video"].get.return_value = "live123"
+        mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         ui.toggle_connection()
         assert ui_state.smart_agg_connecting is True
 
         # Simulate connection success
-        ui.on_source_connect({"video_id": "live123"})
+        ui.on_source_connect({"video_id": "dQw4w9WgXcQ"})
         assert ui_state.smart_agg_connected is True
         assert ui_state.smart_agg_connecting is False
 
