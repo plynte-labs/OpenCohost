@@ -84,6 +84,10 @@ source:
   max_retries: 3
   interruptable: false
 
+twitch:
+  reconnect_delay_seconds: 10
+  max_retries: 3
+
 youtube_api:
   api_key: "${YOUTUBE_API_KEY}"
   channel_id: "${YOUTUBE_CHANNEL_ID}"
