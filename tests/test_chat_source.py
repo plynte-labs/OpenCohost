@@ -2,13 +2,14 @@
 
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
 from smart_aggregator.chat_source import (
     ChatSource,
     NormalizedChatMessage,
+    TwitchChatSource,
     YouTubeChatSource,
 )
 
@@ -211,3 +212,244 @@ class TestYouTubeChatSourceCallbackContent:
         assert msg["user"] == "viewer1"
         assert msg["text"] == "hello world"
         assert "timestamp" in msg
+
+
+class TestTwitchChatSource:
+    """TwitchChatSource IRC parsing and lifecycle (T-13, REQ-4..7)."""
+
+    @pytest.fixture
+    def twitch_config(self):
+        return {"reconnect_delay_seconds": 0.05, "max_retries": 2}
+
+    @pytest.fixture
+    def mock_socket(self):
+        """Create a mock socket with controllable recv behavior."""
+        sock = MagicMock()
+        sock.recv.return_value = b""
+        return sock
+
+    def test_platform_property(self, twitch_config):
+        """REQ-4: platform property returns 'twitch'."""
+        source = TwitchChatSource(twitch_config, callbacks={})
+        assert source.platform == "twitch"
+
+    def test_not_connected_initially(self, twitch_config):
+        """Source should not be connected initially."""
+        source = TwitchChatSource(twitch_config, callbacks={})
+        assert not source.is_connected()
+
+    def test_connect_fails_without_channel(self, twitch_config):
+        """Connect must fail with empty channel name."""
+        source = TwitchChatSource(twitch_config, callbacks={})
+        with pytest.raises(ValueError):
+            source.connect("")
+
+    def test_disconnect_without_connect_does_not_crash(self, twitch_config):
+        """Disconnect without prior connect should not crash."""
+        source = TwitchChatSource(twitch_config, callbacks={})
+        source.disconnect()
+
+    def test_isinstance_of_chat_source(self, twitch_config):
+        """TwitchChatSource subclasses ChatSource."""
+        source = TwitchChatSource(twitch_config, callbacks={})
+        assert isinstance(source, ChatSource)
+
+    @patch("socket.create_connection")
+    def test_irc_connection_commands_sent(
+        self, mock_create_conn, twitch_config
+    ):
+        """REQ-4: NICK, USER, and JOIN commands are sent on connect."""
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        mock_create_conn.return_value = mock_sock
+
+        connect_info = []
+
+        source = TwitchChatSource(
+            twitch_config,
+            callbacks={"on_connect": connect_info.append},
+        )
+        source.connect("testchannel")
+        time.sleep(0.2)
+        source.disconnect()
+
+        # Collect all sent data
+        all_sent = b""
+        for send_call in mock_sock.sendall.call_args_list:
+            all_sent += send_call[0][0]
+
+        assert b"NICK justinfan" in all_sent
+        assert b"USER" in all_sent
+        assert b"JOIN #testchannel" in all_sent
+
+        assert len(connect_info) >= 1
+        assert connect_info[0]["platform"] == "twitch"
+        assert connect_info[0]["source_id"] == "testchannel"
+
+    @patch("socket.create_connection")
+    def test_privmsg_parsing(self, mock_create_conn, twitch_config):
+        """REQ-5: PRIVMSG is parsed into NormalizedChatMessage."""
+        mock_sock = MagicMock()
+        mock_create_conn.return_value = mock_sock
+
+        irc_line = (
+            b":viewer!viewer@viewer.tmi.twitch.tv "
+            b"PRIVMSG #testchannel :hello world\r\n"
+        )
+        mock_sock.recv.side_effect = [irc_line, b""]
+
+        messages = []
+        source = TwitchChatSource(
+            twitch_config,
+            callbacks={"on_message": messages.append},
+        )
+        source.connect("testchannel")
+        time.sleep(0.3)
+        source.disconnect()
+
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg["platform"] == "twitch"
+        assert msg["source_id"] == "testchannel"
+        assert msg["user"] == "viewer"
+        assert msg["text"] == "hello world"
+        assert "timestamp" in msg
+
+    @patch("socket.create_connection")
+    def test_privmsg_spanish_message(self, mock_create_conn, twitch_config):
+        """REQ-5: Spanish messages parse correctly."""
+        mock_sock = MagicMock()
+        mock_create_conn.return_value = mock_sock
+
+        irc_line = (
+            b":usuario_es!usuario_es@usuario_es.tmi.twitch.tv "
+            b"PRIVMSG #testchannel :hola amigo \xc2\xbfc\xc3\xb3mo est\xc3\xa1s?\r\n"
+        )
+        mock_sock.recv.side_effect = [irc_line, b""]
+
+        messages = []
+        source = TwitchChatSource(
+            twitch_config,
+            callbacks={"on_message": messages.append},
+        )
+        source.connect("testchannel")
+        time.sleep(0.3)
+        source.disconnect()
+
+        assert len(messages) == 1
+        assert "hola" in messages[0]["text"]
+
+    @patch("socket.create_connection")
+    def test_ping_pong_response(self, mock_create_conn, twitch_config):
+        """REQ-6: PING is answered with PONG."""
+        mock_sock = MagicMock()
+        mock_create_conn.return_value = mock_sock
+
+        ping_line = b"PING :tmi.twitch.tv\r\n"
+        mock_sock.recv.side_effect = [ping_line, b""]
+
+        source = TwitchChatSource(twitch_config, callbacks={})
+        source.connect("testchannel")
+        time.sleep(0.2)
+        source.disconnect()
+
+        # Check PONG was sent
+        pong_found = False
+        for send_call in mock_sock.sendall.call_args_list:
+            if b"PONG" in send_call[0][0]:
+                pong_found = True
+                break
+        assert pong_found, "PONG response was not sent for PING"
+
+    @patch("socket.create_connection")
+    def test_reconnection_exhausts_retries(self, mock_create_conn, twitch_config):
+        """REQ-7: After exhausting retries, on_disconnect fires."""
+        mock_create_conn.side_effect = ConnectionError("connection refused")
+
+        errors = []
+        on_disconnect = MagicMock()
+        source = TwitchChatSource(
+            twitch_config,
+            callbacks={
+                "on_error": errors.append,
+                "on_disconnect": on_disconnect,
+            },
+        )
+        source.connect("testchannel")
+        time.sleep(0.4)
+        source.disconnect()
+
+        assert len(errors) >= 1
+        on_disconnect.assert_called()
+
+    @patch("socket.create_connection")
+    def test_callback_error_isolation(self, mock_create_conn, twitch_config):
+        """REQ-2: Callback error in on_message doesn't crash source."""
+        mock_sock = MagicMock()
+        mock_create_conn.return_value = mock_sock
+
+        irc_line = (
+            b":viewer!viewer@viewer.tmi.twitch.tv "
+            b"PRIVMSG #testchannel :boom\r\n"
+        )
+        mock_sock.recv.side_effect = [irc_line, b""]
+
+        callbacks = {
+            "on_message": MagicMock(side_effect=RuntimeError("callback boom")),
+            "on_connect": MagicMock(),
+            "on_disconnect": MagicMock(),
+            "on_error": MagicMock(),
+        }
+        source = TwitchChatSource(twitch_config, callbacks=callbacks)
+        source.connect("testchannel")
+        time.sleep(0.3)
+        source.disconnect()
+
+        # The callback was called (and its exception was caught)
+        callbacks["on_message"].assert_called()
+        # Source is still operational
+        assert not source.is_connected()
+
+    @patch("socket.create_connection")
+    def test_is_connected_after_connect(self, mock_create_conn, twitch_config):
+        """is_connected() returns True while socket is alive."""
+        mock_sock = MagicMock()
+        # Block recv so the thread stays alive in the inner loop
+        def _blocking_recv(_size=4096):
+            time.sleep(0.5)
+            raise OSError("closed")
+        mock_sock.recv.side_effect = _blocking_recv
+        mock_create_conn.return_value = mock_sock
+
+        source = TwitchChatSource(twitch_config, callbacks={})
+        source.connect("testchannel")
+        time.sleep(0.15)
+        # Socket assigned before blocking recv → is_connected is True
+        assert source.is_connected()
+        source.disconnect()
+
+    @patch("socket.create_connection")
+    def test_disconnect_stops_thread_and_cleans_socket(
+        self, mock_create_conn, twitch_config
+    ):
+        """Disconnect stops the daemon thread and closes the socket."""
+        mock_sock = MagicMock()
+        # Block recv so thread stays alive until we disconnect
+        def _blocking_recv(_size=4096):
+            time.sleep(0.5)
+            raise OSError("closed")
+        mock_sock.recv.side_effect = _blocking_recv
+        mock_create_conn.return_value = mock_sock
+
+        on_disconnect = MagicMock()
+        source = TwitchChatSource(
+            twitch_config,
+            callbacks={"on_disconnect": on_disconnect},
+        )
+        source.connect("testchannel")
+        time.sleep(0.15)
+        source.disconnect()
+
+        assert not source.is_connected()
+        mock_sock.close.assert_called()
+        on_disconnect.assert_called()

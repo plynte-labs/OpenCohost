@@ -1,3 +1,6 @@
+import random
+import re
+import socket
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -165,6 +168,167 @@ class YouTubeChatSource(ChatSource):
         with self._lock:
             self._running = False
             self._chat = None
+
+        self._notify_disconnect()
+
+    def _notify_disconnect(self):
+        with self._lock:
+            if self._disconnect_notified:
+                return
+            self._disconnect_notified = True
+
+        if self.callbacks.get("on_disconnect"):
+            try:
+                self.callbacks["on_disconnect"]()
+            except Exception:
+                pass
+
+
+class TwitchChatSource(ChatSource):
+    """Anonymous IRC-based Twitch chat source (REQ-4..7).
+
+    Connects to irc.chat.twitch.tv:6667 without authentication,
+    joins a channel, parses PRIVMSG lines, and responds to PING/PONG.
+    """
+
+    def __init__(self, config: dict, callbacks: dict):
+        super().__init__(config, callbacks)
+        self._socket: Optional[socket.socket] = None
+        self._reconnect_delay = config.get("reconnect_delay_seconds", 10)
+        self._max_retries = config.get("max_retries", 3)
+
+    @property
+    def platform(self) -> str:
+        return "twitch"
+
+    def connect(self, source_id: str):
+        if not source_id:
+            raise ValueError("channel name es requerido")
+
+        should_disconnect = False
+        with self._lock:
+            if self._running:
+                should_disconnect = True
+
+        if should_disconnect:
+            self.disconnect()
+
+        with self._lock:
+            self._source_id = source_id
+            self._running = True
+            self._disconnect_notified = False
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def disconnect(self):
+        with self._lock:
+            self._running = False
+
+        sock = None
+        with self._lock:
+            sock = self._socket
+            self._socket = None
+
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
+        self._notify_disconnect()
+
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._running and self._socket is not None
+
+    def _run(self):
+        retries = 0
+        while self._running and retries < self._max_retries:
+            try:
+                nick = f"justinfan{random.randint(10000, 99999)}"
+                sock = socket.create_connection(("irc.chat.twitch.tv", 6667), timeout=30)
+                sock.sendall(f"NICK {nick}\r\n".encode())
+                sock.sendall(f"USER {nick} 8 * :{nick}\r\n".encode())
+                sock.sendall(f"JOIN #{self._source_id}\r\n".encode())
+
+                with self._lock:
+                    self._socket = sock
+
+                if self.callbacks.get("on_connect"):
+                    try:
+                        self.callbacks["on_connect"]({
+                            "platform": "twitch",
+                            "source_id": self._source_id,
+                        })
+                    except Exception:
+                        pass
+
+                buffer = ""
+                while self._running:
+                    try:
+                        data = sock.recv(4096)
+                    except (ConnectionError, OSError, socket.timeout):
+                        break
+
+                    if not data:
+                        break
+
+                    try:
+                        decoded = data.decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+
+                    buffer += decoded
+                    while "\r\n" in buffer:
+                        line, buffer = buffer.split("\r\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("PING"):
+                            try:
+                                sock.sendall(b"PONG :tmi.twitch.tv\r\n")
+                            except Exception:
+                                break
+                        elif "PRIVMSG" in line:
+                            match = re.match(r":(\w+)!.*PRIVMSG #\w+ :(.*)", line)
+                            if match:
+                                msg = {
+                                    "platform": "twitch",
+                                    "source_id": self._source_id,
+                                    "user": match.group(1),
+                                    "text": match.group(2),
+                                    "timestamp": time.time(),
+                                }
+                                if self.callbacks.get("on_message"):
+                                    try:
+                                        self.callbacks["on_message"](msg)
+                                    except Exception:
+                                        pass
+
+                if self._running:
+                    retries += 1
+                    time.sleep(self._reconnect_delay)
+            except Exception as e:
+                retries += 1
+                if self.callbacks.get("on_error"):
+                    try:
+                        self.callbacks["on_error"](str(e))
+                    except Exception:
+                        pass
+                if self._running and retries < self._max_retries:
+                    time.sleep(self._reconnect_delay)
+
+        with self._lock:
+            self._running = False
+            if self._socket:
+                try:
+                    self._socket.close()
+                except Exception:
+                    pass
+                self._socket = None
 
         self._notify_disconnect()
 
