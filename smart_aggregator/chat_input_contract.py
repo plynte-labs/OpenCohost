@@ -14,8 +14,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# ── Feature flag ───────────────────────────────────────────────────────────
+# ── Feature flags ────────────────────────────────────────────────────────────
 INPUT_CONTRACT_SHADOW_MODE = True
+USE_INPUT_CONTRACT_PROMPT = False  # Phase B: set True to use ChatContextPacket as LLM prompt source
 
 
 # ══════════════════════════════════════════════════════════════════════════════

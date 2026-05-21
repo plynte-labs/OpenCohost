@@ -63,6 +63,10 @@ from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.music_library import MusicLibrary
 from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
+from smart_aggregator.chat_input_contract import (
+    USE_INPUT_CONTRACT_PROMPT,
+    ChatContextPacketBuilder,
+)
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -1981,6 +1985,46 @@ class VocalAIApp(ctk.CTk):
             self._enqueue_kira_agenda_action(action)
             self._kira_agenda_update_status()
             return
+        # ── Standalone RF3 path ─────────────────────────────────────────
+        # Phase B: use ChatContextPacket instead of defective compact_chat
+        if USE_INPUT_CONTRACT_PROMPT:
+            try:
+                context = data.get("context", [])
+                intent_summary = data.get("intent_summary", {})
+                old_compact = intent_summary.get("prompt", "")
+
+                builder = ChatContextPacketBuilder()
+                packet = builder.build(context)
+
+                if not packet.should_call_llm:
+                    # No useful signal — stay silent instead of generating
+                    # "qué paz", "qué silencio", etc.
+                    self._log_accion(
+                        f"[InputContract] stay_silent: "
+                        f"msgs={packet.total_messages} users={packet.unique_users} "
+                        f"event={packet.primary_event} confidence={packet.confidence:.2f}"
+                    )
+                    return
+
+                # Valid signal: use packet context as prompt source
+                new_context = packet.to_prompt_context()
+                # Inject into data dict for smart_agg_ui
+                data["intent_summary"]["prompt"] = new_context
+                data["_source_used"] = "input_contract"
+
+                self._log_accion(
+                    f"[InputContract] using packet: "
+                    f"event={packet.primary_event} goal={packet.response_goal} "
+                    f"highlight={'yes' if packet.selected_highlight else 'no'} "
+                    f"clusters={len(packet.topic_clusters)} "
+                    f"old_compact={old_compact[:80]!r}"
+                )
+            except Exception:
+                # Fallback: use old compact_chat on any error
+                data["_source_used"] = "fallback_old_compact"
+        else:
+            data["_source_used"] = "old_compact"
+
         self.smart_agg_ui.on_aggregated_context(data)
 
     # ──────────────────────────────────────────────
