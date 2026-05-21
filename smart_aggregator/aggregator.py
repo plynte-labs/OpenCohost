@@ -10,6 +10,11 @@ from .chat_source import YouTubeChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
 from .intent_aggregator import IntentAggregator
+from .chat_input_contract import (
+    INPUT_CONTRACT_SHADOW_MODE,
+    ChatContextPacketBuilder,
+    ChatEventDetector,
+)
 
 class Aggregator:
     def __init__(self, config_path: str = "config/smart_aggregator.yaml", llm_interface: Optional[Callable] = None):
@@ -195,6 +200,17 @@ class Aggregator:
                         "context": context,
                         "intent_summary": intent_summary,
                     })
+
+                # ── Shadow mode: Input Contract logging ─────────────────
+                if INPUT_CONTRACT_SHADOW_MODE:
+                    try:
+                        builder = ChatContextPacketBuilder()
+                        packet = builder.build(context)
+                        old = intent_summary.get("prompt", "")
+                        self._log_input_contract_shadow(old, packet)
+                    except Exception:
+                        pass
+
             except Exception:
                 pass
 
@@ -287,6 +303,23 @@ class Aggregator:
                 self.on_live_safety_log(message)
             except Exception:
                 pass
+
+    def _log_input_contract_shadow(self, old_compact: str, packet: "ChatContextPacket") -> None:
+        """Shadow log: compare old compact_chat vs new ChatContextPacket."""
+        import json
+        try:
+            packet_dict = packet.to_dict()
+            # Compact the packet for readable single-line logging
+            packet_json = json.dumps(packet_dict, ensure_ascii=False, default=str)
+            msg = (
+                f"[InputContract Shadow] "
+                f"old_compact={old_compact[:120]!r} | "
+                f"packet={packet_json}"
+            )
+            if self.on_live_safety_log:
+                self.on_live_safety_log(msg)
+        except Exception:
+            pass
 
     def _load_spam_config(self):
         spam_cfg = self.config.get("spam", {})
