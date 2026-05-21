@@ -63,10 +63,7 @@ from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.music_library import MusicLibrary
 from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
-from smart_aggregator.chat_input_contract import (
-    USE_INPUT_CONTRACT_PROMPT,
-    ChatContextPacketBuilder,
-)
+from smart_aggregator.chat_input_contract import ChatContextPacketBuilder
 from stream_admin import AdminManager
 
 logger = get_logger()
@@ -1987,7 +1984,8 @@ class VocalAIApp(ctk.CTk):
             return
         # ── Standalone RF3 path ─────────────────────────────────────────
         # Phase B: use ChatContextPacket instead of defective compact_chat
-        if USE_INPUT_CONTRACT_PROMPT:
+        import smart_aggregator.chat_input_contract as _ic
+        if _ic.USE_INPUT_CONTRACT_PROMPT:
             try:
                 context = data.get("context", [])
                 intent_summary = data.get("intent_summary", {})
