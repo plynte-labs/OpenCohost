@@ -335,7 +335,10 @@ class TestProfileSelection:
         profile_panel._on_profile_changed("Kira (Default)")
 
         assert len(received) == 1
-        assert received[0] == profile_panel._perfiles["Kira (Default)"]
+        # Payload now includes _profile_name
+        expected = dict(profile_panel._perfiles["Kira (Default)"])
+        expected["_profile_name"] = "Kira (Default)"
+        assert received[0] == expected
 
     def test_on_profile_changed_unknown_profile(self, profile_panel, dispatcher):
         received = []
@@ -379,7 +382,9 @@ class TestApplyProfile:
         profile_panel.apply_current_profile()
 
         assert len(received) == 1
-        assert received[0] == profile_panel._perfiles["Kira (Default)"]
+        expected = dict(profile_panel._perfiles["Kira (Default)"])
+        expected["_profile_name"] = "Kira (Default)"
+        assert received[0] == expected
 
     def test_apply_current_profile_not_in_dict(self, profile_panel, dispatcher):
         profile_panel.combo_perfiles.set("Nonexistent")

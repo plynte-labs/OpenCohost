@@ -142,7 +142,9 @@ class ProfilePanel:
         """Apply the currently selected profile to the motor."""
         nombre = self.get_selected_profile()
         if nombre in self._perfiles:
-            self._dispatcher.dispatch("on_set_profile", self._perfiles[nombre])
+            data = dict(self._perfiles[nombre])
+            data["_profile_name"] = nombre
+            self._dispatcher.dispatch("on_set_profile", data)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -151,7 +153,9 @@ class ProfilePanel:
     def _on_profile_changed(self, nombre: str) -> None:
         """Handle profile combobox selection change."""
         if nombre in self._perfiles:
-            self._dispatcher.dispatch("on_set_profile", self._perfiles[nombre])
+            data = dict(self._perfiles[nombre])
+            data["_profile_name"] = nombre
+            self._dispatcher.dispatch("on_set_profile", data)
 
     def _on_edit_profile(self) -> None:
         """Open the profile configurator window."""

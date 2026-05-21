@@ -46,6 +46,7 @@ class MotorVocalIA(threading.Thread):
         self.current_model = _startup_model
         self._desired_model: str = _startup_model
         self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
+        self._current_profile_name: str = "default"
 
         # Pending model switch (non-blocking retry)
         self._pending_model_switch: Optional[str] = None
@@ -211,8 +212,10 @@ class MotorVocalIA(threading.Thread):
             elif tipo == "set_profile":
                 self.system_prompt = payload.get("prompt", SYSTEM_PROMPT)
                 self.use_system_role = payload.get("use_system", False)
+                profile_name = payload.get("_profile_name", "desconocido")
+                self._current_profile_name = profile_name
                 self.historial.clear()
-                self._log(f"Perfil actualizado (System Role: {self.use_system_role}). Memoria limpiada.")
+                self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
 
             elif tipo == "download_model":
                 if not self.is_ready:
@@ -711,7 +714,8 @@ class MotorVocalIA(threading.Thread):
             loaded = self._loaded_model or "unknown"
             trace_msg = (
                 f"[MODEL_TRACE] desired={desired} active={active} "
-                f"loaded={loaded} generation={generation_model} source={source}"
+                f"loaded={loaded} generation={generation_model} "
+                f"profile={self._current_profile_name} source={source}"
             )
             if desired != active or active != loaded or loaded != generation_model:
                 self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
