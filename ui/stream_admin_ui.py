@@ -552,6 +552,9 @@ class StreamAdminUI:
         entry_threshold.insert(0, "1.0")
         entry_threshold.pack(side="left", padx=2)
         self._widgets["entry_stream_chat_threshold"] = entry_threshold
+        # Auto-apply on focus loss or Enter
+        entry_threshold.bind("<FocusOut>", lambda e: self._apply_threshold_from_entry())
+        entry_threshold.bind("<Return>", lambda e: self._apply_threshold_from_entry())
         ctk.CTkLabel(tune_row, text="msg/s", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
         for label, value in (("0.5", "0.5"), ("1", "1.0"), ("3", "3.0")):
             btn = ctk.CTkButton(
@@ -568,6 +571,9 @@ class StreamAdminUI:
         entry_cooldown.insert(0, "45")
         entry_cooldown.pack(side="left", padx=2)
         self._widgets["entry_stream_chat_cooldown"] = entry_cooldown
+        # Auto-apply on focus loss or Enter
+        entry_cooldown.bind("<FocusOut>", lambda e: self._apply_cooldown_from_entry())
+        entry_cooldown.bind("<Return>", lambda e: self._apply_cooldown_from_entry())
         ctk.CTkLabel(cooldown_row, text="s entre reacciones", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(3, 4))
         for label, value in (("30", "30"), ("60", "60"), ("120", "120")):
             btn = ctk.CTkButton(
@@ -847,6 +853,24 @@ class StreamAdminUI:
             entry.insert(0, value)
         if self._cooldown_preset_cb is not None:
             self._cooldown_preset_cb(value)
+
+    def _apply_threshold_from_entry(self) -> None:
+        """Apply the current threshold text value immediately."""
+        entry = self._widget("entry_stream_chat_threshold")
+        if entry is None:
+            return
+        value = entry.get().strip()
+        if value:
+            self._dispatch_threshold_preset(value)
+
+    def _apply_cooldown_from_entry(self) -> None:
+        """Apply the current cooldown text value immediately."""
+        entry = self._widget("entry_stream_chat_cooldown")
+        if entry is None:
+            return
+        value = entry.get().strip()
+        if value:
+            self._dispatch_cooldown_preset(value)
 
     def refresh_user_list(self) -> None:
         if self._refresh_user_list_cb is not None:
