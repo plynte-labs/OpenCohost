@@ -69,6 +69,10 @@ _NON_NEGOTIABLES: tuple[NonNegotiableRule, ...] = (
         id="no_meta_commentary",
         description="No meta-commentary about audience engagement",
     ),
+    NonNegotiableRule(
+        id="no_negative_engagement",
+        description="No negative commentary about stream energy, emotion, boredom, or silence",
+    ),
 )
 
 

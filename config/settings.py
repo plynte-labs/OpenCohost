@@ -1,4 +1,6 @@
+import json
 import os
+from datetime import datetime
 from config.storage import STORAGE_PATHS
 
 # ──────────────────────────────────────────────
@@ -156,6 +158,7 @@ PTT_HOTKEY_LIST = [
 
 PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
 WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
+LAST_MODEL_FILE = os.path.join(BASE_DIR, "config", "last_model.json")
 ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
 
 # ──────────────────────────────────────────────
@@ -174,3 +177,47 @@ OLLAMA_POLL_INTERVAL = 15    # seconds between Ollama health polls
 OLLAMA_FAILURE_THRESHOLD = 3 # consecutive failures before "down"
 OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
 HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
+
+
+# ──────────────────────────────────────────────
+# Model persistence
+# ──────────────────────────────────────────────
+
+def resolve_startup_model() -> tuple[str, str]:
+    """Return (model_tag, source) for startup.
+
+    Sources:
+        'saved' — valid model read from last_model.json
+        'default' — no saved model found, using DEFAULT_MODEL
+        'invalid_saved_fallback' — saved model not in MODELS_CATALOG
+    """
+    try:
+        if os.path.exists(LAST_MODEL_FILE):
+            with open(LAST_MODEL_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved = data.get("model", "")
+            if saved and saved in MODELS_CATALOG:
+                return saved, "saved"
+            return DEFAULT_MODEL, "invalid_saved_fallback"
+    except Exception:
+        pass
+    return DEFAULT_MODEL, "default"
+
+
+def save_last_model(tag: str, source: str = "user_switch") -> None:
+    """Persist the last successfully-switched model.
+
+    Uses atomic write (temp file + os.replace) to avoid corruption.
+    """
+    try:
+        os.makedirs(os.path.dirname(LAST_MODEL_FILE), exist_ok=True)
+        tmp = LAST_MODEL_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "model": tag,
+                "saved_at": datetime.now().isoformat(),
+                "source": source,
+            }, f)
+        os.replace(tmp, LAST_MODEL_FILE)
+    except Exception:
+        pass

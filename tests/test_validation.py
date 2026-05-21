@@ -1,4 +1,4 @@
-"""Tests for validation.py — all 10 non-negotiables at 4 layers.
+"""Tests for validation.py — all 11 non-negotiables at 4 layers.
 
 Covers spec scenarios: T11, T12, T13.
 """
@@ -90,7 +90,7 @@ class TestValidateConfig:
         )
         errors = validate_config(config)
         assert len(errors) > 0
-        assert any("Expected 10" in e or "Missing" in e for e in errors)
+        assert any("Expected 11" in e or "Missing" in e for e in errors)
 
     def test_low_signal_noise_not_ignored_rejected(self):
         """R7: low_signal_noise MUST be ignored."""
@@ -372,11 +372,71 @@ class TestFourLayerIntegration:
         allowed, _ = output_guard("como modelo de lenguaje...")
         assert allowed is False
 
-    def test_all_10_non_negotiables_have_description(self):
-        """Ensure all 10 rule IDs have descriptions in the module."""
+    def test_all_11_non_negotiables_have_description(self):
+        """Ensure all 11 rule IDs have descriptions in the module."""
         from config.validation import _NN_DESCRIPTIONS, NON_NEGOTIABLE_IDS
         for rule_id in NON_NEGOTIABLE_IDS:
             assert rule_id in _NN_DESCRIPTIONS, f"Missing description for {rule_id}"
+
+    # ── R11: No negative engagement commentary ──────────────────────────────
+
+    def test_negative_engagement_emocion_blocked(self):
+        """'se perdi\u00f3 la emoci\u00f3n' blocked."""
+        allowed, reason = output_guard("se perdi\u00f3 la emoci\u00f3n del stream")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_perdiendo_emocion_blocked(self):
+        """'perdiendo la emoci\u00f3n' blocked."""
+        allowed, reason = output_guard("ya estamos empezando a perder la emoci\u00f3n")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_silencio_blocked(self):
+        """'qu\u00e9 silencio en la audiencia' blocked."""
+        allowed, reason = output_guard("qu\u00e9 silencio en la audiencia")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_aburrido_blocked(self):
+        """'esto est\u00e1 aburrido' blocked."""
+        allowed, reason = output_guard("esto est\u00e1 aburrido, nadie participa")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_chat_muerto_blocked(self):
+        """'el chat est\u00e1 muerto' blocked by R11 (not R10)."""
+        allowed, reason = output_guard("el chat est\u00e1 muerto, qu\u00e9 aburrido")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_vida_sin_sarcasmo_blocked(self):
+        """'la vida sin sarcasmo' loop phrase blocked."""
+        allowed, reason = output_guard("la vida sin sarcasmo es un abismo sin profundidad")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_sin_energia_blocked(self):
+        """'sin energ\u00eda' blocked."""
+        allowed, reason = output_guard("el stream est\u00e1 sin energ\u00eda")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_english_blocked(self):
+        """English stream-killer blocked."""
+        allowed, reason = output_guard("this stream is so boring right now")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_negative_engagement_positive_allowed(self):
+        """Positive engagement talk NOT blocked (no false positives)."""
+        allowed, _ = output_guard("qu\u00e9 emoci\u00f3n, llegaron muchos viewers nuevos")
+        assert allowed is True
+
+    def test_negative_engagement_normal_chat_allowed(self):
+        """Normal chat NOT blocked."""
+        allowed, _ = output_guard("hola a todos, bienvenidos al stream de hoy")
+        assert allowed is True
 
     def test_valid_config_passes_all_layers(self):
         """A valid default config + clean content passes all 4 layers."""

@@ -13,7 +13,8 @@ from typing import Optional
 from config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
     LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
-    TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
+    TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
+    resolve_startup_model, save_last_model,
 )
 from config.logger import get_logger
 
@@ -41,7 +42,17 @@ class MotorVocalIA(threading.Thread):
         self._speaking = False
         self._current_speech_source: Optional[str] = None
         self._downloading = False
-        self.current_model = DEFAULT_MODEL
+        _startup_model, self._model_source = resolve_startup_model()
+        self.current_model = _startup_model
+        self._desired_model: str = _startup_model
+        self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
+
+        # Pending model switch (non-blocking retry)
+        self._pending_model_switch: Optional[str] = None
+        self._pending_switch_retries: int = 0
+        self._pending_switch_next_at: float = 0.0
+        # Last switch failure info (read by UI handler, cleared after read)
+        self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
 
@@ -116,6 +127,7 @@ class MotorVocalIA(threading.Thread):
             return
 
         self._check_ollama_service()
+        self._log(f"Modelo inicial: {self.current_model} (fuente: {self._model_source})")
         self._log("Motor IA inicializado. Esperando comandos...")
 
         while True:
@@ -124,6 +136,7 @@ class MotorVocalIA(threading.Thread):
             except queue.Empty:
                 # Check priority queue and accumulation buffer when idle
                 self._process_priority_queue()
+                self._check_pending_model_switch()
                 continue
 
             if comando is None:
@@ -169,15 +182,26 @@ class MotorVocalIA(threading.Thread):
                 self._log("Historial de conversación limpiado.")
 
             elif tipo == "switch_model":
-                if not self.is_ready:
-                    self._log("No se puede cambiar modelo: Ollama no esta listo.", level="warning")
-                    self.ui_callback("ollama_unavailable")
-                    continue
                 new_model = payload
-                if self._processing or self._speaking:
-                    self._log("No se puede cambiar modelo mientras la IA está activa.", level="warning")
+                self._desired_model = new_model
+
+                if not self.is_ready:
+                    self._log(f"Switch a {new_model} pendiente: Ollama no está listo.", level="warning")
+                    self._pending_model_switch = new_model
+                    self._pending_switch_retries = 3
+                    self._pending_switch_next_at = time.monotonic() + 2.0
+                    self.ui_callback("model_switch_pending")
                     continue
-                self._switch_and_prepare_model(new_model)
+
+                if self._processing or self._speaking:
+                    self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
+                    self._pending_model_switch = new_model
+                    self._pending_switch_retries = 3
+                    self._pending_switch_next_at = time.monotonic() + 2.0
+                    self.ui_callback("model_switch_pending")
+                    continue
+
+                self._apply_model_switch(new_model)
                 
             elif tipo == "set_motor_tts":
                 self.motor_tts = payload
@@ -496,7 +520,52 @@ class MotorVocalIA(threading.Thread):
         self._warmed_model = None
         self._log(f"🔄 Modelo cambiado a: {new_model}")
         self._prepare_model(new_model)
-        self.ui_callback("model_changed")
+
+    def _check_pending_model_switch(self) -> None:
+        """Attempt pending model switch if conditions are met (non-blocking)."""
+        if self._pending_model_switch is None:
+            return
+        if time.monotonic() < self._pending_switch_next_at:
+            return  # not time yet
+        if self._processing or self._speaking:
+            return  # still busy
+
+        model = self._pending_model_switch
+
+        if not self.is_ready:
+            self._pending_switch_retries -= 1
+            if self._pending_switch_retries <= 0:
+                self._log(f"Switch a {model} fallido: Ollama no disponible tras 3 intentos.", level="error")
+                self._last_switch_failure = {
+                    "requested": model,
+                    "current": self.current_model,
+                    "reason": "ollama_not_ready",
+                }
+                self._pending_model_switch = None
+                self.ui_callback("model_switch_failed")
+            else:
+                self._pending_switch_next_at = time.monotonic() + 2.0
+                self._log(f"Reintento switch {model} en 2s ({self._pending_switch_retries} restantes).", level="debug")
+            return
+
+        self._apply_model_switch(model)
+
+    def _apply_model_switch(self, new_model: str) -> None:
+        """Execute model switch and persist on success."""
+        self._pending_model_switch = None
+        self._pending_switch_retries = 0
+        try:
+            self._switch_and_prepare_model(new_model)
+            save_last_model(new_model, source="user_switch")
+            self.ui_callback("model_switch_applied")
+        except Exception as e:
+            self._log(f"Switch a {new_model} fallido: {e}", level="error")
+            self._last_switch_failure = {
+                "requested": new_model,
+                "current": self.current_model,
+                "reason": f"switch_error: {e}",
+            }
+            self.ui_callback("model_switch_failed")
 
     def _prepare_model(self, model: str) -> bool:
         """Warm the selected Ollama model so first real response is not a cold load."""
@@ -516,11 +585,13 @@ class MotorVocalIA(threading.Thread):
         except Exception as e:
             self._log(f"No se pudo preparar modelo {model}: {e}", level="warning")
             logger.warning("No se pudo preparar modelo %s: %s", model, e)
+            self._loaded_model = None
             self.ui_callback("ready")
             return False
 
         elapsed = time.time() - start
         self._warmed_model = model
+        self._loaded_model = model
         self.ui_callback("ready")
         self._log(f"Modelo {model} preparado en {elapsed:.2f}s. Primera respuesta ya no deberia cargar en frio.")
         return True
@@ -555,6 +626,9 @@ class MotorVocalIA(threading.Thread):
 
             self.historial.clear()
             self.current_model = model_tag
+            self._desired_model = model_tag
+            self._loaded_model = model_tag
+            save_last_model(model_tag, source="download")
             self._log(f"🔄 Modelo activo cambiado a: {model_tag}")
             self.ui_callback("download_done")
 
@@ -629,6 +703,20 @@ class MotorVocalIA(threading.Thread):
 
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
+
+            # MODEL_TRACE: audit which model was used for this generation
+            generation_model = self.current_model
+            desired = self._desired_model
+            active = self.current_model
+            loaded = self._loaded_model or "unknown"
+            trace_msg = (
+                f"[MODEL_TRACE] desired={desired} active={active} "
+                f"loaded={loaded} generation={generation_model} source={source}"
+            )
+            if desired != active or active != loaded or loaded != generation_model:
+                self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
+            else:
+                logger.info(f"Motor: {trace_msg}")
 
             if source.startswith("kira-agenda"):
                 dialogo = self._sanitize_agenda_output(dialogo)

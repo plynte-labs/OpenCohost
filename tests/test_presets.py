@@ -78,9 +78,9 @@ class TestDefaultConfig:
         assert ls.ignore is True
         assert ls.voice_allowed is False
 
-    def test_default_has_10_non_negotiables(self):
+    def test_default_has_11_non_negotiables(self):
         config = default_config()
-        assert len(config.non_negotiables) == 10
+        assert len(config.non_negotiables) == 11
 
     def test_default_non_negotiable_ids(self):
         config = default_config()
@@ -96,6 +96,7 @@ class TestDefaultConfig:
             "no_hate_speech",
             "no_ai_self_identification",
             "no_meta_commentary",
+            "no_negative_engagement",
         }
         assert ids == expected
 
@@ -133,7 +134,7 @@ class TestPresets:
                 f"{name} {ev.value}: voice_allowed+ignore conflict"
             )
         # Non-negotiables must be present
-        assert len(config.non_negotiables) == 10, f"{name}: missing non-negotiables"
+        assert len(config.non_negotiables) == 11, f"{name}: missing non-negotiables"
 
     def test_preset_comunidad_valid(self):
         config = preset_comunidad()
@@ -202,7 +203,7 @@ class TestPresets:
         assert dup.creator.tone == original.creator.tone
         assert dup.creator.formality == original.creator.formality
         # Non-negotiables preserved
-        assert len(dup.non_negotiables) == 10
+        assert len(dup.non_negotiables) == 11
 
     def test_duplicate_preset_is_valid(self):
         dup = duplicate_preset("show", "Show Copy")

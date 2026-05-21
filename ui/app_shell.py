@@ -2149,6 +2149,9 @@ class VocalAIApp(ctk.CTk):
             "speaking_start": self._on_motor_speaking_start,
             "speaking_end": self._on_motor_speaking_end,
             "model_changed": self._on_motor_model_changed,
+            "model_switch_pending": self._on_motor_switch_pending,
+            "model_switch_applied": self._on_motor_model_changed,
+            "model_switch_failed": self._on_motor_switch_failed,
             "download_start": self._on_motor_download_start,
             "download_done": self._on_motor_download_done,
             "download_error": self._on_motor_download_error,
@@ -2167,6 +2170,10 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
         if hasattr(self.motor_ia, "current_model"):
             self._safe_after(lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
+            # Sync combobox to actual startup model (may differ from DEFAULT_MODEL)
+            model = self.motor_ia.current_model
+            self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
+            self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
             self.voice_panel._start_ptt_flush_watcher()
@@ -2382,6 +2389,26 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._safe_after(lambda: self.model_panel.set_active_model(model))
         self._actualizar_pipeline("idle")
+
+    def _on_motor_switch_pending(self) -> None:
+        desired = getattr(self.motor_ia, "_desired_model", None)
+        if desired:
+            display = self.model_panel.get_display_for_tag(desired)
+            self._print_log(f"[Sistema] Cambio a {display} pendiente: se aplicará al terminar la respuesta actual.")
+        # Do NOT restore combobox — user's selection stays visible as intended target
+
+    def _on_motor_switch_failed(self) -> None:
+        failure = getattr(self.motor_ia, "_last_switch_failure", None)
+        actual_model = self.motor_ia.current_model
+        if failure:
+            requested = failure.get("requested", "?")
+            reason = failure.get("reason", "unknown")
+            self._print_log(f"[Sistema] ❌ Cambio a {requested} fallido: {reason}. Modelo activo: {actual_model}")
+            # Clear after read to prevent stale display
+            self.motor_ia._last_switch_failure = None
+        # Restore combobox to actual motor model
+        self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
+        self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
 
     def _on_motor_download_start(self) -> None:
         self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Descargando..."))

@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
-from config.settings import DEFAULT_MODEL, MODELS_CATALOG
+from config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_startup_model
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
 
@@ -107,8 +107,9 @@ class ModelPanel:
 
     @property
     def default_display(self) -> str:
-        """Return the default model display name."""
-        return self.get_display_for_tag(DEFAULT_MODEL)
+        """Return the startup model display name (saved or default)."""
+        startup_model, _ = resolve_startup_model()
+        return self.get_display_for_tag(startup_model)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -220,6 +221,14 @@ class ModelPanel:
         """Set the currently active model to update button state."""
         self._active_model_tag = tag
         self._update_button_for_ollama_state()
+
+    def restore_to_active_model(self, model_tag: str) -> None:
+        """Restore combobox to the actual active model after a failed switch."""
+        display = self.get_display_for_tag(model_tag)
+        if self.combo_modelos is not None:
+            self.combo_modelos.set(display)
+        self._active_model_tag = model_tag
+        self._update_button_for_ollama_state(model_tag)
 
     def set_download_progress_visible(self, visible: bool) -> None:
         """Show or hide the download progress bar."""
