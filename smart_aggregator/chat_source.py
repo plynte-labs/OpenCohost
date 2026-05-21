@@ -62,22 +62,20 @@ class ChatSource(ABC):
         ...
 
 
-class YouTubeChatSource:
+class YouTubeChatSource(ChatSource):
     def __init__(self, config: dict, callbacks: dict):
-        self.config = config
-        self.callbacks = callbacks
-        self._video_id: Optional[str] = None
+        super().__init__(config, callbacks)
         self._chat = None
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
         self._reconnect_delay = config.get("reconnect_delay_seconds", 5)
         self._max_retries = config.get("max_retries", 3)
         self._interruptable = config.get("interruptable", False)
-        self._disconnect_notified = False
-    
-    def connect(self, video_id: str):
-        if not video_id:
+
+    @property
+    def platform(self) -> str:
+        return "youtube"
+
+    def connect(self, source_id: str):
+        if not source_id:
             raise ValueError("video_id es requerido")
         
         if not _PYTCHAT_AVAILABLE:
@@ -95,7 +93,7 @@ class YouTubeChatSource:
             self.disconnect()
 
         with self._lock:
-            self._video_id = video_id
+            self._source_id = source_id
             self._running = True
             self._disconnect_notified = False
             self._thread = threading.Thread(target=self._run, daemon=True)
@@ -120,12 +118,16 @@ class YouTubeChatSource:
         while self._running and retries < self._max_retries:
             try:
                 self._chat = pytchat.create(
-                    video_id=self._video_id,
+                    video_id=self._source_id,
                     interruptable=self._interruptable
                 )
                 if self.callbacks.get("on_connect"):
                     try:
-                        self.callbacks["on_connect"]({"video_id": self._video_id})
+                        self.callbacks["on_connect"]({
+                            "platform": "youtube",
+                            "source_id": self._source_id,
+                            "video_id": self._source_id,  # backward compat
+                        })
                     except Exception:
                         pass
                 
@@ -134,9 +136,11 @@ class YouTubeChatSource:
                         if not self._running:
                             break
                         msg = {
+                            "platform": "youtube",
+                            "source_id": self._source_id,
                             "user": c.author.name,
                             "text": c.message,
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
                         }
                         if self.callbacks.get("on_message"):
                             try:
