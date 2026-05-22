@@ -163,17 +163,19 @@ def on_log():
 @pytest.fixture()
 def model_panel(mock_ctk, mock_parent, ui_state, dispatcher, on_log):
     """ModelPanel instance with mocked customtkinter, built."""
-    with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
-        panel = ModelPanel(
-            parent_frame=mock_parent,
-            ui_state=ui_state,
-            dispatcher=dispatcher,
-            on_log=on_log,
-        )
-        with patch("ui.model_panel.ctk", mock_ctk):
-            panel.build()
-    yield panel
-    panel.cleanup()
+    from config.settings import DEFAULT_MODEL
+    with patch("ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            panel = ModelPanel(
+                parent_frame=mock_parent,
+                ui_state=ui_state,
+                dispatcher=dispatcher,
+                on_log=on_log,
+            )
+            with patch("ui.model_panel.ctk", mock_ctk):
+                panel.build()
+        yield panel
+        panel.cleanup()
 
 
 # ---------------------------------------------------------------------------
