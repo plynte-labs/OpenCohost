@@ -115,8 +115,9 @@ def _mock_external_modules():
             self.text_color = kwargs.get("text_color", "")
             self.corner_radius = kwargs.get("corner_radius", 0)
             self.font = kwargs.get("font", None)
+            self.configure = MagicMock(side_effect=self._configure)
 
-        def configure(self, **kwargs):
+        def _configure(self, **kwargs):
             for key, value in kwargs.items():
                 setattr(self, key, value)
                 self.kwargs[key] = value
@@ -130,6 +131,9 @@ def _mock_external_modules():
         def grid_remove(self):
             self._grid_removed = True
 
+        def winfo_exists(self):
+            return True
+
     class MockFrame:
         def __init__(self, master=None, **kwargs):
             self.master = master
@@ -141,6 +145,9 @@ def _mock_external_modules():
 
         def grid(self, **kwargs):
             self.grid_kwargs = kwargs
+
+        def grid_remove(self):
+            self._grid_removed = True
 
         def grid_columnconfigure(self, col, **kwargs):
             pass
@@ -168,6 +175,9 @@ def _mock_external_modules():
 
         def grid(self, **kwargs):
             self.grid_kwargs = kwargs
+
+        def pack(self, **kwargs):
+            self.pack_kwargs = kwargs
 
     class MockProgressBar:
         def __init__(self, master=None, **kwargs):
