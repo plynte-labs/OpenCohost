@@ -534,7 +534,7 @@ class TestWebSocketReconnection:
 
         connect_call_count = 0
 
-        async def failing_connect(*args, **kwargs):
+        def failing_connect(*args, **kwargs):
             nonlocal connect_call_count
             connect_call_count += 1
             raise Exception("Connection refused")
@@ -554,7 +554,7 @@ class TestWebSocketReconnection:
     def test_reconnect_stops_after_max_retries(self, voice_panel):
         voice_panel._ws_should_reconnect = True
 
-        async def failing_connect(*args, **kwargs):
+        def failing_connect(*args, **kwargs):
             raise Exception("Connection refused")
 
         with patch("ui.voice_control.WS_RECONNECT_BASE_DELAY", 0.01):
@@ -571,7 +571,7 @@ class TestWebSocketReconnection:
         voice_panel._ws_should_reconnect = True
         attempt = 0
 
-        async def failing_connect(*args, **kwargs):
+        def failing_connect(*args, **kwargs):
             nonlocal attempt
             attempt += 1
             if attempt >= 2:
