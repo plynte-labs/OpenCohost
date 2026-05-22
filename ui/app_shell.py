@@ -369,26 +369,42 @@ class VocalAIApp(ctk.CTk):
                     self._kira_avatar_pil = img
                     ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
                     self._kira_avatar_ref = ctk_img
+                    if state.value == "idle" or image_path == config.state_images.get("idle"):
+                        self._kira_avatar_idle_pil = img
+                        self._kira_avatar_idle_ref = ctk_img
                     self._kira_avatar_label.configure(image=ctk_img, text="")
                 except Exception as e:
+                    if not self._show_cached_idle_avatar_preview():
+                        self._kira_avatar_pil = None
+                        self._kira_avatar_ref = None
+                        self._kira_avatar_label.configure(
+                            image=None,
+                            text=f"Error al cargar avatar: {state.value}",
+                            text_color="#aa5555",
+                        )
+                    self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
+            else:
+                if not self._show_cached_idle_avatar_preview():
                     self._kira_avatar_pil = None
                     self._kira_avatar_ref = None
                     self._kira_avatar_label.configure(
                         image=None,
-                        text=f"Error al cargar avatar: {state.value}",
-                        text_color="#aa5555",
+                        text=f"Sin imagen para: {state.value}",
+                        text_color="#6b7b8d",
                     )
-                    self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
-            else:
-                self._kira_avatar_pil = None
-                self._kira_avatar_ref = None
-                self._kira_avatar_label.configure(
-                    image=None,
-                    text=f"Sin imagen para: {state.value}",
-                    text_color="#6b7b8d",
-                )
                 self._print_log(f"[Avatar] Sin imagen configurada o accesible para '{state.value}'")
         self.after(0, update)
+
+    def _show_cached_idle_avatar_preview(self) -> bool:
+        """Keep a known idle avatar visible when a transient state cannot load."""
+        idle_ref = getattr(self, "_kira_avatar_idle_ref", None)
+        label = getattr(self, "_kira_avatar_label", None)
+        if not idle_ref or label is None:
+            return False
+        self._kira_avatar_pil = getattr(self, "_kira_avatar_idle_pil", None)
+        self._kira_avatar_ref = idle_ref
+        label.configure(image=idle_ref, text="")
+        return True
 
     # ──────────────────────────────────────────────
     # UI Construction — delegates to panels

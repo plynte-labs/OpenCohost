@@ -551,20 +551,33 @@ class AvatarPanel:
                 ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
                 self._preview_label.configure(image=ctk_img, text="")
                 self._preview_image_ref = ctk_img
+                if self._current_state == "idle" or image_path == self.config.state_images.get("idle"):
+                    self._preview_idle_image_pil = img
+                    self._preview_idle_image_ref = ctk_img
             except Exception as e:
                 logger.warning(f"[Avatar] No se pudo cargar preview: {e}")
+                if self._show_cached_idle_preview():
+                    return
                 self._preview_image_pil = None
                 self._preview_image_ref = None
-                self._preview_label.configure(
-                    image=None, text="Error al cargar imagen", text_color="#aa5555"
-                )
+                self._preview_label.configure(image=None, text="Error al cargar imagen", text_color="#aa5555")
         else:
             state_label = _STATE_LABELS.get(self._current_state, self._current_state)
+            if self._show_cached_idle_preview():
+                return
             self._preview_image_pil = None
             self._preview_image_ref = None
-            self._preview_label.configure(
-                image=None, text=f"Sin imagen para: {state_label}", text_color="#6b7b8d"
-            )
+            self._preview_label.configure(image=None, text=f"Sin imagen para: {state_label}", text_color="#6b7b8d")
+
+    def _show_cached_idle_preview(self) -> bool:
+        """Keep a known idle image visible when a transient state cannot load."""
+        idle_ref = getattr(self, "_preview_idle_image_ref", None)
+        if not idle_ref or self._preview_label is None:
+            return False
+        self._preview_image_pil = getattr(self, "_preview_idle_image_pil", None)
+        self._preview_image_ref = idle_ref
+        self._preview_label.configure(image=idle_ref, text="")
+        return True
 
     def _on_mode_change(self, value: str) -> None:
         self.config.mode = value

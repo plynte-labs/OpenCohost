@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys
 import importlib
 import threading
-from types import SimpleNamespace
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -208,5 +209,69 @@ def test_poll_health_status_preserves_red_after_motor_failure_reported():
 
         assert app._ui_state.health_status == "red"
         app.after.assert_called_once_with(2000, app._poll_health_status)
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+class _ExistingLabel:
+    def __init__(self):
+        self.configure = MagicMock()
+
+    def winfo_exists(self):
+        return True
+
+
+def test_avatar_preview_missing_transient_state_keeps_cached_idle_image():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        idle_ref = object()
+        app._kira_avatar_label = _ExistingLabel()
+        app._kira_avatar_idle_ref = idle_ref
+        app._kira_avatar_idle_pil = object()
+        app._kira_avatar_ref = idle_ref
+        app._print_log = MagicMock()
+        app.after = MagicMock(side_effect=lambda _delay, fn: fn())
+
+        config = SimpleNamespace(
+            state_images={"idle": Path("idle.png")},
+            get_image_for_state=MagicMock(return_value=None),
+        )
+
+        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+            app._on_avatar_state_for_preview(SimpleNamespace(value="thinking"))
+
+        assert app._kira_avatar_ref is idle_ref
+        app._kira_avatar_label.configure.assert_called_with(image=idle_ref, text="")
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_avatar_preview_load_failure_keeps_cached_idle_image():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        idle_ref = object()
+        app._kira_avatar_label = _ExistingLabel()
+        app._kira_avatar_idle_ref = idle_ref
+        app._kira_avatar_idle_pil = object()
+        app._print_log = MagicMock()
+        app.after = MagicMock(side_effect=lambda _delay, fn: fn())
+
+        config = SimpleNamespace(
+            state_images={"idle": Path("idle.png"), "speaking": Path("speaking.png")},
+            get_image_for_state=MagicMock(return_value=Path("speaking.png")),
+        )
+        image_module = ModuleType("PIL.Image")
+        image_module.open = MagicMock(side_effect=OSError("bad image"))
+        image_module.Resampling = SimpleNamespace(LANCZOS=object())
+
+        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+            with patch.object(app_shell.os.path, "isfile", return_value=True):
+                with patch.dict(sys.modules, {"PIL": SimpleNamespace(Image=image_module), "PIL.Image": image_module}):
+                    app._on_avatar_state_for_preview(SimpleNamespace(value="speaking"))
+
+        assert app._kira_avatar_ref is idle_ref
+        app._kira_avatar_label.configure.assert_called_with(image=idle_ref, text="")
     finally:
         _restore_app_shell_module(old_module)
