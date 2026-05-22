@@ -139,3 +139,74 @@ def test_authenticated_chat_duplicate_gate_preserves_missing_id_and_truncation_b
         assert len(stream_admin_ui._seen_chat_ids) == 1000
     finally:
         _restore_app_shell_module(old_module)
+
+
+def test_motor_heartbeat_reports_dead_started_motor_once():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.motor_ia = SimpleNamespace(is_alive=MagicMock(return_value=False))
+        app._motor_started = True
+        app._closing = False
+        app._motor_heartbeat_failure_reported = False
+        app._ui_state = SimpleNamespace(health_status="green")
+        app._print_log = MagicMock()
+
+        with patch.object(app_shell.logger, "critical") as mock_critical:
+            app._check_motor_heartbeat()
+            app._check_motor_heartbeat()
+
+        mock_critical.assert_called_once_with(
+            "MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline"
+        )
+        assert app._ui_state.health_status == "red"
+        app._print_log.assert_called_once_with(
+            "[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app."
+        )
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_motor_heartbeat_ignores_not_started_or_closing_motor():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.motor_ia = SimpleNamespace(is_alive=MagicMock(return_value=False))
+        app._motor_heartbeat_failure_reported = False
+        app._ui_state = SimpleNamespace(health_status="green")
+        app._print_log = MagicMock()
+
+        with patch.object(app_shell.logger, "critical") as mock_critical:
+            app._motor_started = False
+            app._closing = False
+            app._check_motor_heartbeat()
+
+            app._motor_started = True
+            app._closing = True
+            app._check_motor_heartbeat()
+
+        mock_critical.assert_not_called()
+        assert app._ui_state.health_status == "green"
+        app._print_log.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_poll_health_status_preserves_red_after_motor_failure_reported():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.health_monitor = SimpleNamespace(state=SimpleNamespace(overall_status="green"))
+        app.motor_ia = SimpleNamespace(is_alive=MagicMock(return_value=False))
+        app._motor_started = True
+        app._closing = False
+        app._motor_heartbeat_failure_reported = True
+        app._ui_state = SimpleNamespace(health_status="red")
+        app.after = MagicMock()
+
+        app._poll_health_status()
+
+        assert app._ui_state.health_status == "red"
+        app.after.assert_called_once_with(2000, app._poll_health_status)
+    finally:
+        _restore_app_shell_module(old_module)

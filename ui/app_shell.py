@@ -185,6 +185,9 @@ class VocalAIApp(ctk.CTk):
         self._ptt_accept_logged: bool = False
         self._stream_admin_manual_disconnect: bool = False
         self._logs_panel_visible: bool = True
+        self._closing: bool = False
+        self._motor_started: bool = False
+        self._motor_heartbeat_failure_reported: bool = False
         self.perfiles = cargar_perfiles()
         self.cohost_profiles = load_cohost_profiles()
         self._current_cohost_profile = "Natural" if "Natural" in self.cohost_profiles else next(iter(self.cohost_profiles), "")
@@ -282,6 +285,7 @@ class VocalAIApp(ctk.CTk):
         when the motor calls ui_callback before Tkinter's mainloop starts.
         """
         self.motor_ia.start()
+        self._motor_started = True
 
         # Start health monitor daemon
         if self.health_monitor:
@@ -291,20 +295,49 @@ class VocalAIApp(ctk.CTk):
             except Exception as e:
                 logger.debug(f"HealthMonitor: could not attach existing server: {e}")
             self.health_monitor.start()
-            # Begin UI health status polling
-            self._poll_health_status()
+        # Begin UI health status polling and passive motor heartbeat checks.
+        self._poll_health_status()
 
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
-        if not self.health_monitor:
-            return
-        try:
-            state = self.health_monitor.state
-            self._ui_state.health_status = state.overall_status
-        except Exception:
-            pass
+        if self.health_monitor and not getattr(self, "_motor_heartbeat_failure_reported", False):
+            try:
+                state = self.health_monitor.state
+                self._ui_state.health_status = state.overall_status
+            except Exception:
+                pass
+        self._check_motor_heartbeat()
         # Reschedule every 2 seconds for UI responsiveness
         self.after(2000, self._poll_health_status)
+
+    def _check_motor_heartbeat(self) -> None:
+        """Surface an operator-visible warning if MotorVocalIA dies after startup."""
+        motor = getattr(self, "motor_ia", None)
+        if (
+            motor is None
+            or not getattr(self, "_motor_started", False)
+            or getattr(self, "_closing", False)
+            or getattr(self, "_motor_heartbeat_failure_reported", False)
+        ):
+            return
+        try:
+            alive = motor.is_alive()
+        except Exception:
+            logger.exception("No se pudo verificar el heartbeat de MotorVocalIA")
+            return
+        if alive:
+            return
+
+        self._motor_heartbeat_failure_reported = True
+        logger.critical("MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline")
+        try:
+            self._ui_state.health_status = "red"
+        except Exception:
+            logger.exception("No se pudo marcar health_status tras fallo de MotorVocalIA")
+        try:
+            self._print_log("[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app.")
+        except Exception:
+            logger.exception("No se pudo informar en UI el fallo de MotorVocalIA")
 
     def _on_ui_state_change(self, key: str, value: Any) -> None:
         if key == "ws_connected":
@@ -2834,6 +2867,7 @@ class VocalAIApp(ctk.CTk):
     # ──────────────────────────────────────────────
 
     def on_closing(self) -> None:
+        self._closing = True
         logger.info("Cerrando aplicación...")
 
         # Fix: audit/ui-security-perf-2026-05-17 — unsubscribe UIState observer to
