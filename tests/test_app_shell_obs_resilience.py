@@ -8,7 +8,7 @@ import queue
 import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 
 def _import_app_shell_with_ui_deps_mocked():
@@ -237,6 +237,15 @@ class _EntryStub:
         return self._value
 
 
+class _ImmediateThread:
+    def __init__(self, target, daemon=False):
+        self._target = target
+        self.daemon = daemon
+
+    def start(self):
+        self._target()
+
+
 def test_stream_admin_chat_url_validation_uses_non_blocking_notification():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:
@@ -271,6 +280,50 @@ def test_stream_admin_send_chat_readonly_uses_non_blocking_notification():
             "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.",
         )
         mock_showwarning.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_kira_agenda_add_topic_validation_uses_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.kira_agenda = SimpleNamespace(
+            add_topic=MagicMock(side_effect=ValueError("El tema necesita título.")),
+            queue_topic=MagicMock(),
+        )
+        app._notify_operator = MagicMock()
+
+        with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
+            app._kira_agenda_add_topic("", "", [])
+
+        app._notify_operator.assert_called_once_with("Kira Agenda", "El tema necesita título.")
+        app.kira_agenda.queue_topic.assert_not_called()
+        mock_showwarning.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_stream_admin_worker_error_uses_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.stream_admin = object()
+        app.after = MagicMock(side_effect=lambda _delay, callback: callback())
+        app._notify_operator = MagicMock()
+        app._on_stream_admin_log = MagicMock()
+
+        def fail():
+            raise RuntimeError("boom")
+
+        with patch.object(app_shell.threading, "Thread", _ImmediateThread):
+            with patch.object(app_shell.messagebox, "showerror") as mock_showerror:
+                app._run_stream_admin_task("Acción", fail)
+
+        app.after.assert_called_once_with(0, ANY)
+        app._notify_operator.assert_called_once_with("Stream Admin", "boom", level="error")
+        app._on_stream_admin_log.assert_called_once_with("[StreamAdmin] Acción falló: boom")
+        mock_showerror.assert_not_called()
     finally:
         _restore_app_shell_module(old_module)
 

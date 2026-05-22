@@ -1112,7 +1112,7 @@ class VocalAIApp(ctk.CTk):
             topic = self.kira_agenda.add_topic(title, angle, constraints, approved=True, priority=priority, response_length=response_length)
             self.kira_agenda.queue_topic(topic.id)
         except ValueError as e:
-            messagebox.showwarning("Kira Agenda", str(e))
+            self._notify_operator("Kira Agenda", str(e))
             return
         self._on_stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}, {self.kira_agenda.max_turns_per_topic} turnos globales)")
         self._kira_agenda_update_status()
@@ -1131,7 +1131,7 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_save_profile(self, name: str, style: str, priority: str, response_length: str) -> None:
         safe_name = sanitize_profile_name(name)
         if not safe_name:
-            messagebox.showwarning("Kira Agenda", "El perfil necesita un nombre.")
+            self._notify_operator("Kira Agenda", "El perfil necesita un nombre.")
             return
         try:
             normalized = normalize_cohost_profile({
@@ -1141,7 +1141,7 @@ class VocalAIApp(ctk.CTk):
             })
             self.kira_agenda.set_profile(normalized)
         except ValueError as e:
-            messagebox.showwarning("Kira Agenda", str(e))
+            self._notify_operator("Kira Agenda", str(e))
             return
         self.cohost_profiles[safe_name] = normalized
         self._current_cohost_profile = safe_name
@@ -1152,7 +1152,7 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_topic_by_queue_index(self, index: int):
         queued = self.kira_agenda.queued_topics()
         if index < 1 or index > len(queued):
-            messagebox.showwarning("Kira Agenda", "Elegí un número válido de la cola.")
+            self._notify_operator("Kira Agenda", "Elegí un número válido de la cola.")
             return None
         return queued[index - 1]
 
@@ -1529,7 +1529,10 @@ class VocalAIApp(ctk.CTk):
                 hint = ""
                 if "Falta scope de escritura" in str(e):
                     hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
-                self.after(0, lambda err=e: messagebox.showerror("Stream Admin", str(err)))
+                try:
+                    self.after(0, lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
+                except Exception:
+                    self._notify_operator("Stream Admin", str(e), level="error")
                 self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
 
         threading.Thread(target=worker, daemon=True).start()
