@@ -98,6 +98,7 @@ def _from_pretrained_kwargs(model_path, device):
 # ──────────────────────────────────────────────
 app = Flask(__name__)
 _tts_lock = threading.Lock()
+APP_ID = "voiceai-qwen-tts"
 
 logger.info("Inicializando Motor Pesado (Qwen3-TTS 0.6B)...")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -120,8 +121,8 @@ except Exception as e:
 def health_check():
     """Health probe for the HealthMonitor daemon."""
     if model is not None:
-        return jsonify({"status": "ok", "model_loaded": True}), 200
-    return jsonify({"status": "error", "model_loaded": False}), 503
+        return jsonify({"app": APP_ID, "status": "ok", "model_loaded": True}), 200
+    return jsonify({"app": APP_ID, "status": "error", "model_loaded": False}), 503
 
 @app.route('/generar', methods=['POST'])
 def generar_audio():

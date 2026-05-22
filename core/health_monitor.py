@@ -209,6 +209,7 @@ class QwenProcessManager:
     XTTS_PYTHON = r"E:\Miniconda\envs\xtts_env\python.exe"
     SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
     HEALTH_URL = "http://127.0.0.1:5000/health"
+    APP_ID = "voiceai-qwen-tts"
 
     def __init__(self) -> None:
         self._process: Optional[subprocess.Popen] = None
@@ -380,6 +381,8 @@ class QwenProcessManager:
                 # only expose an HTTP 200 health probe.
                 return True
 
+            if "app" in payload and payload.get("app") != self.APP_ID:
+                return False
             if "model_loaded" in payload:
                 status_ok = "status" not in payload or payload.get("status") == "ok"
                 return payload.get("model_loaded") is True and status_ok

@@ -284,7 +284,37 @@ class TestQwenProcessManager:
         """_check_health returns True on 200 response."""
         mgr = QwenProcessManager()
         with patch("core.health_monitor.requests.get") as mock_get:
-            mock_get.return_value = MagicMock(status_code=200)
+            response = MagicMock(status_code=200)
+            response.json.side_effect = ValueError("not json")
+            mock_get.return_value = response
+            assert mgr._check_health() is True
+
+    def test_check_health_rejects_wrong_app_identifier(self):
+        """_check_health rejects healthy JSON from a different app on port 5000."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "app": "some-other-service",
+                "status": "ok",
+                "model_loaded": True,
+            }
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
+
+    def test_check_health_accepts_correct_app_identifier(self):
+        """_check_health accepts VoiceAI Qwen health JSON with the expected app id."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "app": QwenProcessManager.APP_ID,
+                "status": "ok",
+                "model_loaded": True,
+            }
+            mock_get.return_value = response
+
             assert mgr._check_health() is True
 
     def test_check_health_requires_loaded_model_when_json_available(self):
