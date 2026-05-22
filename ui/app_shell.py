@@ -1516,7 +1516,7 @@ class VocalAIApp(ctk.CTk):
 
     def _run_stream_admin_task(self, action_name: str, func) -> None:
         if not self.stream_admin:
-            messagebox.showwarning("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
+            self._notify_operator("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
             return
 
         def worker():
@@ -1575,7 +1575,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_apply_metadata(self) -> None:
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
             return
         payload = self.stream_admin_ui.metadata_payload_from_ui()
         if self.stream_admin and self.stream_admin.pending_action:
@@ -1599,7 +1599,7 @@ class VocalAIApp(ctk.CTk):
         try:
             parsed = parse_chat_url(raw)
         except ValueError:
-            messagebox.showwarning("Chat Live", "URL no valida o no soportada")
+            self._notify_operator("Chat Live", "URL no valida o no soportada")
             return
 
         platform = parsed["platform"]
@@ -1667,17 +1667,17 @@ class VocalAIApp(ctk.CTk):
         raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
 
         if not raw:
-            messagebox.showwarning("Twitch Chat", "Ingresa una URL de Twitch (twitch.tv/canal).")
+            self._notify_operator("Twitch Chat", "Ingresa una URL de Twitch (twitch.tv/canal).")
             return
 
         try:
             parsed = parse_chat_url(raw)
         except ValueError:
-            messagebox.showwarning("Twitch Chat", "URL no valida o no soportada")
+            self._notify_operator("Twitch Chat", "URL no valida o no soportada")
             return
 
         if parsed["platform"] != "twitch":
-            messagebox.showwarning("Twitch Chat", "La URL no es de Twitch. Usa un enlace twitch.tv/canal.")
+            self._notify_operator("Twitch Chat", "La URL no es de Twitch. Usa un enlace twitch.tv/canal.")
             return
 
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
@@ -1736,7 +1736,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_connect_api_chat(self, video_id: str, live_chat_id: str) -> None:
         if not self.smart_agg:
-            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
             return
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
             messagebox.showwarning("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
@@ -2877,6 +2877,28 @@ class VocalAIApp(ctk.CTk):
     # ──────────────────────────────────────────────
     # Logging
     # ──────────────────────────────────────────────
+
+    def _notify_operator(self, title: str, message: str, level: str = "warning") -> None:
+        level_name = (level or "warning").lower()
+        log_method = getattr(logger, level_name, logger.warning)
+        if not callable(log_method):
+            log_method = logger.warning
+        log_method("%s: %s", title, message)
+
+        text = f"[{level_name.upper()}] {title}: {message}"
+        printed = False
+        printer = getattr(self, "_print_log", None)
+        if callable(printer):
+            try:
+                printer(text)
+                printed = True
+            except Exception:
+                logger.debug("No se pudo imprimir notificacion de operador", exc_info=True)
+
+        if not printed:
+            log_queue = getattr(self, "log_queue", None)
+            if log_queue is not None:
+                log_queue.put(text)
 
     def _print_log(self, msg: str) -> None:
         self._advanced_panel.print_log(msg)

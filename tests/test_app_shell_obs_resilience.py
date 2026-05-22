@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import importlib
+import queue
 import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -189,6 +190,68 @@ def test_motor_heartbeat_ignores_not_started_or_closing_motor():
         mock_critical.assert_not_called()
         assert app._ui_state.health_status == "green"
         app._print_log.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_notify_operator_logs_and_prints_without_modal():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._print_log = MagicMock()
+
+        with patch.object(app_shell.logger, "warning") as mock_warning:
+            app._notify_operator("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
+
+        mock_warning.assert_called_once_with(
+            "%s: %s",
+            "Stream Admin",
+            "RF4 no inicializado. Revisa config/stream_admin.yaml.",
+        )
+        app._print_log.assert_called_once_with(
+            "[WARNING] Stream Admin: RF4 no inicializado. Revisa config/stream_admin.yaml."
+        )
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_notify_operator_falls_back_to_log_queue_when_print_unavailable():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.log_queue = queue.Queue()
+
+        with patch.object(app_shell.logger, "warning"):
+            app._notify_operator("Chat Live", "URL no valida o no soportada")
+
+        assert app.log_queue.get_nowait() == "[WARNING] Chat Live: URL no valida o no soportada"
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+class _EntryStub:
+    def __init__(self, value):
+        self._value = value
+
+    def get(self):
+        return self._value
+
+
+def test_stream_admin_chat_url_validation_uses_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.stream_admin_ui = SimpleNamespace(
+            _widget=MagicMock(return_value=_EntryStub("not a supported chat url"))
+        )
+        app._print_log = MagicMock()
+
+        with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
+            with patch("smart_aggregator.url_parser.parse_chat_url", side_effect=ValueError("bad url")):
+                app._on_stream_admin_connect_chat_live()
+
+        mock_showwarning.assert_not_called()
+        app._print_log.assert_called_once_with("[WARNING] Chat Live: URL no valida o no soportada")
     finally:
         _restore_app_shell_module(old_module)
 
