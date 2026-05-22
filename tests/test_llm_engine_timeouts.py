@@ -320,6 +320,70 @@ def test_stale_chat_expires_before_processing():
     motor._ejecutar_inferencia.assert_not_called()
 
 
+def test_accumulation_expiry_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_ttl = 1.0
+    raw_expired_payload = "RAW_EXPIRED_CHAT_SECRET"
+    raw_fresh_payload = "RAW_FRESH_CHAT_SECRET"
+    raw_source = "secret-source"
+
+    now = time.time()
+    motor._accumulation_buffer = [
+        (now - 2.0, raw_expired_payload, raw_source),
+        (now, raw_fresh_payload, raw_source),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        accumulated = motor._flush_accumulation()
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes expirados" in log_text
+    assert raw_expired_payload not in log_text
+    assert raw_fresh_payload not in log_text
+    assert raw_source not in log_text
+    assert raw_fresh_payload in accumulated
+    assert motor._last_accumulation_flush_count == 1
+
+
+def test_accumulation_item_overflow_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_max_items = 1
+    raw_first_payload = "RAW_ITEM_OVERFLOW_SECRET_1"
+    raw_second_payload = "RAW_ITEM_OVERFLOW_SECRET_2"
+    raw_source = "secret-source"
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        motor.enqueue_accumulation(raw_first_payload, source=raw_source)
+        motor.enqueue_accumulation(raw_second_payload, source=raw_source)
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes por límite de items" in log_text
+    assert raw_first_payload not in log_text
+    assert raw_second_payload not in log_text
+    assert raw_source not in log_text
+
+
+def test_accumulation_char_overflow_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_max_chars = 5
+    raw_payload = "RAW_CHAR_OVERFLOW_SECRET"
+    raw_source = "secret-source"
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        motor.enqueue_accumulation(raw_payload, source=raw_source)
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes por límite de caracteres" in log_text
+    assert raw_payload not in log_text
+    assert raw_source not in log_text
+
+
 def test_ptt_items_never_expire_via_ttl():
     """PTT (priority 0) items must not be expired by TTL check."""
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)

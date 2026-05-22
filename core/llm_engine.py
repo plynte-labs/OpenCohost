@@ -85,6 +85,7 @@ class MotorVocalIA(threading.Thread):
         self._accum_max_chars: int = 2000
         self._accum_ttl: float = 120.0  # 2 minutes
         self._accum_lock = threading.Lock()
+        self._last_accumulation_flush_count: int = 0
 
         # Text-only agenda prefetch: Ollama can think while TTS is speaking.
         self._prefetch_lock = threading.Lock()
@@ -392,14 +393,29 @@ class MotorVocalIA(threading.Thread):
         now = time.time()
         with self._accum_lock:
             self._accumulation_buffer.append((now, payload, source))
+            dropped_item_limit = 0
+            dropped_char_limit = 0
             # Enforce item limit
             if len(self._accumulation_buffer) > self._accum_max_items:
                 self._accumulation_buffer.pop(0)  # Drop oldest
+                dropped_item_limit += 1
             # Enforce char limit — drop oldest until under limit
             total_chars = sum(len(p) for _, p, _ in self._accumulation_buffer)
             while total_chars > self._accum_max_chars and self._accumulation_buffer:
                 dropped = self._accumulation_buffer.pop(0)
                 total_chars -= len(dropped[1])
+                dropped_char_limit += 1
+
+        if dropped_item_limit:
+            self._log(
+                f"Acumulación: descartados {dropped_item_limit} mensajes por límite de items.",
+                level="warning",
+            )
+        if dropped_char_limit:
+            self._log(
+                f"Acumulación: descartados {dropped_char_limit} mensajes por límite de caracteres.",
+                level="warning",
+            )
 
     def _flush_accumulation(self) -> Optional[str]:
         """Compact accumulated messages into a single consultation string.
@@ -410,12 +426,26 @@ class MotorVocalIA(threading.Thread):
         now = time.time()
         with self._accum_lock:
             # Filter out expired messages (>2 minutes old)
+            before_count = len(self._accumulation_buffer)
             fresh = [(ts, p, s) for ts, p, s in self._accumulation_buffer
                      if now - ts < self._accum_ttl]
+            expired_count = before_count - len(fresh)
             self._accumulation_buffer = fresh
+            self._last_accumulation_flush_count = len(fresh)
 
             if not fresh:
+                if expired_count:
+                    self._log(
+                        f"Acumulación: descartados {expired_count} mensajes expirados (TTL {self._accum_ttl:.0f}s).",
+                        level="warning",
+                    )
                 return None
+
+            if expired_count:
+                self._log(
+                    f"Acumulación: descartados {expired_count} mensajes expirados (TTL {self._accum_ttl:.0f}s).",
+                    level="warning",
+                )
 
             # Group by source
             by_source: dict = {}
@@ -465,7 +495,7 @@ class MotorVocalIA(threading.Thread):
                 # No priority items — check accumulation buffer
                 accumulated = self._flush_accumulation()
                 if accumulated:
-                    self._log(f"Procesando acumulación ({len(self._accumulation_buffer) if hasattr(self, '_accumulation_buffer') else 0} mensajes compactados)...")
+                    self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
                     self._processing = True
                     self.ui_callback("processing")
                     try:
