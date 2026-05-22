@@ -1709,7 +1709,7 @@ class VocalAIApp(ctk.CTk):
             video_id = getattr(getattr(self.stream_admin, "metadata", None), "video_id", "")
             live_chat_id = getattr(getattr(self.stream_admin, "metadata", None), "live_chat_id", "")
         if not video_id:
-            messagebox.showwarning("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
+            self._notify_operator("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
             return
 
         if self.stream_admin_ui.chat_connected:
@@ -1725,7 +1725,7 @@ class VocalAIApp(ctk.CTk):
             if current == video_id:
                 self._on_stream_admin_log(f"[StreamAdmin] Chat ya conectado al live {video_id}.")
                 return
-            messagebox.showwarning("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
+            self._notify_operator("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
             return
 
         entry_video = self.stream_admin_ui._widget("entry_stream_chat_message")
@@ -1739,7 +1739,7 @@ class VocalAIApp(ctk.CTk):
             self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
             return
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
-            messagebox.showwarning("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
+            self._notify_operator("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
             return
 
         self.stream_admin_ui.chat_connected = True
@@ -1813,12 +1813,12 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_send_chat(self) -> None:
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
             return
         entry = self.stream_admin_ui._widget("entry_stream_chat_message")
         message = entry.get().strip() if entry else ""
         if not message:
-            messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
+            self._notify_operator("Stream Admin", "Escribe un mensaje para el chat.")
             return
         import re
         message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", message)[:500]
@@ -1852,7 +1852,7 @@ class VocalAIApp(ctk.CTk):
             elif self.stream_admin_ui.last_metadata:
                 context = [{"user": "Stream Admin", "text": f"Live actual: {self.stream_admin_ui.last_metadata.get('title', '')}. Categoria {self.stream_admin_ui.last_metadata.get('category_id', '')}."}]
         if not context:
-            messagebox.showwarning("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
+            self._notify_operator("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
             return
         self.smart_agg_ui.on_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
         self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
@@ -1906,7 +1906,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_simulate_chat(self) -> None:
         if not self.smart_agg:
-            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
             return
         if self.smart_agg_ui.is_busy():
             self._on_stream_admin_log("[StreamAdmin] Simular Chat omitido: Kira está ocupada.")
@@ -1933,7 +1933,7 @@ class VocalAIApp(ctk.CTk):
         user = entry_user.get().strip() if entry_user else ""
         reason = entry_reason.get().strip() if entry_reason else "moderacion manual RF4"
         if not user:
-            messagebox.showwarning("Stream Admin", "Ingresa el channelId del usuario a moderar.")
+            self._notify_operator("Stream Admin", "Ingresa el channelId del usuario a moderar.")
             return
         self._run_stream_admin_task(f"Proponer {action}", lambda: self.stream_admin.propose_high_risk_moderation(action, user, reason, 300))
 
@@ -1980,10 +1980,10 @@ class VocalAIApp(ctk.CTk):
         if not self.stream_admin:
             return
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
             return
         if not channel_id:
-            messagebox.showwarning("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
+            self._notify_operator("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
             return
         reason = reason_entry.get().strip() or f"{action} manual desde Stream Admin"
         verb = "banear" if action == "ban" else "aplicar timeout a"

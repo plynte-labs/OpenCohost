@@ -256,6 +256,25 @@ def test_stream_admin_chat_url_validation_uses_non_blocking_notification():
         _restore_app_shell_module(old_module)
 
 
+def test_stream_admin_send_chat_readonly_uses_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._stream_admin_can_write = MagicMock(return_value=False)
+        app._notify_operator = MagicMock()
+
+        with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
+            app._stream_admin_send_chat()
+
+        app._notify_operator.assert_called_once_with(
+            "Stream Admin",
+            "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.",
+        )
+        mock_showwarning.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_poll_health_status_preserves_red_after_motor_failure_reported():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:
