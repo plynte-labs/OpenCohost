@@ -156,12 +156,14 @@ class TestGetImageForState:
 class TestAssignImageToState:
     def test_copies_image_and_updates_config(self):
         with tempfile.TemporaryDirectory() as td:
+            assets = Path(td) / "assets"
             src = Path(td) / "source.png"
             _make_temp_image(src)
-            config = AvatarConfig()
+            config = AvatarConfig(assets_folder=assets)
             new_config = assign_image_to_state(config, "idle", src)
             assert "idle" in new_config.state_images
             assert new_config.state_images["idle"].exists()
+            assert new_config.state_images["idle"].parent == assets
 
     def test_preserves_obs_config_when_updating_state_image(self):
         with tempfile.TemporaryDirectory() as td:
@@ -175,7 +177,7 @@ class TestAssignImageToState:
                 source_name="KiraCustom",
                 scene_name="Main",
             )
-            config = AvatarConfig(obs=obs)
+            config = AvatarConfig(assets_folder=Path(td) / "assets", obs=obs)
 
             new_config = assign_image_to_state(config, "idle", src)
 
