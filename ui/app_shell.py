@@ -1110,6 +1110,7 @@ class VocalAIApp(ctk.CTk):
             self._on_stream_admin_log("[Kira Agenda] No se activa: no hay temas en cola.")
             self._kira_agenda_update_status()
             return
+        self._kira_agenda_force_strict_chat_filter()
         self.kira_agenda.enable()
         self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
         # Start music bed when co-host mode activates — it's an intentional segment
@@ -1136,8 +1137,24 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self.motor_ia, "drop_pending_sources"):
             self.motor_ia.drop_pending_sources(("kira-agenda",))
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
+        self._kira_agenda_restore_chat_filter()
         self._clear_obs_joyita("KiraJoyita")
         self._kira_agenda_update_status()
+
+    def _kira_agenda_force_strict_chat_filter(self) -> None:
+        if not getattr(self, "smart_agg", None):
+            return
+        if not hasattr(self, "_kira_agenda_previous_filter_policy"):
+            self._kira_agenda_previous_filter_policy = self.smart_agg.get_filter_policy()
+        self.smart_agg.set_filter_policy("strict")
+
+    def _kira_agenda_restore_chat_filter(self) -> None:
+        if not getattr(self, "smart_agg", None):
+            return
+        previous = getattr(self, "_kira_agenda_previous_filter_policy", None)
+        if previous:
+            self.smart_agg.set_filter_policy(previous)
+            delattr(self, "_kira_agenda_previous_filter_policy")
 
     def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
         """Approve a DRAFTED suggestion: mark APPROVED then QUEUED."""
@@ -1217,6 +1234,7 @@ class VocalAIApp(ctk.CTk):
         ):
             self.kira_agenda.state = AgendaState.OFF
             self._on_stream_admin_log("[Kira Agenda] Sesión completada: sin temas pendientes.")
+            self._kira_agenda_restore_chat_filter()
             self._kira_agenda_update_status()
             self._clear_obs_joyita("KiraJoyita")
             return
@@ -1551,6 +1569,10 @@ class VocalAIApp(ctk.CTk):
                 sp = 10
             self.smart_agg.set_spam_limits(max_messages_per_user=sp)
 
+        previous_preset = self.smart_agg.get_filter_policy()
+        preset = "twitch_relaxed" if platform == "twitch" else "balanced"
+        self.smart_agg.set_filter_policy(preset)
+
         if self.smart_agg_ui.connect_to(source_id, platform=platform):
             self.entry_youtube_video.delete(0, "end")
             self.entry_youtube_video.insert(0, source_id)
@@ -1558,6 +1580,8 @@ class VocalAIApp(ctk.CTk):
             if lbl:
                 lbl.configure(text=f"Conectado [{platform}]: {source_id}", text_color="#44aa44")
             self._on_stream_admin_log(f"[StreamAdmin] Chat Live conectado [{platform}]: {source_id}")
+        else:
+            self.smart_agg.set_filter_policy(previous_preset)
 
     def _on_stream_admin_button_twitch(self) -> None:
         """Connect to a Twitch chat live using the URL entry."""
@@ -1592,6 +1616,9 @@ class VocalAIApp(ctk.CTk):
             return
 
         source_id = parsed["source_id"]
+        previous_preset = self.smart_agg.get_filter_policy()
+        self.smart_agg.set_filter_policy("twitch_relaxed")
+
         if self.smart_agg_ui.connect_to(source_id, platform="twitch"):
             self.entry_youtube_video.delete(0, "end")
             self.entry_youtube_video.insert(0, source_id)
@@ -1599,6 +1626,8 @@ class VocalAIApp(ctk.CTk):
             if lbl:
                 lbl.configure(text=f"Conectado [twitch]: {source_id}", text_color="#44aa44")
             self._on_stream_admin_log(f"[StreamAdmin] Chat Live Twitch conectado: {source_id}")
+        else:
+            self.smart_agg.set_filter_policy(previous_preset)
 
     def _stream_admin_connect_current_chat(self) -> None:
         metadata = self.stream_admin_ui.last_metadata or {}

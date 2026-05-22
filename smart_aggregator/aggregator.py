@@ -10,6 +10,8 @@ from .chat_source import YouTubeChatSource, TwitchChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
 from .intent_aggregator import IntentAggregator
+from .filter_policy import get_preset, list_presets
+from .diagnostics import FilterDiagnostics
 from .chat_input_contract import (
     INPUT_CONTRACT_SHADOW_MODE,
     ChatContextPacketBuilder,
@@ -68,6 +70,8 @@ class Aggregator:
         
         self._session_id: Optional[int] = None
         self._busy_callback: Optional[Callable[[], bool]] = None
+        self._diagnostics = FilterDiagnostics()
+        self._filter_policy_name: str = "balanced"
         self._load_spam_config()
         self._load_live_safety_config()
     
@@ -96,6 +100,28 @@ class Aggregator:
             self.activity.cooldown_seconds = max(0.0, float(cooldown_seconds))
         if reset:
             self.activity.reset()
+
+    def set_filter_policy(self, preset_name: str) -> None:
+        preset = self._get_filter_preset(preset_name)
+        if preset is None:
+            raise ValueError(f"Unknown filter preset: {preset_name}. Available: {sorted(list_presets())}")
+        self._filter_policy_name = preset_name
+        _apply_preset_to_filter(self.msg_filter, preset)
+
+    def _get_filter_preset(self, preset_name: str) -> Optional[dict]:
+        configured = self.config.get("filter_presets", {})
+        if isinstance(configured, dict) and isinstance(configured.get(preset_name), dict):
+            return dict(configured[preset_name])
+        return get_preset(preset_name)
+
+    def get_filter_policy(self) -> str:
+        return self._filter_policy_name
+
+    def get_diagnostics(self) -> dict:
+        return self._diagnostics.get_diagnostics()
+
+    def reset_diagnostics(self) -> None:
+        self._diagnostics.reset_diagnostics()
     
     def _check_busy(self) -> bool:
         if self._busy_callback:
@@ -159,6 +185,7 @@ class Aggregator:
     def process_message(self, message: dict):
         now = self._message_timestamp(message)
         self._note_seen_message(now)
+        self._diagnostics.record_seen()
         filtered = self.msg_filter.filter(message)
         accepted = False
         if filtered is not None:
@@ -167,9 +194,17 @@ class Aggregator:
             min_quality = getattr(self.msg_filter, "min_quality_score", 0.0)
             if quality < min_quality:
                 accepted = False
+                self._diagnostics.record_rejected("quality_too_low")
             else:
                 filtered = self._apply_spam_filter(filtered)
                 accepted = filtered is not None
+                if accepted:
+                    self._diagnostics.record_accepted()
+                else:
+                    self._diagnostics.record_rejected("spam")
+        else:
+            reason = self.msg_filter.last_rejection_reason or "unknown"
+            self._diagnostics.record_rejected(reason)
         
         if accepted and self.on_filtered_message:
             try:
@@ -403,3 +438,21 @@ class Aggregator:
                 self.on_source_disconnect()
             except Exception:
                 pass
+
+
+def _apply_preset_to_filter(msg_filter: MessageFilter, preset: dict) -> None:
+    attr_map = {
+        "min_words": "min_words",
+        "min_char_length": "min_char_length",
+        "min_quality_score": "min_quality_score",
+        "discard_emojis_only": "discard_emojis_only",
+        "discard_links": "discard_links",
+        "discard_mentions": "discard_mentions",
+        "discard_repetitive_chars": "discard_repetitive_chars",
+        "discard_repeated_words": "discard_repeated_words",
+        "discard_gibberish": "discard_gibberish",
+        "discard_ascii_art": "discard_ascii_art",
+    }
+    for preset_key, attr_name in attr_map.items():
+        if preset_key in preset:
+            setattr(msg_filter, attr_name, preset[preset_key])

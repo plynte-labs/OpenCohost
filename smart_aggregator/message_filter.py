@@ -43,6 +43,8 @@ class MessageFilter:
             r'[\u2500-\u257F\u2580-\u259F\u25E2-\u25E5\u2B0C-\u2B1B]'
         )
 
+        self._last_rejection_reason: Optional[str] = None
+
     @staticmethod
     def _sanitize_chat_text(text: str) -> str:
         """Strip ANSI escapes, control chars, and null bytes from chat text."""
@@ -53,57 +55,71 @@ class MessageFilter:
         return " ".join(text.split())
 
     def filter(self, message: dict) -> Optional[dict]:
+        self._last_rejection_reason = None
         user = message.get("user", "")
         text = message.get("text", "")
         timestamp = message.get("timestamp", 0)
 
         if not isinstance(text, str):
+            self._last_rejection_reason = "invalid_type"
             return None
 
         text_stripped = text.strip()
         if not text_stripped:
+            self._last_rejection_reason = "empty"
             return None
 
         text_stripped = self._sanitize_chat_text(text_stripped)
         text_stripped = text_stripped[:500]
         if not text_stripped:
+            self._last_rejection_reason = "empty"
             return None
 
         if self.whitelist_enabled and user.lower() in self.whitelist_users:
             return {"user": user, "text": text_stripped, "timestamp": timestamp}
 
         if self.discard_emojis_only and self._has_only_emojis(text_stripped):
+            self._last_rejection_reason = "emoji_only"
             return None
 
         if self.discard_links and self._url_pattern.search(text_stripped):
+            self._last_rejection_reason = "link"
             return None
 
         if self.discard_mentions and self._mention_pattern.search(text_stripped):
+            self._last_rejection_reason = "mention"
             return None
 
         text_clean = self._strip_custom_emojis(text_stripped)
         if not text_clean:
+            self._last_rejection_reason = "emoji_only"
             return None
 
         if len(text_clean) < self.min_char_length:
+            self._last_rejection_reason = "too_short_chars"
             return None
 
         words = text_clean.split()
         if len(words) < self.min_words:
+            self._last_rejection_reason = "too_short_words"
             return None
 
         # --- Quality filters (after basic length check) ---
 
         if self.discard_ascii_art and self._is_ascii_art(text_clean):
+            self._last_rejection_reason = "ascii_art"
             return None
 
         if self.discard_repetitive_chars and self._has_repetitive_chars(text_clean):
+            self._last_rejection_reason = "repetitive_chars"
             return None
 
         if self.discard_repeated_words and self._has_repeated_words(words):
+            self._last_rejection_reason = "repeated_words"
             return None
 
         if self.discard_gibberish and self._is_gibberish(text_clean):
+            self._last_rejection_reason = "gibberish"
             return None
 
         quality = self._quality_score(words, text_clean)
@@ -299,3 +315,11 @@ class MessageFilter:
     def _strip_custom_emojis(self, text: str) -> str:
         text = self._custom_emoji_pattern.sub(" ", text)
         return " ".join(text.split())
+
+    def explain_filter(self, message: dict) -> Optional[str]:
+        self.filter(message)
+        return self._last_rejection_reason
+
+    @property
+    def last_rejection_reason(self) -> Optional[str]:
+        return self._last_rejection_reason

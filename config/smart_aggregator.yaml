@@ -91,3 +91,38 @@ twitch:
 youtube_api:
   api_key: "${YOUTUBE_API_KEY}"
   channel_id: "${YOUTUBE_CHANNEL_ID}"
+
+filter_presets:
+  balanced:
+    min_words: 3
+    min_char_length: 10
+    min_quality_score: 0.5
+    discard_emojis_only: true
+    discard_links: true
+    discard_mentions: true
+    discard_repetitive_chars: true
+    discard_repeated_words: true
+    discard_gibberish: true
+    discard_ascii_art: true
+  twitch_relaxed:
+    min_words: 1
+    min_char_length: 1
+    min_quality_score: 0.0
+    discard_emojis_only: true
+    discard_links: true
+    discard_mentions: true
+    discard_repetitive_chars: true
+    discard_repeated_words: true
+    discard_gibberish: true
+    discard_ascii_art: true
+  strict:
+    min_words: 4
+    min_char_length: 15
+    min_quality_score: 0.6
+    discard_emojis_only: true
+    discard_links: true
+    discard_mentions: true
+    discard_repetitive_chars: true
+    discard_repeated_words: true
+    discard_gibberish: true
+    discard_ascii_art: true
