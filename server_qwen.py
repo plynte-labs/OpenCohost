@@ -8,6 +8,7 @@ import inspect
 from pathlib import Path
 
 from config.storage import STORAGE_PATHS
+from core.temp_file_cleanup import register_temp_file_cleanup
 
 from flask import Flask, request, send_file, jsonify
 import torch
@@ -171,20 +172,12 @@ def generar_audio():
 
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] Audio generado en {elapsed:.2f}s → {archivo_salida}")
-        return send_file(archivo_salida, mimetype="audio/wav")
+        response = send_file(archivo_salida, mimetype="audio/wav")
+        return register_temp_file_cleanup(response, archivo_salida, logger)
 
     except Exception as e:
         logger.exception(f"[{request_id}] Error generando audio")
         return jsonify({"error": str(e)}), 500
-    finally:
-        def cleanup_file():
-            try:
-                if os.path.exists(archivo_salida):
-                    os.remove(archivo_salida)
-            except OSError:
-                pass
-        threading.Timer(5.0, cleanup_file).start()
-
 if __name__ == '__main__':
     logger.info("Servidor Multi-Motor iniciando en http://127.0.0.1:5000")
     app.run(host='127.0.0.1', port=5000, debug=False)
