@@ -328,6 +328,64 @@ def test_stream_admin_worker_error_uses_non_blocking_notification():
         _restore_app_shell_module(old_module)
 
 
+def test_music_import_errors_use_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.music_library = SimpleNamespace(add_file=MagicMock(side_effect=ValueError("formato inválido")))
+        app._music_update_panel = MagicMock()
+        app._notify_operator = MagicMock()
+
+        with patch.object(app_shell.filedialog, "askopenfilenames", return_value=["C:/tmp/bad.mp3"]):
+            with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
+                app._music_import_track("calma")
+
+        app._music_update_panel.assert_called_once_with()
+        app._notify_operator.assert_called_once_with("Música", "bad.mp3: formato inválido")
+        mock_showwarning.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_recording_without_audio_source_uses_non_blocking_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.dispositivo_seleccionado = None
+        app._notify_operator = MagicMock()
+
+        with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
+            app._iniciar_grabacion()
+
+        app._notify_operator.assert_called_once_with("Atención", "Selecciona una fuente de audio primero.")
+        mock_showwarning.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_load_voice_invalid_wav_uses_non_blocking_error_notification():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.btn_voz = MagicMock()
+        app.update_idletasks = MagicMock()
+        app._notify_operator = MagicMock()
+
+        with patch.object(app_shell.filedialog, "askopenfilename", return_value="C:/tmp/bad.wav"):
+            with patch.object(app_shell.sf, "read", side_effect=RuntimeError("archivo roto")):
+                with patch.object(app_shell.messagebox, "showerror") as mock_showerror:
+                    app._cargar_voz()
+
+        app._notify_operator.assert_called_once_with(
+            "Error",
+            "No se pudo leer el archivo de audio:\narchivo roto",
+            level="error",
+        )
+        mock_showerror.assert_not_called()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_poll_health_status_preserves_red_after_motor_failure_reported():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:

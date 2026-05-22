@@ -1025,7 +1025,7 @@ class VocalAIApp(ctk.CTk):
                 errors.append(f"{os.path.basename(path)}: {exc}")
         self._music_update_panel()
         if errors:
-            messagebox.showwarning("Música", "\n".join(errors[:6]))
+            self._notify_operator("Música", "\n".join(errors[:6]))
         elif imported:
             self._print_log(f"[Música] {imported} track(s) importados para {mood}.")
 
@@ -2679,7 +2679,7 @@ class VocalAIApp(ctk.CTk):
 
     def _iniciar_grabacion(self) -> None:
         if self.dispositivo_seleccionado is None:
-            messagebox.showwarning("Atención", "Selecciona una fuente de audio primero.")
+            self._notify_operator("Atención", "Selecciona una fuente de audio primero.")
             return
         dialog = ctk.CTkInputDialog(text=f"Grabarás {RECORDING_DURATION} segundos de audio para calibrar la voz.\nHabla con tu tono natural.\n\nPresiona OK para empezar.", title="Confirmar Grabación")
         res = dialog.get_input()
@@ -2735,15 +2735,15 @@ class VocalAIApp(ctk.CTk):
                 data, sr = sf.read(filepath)
                 duration = len(data) / sr
                 if duration < 2.0:
-                    messagebox.showwarning("Audio muy corto", "El audio debe durar al menos 2 segundos.")
+                    self._notify_operator("Audio muy corto", "El audio debe durar al menos 2 segundos.")
                     self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
                 if duration > 30.0:
-                    messagebox.showwarning("Audio muy largo", "El audio no debe durar más de 30 segundos.")
+                    self._notify_operator("Audio muy largo", "El audio no debe durar más de 30 segundos.")
                     self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
             except Exception as e:
-                messagebox.showerror("Error", f"No se pudo leer el archivo de audio:\n{e}")
+                self._notify_operator("Error", f"No se pudo leer el archivo de audio:\n{e}", level="error")
                 self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                 return
             self.motor_ia.command_queue.put(("set_voice", filepath))
