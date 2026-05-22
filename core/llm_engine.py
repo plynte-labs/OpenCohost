@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 import threading
 import queue
 import time
@@ -14,6 +15,7 @@ from config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
     LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
+    OLLAMA_CHAT_TIMEOUT,
     resolve_startup_model, save_last_model,
 )
 from config.logger import get_logger
@@ -55,6 +57,8 @@ class MotorVocalIA(threading.Thread):
         # Last switch failure info (read by UI handler, cleared after read)
         self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
+        self._ollama_chat_client = None
+        self._last_llm_failure: Optional[dict] = None
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
@@ -120,6 +124,7 @@ class MotorVocalIA(threading.Thread):
 
         self.pygame = pygame
         self.ollama = ollama
+        self._ollama_chat_client = self._create_ollama_chat_client(ollama)
 
         try:
             self.pygame.mixer.init()
@@ -680,12 +685,36 @@ class MotorVocalIA(threading.Thread):
             respuesta = None
             
             for intento in range(max_intentos):
-                respuesta = self.ollama.chat(
-                    model=self.current_model,
-                    messages=messages,
-                    keep_alive=-1,
-                    options=opciones_llm
-                )
+                try:
+                    respuesta = self._ollama_chat(
+                        model=self.current_model,
+                        messages=messages,
+                        keep_alive=-1,
+                        options=opciones_llm
+                    )
+                except Exception as e:
+                    if not self._is_ollama_transport_error(e):
+                        raise
+                    self._last_llm_failure = {
+                        "model": self.current_model,
+                        "source": source,
+                        "attempt": intento + 1,
+                        "reason": type(e).__name__,
+                        "message": str(e),
+                    }
+                    self._log(
+                        f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}: {e}",
+                        level="error",
+                    )
+                    logger.warning(
+                        "Ollama chat transport failure: model=%s source=%s attempt=%s/%s",
+                        self.current_model,
+                        source,
+                        intento + 1,
+                        max_intentos,
+                        exc_info=True,
+                    )
+                    return ""
                 
                 msg_obj = respuesta.get('message', {})
                 if isinstance(msg_obj, dict):
@@ -736,6 +765,8 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
                 return ""
 
+            self._last_llm_failure = None
+
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
                 return ""
@@ -753,6 +784,27 @@ class MotorVocalIA(threading.Thread):
             self._log(f"ERROR Ollama: {e}", level="error")
             logger.exception("Error en inferencia LLM")
             return ""
+
+    def _create_ollama_chat_client(self, ollama_module):
+        client_factory = getattr(ollama_module, "Client", None)
+        if client_factory is None:
+            return None
+        try:
+            return client_factory(timeout=OLLAMA_CHAT_TIMEOUT)
+        except TypeError as e:
+            self._log(f"Ollama Client no soporta timeout de chat; usando cliente por defecto: {e}", level="warning")
+            return None
+
+    def _ollama_chat(self, **kwargs):
+        client = self._ollama_chat_client or self.ollama
+        return client.chat(**kwargs)
+
+    @staticmethod
+    def _is_ollama_transport_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError, socket.timeout, requests.exceptions.RequestException)):
+            return True
+        class_names = {cls.__name__ for cls in type(exc).__mro__}
+        return any("Timeout" in name or "Connect" in name or "Connection" in name for name in class_names)
 
     def _accept_agenda_output(self, dialogo: str) -> bool:
         validator = getattr(self, "agenda_output_validator", None)

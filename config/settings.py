@@ -176,6 +176,7 @@ RTF_RECOVERY_COUNT = 3       # consecutive measurements below threshold to recov
 OLLAMA_POLL_INTERVAL = 15    # seconds between Ollama health polls
 OLLAMA_FAILURE_THRESHOLD = 3 # consecutive failures before "down"
 OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
+OLLAMA_CHAT_TIMEOUT = 180    # max seconds to wait for an Ollama chat generation
 HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
 
 

@@ -1,5 +1,6 @@
 """Focused tests for LLM/TTS timeout coordination."""
 
+import logging
 import queue
 import threading
 import time
@@ -44,6 +45,22 @@ def test_check_ollama_service_warms_current_model_after_service_ready():
     motor.ollama.list.assert_called_once()
     motor.ollama.generate.assert_called_once()
     assert motor._warmed_model == "llama3"
+
+
+def test_ollama_chat_client_uses_configured_timeout():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    created = {}
+
+    class FakeOllamaModule:
+        @staticmethod
+        def Client(**kwargs):
+            created.update(kwargs)
+            return MagicMock()
+
+    client = motor._create_ollama_chat_client(FakeOllamaModule)
+
+    assert client is not None
+    assert created == {"timeout": llm_engine.OLLAMA_CHAT_TIMEOUT}
 
 
 def test_replace_pending_keeps_latest_item_for_same_source():
@@ -159,6 +176,49 @@ def test_agenda_generation_uses_controller_guardrail_before_history_or_speech():
 
     assert dialogo == ""
     motor.agenda_output_validator.assert_called_once()
+    assert list(motor.historial) == []
+
+
+def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.side_effect = TimeoutError("chat stalled")
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert dialogo == ""
+    assert motor.ollama.chat.call_count == 1
+    assert motor._last_llm_failure == {
+        "model": "llama3",
+        "source": "direct",
+        "attempt": 1,
+        "reason": "TimeoutError",
+        "message": "chat stalled",
+    }
+    assert any("ERROR Ollama chat (TimeoutError)" in item for item in list(motor.log_queue.queue))
+    assert any("Ollama chat transport failure" in record.message for record in caplog.records)
+    assert list(motor.historial) == []
+
+
+def test_ollama_chat_connection_error_is_logged_and_returns_empty(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.side_effect = ConnectionError("ollama refused")
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        dialogo = motor._generar_dialogo("hola", source="chat", commit_history=True)
+
+    assert dialogo == ""
+    assert motor.ollama.chat.call_count == 1
+    assert motor._last_llm_failure["reason"] == "ConnectionError"
+    assert motor._last_llm_failure["message"] == "ollama refused"
+    assert any("ERROR Ollama chat (ConnectionError)" in item for item in list(motor.log_queue.queue))
+    assert any("Ollama chat transport failure" in record.message for record in caplog.records)
     assert list(motor.historial) == []
 
 
