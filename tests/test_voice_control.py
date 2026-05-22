@@ -491,6 +491,34 @@ class TestWebSocketDisconnect:
 class TestWebSocketReconnection:
     """Test WebSocket reconnection with exponential backoff."""
 
+    def test_run_ws_client_logs_unexpected_exception_and_marks_idle(self, voice_panel, mock_logger):
+        voice_panel.create_voice_panel()
+        voice_panel._ws_connected = True
+        voice_panel._ws_should_reconnect = True
+        voice_panel._ui_state.ws_connected = True
+        voice_panel._ui_state.ws_should_reconnect = True
+
+        with patch.object(
+            voice_panel,
+            "_ws_reconnect_loop",
+            new_callable=AsyncMock,
+        ) as mock_loop:
+            mock_loop.side_effect = RuntimeError("event loop crashed")
+            voice_panel._run_ws_client()
+
+        mock_logger.exception.assert_called_once_with(
+            "Unexpected error in WebSocket client thread"
+        )
+        mock_logger.info.assert_any_call(
+            "[Red] Error inesperado en LiveAudio. Desconectado."
+        )
+        assert voice_panel._ws_connected is False
+        assert voice_panel._ws_should_reconnect is False
+        assert voice_panel._ui_state.ws_connected is False
+        assert voice_panel._ui_state.ws_should_reconnect is False
+        assert voice_panel.get_state() == "error"
+        assert voice_panel.btn_primary_voice.text == "Hablar"
+
     def test_reconnect_uses_exponential_backoff(self, voice_panel):
         voice_panel._ws_should_reconnect = True
 
@@ -548,6 +576,48 @@ class TestWebSocketReconnection:
                             asyncio.run(voice_panel._ws_reconnect_loop())
 
         assert voice_panel._ws_should_reconnect is False
+
+
+class TestPTTFlushWatcher:
+    """Test PTT flush watcher resilience."""
+
+    def test_flush_watcher_logs_exception_and_continues(self, voice_panel, mock_logger):
+        class FakeStop:
+            def __init__(self):
+                self.stopped = False
+                self.wait_calls = []
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, timeout):
+                self.wait_calls.append(timeout)
+
+            def set(self):
+                self.stopped = True
+
+        fake_stop = FakeStop()
+        voice_panel._ptt_flush_stop = fake_stop
+        voice_panel._ptt_buffer = "buffered transcript"
+        voice_panel._ptt_grace_deadline = time.time() - 1
+
+        flush_calls = 0
+
+        def flush_side_effect():
+            nonlocal flush_calls
+            flush_calls += 1
+            if flush_calls == 1:
+                raise RuntimeError("flush failed")
+            fake_stop.set()
+
+        with patch.object(voice_panel, "_flush_ptt_buffer", side_effect=flush_side_effect):
+            voice_panel._ptt_flush_watcher()
+
+        mock_logger.exception.assert_called_once_with(
+            "Unexpected error in PTT flush watcher"
+        )
+        assert flush_calls == 2
+        assert fake_stop.wait_calls == [0.5, 0.5]
 
 
 class TestWebSocketMessageHandling:

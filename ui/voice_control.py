@@ -187,21 +187,24 @@ class VoiceControlPanel:
     def _ptt_flush_watcher(self) -> None:
         """Watch for grace period expiration and flush buffer."""
         while not self._ptt_flush_stop.is_set():
-            now = time.time()
-            # Fix: audit/ui-security-perf-2026-05-17 — snapshot shared state under lock
-            # to avoid torn reads from concurrent WebSocket listener writes.
-            with self._ptt_lock:
-                deadline = self._ptt_grace_deadline
-                has_buffer = bool(self._ptt_buffer)
-            if deadline > 0 and now >= deadline:
-                if has_buffer:
-                    self._flush_ptt_buffer()
-                else:
-                    self._logger.debug("[PTT Flush] Grace period expiró sin transcripciones acumuladas")
-                # Fix: audit/ui-security-perf-2026-05-17 — lock reset to prevent
-                # WebSocket listener from extending an already-expired deadline.
+            try:
+                now = time.time()
+                # Fix: audit/ui-security-perf-2026-05-17 — snapshot shared state under lock
+                # to avoid torn reads from concurrent WebSocket listener writes.
                 with self._ptt_lock:
-                    self._ptt_grace_deadline = 0.0
+                    deadline = self._ptt_grace_deadline
+                    has_buffer = bool(self._ptt_buffer)
+                if deadline > 0 and now >= deadline:
+                    if has_buffer:
+                        self._flush_ptt_buffer()
+                    else:
+                        self._logger.debug("[PTT Flush] Grace period expiró sin transcripciones acumuladas")
+                    # Fix: audit/ui-security-perf-2026-05-17 — lock reset to prevent
+                    # WebSocket listener from extending an already-expired deadline.
+                    with self._ptt_lock:
+                        self._ptt_grace_deadline = 0.0
+            except Exception:
+                self._logger.exception("Unexpected error in PTT flush watcher")
             self._ptt_flush_stop.wait(0.5)
 
     def _flush_ptt_buffer(self) -> None:
@@ -377,12 +380,28 @@ class VoiceControlPanel:
 
     def _run_ws_client(self) -> None:
         """Run the async WebSocket client in a dedicated event loop."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = None
         try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             loop.run_until_complete(self._ws_reconnect_loop())
+        except Exception:
+            self._logger.exception("Unexpected error in WebSocket client thread")
+            self._ws_connected = False
+            self._ws_should_reconnect = False
+            self._ui_state.ws_connected = False
+            self._ui_state.ws_should_reconnect = False
+            try:
+                self._on_log("[Red] Error inesperado en LiveAudio. Desconectado.")
+            except Exception:
+                self._logger.exception("Unexpected error while reporting WebSocket failure")
+            try:
+                self._schedule_ui_update(lambda: self.set_state("error"))
+            except Exception:
+                self._logger.exception("Unexpected error while marking WebSocket failure state")
         finally:
-            loop.close()
+            if loop is not None:
+                loop.close()
 
     async def _ws_reconnect_loop(self) -> None:
         """Main reconnection loop with exponential backoff."""
