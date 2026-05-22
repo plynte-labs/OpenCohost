@@ -69,6 +69,18 @@ from stream_admin import AdminManager
 logger = get_logger()
 
 
+def _stream_admin_should_process_chat_message(stream_admin_ui: Any, msg_id: Any) -> bool:
+    if not msg_id:
+        return True
+    with stream_admin_ui._chat_lock:
+        if msg_id in stream_admin_ui._seen_chat_ids:
+            return False
+        stream_admin_ui._seen_chat_ids.add(msg_id)
+        if len(stream_admin_ui._seen_chat_ids) > 2000:
+            stream_admin_ui._seen_chat_ids = set(list(stream_admin_ui._seen_chat_ids)[-1000:])
+    return True
+
+
 def _cargar_geometria() -> dict | None:
     try:
         if os.path.exists(WINDOW_GEOMETRY_FILE):
@@ -1699,12 +1711,8 @@ class VocalAIApp(ctk.CTk):
                     page_token = result.get("next_page_token") or page_token
                     for message in result.get("messages", []):
                         msg_id = message.get("id")
-                        if msg_id and msg_id in self.stream_admin_ui._seen_chat_ids:
+                        if not _stream_admin_should_process_chat_message(self.stream_admin_ui, msg_id):
                             continue
-                        if msg_id:
-                            self.stream_admin_ui._seen_chat_ids.add(msg_id)
-                            if len(self.stream_admin_ui._seen_chat_ids) > 2000:
-                                self.stream_admin_ui._seen_chat_ids = set(list(self.stream_admin_ui._seen_chat_ids)[-1000:])
                         self.smart_agg.process_message(message)
                     delay = max(1.0, float(result.get("polling_interval_millis", 5000)) / 1000.0)
                 except Exception as e:
