@@ -247,6 +247,74 @@ def test_avatar_preview_missing_transient_state_keeps_cached_idle_image():
         _restore_app_shell_module(old_module)
 
 
+def test_avatar_preview_second_state_cancels_pending_update_and_schedules_latest():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._kira_avatar_label = _ExistingLabel()
+        app._kira_avatar_idle_ref = None
+        app._kira_avatar_idle_pil = None
+        app._kira_avatar_ref = None
+        app._kira_avatar_preview_after_id = None
+        app._print_log = MagicMock()
+        scheduled = []
+
+        def schedule(_delay, fn):
+            scheduled.append(fn)
+            return f"after-{len(scheduled)}"
+
+        app.after = MagicMock(side_effect=schedule)
+        app.after_cancel = MagicMock()
+        config = SimpleNamespace(
+            state_images={"idle": Path("idle.png")},
+            get_image_for_state=MagicMock(return_value=None),
+        )
+
+        app._on_avatar_state_for_preview(SimpleNamespace(value="thinking"))
+        app._on_avatar_state_for_preview(SimpleNamespace(value="speaking"))
+
+        app.after_cancel.assert_called_once_with("after-1")
+        assert app._kira_avatar_preview_after_id == "after-2"
+        assert len(scheduled) == 2
+
+        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+            scheduled[1]()
+
+        config.get_image_for_state.assert_called_once_with("speaking")
+        app._kira_avatar_label.configure.assert_called_once_with(
+            image=None,
+            text="Sin imagen para: speaking",
+            text_color="#6b7b8d",
+        )
+        assert app._kira_avatar_preview_after_id is None
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_avatar_preview_after_cancel_failure_only_logs_debug_and_reschedules():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._kira_avatar_label = _ExistingLabel()
+        app._kira_avatar_idle_ref = None
+        app._kira_avatar_idle_pil = None
+        app._kira_avatar_ref = None
+        app._kira_avatar_preview_after_id = "after-old"
+        app._print_log = MagicMock()
+        app.after = MagicMock(return_value="after-new")
+        app.after_cancel = MagicMock(side_effect=RuntimeError("already gone"))
+
+        with patch.object(app_shell.logger, "debug") as debug_log:
+            app._on_avatar_state_for_preview(SimpleNamespace(value="speaking"))
+
+        app.after_cancel.assert_called_once_with("after-old")
+        debug_log.assert_called_once()
+        app.after.assert_called_once()
+        assert app._kira_avatar_preview_after_id == "after-new"
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_avatar_preview_load_failure_keeps_cached_idle_image():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:

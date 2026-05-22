@@ -188,6 +188,7 @@ class VocalAIApp(ctk.CTk):
         self._closing: bool = False
         self._motor_started: bool = False
         self._motor_heartbeat_failure_reported: bool = False
+        self._kira_avatar_preview_after_id: Any = None
         self.perfiles = cargar_perfiles()
         self.cohost_profiles = load_cohost_profiles()
         self._current_cohost_profile = "Natural" if "Natural" in self.cohost_profiles else next(iter(self.cohost_profiles), "")
@@ -351,7 +352,17 @@ class VocalAIApp(ctk.CTk):
 
     def _on_avatar_state_for_preview(self, state: AvatarState) -> None:
         """Update the left-panel avatar preview when bridge state changes."""
+        previous_after_id = getattr(self, "_kira_avatar_preview_after_id", None)
+        if previous_after_id is not None:
+            try:
+                self.after_cancel(previous_after_id)
+            except Exception:
+                logger.debug("No se pudo cancelar update pendiente de preview de avatar", exc_info=True)
+            finally:
+                self._kira_avatar_preview_after_id = None
+
         def update():
+            self._kira_avatar_preview_after_id = None
             if self._kira_avatar_label is None or not self._kira_avatar_label.winfo_exists():
                 return
             from avatar.avatar_config import load_avatar_config
@@ -393,7 +404,7 @@ class VocalAIApp(ctk.CTk):
                         text_color="#6b7b8d",
                     )
                 self._print_log(f"[Avatar] Sin imagen configurada o accesible para '{state.value}'")
-        self.after(0, update)
+        self._kira_avatar_preview_after_id = self.after(0, update)
 
     def _show_cached_idle_avatar_preview(self) -> bool:
         """Keep a known idle avatar visible when a transient state cannot load."""
