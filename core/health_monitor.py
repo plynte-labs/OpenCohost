@@ -370,7 +370,22 @@ class QwenProcessManager:
     def _check_health(self) -> bool:
         try:
             resp = requests.get(self.HEALTH_URL, timeout=3)
-            return resp.status_code == 200
+            if resp.status_code != 200:
+                return False
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                # Preserve attach compatibility with older/manual servers that
+                # only expose an HTTP 200 health probe.
+                return True
+
+            if "model_loaded" in payload:
+                status_ok = "status" not in payload or payload.get("status") == "ok"
+                return payload.get("model_loaded") is True and status_ok
+            if "status" in payload:
+                return payload.get("status") == "ok"
+            return True
         except Exception:
             return False
 
@@ -446,27 +461,38 @@ class HealthMonitor(threading.Thread):
         """Poll all sub-components and update state atomically."""
         self._vram.poll()
         self._ollama.poll()
-        self._qwen.is_healthy  # triggers health check + idle TTL reset
+        qwen_healthy = self._qwen.is_healthy  # triggers health check + idle TTL reset
 
-        overall = self._compute_overall()
+        qwen_status = self._qwen_status(qwen_healthy)
+        overall = self._compute_overall(qwen_status)
 
         with self._lock:
             self._state = MonitorState(
                 vram_status=self._vram.status,
                 rtf_status=self._rtf.status,
                 ollama_status=self._ollama.status,
-                qwen_status="healthy" if self._qwen.is_running else ("unknown" if not self._qwen.is_manual else "unavailable"),
+                qwen_status=qwen_status,
                 overall_status=overall,
                 free_vram_mb=self._vram.free_mb,
                 rtf_rolling_avg=self._rtf.rolling_average,
                 last_updated=time.time(),
             )
 
-    def _compute_overall(self) -> str:
+    def _qwen_status(self, qwen_healthy: bool) -> str:
+        if qwen_healthy:
+            return "healthy"
+        if self._qwen.is_running:
+            return "unhealthy"
+        if self._qwen.is_manual:
+            return "unavailable"
+        return "unknown"
+
+    def _compute_overall(self, qwen_status: Optional[str] = None) -> str:
         """Compute overall health: green, yellow, or red."""
         vram = self._vram.status
         rtf = self._rtf.status
-        qwen_running = self._qwen.is_running
+        if qwen_status is None:
+            qwen_status = self._qwen_status(self._qwen.is_healthy)
         ollama = self._ollama.status
 
         # RED conditions: any single critical factor
@@ -474,8 +500,7 @@ class HealthMonitor(threading.Thread):
             return "red"
         if ollama == "down":
             return "red"
-        if not qwen_running and self._qwen.is_manual is False:
-            # We manage the server and it's not running
+        if qwen_status not in ("healthy", "unavailable"):
             return "red"
 
         # YELLOW conditions: any single degraded factor

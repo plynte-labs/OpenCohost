@@ -287,6 +287,36 @@ class TestQwenProcessManager:
             mock_get.return_value = MagicMock(status_code=200)
             assert mgr._check_health() is True
 
+    def test_check_health_requires_loaded_model_when_json_available(self):
+        """_check_health rejects alive Qwen server when model is not loaded."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"status": "error", "model_loaded": False}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
+
+    def test_check_health_accepts_loaded_model_without_status_for_compat(self):
+        """Manual compatible servers may only expose model_loaded in JSON."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"model_loaded": True}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is True
+
+    def test_check_health_returns_false_on_503_model_not_loaded(self):
+        """_check_health rejects Qwen /health 503 even if the port responds."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=503)
+            response.json.return_value = {"status": "error", "model_loaded": False}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
+
     def test_is_port_in_use(self):
         """_is_port_in_use checks port availability."""
         result = QwenProcessManager._is_port_in_use(5000)
@@ -550,6 +580,23 @@ class TestHealthMonitor:
         monitor._poll_all()
         state = monitor.state
         assert state.overall_status == "red"
+
+    def test_qwen_alive_but_unhealthy_is_not_green(self):
+        """Alive Qwen process without loaded model must not publish fake green."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._qwen.is_running = True
+        monitor._qwen.is_manual = False
+        monitor._qwen.is_healthy = False
+
+        monitor._poll_all()
+
+        state = monitor.state
+        assert state.qwen_status == "unhealthy"
+        assert state.overall_status == "red"
+        assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is False
 
     def test_thread_safety_concurrent_reads(self):
         """Multiple concurrent state reads don't crash."""
