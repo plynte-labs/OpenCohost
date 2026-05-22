@@ -28,6 +28,7 @@ import requests
 
 from config.settings import (
     HEALTH_POLL_INTERVAL,
+    LOG_DIR,
     OLLAMA_FAILURE_THRESHOLD,
     OLLAMA_POLL_INTERVAL,
     OLLAMA_REQUEST_TIMEOUT,
@@ -214,6 +215,25 @@ class QwenProcessManager:
         self._is_manual: bool = False
         self._last_health_time: float = 0.0
         self._lock = threading.Lock()
+        self._stdout_log = None
+        self._stderr_log = None
+
+    def _open_subprocess_logs(self):
+        """Open dedicated files that preserve Qwen startup tracebacks."""
+        os.makedirs(LOG_DIR, exist_ok=True)
+        stdout_log = open(os.path.join(LOG_DIR, "server_qwen_stdout.log"), "a", encoding="utf-8")
+        stderr_log = open(os.path.join(LOG_DIR, "server_qwen_stderr.log"), "a", encoding="utf-8")
+        return stdout_log, stderr_log
+
+    def _close_subprocess_logs(self) -> None:
+        for handle_name in ("_stdout_log", "_stderr_log"):
+            handle = getattr(self, handle_name, None)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    logger.debug("QwenProcessManager: failed to close subprocess log", exc_info=True)
+                setattr(self, handle_name, None)
 
     def start(self) -> bool:
         """Launch server_qwen.py via subprocess. Returns True if healthy."""
@@ -230,14 +250,22 @@ class QwenProcessManager:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
 
+            # If a previous managed Qwen process exited unexpectedly and start()
+            # is called again before stop(), close stale log handles before
+            # replacing them. This keeps the diagnostic upgrade leak-free across
+            # restart attempts.
+            self._close_subprocess_logs()
+            self._stdout_log, self._stderr_log = self._open_subprocess_logs()
+
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._stdout_log,
+                stderr=self._stderr_log,
                 creationflags=creationflags,
             )
             self._is_manual = False
         except Exception as e:
+            self._close_subprocess_logs()
             logger.error(f"QwenProcessManager: failed to start: {e}")
             return False
 
@@ -268,6 +296,7 @@ class QwenProcessManager:
             self._process = None
 
         if proc.poll() is not None:
+            self._close_subprocess_logs()
             return  # Already exited
 
         try:
@@ -283,7 +312,11 @@ class QwenProcessManager:
                 logger.info("QwenProcessManager: server killed after graceful stop failure")
             except Exception as kill_error:
                 logger.warning(f"QwenProcessManager: forced kill failed: {kill_error}")
+            finally:
+                self._close_subprocess_logs()
             return
+
+        self._close_subprocess_logs()
 
         # Wait up to 10s, then force-kill.
         try:
@@ -469,27 +502,42 @@ class HealthMonitor(threading.Thread):
         Returns:
             True if heavy TTS should be used, False if fallback to Edge-TTS.
         """
+        return self.heavy_tts_block_reason(auto_fallback_enabled, manual_motor) is None
+
+    def heavy_tts_block_reason(self, auto_fallback_enabled: bool, manual_motor: str) -> Optional[str]:
+        """Return why Qwen heavy TTS is blocked, or None when it is allowed.
+
+        This is intentionally side-effect-free so the TTS pipeline can log the
+        exact fallback reason seen by the streamer without changing policy.
+        """
         if not auto_fallback_enabled:
             # Backward compat: if auto-fallback disabled, always respect manual
-            return manual_motor == "pesado"
+            return None if manual_motor == "pesado" else "manual_motor=ligero"
 
         # Manual "ligero" always uses Edge-TTS regardless of health
         if manual_motor == "ligero":
-            return False
+            return "manual_motor=ligero"
 
         # Check health gates
         s = self.state
         if s.vram_status in ("low", "critical"):
-            logger.info(f"HealthMonitor: heavy TTS blocked — vram_{s.vram_status}")
-            return False
+            reason = (
+                f"vram_{s.vram_status} "
+                f"free={s.free_vram_mb:.0f}MB "
+                f"required>={VRAM_LOW_THRESHOLD_MB}MB"
+            )
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
         if s.rtf_status == "degraded":
-            logger.info("HealthMonitor: heavy TTS blocked — rtf_degraded")
-            return False
+            reason = f"rtf_degraded avg={s.rtf_rolling_avg}"
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
         if s.qwen_status not in ("healthy", "unavailable"):
-            logger.info(f"HealthMonitor: heavy TTS blocked — qwen_{s.qwen_status}")
-            return False
+            reason = f"qwen_{s.qwen_status}"
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
 
-        return True
+        return None
 
     def can_vibe_call(self) -> bool:
         """Check if Vibe LLM calls are allowed.

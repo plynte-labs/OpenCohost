@@ -203,6 +203,47 @@ class TestQwenProcessManager:
         flags = mock_popen.call_args.kwargs["creationflags"]
         assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
 
+    def test_start_redirects_qwen_output_to_dedicated_logs(self, tmp_path):
+        """Qwen startup tracebacks must be preserved in logs, not swallowed."""
+        mgr = QwenProcessManager()
+
+        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch.object(mgr, "_check_health", return_value=True):
+                    mock_popen.return_value.poll.return_value = None
+
+                    assert mgr.start() is True
+
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["stdout"] is not subprocess.DEVNULL
+        assert kwargs["stderr"] is not subprocess.DEVNULL
+        assert kwargs["stdout"].name == str(tmp_path / "server_qwen_stdout.log")
+        assert kwargs["stderr"].name == str(tmp_path / "server_qwen_stderr.log")
+
+        mgr._close_subprocess_logs()
+
+    def test_start_closes_stale_qwen_log_handles_before_reopening(self, tmp_path):
+        """Restart attempts must not leak old Qwen subprocess log handles."""
+        mgr = QwenProcessManager()
+        stale_stdout = MagicMock()
+        stale_stderr = MagicMock()
+        mgr._stdout_log = stale_stdout
+        mgr._stderr_log = stale_stderr
+
+        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch.object(mgr, "_check_health", return_value=True):
+                    mock_popen.return_value.poll.return_value = None
+
+                    assert mgr.start() is True
+
+        stale_stdout.close.assert_called_once()
+        stale_stderr.close.assert_called_once()
+        assert mgr._stdout_log is not stale_stdout
+        assert mgr._stderr_log is not stale_stderr
+
+        mgr._close_subprocess_logs()
+
     def test_stop_kills_when_graceful_signal_fails(self):
         """A failed CTRL_BREAK_EVENT must fall back to kill() to release VRAM."""
         mgr = QwenProcessManager()
@@ -310,6 +351,18 @@ class TestHealthMonitor:
         monitor._poll_all()
         assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is False
 
+    def test_heavy_tts_block_reason_reports_vram_threshold(self):
+        """Fallback logs must expose the exact VRAM gate that blocked Qwen."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "low"
+        monitor._vram._free_mb = 1500.0
+        monitor._ollama._status = "healthy"
+        monitor._poll_all()
+
+        reason = monitor.heavy_tts_block_reason(auto_fallback_enabled=True, manual_motor="pesado")
+
+        assert reason == "vram_low free=1500MB required>=2048MB"
+
     def test_should_use_heavy_tts_vram_critical_blocks(self):
         """VRAM critical blocks heavy TTS."""
         monitor = self._make_monitor()
@@ -333,6 +386,16 @@ class TestHealthMonitor:
         monitor._ollama._status = "healthy"
         monitor._poll_all()
         assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is True
+
+    def test_heavy_tts_block_reason_none_when_healthy(self):
+        """No fallback reason is reported when Qwen is allowed."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._poll_all()
+
+        assert monitor.heavy_tts_block_reason(auto_fallback_enabled=True, manual_motor="pesado") is None
 
     def test_can_vibe_call_vram_low(self):
         """VRAM low blocks Vibe calls."""

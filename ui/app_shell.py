@@ -2474,31 +2474,42 @@ class VocalAIApp(ctk.CTk):
             # Connect in background thread to avoid blocking UI. Keep retrying so
             # non-technical users can open OBS after VoiceAI without breaking the
             # avatar bridge for the whole session.
-            def connect_obs():
-                logged_once = False
-                retry_delay = 5
-                while getattr(self, "_obs_client", None) is not None:
-                    if self._obs_client.connect():
-                        self._obs_client.subscribe_bridge(self._avatar_bridge)
-                        self._obs_client.on_state_change(self._avatar_bridge.get_state())
-                        try:
-                            if self.winfo_exists():
-                                self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
-                        except Exception:
-                            pass
-                        return
-                    if not logged_once:
-                        self._print_log(
-                            "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
-                            "Abrí OBS y la conexión se restablecerá automáticamente."
-                        )
-                        logged_once = True
-                    time.sleep(retry_delay)
-                # Client was destroyed (app closing)
-
-            threading.Thread(target=connect_obs, daemon=True).start()
+            threading.Thread(target=self._connect_obs_loop, daemon=True).start()
         except Exception as e:
             self._print_log(f"[OBS] Failed to initialize: {e}")
+
+    def _connect_obs_loop(self, retry_delay: float = 5) -> None:
+        """Retry OBS connection without letting unexpected socket errors kill the thread."""
+        logged_once = False
+        while getattr(self, "_obs_client", None) is not None:
+            try:
+                obs_client = self._obs_client
+                if obs_client is None:
+                    break
+                if obs_client.connect():
+                    obs_client.subscribe_bridge(self._avatar_bridge)
+                    obs_client.on_state_change(self._avatar_bridge.get_state())
+                    try:
+                        if self.winfo_exists():
+                            self.after(0, lambda: self._avatar_panel.set_obs_client(obs_client))
+                    except Exception:
+                        pass
+                    return
+                if not logged_once:
+                    self._print_log(
+                        "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                        "Abrí OBS y la conexión se restablecerá automáticamente."
+                    )
+                    logged_once = True
+            except Exception:
+                logger.exception("Fallo inesperado en loop de OBS")
+                if not logged_once:
+                    self._print_log(
+                        "[OBS] Error inesperado conectando. VoiceAI seguira reintentando cada 5s."
+                    )
+                    logged_once = True
+            time.sleep(retry_delay)
+        # Client was destroyed (app closing)
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model

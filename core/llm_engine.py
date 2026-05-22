@@ -930,10 +930,24 @@ class MotorVocalIA(threading.Thread):
             if effective_motor == "pesado":
                 hm = getattr(self, "health_monitor", None)
                 if hm is not None:
-                    if not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
-                        fallback_reason = "health_gate"
+                    block_reason = None
+                    if hasattr(hm, "heavy_tts_block_reason"):
+                        block_reason = hm.heavy_tts_block_reason(
+                            auto_fallback_enabled=True,
+                            manual_motor=effective_motor,
+                        )
+                    elif not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
                         effective_motor = "ligero"
-                        self._log(f"Auto-fallback to Edge-TTS (health gate triggered)")
+                        block_reason = "health_gate"
+                    if block_reason:
+                        fallback_reason = block_reason
+                        effective_motor = "ligero"
+                        self._log(
+                            "Auto-fallback to Edge-TTS: "
+                            f"requested=pesado effective=ligero reason={fallback_reason}"
+                        )
+                    else:
+                        self._log("TTS efectivo: requested=pesado effective=pesado")
 
             for i, oracion in enumerate(oraciones):
                 if not self._speaking:
