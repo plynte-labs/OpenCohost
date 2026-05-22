@@ -327,6 +327,65 @@ class TestHealthMonitor:
         s2 = monitor.state
         assert s1 is not s2
 
+    def test_run_logs_poll_exception_and_continues(self, caplog):
+        """Unexpected poll exceptions are logged and do not kill the loop."""
+        monitor = self._make_monitor()
+        poll_calls = 0
+
+        def poll_once_then_stop():
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RuntimeError("boom")
+            monitor._stop_event.set()
+
+        monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
+
+        with caplog.at_level("ERROR", logger="HealthMonitor"):
+            with patch("core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+                monitor.start()
+                monitor.join(timeout=1)
+
+        assert monitor.is_alive() is False
+        assert monitor._poll_all.call_count == 2
+        assert "HealthMonitor: polling cycle failed" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
+
+    def test_run_marks_state_unknown_after_poll_exception(self):
+        """A failed poll cycle does not leave a stale green snapshot exposed."""
+        monitor = self._make_monitor()
+        poll_calls = 0
+        with monitor._lock:
+            monitor._state = MonitorState(
+                vram_status="normal",
+                rtf_status="normal",
+                ollama_status="healthy",
+                qwen_status="healthy",
+                overall_status="green",
+                free_vram_mb=5000.0,
+                last_updated=1.0,
+            )
+
+        def poll_once_then_stop():
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RuntimeError("boom")
+            monitor._stop_event.set()
+
+        monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
+
+        with patch("core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+            monitor.start()
+            monitor.join(timeout=1)
+
+        state = monitor.state
+        assert state.overall_status == "unknown"
+        assert state.vram_status == "unknown"
+        assert state.ollama_status == "unknown"
+        assert state.qwen_status == "unknown"
+        assert state.last_updated > 1.0
+
     def test_should_use_heavy_tts_backward_compat(self):
         """Returns True when auto_fallback disabled and motor is pesado."""
         monitor = self._make_monitor()

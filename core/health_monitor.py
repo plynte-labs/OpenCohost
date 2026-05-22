@@ -423,9 +423,18 @@ class HealthMonitor(threading.Thread):
         """Main polling loop. Runs until stop() is called."""
         logger.info("HealthMonitor: daemon started")
         while not self._stop_event.is_set():
-            self._poll_all()
+            try:
+                self._poll_all()
+            except Exception:
+                logger.exception("HealthMonitor: polling cycle failed")
+                self._mark_poll_unknown()
             self._stop_event.wait(HEALTH_POLL_INTERVAL)
         logger.info("HealthMonitor: daemon stopped")
+
+    def _mark_poll_unknown(self) -> None:
+        """Avoid exposing stale healthy state after an unexpected poll failure."""
+        with self._lock:
+            self._state = MonitorState(last_updated=time.time())
 
     def stop(self) -> None:
         """Signal the daemon to stop and clean up resources."""
