@@ -15,7 +15,8 @@ from typing import Any, Callable, Optional
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
-from config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_startup_model
+from config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_llm_tiers, resolve_startup_model
+from core.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
 
@@ -70,6 +71,9 @@ class ModelPanel:
         self.btn_download: Optional[ctk.CTkButton] = None
         self.lbl_modelo_info: Optional[ctk.CTkLabel] = None
         self.progress_download: Optional[ctk.CTkProgressBar] = None
+        self.lbl_tier_header: Optional[ctk.CTkLabel] = None
+        self.lbl_tier_info: Optional[ctk.CTkLabel] = None
+        self._tier_buttons: dict[str, ctk.CTkButton] = {}
 
         # Observer
         self._observer_id: Optional[int] = None
@@ -79,6 +83,8 @@ class ModelPanel:
         
         # Active model tracking
         self._active_model_tag: Optional[str] = None
+        self._active_llm_tier: str = "balanced"
+        self._llm_tiers: dict[str, Optional[str]] = dict(resolve_llm_tiers())
 
     # ------------------------------------------------------------------
     # Model catalog
@@ -158,6 +164,37 @@ class ModelPanel:
         )
         self.lbl_modelo_info.pack(fill="x", padx=10, pady=4)
 
+        self.lbl_tier_header = ctk.CTkLabel(
+            self._parent,
+            text="Tier LLM manual",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        self.lbl_tier_header.pack(fill="x", padx=10, pady=(8, 2))
+
+        for tier in LLM_TIERS:
+            button = ctk.CTkButton(
+                self._parent,
+                text=self._format_tier_button_text(tier),
+                command=lambda selected=tier: self._on_llm_tier_selected(selected),
+                width=110,
+                fg_color="#1f4f7a" if tier == self._active_llm_tier else "#2b3440",
+                hover_color="#286391",
+            )
+            button.pack(fill="x", padx=10, pady=2)
+            self._tier_buttons[tier] = button
+
+        self.lbl_tier_info = ctk.CTkLabel(
+            self._parent,
+            text="El tier cambia solo el modelo de futuros pedidos; perfil y memoria se conservan.",
+            font=ctk.CTkFont(size=10),
+            text_color="#8fa3b8",
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        self.lbl_tier_info.pack(fill="x", padx=10, pady=(2, 6))
+
         self.progress_download = ctk.CTkProgressBar(self._parent, width=150)
         self.progress_download.pack(fill="x", padx=10, pady=(4, 10))
         self.progress_download.set(0)
@@ -221,6 +258,7 @@ class ModelPanel:
         """Set the currently active model to update button state."""
         self._active_model_tag = tag
         self._update_button_for_ollama_state()
+        self._update_tier_buttons()
 
     def restore_to_active_model(self, model_tag: str) -> None:
         """Restore combobox to the actual active model after a failed switch."""
@@ -229,6 +267,13 @@ class ModelPanel:
             self.combo_modelos.set(display)
         self._active_model_tag = model_tag
         self._update_button_for_ollama_state(model_tag)
+        self._update_tier_buttons()
+
+    def set_llm_tier_state(self, tiers: dict[str, Optional[str]], active_tier: str) -> None:
+        """Update visible tier mapping and active tier."""
+        self._llm_tiers = dict(tiers)
+        self._active_llm_tier = active_tier
+        self._update_tier_buttons()
 
     def set_download_progress_visible(self, visible: bool) -> None:
         """Show or hide the download progress bar."""
@@ -273,6 +318,26 @@ class ModelPanel:
                 "[Sistema] Ollama no esta listo. "
                 "Usa el boton de Ollama/modelo para prepararlo."
             )
+
+    def _on_llm_tier_selected(self, tier: str) -> None:
+        """Handle explicit manual Quality/Balanced/Fast tier selection."""
+        model = self._llm_tiers.get(tier)
+        label = LLM_TIER_LABELS.get(tier, tier)
+        if not model:
+            self._on_log(f"[Sistema] Tier LLM {label} no configurado.")
+            self._update_tier_buttons()
+            return
+        if self._ui_state.ollama_state != "ready":
+            self._on_log("[Sistema] Ollama no esta listo para cambiar tier LLM.")
+            self._update_tier_buttons()
+            return
+        if not self._modelo_instalado(model):
+            self._on_log(f"[Sistema] Tier LLM {label} usa '{model}', pero no esta instalado.")
+            self._update_tier_buttons()
+            return
+
+        self._dispatcher.dispatch("on_switch_llm_tier", tier)
+        self._on_log(f"[Sistema] Cambiando tier LLM a {label}: {model}")
 
     def _on_download_model(self) -> None:
         """Handle Ollama/model button click."""
@@ -391,6 +456,28 @@ class ModelPanel:
             self.btn_download.configure(state="normal", text="Activar modelo")
         else:
             self.btn_download.configure(state="normal", text="Descargar modelo")
+
+        self._update_tier_buttons()
+
+    def _format_tier_button_text(self, tier: str) -> str:
+        label = LLM_TIER_LABELS.get(tier, tier)
+        model = self._llm_tiers.get(tier)
+        detail = self.get_display_for_tag(model) if model else "sin configurar"
+        active = "Activo: " if tier == self._active_llm_tier else ""
+        return f"{active}{label} - {detail}"
+
+    def _update_tier_buttons(self) -> None:
+        if not self._tier_buttons:
+            return
+        for tier, button in self._tier_buttons.items():
+            model = self._llm_tiers.get(tier)
+            is_active = tier == self._active_llm_tier
+            state = "normal" if model and self._ui_state.ollama_state == "ready" else "disabled"
+            button.configure(
+                text=self._format_tier_button_text(tier),
+                state="disabled" if is_active else state,
+                fg_color="#1f4f7a" if is_active else "#2b3440",
+            )
 
     # ------------------------------------------------------------------
     # Ollama start

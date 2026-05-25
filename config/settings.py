@@ -25,6 +25,11 @@ LLM_TOP_P = 0.9
 LLM_MAX_TOKENS = 300
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
+DEFAULT_LLM_TIERS = {
+    "quality": "gemma4:e4b",
+    "balanced": "llama3",
+    "fast": "qwen3:1.7b",
+}
 
 # Catálogo curado de modelos recomendados para esta tarea
 MODELS_CATALOG = {
@@ -159,6 +164,7 @@ PTT_HOTKEY_LIST = [
 PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
 WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
 LAST_MODEL_FILE = os.path.join(BASE_DIR, "config", "last_model.json")
+LLM_TIERS_FILE = os.path.join(BASE_DIR, "config", "llm_tiers.json")
 ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
 
 # ──────────────────────────────────────────────
@@ -222,3 +228,27 @@ def save_last_model(tag: str, source: str = "user_switch") -> None:
         os.replace(tmp, LAST_MODEL_FILE)
     except Exception:
         pass
+
+
+def resolve_llm_tiers() -> dict[str, str]:
+    """Return configurable manual LLM tier slots with safe defaults.
+
+    The file is intentionally simple so operators can adjust the three manual
+    buttons without touching Python code:
+
+        config/llm_tiers.json
+        {"quality": "gemma4:e4b", "balanced": "llama3", "fast": "qwen3:1.7b"}
+    """
+    tiers = dict(DEFAULT_LLM_TIERS)
+    try:
+        if os.path.exists(LLM_TIERS_FILE):
+            with open(LLM_TIERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for tier in tiers:
+                    model = data.get(tier)
+                    if isinstance(model, str) and model.strip():
+                        tiers[tier] = model.strip()
+    except Exception:
+        pass
+    return tiers

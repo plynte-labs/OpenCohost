@@ -227,6 +227,14 @@ def test_audio_bed_state_mutation_is_locked() -> None:
     assert "with self._lock:" in source
 
 
+def test_chat_speech_does_not_start_music_bed_boundary() -> None:
+    """Music bed boundaries must not auto-start music for regular chat speech."""
+    source = read_text(APP_SHELL)
+
+    assert "if agenda_speech or self.audio_bed.current_track is not None:" in source
+    assert "self.audio_bed.on_boundary()" in source
+
+
 def test_avatar_panel_is_gridded_into_its_parent() -> None:
     """AvatarPanel must attach its root frame, otherwise the tab renders empty."""
     source = read_text(AVATAR_PANEL)

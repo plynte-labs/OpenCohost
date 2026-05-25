@@ -213,6 +213,32 @@ class TestYouTubeChatSourceCallbackContent:
         assert msg["text"] == "hello world"
         assert "timestamp" in msg
 
+    @patch("smart_aggregator.chat_source.pytchat", create=True)
+    def test_youtube_custom_emote_text_is_not_changed(
+        self, mock_pytchat, smart_aggregator_config
+    ):
+        """Twitch emote stripping must not change YouTubeChatSource messages."""
+        mock_message = MagicMock()
+        mock_message.author.name = "viewer1"
+        mock_message.message = "hello :bird:"
+
+        mock_chat = MagicMock()
+        mock_chat.is_alive.side_effect = [True, False]
+        mock_chat.get.return_value.sync_items.return_value = [mock_message]
+        mock_pytchat.create.return_value = mock_chat
+
+        messages = []
+        source = YouTubeChatSource(
+            smart_aggregator_config["source"],
+            callbacks={"on_message": messages.append},
+        )
+        source.connect("test12345678")
+        time.sleep(0.7)
+        source.disconnect()
+
+        assert messages[0]["platform"] == "youtube"
+        assert messages[0]["text"] == "hello :bird:"
+
 
 class TestTwitchChatSource:
     """TwitchChatSource IRC parsing and lifecycle (T-13, REQ-4..7)."""
@@ -258,7 +284,7 @@ class TestTwitchChatSource:
     def test_irc_connection_commands_sent(
         self, mock_create_conn, twitch_config
     ):
-        """REQ-4: NICK, USER, and JOIN commands are sent on connect."""
+        """REQ-4: IRC tags capability, NICK, USER, and JOIN are sent on connect."""
         mock_sock = MagicMock()
         mock_sock.recv.return_value = b""
         mock_create_conn.return_value = mock_sock
@@ -278,6 +304,7 @@ class TestTwitchChatSource:
         for send_call in mock_sock.sendall.call_args_list:
             all_sent += send_call[0][0]
 
+        assert b"CAP REQ :twitch.tv/tags" in all_sent
         assert b"NICK justinfan" in all_sent
         assert b"USER" in all_sent
         assert b"JOIN #testchannel" in all_sent
@@ -314,6 +341,50 @@ class TestTwitchChatSource:
         assert msg["user"] == "viewer"
         assert msg["text"] == "hello world"
         assert "timestamp" in msg
+
+    def test_tagged_privmsg_strips_only_emote_ranges(self, twitch_config):
+        """Tagged Twitch emote ranges are removed before filtering/aggregation."""
+        line = (
+            "@emotes=25:0-4/1902:6-10;badges= :viewer!viewer@viewer.tmi.twitch.tv "
+            "PRIVMSG #testchannel :Kappa Kappa hello"
+        )
+
+        parsed = TwitchChatSource(twitch_config, callbacks={})._parse_privmsg_line(line)
+
+        assert parsed == {"user": "viewer", "text": "hello"}
+
+    def test_tagged_mixed_privmsg_preserves_non_emote_text_order(self, twitch_config):
+        """Mixed Twitch emotes and text keep only normal words in original order."""
+        line = (
+            "@emotes=25:0-4/305954156:12-19 :viewer!viewer@viewer.tmi.twitch.tv "
+            "PRIVMSG #testchannel :Kappa hello PogChamp"
+        )
+
+        parsed = TwitchChatSource(twitch_config, callbacks={})._parse_privmsg_line(line)
+
+        assert parsed == {"user": "viewer", "text": "hello"}
+
+    def test_tagged_emote_only_privmsg_emits_empty_text(self, twitch_config):
+        """Emote-only messages become empty so MessageFilter rejects them safely."""
+        line = (
+            "@emotes=25:0-4/1902:6-10 :viewer!viewer@viewer.tmi.twitch.tv "
+            "PRIVMSG #testchannel :Kappa Kappa"
+        )
+
+        parsed = TwitchChatSource(twitch_config, callbacks={})._parse_privmsg_line(line)
+
+        assert parsed == {"user": "viewer", "text": ""}
+
+    def test_privmsg_without_emotes_tag_preserves_current_text(self, twitch_config):
+        """Tags without emotes keep current Twitch behavior."""
+        line = (
+            "@badges= :viewer!viewer@viewer.tmi.twitch.tv "
+            "PRIVMSG #testchannel :Kappa Kappa hello"
+        )
+
+        parsed = TwitchChatSource(twitch_config, callbacks={})._parse_privmsg_line(line)
+
+        assert parsed == {"user": "viewer", "text": "Kappa Kappa hello"}
 
     @patch("socket.create_connection")
     def test_privmsg_spanish_message(self, mock_create_conn, twitch_config):

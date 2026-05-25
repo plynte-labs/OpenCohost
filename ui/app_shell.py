@@ -211,6 +211,7 @@ class VocalAIApp(ctk.CTk):
         # Callback dispatchers
         self._model_dispatcher = CallbackDispatcher(source="ModelPanel")
         self._model_dispatcher.subscribe("on_switch_model", lambda tag: self.motor_ia.command_queue.put(("switch_model", tag)))
+        self._model_dispatcher.subscribe("on_switch_llm_tier", lambda tier: self.motor_ia.command_queue.put(("switch_llm_tier", tier)))
         self._model_dispatcher.subscribe("on_download_model", lambda tag: self.motor_ia.command_queue.put(("download_model", tag)))
 
         self._profile_dispatcher = CallbackDispatcher(source="ProfilePanel")
@@ -2340,6 +2341,8 @@ class VocalAIApp(ctk.CTk):
             "model_switch_pending": self._on_motor_switch_pending,
             "model_switch_applied": self._on_motor_model_changed,
             "model_switch_failed": self._on_motor_switch_failed,
+            "llm_tier_switch_applied": self._on_motor_model_changed,
+            "llm_tier_switch_failed": self._on_motor_switch_failed,
             "download_start": self._on_motor_download_start,
             "download_done": self._on_motor_download_done,
             "download_error": self._on_motor_download_error,
@@ -2361,6 +2364,7 @@ class VocalAIApp(ctk.CTk):
             # Sync combobox to actual startup model (may differ from DEFAULT_MODEL)
             model = self.motor_ia.current_model
             self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
+            self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
             self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
@@ -2444,7 +2448,8 @@ class VocalAIApp(ctk.CTk):
         self._stop_speaking_alt_timer()
         if hasattr(self, "audio_bed"):
             self.audio_bed.unduck()
-            self.audio_bed.on_boundary()
+            if agenda_speech or self.audio_bed.current_track is not None:
+                self.audio_bed.on_boundary()
         estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
         self._actualizar_pipeline(estado)
         if hasattr(self, "_avatar_bridge"):
@@ -2587,6 +2592,7 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._safe_after(lambda: self.model_panel.set_active_model(model))
+        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._actualizar_pipeline("idle")
 
     def _on_motor_switch_pending(self) -> None:
@@ -2607,6 +2613,7 @@ class VocalAIApp(ctk.CTk):
             self.motor_ia._last_switch_failure = None
         # Restore combobox to actual motor model
         self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
+        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
 
     def _on_motor_download_start(self) -> None:
