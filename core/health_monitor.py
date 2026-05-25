@@ -28,6 +28,7 @@ import requests
 
 from config.settings import (
     HEALTH_POLL_INTERVAL,
+    LOG_DIR,
     OLLAMA_FAILURE_THRESHOLD,
     OLLAMA_POLL_INTERVAL,
     OLLAMA_REQUEST_TIMEOUT,
@@ -208,12 +209,32 @@ class QwenProcessManager:
     XTTS_PYTHON = r"E:\Miniconda\envs\xtts_env\python.exe"
     SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
     HEALTH_URL = "http://127.0.0.1:5000/health"
+    APP_ID = "voiceai-qwen-tts"
 
     def __init__(self) -> None:
         self._process: Optional[subprocess.Popen] = None
         self._is_manual: bool = False
         self._last_health_time: float = 0.0
         self._lock = threading.Lock()
+        self._stdout_log = None
+        self._stderr_log = None
+
+    def _open_subprocess_logs(self):
+        """Open dedicated files that preserve Qwen startup tracebacks."""
+        os.makedirs(LOG_DIR, exist_ok=True)
+        stdout_log = open(os.path.join(LOG_DIR, "server_qwen_stdout.log"), "a", encoding="utf-8")
+        stderr_log = open(os.path.join(LOG_DIR, "server_qwen_stderr.log"), "a", encoding="utf-8")
+        return stdout_log, stderr_log
+
+    def _close_subprocess_logs(self) -> None:
+        for handle_name in ("_stdout_log", "_stderr_log"):
+            handle = getattr(self, handle_name, None)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    logger.debug("QwenProcessManager: failed to close subprocess log", exc_info=True)
+                setattr(self, handle_name, None)
 
     def start(self) -> bool:
         """Launch server_qwen.py via subprocess. Returns True if healthy."""
@@ -230,14 +251,22 @@ class QwenProcessManager:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
 
+            # If a previous managed Qwen process exited unexpectedly and start()
+            # is called again before stop(), close stale log handles before
+            # replacing them. This keeps the diagnostic upgrade leak-free across
+            # restart attempts.
+            self._close_subprocess_logs()
+            self._stdout_log, self._stderr_log = self._open_subprocess_logs()
+
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._stdout_log,
+                stderr=self._stderr_log,
                 creationflags=creationflags,
             )
             self._is_manual = False
         except Exception as e:
+            self._close_subprocess_logs()
             logger.error(f"QwenProcessManager: failed to start: {e}")
             return False
 
@@ -268,6 +297,7 @@ class QwenProcessManager:
             self._process = None
 
         if proc.poll() is not None:
+            self._close_subprocess_logs()
             return  # Already exited
 
         try:
@@ -283,7 +313,11 @@ class QwenProcessManager:
                 logger.info("QwenProcessManager: server killed after graceful stop failure")
             except Exception as kill_error:
                 logger.warning(f"QwenProcessManager: forced kill failed: {kill_error}")
+            finally:
+                self._close_subprocess_logs()
             return
+
+        self._close_subprocess_logs()
 
         # Wait up to 10s, then force-kill.
         try:
@@ -337,7 +371,24 @@ class QwenProcessManager:
     def _check_health(self) -> bool:
         try:
             resp = requests.get(self.HEALTH_URL, timeout=3)
-            return resp.status_code == 200
+            if resp.status_code != 200:
+                return False
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                # Preserve attach compatibility with older/manual servers that
+                # only expose an HTTP 200 health probe.
+                return True
+
+            if "app" in payload and payload.get("app") != self.APP_ID:
+                return False
+            if "model_loaded" in payload:
+                status_ok = "status" not in payload or payload.get("status") == "ok"
+                return payload.get("model_loaded") is True and status_ok
+            if "status" in payload:
+                return payload.get("status") == "ok"
+            return True
         except Exception:
             return False
 
@@ -390,9 +441,18 @@ class HealthMonitor(threading.Thread):
         """Main polling loop. Runs until stop() is called."""
         logger.info("HealthMonitor: daemon started")
         while not self._stop_event.is_set():
-            self._poll_all()
+            try:
+                self._poll_all()
+            except Exception:
+                logger.exception("HealthMonitor: polling cycle failed")
+                self._mark_poll_unknown()
             self._stop_event.wait(HEALTH_POLL_INTERVAL)
         logger.info("HealthMonitor: daemon stopped")
+
+    def _mark_poll_unknown(self) -> None:
+        """Avoid exposing stale healthy state after an unexpected poll failure."""
+        with self._lock:
+            self._state = MonitorState(last_updated=time.time())
 
     def stop(self) -> None:
         """Signal the daemon to stop and clean up resources."""
@@ -404,27 +464,38 @@ class HealthMonitor(threading.Thread):
         """Poll all sub-components and update state atomically."""
         self._vram.poll()
         self._ollama.poll()
-        self._qwen.is_healthy  # triggers health check + idle TTL reset
+        qwen_healthy = self._qwen.is_healthy  # triggers health check + idle TTL reset
 
-        overall = self._compute_overall()
+        qwen_status = self._qwen_status(qwen_healthy)
+        overall = self._compute_overall(qwen_status)
 
         with self._lock:
             self._state = MonitorState(
                 vram_status=self._vram.status,
                 rtf_status=self._rtf.status,
                 ollama_status=self._ollama.status,
-                qwen_status="healthy" if self._qwen.is_running else ("unknown" if not self._qwen.is_manual else "unavailable"),
+                qwen_status=qwen_status,
                 overall_status=overall,
                 free_vram_mb=self._vram.free_mb,
                 rtf_rolling_avg=self._rtf.rolling_average,
                 last_updated=time.time(),
             )
 
-    def _compute_overall(self) -> str:
+    def _qwen_status(self, qwen_healthy: bool) -> str:
+        if qwen_healthy:
+            return "healthy"
+        if self._qwen.is_running:
+            return "unhealthy"
+        if self._qwen.is_manual:
+            return "unavailable"
+        return "unknown"
+
+    def _compute_overall(self, qwen_status: Optional[str] = None) -> str:
         """Compute overall health: green, yellow, or red."""
         vram = self._vram.status
         rtf = self._rtf.status
-        qwen_running = self._qwen.is_running
+        if qwen_status is None:
+            qwen_status = self._qwen_status(self._qwen.is_healthy)
         ollama = self._ollama.status
 
         # RED conditions: any single critical factor
@@ -432,8 +503,7 @@ class HealthMonitor(threading.Thread):
             return "red"
         if ollama == "down":
             return "red"
-        if not qwen_running and self._qwen.is_manual is False:
-            # We manage the server and it's not running
+        if qwen_status not in ("healthy", "unavailable"):
             return "red"
 
         # YELLOW conditions: any single degraded factor
@@ -469,27 +539,42 @@ class HealthMonitor(threading.Thread):
         Returns:
             True if heavy TTS should be used, False if fallback to Edge-TTS.
         """
+        return self.heavy_tts_block_reason(auto_fallback_enabled, manual_motor) is None
+
+    def heavy_tts_block_reason(self, auto_fallback_enabled: bool, manual_motor: str) -> Optional[str]:
+        """Return why Qwen heavy TTS is blocked, or None when it is allowed.
+
+        This is intentionally side-effect-free so the TTS pipeline can log the
+        exact fallback reason seen by the streamer without changing policy.
+        """
         if not auto_fallback_enabled:
             # Backward compat: if auto-fallback disabled, always respect manual
-            return manual_motor == "pesado"
+            return None if manual_motor == "pesado" else "manual_motor=ligero"
 
         # Manual "ligero" always uses Edge-TTS regardless of health
         if manual_motor == "ligero":
-            return False
+            return "manual_motor=ligero"
 
         # Check health gates
         s = self.state
         if s.vram_status in ("low", "critical"):
-            logger.info(f"HealthMonitor: heavy TTS blocked — vram_{s.vram_status}")
-            return False
+            reason = (
+                f"vram_{s.vram_status} "
+                f"free={s.free_vram_mb:.0f}MB "
+                f"required>={VRAM_LOW_THRESHOLD_MB}MB"
+            )
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
         if s.rtf_status == "degraded":
-            logger.info("HealthMonitor: heavy TTS blocked — rtf_degraded")
-            return False
+            reason = f"rtf_degraded avg={s.rtf_rolling_avg}"
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
         if s.qwen_status not in ("healthy", "unavailable"):
-            logger.info(f"HealthMonitor: heavy TTS blocked — qwen_{s.qwen_status}")
-            return False
+            reason = f"qwen_{s.qwen_status}"
+            logger.info(f"HealthMonitor: heavy TTS blocked — {reason}")
+            return reason
 
-        return True
+        return None
 
     def can_vibe_call(self) -> bool:
         """Check if Vibe LLM calls are allowed.

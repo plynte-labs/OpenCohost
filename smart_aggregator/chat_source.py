@@ -1,10 +1,9 @@
 import random
-import re
 import socket
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, TypedDict
+from typing import Optional, TypedDict
 
 try:
     import pytchat
@@ -250,6 +249,7 @@ class TwitchChatSource(ChatSource):
             try:
                 nick = f"justinfan{random.randint(10000, 99999)}"
                 sock = socket.create_connection(("irc.chat.twitch.tv", 6667), timeout=30)
+                sock.sendall(b"CAP REQ :twitch.tv/tags\r\n")
                 sock.sendall(f"NICK {nick}\r\n".encode())
                 sock.sendall(f"USER {nick} 8 * :{nick}\r\n".encode())
                 sock.sendall(f"JOIN #{self._source_id}\r\n".encode())
@@ -293,13 +293,13 @@ class TwitchChatSource(ChatSource):
                             except Exception:
                                 break
                         elif "PRIVMSG" in line:
-                            match = re.match(r":(\w+)!.*PRIVMSG #\w+ :(.*)", line)
-                            if match:
+                            parsed = self._parse_privmsg_line(line)
+                            if parsed:
                                 msg = {
                                     "platform": "twitch",
                                     "source_id": self._source_id,
-                                    "user": match.group(1),
-                                    "text": match.group(2),
+                                    "user": parsed["user"],
+                                    "text": parsed["text"],
                                     "timestamp": time.time(),
                                 }
                                 if self.callbacks.get("on_message"):
@@ -331,6 +331,78 @@ class TwitchChatSource(ChatSource):
                 self._socket = None
 
         self._notify_disconnect()
+
+    @staticmethod
+    def _parse_privmsg_line(line: str) -> Optional[dict]:
+        """Parse a Twitch IRC PRIVMSG line, including optional IRCv3 tags."""
+        tags = {}
+        rest = line
+        if rest.startswith("@"):
+            raw_tags, sep, rest = rest.partition(" ")
+            if not sep:
+                return None
+            tags = TwitchChatSource._parse_irc_tags(raw_tags[1:])
+
+        if not rest.startswith(":"):
+            return None
+
+        prefix, sep, command = rest[1:].partition(" ")
+        if not sep or " PRIVMSG " not in f" {command} ":
+            return None
+
+        user = prefix.split("!", 1)[0]
+        marker = " :"
+        before_text, sep, text = command.partition(marker)
+        if not sep or not before_text.startswith("PRIVMSG "):
+            return None
+
+        return {
+            "user": user,
+            "text": TwitchChatSource._strip_twitch_emote_ranges(text, tags.get("emotes", "")),
+        }
+
+    @staticmethod
+    def _parse_irc_tags(raw_tags: str) -> dict:
+        tags = {}
+        for part in raw_tags.split(";"):
+            key, sep, value = part.partition("=")
+            if sep:
+                tags[key] = value
+            else:
+                tags[key] = ""
+        return tags
+
+    @staticmethod
+    def _strip_twitch_emote_ranges(text: str, emotes_tag: str) -> str:
+        if not emotes_tag:
+            return text
+
+        ranges = []
+        for emote_entry in emotes_tag.split("/"):
+            _emote_id, sep, positions = emote_entry.partition(":")
+            if not sep:
+                continue
+            for position in positions.split(","):
+                start_raw, dash, end_raw = position.partition("-")
+                if not dash:
+                    continue
+                try:
+                    start = int(start_raw)
+                    end = int(end_raw)
+                except ValueError:
+                    continue
+                if 0 <= start <= end < len(text):
+                    ranges.append((start, end))
+
+        if not ranges:
+            return text
+
+        remove_indexes = set()
+        for start, end in ranges:
+            remove_indexes.update(range(start, end + 1))
+
+        stripped = "".join(char for index, char in enumerate(text) if index not in remove_indexes)
+        return " ".join(stripped.split())
 
     def _notify_disconnect(self):
         with self._lock:

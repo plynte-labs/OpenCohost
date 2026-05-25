@@ -203,6 +203,47 @@ class TestQwenProcessManager:
         flags = mock_popen.call_args.kwargs["creationflags"]
         assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
 
+    def test_start_redirects_qwen_output_to_dedicated_logs(self, tmp_path):
+        """Qwen startup tracebacks must be preserved in logs, not swallowed."""
+        mgr = QwenProcessManager()
+
+        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch.object(mgr, "_check_health", return_value=True):
+                    mock_popen.return_value.poll.return_value = None
+
+                    assert mgr.start() is True
+
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["stdout"] is not subprocess.DEVNULL
+        assert kwargs["stderr"] is not subprocess.DEVNULL
+        assert kwargs["stdout"].name == str(tmp_path / "server_qwen_stdout.log")
+        assert kwargs["stderr"].name == str(tmp_path / "server_qwen_stderr.log")
+
+        mgr._close_subprocess_logs()
+
+    def test_start_closes_stale_qwen_log_handles_before_reopening(self, tmp_path):
+        """Restart attempts must not leak old Qwen subprocess log handles."""
+        mgr = QwenProcessManager()
+        stale_stdout = MagicMock()
+        stale_stderr = MagicMock()
+        mgr._stdout_log = stale_stdout
+        mgr._stderr_log = stale_stderr
+
+        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch.object(mgr, "_check_health", return_value=True):
+                    mock_popen.return_value.poll.return_value = None
+
+                    assert mgr.start() is True
+
+        stale_stdout.close.assert_called_once()
+        stale_stderr.close.assert_called_once()
+        assert mgr._stdout_log is not stale_stdout
+        assert mgr._stderr_log is not stale_stderr
+
+        mgr._close_subprocess_logs()
+
     def test_stop_kills_when_graceful_signal_fails(self):
         """A failed CTRL_BREAK_EVENT must fall back to kill() to release VRAM."""
         mgr = QwenProcessManager()
@@ -243,8 +284,68 @@ class TestQwenProcessManager:
         """_check_health returns True on 200 response."""
         mgr = QwenProcessManager()
         with patch("core.health_monitor.requests.get") as mock_get:
-            mock_get.return_value = MagicMock(status_code=200)
+            response = MagicMock(status_code=200)
+            response.json.side_effect = ValueError("not json")
+            mock_get.return_value = response
             assert mgr._check_health() is True
+
+    def test_check_health_rejects_wrong_app_identifier(self):
+        """_check_health rejects healthy JSON from a different app on port 5000."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "app": "some-other-service",
+                "status": "ok",
+                "model_loaded": True,
+            }
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
+
+    def test_check_health_accepts_correct_app_identifier(self):
+        """_check_health accepts VoiceAI Qwen health JSON with the expected app id."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "app": QwenProcessManager.APP_ID,
+                "status": "ok",
+                "model_loaded": True,
+            }
+            mock_get.return_value = response
+
+            assert mgr._check_health() is True
+
+    def test_check_health_requires_loaded_model_when_json_available(self):
+        """_check_health rejects alive Qwen server when model is not loaded."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"status": "error", "model_loaded": False}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
+
+    def test_check_health_accepts_loaded_model_without_status_for_compat(self):
+        """Manual compatible servers may only expose model_loaded in JSON."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"model_loaded": True}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is True
+
+    def test_check_health_returns_false_on_503_model_not_loaded(self):
+        """_check_health rejects Qwen /health 503 even if the port responds."""
+        mgr = QwenProcessManager()
+        with patch("core.health_monitor.requests.get") as mock_get:
+            response = MagicMock(status_code=503)
+            response.json.return_value = {"status": "error", "model_loaded": False}
+            mock_get.return_value = response
+
+            assert mgr._check_health() is False
 
     def test_is_port_in_use(self):
         """_is_port_in_use checks port availability."""
@@ -286,6 +387,65 @@ class TestHealthMonitor:
         s2 = monitor.state
         assert s1 is not s2
 
+    def test_run_logs_poll_exception_and_continues(self, caplog):
+        """Unexpected poll exceptions are logged and do not kill the loop."""
+        monitor = self._make_monitor()
+        poll_calls = 0
+
+        def poll_once_then_stop():
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RuntimeError("boom")
+            monitor._stop_event.set()
+
+        monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
+
+        with caplog.at_level("ERROR", logger="HealthMonitor"):
+            with patch("core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+                monitor.start()
+                monitor.join(timeout=1)
+
+        assert monitor.is_alive() is False
+        assert monitor._poll_all.call_count == 2
+        assert "HealthMonitor: polling cycle failed" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
+
+    def test_run_marks_state_unknown_after_poll_exception(self):
+        """A failed poll cycle does not leave a stale green snapshot exposed."""
+        monitor = self._make_monitor()
+        poll_calls = 0
+        with monitor._lock:
+            monitor._state = MonitorState(
+                vram_status="normal",
+                rtf_status="normal",
+                ollama_status="healthy",
+                qwen_status="healthy",
+                overall_status="green",
+                free_vram_mb=5000.0,
+                last_updated=1.0,
+            )
+
+        def poll_once_then_stop():
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RuntimeError("boom")
+            monitor._stop_event.set()
+
+        monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
+
+        with patch("core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+            monitor.start()
+            monitor.join(timeout=1)
+
+        state = monitor.state
+        assert state.overall_status == "unknown"
+        assert state.vram_status == "unknown"
+        assert state.ollama_status == "unknown"
+        assert state.qwen_status == "unknown"
+        assert state.last_updated > 1.0
+
     def test_should_use_heavy_tts_backward_compat(self):
         """Returns True when auto_fallback disabled and motor is pesado."""
         monitor = self._make_monitor()
@@ -310,6 +470,18 @@ class TestHealthMonitor:
         monitor._poll_all()
         assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is False
 
+    def test_heavy_tts_block_reason_reports_vram_threshold(self):
+        """Fallback logs must expose the exact VRAM gate that blocked Qwen."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "low"
+        monitor._vram._free_mb = 1500.0
+        monitor._ollama._status = "healthy"
+        monitor._poll_all()
+
+        reason = monitor.heavy_tts_block_reason(auto_fallback_enabled=True, manual_motor="pesado")
+
+        assert reason == "vram_low free=1500MB required>=2048MB"
+
     def test_should_use_heavy_tts_vram_critical_blocks(self):
         """VRAM critical blocks heavy TTS."""
         monitor = self._make_monitor()
@@ -333,6 +505,16 @@ class TestHealthMonitor:
         monitor._ollama._status = "healthy"
         monitor._poll_all()
         assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is True
+
+    def test_heavy_tts_block_reason_none_when_healthy(self):
+        """No fallback reason is reported when Qwen is allowed."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._poll_all()
+
+        assert monitor.heavy_tts_block_reason(auto_fallback_enabled=True, manual_motor="pesado") is None
 
     def test_can_vibe_call_vram_low(self):
         """VRAM low blocks Vibe calls."""
@@ -428,6 +610,23 @@ class TestHealthMonitor:
         monitor._poll_all()
         state = monitor.state
         assert state.overall_status == "red"
+
+    def test_qwen_alive_but_unhealthy_is_not_green(self):
+        """Alive Qwen process without loaded model must not publish fake green."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._qwen.is_running = True
+        monitor._qwen.is_manual = False
+        monitor._qwen.is_healthy = False
+
+        monitor._poll_all()
+
+        state = monitor.state
+        assert state.qwen_status == "unhealthy"
+        assert state.overall_status == "red"
+        assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is False
 
     def test_thread_safety_concurrent_reads(self):
         """Multiple concurrent state reads don't crash."""

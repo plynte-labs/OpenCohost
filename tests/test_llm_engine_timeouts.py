@@ -1,5 +1,6 @@
 """Focused tests for LLM/TTS timeout coordination."""
 
+import logging
 import queue
 import threading
 import time
@@ -44,6 +45,22 @@ def test_check_ollama_service_warms_current_model_after_service_ready():
     motor.ollama.list.assert_called_once()
     motor.ollama.generate.assert_called_once()
     assert motor._warmed_model == "llama3"
+
+
+def test_ollama_chat_client_uses_configured_timeout():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    created = {}
+
+    class FakeOllamaModule:
+        @staticmethod
+        def Client(**kwargs):
+            created.update(kwargs)
+            return MagicMock()
+
+    client = motor._create_ollama_chat_client(FakeOllamaModule)
+
+    assert client is not None
+    assert created == {"timeout": llm_engine.OLLAMA_CHAT_TIMEOUT}
 
 
 def test_replace_pending_keeps_latest_item_for_same_source():
@@ -162,6 +179,49 @@ def test_agenda_generation_uses_controller_guardrail_before_history_or_speech():
     assert list(motor.historial) == []
 
 
+def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.side_effect = TimeoutError("chat stalled")
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert dialogo == ""
+    assert motor.ollama.chat.call_count == 1
+    assert motor._last_llm_failure == {
+        "model": "llama3",
+        "source": "direct",
+        "attempt": 1,
+        "reason": "TimeoutError",
+        "message": "chat stalled",
+    }
+    assert any("ERROR Ollama chat (TimeoutError)" in item for item in list(motor.log_queue.queue))
+    assert any("Ollama chat transport failure" in record.message for record in caplog.records)
+    assert list(motor.historial) == []
+
+
+def test_ollama_chat_connection_error_is_logged_and_returns_empty(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.side_effect = ConnectionError("ollama refused")
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        dialogo = motor._generar_dialogo("hola", source="chat", commit_history=True)
+
+    assert dialogo == ""
+    assert motor.ollama.chat.call_count == 1
+    assert motor._last_llm_failure["reason"] == "ConnectionError"
+    assert motor._last_llm_failure["message"] == "ollama refused"
+    assert any("ERROR Ollama chat (ConnectionError)" in item for item in list(motor.log_queue.queue))
+    assert any("Ollama chat transport failure" in record.message for record in caplog.records)
+    assert list(motor.historial) == []
+
+
 def test_agenda_output_transformer_caps_before_history_commit():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
@@ -258,6 +318,70 @@ def test_stale_chat_expires_before_processing():
     assert motor._priority_queue == []
     assert motor._accumulation_buffer == []
     motor._ejecutar_inferencia.assert_not_called()
+
+
+def test_accumulation_expiry_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_ttl = 1.0
+    raw_expired_payload = "RAW_EXPIRED_CHAT_SECRET"
+    raw_fresh_payload = "RAW_FRESH_CHAT_SECRET"
+    raw_source = "secret-source"
+
+    now = time.time()
+    motor._accumulation_buffer = [
+        (now - 2.0, raw_expired_payload, raw_source),
+        (now, raw_fresh_payload, raw_source),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        accumulated = motor._flush_accumulation()
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes expirados" in log_text
+    assert raw_expired_payload not in log_text
+    assert raw_fresh_payload not in log_text
+    assert raw_source not in log_text
+    assert raw_fresh_payload in accumulated
+    assert motor._last_accumulation_flush_count == 1
+
+
+def test_accumulation_item_overflow_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_max_items = 1
+    raw_first_payload = "RAW_ITEM_OVERFLOW_SECRET_1"
+    raw_second_payload = "RAW_ITEM_OVERFLOW_SECRET_2"
+    raw_source = "secret-source"
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        motor.enqueue_accumulation(raw_first_payload, source=raw_source)
+        motor.enqueue_accumulation(raw_second_payload, source=raw_source)
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes por límite de items" in log_text
+    assert raw_first_payload not in log_text
+    assert raw_second_payload not in log_text
+    assert raw_source not in log_text
+
+
+def test_accumulation_char_overflow_logs_count_without_raw_payload(caplog):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._accum_max_chars = 5
+    raw_payload = "RAW_CHAR_OVERFLOW_SECRET"
+    raw_source = "secret-source"
+
+    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+        motor.enqueue_accumulation(raw_payload, source=raw_source)
+
+    log_text = "\n".join(
+        [record.message for record in caplog.records] + list(motor.log_queue.queue)
+    )
+    assert "descartados 1 mensajes por límite de caracteres" in log_text
+    assert raw_payload not in log_text
+    assert raw_source not in log_text
 
 
 def test_ptt_items_never_expire_via_ttl():

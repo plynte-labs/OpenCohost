@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 import threading
 import queue
 import time
@@ -14,8 +15,11 @@ from config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
     LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
+    OLLAMA_CHAT_TIMEOUT,
+    resolve_llm_tiers,
     resolve_startup_model, save_last_model,
 )
+from core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from config.logger import get_logger
 
 logger = get_logger()
@@ -47,6 +51,11 @@ class MotorVocalIA(threading.Thread):
         self._desired_model: str = _startup_model
         self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
         self._current_profile_name: str = "default"
+        _tier_config = LLMTierConfig(**resolve_llm_tiers())
+        self.llm_tiers = LLMTierState(
+            config=_tier_config,
+            active_tier=self._infer_active_tier(_startup_model, _tier_config),
+        )
 
         # Pending model switch (non-blocking retry)
         self._pending_model_switch: Optional[str] = None
@@ -55,6 +64,8 @@ class MotorVocalIA(threading.Thread):
         # Last switch failure info (read by UI handler, cleared after read)
         self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
+        self._ollama_chat_client = None
+        self._last_llm_failure: Optional[dict] = None
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
@@ -81,6 +92,7 @@ class MotorVocalIA(threading.Thread):
         self._accum_max_chars: int = 2000
         self._accum_ttl: float = 120.0  # 2 minutes
         self._accum_lock = threading.Lock()
+        self._last_accumulation_flush_count: int = 0
 
         # Text-only agenda prefetch: Ollama can think while TTS is speaking.
         self._prefetch_lock = threading.Lock()
@@ -120,6 +132,7 @@ class MotorVocalIA(threading.Thread):
 
         self.pygame = pygame
         self.ollama = ollama
+        self._ollama_chat_client = self._create_ollama_chat_client(ollama)
 
         try:
             self.pygame.mixer.init()
@@ -203,6 +216,9 @@ class MotorVocalIA(threading.Thread):
                     continue
 
                 self._apply_model_switch(new_model)
+
+            elif tipo == "switch_llm_tier":
+                self.switch_llm_tier(str(payload))
                 
             elif tipo == "set_motor_tts":
                 self.motor_tts = payload
@@ -387,14 +403,29 @@ class MotorVocalIA(threading.Thread):
         now = time.time()
         with self._accum_lock:
             self._accumulation_buffer.append((now, payload, source))
+            dropped_item_limit = 0
+            dropped_char_limit = 0
             # Enforce item limit
             if len(self._accumulation_buffer) > self._accum_max_items:
                 self._accumulation_buffer.pop(0)  # Drop oldest
+                dropped_item_limit += 1
             # Enforce char limit — drop oldest until under limit
             total_chars = sum(len(p) for _, p, _ in self._accumulation_buffer)
             while total_chars > self._accum_max_chars and self._accumulation_buffer:
                 dropped = self._accumulation_buffer.pop(0)
                 total_chars -= len(dropped[1])
+                dropped_char_limit += 1
+
+        if dropped_item_limit:
+            self._log(
+                f"Acumulación: descartados {dropped_item_limit} mensajes por límite de items.",
+                level="warning",
+            )
+        if dropped_char_limit:
+            self._log(
+                f"Acumulación: descartados {dropped_char_limit} mensajes por límite de caracteres.",
+                level="warning",
+            )
 
     def _flush_accumulation(self) -> Optional[str]:
         """Compact accumulated messages into a single consultation string.
@@ -405,12 +436,26 @@ class MotorVocalIA(threading.Thread):
         now = time.time()
         with self._accum_lock:
             # Filter out expired messages (>2 minutes old)
+            before_count = len(self._accumulation_buffer)
             fresh = [(ts, p, s) for ts, p, s in self._accumulation_buffer
                      if now - ts < self._accum_ttl]
+            expired_count = before_count - len(fresh)
             self._accumulation_buffer = fresh
+            self._last_accumulation_flush_count = len(fresh)
 
             if not fresh:
+                if expired_count:
+                    self._log(
+                        f"Acumulación: descartados {expired_count} mensajes expirados (TTL {self._accum_ttl:.0f}s).",
+                        level="warning",
+                    )
                 return None
+
+            if expired_count:
+                self._log(
+                    f"Acumulación: descartados {expired_count} mensajes expirados (TTL {self._accum_ttl:.0f}s).",
+                    level="warning",
+                )
 
             # Group by source
             by_source: dict = {}
@@ -460,7 +505,7 @@ class MotorVocalIA(threading.Thread):
                 # No priority items — check accumulation buffer
                 accumulated = self._flush_accumulation()
                 if accumulated:
-                    self._log(f"Procesando acumulación ({len(self._accumulation_buffer) if hasattr(self, '_accumulation_buffer') else 0} mensajes compactados)...")
+                    self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
                     self._processing = True
                     self.ui_callback("processing")
                     try:
@@ -523,6 +568,105 @@ class MotorVocalIA(threading.Thread):
         self._warmed_model = None
         self._log(f"🔄 Modelo cambiado a: {new_model}")
         self._prepare_model(new_model)
+
+    @property
+    def active_llm_tier(self) -> str:
+        return self.llm_tiers.active_tier
+
+    @active_llm_tier.setter
+    def active_llm_tier(self, tier: str) -> None:
+        if self.llm_tiers.config.is_available(tier):
+            self.llm_tiers.active_tier = tier
+
+    def configure_llm_tiers(
+        self,
+        config: LLMTierConfig,
+        active_tier: Optional[str] = None,
+    ) -> None:
+        """Replace manual tier slots without changing prompt or conversation memory."""
+        tier = active_tier or self._infer_active_tier(self.current_model, config)
+        self.llm_tiers = LLMTierState(config=config, active_tier=tier)
+
+    @staticmethod
+    def _infer_active_tier(model: str, config: LLMTierConfig) -> str:
+        for tier, tier_model in config.as_dict().items():
+            if tier_model == model:
+                return tier
+        return config.first_available_tier() or "balanced"
+
+    def switch_llm_tier(self, target_tier: str) -> bool:
+        """Manually switch active LLM tier for future requests.
+
+        The previous active tier/model is restored if the target slot is empty or
+        model preparation fails. Conversation history and profile prompt are not
+        changed by tier switching.
+        """
+        previous_tier = self.llm_tiers.active_tier
+        previous_model = self.current_model
+        previous_loaded_model = self._loaded_model
+        previous_warmed_model = self._warmed_model
+        target_model = self.llm_tiers.config.model_for(target_tier)
+
+        if target_model is None:
+            self._last_switch_failure = {
+                "requested_tier": target_tier,
+                "requested": None,
+                "current_tier": previous_tier,
+                "current": previous_model,
+                "reason": "tier_unavailable",
+            }
+            self._log(
+                f"Tier LLM '{target_tier}' no disponible; "
+                f"se mantiene {previous_tier} ({previous_model}).",
+                level="warning",
+            )
+            self.ui_callback("llm_tier_switch_failed")
+            return False
+
+        try:
+            if self.is_ready and not self._prepare_model(target_model):
+                raise RuntimeError("target_model_unavailable")
+            self.llm_tiers.switch_to(target_tier)
+            self.current_model = target_model
+            self._desired_model = target_model
+            self._loaded_model = (
+                target_model
+                if self._warmed_model == target_model
+                else self._loaded_model
+            )
+            if previous_model != target_model:
+                try:
+                    self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
+                except Exception as e:
+                    logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
+            save_last_model(target_model, source="llm_tier_switch")
+        except Exception as e:
+            self.llm_tiers.active_tier = previous_tier
+            self.current_model = previous_model
+            self._desired_model = previous_model
+            self._loaded_model = previous_loaded_model
+            self._warmed_model = previous_warmed_model
+            self._last_switch_failure = {
+                "requested_tier": target_tier,
+                "requested": target_model,
+                "current_tier": previous_tier,
+                "current": previous_model,
+                "reason": f"switch_error: {e}",
+            }
+            self._log(
+                f"Tier LLM {previous_tier} -> {target_tier} ({target_model}) fallido: {e}. "
+                f"Se mantiene {previous_model}.",
+                level="error",
+            )
+            self.ui_callback("llm_tier_switch_failed")
+            return False
+
+        label = LLM_TIER_LABELS.get(target_tier, target_tier)
+        self._last_switch_failure = None
+        self._log(f"LLM tier changed: {previous_tier} -> {target_tier} ({target_model})")
+        logger.info("Manual LLM tier changed to %s (%s)", label, target_model)
+        self.ui_callback("llm_tier_switch_applied")
+        return True
 
     def _check_pending_model_switch(self) -> None:
         """Attempt pending model switch if conditions are met (non-blocking)."""
@@ -643,7 +787,8 @@ class MotorVocalIA(threading.Thread):
             self._downloading = False
 
     def _generar_dialogo(self, contexto, source: str = "direct", *, commit_history: bool = True, log_prefix: str = "LLM") -> str:
-        self._log(f"Analizando contexto con {self.current_model}...")
+        request_model = self.current_model
+        self._log(f"Analizando contexto con {request_model}...")
         try:
             messages = []
             
@@ -666,11 +811,11 @@ class MotorVocalIA(threading.Thread):
                 'num_ctx': 4096,
             }
 
-            if "gemma" in self.current_model.lower():
+            if "gemma" in request_model.lower():
                 opciones_llm.pop('num_ctx', None)
                 opciones_llm['temperature'] = 0.7
 
-            if "e2b" in self.current_model.lower() or "qwen3.5:4b" in self.current_model.lower() or "e4b" in self.current_model.lower() or "think" in self.current_model.lower():
+            if self._uses_reasoning_token_budget(request_model):
                 opciones_llm.pop('num_predict', None)
                 self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
 
@@ -680,12 +825,36 @@ class MotorVocalIA(threading.Thread):
             respuesta = None
             
             for intento in range(max_intentos):
-                respuesta = self.ollama.chat(
-                    model=self.current_model,
-                    messages=messages,
-                    keep_alive=-1,
-                    options=opciones_llm
-                )
+                try:
+                    respuesta = self._ollama_chat(
+                        model=request_model,
+                        messages=messages,
+                        keep_alive=-1,
+                        options=opciones_llm
+                    )
+                except Exception as e:
+                    if not self._is_ollama_transport_error(e):
+                        raise
+                    self._last_llm_failure = {
+                        "model": self.current_model,
+                        "source": source,
+                        "attempt": intento + 1,
+                        "reason": type(e).__name__,
+                        "message": str(e),
+                    }
+                    self._log(
+                        f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}: {e}",
+                        level="error",
+                    )
+                    logger.warning(
+                        "Ollama chat transport failure: model=%s source=%s attempt=%s/%s",
+                        request_model,
+                        source,
+                        intento + 1,
+                        max_intentos,
+                        exc_info=True,
+                    )
+                    return ""
                 
                 msg_obj = respuesta.get('message', {})
                 if isinstance(msg_obj, dict):
@@ -701,14 +870,14 @@ class MotorVocalIA(threading.Thread):
                 if raw_content.strip():
                     break
                 
-                self._log(f"⚠️ Intento {intento+1}: {self.current_model} devolvió respuesta vacía. Reintentando...", level="warning")
+                self._log(f"⚠️ Intento {intento+1}: {request_model} devolvió respuesta vacía. Reintentando...", level="warning")
                 time.sleep(0.5)
 
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
 
             # MODEL_TRACE: audit which model was used for this generation
-            generation_model = self.current_model
+            generation_model = request_model
             desired = self._desired_model
             active = self.current_model
             loaded = self._loaded_model or "unknown"
@@ -732,9 +901,11 @@ class MotorVocalIA(threading.Thread):
                         logger.exception("Agenda output transformer failed")
 
             if not dialogo:
-                self._log(f"⚠️ {self.current_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
+                self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
                 return ""
+
+            self._last_llm_failure = None
 
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
@@ -753,6 +924,37 @@ class MotorVocalIA(threading.Thread):
             self._log(f"ERROR Ollama: {e}", level="error")
             logger.exception("Error en inferencia LLM")
             return ""
+
+    def _create_ollama_chat_client(self, ollama_module):
+        client_factory = getattr(ollama_module, "Client", None)
+        if client_factory is None:
+            return None
+        try:
+            return client_factory(timeout=OLLAMA_CHAT_TIMEOUT)
+        except TypeError as e:
+            self._log(f"Ollama Client no soporta timeout de chat; usando cliente por defecto: {e}", level="warning")
+            return None
+
+    def _ollama_chat(self, **kwargs):
+        client = self._ollama_chat_client or self.ollama
+        return client.chat(**kwargs)
+
+    @staticmethod
+    def _uses_reasoning_token_budget(model: str) -> bool:
+        """Return whether a model should avoid fixed num_predict limits.
+
+        Qwen3 and Gemma E models can spend part of the budget on internal
+        reasoning. A hard low cap can yield empty or visibly truncated answers.
+        """
+        name = model.lower()
+        return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
+
+    @staticmethod
+    def _is_ollama_transport_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError, socket.timeout, requests.exceptions.RequestException)):
+            return True
+        class_names = {cls.__name__ for cls in type(exc).__mro__}
+        return any("Timeout" in name or "Connect" in name or "Connection" in name for name in class_names)
 
     def _accept_agenda_output(self, dialogo: str) -> bool:
         validator = getattr(self, "agenda_output_validator", None)
@@ -930,10 +1132,24 @@ class MotorVocalIA(threading.Thread):
             if effective_motor == "pesado":
                 hm = getattr(self, "health_monitor", None)
                 if hm is not None:
-                    if not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
-                        fallback_reason = "health_gate"
+                    block_reason = None
+                    if hasattr(hm, "heavy_tts_block_reason"):
+                        block_reason = hm.heavy_tts_block_reason(
+                            auto_fallback_enabled=True,
+                            manual_motor=effective_motor,
+                        )
+                    elif not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
                         effective_motor = "ligero"
-                        self._log(f"Auto-fallback to Edge-TTS (health gate triggered)")
+                        block_reason = "health_gate"
+                    if block_reason:
+                        fallback_reason = block_reason
+                        effective_motor = "ligero"
+                        self._log(
+                            "Auto-fallback to Edge-TTS: "
+                            f"requested=pesado effective=ligero reason={fallback_reason}"
+                        )
+                    else:
+                        self._log("TTS efectivo: requested=pesado effective=pesado")
 
             for i, oracion in enumerate(oraciones):
                 if not self._speaking:

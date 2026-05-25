@@ -69,6 +69,18 @@ from stream_admin import AdminManager
 logger = get_logger()
 
 
+def _stream_admin_should_process_chat_message(stream_admin_ui: Any, msg_id: Any) -> bool:
+    if not msg_id:
+        return True
+    with stream_admin_ui._chat_lock:
+        if msg_id in stream_admin_ui._seen_chat_ids:
+            return False
+        stream_admin_ui._seen_chat_ids.add(msg_id)
+        if len(stream_admin_ui._seen_chat_ids) > 2000:
+            stream_admin_ui._seen_chat_ids = set(list(stream_admin_ui._seen_chat_ids)[-1000:])
+    return True
+
+
 def _cargar_geometria() -> dict | None:
     try:
         if os.path.exists(WINDOW_GEOMETRY_FILE):
@@ -173,6 +185,10 @@ class VocalAIApp(ctk.CTk):
         self._ptt_accept_logged: bool = False
         self._stream_admin_manual_disconnect: bool = False
         self._logs_panel_visible: bool = True
+        self._closing: bool = False
+        self._motor_started: bool = False
+        self._motor_heartbeat_failure_reported: bool = False
+        self._kira_avatar_preview_after_id: Any = None
         self.perfiles = cargar_perfiles()
         self.cohost_profiles = load_cohost_profiles()
         self._current_cohost_profile = "Natural" if "Natural" in self.cohost_profiles else next(iter(self.cohost_profiles), "")
@@ -195,6 +211,7 @@ class VocalAIApp(ctk.CTk):
         # Callback dispatchers
         self._model_dispatcher = CallbackDispatcher(source="ModelPanel")
         self._model_dispatcher.subscribe("on_switch_model", lambda tag: self.motor_ia.command_queue.put(("switch_model", tag)))
+        self._model_dispatcher.subscribe("on_switch_llm_tier", lambda tier: self.motor_ia.command_queue.put(("switch_llm_tier", tier)))
         self._model_dispatcher.subscribe("on_download_model", lambda tag: self.motor_ia.command_queue.put(("download_model", tag)))
 
         self._profile_dispatcher = CallbackDispatcher(source="ProfilePanel")
@@ -270,6 +287,7 @@ class VocalAIApp(ctk.CTk):
         when the motor calls ui_callback before Tkinter's mainloop starts.
         """
         self.motor_ia.start()
+        self._motor_started = True
 
         # Start health monitor daemon
         if self.health_monitor:
@@ -279,20 +297,49 @@ class VocalAIApp(ctk.CTk):
             except Exception as e:
                 logger.debug(f"HealthMonitor: could not attach existing server: {e}")
             self.health_monitor.start()
-            # Begin UI health status polling
-            self._poll_health_status()
+        # Begin UI health status polling and passive motor heartbeat checks.
+        self._poll_health_status()
 
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
-        if not self.health_monitor:
-            return
-        try:
-            state = self.health_monitor.state
-            self._ui_state.health_status = state.overall_status
-        except Exception:
-            pass
+        if self.health_monitor and not getattr(self, "_motor_heartbeat_failure_reported", False):
+            try:
+                state = self.health_monitor.state
+                self._ui_state.health_status = state.overall_status
+            except Exception:
+                pass
+        self._check_motor_heartbeat()
         # Reschedule every 2 seconds for UI responsiveness
         self.after(2000, self._poll_health_status)
+
+    def _check_motor_heartbeat(self) -> None:
+        """Surface an operator-visible warning if MotorVocalIA dies after startup."""
+        motor = getattr(self, "motor_ia", None)
+        if (
+            motor is None
+            or not getattr(self, "_motor_started", False)
+            or getattr(self, "_closing", False)
+            or getattr(self, "_motor_heartbeat_failure_reported", False)
+        ):
+            return
+        try:
+            alive = motor.is_alive()
+        except Exception:
+            logger.exception("No se pudo verificar el heartbeat de MotorVocalIA")
+            return
+        if alive:
+            return
+
+        self._motor_heartbeat_failure_reported = True
+        logger.critical("MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline")
+        try:
+            self._ui_state.health_status = "red"
+        except Exception:
+            logger.exception("No se pudo marcar health_status tras fallo de MotorVocalIA")
+        try:
+            self._print_log("[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app.")
+        except Exception:
+            logger.exception("No se pudo informar en UI el fallo de MotorVocalIA")
 
     def _on_ui_state_change(self, key: str, value: Any) -> None:
         if key == "ws_connected":
@@ -306,7 +353,17 @@ class VocalAIApp(ctk.CTk):
 
     def _on_avatar_state_for_preview(self, state: AvatarState) -> None:
         """Update the left-panel avatar preview when bridge state changes."""
+        previous_after_id = getattr(self, "_kira_avatar_preview_after_id", None)
+        if previous_after_id is not None:
+            try:
+                self.after_cancel(previous_after_id)
+            except Exception:
+                logger.debug("No se pudo cancelar update pendiente de preview de avatar", exc_info=True)
+            finally:
+                self._kira_avatar_preview_after_id = None
+
         def update():
+            self._kira_avatar_preview_after_id = None
             if self._kira_avatar_label is None or not self._kira_avatar_label.winfo_exists():
                 return
             from avatar.avatar_config import load_avatar_config
@@ -324,26 +381,42 @@ class VocalAIApp(ctk.CTk):
                     self._kira_avatar_pil = img
                     ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
                     self._kira_avatar_ref = ctk_img
+                    if state.value == "idle" or image_path == config.state_images.get("idle"):
+                        self._kira_avatar_idle_pil = img
+                        self._kira_avatar_idle_ref = ctk_img
                     self._kira_avatar_label.configure(image=ctk_img, text="")
                 except Exception as e:
+                    if not self._show_cached_idle_avatar_preview():
+                        self._kira_avatar_pil = None
+                        self._kira_avatar_ref = None
+                        self._kira_avatar_label.configure(
+                            image=None,
+                            text=f"Error al cargar avatar: {state.value}",
+                            text_color="#aa5555",
+                        )
+                    self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
+            else:
+                if not self._show_cached_idle_avatar_preview():
                     self._kira_avatar_pil = None
                     self._kira_avatar_ref = None
                     self._kira_avatar_label.configure(
                         image=None,
-                        text=f"Error al cargar avatar: {state.value}",
-                        text_color="#aa5555",
+                        text=f"Sin imagen para: {state.value}",
+                        text_color="#6b7b8d",
                     )
-                    self._print_log(f"[Avatar] No se pudo cargar preview '{state.value}' desde {image_path}: {e}")
-            else:
-                self._kira_avatar_pil = None
-                self._kira_avatar_ref = None
-                self._kira_avatar_label.configure(
-                    image=None,
-                    text=f"Sin imagen para: {state.value}",
-                    text_color="#6b7b8d",
-                )
                 self._print_log(f"[Avatar] Sin imagen configurada o accesible para '{state.value}'")
-        self.after(0, update)
+        self._kira_avatar_preview_after_id = self.after(0, update)
+
+    def _show_cached_idle_avatar_preview(self) -> bool:
+        """Keep a known idle avatar visible when a transient state cannot load."""
+        idle_ref = getattr(self, "_kira_avatar_idle_ref", None)
+        label = getattr(self, "_kira_avatar_label", None)
+        if not idle_ref or label is None:
+            return False
+        self._kira_avatar_pil = getattr(self, "_kira_avatar_idle_pil", None)
+        self._kira_avatar_ref = idle_ref
+        label.configure(image=idle_ref, text="")
+        return True
 
     # ──────────────────────────────────────────────
     # UI Construction — delegates to panels
@@ -953,7 +1026,7 @@ class VocalAIApp(ctk.CTk):
                 errors.append(f"{os.path.basename(path)}: {exc}")
         self._music_update_panel()
         if errors:
-            messagebox.showwarning("Música", "\n".join(errors[:6]))
+            self._notify_operator("Música", "\n".join(errors[:6]))
         elif imported:
             self._print_log(f"[Música] {imported} track(s) importados para {mood}.")
 
@@ -1040,7 +1113,7 @@ class VocalAIApp(ctk.CTk):
             topic = self.kira_agenda.add_topic(title, angle, constraints, approved=True, priority=priority, response_length=response_length)
             self.kira_agenda.queue_topic(topic.id)
         except ValueError as e:
-            messagebox.showwarning("Kira Agenda", str(e))
+            self._notify_operator("Kira Agenda", str(e))
             return
         self._on_stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}, {self.kira_agenda.max_turns_per_topic} turnos globales)")
         self._kira_agenda_update_status()
@@ -1059,7 +1132,7 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_save_profile(self, name: str, style: str, priority: str, response_length: str) -> None:
         safe_name = sanitize_profile_name(name)
         if not safe_name:
-            messagebox.showwarning("Kira Agenda", "El perfil necesita un nombre.")
+            self._notify_operator("Kira Agenda", "El perfil necesita un nombre.")
             return
         try:
             normalized = normalize_cohost_profile({
@@ -1069,7 +1142,7 @@ class VocalAIApp(ctk.CTk):
             })
             self.kira_agenda.set_profile(normalized)
         except ValueError as e:
-            messagebox.showwarning("Kira Agenda", str(e))
+            self._notify_operator("Kira Agenda", str(e))
             return
         self.cohost_profiles[safe_name] = normalized
         self._current_cohost_profile = safe_name
@@ -1080,7 +1153,7 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_topic_by_queue_index(self, index: int):
         queued = self.kira_agenda.queued_topics()
         if index < 1 or index > len(queued):
-            messagebox.showwarning("Kira Agenda", "Elegí un número válido de la cola.")
+            self._notify_operator("Kira Agenda", "Elegí un número válido de la cola.")
             return None
         return queued[index - 1]
 
@@ -1444,7 +1517,7 @@ class VocalAIApp(ctk.CTk):
 
     def _run_stream_admin_task(self, action_name: str, func) -> None:
         if not self.stream_admin:
-            messagebox.showwarning("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
+            self._notify_operator("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
             return
 
         def worker():
@@ -1457,7 +1530,10 @@ class VocalAIApp(ctk.CTk):
                 hint = ""
                 if "Falta scope de escritura" in str(e):
                     hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
-                self.after(0, lambda err=e: messagebox.showerror("Stream Admin", str(err)))
+                try:
+                    self.after(0, lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
+                except Exception:
+                    self._notify_operator("Stream Admin", str(e), level="error")
                 self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1503,7 +1579,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_apply_metadata(self) -> None:
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
             return
         payload = self.stream_admin_ui.metadata_payload_from_ui()
         if self.stream_admin and self.stream_admin.pending_action:
@@ -1527,7 +1603,7 @@ class VocalAIApp(ctk.CTk):
         try:
             parsed = parse_chat_url(raw)
         except ValueError:
-            messagebox.showwarning("Chat Live", "URL no valida o no soportada")
+            self._notify_operator("Chat Live", "URL no valida o no soportada")
             return
 
         platform = parsed["platform"]
@@ -1595,17 +1671,17 @@ class VocalAIApp(ctk.CTk):
         raw = raw.replace("\x00", "").replace("\n", "").replace("\r", "")[:500]
 
         if not raw:
-            messagebox.showwarning("Twitch Chat", "Ingresa una URL de Twitch (twitch.tv/canal).")
+            self._notify_operator("Twitch Chat", "Ingresa una URL de Twitch (twitch.tv/canal).")
             return
 
         try:
             parsed = parse_chat_url(raw)
         except ValueError:
-            messagebox.showwarning("Twitch Chat", "URL no valida o no soportada")
+            self._notify_operator("Twitch Chat", "URL no valida o no soportada")
             return
 
         if parsed["platform"] != "twitch":
-            messagebox.showwarning("Twitch Chat", "La URL no es de Twitch. Usa un enlace twitch.tv/canal.")
+            self._notify_operator("Twitch Chat", "La URL no es de Twitch. Usa un enlace twitch.tv/canal.")
             return
 
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
@@ -1637,7 +1713,7 @@ class VocalAIApp(ctk.CTk):
             video_id = getattr(getattr(self.stream_admin, "metadata", None), "video_id", "")
             live_chat_id = getattr(getattr(self.stream_admin, "metadata", None), "live_chat_id", "")
         if not video_id:
-            messagebox.showwarning("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
+            self._notify_operator("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
             return
 
         if self.stream_admin_ui.chat_connected:
@@ -1653,7 +1729,7 @@ class VocalAIApp(ctk.CTk):
             if current == video_id:
                 self._on_stream_admin_log(f"[StreamAdmin] Chat ya conectado al live {video_id}.")
                 return
-            messagebox.showwarning("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
+            self._notify_operator("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
             return
 
         entry_video = self.stream_admin_ui._widget("entry_stream_chat_message")
@@ -1664,10 +1740,10 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_connect_api_chat(self, video_id: str, live_chat_id: str) -> None:
         if not self.smart_agg:
-            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
             return
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
-            messagebox.showwarning("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
+            self._notify_operator("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
             return
 
         self.stream_admin_ui.chat_connected = True
@@ -1699,12 +1775,8 @@ class VocalAIApp(ctk.CTk):
                     page_token = result.get("next_page_token") or page_token
                     for message in result.get("messages", []):
                         msg_id = message.get("id")
-                        if msg_id and msg_id in self.stream_admin_ui._seen_chat_ids:
+                        if not _stream_admin_should_process_chat_message(self.stream_admin_ui, msg_id):
                             continue
-                        if msg_id:
-                            self.stream_admin_ui._seen_chat_ids.add(msg_id)
-                            if len(self.stream_admin_ui._seen_chat_ids) > 2000:
-                                self.stream_admin_ui._seen_chat_ids = set(list(self.stream_admin_ui._seen_chat_ids)[-1000:])
                         self.smart_agg.process_message(message)
                     delay = max(1.0, float(result.get("polling_interval_millis", 5000)) / 1000.0)
                 except Exception as e:
@@ -1745,12 +1817,12 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_send_chat(self) -> None:
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
             return
         entry = self.stream_admin_ui._widget("entry_stream_chat_message")
         message = entry.get().strip() if entry else ""
         if not message:
-            messagebox.showwarning("Stream Admin", "Escribe un mensaje para el chat.")
+            self._notify_operator("Stream Admin", "Escribe un mensaje para el chat.")
             return
         import re
         message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", message)[:500]
@@ -1784,7 +1856,7 @@ class VocalAIApp(ctk.CTk):
             elif self.stream_admin_ui.last_metadata:
                 context = [{"user": "Stream Admin", "text": f"Live actual: {self.stream_admin_ui.last_metadata.get('title', '')}. Categoria {self.stream_admin_ui.last_metadata.get('category_id', '')}."}]
         if not context:
-            messagebox.showwarning("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
+            self._notify_operator("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
             return
         self.smart_agg_ui.on_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
         self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
@@ -1838,7 +1910,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_simulate_chat(self) -> None:
         if not self.smart_agg:
-            messagebox.showwarning("Stream Admin", "Smart Aggregator no inicializado.")
+            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
             return
         if self.smart_agg_ui.is_busy():
             self._on_stream_admin_log("[StreamAdmin] Simular Chat omitido: Kira está ocupada.")
@@ -1865,7 +1937,7 @@ class VocalAIApp(ctk.CTk):
         user = entry_user.get().strip() if entry_user else ""
         reason = entry_reason.get().strip() if entry_reason else "moderacion manual RF4"
         if not user:
-            messagebox.showwarning("Stream Admin", "Ingresa el channelId del usuario a moderar.")
+            self._notify_operator("Stream Admin", "Ingresa el channelId del usuario a moderar.")
             return
         self._run_stream_admin_task(f"Proponer {action}", lambda: self.stream_admin.propose_high_risk_moderation(action, user, reason, 300))
 
@@ -1912,10 +1984,10 @@ class VocalAIApp(ctk.CTk):
         if not self.stream_admin:
             return
         if not self._stream_admin_can_write():
-            messagebox.showwarning("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
+            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
             return
         if not channel_id:
-            messagebox.showwarning("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
+            self._notify_operator("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
             return
         reason = reason_entry.get().strip() or f"{action} manual desde Stream Admin"
         verb = "banear" if action == "ban" else "aplicar timeout a"
@@ -2269,6 +2341,8 @@ class VocalAIApp(ctk.CTk):
             "model_switch_pending": self._on_motor_switch_pending,
             "model_switch_applied": self._on_motor_model_changed,
             "model_switch_failed": self._on_motor_switch_failed,
+            "llm_tier_switch_applied": self._on_motor_model_changed,
+            "llm_tier_switch_failed": self._on_motor_switch_failed,
             "download_start": self._on_motor_download_start,
             "download_done": self._on_motor_download_done,
             "download_error": self._on_motor_download_error,
@@ -2290,6 +2364,7 @@ class VocalAIApp(ctk.CTk):
             # Sync combobox to actual startup model (may differ from DEFAULT_MODEL)
             model = self.motor_ia.current_model
             self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
+            self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
             self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
@@ -2373,7 +2448,8 @@ class VocalAIApp(ctk.CTk):
         self._stop_speaking_alt_timer()
         if hasattr(self, "audio_bed"):
             self.audio_bed.unduck()
-            self.audio_bed.on_boundary()
+            if agenda_speech or self.audio_bed.current_track is not None:
+                self.audio_bed.on_boundary()
         estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
         self._actualizar_pipeline(estado)
         if hasattr(self, "_avatar_bridge"):
@@ -2474,37 +2550,49 @@ class VocalAIApp(ctk.CTk):
             # Connect in background thread to avoid blocking UI. Keep retrying so
             # non-technical users can open OBS after VoiceAI without breaking the
             # avatar bridge for the whole session.
-            def connect_obs():
-                logged_once = False
-                retry_delay = 5
-                while getattr(self, "_obs_client", None) is not None:
-                    if self._obs_client.connect():
-                        self._obs_client.subscribe_bridge(self._avatar_bridge)
-                        self._obs_client.on_state_change(self._avatar_bridge.get_state())
-                        try:
-                            if self.winfo_exists():
-                                self.after(0, lambda: self._avatar_panel.set_obs_client(self._obs_client))
-                        except Exception:
-                            pass
-                        return
-                    if not logged_once:
-                        self._print_log(
-                            "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
-                            "Abrí OBS y la conexión se restablecerá automáticamente."
-                        )
-                        logged_once = True
-                    time.sleep(retry_delay)
-                # Client was destroyed (app closing)
-
-            threading.Thread(target=connect_obs, daemon=True).start()
+            threading.Thread(target=self._connect_obs_loop, daemon=True).start()
         except Exception as e:
             self._print_log(f"[OBS] Failed to initialize: {e}")
+
+    def _connect_obs_loop(self, retry_delay: float = 5) -> None:
+        """Retry OBS connection without letting unexpected socket errors kill the thread."""
+        logged_once = False
+        while getattr(self, "_obs_client", None) is not None:
+            try:
+                obs_client = self._obs_client
+                if obs_client is None:
+                    break
+                if obs_client.connect():
+                    obs_client.subscribe_bridge(self._avatar_bridge)
+                    obs_client.on_state_change(self._avatar_bridge.get_state())
+                    try:
+                        if self.winfo_exists():
+                            self.after(0, lambda: self._avatar_panel.set_obs_client(obs_client))
+                    except Exception:
+                        pass
+                    return
+                if not logged_once:
+                    self._print_log(
+                        "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                        "Abrí OBS y la conexión se restablecerá automáticamente."
+                    )
+                    logged_once = True
+            except Exception:
+                logger.exception("Fallo inesperado en loop de OBS")
+                if not logged_once:
+                    self._print_log(
+                        "[OBS] Error inesperado conectando. VoiceAI seguira reintentando cada 5s."
+                    )
+                    logged_once = True
+            time.sleep(retry_delay)
+        # Client was destroyed (app closing)
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
         self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._safe_after(lambda: self.model_panel.set_active_model(model))
+        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._actualizar_pipeline("idle")
 
     def _on_motor_switch_pending(self) -> None:
@@ -2525,6 +2613,7 @@ class VocalAIApp(ctk.CTk):
             self.motor_ia._last_switch_failure = None
         # Restore combobox to actual motor model
         self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
+        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
 
     def _on_motor_download_start(self) -> None:
@@ -2597,7 +2686,7 @@ class VocalAIApp(ctk.CTk):
 
     def _iniciar_grabacion(self) -> None:
         if self.dispositivo_seleccionado is None:
-            messagebox.showwarning("Atención", "Selecciona una fuente de audio primero.")
+            self._notify_operator("Atención", "Selecciona una fuente de audio primero.")
             return
         dialog = ctk.CTkInputDialog(text=f"Grabarás {RECORDING_DURATION} segundos de audio para calibrar la voz.\nHabla con tu tono natural.\n\nPresiona OK para empezar.", title="Confirmar Grabación")
         res = dialog.get_input()
@@ -2653,15 +2742,15 @@ class VocalAIApp(ctk.CTk):
                 data, sr = sf.read(filepath)
                 duration = len(data) / sr
                 if duration < 2.0:
-                    messagebox.showwarning("Audio muy corto", "El audio debe durar al menos 2 segundos.")
+                    self._notify_operator("Audio muy corto", "El audio debe durar al menos 2 segundos.")
                     self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
                 if duration > 30.0:
-                    messagebox.showwarning("Audio muy largo", "El audio no debe durar más de 30 segundos.")
+                    self._notify_operator("Audio muy largo", "El audio no debe durar más de 30 segundos.")
                     self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                     return
             except Exception as e:
-                messagebox.showerror("Error", f"No se pudo leer el archivo de audio:\n{e}")
+                self._notify_operator("Error", f"No se pudo leer el archivo de audio:\n{e}", level="error")
                 self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555")
                 return
             self.motor_ia.command_queue.put(("set_voice", filepath))
@@ -2799,6 +2888,28 @@ class VocalAIApp(ctk.CTk):
     # Logging
     # ──────────────────────────────────────────────
 
+    def _notify_operator(self, title: str, message: str, level: str = "warning") -> None:
+        level_name = (level or "warning").lower()
+        log_method = getattr(logger, level_name, logger.warning)
+        if not callable(log_method):
+            log_method = logger.warning
+        log_method("%s: %s", title, message)
+
+        text = f"[{level_name.upper()}] {title}: {message}"
+        printed = False
+        printer = getattr(self, "_print_log", None)
+        if callable(printer):
+            try:
+                printer(text)
+                printed = True
+            except Exception:
+                logger.debug("No se pudo imprimir notificacion de operador", exc_info=True)
+
+        if not printed:
+            log_queue = getattr(self, "log_queue", None)
+            if log_queue is not None:
+                log_queue.put(text)
+
     def _print_log(self, msg: str) -> None:
         self._advanced_panel.print_log(msg)
 
@@ -2815,6 +2926,7 @@ class VocalAIApp(ctk.CTk):
     # ──────────────────────────────────────────────
 
     def on_closing(self) -> None:
+        self._closing = True
         logger.info("Cerrando aplicación...")
 
         # Fix: audit/ui-security-perf-2026-05-17 — unsubscribe UIState observer to

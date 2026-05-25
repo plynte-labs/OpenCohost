@@ -1,0 +1,5 @@
+{
+  "quality": "gemma4:e4b",
+  "balanced": "llama3",
+  "fast": "qwen3:1.7b"
+}
