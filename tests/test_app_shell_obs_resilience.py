@@ -406,6 +406,42 @@ def test_poll_health_status_preserves_red_after_motor_failure_reported():
         _restore_app_shell_module(old_module)
 
 
+def test_app_closing_releases_owned_model_and_runs_safe_janitor():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._ui_state_sub_id = "sub-1"
+        app._ui_state = SimpleNamespace(unsubscribe=MagicMock())
+        app.status_bar = None
+        app._stop_speaking_alt_timer = MagicMock()
+        app._stop_inactivity_timer = MagicMock()
+        app._obs_client = None
+        app.ptt = SimpleNamespace(stop_listener=MagicMock())
+        app.health_monitor = None
+        app._avatar_bridge = SimpleNamespace(set_state=MagicMock())
+        app.smart_agg = None
+        app.stream_admin_ui = SimpleNamespace(chat_connected=False, cleanup=MagicMock())
+        app.winfo_x = MagicMock(return_value=1)
+        app.winfo_y = MagicMock(return_value=2)
+        app.winfo_width = MagicMock(return_value=3)
+        app.winfo_height = MagicMock(return_value=4)
+        app.motor_ia = SimpleNamespace(
+            command_queue=queue.Queue(),
+            release_owned_ollama_model=MagicMock(return_value=True),
+        )
+        app.destroy = MagicMock()
+
+        with patch.object(app_shell, "cleanup_voiceai_temp_artifacts") as janitor:
+            app.on_closing()
+
+        app.motor_ia.release_owned_ollama_model.assert_called_once_with(timeout=2.0)
+        janitor.assert_called_once_with(app_shell.TEMP_DIR, app_shell.logger, min_age_seconds=0.0)
+        assert app.motor_ia.command_queue.get_nowait() is None
+        app.destroy.assert_called_once()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 class _ExistingLabel:
     def __init__(self):
         self.configure = MagicMock()

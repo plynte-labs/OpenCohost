@@ -50,6 +50,7 @@ class MotorVocalIA(threading.Thread):
         self.current_model = _startup_model
         self._desired_model: str = _startup_model
         self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
+        self._owns_ollama_model: bool = False
         self._current_profile_name: str = "default"
         _tier_config = LLMTierConfig(**resolve_llm_tiers())
         self.llm_tiers = LLMTierState(
@@ -605,6 +606,7 @@ class MotorVocalIA(threading.Thread):
         previous_model = self.current_model
         previous_loaded_model = self._loaded_model
         previous_warmed_model = self._warmed_model
+        previous_owns_ollama_model = self._owns_ollama_model
         target_model = self.llm_tiers.config.model_for(target_tier)
 
         if target_model is None:
@@ -646,6 +648,7 @@ class MotorVocalIA(threading.Thread):
             self._desired_model = previous_model
             self._loaded_model = previous_loaded_model
             self._warmed_model = previous_warmed_model
+            self._owns_ollama_model = previous_owns_ollama_model
             self._last_switch_failure = {
                 "requested_tier": target_tier,
                 "requested": target_model,
@@ -733,15 +736,46 @@ class MotorVocalIA(threading.Thread):
             self._log(f"No se pudo preparar modelo {model}: {e}", level="warning")
             logger.warning("No se pudo preparar modelo %s: %s", model, e)
             self._loaded_model = None
+            self._owns_ollama_model = False
             self.ui_callback("ready")
             return False
 
         elapsed = time.time() - start
         self._warmed_model = model
         self._loaded_model = model
+        self._owns_ollama_model = True
         self.ui_callback("ready")
         self._log(f"Modelo {model} preparado en {elapsed:.2f}s. Primera respuesta ya no deberia cargar en frio.")
         return True
+
+    def release_owned_ollama_model(self, timeout: float = 2.0) -> bool:
+        """Best-effort unload for the model warmed by this VoiceAI session."""
+        model = self._loaded_model or self._warmed_model
+        if not model or not self._owns_ollama_model or not hasattr(self, "ollama"):
+            logger.info("Ollama model release skipped; no VoiceAI-owned model recorded")
+            return False
+
+        result = {"released": False}
+
+        def unload() -> None:
+            try:
+                self.ollama.generate(model=model, prompt="", keep_alive=0)
+                result["released"] = True
+            except Exception as exc:
+                logger.warning("No se pudo liberar modelo Ollama %s: %s", model, exc)
+
+        thread = threading.Thread(target=unload, name="OllamaModelRelease", daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning("Timeout liberando modelo Ollama %s; cierre continua", model)
+            return False
+        if result["released"]:
+            self._loaded_model = None
+            self._warmed_model = None
+            self._owns_ollama_model = False
+            logger.info("Modelo Ollama %s liberado", model)
+        return result["released"]
 
     def _download_model_worker(self, model_tag):
         self._downloading = True

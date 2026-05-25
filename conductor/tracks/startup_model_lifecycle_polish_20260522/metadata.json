@@ -1,0 +1,8 @@
+{
+  "track_id": "startup_model_lifecycle_polish_20260522",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-05-22T21:35:36-06:00",
+  "updated_at": "2026-05-22T21:35:36-06:00",
+  "description": "Startup and model lifecycle polish for Ollama, OBS, and model memory release"
+}

@@ -104,6 +104,26 @@ class TestOllamaWatchdog:
         with patch("core.health_monitor.requests.get", side_effect=requests.exceptions.Timeout):
             wd.poll()  # Should not raise
 
+    def test_startup_failures_wait_before_degraded(self):
+        """Transient Ollama startup failures are waiting, not immediate down."""
+        wd = OllamaWatchdog()
+        with patch("core.health_monitor.requests.get", side_effect=Exception("connection refused")):
+            wd.poll()
+
+        assert wd.status == "unknown"
+        assert wd.lifecycle_state == "waiting"
+        assert "Waiting" in wd.message
+
+    def test_exhausted_startup_retries_become_degraded(self):
+        """After retry threshold, Ollama exposes actionable degraded state."""
+        wd = OllamaWatchdog()
+        with patch("core.health_monitor.requests.get", side_effect=Exception("connection refused")):
+            for _ in range(4):
+                wd.poll()
+
+        assert wd.status == "down"
+        assert wd.lifecycle_state == "degraded"
+
 
 # ──────────────────────────────────────────────
 # RTFTracker Tests
@@ -256,7 +276,34 @@ class TestQwenProcessManager:
             mgr.stop()
 
         proc.kill.assert_called_once()
-        proc.wait.assert_called_once_with(timeout=5)
+        proc.wait.assert_called_once_with(timeout=2.0)
+
+    def test_stop_never_kills_external_manual_server(self):
+        """External/manual Qwen servers are protected during shutdown."""
+        mgr = QwenProcessManager()
+        proc = MagicMock()
+        mgr._process = proc
+        mgr._is_manual = True
+
+        mgr.stop()
+
+        proc.kill.assert_not_called()
+        proc.terminate.assert_not_called()
+        proc.send_signal.assert_not_called()
+        assert mgr.ownership == "external"
+
+    def test_stop_timeout_returns_after_short_wait_and_kills_owned_process(self):
+        """Owned Qwen shutdown is bounded and may kill only owned child process."""
+        mgr = QwenProcessManager()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = [subprocess.TimeoutExpired("qwen", 0.1), None]
+        mgr._process = proc
+
+        mgr.stop(graceful_timeout=0.1, kill_timeout=0.2)
+
+        proc.kill.assert_called_once()
+        assert proc.wait.call_args_list[-1].kwargs == {"timeout": 0.2}
 
     def test_attach_existing_no_server(self):
         """attach_existing returns False when no server on port 5000."""
@@ -273,6 +320,7 @@ class TestQwenProcessManager:
                 result = mgr.attach_existing()
         assert result is True
         assert mgr.is_manual is True
+        assert mgr.ownership == "external"
 
     def test_check_health_returns_false_on_error(self):
         """_check_health returns False on connection error."""
@@ -379,6 +427,8 @@ class TestHealthMonitor:
         state = monitor.state
         assert isinstance(state, MonitorState)
         assert state.overall_status == "unknown"
+        assert state.ollama_lifecycle == "starting"
+        assert state.qwen_lifecycle == "starting"
 
     def test_state_is_snapshot_not_reference(self):
         """state returns a copy, not a reference."""

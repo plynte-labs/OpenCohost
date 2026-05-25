@@ -24,7 +24,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Startup and Model Lifecycle Polish for Ollama, OBS, and Memory Release**
+- [~] **Track: Startup and Model Lifecycle Polish for Ollama, OBS, and Memory Release**
   *Link: [./tracks/startup_model_lifecycle_polish_20260522/](./tracks/startup_model_lifecycle_polish_20260522/)*
 
 ---

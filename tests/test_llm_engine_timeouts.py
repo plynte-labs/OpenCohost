@@ -30,8 +30,35 @@ def test_prepare_model_warms_selected_ollama_model():
     assert call["keep_alive"] == -1
     assert call["options"]["num_predict"] == 1
     assert motor._warmed_model == "llama3"
+    assert motor._owns_ollama_model is True
     assert "model_warming" in events
     assert events[-1] == "ready"
+
+
+def test_release_owned_ollama_model_uses_short_timeout_and_clears_owned_state():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.ollama = MagicMock()
+    motor._loaded_model = "llama3"
+    motor._warmed_model = "llama3"
+    motor._owns_ollama_model = True
+
+    assert motor.release_owned_ollama_model(timeout=0.2) is True
+
+    motor.ollama.generate.assert_called_once_with(model="llama3", prompt="", keep_alive=0)
+    assert motor._loaded_model is None
+    assert motor._warmed_model is None
+    assert motor._owns_ollama_model is False
+
+
+def test_release_owned_ollama_model_skips_when_not_owned():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.ollama = MagicMock()
+    motor._loaded_model = "llama3"
+    motor._owns_ollama_model = False
+
+    assert motor.release_owned_ollama_model(timeout=0.2) is False
+
+    motor.ollama.generate.assert_not_called()
 
 
 def test_check_ollama_service_warms_current_model_after_service_ready():

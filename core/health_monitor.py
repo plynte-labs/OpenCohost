@@ -45,6 +45,12 @@ from config.settings import (
 
 logger = logging.getLogger("HealthMonitor")
 
+LIFECYCLE_STARTING = "starting"
+LIFECYCLE_WAITING = "waiting"
+LIFECYCLE_DEGRADED = "degraded"
+LIFECYCLE_READY = "ready"
+LIFECYCLE_FAILED = "failed"
+
 
 # ──────────────────────────────────────────────
 # VRAM Guard
@@ -116,6 +122,8 @@ class OllamaWatchdog:
     def __init__(self) -> None:
         self._consecutive_failures = 0
         self._status: str = "unknown"
+        self._lifecycle_state: str = LIFECYCLE_STARTING
+        self._message: str = "Ollama startup check pending"
         self._lock = threading.Lock()
         self._base_url = "http://127.0.0.1:11434"
 
@@ -130,6 +138,8 @@ class OllamaWatchdog:
                 with self._lock:
                     self._consecutive_failures = 0
                     self._status = "healthy"
+                    self._lifecycle_state = LIFECYCLE_READY
+                    self._message = "Ollama ready"
                 return
         except Exception:
             pass
@@ -138,6 +148,12 @@ class OllamaWatchdog:
             self._consecutive_failures += 1
             if self._consecutive_failures >= OLLAMA_FAILURE_THRESHOLD:
                 self._status = "down"
+                self._lifecycle_state = LIFECYCLE_DEGRADED
+                self._message = "Ollama unavailable after startup retries"
+            else:
+                self._status = "unknown"
+                self._lifecycle_state = LIFECYCLE_WAITING
+                self._message = "Waiting for Ollama startup"
 
     @property
     def status(self) -> str:
@@ -148,6 +164,16 @@ class OllamaWatchdog:
     def consecutive_failures(self) -> int:
         with self._lock:
             return self._consecutive_failures
+
+    @property
+    def lifecycle_state(self) -> str:
+        with self._lock:
+            return self._lifecycle_state
+
+    @property
+    def message(self) -> str:
+        with self._lock:
+            return self._message
 
 
 # ──────────────────────────────────────────────
@@ -218,6 +244,7 @@ class QwenProcessManager:
         self._lock = threading.Lock()
         self._stdout_log = None
         self._stderr_log = None
+        self._lifecycle_state: str = LIFECYCLE_STARTING
 
     def _open_subprocess_logs(self):
         """Open dedicated files that preserve Qwen startup tracebacks."""
@@ -265,8 +292,10 @@ class QwenProcessManager:
                 creationflags=creationflags,
             )
             self._is_manual = False
+            self._lifecycle_state = LIFECYCLE_WAITING
         except Exception as e:
             self._close_subprocess_logs()
+            self._lifecycle_state = LIFECYCLE_FAILED
             logger.error(f"QwenProcessManager: failed to start: {e}")
             return False
 
@@ -276,19 +305,21 @@ class QwenProcessManager:
             if self._check_health():
                 with self._lock:
                     self._last_health_time = time.time()
+                    self._lifecycle_state = LIFECYCLE_READY
                 logger.info("QwenProcessManager: server started and healthy")
                 return True
             time.sleep(1.0)
 
-        logger.error("QwenProcessManager: startup timeout waiting for /health")
+        self._lifecycle_state = LIFECYCLE_FAILED
+        logger.warning("QwenProcessManager: startup timeout waiting for /health")
         self.stop()
         return False
 
-    def stop(self) -> None:
+    def stop(self, graceful_timeout: float = 3.0, kill_timeout: float = 2.0) -> None:
         """Stop the managed server process. Does NOT stop manual servers."""
         with self._lock:
             if self._is_manual:
-                logger.debug("QwenProcessManager: skipping stop of manual server")
+                logger.info("QwenProcessManager: external/manual server detected; shutdown skipped")
                 return
             if self._process is None:
                 return
@@ -309,7 +340,7 @@ class QwenProcessManager:
             logger.warning(f"QwenProcessManager: graceful stop failed, killing server: {e}")
             try:
                 proc.kill()
-                proc.wait(timeout=5)
+                proc.wait(timeout=kill_timeout)
                 logger.info("QwenProcessManager: server killed after graceful stop failure")
             except Exception as kill_error:
                 logger.warning(f"QwenProcessManager: forced kill failed: {kill_error}")
@@ -319,12 +350,12 @@ class QwenProcessManager:
 
         self._close_subprocess_logs()
 
-        # Wait up to 10s, then force-kill.
+        # Wait briefly, then force-kill only the owned child process.
         try:
-            proc.wait(timeout=10)
+            proc.wait(timeout=graceful_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=5)
+            proc.wait(timeout=kill_timeout)
         logger.info("QwenProcessManager: server stopped")
 
     def attach_existing(self) -> bool:
@@ -335,6 +366,7 @@ class QwenProcessManager:
                     self._is_manual = True
                     self._process = None
                     self._last_health_time = time.time()
+                    self._lifecycle_state = LIFECYCLE_READY
                 logger.info("QwenProcessManager: attached to existing manual server")
                 return True
         return False
@@ -360,6 +392,20 @@ class QwenProcessManager:
     def is_manual(self) -> bool:
         with self._lock:
             return self._is_manual
+
+    @property
+    def ownership(self) -> str:
+        with self._lock:
+            if self._is_manual:
+                return "external"
+            if self._process is not None:
+                return "owned"
+            return "none"
+
+    @property
+    def lifecycle_state(self) -> str:
+        with self._lock:
+            return self._lifecycle_state
 
     @property
     def idle_seconds(self) -> float:
@@ -410,6 +456,8 @@ class MonitorState:
     ollama_status: str = "unknown"
     qwen_status: str = "unknown"
     overall_status: str = "unknown"
+    ollama_lifecycle: str = LIFECYCLE_STARTING
+    qwen_lifecycle: str = LIFECYCLE_STARTING
     free_vram_mb: float = 0.0
     rtf_rolling_avg: Optional[float] = None
     last_updated: float = 0.0
@@ -476,6 +524,8 @@ class HealthMonitor(threading.Thread):
                 ollama_status=self._ollama.status,
                 qwen_status=qwen_status,
                 overall_status=overall,
+                ollama_lifecycle=self._ollama.lifecycle_state,
+                qwen_lifecycle=self._qwen.lifecycle_state,
                 free_vram_mb=self._vram.free_mb,
                 rtf_rolling_avg=self._rtf.rolling_average,
                 last_updated=time.time(),
@@ -524,6 +574,8 @@ class HealthMonitor(threading.Thread):
                 ollama_status=self._state.ollama_status,
                 qwen_status=self._state.qwen_status,
                 overall_status=self._state.overall_status,
+                ollama_lifecycle=self._state.ollama_lifecycle,
+                qwen_lifecycle=self._state.qwen_lifecycle,
                 free_vram_mb=self._state.free_vram_mb,
                 rtf_rolling_avg=self._state.rtf_rolling_avg,
                 last_updated=self._state.last_updated,

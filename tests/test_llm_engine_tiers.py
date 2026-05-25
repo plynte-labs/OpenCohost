@@ -41,6 +41,7 @@ def test_failed_tier_switch_keeps_previous_active_model_and_tier():
     motor._desired_model = "qwen3:4b"
     motor._loaded_model = "qwen3:4b"
     motor._warmed_model = "qwen3:4b"
+    motor._owns_ollama_model = True
     motor.active_llm_tier = "balanced"
     motor.ollama.generate.side_effect = RuntimeError("not found")
 
@@ -51,6 +52,7 @@ def test_failed_tier_switch_keeps_previous_active_model_and_tier():
     assert motor._desired_model == "qwen3:4b"
     assert motor._loaded_model == "qwen3:4b"
     assert motor._warmed_model == "qwen3:4b"
+    assert motor._owns_ollama_model is True
     assert motor._last_switch_failure["requested_tier"] == "fast"
     assert motor._last_switch_failure["current"] == "qwen3:4b"
     assert "llm_tier_switch_failed" in events

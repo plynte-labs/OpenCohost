@@ -61,6 +61,7 @@ from core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, nor
 from core.audio_bed import AudioBedEngine
 from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
+from core.temp_file_cleanup import cleanup_voiceai_temp_artifacts
 from core.music_library import MusicLibrary
 from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
 from smart_aggregator.chat_input_contract import ChatContextPacketBuilder
@@ -180,6 +181,7 @@ class VocalAIApp(ctk.CTk):
         self.minsize(800, 500)
 
         self.log_queue = queue.Queue()
+        self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
         self._modo_compacto: bool = False
         self._ptt_accept_logged: bool = False
@@ -299,6 +301,16 @@ class VocalAIApp(ctk.CTk):
             self.health_monitor.start()
         # Begin UI health status polling and passive motor heartbeat checks.
         self._poll_health_status()
+
+    def _run_startup_janitor(self) -> None:
+        """Recover only known VoiceAI temp leftovers from a previous run."""
+        try:
+            stats = cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=60.0)
+        except Exception as exc:
+            logger.warning("Startup temp janitor failed: %s", exc)
+            return
+        if stats.get("removed"):
+            logger.info("Startup temp janitor removed %s VoiceAI artifact(s)", stats["removed"])
 
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
@@ -2562,7 +2574,7 @@ class VocalAIApp(ctk.CTk):
                 obs_client = self._obs_client
                 if obs_client is None:
                     break
-                if obs_client.connect():
+                if obs_client.connect(log_failures=not logged_once):
                     obs_client.subscribe_bridge(self._avatar_bridge)
                     obs_client.on_state_change(self._avatar_bridge.get_state())
                     try:
@@ -2989,24 +3001,17 @@ class VocalAIApp(ctk.CTk):
             pass
 
         try:
-            import ollama
-            model_to_unload = getattr(self.motor_ia, "current_model", None)
-            if model_to_unload:
-                logger.info(f"Liberando modelo {model_to_unload} de la memoria...")
-                ollama.generate(model=model_to_unload, prompt="", keep_alive=0)
+            release_model = getattr(self.motor_ia, "release_owned_ollama_model", None)
+            if callable(release_model):
+                release_model(timeout=2.0)
         except Exception as e:
-            logger.warning(f"No se pudo liberar memoria al salir: {e}")
+            logger.warning(f"No se pudo liberar memoria Ollama al salir: {e}")
 
         self.motor_ia.command_queue.put(None)
 
         try:
-            for f in os.listdir(TEMP_DIR):
-                fpath = os.path.join(TEMP_DIR, f)
-                try:
-                    os.remove(fpath)
-                except OSError:
-                    pass
-        except Exception:
-            pass
+            cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=0.0)
+        except Exception as e:
+            logger.warning(f"No se pudo limpiar temporales VoiceAI al salir: {e}")
 
         self.destroy()

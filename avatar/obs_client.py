@@ -65,7 +65,7 @@ class OBSClient:
 
     # -- connection --------------------------------------------------------
 
-    def connect(self) -> bool:
+    def connect(self, *, log_failures: bool = True) -> bool:
         """Connect to OBS WebSocket. Returns True on success."""
         if not self.config.enabled:
             self.on_log("[OBS] OBS integration is disabled in config.")
@@ -89,16 +89,19 @@ class OBSClient:
             logger.info("OBS WebSocket connected: %s:%d", self.config.host, self.config.port)
             return True
         except ImportError as e:
-            self.on_log(f"[OBS] obsws-python not installed. Run: pip install obsws-python ({e})")
-            logger.error("obsws-python not installed: %s", e)
+            if log_failures:
+                self.on_log(f"[OBS] obsws-python not installed. Run: pip install obsws-python ({e})")
+                logger.error("obsws-python not installed: %s", e)
             return False
         except ConnectionRefusedError:
-            self.on_log(f"[OBS] Connection refused. Is OBS running with WebSocket on {self.config.host}:{self.config.port}?")
-            logger.error("OBS WebSocket connection refused")
+            if log_failures:
+                self.on_log(f"[OBS] Connection refused. Is OBS running with WebSocket on {self.config.host}:{self.config.port}?")
+                logger.info("OBS WebSocket not ready yet: %s:%d", self.config.host, self.config.port)
             return False
         except Exception as e:
-            self.on_log(f"[OBS] Connection error: {type(e).__name__}: {e}")
-            logger.exception("OBS WebSocket connection error")
+            if log_failures:
+                self.on_log(f"[OBS] Connection error: {type(e).__name__}: {e}")
+                logger.warning("OBS WebSocket not ready or returned an error: %s: %s", type(e).__name__, e)
             return False
 
     def disconnect(self) -> None:
