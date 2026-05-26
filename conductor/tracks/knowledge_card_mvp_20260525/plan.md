@@ -58,49 +58,49 @@
 
 ## Phase 4 — Prompt Injection and Purge Semantics
 
-- [ ] Task: Build editorial context prompt block
-    - [ ] Render only structured fields.
-    - [ ] Use a bounded `<editorial_context>` block or equivalent clear delimiter.
-    - [ ] Include instruction to prioritize clarity over jokes when using the card.
-    - [ ] Avoid claiming source verification unless a later policy adds it.
-- [ ] Task: Inject one active card into one request
-    - [ ] Keep Kira's base system prompt unchanged.
-    - [ ] Add card as user-level ephemeral context.
-    - [ ] Do not append editorial block to long-term history.
+- [x] Task: Build editorial context prompt block
+    - [x] Render only structured fields.
+    - [x] Use a bounded `<editorial_context>` block or equivalent clear delimiter.
+    - [x] Include instruction to prioritize clarity over jokes when using the card.
+    - [x] Avoid claiming source verification unless a later policy adds it.
+- [x] Task: Inject one active card into one request
+    - [x] Keep Kira's base system prompt unchanged.
+    - [x] Add card as user-level ephemeral context through Agenda prompt composition.
+    - [x] Do not append editorial block to long-term history; agenda history redaction covers this path.
 - [ ] Task: Mark used and purge after generation
-    - [ ] On successful use, mark card `used` and increment `use_count`.
+    - [x] On successful use, mark card `used` and increment `use_count`.
     - [ ] On failed/cancelled generation, define whether card returns to `armed` or stays `active`.
     - [ ] Verify no-card path has identical behavior to current baseline.
-- [ ] Task: Add prompt safety tests
-    - [ ] Test no active card means no editorial block.
-    - [ ] Test used card is absent from next request.
-    - [ ] Test oversized card is rejected or compressed before injection.
+- [~] Task: Add prompt safety tests
+    - [x] Test no active card means no editorial block.
+    - [x] Test used card is absent from next request.
+    - [x] Test oversized card is rejected or compressed before injection.
     - [ ] Test internal labels/JSON are not expected in Kira's public output where output guards exist.
 - [ ] Task: Conductor - User Manual Verification 'Phase 4 — Prompt Injection and Purge Semantics' (Protocol in workflow.md)
 
 ## Phase 5 — Agenda/Cohost Activation and Operator UX
 
 - [ ] Task: Add pre-stream/between-segment card preparation flow
-    - [ ] Prefer manual fields: `topic`, `summary`, `streamer_take`.
+    - [x] Prefer manual fields: `topic`, `summary`, `streamer_take`.
     - [ ] Optional fields may be left blank.
     - [ ] Enforce size limits before arming.
-- [ ] Task: Link cards to Agenda/Cohost blocks
-    - [ ] Add a deterministic association between an armed card and an Agenda/Cohost block or equivalent UI state.
+- [~] Task: Link cards to Agenda/Cohost blocks
+    - [x] Add a deterministic association between an armed card and an Agenda/Cohost block or equivalent controller state.
     - [ ] Show which card is linked before activation.
     - [ ] Handle missing, expired, or already-used linked cards clearly.
 - [ ] Task: Add deterministic Agenda/Cohost activation flow
-    - [ ] Activate through block/UI selection only.
-    - [ ] Do not implement PTT/voice command routing in MVP.
-    - [ ] Do not implement passive keyword-trigger activation in MVP.
-    - [ ] Ensure one active card is consumed by one Agenda/Cohost response and then marked used.
+    - [x] Activate through block/UI selection only.
+    - [x] Do not implement PTT/voice command routing in MVP.
+    - [x] Do not implement passive keyword-trigger activation in MVP.
+    - [x] Ensure one active card is consumed by one Agenda/Cohost response and then marked used.
 - [ ] Task: Add post-use rating flow
     - [ ] Allow quick `useful`, `not useful`, or `unsure` rating.
     - [ ] Allow optional reason code.
     - [ ] Do not interrupt the live flow if rating is skipped.
 - [ ] Task: Add UX tests or controller tests
-    - [ ] Test create -> arm -> link to Agenda block -> activate block -> use -> rate flow.
+    - [x] Test create -> arm -> link to Agenda block -> activate block -> use flow.
     - [ ] Test duplicate topic update warning/upsert.
-    - [ ] Test missing/expired/used linked card does not inject context.
+    - [x] Test missing/expired/used linked card does not inject context.
     - [ ] Test skipped rating does not break state.
 - [ ] Task: Conductor - User Manual Verification 'Phase 5 — Agenda/Cohost Activation and Operator UX' (Protocol in workflow.md)
 

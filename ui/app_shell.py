@@ -59,6 +59,8 @@ from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
 from core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
 from core.audio_bed import AudioBedEngine
+from core.editorial_agenda_bridge import EditorialAgendaBridge
+from core.editorial_cards import EditorialCard, EditorialCardStore
 from core.llm_engine import MotorVocalIA
 from core.health_monitor import HealthMonitor
 from core.temp_file_cleanup import cleanup_voiceai_temp_artifacts
@@ -197,6 +199,7 @@ class VocalAIApp(ctk.CTk):
         self.music_library = MusicLibrary()
         self.music_library.load()
         self.audio_bed = AudioBedEngine(self.music_library, on_log=lambda msg: self._print_log(msg))
+        self.editorial_cards = EditorialCardStore(os.path.join(BASE_DIR, "data", "editorial_cards", "cards.db"))
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -246,9 +249,11 @@ class VocalAIApp(ctk.CTk):
         # "main thread is not in main loop" race condition)
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
         self.kira_agenda = KiraAgendaController()
+        self.editorial_agenda = EditorialAgendaBridge(self.editorial_cards, self.kira_agenda)
+        self.editorial_agenda.register_provider()
         self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
         self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
-        self.motor_ia.agenda_output_recorder = self.kira_agenda.record_accepted_output
+        self.motor_ia.agenda_output_recorder = self._record_accepted_kira_agenda_output
         self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
         self.motor_ia.agenda_controller = self.kira_agenda            # Phase 0: metrics access
 
@@ -1129,6 +1134,36 @@ class VocalAIApp(ctk.CTk):
             return
         self._on_stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}, {self.kira_agenda.max_turns_per_topic} turnos globales)")
         self._kira_agenda_update_status()
+
+    def _editorial_card_create_or_update(
+        self,
+        *,
+        topic: str,
+        summary: str,
+        streamer_take: str,
+        counterpoints: list[str] | None = None,
+        discussion_hooks: list[str] | None = None,
+        triggers: list[str] | None = None,
+    ) -> EditorialCard:
+        return self.editorial_agenda.create_or_update_card(
+            topic=topic,
+            summary=summary,
+            streamer_take=streamer_take,
+            counterpoints=counterpoints,
+            discussion_hooks=discussion_hooks,
+            triggers=triggers,
+        )
+
+    def _editorial_card_arm(self, card_id: str) -> bool:
+        return self.editorial_agenda.arm_card(card_id)
+
+    def _editorial_card_link_to_agenda_topic(self, topic_id: str, card_id: str) -> bool:
+        return self.editorial_agenda.link_card_to_topic(topic_id, card_id)
+
+    def _record_accepted_kira_agenda_output(self, output: str) -> None:
+        self.kira_agenda.record_accepted_output(output)
+        if self.editorial_agenda.mark_used_after_successful_generation():
+            self._on_stream_admin_log("[Editorial Cards] Cue card usada y marcada como consumida.")
 
     def _kira_agenda_set_session_settings(self, turns: int, rhythm: str, response_length: str, safety_mode: str = "live_safe") -> None:
         self.kira_agenda.set_session_settings(max_turns_per_topic=turns, rhythm=rhythm, response_length=response_length, safety_mode=safety_mode)

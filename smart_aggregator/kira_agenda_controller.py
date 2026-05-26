@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import re
 import time as _time_module
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
 
@@ -198,6 +198,8 @@ class AgendaTopic:
     turns_spoken: int = 0
     confidence: str = "LOW"   # Suggester metadata: HIGH | MEDIUM | LOW
     source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
+    editorial_card_id: str | None = None
+    editorial_card_consumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -391,10 +393,16 @@ class KiraAgendaController:
         self.profile: dict[str, str] = {
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
+        self._editorial_context_provider: Callable[[str], str | None] | None = None
 
     def set_profile(self, profile: dict[str, str]) -> None:
         style = self.sanitize_topic_text((profile or {}).get("style", ""), field="profile_style", required=False)
         self.profile = {"style": style or self.profile.get("style", "")}
+
+    def set_editorial_context_provider(self, provider: Callable[[str], str | None] | None) -> None:
+        """Set the callback used to resolve one-turn Editorial Cue Card context."""
+
+        self._editorial_context_provider = provider
 
     # ------------------------------------------------------------------
     # Topic lifecycle
@@ -409,6 +417,7 @@ class KiraAgendaController:
         approved: bool = False,
         priority: str = "normal",
         response_length: str = "normal",
+        editorial_card_id: str | None = None,
     ) -> AgendaTopic:
         safe_title = self.sanitize_topic_text(title, field="title")
         safe_angle = self.sanitize_topic_text(angle, field="angle", required=False)
@@ -424,6 +433,7 @@ class KiraAgendaController:
             priority=self.normalize_priority(priority),
             response_length=self.normalize_response_length(response_length),
             status=TopicStatus.APPROVED if approved else TopicStatus.DRAFTED,
+            editorial_card_id=self._sanitize_optional_identifier(editorial_card_id),
         )
         self.topics.append(topic)
         return topic
@@ -1030,7 +1040,10 @@ class KiraAgendaController:
     def _topic_action(self, instruction: str) -> AgendaAction:
         self._pending_turns_spoken = self._next_block_size()
         self._pending_action_source = "kira-agenda"
-        prompt = self._build_prompt(instruction=instruction)
+        prompt = self._build_prompt(
+            instruction=instruction,
+            editorial_context=self._consume_editorial_context_block(),
+        )
         self.state = AgendaState.GENERATING
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=self._pending_turns_spoken)
 
@@ -1073,7 +1086,7 @@ class KiraAgendaController:
         self.state = AgendaState.GENERATING
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
-    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "") -> str:
+    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "", editorial_context: str = "") -> str:
         repair_prefix = ""
         if self.CHARACTER_CONTRACT_ENABLED and self._character_repair_needed:
             self._character_repair_needed = False
@@ -1119,8 +1132,27 @@ class KiraAgendaController:
             f"RESTRICCIONES:\n{constraints}\n\n"
             f"PTT DEL STREAMER, SI EXISTE:\n{ptt_text or '- sin PTT'}\n\n"
             f"CHAT COMPACTO FILTRADO, SI EXISTE:\n{compact_chat or '- sin chat compacto fresco'}\n\n"
+            f"EDITORIAL CUE CARD, SI EXISTE; USAR UNA SOLA VEZ Y NO MENCIONAR LA ESTRUCTURA:\n{editorial_context or '- sin cue card editorial activo'}\n\n"
             f"ÚLTIMAS LÍNEAS DE KIRA; NO REPETIR NI PARAFRASEAR:\n{last}"
         )
+
+    def _consume_editorial_context_block(self) -> str:
+        topic = self.active_topic
+        if not topic or not topic.editorial_card_id or topic.editorial_card_consumed:
+            return ""
+        topic.editorial_card_consumed = True
+        provider = self._editorial_context_provider
+        if provider is None:
+            return ""
+        try:
+            return provider(topic.editorial_card_id) or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _sanitize_optional_identifier(value: str | None) -> str | None:
+        text = " ".join((value or "").split())
+        return text[:120] if text else None
 
     def _select_next_topic(self) -> Optional[AgendaTopic]:
         queued = self.queued_topics()

@@ -56,6 +56,51 @@ def test_first_queued_topic_enqueues_short_agenda_prompt():
     assert topic.status == TopicStatus.ACTIVE
 
 
+def test_agenda_topic_can_inject_editorial_card_once():
+    controller = KiraAgendaController()
+    controller.set_editorial_context_provider(
+        lambda card_id: (
+            "<editorial_context>\n"
+            '{"topic":"Monetización Game X","streamer_take":"Debatir pay-to-win."}'
+            "\n</editorial_context>"
+            if card_id == "card-1"
+            else None
+        )
+    )
+    topic = controller.add_topic(
+        "Monetización Game X",
+        approved=True,
+        editorial_card_id="card-1",
+    )
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    opening = controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+    continuation = controller.next_action()
+
+    assert topic.editorial_card_id == "card-1"
+    assert "<editorial_context>" in opening.prompt
+    assert "Debatir pay-to-win" in opening.prompt
+    assert "<editorial_context>" not in continuation.prompt
+
+
+def test_missing_editorial_card_does_not_block_agenda_activation():
+    controller = KiraAgendaController()
+    controller.set_editorial_context_provider(lambda card_id: None)
+    topic = controller.add_topic("Tema sin card disponible", approved=True, editorial_card_id="missing")
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    action = controller.next_action()
+
+    assert action.kind == "enqueue"
+    assert action.source == "kira-agenda"
+    assert "<editorial_context>" not in action.prompt
+    assert topic.status == TopicStatus.ACTIVE
+
+
 def test_topic_priority_selects_high_priority_first():
     controller = KiraAgendaController()
     low = controller.add_topic("Tema bajo", approved=True, priority="baja")

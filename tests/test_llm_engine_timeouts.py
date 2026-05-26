@@ -275,6 +275,21 @@ def test_agenda_history_redacts_raw_compact_prompt_when_committed():
     assert "Salida segura" in history_text
 
 
+def test_agenda_history_redacts_editorial_context_when_committed():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    motor._commit_history(
+        "<editorial_context>{\"topic\":\"Monetización\",\"streamer_take\":\"pay-to-win\"}</editorial_context>",
+        "Salida segura",
+        source="kira-agenda",
+    )
+
+    history_text = "\n".join(item["content"] for item in motor.historial)
+    assert "<editorial_context>" not in history_text
+    assert "pay-to-win" not in history_text
+    assert "Salida segura" in history_text
+
+
 def test_ptt_priority_wins_over_chat_and_agenda():
     """PTT (priority 0) must always be processed before chat (1) and agenda (2)."""
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
