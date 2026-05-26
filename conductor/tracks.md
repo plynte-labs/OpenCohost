@@ -34,5 +34,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Editorial Cue Cards MVP — Streamer-Curated One-Turn Context**
+- [~] **Track: Editorial Cue Cards MVP — Streamer-Curated One-Turn Context**
   *Link: [./tracks/knowledge_card_mvp_20260525/](./tracks/knowledge_card_mvp_20260525/)*
