@@ -406,6 +406,24 @@ def test_poll_health_status_preserves_red_after_motor_failure_reported():
         _restore_app_shell_module(old_module)
 
 
+def test_model_switch_pending_logs_ollama_blocker_when_motor_not_ready():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.motor_ia = SimpleNamespace(_desired_model="gemma4:e4b", is_ready=False)
+        app.model_panel = MagicMock()
+        app.model_panel.get_display_for_tag.return_value = "Gemma 4"
+        app._print_log = MagicMock()
+
+        app._on_motor_switch_pending()
+
+        message = app._print_log.call_args.args[0]
+        assert "Ollama no está listo" in message
+        assert "terminar la respuesta actual" not in message
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_app_closing_releases_owned_model_and_runs_safe_janitor():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:

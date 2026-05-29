@@ -201,6 +201,7 @@ class TestRetryExhaustion:
         motor._pending_switch_next_at = 0
         motor._processing = False
         motor._speaking = False
+        motor.ollama.list = MagicMock(side_effect=RuntimeError("down"))
 
         # Retry 1
         motor._check_pending_model_switch()
@@ -238,7 +239,12 @@ class TestRetryExhaustion:
             motor._pending_model_switch = "gemma4:e4b"
             motor._pending_switch_retries = 3
             motor._pending_switch_next_at = 0
-            motor.ollama.list = MagicMock(return_value=[])
+            motor.ollama.list = MagicMock(side_effect=[
+                RuntimeError("down"),
+                RuntimeError("down"),
+                RuntimeError("down"),
+                [],
+            ])
             motor.ollama.generate = MagicMock()
 
             # Simulate the old failure window passing before Ollama is ready.
@@ -258,6 +264,69 @@ class TestRetryExhaustion:
             assert data["model"] == "gemma4:e4b"
         finally:
             settings.LAST_MODEL_FILE = original
+
+    def test_pending_switch_rechecks_ollama_readiness_without_user_check_spam(self, tmp_path):
+        """Pending switch should recover when Ollama starts outside the motor loop."""
+        import config.settings as settings
+
+        original = settings.LAST_MODEL_FILE
+        settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
+        try:
+            motor, log_q, ui_events = _make_motor(tmp_dir=str(tmp_path))
+            motor.is_ready = False
+            motor.current_model = "qwen3:1.7b"
+            motor._desired_model = "gemma4:e4b"
+            motor._pending_model_switch = "gemma4:e4b"
+            motor._pending_switch_retries = 3
+            motor._pending_switch_next_at = 0
+            motor._processing = False
+            motor._speaking = False
+            motor.ollama.list = MagicMock(side_effect=[RuntimeError("down"), []])
+            motor.ollama.generate = MagicMock()
+
+            motor._check_pending_model_switch()
+            motor._pending_switch_next_at = 0
+            motor._check_pending_model_switch()
+
+            assert motor.ollama.list.call_count == 2
+            assert motor.current_model == "gemma4:e4b"
+            assert motor._pending_model_switch is None
+            assert "model_switch_applied" in ui_events
+
+            pending_logs = [
+                msg for msg in _drain_log(log_q)
+                if "Switch a gemma4:e4b sigue pendiente: Ollama no está listo." in msg
+            ]
+            assert len(pending_logs) == 1
+        finally:
+            settings.LAST_MODEL_FILE = original
+
+    def test_pending_switch_readiness_probe_does_not_emit_unavailable_spam(self, tmp_path):
+        """Background pending retries should not spam UI/logs while Ollama is still down."""
+        motor, log_q, ui_events = _make_motor(tmp_dir=str(tmp_path))
+        motor.is_ready = False
+        motor.current_model = "qwen3:1.7b"
+        motor._desired_model = "gemma4:e4b"
+        motor._pending_model_switch = "gemma4:e4b"
+        motor._pending_switch_retries = 3
+        motor._pending_switch_next_at = 0
+        motor._processing = False
+        motor._speaking = False
+        motor.ollama.list = MagicMock(side_effect=RuntimeError("down"))
+
+        motor._check_pending_model_switch()
+        motor._pending_switch_next_at = 0
+        motor._check_pending_model_switch()
+
+        logs = _drain_log(log_q)
+
+        assert ui_events == []
+        assert not any("Ollama no esta disponible" in msg for msg in logs)
+        pending_logs = [
+            msg for msg in logs
+            if "Switch a gemma4:e4b sigue pendiente: Ollama no está listo." in msg
+        ]
+        assert len(pending_logs) == 1
 
     def test_check_ollama_with_pending_model_does_not_warm_stale_current_model(self, tmp_path):
         """When Ollama becomes ready, prepare the user's pending model directly.

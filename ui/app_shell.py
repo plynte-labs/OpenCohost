@@ -2646,7 +2646,10 @@ class VocalAIApp(ctk.CTk):
         desired = getattr(self.motor_ia, "_desired_model", None)
         if desired:
             display = self.model_panel.get_display_for_tag(desired)
-            self._print_log(f"[Sistema] Cambio a {display} pendiente: se aplicará al terminar la respuesta actual.")
+            if not getattr(self.motor_ia, "is_ready", False):
+                self._print_log(f"[Sistema] Cambio a {display} pendiente: Ollama no está listo.")
+            else:
+                self._print_log(f"[Sistema] Cambio a {display} pendiente: se aplicará al terminar la respuesta actual.")
         # Do NOT restore combobox — user's selection stays visible as intended target
 
     def _on_motor_switch_failed(self) -> None:

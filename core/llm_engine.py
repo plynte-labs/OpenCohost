@@ -63,6 +63,7 @@ class MotorVocalIA(threading.Thread):
         self._pending_model_switch: Optional[str] = None
         self._pending_switch_retries: int = 0
         self._pending_switch_next_at: float = 0.0
+        self._pending_switch_not_ready_logged: bool = False
         # Last switch failure info (read by UI handler, cleared after read)
         self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
@@ -203,6 +204,7 @@ class MotorVocalIA(threading.Thread):
 
                 if not self.is_ready:
                     self._log(f"Switch a {new_model} pendiente: Ollama no está listo.", level="warning")
+                    self._pending_switch_not_ready_logged = False
                     self._pending_model_switch = new_model
                     self._pending_switch_retries = 3
                     self._pending_switch_next_at = time.monotonic() + 2.0
@@ -211,6 +213,7 @@ class MotorVocalIA(threading.Thread):
 
                 if self._processing or self._speaking:
                     self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
+                    self._pending_switch_not_ready_logged = False
                     self._pending_model_switch = new_model
                     self._pending_switch_retries = 3
                     self._pending_switch_next_at = time.monotonic() + 2.0
@@ -540,13 +543,14 @@ class MotorVocalIA(threading.Thread):
                     self._processing = False
                     self.ui_callback("idle")
 
-    def _check_ollama_service(self):
+    def _check_ollama_service(self, *, notify_unavailable: bool = True):
         try:
             self.ollama.list()
         except Exception as e:
             self.is_ready = False
-            self._log(f"Ollama no esta disponible: {e}", level="warning")
-            self.ui_callback("ollama_unavailable")
+            if notify_unavailable:
+                self._log(f"Ollama no esta disponible: {e}", level="warning")
+                self.ui_callback("ollama_unavailable")
             return False
 
         self.is_ready = True
@@ -559,6 +563,7 @@ class MotorVocalIA(threading.Thread):
             if self._pending_model_switch == self.current_model:
                 self._pending_model_switch = None
                 self._pending_switch_retries = 0
+                self._pending_switch_not_ready_logged = False
         self._log("Motor IA listo.")
         return True
 
@@ -693,7 +698,11 @@ class MotorVocalIA(threading.Thread):
 
         if not self.is_ready:
             self._pending_switch_next_at = time.monotonic() + 2.0
-            self._log(f"Switch a {model} sigue pendiente: Ollama no está listo.", level="debug")
+            if self._check_ollama_service(notify_unavailable=False):
+                return
+            if not self._pending_switch_not_ready_logged:
+                self._log(f"Switch a {model} sigue pendiente: Ollama no está listo.", level="debug")
+                self._pending_switch_not_ready_logged = True
             return
 
         self._apply_model_switch(model)
@@ -703,6 +712,7 @@ class MotorVocalIA(threading.Thread):
         previous_model = self.current_model
         self._pending_model_switch = None
         self._pending_switch_retries = 0
+        self._pending_switch_not_ready_logged = False
         try:
             self._switch_and_prepare_model(new_model)
             self._desired_model = new_model
