@@ -16,6 +16,7 @@ import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
 from config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_llm_tiers, resolve_startup_model
+from core.ollama_startup import OllamaStartupManager
 from core.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
@@ -82,6 +83,7 @@ class ModelPanel:
 
         # Ollama starting flag
         self._ollama_starting: bool = False
+        self._ollama_process: Optional[Any] = None
         
         # Active model tracking
         self._active_model_tag: Optional[str] = None
@@ -502,40 +504,39 @@ class ModelPanel:
         self._on_log("[Sistema] Iniciando Ollama...")
 
         import os
-        import subprocess
         import threading
-        import time
-        from config.settings import OLLAMA_MODELS_DIR
+        from config.settings import LOG_DIR, OLLAMA_MODELS_DIR
 
         def worker() -> None:
-            try:
-                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                subprocess.Popen(
-                    [ollama_exe, "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    env={**os.environ, "OLLAMA_MODELS": OLLAMA_MODELS_DIR},
-                )
-            except Exception as e:
-                self._on_log(f"[Sistema] No se pudo iniciar Ollama: {e}")
-                self._ollama_starting = False
+            manager = OllamaStartupManager(
+                is_ready=lambda: self._detectar_estado_ollama() == "ready",
+                timeout_seconds=60.0,
+                poll_interval_seconds=0.5,
+                stdout_log_path=os.path.join(LOG_DIR, "ollama_startup_stdout.log"),
+                stderr_log_path=os.path.join(LOG_DIR, "ollama_startup_stderr.log"),
+            )
+            result = manager.start_and_wait(ollama_exe, OLLAMA_MODELS_DIR)
+            self._ollama_process = result.process
+            self._ollama_starting = False
+
+            if result.status in {"ready", "already_running"}:
+                if result.status == "already_running":
+                    self._on_log("[Sistema] Ollama ya estaba iniciado.")
+                else:
+                    self._on_log("[Sistema] Ollama iniciado correctamente.")
                 self._schedule_ui_update(lambda: self.refresh_ollama_state())
                 return
 
-            for _ in range(20):
-                time.sleep(0.5)
-                if self._detectar_estado_ollama() == "ready":
-                    self._ollama_starting = False
-                    self._on_log("[Sistema] Ollama iniciado correctamente.")
-                    self._schedule_ui_update(lambda: self.refresh_ollama_state())
-                    return
+            if result.status == "process_exited_early":
+                self._on_log(f"[Sistema] Ollama se cerro durante el inicio: {result.diagnostic}")
+            elif result.status == "timeout_waiting_ready":
+                self._on_log(
+                    "[Sistema] Ollama no respondio despues de iniciar. "
+                    f"{result.diagnostic}"
+                )
+            else:
+                self._on_log(f"[Sistema] No se pudo iniciar Ollama: {result.diagnostic}")
 
-            self._ollama_starting = False
-            self._on_log(
-                "[Sistema] Ollama no respondio despues de iniciar. "
-                "Revisa la instalacion."
-            )
             self._schedule_ui_update(lambda: self.refresh_ollama_state())
 
         threading.Thread(target=worker, daemon=True).start()
