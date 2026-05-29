@@ -52,12 +52,14 @@ class ModelPanel:
         dispatcher: CallbackDispatcher,
         on_log: Callable[[str], None],
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        on_check_ollama: Optional[Callable[[], None]] = None,
     ) -> None:
         self._parent = parent_frame
         self._ui_state = ui_state
         self._dispatcher = dispatcher
         self._on_log = on_log
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
+        self._on_check_ollama = on_check_ollama
 
         # Model catalog mappings
         self._model_display_to_tag: dict[str, str] = {}
@@ -236,8 +238,9 @@ class ModelPanel:
         self._ui_state.ollama_state = state
         self._update_button_for_ollama_state()
 
-        if state == "ready" and on_check_ollama is not None:
-            on_check_ollama()
+        check_callback = on_check_ollama or self._on_check_ollama
+        if state == "ready" and check_callback is not None:
+            check_callback()
 
     def set_model_selection(self, display_name: str) -> None:
         """Set the model combobox to a specific display name."""
@@ -314,9 +317,9 @@ class ModelPanel:
                 "Usa el boton de Ollama/modelo para obtenerlo."
             )
         else:
+            self._dispatcher.dispatch("on_switch_model", tag)
             self._on_log(
-                "[Sistema] Ollama no esta listo. "
-                "Usa el boton de Ollama/modelo para prepararlo."
+                f"[Sistema] Ollama no esta listo. Cambio a '{tag}' queda pendiente hasta que Ollama responda."
             )
 
     def _on_llm_tier_selected(self, tier: str) -> None:

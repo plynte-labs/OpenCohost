@@ -754,7 +754,14 @@ class VocalAIApp(ctk.CTk):
         # Model panel
         frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_model.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
-        self.model_panel = ModelPanel(parent_frame=frame_model, ui_state=self._ui_state, dispatcher=self._model_dispatcher, on_log=self._print_log, schedule_ui_update=lambda fn: self.after(0, fn))
+        self.model_panel = ModelPanel(
+            parent_frame=frame_model,
+            ui_state=self._ui_state,
+            dispatcher=self._model_dispatcher,
+            on_log=self._print_log,
+            schedule_ui_update=lambda fn: self.after(0, fn),
+            on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None)),
+        )
         self.model_panel.build()
         self.combo_modelos = self.model_panel.combo_modelos
         self.btn_download = self.model_panel.btn_download
@@ -762,7 +769,7 @@ class VocalAIApp(ctk.CTk):
         self.progress_download = self.model_panel.progress_download
         self._model_display_to_tag = self.model_panel._model_display_to_tag
         self._model_tag_to_display = self.model_panel._model_tag_to_display
-        self.after(250, lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
+        self.after(250, self.model_panel.refresh_ollama_state)
 
         # Profile panel
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)

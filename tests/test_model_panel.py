@@ -462,7 +462,7 @@ class TestModelSelection:
         assert len(received) == 0
         model_panel._on_log.assert_called()
 
-    def test_on_model_changed_ollama_not_ready(self, model_panel, dispatcher):
+    def test_on_model_changed_ollama_not_ready_dispatches_pending_intent(self, model_panel, dispatcher):
         from config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
@@ -475,7 +475,10 @@ class TestModelSelection:
         with patch.object(model_panel, "update_model_info"):
             model_panel._on_model_changed(display)
 
-        assert len(received) == 0
+        assert received == [tag]
+        model_panel._on_log.assert_any_call(
+            f"[Sistema] Ollama no esta listo. Cambio a '{tag}' queda pendiente hasta que Ollama responda."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +728,42 @@ class TestRefreshOllamaState:
             model_panel.refresh_ollama_state(on_check_ollama=mock_check)
 
         mock_check.assert_called_once()
+
+    def test_refresh_calls_persistent_check_callback_when_ready(self, mock_parent, ui_state, dispatcher, on_log):
+        mock_check = MagicMock()
+        panel = ModelPanel(
+            parent_frame=mock_parent,
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            on_log=on_log,
+            on_check_ollama=mock_check,
+        )
+        try:
+            with patch.object(panel, "_detectar_estado_ollama", return_value="ready"):
+                panel.refresh_ollama_state()
+        finally:
+            panel.cleanup()
+
+        mock_check.assert_called_once()
+
+    def test_refresh_override_callback_takes_precedence_when_ready(self, mock_parent, ui_state, dispatcher, on_log):
+        persistent_check = MagicMock()
+        override_check = MagicMock()
+        panel = ModelPanel(
+            parent_frame=mock_parent,
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            on_log=on_log,
+            on_check_ollama=persistent_check,
+        )
+        try:
+            with patch.object(panel, "_detectar_estado_ollama", return_value="ready"):
+                panel.refresh_ollama_state(on_check_ollama=override_check)
+        finally:
+            panel.cleanup()
+
+        override_check.assert_called_once()
+        persistent_check.assert_not_called()
 
     def test_refresh_does_not_call_callback_when_not_ready(self, model_panel):
         mock_check = MagicMock()
