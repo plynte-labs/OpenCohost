@@ -41,3 +41,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: Streaming Speech Pipeline — LLM Streaming to Sentence TTS Playback**
   *Link: [./tracks/streaming_speech_pipeline_20260529/](./tracks/streaming_speech_pipeline_20260529/)*
+
+---
+
+- [ ] **Track: First-run Readiness Wizard — External Ollama and Hardware Setup**
+  *Link: [./tracks/first_run_readiness_wizard_20260529/](./tracks/first_run_readiness_wizard_20260529/)*
