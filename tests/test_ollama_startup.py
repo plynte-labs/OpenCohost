@@ -181,3 +181,51 @@ def test_timeout_does_not_block_reading_live_stderr_pipe_without_log_path() -> N
 
     assert result.status == "timeout_waiting_ready"
     assert "sin stderr capturado" in result.diagnostic
+
+
+def test_popen_raises_reports_process_exited_early() -> None:
+    """Ollama not installed or permission denied — Popen raises."""
+    manager = OllamaStartupManager(
+        popen=_raise_file_not_found,
+        is_ready=lambda: False,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+    )
+
+    result = manager.start_and_wait("C:/NoExiste/ollama.exe", "D:/ollama-models")
+
+    assert result.status == "process_exited_early"
+    assert result.process is None
+    assert "No se pudo iniciar Ollama" in result.diagnostic
+    assert "FileNotFoundError" in result.diagnostic or "No such file" in result.diagnostic
+
+
+def _raise_file_not_found(*args, **kwargs):
+    raise FileNotFoundError("[WinError 2] No such file or directory: 'C:/NoExiste/ollama.exe'")
+
+
+def test_flaky_readiness_eventually_succeeds() -> None:
+    """Ollama oscillates ready/not-ready during startup — must still succeed."""
+    proc = FakeProcess(poll_values=(None, None, None, None, None, None))
+    clock = FakeClock()
+    # Pattern: False, True (flaky), False, False, True (stable)
+    readiness_sequence = iter([False, True])
+
+    def flaky_ready() -> bool:
+        return next(readiness_sequence, False)
+
+    manager = OllamaStartupManager(
+        popen=lambda *args, **kwargs: proc,
+        is_ready=flaky_ready,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        timeout_seconds=60.0,
+        poll_interval_seconds=1.0,
+    )
+
+    result = manager.start_and_wait("ollama", "D:/ollama-models")
+
+    # The second call to is_ready returns True, so it should succeed
+    assert result.status == "ready"
+    assert result.process is proc
+
