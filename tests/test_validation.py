@@ -386,6 +386,12 @@ class TestFourLayerIntegration:
         assert allowed is False
         assert "no_negative_engagement" in reason
 
+    def test_negative_engagement_emocion_without_accent_blocked(self):
+        """Accent-free Spanish variants stay blocked."""
+        allowed, reason = output_guard("se perdio la emocion del stream")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
     def test_negative_engagement_perdiendo_emocion_blocked(self):
         """'perdiendo la emoci\u00f3n' blocked."""
         allowed, reason = output_guard("ya estamos empezando a perder la emoci\u00f3n")

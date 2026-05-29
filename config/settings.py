@@ -22,7 +22,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # ──────────────────────────────────────────────
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
-LLM_MAX_TOKENS = 300
+LLM_MAX_TOKENS = 768
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
 DEFAULT_LLM_TIERS = {

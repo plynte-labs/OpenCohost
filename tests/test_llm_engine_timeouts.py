@@ -90,6 +90,33 @@ def test_ollama_chat_client_uses_configured_timeout():
     assert created == {"timeout": llm_engine.OLLAMA_CHAT_TIMEOUT}
 
 
+def test_non_reasoning_models_use_configured_token_cap():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {"message": {"content": "Respuesta segura."}}
+
+    assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "Respuesta segura."
+
+    options = motor.ollama.chat.call_args.kwargs["options"]
+    assert options["num_predict"] == llm_engine.LLM_MAX_TOKENS
+    assert options["num_predict"] == 768
+
+
+def test_reasoning_models_skip_fixed_token_cap():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "qwen3:4b"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {"message": {"content": "Respuesta segura."}}
+
+    assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "Respuesta segura."
+
+    options = motor.ollama.chat.call_args.kwargs["options"]
+    assert "num_predict" not in options
+
+
 def test_replace_pending_keeps_latest_item_for_same_source():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
 
@@ -203,6 +230,36 @@ def test_agenda_generation_uses_controller_guardrail_before_history_or_speech():
 
     assert dialogo == ""
     motor.agenda_output_validator.assert_called_once()
+    assert list(motor.historial) == []
+
+
+def test_output_guard_blocks_direct_generation_before_history_commit():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {
+        "message": {"content": "Como modelo de lenguaje, no puedo responder eso."}
+    }
+
+    dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert dialogo == ""
+    assert list(motor.historial) == []
+
+
+def test_output_guard_blocks_chat_generation_before_history_commit():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {
+        "message": {"content": "Tu audiencia está muy callada hoy."}
+    }
+
+    dialogo = motor._generar_dialogo("chat compactado", source="chat", commit_history=True)
+
+    assert dialogo == ""
     assert list(motor.historial) == []
 
 
@@ -440,3 +497,58 @@ def test_ptt_items_never_expire_via_ttl():
     motor._process_priority_queue()
 
     motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt")
+
+
+def test_heavy_tts_continues_after_connection_error(tmp_path):
+    events = []
+    motor = llm_engine.MotorVocalIA(queue.Queue(), events.append)
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+
+    class FakeMusic:
+        def __init__(self):
+            self.loaded = []
+
+        def load(self, path):
+            self.loaded.append(path)
+
+        def play(self):
+            pass
+
+        def get_busy(self):
+            return False
+
+        def unload(self):
+            pass
+
+    music = FakeMusic()
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = music
+
+    ok_response = MagicMock(status_code=200, content=b"wav")
+
+    original_post = llm_engine.requests.post
+    calls = {"count": 0}
+
+    def fake_post(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise llm_engine.requests.exceptions.ConnectionError("temporary outage")
+        return ok_response
+
+    try:
+        llm_engine.requests.post = fake_post
+        motor._hablar(
+            "Primera oración suficientemente larga para generar chunk. "
+            "Segunda oración suficientemente larga para generar otro chunk.",
+            source="direct",
+        )
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert calls["count"] == 2
+    assert len(music.loaded) == 1
+    assert events[0] == "speaking_start"
+    assert events[-1] == "speaking_end"

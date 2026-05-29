@@ -161,61 +161,24 @@ _META_COMMENTARY_PATTERNS: list[re.Pattern] = [
 ]
 
 # R11: No negative engagement commentary (stream-killer phrases)
-# Uses \uNNNN escapes for accented chars (compatible with raw strings).
+# Uses \uNNNN escapes for accented chars to keep raw strings stable.
 _NEGATIVE_ENGAGEMENT_PATTERNS: list[re.Pattern] = [
     # Spanish — "emoción" / "aburrido" / "silencio" / loop phrases
     re.compile(
         r"\b(?:qu[e\u00e9]\s+silencio\s+en\s+(?:la\s+)?audiencia|"
-        r"se\s+perdi[\u00f3o]\s+la\s+emocio[\u00f3o]n|"
-        r"perdiendo\s+la\s+emocio[\u00f3o]n|"
-        r"empezando\s+a\s+perder\s+la\s+emocio[\u00f3o]n|"
+        r"se\s+perdi[\u00f3o]\s+la\s+emoci[\u00f3o]n|"
+        r"perdiendo\s+la\s+emoci[\u00f3o]n|"
+        r"empezando\s+a\s+perder\s+la\s+emoci[\u00f3o]n|"
         r"esto\s+est[a\u00e1]\s+(?:aburrido|muerto|apagado|vac[i\u00ed]o)|"
         r"(?:el|la|esto)\s+(?:stream|directo|chat|audiencia)\s+est[a\u00e1]\s+"
         r"(?:aburrid[oa]|muert[oa]|apagad[oa]|vac[i\u00ed][oa]|callad[oa]|sin\s+energ[i\u00ed]a)|"
-        r"nadie\s+est[a\u00e1]\s+(?:emocionado|prestando\s+atencio[\u00f3o]n|participando)|"
-        r"falta\s+(?:emocio[\u00f3o]n|energ[i\u00ed]a|actividad|inter[e\u00e9]s)|"
-        r"(?:el|la)\s+(?:emocio[\u00f3o]n|energ[i\u00ed]a)\s+se\s+(?:perdio[\u00f3o]|fue|acabo[\u00f3o]|murio[\u00f3o])|"
-        r"no\s+hay\s+(?:emocio[\u00f3o]n|energ[i\u00ed]a|nadie|actividad)|"
+        r"nadie\s+est[a\u00e1]\s+(?:emocionado|prestando\s+atenci[\u00f3o]n|participando)|"
+        r"falta\s+(?:emoci[\u00f3o]n|energ[i\u00ed]a|actividad|inter[e\u00e9]s)|"
+        r"(?:el|la)\s+(?:emoci[\u00f3o]n|energ[i\u00ed]a)\s+se\s+(?:perdi[\u00f3o]|fue|acab[\u00f3o]|muri[\u00f3o])|"
+        r"no\s+hay\s+(?:emoci[\u00f3o]n|energ[i\u00ed]a|nadie|actividad)|"
         r"parece\s+que\s+(?:no\s+hay\s+nadie|nadie\s+est[a\u00e1]|esto\s+est[a\u00e1]\s+muerto)|"
         r"qu[e\u00e9]\s+(?:aburrido|aburrimiento|poco\s+emocionante)|"
         r"tan\s+(?:callad[oa]s?|silencios[oa]s?|aburrid[oa]s?)\s+(?:est[a\u00e1]n?|que\s+est[a\u00e1]n?)|"
-        r"la\s+vida\s+sin\s+sarcasmo|el\s+stream\s+sin\s+sarcasmo)\b",
-        re.IGNORECASE,
-    ),
-    # English — "silence" / "boring" / "emotion"
-    re.compile(
-        r"\b(?:what\s+(?:a\s+)?silence|so\s+quiet\s+in\s+here|"
-        r"this\s+(?:stream|chat)\s+is\s+so\s+(?:boring|dead|empty|quiet)|"
-        r"(?:the|this)\s+(?:stream|chat|audience)\s+is\s+(?:boring|dead|empty|silent|quiet)|"
-        r"nobody(?:'s|\s+is)\s+(?:excited|paying\s+attention|here)|"
-        r"(?:the|all\s+the)\s+(?:emotion|energy|excitement)\s+(?:is\s+gone|lost|died|left)|"
-        r"losing\s+the\s+(?:emotion|energy|excitement)|"
-        r"no\s+one(?:'s|\s+is)\s+(?:here|watching|excited)|"
-        r"where\s+did\s+(?:everyone|the\s+energy|the\s+excitement)\s+go)\b",
-        re.IGNORECASE,
-    ),
-]
-
-# R11: No negative engagement commentary (stream-killer phrases)
-# Uses hex escapes for accented chars to avoid encoding issues.
-_NEGATIVE_ENGAGEMENT_PATTERNS: list[re.Pattern] = [
-    # Spanish — "emoción" / "aburrido" / "silencio" / loop phrases
-    re.compile(
-        r"\b(?:qu[e\xe9]\s+silencio\s+en\s+(?:la\s+)?audiencia|"
-        r"se\s+perdi[\xf3o]\s+la\s+emoci[\xf3o]n|"
-        r"periendo\s+la\s+emoci[\xf3o]n|"
-        r"perdiendo\s+la\s+emoci[\xf3o]n|"
-        r"empezando\s+a\s+perder\s+la\s+emoci[\xf3o]n|"
-        r"esto\s+est[a\xe1]\s+(?:aburrido|muerto|apagado|vac[\xed]o)|"
-        r"(?:el|la|esto)\s+(?:stream|directo|chat|audiencia)\s+est[a\xe1]\s+"
-        r"(?:aburrid[oa]|muert[oa]|apagad[oa]|vac[\xed][oa]|callad[oa]|sin\s+energ[\xed]a)|"
-        r"nadie\s+est[a\xe1]\s+(?:emocionado|prestando\s+atenci[\xf3o]n|participando)|"
-        r"falta\s+(?:emoci[\xf3o]n|energ[\xed]a|actividad|inter[e\xe9]s)|"
-        r"(?:el|la)\s+(?:emoci[\xf3o]n|energ[\xed]a)\s+se\s+(?:perdi[\xf3o]|fue|acab[\xf3o]|muri[\xf3o])|"
-        r"no\s+hay\s+(?:emoci[\xf3o]n|energ[\xed]a|nadie|actividad)|"
-        r"parece\s+que\s+(?:no\s+hay\s+nadie|nadie\s+est[a\xe1]|esto\s+est[a\xe1]\s+muerto)|"
-        r"qu[e\xe9]\s+(?:aburrido|aburrimiento|poco\s+emocionante)|"
-        r"tan\s+(?:callad[oa]s?|silencios[oa]s?|aburrid[oa]s?)\s+(?:est[a\xe1]n?|que\s+est[a\xe1]n?)|"
         r"la\s+vida\s+sin\s+sarcasmo|el\s+stream\s+sin\s+sarcasmo)\b",
         re.IGNORECASE,
     ),

@@ -191,8 +191,8 @@ class TestModelSwitch:
 # ---------------------------------------------------------------------------
 
 class TestRetryExhaustion:
-    def test_pending_switch_retries_exhausted(self, tmp_path):
-        """is_ready=False x 3 retries -> model_switch_failed."""
+    def test_pending_switch_waits_for_ollama_without_rejecting_user_intent(self, tmp_path):
+        """is_ready=False must not reject a model the user intentionally selected."""
         motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
 
@@ -205,21 +205,135 @@ class TestRetryExhaustion:
         # Retry 1
         motor._check_pending_model_switch()
         assert motor._pending_model_switch == "gemma4:e4b"
-        assert motor._pending_switch_retries == 2
+        assert motor._pending_switch_retries == 3
 
         # Retry 2
         motor._pending_switch_next_at = 0
         motor._check_pending_model_switch()
-        assert motor._pending_switch_retries == 1
+        assert motor._pending_model_switch == "gemma4:e4b"
+        assert motor._pending_switch_retries == 3
 
-        # Retry 3 — exhaustion
+        # Retry 3 — still pending; user intent must survive slow Ollama startup
         motor._pending_switch_next_at = 0
         motor._check_pending_model_switch()
+        assert motor._pending_model_switch == "gemma4:e4b"
+        assert "model_switch_failed" not in ui_events
+        assert motor._last_switch_failure is None
+
+    def test_model_selected_before_ollama_ready_applies_after_check_ollama(self, tmp_path):
+        """Selecting Gemma while Ollama is down should become intent, not a dead rejection.
+
+        The user should be able to choose a model first, start/check Ollama next,
+        and have the selected model prepared automatically once Ollama is ready.
+        """
+        import config.settings as settings
+
+        original = settings.LAST_MODEL_FILE
+        settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
+        try:
+            motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
+            motor.is_ready = False
+            motor.current_model = "qwen3:1.7b"
+            motor._desired_model = "gemma4:e4b"
+            motor._pending_model_switch = "gemma4:e4b"
+            motor._pending_switch_retries = 3
+            motor._pending_switch_next_at = 0
+            motor.ollama.list = MagicMock(return_value=[])
+            motor.ollama.generate = MagicMock()
+
+            # Simulate the old failure window passing before Ollama is ready.
+            for _ in range(3):
+                motor._pending_switch_next_at = 0
+                motor._check_pending_model_switch()
+                assert motor._pending_model_switch == "gemma4:e4b"
+
+            assert motor._check_ollama_service() is True
+
+            assert motor.current_model == "gemma4:e4b"
+            assert motor._pending_model_switch is None
+            assert "model_switch_applied" in ui_events
+            assert os.path.exists(settings.LAST_MODEL_FILE)
+            with open(settings.LAST_MODEL_FILE) as f:
+                data = json.load(f)
+            assert data["model"] == "gemma4:e4b"
+        finally:
+            settings.LAST_MODEL_FILE = original
+
+    def test_check_ollama_with_pending_model_does_not_warm_stale_current_model(self, tmp_path):
+        """When Ollama becomes ready, prepare the user's pending model directly.
+
+        Warming the stale current model first adds exactly the delay the user is
+        trying to avoid when selecting a heavier Gemma model before Ollama is up.
+        """
+        import config.settings as settings
+
+        original = settings.LAST_MODEL_FILE
+        settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
+        try:
+            motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+            motor.is_ready = False
+            motor.current_model = "qwen3:1.7b"
+            motor._desired_model = "gemma4:e4b"
+            motor._pending_model_switch = "gemma4:e4b"
+            motor.ollama.list = MagicMock(return_value=[])
+            motor.ollama.generate = MagicMock()
+
+            assert motor._check_ollama_service() is True
+
+            warmed_models = [
+                call.kwargs["model"]
+                for call in motor.ollama.generate.call_args_list
+                if call.kwargs.get("prompt") == "Responde solo: ok"
+            ]
+            assert warmed_models == ["gemma4:e4b"]
+        finally:
+            settings.LAST_MODEL_FILE = original
+
+    def test_check_ollama_clears_pending_when_model_is_already_current(self, tmp_path):
+        """A pending intent equal to the active model should not linger forever."""
+        motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
+        motor.is_ready = False
+        motor.current_model = "gemma4:e4b"
+        motor._desired_model = "gemma4:e4b"
+        motor._pending_model_switch = "gemma4:e4b"
+        motor.ollama.list = MagicMock(return_value=[])
+        motor.ollama.generate = MagicMock()
+
+        assert motor._check_ollama_service() is True
+
+        assert motor.current_model == "gemma4:e4b"
         assert motor._pending_model_switch is None
-        assert "model_switch_failed" in ui_events
-        assert motor._last_switch_failure is not None
-        assert motor._last_switch_failure["requested"] == "gemma4:e4b"
-        assert motor._last_switch_failure["reason"] == "ollama_not_ready"
+        assert "model_switch_failed" not in ui_events
+
+    def test_pending_model_prepare_failure_does_not_persist_or_mark_active(self, tmp_path):
+        """If pending Gemma cannot warm, keep the previous model as source of truth."""
+        import config.settings as settings
+
+        original = settings.LAST_MODEL_FILE
+        settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
+        try:
+            motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
+            motor.is_ready = False
+            motor.current_model = "qwen3:1.7b"
+            motor._desired_model = "gemma4:e4b"
+            motor._pending_model_switch = "gemma4:e4b"
+            motor.ollama.list = MagicMock(return_value=[])
+
+            def fake_generate(*, model, prompt, **kwargs):
+                if model == "gemma4:e4b" and prompt == "Responde solo: ok":
+                    raise RuntimeError("model unavailable")
+                return {"response": "ok"}
+
+            motor.ollama.generate = MagicMock(side_effect=fake_generate)
+
+            assert motor._check_ollama_service() is True
+
+            assert motor.current_model == "qwen3:1.7b"
+            assert motor._desired_model == "qwen3:1.7b"
+            assert "model_switch_failed" in ui_events
+            assert not os.path.exists(settings.LAST_MODEL_FILE)
+        finally:
+            settings.LAST_MODEL_FILE = original
 
 
 # ---------------------------------------------------------------------------

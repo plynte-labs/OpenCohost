@@ -21,6 +21,7 @@ from config.settings import (
 )
 from core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from config.logger import get_logger
+from config.validation import output_guard
 
 logger = get_logger()
 
@@ -550,13 +551,23 @@ class MotorVocalIA(threading.Thread):
 
         self.is_ready = True
         self._log("Ollama disponible. Preparando modelo...")
-        self._prepare_model(self.current_model)
+        if self._pending_model_switch and self._pending_model_switch != self.current_model:
+            self._log(f"Aplicando modelo pendiente: {self._pending_model_switch}")
+            self._apply_model_switch(self._pending_model_switch)
+        else:
+            self._prepare_model(self.current_model)
+            if self._pending_model_switch == self.current_model:
+                self._pending_model_switch = None
+                self._pending_switch_retries = 0
         self._log("Motor IA listo.")
         return True
 
     def _switch_and_prepare_model(self, new_model: str) -> None:
         previous_model = self.current_model
         self.historial.clear()
+
+        if not self._prepare_model(new_model):
+            raise RuntimeError("target_model_unavailable")
 
         if previous_model != new_model:
             self._log(f"Liberando memoria del modelo: {previous_model}...")
@@ -566,9 +577,7 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
 
         self.current_model = new_model
-        self._warmed_model = None
         self._log(f"🔄 Modelo cambiado a: {new_model}")
-        self._prepare_model(new_model)
 
     @property
     def active_llm_tier(self) -> str:
@@ -683,33 +692,26 @@ class MotorVocalIA(threading.Thread):
         model = self._pending_model_switch
 
         if not self.is_ready:
-            self._pending_switch_retries -= 1
-            if self._pending_switch_retries <= 0:
-                self._log(f"Switch a {model} fallido: Ollama no disponible tras 3 intentos.", level="error")
-                self._last_switch_failure = {
-                    "requested": model,
-                    "current": self.current_model,
-                    "reason": "ollama_not_ready",
-                }
-                self._pending_model_switch = None
-                self.ui_callback("model_switch_failed")
-            else:
-                self._pending_switch_next_at = time.monotonic() + 2.0
-                self._log(f"Reintento switch {model} en 2s ({self._pending_switch_retries} restantes).", level="debug")
+            self._pending_switch_next_at = time.monotonic() + 2.0
+            self._log(f"Switch a {model} sigue pendiente: Ollama no está listo.", level="debug")
             return
 
         self._apply_model_switch(model)
 
     def _apply_model_switch(self, new_model: str) -> None:
         """Execute model switch and persist on success."""
+        previous_model = self.current_model
         self._pending_model_switch = None
         self._pending_switch_retries = 0
         try:
             self._switch_and_prepare_model(new_model)
+            self._desired_model = new_model
             save_last_model(new_model, source="user_switch")
             self.ui_callback("model_switch_applied")
         except Exception as e:
             self._log(f"Switch a {new_model} fallido: {e}", level="error")
+            self.current_model = previous_model
+            self._desired_model = previous_model
             self._last_switch_failure = {
                 "requested": new_model,
                 "current": self.current_model,
@@ -937,6 +939,11 @@ class MotorVocalIA(threading.Thread):
             if not dialogo:
                 self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
+                return ""
+
+            allowed, guard_reason = output_guard(dialogo)
+            if not allowed:
+                self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
                 return ""
 
             self._last_llm_failure = None
@@ -1240,7 +1247,7 @@ class MotorVocalIA(threading.Thread):
                     self._log("ERROR: Servidor Qwen3-TTS no disponible.", level="error")
                     cola_audios.put(None)
                     error_count += 1
-                    break
+                    continue
 
                 except requests.exceptions.Timeout:
                     logger.warning(f"TTS chunk {i} timeout")
@@ -1253,7 +1260,7 @@ class MotorVocalIA(threading.Thread):
                         logger.warning(f"TTS ligero fallo; timeout configurado {TTS_LIGHT_TIMEOUT}s: {e}")
                         cola_audios.put(None)
                         error_count += 1
-                        break
+                        continue
                     logger.exception(f"TTS chunk {i} error inesperado")
                     cola_audios.put(None)
                     error_count += 1
