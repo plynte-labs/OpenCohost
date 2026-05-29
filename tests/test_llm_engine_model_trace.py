@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -79,6 +80,15 @@ def _drain_log(log_queue):
         except queue.Empty:
             break
     return messages
+
+
+def _wait_until(predicate, *, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +309,47 @@ class TestRetryExhaustion:
             ]
             assert len(pending_logs) == 1
         finally:
+            settings.LAST_MODEL_FILE = original
+
+    def test_run_loop_recovers_selected_model_after_external_ollama_start(self, tmp_path, monkeypatch):
+        """Actual switch_model command should recover when Ollama starts externally."""
+        import config.settings as settings
+
+        original = settings.LAST_MODEL_FILE
+        settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
+        motor = None
+        try:
+            motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
+            motor.current_model = "qwen3:1.7b"
+            motor._desired_model = "qwen3:1.7b"
+
+            fake_ollama = SimpleNamespace(
+                list=MagicMock(side_effect=[RuntimeError("down"), []]),
+                generate=MagicMock(),
+                Client=MagicMock(return_value=MagicMock()),
+            )
+            fake_pygame = SimpleNamespace(mixer=SimpleNamespace(init=MagicMock()))
+            monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+            monkeypatch.setitem(sys.modules, "pygame", fake_pygame)
+
+            motor.start()
+            assert _wait_until(lambda: fake_ollama.list.call_count == 1)
+            assert motor.is_ready is False
+
+            motor.command_queue.put(("switch_model", "gemma4:e4b"))
+            assert _wait_until(lambda: "model_switch_pending" in ui_events)
+            assert motor.current_model == "qwen3:1.7b"
+
+            motor._pending_switch_next_at = 0
+            assert _wait_until(lambda: "model_switch_applied" in ui_events)
+
+            assert fake_ollama.list.call_count == 2
+            assert motor.current_model == "gemma4:e4b"
+            assert motor._pending_model_switch is None
+        finally:
+            if motor is not None:
+                motor.command_queue.put(None)
+                motor.join(timeout=1.0)
             settings.LAST_MODEL_FILE = original
 
     def test_pending_switch_readiness_probe_does_not_emit_unavailable_spam(self, tmp_path):
