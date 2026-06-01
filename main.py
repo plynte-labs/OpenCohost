@@ -7,6 +7,12 @@ from config.logger import get_logger
 
 logger = get_logger()
 
+# Cached ollama reference to prevent dynamic import failures inside atexit handler
+try:
+    import ollama
+except ImportError:
+    ollama = None
+
 # ──────────────────────────────────────────────
 # UI Theme
 # ──────────────────────────────────────────────
@@ -30,10 +36,10 @@ def _emergency_cleanup():
         pass
     try:
         # Unload Ollama model from VRAM
-        import ollama
-        model = getattr(getattr(_app_instance, "motor_ia", None), "current_model", None)
-        if model:
-            ollama.generate(model=model, prompt="", keep_alive=0)
+        if ollama is not None:
+            model = getattr(getattr(_app_instance, "motor_ia", None), "current_model", None)
+            if model:
+                ollama.generate(model=model, prompt="", keep_alive=0)
     except Exception:
         pass
 
@@ -41,6 +47,19 @@ def _emergency_cleanup():
 def main():
     global _app_instance
     logger.info("=== VoiceAI Starting ===")
+    
+    # Explicitly initialize environment vars and directories with robust permission error catch
+    try:
+        from config.storage import apply_storage_environment
+        apply_storage_environment()
+    except PermissionError as exc:
+        logger.critical(f"Falla de permisos al crear directorios de trabajo: {exc}")
+        # En una app de producción, aquí se puede alertar visualmente al usuario
+        # antes de realizar un apagado ordenado y limpio del hilo principal.
+        sys.exit(1)
+    except Exception as exc:
+        logger.error(f"Falla inesperada al inicializar el almacenamiento: {exc}")
+
     atexit.register(_emergency_cleanup)
     _app_instance = VocalAIApp()
     _app_instance.protocol("WM_DELETE_WINDOW", _app_instance.on_closing)

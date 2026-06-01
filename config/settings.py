@@ -1,14 +1,21 @@
 import json
 import os
+import sys
+from pathlib import Path
 from datetime import datetime
-from config.storage import STORAGE_PATHS
+from config.storage import STORAGE_PATHS, USER_DATA_DIR
 
 # ──────────────────────────────────────────────
 # Configuración global
 # ──────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+BASE_DIR = str(get_app_dir())
 TEMP_DIR = str(STORAGE_PATHS.temp_root)
-LOG_DIR = os.path.join(BASE_DIR, "logs")
+LOG_DIR = os.path.join(str(USER_DATA_DIR), "logs")
 HF_CACHE_DIR = str(STORAGE_PATHS.hf_home)
 HF_HUB_DIR = str(STORAGE_PATHS.hf_hub_cache)
 TORCH_CACHE_DIR = str(STORAGE_PATHS.torch_home)
@@ -130,7 +137,7 @@ REGLAS:
 - Si alguien dice algo polémico, toma postura y defiéndela
 - Recuerda lo que se ha dicho antes y haz callbacks cuando sea relevante"""
 
-PROFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
+PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "perfiles.json")
 
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
 TTS_HEAVY_TIMEOUT = 180
@@ -161,11 +168,17 @@ PTT_HOTKEY_LIST = [
     "ScrollLock", "Insert", "Pause"
 ]
 
-PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
-WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
-LAST_MODEL_FILE = os.path.join(BASE_DIR, "config", "last_model.json")
-LLM_TIERS_FILE = os.path.join(BASE_DIR, "config", "llm_tiers.json")
-ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
+PTT_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "ptt_settings.json")
+WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geometry.json")
+LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
+LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
+ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
+
+# Writable paths for Cohost, Music, and Avatar modules
+COHOST_PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "cohost_profiles.json")
+MUSIC_DIR = os.path.join(str(USER_DATA_DIR), "assets", "music")
+MUSIC_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "music_library.json")
+AVATAR_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "avatar.yaml")
 
 # ──────────────────────────────────────────────
 # Health Monitor configuration

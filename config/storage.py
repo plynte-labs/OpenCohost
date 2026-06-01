@@ -7,6 +7,7 @@ TEMP/TMP/HF/Torch/Ollama paths are set before those libraries initialize.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,23 @@ except Exception:  # pragma: no cover - settings fallback only
     yaml = None
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+
+def get_user_data_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        if sys.platform == "win32":
+            return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "VoiceAI"
+        else:
+            return Path.home() / ".config" / "VoiceAI"
+    return Path(__file__).resolve().parent.parent
+
+
+BASE_DIR = get_app_dir()
+USER_DATA_DIR = get_user_data_dir()
 STORAGE_CONFIG_FILE = BASE_DIR / "config" / "storage.yaml"
 
 
@@ -78,6 +95,11 @@ def ensure_storage_dirs(paths: StoragePaths) -> None:
         paths.hf_hub_cache,
         paths.torch_home,
         paths.ollama_models,
+        USER_DATA_DIR,
+        USER_DATA_DIR / "config",
+        USER_DATA_DIR / "logs",
+        USER_DATA_DIR / "assets" / "music",
+        USER_DATA_DIR / "assets" / "avatar" / "kira",
     ):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -98,4 +120,6 @@ def apply_storage_environment(paths: StoragePaths | None = None) -> StoragePaths
     return paths
 
 
-STORAGE_PATHS = apply_storage_environment()
+# Lazily resolved STORAGE_PATHS schema definition without hitting the disk at import time.
+# The physical directories and environment mutations are explicitly initialized during main() startup.
+STORAGE_PATHS = resolve_storage_paths()

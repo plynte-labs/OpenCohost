@@ -7,12 +7,11 @@ import os
 from copy import deepcopy
 from typing import Any
 
-from config.settings import BASE_DIR
+from config.settings import COHOST_PROFILES_FILE
 from config.logger import get_logger
 
 
 logger = get_logger()
-COHOST_PROFILES_FILE = os.path.join(BASE_DIR, "cohost_profiles.json")
 
 
 DEFAULT_COHOST_PROFILES: dict[str, dict[str, Any]] = {

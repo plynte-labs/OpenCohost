@@ -1,17 +1,13 @@
 """VocalAIApp shell — thin composition and wiring layer.
-
 This module contains the ``VocalAIApp`` class that is ONLY responsible for:
 - Creating UIState and all panel instances
 - Wiring callbacks between panels
 - Calling panel.build() methods
 - Setting up window geometry
 - Delegating cleanup to all panels
-
 No UI construction code is inline — all delegated to panels.
 """
-
 from __future__ import annotations
-
 import json
 import logging
 import os
@@ -21,16 +17,13 @@ import threading
 import traceback
 import time
 from typing import Any, Optional
-
 import customtkinter as ctk
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from tkinter import filedialog
 import tkinter.messagebox as messagebox
-
 from pynput import keyboard, mouse
-
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher, SmartAggregatorCallbacks
 from ui.ptt_manager import PTTManager
@@ -46,9 +39,7 @@ from ui.advanced_panel import AdvancedModePanel
 from ui.profiles_window import ConfiguradorPerfiles
 from ui.avatar_panel import AvatarPanel
 from avatar.obs_client import OBSClient, OBSConfig
-
 from avatar.avatar_state import AvatarState, AvatarStateBridge
-
 from config.settings import (
     DEFAULT_MODEL, MODELS_CATALOG, BASE_DIR, TEMP_DIR,
     RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
@@ -68,10 +59,7 @@ from core.music_library import MusicLibrary
 from smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
 from smart_aggregator.chat_input_contract import ChatContextPacketBuilder
 from stream_admin import AdminManager
-
 logger = get_logger()
-
-
 def _stream_admin_should_process_chat_message(stream_admin_ui: Any, msg_id: Any) -> bool:
     if not msg_id:
         return True
@@ -82,8 +70,6 @@ def _stream_admin_should_process_chat_message(stream_admin_ui: Any, msg_id: Any)
         if len(stream_admin_ui._seen_chat_ids) > 2000:
             stream_admin_ui._seen_chat_ids = set(list(stream_admin_ui._seen_chat_ids)[-1000:])
     return True
-
-
 def _cargar_geometria() -> dict | None:
     try:
         if os.path.exists(WINDOW_GEOMETRY_FILE):
@@ -92,8 +78,6 @@ def _cargar_geometria() -> dict | None:
     except Exception:
         pass
     return None
-
-
 def _guardar_geometria(x: int, y: int, w: int, h: int) -> None:
     try:
         os.makedirs(os.path.dirname(WINDOW_GEOMETRY_FILE), exist_ok=True)
@@ -101,43 +85,29 @@ def _guardar_geometria(x: int, y: int, w: int, h: int) -> None:
             json.dump({"x": x, "y": y, "width": w, "height": h}, f)
     except Exception:
         pass
-
-
 class _EntryStub:
     """Stand-in for CTkEntry widgets removed from sidebar (moved to Stream Admin)."""
     def __init__(self, default: str = "") -> None:
         self._text = default
-
     def get(self) -> str:
         return self._text
-
     def delete(self, first: object, last: object = None) -> None:
         self._text = ""
-
     def insert(self, index: object, value: str) -> None:
         self._text = value
-
     def pack(self, **kw: object) -> None:
         pass
-
-
 class _ButtonStub:
     """Stand-in for CTkButton widgets removed from sidebar."""
     def configure(self, **kw: object) -> None:
         pass
-
     def pack(self, **kw: object) -> None:
         pass
-
-
 # ── Global crash handler: log unhandled exceptions before the process dies ──
 _CRASH_LOG = os.environ.get("VOICEAI_CRASH_LOG", os.path.join("logs", "crash.log"))
-
-
 def _install_crash_handler() -> None:
     """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
     os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-
     def _write_crash(tb_text: str) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
@@ -146,32 +116,23 @@ def _install_crash_handler() -> None:
             f.write(f"Thread: {threading.current_thread().name}\n")
             f.write(tb_text)
         sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
-
     def _handler(exc_type, exc_value, exc_tb):
         _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
         sys.__excepthook__(exc_type, exc_value, exc_tb)
-
     def _thread_handler(args):
         _write_crash("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
         sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
-
     sys.excepthook = _handler
     threading.excepthook = _thread_handler
     # Tkinter swallows exceptions by default — make it loud
     import tkinter as _tk
     _tk.Tk.report_callback_exception = _handler
-
-
 _install_crash_handler()
-
-
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
-
     def __init__(self) -> None:
         super().__init__()
         self.title(f"VocalAI — Qwen3-TTS + {DEFAULT_MODEL}")
-
         geo = _cargar_geometria()
         if geo:
             try:
@@ -181,7 +142,6 @@ class VocalAIApp(ctk.CTk):
         else:
             self.geometry("1100x700")
         self.minsize(800, 500)
-
         self.log_queue = queue.Queue()
         self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
@@ -200,37 +160,29 @@ class VocalAIApp(ctk.CTk):
         self.music_library.load()
         self.audio_bed = AudioBedEngine(self.music_library, on_log=lambda msg: self._print_log(msg))
         self.editorial_cards = EditorialCardStore(os.path.join(BASE_DIR, "data", "editorial_cards", "cards.db"))
-
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
-
         self.lista_dispositivos = self._obtener_dispositivos_entrada()
-
         # Shared UIState
         self._ui_state = UIState()
         # Fix: audit/ui-security-perf-2026-05-17 — store subscription ID for cleanup.
         # Without unsubscribe, UIState holds a reference to VocalAIApp preventing GC
         # after destroy(). Same pattern used by StatusBar, ModelPanel, etc.
         self._ui_state_sub_id = self._ui_state.subscribe(self._on_ui_state_change)
-
         # Callback dispatchers
         self._model_dispatcher = CallbackDispatcher(source="ModelPanel")
         self._model_dispatcher.subscribe("on_switch_model", lambda tag: self.motor_ia.command_queue.put(("switch_model", tag)))
         self._model_dispatcher.subscribe("on_switch_llm_tier", lambda tier: self.motor_ia.command_queue.put(("switch_llm_tier", tier)))
         self._model_dispatcher.subscribe("on_download_model", lambda tag: self.motor_ia.command_queue.put(("download_model", tag)))
-
         self._profile_dispatcher = CallbackDispatcher(source="ProfilePanel")
         self._profile_dispatcher.subscribe("on_set_profile", lambda p: self.motor_ia.command_queue.put(("set_profile", p)))
-
         self._smart_agg_dispatcher = CallbackDispatcher(source="SmartAggregatorUI")
         self._smart_agg_dispatcher.set_protocol(SmartAggregatorCallbacks)
-
         # PTT Manager
         self.ptt = PTTManager(logger=logger)
         self.ptt.set_status_callback(self._on_ptt_status_change)
         self.ptt.set_state_callback(self._actualizar_pipeline)
         self.ptt.set_log_callback(lambda msg: self._print_log(msg))
-
         # Avatar state bridge (independent from Tkinter)
         self._avatar_bridge = AvatarStateBridge()
         self._speaking_alt_timer_id: str | None = None
@@ -238,13 +190,10 @@ class VocalAIApp(ctk.CTk):
         self._inactivity_timer_id: str | None = None
         self._joyita_obs_timer_id: str | None = None
         self._inactivity_timeout_ms: int = 2 * 60 * 1000  # 2 minutes to sleeping
-
         # OBS WebSocket client (initialized after UI build to access config)
         self._obs_client: Optional[OBSClient] = None
-
         # ── Build UI structure ──
         self._build_ui()
-
         # Motor IA (deferred until mainloop is running to avoid
         # "main thread is not in main loop" race condition)
         self.motor_ia = MotorVocalIA(self.log_queue, self._on_motor_event)
@@ -256,7 +205,6 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia.agenda_output_recorder = self._record_accepted_kira_agenda_output
         self.motor_ia.agenda_output_transformer = self.kira_agenda.enforce_live_safety_cap
         self.motor_ia.agenda_controller = self.kira_agenda            # Phase 0: metrics access
-
         # Health Monitor — system health daemon (graceful if init fails)
         self.health_monitor: HealthMonitor | None = None
         try:
@@ -264,7 +212,6 @@ class VocalAIApp(ctk.CTk):
             self.motor_ia.health_monitor = self.health_monitor  # wire for TTS fallback
         except Exception as e:
             logger.warning(f"HealthMonitor init failed (non-fatal): {e}")
-
         if self._current_cohost_profile:
             self.kira_agenda.set_profile(self.cohost_profiles.get(self._current_cohost_profile, {}))
         self._kira_agenda_tick_id: str | None = None
@@ -272,30 +219,24 @@ class VocalAIApp(ctk.CTk):
         self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
         self.after(100, self._start_motor)
-
         # Wire motor_ia to voice control panel
         if hasattr(self, "voice_panel"):
             self.voice_panel.set_motor_ia(self.motor_ia)
-
         # Initialize smart aggregator and stream admin
         self._init_smart_aggregator()
         self._init_stream_admin()
-
         # Start log processing
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
         logger.info("Aplicación VoiceAI iniciada.")
-
     def _start_motor(self) -> None:
         """Start the IA motor thread after mainloop is running.
-
         Deferring this avoids 'main thread is not in main loop' errors
         when the motor calls ui_callback before Tkinter's mainloop starts.
         """
         self.motor_ia.start()
         self._motor_started = True
-
         # Start health monitor daemon
         if self.health_monitor:
             # Try to attach to manually-started Qwen server first
@@ -306,7 +247,6 @@ class VocalAIApp(ctk.CTk):
             self.health_monitor.start()
         # Begin UI health status polling and passive motor heartbeat checks.
         self._poll_health_status()
-
     def _run_startup_janitor(self) -> None:
         """Recover only known VoiceAI temp leftovers from a previous run."""
         try:
@@ -316,7 +256,6 @@ class VocalAIApp(ctk.CTk):
             return
         if stats.get("removed"):
             logger.info("Startup temp janitor removed %s VoiceAI artifact(s)", stats["removed"])
-
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
         if self.health_monitor and not getattr(self, "_motor_heartbeat_failure_reported", False):
@@ -328,7 +267,6 @@ class VocalAIApp(ctk.CTk):
         self._check_motor_heartbeat()
         # Reschedule every 2 seconds for UI responsiveness
         self.after(2000, self._poll_health_status)
-
     def _check_motor_heartbeat(self) -> None:
         """Surface an operator-visible warning if MotorVocalIA dies after startup."""
         motor = getattr(self, "motor_ia", None)
@@ -346,7 +284,6 @@ class VocalAIApp(ctk.CTk):
             return
         if alive:
             return
-
         self._motor_heartbeat_failure_reported = True
         logger.critical("MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline")
         try:
@@ -357,7 +294,6 @@ class VocalAIApp(ctk.CTk):
             self._print_log("[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app.")
         except Exception:
             logger.exception("No se pudo informar en UI el fallo de MotorVocalIA")
-
     def _on_ui_state_change(self, key: str, value: Any) -> None:
         if key == "ws_connected":
             def update_btn():
@@ -367,7 +303,6 @@ class VocalAIApp(ctk.CTk):
                     else:
                         self.btn_ws.configure(text="Conectar LiveAudio", fg_color="#555555")
             self.after(0, update_btn)
-
     def _on_avatar_state_for_preview(self, state: AvatarState) -> None:
         """Update the left-panel avatar preview when bridge state changes."""
         previous_after_id = getattr(self, "_kira_avatar_preview_after_id", None)
@@ -378,7 +313,6 @@ class VocalAIApp(ctk.CTk):
                 logger.debug("No se pudo cancelar update pendiente de preview de avatar", exc_info=True)
             finally:
                 self._kira_avatar_preview_after_id = None
-
         def update():
             self._kira_avatar_preview_after_id = None
             if self._kira_avatar_label is None or not self._kira_avatar_label.winfo_exists():
@@ -423,7 +357,6 @@ class VocalAIApp(ctk.CTk):
                     )
                 self._print_log(f"[Avatar] Sin imagen configurada o accesible para '{state.value}'")
         self._kira_avatar_preview_after_id = self.after(0, update)
-
     def _show_cached_idle_avatar_preview(self) -> bool:
         """Keep a known idle avatar visible when a transient state cannot load."""
         idle_ref = getattr(self, "_kira_avatar_idle_ref", None)
@@ -434,11 +367,9 @@ class VocalAIApp(ctk.CTk):
         self._kira_avatar_ref = idle_ref
         label.configure(image=idle_ref, text="")
         return True
-
     # ──────────────────────────────────────────────
     # UI Construction — delegates to panels
     # ──────────────────────────────────────────────
-
     def _build_ui(self) -> None:
         self.configure(fg_color="#0b0f14")
         self.grid_columnconfigure(0, weight=1)
@@ -448,14 +379,12 @@ class VocalAIApp(ctk.CTk):
         self.grid_rowconfigure(3, weight=0, minsize=0)
         self.grid_rowconfigure(4, weight=0, minsize=0)
         self.grid_rowconfigure(5, weight=0, minsize=0)
-
         # Status bar
         status_bar_frame = ctk.CTkFrame(self, fg_color="#111820", corner_radius=14)
         status_bar_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
         self.status_bar = StatusBar(status_bar_frame, self._ui_state)
         self.status_bar.create_status_pills()
         self.lbl_status = self.status_bar.lbl_status
-
         # Additional pills not managed by StatusBar
         self.lbl_oauth_status_pill = ctk.CTkLabel(status_bar_frame, text="OAuth: desconectado", fg_color="#1b2633", corner_radius=12)
         self.lbl_oauth_status_pill.pack(side="left", padx=4, pady=8)
@@ -463,13 +392,24 @@ class VocalAIApp(ctk.CTk):
         self.lbl_memory_status_pill.pack(side="left", padx=4, pady=8)
         self.lbl_moderation_status_pill = ctk.CTkLabel(status_bar_frame, text="Moderación: sin pendientes", fg_color="#1b2633", corner_radius=12)
         self.lbl_moderation_status_pill.pack(side="left", padx=4, pady=8)
-
         self.switch_advanced = ctk.CTkSwitch(status_bar_frame, text="Mostrar logs", command=self._toggle_logs_panel, onvalue=True, offvalue=False)
         self.switch_advanced.pack(side="right", padx=(8, 12), pady=8)
         self.switch_advanced.select()
-
         self.switch_compacto = ctk.CTkSwitch(status_bar_frame, text="Compacto", command=self._toggle_modo_compacto, onvalue=True, offvalue=False)
         self.switch_compacto.pack(side="right", padx=8, pady=8)
+        # Autoría / Marca interactiva
+        import webbrowser
+        self.lbl_author = ctk.CTkLabel(
+            status_bar_frame,
+            text="VoiceAI by FranGuh",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#3a86ff",
+            cursor="hand2"
+        )
+        self.lbl_author.pack(side="right", padx=(20, 8), pady=8)
+        self.lbl_author.bind("<Button-1>", lambda e: webbrowser.open_new_tab("https://github.com/Franguh"))
+        self.lbl_author.bind("<Enter>", lambda e: self.lbl_author.configure(text_color="#5390ff", font=ctk.CTkFont(size=12, weight="bold", underline=True)))
+        self.lbl_author.bind("<Leave>", lambda e: self.lbl_author.configure(text_color="#3a86ff", font=ctk.CTkFont(size=12, weight="bold", underline=False)))
 
         # Product shell: Kira stays visible on the left; configuration and
         # stream operations live on the right.  Phase 2 only moves containers,
@@ -479,36 +419,29 @@ class VocalAIApp(ctk.CTk):
         app_shell.grid_columnconfigure(0, weight=0, minsize=460)
         app_shell.grid_columnconfigure(1, weight=1)
         app_shell.grid_rowconfigure(0, weight=1)
-
         # Persistent Kira panel
         main_panel = ctk.CTkFrame(app_shell, fg_color="#10161d", corner_radius=18)
         main_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
         main_panel.grid_columnconfigure(0, weight=1)
         main_panel.grid_rowconfigure(0, weight=1)
-
         main_content = ctk.CTkFrame(main_panel, fg_color="transparent")
         main_content.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main_content.grid_columnconfigure(0, weight=1)
         main_content.grid_rowconfigure(0, weight=1)
-
         tab_main_kira = ctk.CTkFrame(main_content, fg_color="transparent")
         tab_main_kira.grid(row=0, column=0, sticky="nsew")
-
         self._main_view_buttons: dict[str, Any] = {}
         self._main_view_frames = {"Kira": tab_main_kira}
-
         tab_main_kira.grid_columnconfigure(0, weight=1)
         tab_main_kira.grid_rowconfigure(1, weight=1)
         tab_main_kira.grid_rowconfigure(2, weight=0)
         tab_main_kira.grid_rowconfigure(3, weight=1)
-
         # Kira header
         kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
         kira_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
         kira_header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(kira_header, text="Kira", font=ctk.CTkFont(size=22, weight="bold"), anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(kira_header, text="Experiencia principal", text_color="#8fa3b8", anchor="e").grid(row=0, column=1, sticky="e")
-
         # Avatar preview in left Kira panel
         self._kira_avatar_label: ctk.CTkLabel | None = None
         self._kira_avatar_ref: Any = None
@@ -526,7 +459,6 @@ class VocalAIApp(ctk.CTk):
         self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         # Subscribe avatar bridge to update left-panel preview
         self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)
-
         # Primary action button — Hablar (prominent, at Kira level)
         self._primary_speak_btn = ctk.CTkButton(
             tab_main_kira,
@@ -539,26 +471,22 @@ class VocalAIApp(ctk.CTk):
             hover_color="#24946c",
         )
         self._primary_speak_btn.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
-
         # Kira response: compact scrollable panel so the avatar remains the hero.
         kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=18)
         kira_response_shell.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 10))
         kira_response_shell.grid_columnconfigure(0, weight=1)
         kira_response_shell.grid_rowconfigure(1, weight=0)
         ctk.CTkLabel(kira_response_shell, text="Respuesta de Kira", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef", anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
-
         self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=14), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled", height=130, wrap="word")
         self.text_kira_response.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         self.text_kira_response.configure(state="normal")
         self.text_kira_response.insert("end", "La respuesta de Kira aparecerá aquí. Los logs completos se muestran abajo solo si activas Mostrar logs.\n")
         self.text_kira_response.configure(state="disabled")
-
         # Voice panel (compact — primary button is at Kira level)
         voice_panel_frame = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
         voice_panel_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
         voice_panel_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
-
         self.voice_panel = VoiceControlPanel(
             parent_frame=voice_panel_frame,
             ui_state=self._ui_state,
@@ -571,7 +499,6 @@ class VocalAIApp(ctk.CTk):
             external_primary_button=self._primary_speak_btn,
         )
         self.voice_panel.create_voice_panel()
-
         # Expose widgets for backward compatibility
         self.lbl_kira_voice_state = self.voice_panel.lbl_kira_voice_state
         self.lbl_kira_tts_state = self.voice_panel.lbl_kira_tts_state
@@ -581,43 +508,34 @@ class VocalAIApp(ctk.CTk):
         self.btn_primary_voice = self.voice_panel.btn_primary_voice
         self.barra_rms = self.voice_panel.barra_rms
         self.voice_panel._schedule_rms_frame = lambda: self.after(150, self.voice_panel._animar_rms)
-
         # Wire primary button to VoiceControlPanel's toggle
         self._primary_speak_btn.configure(command=self.voice_panel._toggle_websocket)
-
         # Bottom chat entry
         frame_bottom = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
         frame_bottom.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 16))
         frame_bottom.grid_columnconfigure(0, weight=1)
-
         self.entry_chat = ctk.CTkEntry(frame_bottom, placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)...")
         self.entry_chat.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=10)
         self.entry_chat.bind("<Return>", lambda e: self._enviar_contexto_manual())
-
         self.btn_enviar = ctk.CTkButton(frame_bottom, text="Enviar a IA", command=self._enviar_contexto_manual, width=110, state="disabled", fg_color="#555555", hover_color="#666666")
         self.btn_enviar.grid(row=0, column=1, padx=(0, 10), pady=10)
-
         # Product workspace: current configuration plus full Stream Admin.
         side_panel = ctk.CTkFrame(app_shell, fg_color="#0f151c", corner_radius=18)
         side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
         side_panel.grid_columnconfigure(0, weight=1)
         side_panel.grid_rowconfigure(3, weight=1)
         ctk.CTkLabel(side_panel, text="Paneles de producto", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-
         # Product tabs — custom buttons (full-width, clear active state)
         product_tab_bar = ctk.CTkFrame(side_panel, fg_color="transparent")
         product_tab_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 6))
         for col in range(5):
             product_tab_bar.grid_columnconfigure(col, weight=1, uniform="product_tab")
-
         product_content = ctk.CTkFrame(side_panel, fg_color="#0f151c", corner_radius=18)
         product_content.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 12))
         product_content.grid_columnconfigure(0, weight=1)
         product_content.grid_rowconfigure(0, weight=1)
-
         self._product_tab_data: dict[str, dict] = {}
         self._active_product_tab: str = "config"
-
         TAB_DEFS = [
             ("config", "Configuración"),
             ("stream", "Stream"),
@@ -625,7 +543,6 @@ class VocalAIApp(ctk.CTk):
             ("music", "Música"),
             ("avatar", "Avatar / OBS"),
         ]
-
         for idx, (key, label) in enumerate(TAB_DEFS):
             is_active = (key == self._active_product_tab)
             btn = ctk.CTkButton(
@@ -641,18 +558,15 @@ class VocalAIApp(ctk.CTk):
             btn.grid(row=0, column=idx, sticky="ew", padx=2, pady=2)
             btn.configure(command=lambda k=key: self._switch_product_tab(k))
             self._product_tab_data[key] = {"button": btn}
-
         # Sub-tab container — same module as product tabs, shows context-specific subtabs
         sub_tab_container = ctk.CTkFrame(side_panel, fg_color="transparent")
         sub_tab_container.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 0))
         sub_tab_container.grid_columnconfigure(0, weight=1)
-
         # Config sub-tabs (visible when "Configuración" is active)
         cfg_sub_bar = ctk.CTkFrame(sub_tab_container, fg_color="transparent")
         cfg_sub_bar.grid(row=0, column=0, sticky="ew", padx=2, pady=0)
         for col in range(3):
             cfg_sub_bar.grid_columnconfigure(col, weight=1, uniform="cfg_subtab")
-
         self._cfg_subtab_data: dict[str, dict] = {}
         self._active_cfg_subtab: str = "modelo_perfil"
         CFG_SUBTABS = [("modelo_perfil", "M/Perfil"), ("audio_tts", "Audio/TTS"), ("ayuda", "Ayuda")]
@@ -667,14 +581,12 @@ class VocalAIApp(ctk.CTk):
             btn.grid(row=0, column=idx, sticky="ew", padx=2, pady=0)
             btn.configure(command=lambda k=key: self._switch_cfg_subtab(k))
             self._cfg_subtab_data[key] = {"button": btn}
-
         # Stream sub-tabs (visible when "Stream" is active, initially hidden)
         stream_sub_bar = ctk.CTkFrame(sub_tab_container, fg_color="transparent")
         stream_sub_bar.grid(row=0, column=0, sticky="ew", padx=2, pady=0)
         stream_sub_bar.grid_remove()
         for col in range(2):
             stream_sub_bar.grid_columnconfigure(col, weight=1, uniform="stream_subtab")
-
         self._stream_subtab_data: dict[str, dict] = {}
         self._active_stream_subtab: str = "emision"
         STREAM_SUBTABS = [("emision", "Emisión"), ("acciones", "Acciones")]
@@ -689,59 +601,50 @@ class VocalAIApp(ctk.CTk):
             btn.grid(row=0, column=idx, sticky="ew", padx=2, pady=0)
             btn.configure(command=lambda k=key: self._switch_stream_subtab(k))
             self._stream_subtab_data[key] = {"button": btn}
-
         # Store sub-bar references for visibility toggling
         self._cfg_sub_bar = cfg_sub_bar
         self._stream_sub_bar = stream_sub_bar
-
         # Content frames — only active one visible
         tab_product_config = ctk.CTkFrame(product_content, fg_color="transparent")
         tab_product_config.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_product_config.grid_columnconfigure(0, weight=1)
         tab_product_config.grid_rowconfigure(0, weight=1)
         self._product_tab_data["config"]["frame"] = tab_product_config
-
         tab_product_stream = ctk.CTkFrame(product_content, fg_color="transparent")
         tab_product_stream.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_product_stream.grid_columnconfigure(0, weight=1)
         tab_product_stream.grid_rowconfigure(0, weight=1)
         tab_product_stream.grid_remove()
         self._product_tab_data["stream"]["frame"] = tab_product_stream
-
         tab_product_cohost = ctk.CTkFrame(product_content, fg_color="transparent")
         tab_product_cohost.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_product_cohost.grid_columnconfigure(0, weight=1)
         tab_product_cohost.grid_rowconfigure(0, weight=1)
         tab_product_cohost.grid_remove()
         self._product_tab_data["cohost"]["frame"] = tab_product_cohost
-
         tab_product_music = ctk.CTkFrame(product_content, fg_color="transparent")
         tab_product_music.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_product_music.grid_columnconfigure(0, weight=1)
         tab_product_music.grid_rowconfigure(0, weight=1)
         tab_product_music.grid_remove()
         self._product_tab_data["music"]["frame"] = tab_product_music
-
         tab_product_avatar = ctk.CTkFrame(product_content, fg_color="transparent")
         tab_product_avatar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_product_avatar.grid_columnconfigure(0, weight=1)
         tab_product_avatar.grid_rowconfigure(0, weight=1)
         tab_product_avatar.grid_remove()
         self._product_tab_data["avatar"]["frame"] = tab_product_avatar
-
         # Config content frames — directly in tab_product_config (sub-tabs at side_panel level)
         tab_cfg_model_profile = ctk.CTkScrollableFrame(tab_product_config, fg_color="transparent", scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
         tab_cfg_model_profile.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_model_profile.grid_columnconfigure(0, weight=1)
         tab_cfg_model_profile.grid_columnconfigure(1, weight=1)
         self._cfg_subtab_data["modelo_perfil"]["frame"] = tab_cfg_model_profile
-
         tab_cfg_audio_voice = ctk.CTkScrollableFrame(tab_product_config, fg_color="transparent", scrollbar_button_color="#2f5f8f", scrollbar_button_hover_color="#3670aa")
         tab_cfg_audio_voice.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_audio_voice.grid_columnconfigure(0, weight=1)
         tab_cfg_audio_voice.grid_remove()
         self._cfg_subtab_data["audio_tts"]["frame"] = tab_cfg_audio_voice
-
         tab_cfg_admin = ctk.CTkFrame(tab_product_config, fg_color="transparent")
         tab_cfg_admin.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         tab_cfg_admin.grid_columnconfigure(0, weight=1)
@@ -750,7 +653,6 @@ class VocalAIApp(ctk.CTk):
         tab_cfg_admin.grid_rowconfigure(0, weight=1)
         tab_cfg_admin.grid_remove()
         self._cfg_subtab_data["ayuda"]["frame"] = tab_cfg_admin
-
         # Model panel
         frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_model.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
@@ -770,7 +672,6 @@ class VocalAIApp(ctk.CTk):
         self._model_display_to_tag = self.model_panel._model_display_to_tag
         self._model_tag_to_display = self.model_panel._model_tag_to_display
         self.after(250, self.model_panel.refresh_ollama_state)
-
         # Profile panel
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
@@ -779,7 +680,6 @@ class VocalAIApp(ctk.CTk):
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
         self.btn_editar_perfiles = self.profile_panel.btn_editar_perfiles
-
         # Audio tab
         frame_audio = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_audio.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
@@ -795,7 +695,6 @@ class VocalAIApp(ctk.CTk):
             self.combo_dispositivos.set("Sin dispositivos de audio")
             if self.status_bar:
                 self.status_bar.update_mic_status("disconnected")
-
         audio_buttons = ctk.CTkFrame(frame_audio, fg_color="transparent")
         audio_buttons.pack(fill="x", padx=10, pady=4)
         self.btn_grabar = ctk.CTkButton(audio_buttons, text="🎤 Grabar", command=self._iniciar_grabacion, state="disabled", width=90, fg_color="#555555", hover_color="#666666")
@@ -821,7 +720,6 @@ class VocalAIApp(ctk.CTk):
             state="disabled",
         )
         self.btn_ws.pack(fill="x", padx=10, pady=(0, 10))
-
         # TTS / Memory
         frame_tts_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_tts_memory.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
@@ -833,7 +731,6 @@ class VocalAIApp(ctk.CTk):
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
-
         # PTT controls live with model/profile because they configure how Kira is operated.
         frame_ptt = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_ptt.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
@@ -850,7 +747,6 @@ class VocalAIApp(ctk.CTk):
         self.btn_mapear.pack(side="right", padx=3)
         self.lbl_ptt_status = ctk.CTkLabel(frame_ptt, text="", font=ctk.CTkFont(size=12), text_color="#888888", anchor="w", justify="left")
         self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
-
         # Ayuda tab — contextual help for each product tab
         # YouTube chat controls moved to Stream Admin > Acciones > Chat Live (RF3).
         # These stubs preserve backward compat with existing methods that reference them.
@@ -858,11 +754,9 @@ class VocalAIApp(ctk.CTk):
         self.btn_youtube_chat = _ButtonStub()
         self.entry_youtube_user_limit = _EntryStub("10")
         self.entry_youtube_threshold = _EntryStub("1.0")
-
         # Backward compat stubs (stream_admin_ui references them via _widget lookup; skips when None)
         self.lbl_oauth_side_status = None
         self.lbl_moderation_side_status = None
-
         # Ayuda tab — collapsible help cards per section
         frame_ayuda = ctk.CTkScrollableFrame(tab_cfg_admin, fg_color="transparent")
         frame_ayuda.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
