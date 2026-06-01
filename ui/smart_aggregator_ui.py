@@ -41,6 +41,7 @@ import tkinter.messagebox as messagebox
 
 from config.settings import BASE_DIR
 from config.logger import get_logger
+from smart_aggregator.url_parser import parse_chat_url
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
 
@@ -212,7 +213,7 @@ class SmartAggregatorUI:
     # ------------------------------------------------------------------
 
     def toggle_connection(self) -> None:
-        """Connect or disconnect the Smart Aggregator YouTube chat."""
+        """Connect or disconnect the Smart Aggregator chat."""
         if not self._smart_agg:
             self._on_log("[SmartAggregator] No inicializado. Revisa config/smart_aggregator.yaml.")
             return
@@ -227,45 +228,45 @@ class SmartAggregatorUI:
                 self._set_chat_button("Conectar Chat", "#2f5f8f")
             return
 
-        video_id = self._get_video_id_from_entry()
-        if not video_id:
+        platform, source_id = self._get_chat_url_info()
+        if not source_id:
             messagebox.showwarning(
-                "YouTube Live",
-                "Ingresa una URL o video_id de un live de YouTube.",
+                "Chat Live",
+                "URL no valida o no soportada",
             )
             return
 
-        self._do_connect(video_id)
+        self._do_connect(platform, source_id)
 
-    def connect_to(self, video_id: str) -> bool:
-        """Connect to a YouTube chat by pre-sanitized video_id. Returns True on success."""
+    def connect_to(self, source_id: str, platform: str = "youtube") -> bool:
+        """Connect to a chat by source_id and platform. Returns True on success."""
         if not self._smart_agg:
             self._on_log("[SmartAggregator] No inicializado.")
             return False
-        if not video_id:
+        if not source_id:
             return False
         if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
             return False
         try:
-            self._do_connect(video_id)
+            self._do_connect(platform, source_id)
             return True
         except Exception:
             return False
 
-    def _do_connect(self, video_id: str) -> None:
+    def _do_connect(self, platform: str, source_id: str) -> None:
         try:
             self._apply_spam_limit(log=False)
             self._apply_threshold(log=False)
             self._manual_disconnect = False
             self._ui_state.smart_agg_connecting = True
             self._set_chat_button("Conectando...", "#a66a00")
-            self._on_log(f"[SmartAggregator] Conectando chat YouTube: {video_id}")
-            self._smart_agg.connect(video_id)
+            self._on_log(f"[SmartAggregator] Conectando chat {platform}: {source_id}")
+            self._smart_agg.connect(source_id, platform=platform)
         except Exception:
             self._ui_state.smart_agg_connecting = False
             self._set_chat_button("Conectar Chat", "#2f5f8f")
             logger.exception("Error conectando Smart Aggregator")
-            messagebox.showerror("YouTube Live", "No se pudo conectar al chat.")
+            messagebox.showerror("Chat Live", "No se pudo conectar al chat.")
 
     # ------------------------------------------------------------------
     # Spam limit
@@ -338,26 +339,27 @@ class SmartAggregatorUI:
     # ------------------------------------------------------------------
 
     def on_source_error(self, error: str) -> None:
-        """Handle a YouTube source error (transient reconnect)."""
+        """Handle a chat source error (transient reconnect)."""
         self._on_log(
-            f"[SmartAggregator] Aviso YouTube: reconectando por fallo transitorio ({error})"
+            f"[SmartAggregator] Aviso: reconectando por fallo transitorio ({error})"
         )
 
     def on_source_connect(self, info: dict) -> None:
-        """Handle successful YouTube chat connection."""
+        """Handle successful chat connection."""
         was_connected = self._ui_state.smart_agg_connected
         self._ui_state.smart_agg_connecting = False
         self._ui_state.smart_agg_connected = True
 
-        video_id = info.get("video_id", "")
+        platform = info.get("platform", "")
+        source_id = info.get("source_id", info.get("video_id", ""))
         self._schedule_ui_update(lambda: self._set_chat_button("Desconectar Chat", "darkred"))
         self._schedule_ui_update(lambda: self._update_chat_pill("connected"))
         self._schedule_ui_update(lambda: self._set_kira_chat_state("Chat: conectado", "#1f5a3a"))
         if not was_connected:
-            self._on_log(f"[SmartAggregator] Chat YouTube conectado: {video_id}")
+            self._on_log(f"[SmartAggregator] Chat {platform} conectado: {source_id}")
 
     def on_source_disconnect(self) -> None:
-        """Handle YouTube chat disconnection."""
+        """Handle chat disconnection."""
         was_active = (
             self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting
         )
@@ -374,7 +376,7 @@ class SmartAggregatorUI:
                 if self._manual_disconnect
                 else "desconectado tras agotar reconexiones"
             )
-            self._on_log(f"[SmartAggregator] Chat YouTube {reason}.")
+            self._on_log(f"[SmartAggregator] Chat {reason}.")
         self._manual_disconnect = False
 
     # ------------------------------------------------------------------
@@ -703,11 +705,18 @@ class SmartAggregatorUI:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_video_id_from_entry(self) -> str:
-        """Read and extract the video ID from the YouTube URL entry."""
+    def _get_chat_url_info(self) -> tuple:
+        """Parse the URL entry and return (platform, source_id) or (None, None)."""
         if self._entry_youtube_video is None:
-            return ""
-        return self.extract_youtube_video_id(self._entry_youtube_video.get())
+            return (None, None)
+        raw = self._entry_youtube_video.get().strip()
+        if not raw:
+            return (None, None)
+        try:
+            parsed = parse_chat_url(raw)
+            return (parsed["platform"], parsed["source_id"])
+        except ValueError:
+            return (None, None)
 
     def _get_user_limit_text(self) -> str:
         """Read the spam-limit entry text."""

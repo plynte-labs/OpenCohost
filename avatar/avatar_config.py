@@ -17,9 +17,11 @@ try:
 except Exception:  # pragma: no cover - settings fallback
     yaml = None
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-AVATAR_CONFIG_FILE = BASE_DIR / "config" / "avatar.yaml"
-DEFAULT_ASSETS_FOLDER = BASE_DIR / "assets" / "avatar" / "kira"
+from config.settings import AVATAR_CONFIG_FILE, BASE_DIR
+from config.storage import USER_DATA_DIR
+
+AVATAR_CONFIG_FILE = Path(AVATAR_CONFIG_FILE)
+DEFAULT_ASSETS_FOLDER = Path(USER_DATA_DIR) / "assets" / "avatar" / "kira"
 
 VALID_STATES = frozenset(
     {"idle", "listening", "thinking", "speaking", "speaking_alt", "sleeping", "angry", "error"}

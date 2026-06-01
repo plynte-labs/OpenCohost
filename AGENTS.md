@@ -37,3 +37,11 @@
 - If code looks like a bug but might be intentional feature logic, INFORM or ASK the user before changing it.
 - Never remove a feature gate, filter, or validation without confirming its purpose with the user.
 - When refactoring, preserve exact behavior of existing features — extract first, then fix bugs separately with user confirmation.
+
+## SmartAggregator Input Policy
+
+- Never expose raw chat to the LLM, UI diagnostics, logs, or persistence. Raw chat may only feed in-memory counters.
+- RF3/chat-interactive may use a relaxed filter policy for Twitch (`twitch_relaxed`) so short chat messages can reach compact aggregation.
+- Cohost/Agenda mode must stay stricter: agenda topics are the priority and chat is secondary compact context only.
+- LiveVoice continuous and PTT are separate voice pipelines; do not change them when tuning SmartAggregator chat filters.
+- Keep diagnostics as counts/reasons only (`seen`, `accepted`, `rejected`, `by_reason`) and preserve compact context boundaries.

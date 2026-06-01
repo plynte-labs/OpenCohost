@@ -77,6 +77,7 @@ class VoiceControlPanel:
         on_pipeline_change: Callable[[str], None],
         dispositivo_seleccionado: Optional[int] = None,
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        external_primary_button: Optional[ctk.CTkButton] = None,
     ) -> None:
         """Initialize the voice control panel.
 
@@ -100,6 +101,7 @@ class VoiceControlPanel:
         self._schedule_ui_update: Callable[[Callable[[], None]], None] = (
             schedule_ui_update if schedule_ui_update is not None else (lambda fn: fn())
         )
+        self._external_primary_button = external_primary_button
 
         # Internal state
         self._pipeline_state: str = "idle"
@@ -121,6 +123,11 @@ class VoiceControlPanel:
         self._ptt_prev_active: bool = False  # track press→release transition
         self._ptt_flush_thread: Optional[threading.Thread] = None
         self._ptt_flush_stop = threading.Event()
+        # Fix: audit/ui-security-perf-2026-05-17 — _ptt_buffer, _ptt_grace_deadline,
+        # _ptt_prev_active are accessed from WebSocket async listener AND PTT flush
+        # watcher threads concurrently. Single lock prevents torn reads and corrupted
+        # buffer accumulation.
+        self._ptt_lock = threading.Lock()
 
         # Motor IA reference (set after construction)
         self._motor_ia: Any = None
@@ -149,15 +156,21 @@ class VoiceControlPanel:
 
         Called when PTT is pressed to start a new accumulation cycle.
         """
-        self._ptt_buffer = ""
-        self._ptt_grace_deadline = 0.0
-        self._ptt_prev_active = True  # Mark PTT as active; release will trigger grace
+        # Fix: audit/ui-security-perf-2026-05-17 — lock all PTT state writes;
+        # prevents flush watcher thread from seeing partially-cleared buffer.
+        with self._ptt_lock:
+            self._ptt_buffer = ""
+            self._ptt_grace_deadline = 0.0
+            self._ptt_prev_active = True  # Mark PTT as active; release will trigger grace
         self._start_ptt_flush_watcher()
 
     def on_ptt_release(self) -> None:
         """Called when PTT key is released. Starts the grace period immediately."""
-        self._ptt_prev_active = False
-        self._ptt_grace_deadline = time.time() + self._ptt_grace_period
+        # Fix: audit/ui-security-perf-2026-05-17 — lock prevents WebSocket listener
+        # from observing inconsistent _ptt_prev_active / _ptt_grace_deadline.
+        with self._ptt_lock:
+            self._ptt_prev_active = False
+            self._ptt_grace_deadline = time.time() + self._ptt_grace_period
         self._logger.debug(f"[PTT] Release → grace period {self._ptt_grace_period}s (deadline set immediately)")
         self._on_log(f"[PTT] Soltado — esperando transcripción final ({self._ptt_grace_period:.0f}s)...")
 
@@ -174,25 +187,39 @@ class VoiceControlPanel:
     def _ptt_flush_watcher(self) -> None:
         """Watch for grace period expiration and flush buffer."""
         while not self._ptt_flush_stop.is_set():
-            now = time.time()
-            deadline = self._ptt_grace_deadline
-            if deadline > 0 and now >= deadline:
-                if self._ptt_buffer:
-                    self._flush_ptt_buffer()
-                else:
-                    self._logger.debug("[PTT Flush] Grace period expiró sin transcripciones acumuladas")
-                self._ptt_grace_deadline = 0.0
+            try:
+                now = time.time()
+                # Fix: audit/ui-security-perf-2026-05-17 — snapshot shared state under lock
+                # to avoid torn reads from concurrent WebSocket listener writes.
+                with self._ptt_lock:
+                    deadline = self._ptt_grace_deadline
+                    has_buffer = bool(self._ptt_buffer)
+                if deadline > 0 and now >= deadline:
+                    if has_buffer:
+                        self._flush_ptt_buffer()
+                    else:
+                        self._logger.debug("[PTT Flush] Grace period expiró sin transcripciones acumuladas")
+                    # Fix: audit/ui-security-perf-2026-05-17 — lock reset to prevent
+                    # WebSocket listener from extending an already-expired deadline.
+                    with self._ptt_lock:
+                        self._ptt_grace_deadline = 0.0
+            except Exception:
+                self._logger.exception("Unexpected error in PTT flush watcher")
             self._ptt_flush_stop.wait(0.5)
 
     def _flush_ptt_buffer(self) -> None:
         """Flush accumulated PTT buffer to motor IA."""
-        texto = self._ptt_buffer.strip()
-        self._ptt_buffer = ""
+        # Fix: audit/ui-security-perf-2026-05-17 — lock protects buffer read+clear
+        # against concurrent writes from WebSocket listener thread.
+        with self._ptt_lock:
+            texto = self._ptt_buffer.strip()
+            self._ptt_buffer = ""
 
         if not texto:
             return
 
-        self._logger.info(f"[PTT Flush] Enviando texto acumulado ({len(texto)} chars): {texto[:80]}...")
+        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
+        self._logger.info(f"[PTT Flush] Enviando texto acumulado ({len(texto)} chars): {texto[:30]}...")
 
         motor_busy = self._motor_ia and (
             getattr(self._motor_ia, 'is_speaking', False)
@@ -213,7 +240,8 @@ class VoiceControlPanel:
             self._logger.debug(f"[PTT Flush] Muy corto ({len(palabras)} palabras): {texto}")
             return
 
-        self._on_log(f"[PTT]: {texto}")
+        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
+        self._on_log(f"[PTT]: {texto[:30]}{'...' if len(texto) > 30 else ''}")
         self._motor_ia.command_queue.put((
             "process_context",
             f"El streamer acaba de decir (PTT): {texto}"
@@ -236,7 +264,7 @@ class VoiceControlPanel:
         """
         # State strip
         kira_state_strip = ctk.CTkFrame(self._parent, fg_color="transparent")
-        kira_state_strip.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 6))
+        kira_state_strip.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 4))
         for col in range(4):
             kira_state_strip.grid_columnconfigure(col, weight=1)
 
@@ -270,29 +298,35 @@ class VoiceControlPanel:
             text="Conecta el reconocimiento de voz en tiempo real. PTT requiere LiveAudio activo.",
             text_color="#8fa3b8", anchor="w"
         )
-        self.lbl_voice_hint.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.lbl_voice_hint.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 2))
 
-        # Voice actions frame
-        voice_actions = ctk.CTkFrame(self._parent, fg_color="transparent")
-        voice_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
-        voice_actions.grid_columnconfigure(0, weight=1)
-
-        self.btn_primary_voice = ctk.CTkButton(
-            voice_actions,
-            text="Hablar",
-            command=self._toggle_websocket,
-            state="disabled",
-            height=72,
-            font=ctk.CTkFont(size=21, weight="bold"),
-            fg_color="#1f7a5a",
-            hover_color="#24946c"
-        )
-        self.btn_primary_voice.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
-
-        self.barra_rms = ctk.CTkProgressBar(voice_actions, width=150, height=10)
-        self.barra_rms.set(0)
-        self.barra_rms.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
-        self.barra_rms.grid_remove()
+        # Voice actions / RMS bar
+        if self._external_primary_button is not None:
+            self.btn_primary_voice = self._external_primary_button
+            # No empty frame — barra_rms lives directly in parent, hidden
+            self.barra_rms = ctk.CTkProgressBar(self._parent, width=150, height=10)
+            self.barra_rms.set(0)
+            self.barra_rms.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+            self.barra_rms.grid_remove()
+        else:
+            voice_actions = ctk.CTkFrame(self._parent, fg_color="transparent")
+            voice_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
+            voice_actions.grid_columnconfigure(0, weight=1)
+            self.btn_primary_voice = ctk.CTkButton(
+                voice_actions,
+                text="Hablar",
+                command=self._toggle_websocket,
+                state="disabled",
+                height=72,
+                font=ctk.CTkFont(size=21, weight="bold"),
+                fg_color="#1f7a5a",
+                hover_color="#24946c"
+            )
+            self.btn_primary_voice.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
+            self.barra_rms = ctk.CTkProgressBar(voice_actions, width=150, height=10)
+            self.barra_rms.set(0)
+            self.barra_rms.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
+            self.barra_rms.grid_remove()
 
     # ------------------------------------------------------------------
     # WebSocket management
@@ -346,12 +380,28 @@ class VoiceControlPanel:
 
     def _run_ws_client(self) -> None:
         """Run the async WebSocket client in a dedicated event loop."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = None
         try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             loop.run_until_complete(self._ws_reconnect_loop())
+        except Exception:
+            self._logger.exception("Unexpected error in WebSocket client thread")
+            self._ws_connected = False
+            self._ws_should_reconnect = False
+            self._ui_state.ws_connected = False
+            self._ui_state.ws_should_reconnect = False
+            try:
+                self._on_log("[Red] Error inesperado en LiveAudio. Desconectado.")
+            except Exception:
+                self._logger.exception("Unexpected error while reporting WebSocket failure")
+            try:
+                self._schedule_ui_update(lambda: self.set_state("error"))
+            except Exception:
+                self._logger.exception("Unexpected error while marking WebSocket failure state")
         finally:
-            loop.close()
+            if loop is not None:
+                loop.close()
 
     async def _ws_reconnect_loop(self) -> None:
         """Main reconnection loop with exponential backoff."""
@@ -413,9 +463,10 @@ class VoiceControlPanel:
                     texto_transcrito = data.get("text", "").strip()
 
                     if texto_transcrito:
+                        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                         self._logger.debug(
                             f"WS recibido ({len(texto_transcrito)} chars): "
-                            f"{texto_transcrito[:60]}..."
+                            f"{texto_transcrito[:30]}..."
                         )
 
                     # --- Anti-Loop Whisper Filter (Sanitización Agresiva) ---
@@ -424,47 +475,58 @@ class VoiceControlPanel:
                     texto_transcrito = re.sub(r'\b(.+?)(?:\s+\1\b){2,}', r'\1', texto_transcrito, flags=re.IGNORECASE).strip()
                     
                     if texto_transcrito != texto_original:
-                        self._logger.info(f"Filtro Anti-Loop aplicado. \nOriginal: {texto_original}\nLimpio: {texto_transcrito}")
+                        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
+                        self._logger.info(
+                            f"Filtro Anti-Loop aplicado. "
+                            f"Original: {texto_original[:30]}... "
+                            f"Limpio: {texto_transcrito[:30]}..."
+                        )
 
                     # PTT gate with buffer + grace period
                     ptt_now = self._ui_state.ptt_active
                     now = time.time()
 
-                    # Detect press→release transition: start grace period
-                    if self._ptt_prev_active and not ptt_now:
-                        self._ptt_grace_deadline = now + self._ptt_grace_period
-                        self._logger.debug(f"[PTT] Release → grace period {self._ptt_grace_period}s")
+                    # Fix: audit/ui-security-perf-2026-05-17 — lock all PTT buffer
+                    # state access; prevents flush watcher thread from seeing
+                    # partially-accumulated buffer or inconsistent grace deadline.
+                    with self._ptt_lock:
+                        # Detect press→release transition: start grace period
+                        if self._ptt_prev_active and not ptt_now:
+                            self._ptt_grace_deadline = now + self._ptt_grace_period
+                            self._logger.debug(f"[PTT] Release → grace period {self._ptt_grace_period}s")
 
-                    self._ptt_prev_active = ptt_now
+                        self._ptt_prev_active = ptt_now
 
-                    in_grace = now < self._ptt_grace_deadline
+                        in_grace = now < self._ptt_grace_deadline
 
-                    if self._ui_state.ptt_enabled and not ptt_now and not in_grace:
-                        # Outside PTT window and grace period → discard
-                        if texto_transcrito:
-                            self._logger.debug(
-                                f"WS descartado (PTT inactivo, fuera de gracia): {texto_transcrito[:40]}..."
-                            )
-                        continue
-
-                    # When PTT is active or in grace period, accumulate to buffer
-                    if self._ui_state.ptt_enabled and (ptt_now or in_grace):
-                        if texto_transcrito:
-                            if len(self._ptt_buffer) < self._ptt_max_chars:
-                                if self._ptt_buffer:
-                                    self._ptt_buffer += " " + texto_transcrito
-                                else:
-                                    self._ptt_buffer = texto_transcrito
-                                if in_grace and not ptt_now:
-                                    self._ptt_grace_deadline = now + self._ptt_grace_period
+                        if self._ui_state.ptt_enabled and not ptt_now and not in_grace:
+                            # Outside PTT window and grace period → discard
+                            if texto_transcrito:
+                                # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                                 self._logger.debug(
-                                    f"[PTT Buffer] Acumulado ({len(self._ptt_buffer)} chars): {self._ptt_buffer[:80]}..."
+                                    f"WS descartado (PTT inactivo, fuera de gracia): {texto_transcrito[:30]}..."
                                 )
-                            else:
-                                self._logger.warning(
-                                    f"[PTT Buffer] Límite de {self._ptt_max_chars} chars alcanzado. Truncando."
-                                )
-                        continue  # Don't send yet — flush watcher handles expiration
+                            continue
+
+                        # When PTT is active or in grace period, accumulate to buffer
+                        if self._ui_state.ptt_enabled and (ptt_now or in_grace):
+                            if texto_transcrito:
+                                if len(self._ptt_buffer) < self._ptt_max_chars:
+                                    if self._ptt_buffer:
+                                        self._ptt_buffer += " " + texto_transcrito
+                                    else:
+                                        self._ptt_buffer = texto_transcrito
+                                    if in_grace and not ptt_now:
+                                        self._ptt_grace_deadline = now + self._ptt_grace_period
+                                    # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
+                                    self._logger.debug(
+                                        f"[PTT Buffer] Acumulado ({len(self._ptt_buffer)} chars): {self._ptt_buffer[:30]}..."
+                                    )
+                                else:
+                                    self._logger.warning(
+                                        f"[PTT Buffer] Límite de {self._ptt_max_chars} chars alcanzado. Truncando."
+                                    )
+                            continue  # Don't send yet — flush watcher handles expiration
 
                     # Non-PTT mode (continuous WebSocket) — original behavior
                     motor_busy = self._motor_ia and (
@@ -473,8 +535,9 @@ class VoiceControlPanel:
                     )
                     if motor_busy:
                         if texto_transcrito:
+                            # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                             self._logger.debug(
-                                f"WS descartado (IA ocupada): {texto_transcrito[:40]}..."
+                                f"WS descartado (IA ocupada): {texto_transcrito[:30]}..."
                             )
                         continue
 
@@ -482,9 +545,10 @@ class VoiceControlPanel:
                     palabras = texto_transcrito.split()
                     if len(palabras) < 4:
                         if texto_transcrito:
+                            # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                             self._logger.debug(
                                 f"WS descartado (muy corto, {len(palabras)} palabras): "
-                                f"{texto_transcrito}"
+                                f"{texto_transcrito[:30]}..."
                             )
                         continue
 
@@ -492,13 +556,15 @@ class VoiceControlPanel:
                         if self._motor_ia is None:
                             self._logger.warning("Motor IA no disponible, transcripción descartada.")
                             continue
-                        self._on_log(f"[LiveAudio]: {texto_transcrito}")
+                        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
+                        self._on_log(f"[LiveAudio]: {texto_transcrito[:30]}{'...' if len(texto_transcrito) > 30 else ''}")
                         self._motor_ia.command_queue.put((
                             "process_context",
                             f"El streamer acaba de decir: {texto_transcrito}"
                         ))
+                        # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                         self._logger.info(
-                            f"Transcripción aceptada: {texto_transcrito[:80]}..."
+                            f"Transcripción aceptada: {texto_transcrito[:30]}..."
                         )
 
                 except asyncio.TimeoutError:

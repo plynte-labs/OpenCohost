@@ -52,7 +52,7 @@ _STATE_LABELS: Dict[str, str] = {
 
 _STATE_ORDER = ["idle", "listening", "thinking", "speaking", "speaking_alt", "sleeping", "angry", "error"]
 
-_PREVIEW_SIZE = 200
+_PREVIEW_SIZE = 160
 
 
 class AvatarPanel:
@@ -89,6 +89,13 @@ class AvatarPanel:
         self._frame: Optional[ctk.CTkFrame] = None
         self._content_frame: Any = None
         self._lbl_mode: Optional[ctk.CTkLabel] = None
+        self._mode_spinner: Optional[ctk.CTkOptionMenu] = None
+        self._toggle_all_states_btn: Optional[ctk.CTkButton] = None
+        self._toggle_obs_btn: Optional[ctk.CTkButton] = None
+        self._obs_frame: Optional[ctk.CTkFrame] = None
+        self._main_expanded: bool = True
+        self._all_states_expanded: bool = False
+        self._obs_expanded: bool = False
 
         # OBS widgets
         self._obs_switch: Optional[ctk.CTkSwitch] = None
@@ -136,21 +143,60 @@ class AvatarPanel:
             anchor="e",
         ).grid(row=0, column=1, sticky="e")
 
+        # Collapsible: Avatar / OBS main content
+        card_main = ctk.CTkFrame(self._content_frame, fg_color="#151d26", corner_radius=16)
+        card_main.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 8))
+        card_main.grid_columnconfigure(0, weight=1)
+
+        btn_toggle_main = ctk.CTkButton(
+            card_main, text="▼ Avatar / OBS",
+            anchor="w",
+            fg_color="transparent", text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        btn_toggle_main.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+
+        main_content = ctk.CTkFrame(card_main, fg_color="#101923", corner_radius=14)
+        main_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        main_content.grid_columnconfigure(0, weight=1)
+
+        btn_toggle_main.configure(
+            command=lambda: self._toggle_main_section(main_content, btn_toggle_main)
+        )
+
         # Mode / status info
-        info_frame = ctk.CTkFrame(self._content_frame, fg_color="transparent")
-        info_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
-        info_frame.grid_columnconfigure(0, weight=1)
+        info_frame = ctk.CTkFrame(main_content, fg_color="transparent")
+        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        info_frame.grid_columnconfigure(1, weight=1)
+
+        # Mode selector
+        mode_values = ["Imagen estática"]
+        if self.config.mode not in mode_values:
+            mode_values.insert(0, self.config.mode)
+        mode_values.extend(["Live2D (próximamente)", "VRM (próximamente)"])
+
+        self._mode_spinner = ctk.CTkOptionMenu(
+            info_frame,
+            values=mode_values,
+            command=self._on_mode_change,
+            width=200,
+        )
+        self._mode_spinner.set("Imagen estática")
+        self._mode_spinner.grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        # Keep the state label but simplified
         self._lbl_mode = ctk.CTkLabel(
-            info_frame, text=f"Modo: {self.config.mode} | Estado: {self._current_state}",
+            info_frame, text=f"Estado: {self._current_state}",
             font=ctk.CTkFont(size=11),
             text_color="#8fa3b8",
             anchor="w",
         )
-        self._lbl_mode.grid(row=0, column=0, sticky="w")
+        self._lbl_mode.grid(row=0, column=1, sticky="w")
 
         # Preview area
-        preview_frame = ctk.CTkFrame(self._content_frame, fg_color="#0c1117", corner_radius=12)
-        preview_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 8))
+        preview_frame = ctk.CTkFrame(main_content, fg_color="#0c1117", corner_radius=12)
+        preview_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 8))
         preview_frame.grid_columnconfigure(0, weight=1)
 
         self._preview_label = ctk.CTkLabel(
@@ -162,23 +208,62 @@ class AvatarPanel:
         )
         self._preview_label.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
 
-        # State rows
-        row_idx = 3
+        # State rows — show only active states by default
+        DEFAULT_VISIBLE_STATES = {"idle", "listening", "speaking", "speaking_alt"}
+        self._all_states_expanded = False
+
+        self._build_parent = main_content
+        row_idx = 2
         for state in _STATE_ORDER:
             self._build_state_row(state, row_idx)
+            if state not in DEFAULT_VISIBLE_STATES:
+                # Build but hide non-default states
+                row_frame = self._state_rows[state].get("_frame")
+                if row_frame:
+                    row_frame.grid_remove()
             row_idx += 1
+        self._build_parent = None
 
-        # OBS WebSocket section
-        self._build_obs_section(row_idx)
+        # "Todos los estados" toggle button
+        self._toggle_all_states_btn = ctk.CTkButton(
+            self._content_frame,
+            text="▶ Estados adicionales",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#151d26",
+            text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            command=self._toggle_all_states,
+            anchor="w",
+        )
+        self._toggle_all_states_btn.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 4))
 
-        # Initial preview update
+        # OBS WebSocket section — collapsible
+        self._obs_expanded = False
+        self._toggle_obs_btn = ctk.CTkButton(
+            self._content_frame,
+            text="▶ OBS WebSocket",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#151d26",
+            text_color="#d8e2ef",
+            hover_color="#1d2a38",
+            command=self._toggle_obs_section,
+            anchor="w",
+        )
+        self._toggle_obs_btn.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 0))
+
+        self._build_obs_section(4)
+        # Hide OBS section by default
+        if hasattr(self, '_obs_frame') and self._obs_frame:
+            self._obs_frame.grid_remove()
+
         self._update_preview()
 
         return self._frame
 
     def _build_state_row(self, state: str, row: int) -> None:
         """Build a single state configuration row."""
-        row_frame = ctk.CTkFrame(self._content_frame, fg_color="#0f151c", corner_radius=8)
+        parent = getattr(self, '_build_parent', None) or self._content_frame
+        row_frame = ctk.CTkFrame(parent, fg_color="#0f151c", corner_radius=8)
         row_frame.grid(row=row, column=0, sticky="ew", padx=10, pady=2)
         row_frame.grid_columnconfigure(1, weight=1)
 
@@ -210,8 +295,8 @@ class AvatarPanel:
         # Elegir imagen button
         choose_btn = ctk.CTkButton(
             btn_frame, text="Elegir imagen",
-            width=100, height=24,
-            font=ctk.CTkFont(size=10),
+            width=110, height=30,
+            font=ctk.CTkFont(size=12),
             fg_color="#2f5f8f", hover_color="#3670aa",
             command=lambda s=state: self._choose_image(s),
         )
@@ -221,13 +306,16 @@ class AvatarPanel:
         # Probar button
         test_btn = ctk.CTkButton(
             btn_frame, text="Probar",
-            width=60, height=24,
-            font=ctk.CTkFont(size=10),
+            width=80, height=30,
+            font=ctk.CTkFont(size=12),
             fg_color="#555555", hover_color="#666666",
             command=lambda s=state: self._test_state(s),
         )
         test_btn.pack(side="left")
         self._state_rows[state]["test_btn"] = test_btn
+
+        # Store frame reference for collapsible toggle
+        self._state_rows[state]["_frame"] = row_frame
 
     def _build_obs_section(self, row: int) -> None:
         """Build the OBS WebSocket configuration section."""
@@ -316,6 +404,9 @@ class AvatarPanel:
 
         # Update field states
         self._update_obs_fields_state()
+
+        # Store frame reference for collapsible toggle
+        self._obs_frame = obs_frame
 
     def _on_obs_toggle(self) -> None:
         """Handle OBS enable/disable toggle."""
@@ -460,26 +551,80 @@ class AvatarPanel:
                 ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
                 self._preview_label.configure(image=ctk_img, text="")
                 self._preview_image_ref = ctk_img
+                if self._current_state == "idle" or image_path == self.config.state_images.get("idle"):
+                    self._preview_idle_image_pil = img
+                    self._preview_idle_image_ref = ctk_img
             except Exception as e:
                 logger.warning(f"[Avatar] No se pudo cargar preview: {e}")
+                if self._show_cached_idle_preview():
+                    return
                 self._preview_image_pil = None
                 self._preview_image_ref = None
-                self._preview_label.configure(
-                    image=None, text="Error al cargar imagen", text_color="#aa5555"
-                )
+                self._preview_label.configure(image=None, text="Error al cargar imagen", text_color="#aa5555")
         else:
             state_label = _STATE_LABELS.get(self._current_state, self._current_state)
+            if self._show_cached_idle_preview():
+                return
             self._preview_image_pil = None
             self._preview_image_ref = None
-            self._preview_label.configure(
-                image=None, text=f"Sin imagen para: {state_label}", text_color="#6b7b8d"
-            )
+            self._preview_label.configure(image=None, text=f"Sin imagen para: {state_label}", text_color="#6b7b8d")
+
+    def _show_cached_idle_preview(self) -> bool:
+        """Keep a known idle image visible when a transient state cannot load."""
+        idle_ref = getattr(self, "_preview_idle_image_ref", None)
+        if not idle_ref or self._preview_label is None:
+            return False
+        self._preview_image_pil = getattr(self, "_preview_idle_image_pil", None)
+        self._preview_image_ref = idle_ref
+        self._preview_label.configure(image=idle_ref, text="")
+        return True
+
+    def _on_mode_change(self, value: str) -> None:
+        self.config.mode = value
+        save_avatar_config(self.config)
+        self._update_preview()
+        self.on_log(f"[Avatar] Modo cambiado a: {value}")
+
+    def _toggle_all_states(self) -> None:
+        self._all_states_expanded = not self._all_states_expanded
+        DEFAULT_VISIBLE_STATES = {"idle", "listening", "speaking", "speaking_alt"}
+        for state in _STATE_ORDER:
+            if state not in DEFAULT_VISIBLE_STATES:
+                row_frame = self._state_rows.get(state, {}).get("_frame")
+                if row_frame:
+                    if self._all_states_expanded:
+                        row_frame.grid()
+                    else:
+                        row_frame.grid_remove()
+        self._toggle_all_states_btn.configure(
+            text=f"{'▼' if self._all_states_expanded else '▶'} Estados adicionales"
+        )
+
+    def _toggle_obs_section(self) -> None:
+        self._obs_expanded = not self._obs_expanded
+        if hasattr(self, '_obs_frame') and self._obs_frame:
+            if self._obs_expanded:
+                self._obs_frame.grid()
+            else:
+                self._obs_frame.grid_remove()
+        arrow = "▼" if self._obs_expanded else "▶"
+        if self._toggle_obs_btn:
+            self._toggle_obs_btn.configure(text=f"{arrow} OBS WebSocket")
+
+    def _toggle_main_section(self, content: Any, button: Any) -> None:
+        self._main_expanded = not self._main_expanded
+        if self._main_expanded:
+            content.grid()
+            button.configure(text="▼ Avatar / OBS")
+        else:
+            content.grid_remove()
+            button.configure(text="▶ Avatar / OBS")
 
     def _update_info_label(self) -> None:
-        """Update the mode/state info label."""
+        """Update the state info label."""
         if self._lbl_mode:
             self._lbl_mode.configure(
-                text=f"Modo: {self.config.mode} | Estado: {self._current_state}"
+                text=f"Estado: {self._current_state}"
             )
 
     # ------------------------------------------------------------------

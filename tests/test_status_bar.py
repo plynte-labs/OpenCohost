@@ -173,7 +173,7 @@ class TestPillCreationDefaults:
         assert status_bar.lbl_mic_status_pill.fg_color == "#1b2633"
 
     def test_tts_pill_default_text(self, status_bar):
-        assert status_bar.lbl_tts_status_pill.text == "TTS: idle"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: inactivo"
 
     def test_tts_pill_default_color(self, status_bar):
         assert status_bar.lbl_tts_status_pill.fg_color == "#1b2633"
@@ -288,8 +288,8 @@ class TestTtsStatus:
     @pytest.mark.parametrize(
         "status,expected_text,expected_color",
         [
-            ("idle", "TTS: idle", "#1b2633"),
-            ("generating", "TTS: generando", "#1f3f6f"),
+            ("idle", "TTS: inactivo", "#1b2633"),
+            ("generating", "TTS: renderizando", "#1f3f6f"),
             ("speaking", "TTS: hablando", "#1f526f"),
             ("error", "TTS: error", "#cc3333"),
         ],
@@ -308,7 +308,7 @@ class TestTtsStatus:
 
     def test_update_tts_status_generating(self, status_bar):
         status_bar.update_tts_status("generating")
-        assert status_bar.lbl_tts_status_pill.text == "TTS: generando"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: renderizando"
         assert status_bar.lbl_tts_status_pill.fg_color == "#1f3f6f"
 
     def test_update_tts_status_speaking(self, status_bar):
@@ -385,7 +385,7 @@ class TestPipelineState:
             ("idle", "Modelo listo", "#44cc66"),
             ("listening", "Micrófono escuchando", "#44ff44"),
             ("processing", "Modelo procesando", "#ffaa00"),
-            ("speaking", "TTS generando", "#4488ff"),
+            ("speaking", "TTS renderizando voz", "#4488ff"),
             ("playing", "TTS hablando", "#44ccff"),
             ("downloading", "Modelo cargando", "#ff8800"),
             ("init", "Modelo cargando", "#888888"),
@@ -405,16 +405,16 @@ class TestPipelineState:
     def test_pipeline_idle_sets_mic_and_tts_idle(self, status_bar):
         status_bar.update_pipeline_state("idle")
         assert status_bar.lbl_mic_status_pill.text == "Mic: conectado"
-        assert status_bar.lbl_tts_status_pill.text == "TTS: idle"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: inactivo"
 
     def test_pipeline_listening_sets_mic_listening(self, status_bar):
         status_bar.update_pipeline_state("listening")
         assert status_bar.lbl_mic_status_pill.text == "Mic: escuchando"
-        assert status_bar.lbl_tts_status_pill.text == "TTS: idle"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: inactivo"
 
     def test_pipeline_speaking_sets_tts_generating(self, status_bar):
         status_bar.update_pipeline_state("speaking")
-        assert status_bar.lbl_tts_status_pill.text == "TTS: generando"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: renderizando"
         assert status_bar.lbl_tts_status_pill.fg_color == "#1f3f6f"
 
     def test_pipeline_playing_sets_tts_speaking(self, status_bar):
@@ -424,7 +424,7 @@ class TestPipelineState:
 
     def test_pipeline_error_sets_tts_idle(self, status_bar):
         status_bar.update_pipeline_state("error")
-        assert status_bar.lbl_tts_status_pill.text == "TTS: idle"
+        assert status_bar.lbl_tts_status_pill.text == "TTS: inactivo"
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +541,7 @@ class TestBatchUpdates:
         )
         time.sleep(0.15)
         assert bar.lbl_mic_status_pill.text == "Mic: escuchando"
-        assert bar.lbl_tts_status_pill.text == "TTS: generando"
+        assert bar.lbl_tts_status_pill.text == "TTS: renderizando"
         assert bar.lbl_chat_status_pill.text == "Chat: conectando"
         bar.cleanup()
 
@@ -591,8 +591,8 @@ class TestEdgeCases:
 
     def test_all_tts_transitions(self, status_bar):
         transitions = [
-            ("idle", "TTS: idle", "#1b2633"),
-            ("generating", "TTS: generando", "#1f3f6f"),
+            ("idle", "TTS: inactivo", "#1b2633"),
+            ("generating", "TTS: renderizando", "#1f3f6f"),
             ("speaking", "TTS: hablando", "#1f526f"),
             ("error", "TTS: error", "#cc3333"),
         ]
@@ -618,7 +618,7 @@ class TestEdgeCases:
             ("idle", "Modelo listo", "#44cc66"),
             ("listening", "Micrófono escuchando", "#44ff44"),
             ("processing", "Modelo procesando", "#ffaa00"),
-            ("speaking", "TTS generando", "#4488ff"),
+            ("speaking", "TTS renderizando voz", "#4488ff"),
             ("playing", "TTS hablando", "#44ccff"),
             ("downloading", "Modelo cargando", "#ff8800"),
             ("init", "Modelo cargando", "#888888"),

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -191,6 +192,42 @@ class TestStateBridgeIntegration:
 
         panel.cleanup()
         assert panel._bridge_sub_id is None
+
+
+class TestPreviewFallback:
+    def test_missing_transient_state_keeps_cached_idle_image(self, panel, tmp_path):
+        panel.build()
+        idle_ref = object()
+        panel._preview_idle_image_ref = idle_ref
+        panel._preview_idle_image_pil = object()
+        panel._preview_image_ref = idle_ref
+        panel.config.state_images = {"idle": tmp_path / "idle.png"}
+        panel._current_state = "thinking"
+
+        with patch("ui.avatar_panel.os.path.isfile", return_value=False):
+            panel._update_preview()
+
+        assert panel._preview_image_ref is idle_ref
+        panel._preview_label.configure.assert_called_with(image=idle_ref, text="")
+
+    def test_load_failure_keeps_cached_idle_image(self, panel, tmp_path):
+        panel.build()
+        idle_ref = object()
+        panel._preview_idle_image_ref = idle_ref
+        panel._preview_idle_image_pil = object()
+        panel.config.state_images = {"idle": tmp_path / "idle.png", "speaking": tmp_path / "speaking.png"}
+        panel._current_state = "speaking"
+
+        image_module = ModuleType("PIL.Image")
+        image_module.open = MagicMock(side_effect=OSError("bad image"))
+        image_module.Resampling = SimpleNamespace(LANCZOS=object())
+
+        with patch.dict(sys.modules, {"PIL": SimpleNamespace(Image=image_module), "PIL.Image": image_module}):
+            with patch("ui.avatar_panel.os.path.isfile", return_value=True):
+                panel._update_preview()
+
+        assert panel._preview_image_ref is idle_ref
+        panel._preview_label.configure.assert_called_with(image=idle_ref, text="")
 
 
 # ---------------------------------------------------------------------------

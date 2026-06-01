@@ -343,8 +343,22 @@ class AdvancedModePanel:
             os.makedirs(os.path.dirname(self._acciones_file), exist_ok=True)
             with open(self._acciones_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"ts": time.time(), "msg": msg}, ensure_ascii=False) + "\n")
+            # Fix: audit/ui-security-perf-2026-05-17 — prevent unbounded action log growth
+            self._rotate_acciones(max_lines=5000)
         except Exception as exc:
             logger.warning("[AdvancedModePanel] Failed to save action: %s", exc)
+
+    def _rotate_acciones(self, max_lines: int = 5000) -> None:
+        """Keep only the last max_lines entries in the action log file."""
+        # Fix: audit/ui-security-perf-2026-05-17 — prevent unbounded action log growth
+        try:
+            with open(self._acciones_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if len(lines) > max_lines:
+                with open(self._acciones_file, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-max_lines:])
+        except Exception:
+            pass  # Non-critical — log rotation failure shouldn't break the app
 
     def _cargar_acciones(self, limite: int = 50) -> list[str]:
         """Load recent actions from the actions log file.

@@ -21,3 +21,33 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: Hardening & Failure Testing for Kira Agenda, Interruptions, Chat Load, and Installer Readiness**
   *Link: [./tracks/hardening_failure_testing_20260515/](./tracks/hardening_failure_testing_20260515/)*
+
+---
+
+- [~] **Track: Startup and Model Lifecycle Polish for Ollama, OBS, and Memory Release**
+  *Link: [./tracks/startup_model_lifecycle_polish_20260522/](./tracks/startup_model_lifecycle_polish_20260522/)*
+
+---
+
+- [ ] **Track: Manual LLM Tier Switching — Quality, Balanced, and Fast Models**
+  *Link: [./tracks/manual_llm_tier_switching_20260522/](./tracks/manual_llm_tier_switching_20260522/)*
+
+---
+
+- [~] **Track: Editorial Cue Cards MVP — Streamer-Curated One-Turn Context**
+  *Link: [./tracks/knowledge_card_mvp_20260525/](./tracks/knowledge_card_mvp_20260525/)*
+
+---
+
+- [ ] **Track: Streaming Speech Pipeline — LLM Streaming to Sentence TTS Playback**
+  *Link: [./tracks/streaming_speech_pipeline_20260529/](./tracks/streaming_speech_pipeline_20260529/)*
+
+---
+
+- [ ] **Track: First-run Readiness Wizard — External Ollama and Hardware Setup**
+  *Link: [./tracks/first_run_readiness_wizard_20260529/](./tracks/first_run_readiness_wizard_20260529/)*
+
+---
+
+- [ ] **Track: Ollama Offline UI/UX Guardrails — Prevent Unexpected Switches and Silent Freezing**
+  *Link: [./tracks/ollama_offline_ux_guardrails_20260601/](./tracks/ollama_offline_ux_guardrails_20260601/)*

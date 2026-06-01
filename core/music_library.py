@@ -10,11 +10,11 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
 
-from config.settings import BASE_DIR
+from config.settings import MUSIC_DIR, MUSIC_CONFIG_FILE
 
 
-MUSIC_DIR = Path(BASE_DIR) / "assets" / "music"
-MUSIC_CONFIG_FILE = Path(BASE_DIR) / "config" / "music_library.json"
+MUSIC_DIR = Path(MUSIC_DIR)
+MUSIC_CONFIG_FILE = Path(MUSIC_CONFIG_FILE)
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav"}
 KNOWN_MOODS = ("normal", "nostalgia", "hype", "tension", "sad", "calm", "comedy", "ending")
 

@@ -88,12 +88,12 @@ def test_phase2_product_shell_uses_persistent_kira_and_workspace() -> None:
     assert "Product shell: Kira stays visible on the left" in source
     assert "Product workspace: current configuration plus full Stream Admin" in source
     assert "Paneles de producto" in source
-    assert "product_tabs.add(\"Configuración\")" in source
-    assert "product_tabs.add(\"Stream\")" in source
-    assert "product_tabs.add(\"Co-host\")" in source
-    assert "product_tabs.add(\"Música\")" in source
+    assert '("config", "Configuración")' in source
+    assert '("stream", "Stream")' in source
+    assert '("cohost", "Co-host")' in source
+    assert '("music", "Música")' in source
     assert "self._product_workspace_panel" in source
-    assert "self._product_tabs" in source
+    assert "self._product_tab_data" in source
 
 
 def test_stream_admin_container_moved_without_rewriting_internals() -> None:
@@ -175,8 +175,8 @@ def test_music_mood_tab_is_wired_next_to_avatar_obs() -> None:
     assert "MusicLibrary" in source
     assert "AudioBedEngine" in source
     assert "MusicPanel" in source
-    assert "tab_product_music = product_tabs.add(\"Música\")" in source
-    assert "tab_product_avatar = product_tabs.add(\"Avatar / OBS\")" in source
+    assert '("music", "Música")' in source
+    assert '("avatar", "Avatar / OBS")' in source
     assert "self.music_panel = MusicPanel(" in source
     assert "on_delete_track=lambda track_id: self._music_delete_track(track_id)" in source
     assert "def _music_delete_track" in source
@@ -227,6 +227,14 @@ def test_audio_bed_state_mutation_is_locked() -> None:
     assert "with self._lock:" in source
 
 
+def test_chat_speech_does_not_start_music_bed_boundary() -> None:
+    """Music bed boundaries must not auto-start music for regular chat speech."""
+    source = read_text(APP_SHELL)
+
+    assert "if agenda_speech or self.audio_bed.current_track is not None:" in source
+    assert "self.audio_bed.on_boundary()" in source
+
+
 def test_avatar_panel_is_gridded_into_its_parent() -> None:
     """AvatarPanel must attach its root frame, otherwise the tab renders empty."""
     source = read_text(AVATAR_PANEL)
@@ -252,7 +260,7 @@ def test_kira_avatar_preview_is_the_visual_hero() -> None:
 
     assert "minsize=460" in source
     assert "img.thumbnail((220, 220)" in source
-    assert "height=220" in source
+    assert "height=140" in source
 
 
 def test_kira_response_panel_is_compact_and_scrollable() -> None:

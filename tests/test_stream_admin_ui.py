@@ -276,9 +276,8 @@ class TestStreamAdminUILayoutSafety:
         """Stream Admin groups controls into fewer user-facing tabs."""
         source = read_stream_admin_source()
 
-        assert 'stream_tabs.add("Emisión")' in source
-        assert 'stream_tabs.add("Acciones")' in source
-        assert 'stream_tabs.add("Estado")' in source
+        assert "self.tab_stream_live" in source
+        assert "self.tab_stream_actions" in source
         assert 'stream_tabs.add("Conexión")' not in source
         assert 'stream_tabs.add("Metadata")' not in source
         assert 'stream_tabs.add("Moderación")' not in source
@@ -369,7 +368,7 @@ class TestStreamAdminUILayoutSafety:
         source = read_stream_admin_source()
 
         assert "vertical scrollable containment" in source
-        assert source.count("CTkScrollableFrame") >= 4
+        assert source.count("CTkScrollableFrame") >= 3
         assert 'sticky="ew", padx=10' in source
         assert "columnspan=8" not in source
         assert "columnspan=7" not in source

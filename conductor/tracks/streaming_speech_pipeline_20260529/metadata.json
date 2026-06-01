@@ -1,0 +1,8 @@
+{
+  "track_id": "streaming_speech_pipeline_20260529",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-05-29T00:00:00Z",
+  "updated_at": "2026-05-29T00:00:00Z",
+  "description": "Track B: Streaming LLM to sentence splitter to TTS/playback pipeline using Strangler Pattern without breaking legacy _hablar()."
+}

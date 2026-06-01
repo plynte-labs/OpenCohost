@@ -110,3 +110,7 @@ OAuth/API oficial de YouTube usa `requests` y stdlib en el MVP. Las credenciales
 
 **Servidor TTS** (xtts_env):
 `flask`, `torch`, `torchaudio`, `soundfile`, `qwen-tts`, `edge-tts`
+
+## Licencia
+
+Este proyecto está bajo la Licencia **MIT**. Consulta el archivo [LICENSE](file:///e:/VoiceAI/LICENSE) para ver el texto completo.

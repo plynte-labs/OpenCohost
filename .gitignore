@@ -64,3 +64,5 @@ debug_*.py
 assets/music/
 config/music_library.json
 Documents/
+WhatIs.md
+config/last_model.json

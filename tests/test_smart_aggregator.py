@@ -15,17 +15,20 @@ import json
 import sqlite3
 import time
 from copy import deepcopy
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from smart_aggregator.session_history import SessionHistory
 from smart_aggregator.message_filter import MessageFilter
-from smart_aggregator.chat_source import YouTubeChatSource
+from smart_aggregator.chat_source import YouTubeChatSource, TwitchChatSource
 from smart_aggregator.vibe_thermometer import VibeThermometer
 from smart_aggregator.activity_trigger import ActivityTrigger
 from smart_aggregator.aggregator import Aggregator
 from smart_aggregator.intent_aggregator import IntentAggregator, IntentClassifier
+from smart_aggregator.filter_policy import get_preset, list_presets, PRESETS
+from smart_aggregator.diagnostics import FilterDiagnostics
 
 MOCK_MESSAGES_20 = [
     {"user": f"user{i}", "text": f"Mensaje de prueba numero {i} para Kira", "timestamp": time.time() + i}
@@ -685,6 +688,118 @@ class TestAggregator:
         for msg in MOCK_MESSAGES_20[:5]:
             agg2.process_message(msg)
 
+    # --- Aggregator Factory Tests (T-14, REQ-17..20) ---
+
+    def test_factory_creates_youtube_source(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-17/18: connect() with default platform creates YouTubeChatSource."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(YouTubeChatSource, "connect") as mock_connect:
+            agg.connect("test123")
+            assert isinstance(agg.source, YouTubeChatSource)
+            mock_connect.assert_called_once_with("test123")
+
+    def test_factory_creates_twitch_source(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-17/18: connect() with platform='twitch' creates TwitchChatSource."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(TwitchChatSource, "connect") as mock_connect:
+            agg.connect("testchannel", platform="twitch")
+            assert isinstance(agg.source, TwitchChatSource)
+            mock_connect.assert_called_once_with("testchannel")
+
+    def test_factory_rejects_unknown_platform(self, smart_aggregator_config, mock_llm, temp_dir):
+        """REQ-18: connect() with unknown platform raises ValueError."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        with pytest.raises(ValueError, match="Plataforma no soportada"):
+            agg.connect("test", platform="kick")
+
+    def test_should_consider_vibe_without_video_id(self, smart_aggregator_config, temp_dir):
+        """REQ-20: _should_consider_vibe works without _video_id attribute."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+
+        # No source connected — should consider vibe
+        assert agg._should_consider_vibe(1.0) is True
+
+        # Source connected — should consider vibe
+        mock_source = MagicMock()
+        mock_source.is_connected.return_value = True
+        agg._source = mock_source
+        assert agg._should_consider_vibe(1.0) is True
+
+        # Source disconnected — should NOT consider vibe
+        mock_source.is_connected.return_value = False
+        assert agg._should_consider_vibe(1.0) is False
+
+    def test_youtube_backward_compat_still_works(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Backward compat: connect() without platform still works for YouTube."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(YouTubeChatSource, "connect") as mock_connect:
+            agg.connect("dQw4w9WgXcQ")
+            assert isinstance(agg.source, YouTubeChatSource)
+            mock_connect.assert_called_once_with("dQw4w9WgXcQ")
+
+    def test_disconnect_handles_no_source(self, smart_aggregator_config, temp_dir):
+        """REQ-17: disconnect() does not crash when no source exists."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        # No source — disconnect should not crash
+        agg.disconnect()
+
+    def test_source_property_returns_none_initially(self, smart_aggregator_config, temp_dir):
+        """source property returns None when no source is connected."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        assert agg.source is None
+
 
 # --- TC3.7 — YouTube API (placeholder) ---
 
@@ -695,3 +810,373 @@ class TestYouTubeAPI:
         """TC3.7: YouTube API key placeholder check."""
         cfg = smart_aggregator_config.get("youtube_api", {})
         assert cfg.get("api_key") == "${YOUTUBE_API_KEY}"
+
+
+# --- TC4.1 — Filter Policy ---
+
+class TestFilterPolicy:
+    """TC4.1: Filter policy presets."""
+
+    def test_balanced_preset_matches_existing_defaults(self, smart_aggregator_config):
+        preset = get_preset("balanced")
+        assert preset is not None
+        assert preset["min_words"] == 3
+        assert preset["min_char_length"] == 10
+        assert preset["min_quality_score"] == 0.5
+        assert preset["discard_gibberish"] is True
+        assert preset["discard_ascii_art"] is True
+        assert preset["discard_repetitive_chars"] is True
+        assert preset["discard_repeated_words"] is True
+
+    def test_twitch_relaxed_relaxes_only_size_and_quality(self):
+        preset = get_preset("twitch_relaxed")
+        assert preset is not None
+        assert preset["min_words"] == 1
+        assert preset["min_char_length"] == 1
+        assert preset["min_quality_score"] == 0.0
+        assert preset["discard_gibberish"] is True
+        assert preset["discard_ascii_art"] is True
+        assert preset["discard_repetitive_chars"] is True
+        assert preset["discard_repeated_words"] is True
+        assert preset["discard_links"] is True
+        assert preset["discard_mentions"] is True
+
+    def test_strict_preset_is_stricter_than_balanced(self):
+        preset = get_preset("strict")
+        assert preset is not None
+        assert preset["min_words"] >= 3
+        assert preset["min_char_length"] >= 10
+        assert preset["min_quality_score"] >= 0.5
+        assert preset["discard_gibberish"] is True
+        assert preset["discard_ascii_art"] is True
+
+    def test_unknown_preset_returns_none(self):
+        assert get_preset("nonexistent") is None
+
+    def test_list_presets_includes_all_three(self):
+        names = list_presets()
+        assert "balanced" in names
+        assert "twitch_relaxed" in names
+        assert "strict" in names
+
+    def test_presets_are_readonly(self):
+        with pytest.raises(TypeError):
+            PRESETS["balanced"] = {}
+
+    def test_all_critical_filters_enabled_in_all_presets(self):
+        for name in ("balanced", "twitch_relaxed", "strict"):
+            preset = get_preset(name)
+            assert preset["discard_gibberish"], f"{name} must enable discard_gibberish"
+            assert preset["discard_ascii_art"], f"{name} must enable discard_ascii_art"
+            assert preset["discard_repetitive_chars"], f"{name} must enable discard_repetitive_chars"
+            assert preset["discard_repeated_words"], f"{name} must enable discard_repeated_words"
+
+
+# --- TC4.2 — Filter Diagnostics ---
+
+class TestFilterDiagnostics:
+    """TC4.2: FilterDiagnostics counters."""
+
+    def test_initial_counts_are_zero(self):
+        diag = FilterDiagnostics()
+        d = diag.get_diagnostics()
+        assert d["seen"] == 0
+        assert d["accepted"] == 0
+        assert d["rejected"] == 0
+        assert d["by_reason"] == {}
+
+    def test_seen_increments(self):
+        diag = FilterDiagnostics()
+        diag.record_seen()
+        diag.record_seen()
+        assert diag.get_diagnostics()["seen"] == 2
+
+    def test_accepted_increments(self):
+        diag = FilterDiagnostics()
+        diag.record_accepted()
+        diag.record_accepted()
+        assert diag.get_diagnostics()["accepted"] == 2
+
+    def test_rejected_increments_with_reason(self):
+        diag = FilterDiagnostics()
+        diag.record_rejected("empty")
+        diag.record_rejected("empty")
+        diag.record_rejected("link")
+        d = diag.get_diagnostics()
+        assert d["rejected"] == 3
+        assert d["by_reason"]["empty"] == 2
+        assert d["by_reason"]["link"] == 1
+
+    def test_reset_clears_all(self):
+        diag = FilterDiagnostics()
+        diag.record_seen()
+        diag.record_accepted()
+        diag.record_rejected("spam")
+        diag.reset_diagnostics()
+        d = diag.get_diagnostics()
+        assert d["seen"] == 0
+        assert d["accepted"] == 0
+        assert d["rejected"] == 0
+        assert d["by_reason"] == {}
+
+    def test_diagnostics_is_safe_copy(self):
+        diag = FilterDiagnostics()
+        diag.record_rejected("link")
+        d = diag.get_diagnostics()
+        d["by_reason"]["link"] = 999
+        assert diag.get_diagnostics()["by_reason"]["link"] == 1
+
+    def test_no_raw_messages_in_diagnostics(self):
+        diag = FilterDiagnostics()
+        diag.record_seen()
+        diag.record_rejected("empty")
+        d = diag.get_diagnostics()
+        assert "messages" not in d
+        assert "raw" not in d
+        assert "text" not in d
+        assert isinstance(d["by_reason"], dict)
+        for key in d["by_reason"]:
+            assert isinstance(key, str)
+            assert isinstance(d["by_reason"][key], int)
+
+
+# --- TC4.3 — MessageFilter Rejection Reason ---
+
+class TestMessageFilterRejectionReason:
+    """TC4.3: explain_filter and last_rejection_reason."""
+
+    def test_rejection_reason_empty(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        result = mf.filter({"user": "a", "text": "", "timestamp": time.time()})
+        assert result is None
+        assert mf.last_rejection_reason == "empty"
+
+    def test_rejection_reason_too_short_words(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        result = mf.filter({"user": "a", "text": "hello world", "timestamp": time.time()})
+        assert result is None
+        assert mf.last_rejection_reason == "too_short_words"
+
+    def test_rejection_reason_link(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        msg = {"user": "a", "text": "mira https://twitch.tv/test", "timestamp": time.time()}
+        result = mf.filter(msg)
+        assert result is None
+        assert mf.last_rejection_reason == "link"
+
+    def test_rejection_reason_mention(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        result = mf.filter({"user": "a", "text": "@Kira hola", "timestamp": time.time()})
+        assert result is None
+        assert mf.last_rejection_reason == "mention"
+
+    def test_rejection_reason_emoji_only(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"].copy()
+        cfg["min_words"] = 1
+        cfg["min_char_length"] = 1
+        mf = MessageFilter(cfg)
+        result = mf.filter({"user": "a", "text": "🔥🔥", "timestamp": time.time()})
+        assert result is None
+        assert mf.last_rejection_reason == "emoji_only"
+
+    def test_rejection_reason_gibberish(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"].copy()
+        cfg["min_words"] = 1
+        mf = MessageFilter(cfg)
+        result = mf.filter({
+            "user": "a",
+            "text": "bjbd kxxbfjjbeldbdhdicvyckveyfkcjuhdkudnejxvdxvdjdhdjxbyeb",
+            "timestamp": time.time(),
+        })
+        assert result is None
+        assert mf.last_rejection_reason == "gibberish"
+
+    def test_explain_filter_returns_none_for_accepted(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        msg = {"user": "a", "text": "Kira que juego estas jugando?", "timestamp": time.time()}
+        reason = mf.explain_filter(msg)
+        assert reason is None
+
+    def test_explain_filter_returns_reason_for_rejected(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        reason = mf.explain_filter({"user": "a", "text": "hello world", "timestamp": time.time()})
+        assert reason == "too_short_words"
+
+    def test_filter_contract_unchanged(self, smart_aggregator_config):
+        cfg = smart_aggregator_config["filter"]
+        mf = MessageFilter(cfg)
+        result = mf.filter({"user": "a", "text": "Kira que juego estas jugando?", "timestamp": time.time()})
+        assert result is not None
+        assert "user" in result
+        assert "text" in result
+        assert "timestamp" in result
+        assert "quality" in result
+        assert "rejection_reason" not in result
+
+
+# --- TC4.4 — Aggregator Filter Policy + Diagnostics ---
+
+class TestAggregatorFilterPolicy:
+    """TC4.4: Aggregator set_filter_policy, get_diagnostics, reset_diagnostics."""
+
+    def test_set_filter_policy_applies_preset(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.set_filter_policy("twitch_relaxed")
+        assert agg.get_filter_policy() == "twitch_relaxed"
+        assert agg.msg_filter.min_words == 1
+        assert agg.msg_filter.min_char_length == 1
+        assert agg.msg_filter.min_quality_score == 0.0
+        assert agg.msg_filter.discard_gibberish is True
+
+    def test_set_filter_policy_unknown_raises(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        with pytest.raises(ValueError, match="Unknown filter preset"):
+            agg.set_filter_policy("invalid_preset")
+
+    def test_relaxed_passes_short_twitch_messages(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.set_filter_policy("twitch_relaxed")
+
+        accepted = []
+        agg.on_filtered_message = accepted.append
+
+        short_msgs = [
+            {"user": "u1", "text": "L", "timestamp": time.time()},
+            {"user": "u2", "text": "F", "timestamp": time.time() + 1},
+            {"user": "u3", "text": "hola", "timestamp": time.time() + 2},
+            {"user": "u4", "text": "gg", "timestamp": time.time() + 3},
+            {"user": "u5", "text": "Kira juegas?", "timestamp": time.time() + 4},
+            {"user": "u6", "text": "buena jugada bro", "timestamp": time.time() + 5},
+        ]
+        for msg in short_msgs:
+            agg.process_message(msg)
+
+        assert len(accepted) >= 4
+
+    def test_balanced_preserves_current_defaults(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        assert agg.msg_filter.min_words == 3
+        assert agg.msg_filter.min_char_length == 10
+        assert agg.msg_filter.min_quality_score == 0.5
+
+        agg.set_filter_policy("balanced")
+        assert agg.msg_filter.min_words == 3
+        assert agg.msg_filter.min_char_length == 10
+        assert agg.msg_filter.min_quality_score == 0.5
+
+    def test_strict_preset_rejects_balanced_messages(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.set_filter_policy("strict")
+
+        accepted = []
+        agg.on_filtered_message = accepted.append
+
+        msg = {"user": "a", "text": "ok buena jugada", "timestamp": time.time()}
+        agg.process_message(msg)
+
+        assert len(accepted) == 0
+
+    def test_diagnostics_counters_increment(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.set_filter_policy("twitch_relaxed")
+
+        agg.process_message({"user": "u1", "text": "🔥🔥🔥", "timestamp": time.time()})
+        agg.process_message({"user": "u2", "text": "hola", "timestamp": time.time() + 1})
+        agg.process_message({"user": "u3", "text": "Kira que juegas hoy amiga?", "timestamp": time.time() + 2})
+
+        d = agg.get_diagnostics()
+        assert d["seen"] == 3
+        assert d["accepted"] >= 1
+        assert d["rejected"] >= 1
+        assert len(d["by_reason"]) >= 1
+
+    def test_reset_diagnostics_clears_all(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.process_message({"user": "u1", "text": "hola Kira que tal todo bien?", "timestamp": time.time()})
+
+        agg.reset_diagnostics()
+        d = agg.get_diagnostics()
+        assert d["seen"] == 0
+        assert d["accepted"] == 0
+        assert d["rejected"] == 0
+
+    def test_get_filter_policy_default(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        assert agg.get_filter_policy() == "balanced"
+
+    def test_strict_preset_available_for_cohost(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.set_filter_policy("strict")
+        assert agg.get_filter_policy() == "strict"
+        assert agg.msg_filter.min_words == 4
+        assert agg.msg_filter.min_char_length == 15
+        assert agg.msg_filter.min_quality_score == 0.6

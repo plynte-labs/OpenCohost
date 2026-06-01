@@ -8,6 +8,7 @@ import inspect
 from pathlib import Path
 
 from config.storage import STORAGE_PATHS
+from core.temp_file_cleanup import register_temp_file_cleanup
 
 from flask import Flask, request, send_file, jsonify
 import torch
@@ -98,6 +99,7 @@ def _from_pretrained_kwargs(model_path, device):
 # ──────────────────────────────────────────────
 app = Flask(__name__)
 _tts_lock = threading.Lock()
+APP_ID = "voiceai-qwen-tts"
 
 logger.info("Inicializando Motor Pesado (Qwen3-TTS 0.6B)...")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -120,8 +122,8 @@ except Exception as e:
 def health_check():
     """Health probe for the HealthMonitor daemon."""
     if model is not None:
-        return jsonify({"status": "ok", "model_loaded": True}), 200
-    return jsonify({"status": "error", "model_loaded": False}), 503
+        return jsonify({"app": APP_ID, "status": "ok", "model_loaded": True}), 200
+    return jsonify({"app": APP_ID, "status": "error", "model_loaded": False}), 503
 
 @app.route('/generar', methods=['POST'])
 def generar_audio():
@@ -170,20 +172,12 @@ def generar_audio():
 
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] Audio generado en {elapsed:.2f}s → {archivo_salida}")
-        return send_file(archivo_salida, mimetype="audio/wav")
+        response = send_file(archivo_salida, mimetype="audio/wav")
+        return register_temp_file_cleanup(response, archivo_salida, logger)
 
     except Exception as e:
         logger.exception(f"[{request_id}] Error generando audio")
         return jsonify({"error": str(e)}), 500
-    finally:
-        def cleanup_file():
-            try:
-                if os.path.exists(archivo_salida):
-                    os.remove(archivo_salida)
-            except OSError:
-                pass
-        threading.Timer(5.0, cleanup_file).start()
-
 if __name__ == '__main__':
     logger.info("Servidor Multi-Motor iniciando en http://127.0.0.1:5000")
     app.run(host='127.0.0.1', port=5000, debug=False)

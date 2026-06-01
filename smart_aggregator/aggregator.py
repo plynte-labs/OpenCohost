@@ -6,10 +6,17 @@ from typing import Optional, Callable
 
 from .session_history import SessionHistory
 from .message_filter import MessageFilter
-from .chat_source import YouTubeChatSource
+from .chat_source import YouTubeChatSource, TwitchChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
 from .intent_aggregator import IntentAggregator
+from .filter_policy import get_preset, list_presets
+from .diagnostics import FilterDiagnostics
+from .chat_input_contract import (
+    INPUT_CONTRACT_SHADOW_MODE,
+    ChatContextPacketBuilder,
+    ChatEventDetector,
+)
 
 class Aggregator:
     def __init__(self, config_path: str = "config/smart_aggregator.yaml", llm_interface: Optional[Callable] = None):
@@ -46,16 +53,12 @@ class Aggregator:
             callbacks={"on_trigger": self._on_activity_trigger}
         )
         self.intent_aggregator = IntentAggregator(self.config.get("intent", {}))
-        self.source = YouTubeChatSource(
-            self.config.get("source", {}),
-            callbacks={
-                "on_message": self.process_message,
-                "on_error": self._on_source_error,
-                "on_connect": self._on_source_connect,
-                "on_disconnect": self._on_source_disconnect
-            }
-        )
-        
+        self._source = None
+        self._source_factory = {
+            "youtube": YouTubeChatSource,
+            "twitch": TwitchChatSource,
+        }
+
         self.on_filtered_message: Optional[Callable] = None
         self.on_vibe_update: Optional[Callable] = None
         self.on_activity_trigger: Optional[Callable] = None
@@ -67,12 +70,19 @@ class Aggregator:
         
         self._session_id: Optional[int] = None
         self._busy_callback: Optional[Callable[[], bool]] = None
+        self._diagnostics = FilterDiagnostics()
+        self._filter_policy_name: str = "balanced"
         self._load_spam_config()
         self._load_live_safety_config()
     
     def set_busy_callback(self, callback: Callable[[], bool]):
         self._busy_callback = callback
         self.thermometer._is_busy_callback = callback
+
+    @property
+    def source(self):
+        """Return the current chat source (backward-compat property)."""
+        return self._source
 
     def set_llm_interface(self, llm_interface: Optional[Callable]):
         self.thermometer.set_llm_interface(llm_interface)
@@ -90,6 +100,28 @@ class Aggregator:
             self.activity.cooldown_seconds = max(0.0, float(cooldown_seconds))
         if reset:
             self.activity.reset()
+
+    def set_filter_policy(self, preset_name: str) -> None:
+        preset = self._get_filter_preset(preset_name)
+        if preset is None:
+            raise ValueError(f"Unknown filter preset: {preset_name}. Available: {sorted(list_presets())}")
+        self._filter_policy_name = preset_name
+        _apply_preset_to_filter(self.msg_filter, preset)
+
+    def _get_filter_preset(self, preset_name: str) -> Optional[dict]:
+        configured = self.config.get("filter_presets", {})
+        if isinstance(configured, dict) and isinstance(configured.get(preset_name), dict):
+            return dict(configured[preset_name])
+        return get_preset(preset_name)
+
+    def get_filter_policy(self) -> str:
+        return self._filter_policy_name
+
+    def get_diagnostics(self) -> dict:
+        return self._diagnostics.get_diagnostics()
+
+    def reset_diagnostics(self) -> None:
+        self._diagnostics.reset_diagnostics()
     
     def _check_busy(self) -> bool:
         if self._busy_callback:
@@ -99,10 +131,33 @@ class Aggregator:
                 return False
         return False
     
-    def connect(self, video_id: str):
-        self.source.connect(video_id)
+    def connect(self, source_id: str, platform: str = "youtube"):
+        if self._source is not None:
+            self._source.disconnect()
+
+        source_cls = self._source_factory.get(platform)
+        if source_cls is None:
+            raise ValueError(f"Plataforma no soportada: {platform}")
+
+        source_config = (
+            self.config.get("source", {})
+            if platform == "youtube"
+            else self.config.get("twitch", {})
+        )
+
+        self._source = source_cls(
+            source_config,
+            callbacks={
+                "on_message": self.process_message,
+                "on_error": self._on_source_error,
+                "on_connect": self._on_source_connect,
+                "on_disconnect": self._on_source_disconnect,
+            },
+        )
+        self._source.connect(source_id)
+
         if self._session_id is None:
-            self._session_id = self.history.start_session("youtube", video_id)
+            self._session_id = self.history.start_session(platform, source_id)
 
     def start_session(self, platform: str = "youtube", channel: str = "headless") -> int:
         if self._session_id is None:
@@ -119,7 +174,8 @@ class Aggregator:
                 pass
     
     def disconnect(self):
-        self.source.disconnect()
+        if self._source is not None:
+            self._source.disconnect()
         self.end_session()
         try:
             self.history.cleanup_old_sessions()
@@ -129,6 +185,7 @@ class Aggregator:
     def process_message(self, message: dict):
         now = self._message_timestamp(message)
         self._note_seen_message(now)
+        self._diagnostics.record_seen()
         filtered = self.msg_filter.filter(message)
         accepted = False
         if filtered is not None:
@@ -137,9 +194,17 @@ class Aggregator:
             min_quality = getattr(self.msg_filter, "min_quality_score", 0.0)
             if quality < min_quality:
                 accepted = False
+                self._diagnostics.record_rejected("quality_too_low")
             else:
                 filtered = self._apply_spam_filter(filtered)
                 accepted = filtered is not None
+                if accepted:
+                    self._diagnostics.record_accepted()
+                else:
+                    self._diagnostics.record_rejected("spam")
+        else:
+            reason = self.msg_filter.last_rejection_reason or "unknown"
+            self._diagnostics.record_rejected(reason)
         
         if accepted and self.on_filtered_message:
             try:
@@ -195,6 +260,17 @@ class Aggregator:
                         "context": context,
                         "intent_summary": intent_summary,
                     })
+
+                # ── Shadow mode: Input Contract logging ─────────────────
+                if INPUT_CONTRACT_SHADOW_MODE:
+                    try:
+                        builder = ChatContextPacketBuilder()
+                        packet = builder.build(context)
+                        old = intent_summary.get("prompt", "")
+                        self._log_input_contract_shadow(old, packet)
+                    except Exception:
+                        pass
+
             except Exception:
                 pass
 
@@ -261,8 +337,7 @@ class Aggregator:
             return False
         if max(current_rate, self._raw_seen_rate()) >= self._live_safety_threshold:
             return False
-        source_has_live_target = bool(getattr(self.source, "_video_id", None))
-        if source_has_live_target and hasattr(self.source, "is_connected") and not self.source.is_connected():
+        if self._source is not None and not self._source.is_connected():
             return False
         return True
 
@@ -287,6 +362,23 @@ class Aggregator:
                 self.on_live_safety_log(message)
             except Exception:
                 pass
+
+    def _log_input_contract_shadow(self, old_compact: str, packet: "ChatContextPacket") -> None:
+        """Shadow log: compare old compact_chat vs new ChatContextPacket."""
+        import json
+        try:
+            packet_dict = packet.to_dict()
+            # Compact the packet for readable single-line logging
+            packet_json = json.dumps(packet_dict, ensure_ascii=False, default=str)
+            msg = (
+                f"[InputContract Shadow] "
+                f"old_compact={old_compact[:120]!r} | "
+                f"packet={packet_json}"
+            )
+            if self.on_live_safety_log:
+                self.on_live_safety_log(msg)
+        except Exception:
+            pass
 
     def _load_spam_config(self):
         spam_cfg = self.config.get("spam", {})
@@ -346,3 +438,21 @@ class Aggregator:
                 self.on_source_disconnect()
             except Exception:
                 pass
+
+
+def _apply_preset_to_filter(msg_filter: MessageFilter, preset: dict) -> None:
+    attr_map = {
+        "min_words": "min_words",
+        "min_char_length": "min_char_length",
+        "min_quality_score": "min_quality_score",
+        "discard_emojis_only": "discard_emojis_only",
+        "discard_links": "discard_links",
+        "discard_mentions": "discard_mentions",
+        "discard_repetitive_chars": "discard_repetitive_chars",
+        "discard_repeated_words": "discard_repeated_words",
+        "discard_gibberish": "discard_gibberish",
+        "discard_ascii_art": "discard_ascii_art",
+    }
+    for preset_key, attr_name in attr_map.items():
+        if preset_key in preset:
+            setattr(msg_filter, attr_name, preset[preset_key])

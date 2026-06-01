@@ -15,7 +15,9 @@ from typing import Any, Callable, Optional
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
-from config.settings import DEFAULT_MODEL, MODELS_CATALOG
+from config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_llm_tiers, resolve_startup_model
+from core.ollama_startup import OllamaStartupManager
+from core.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
 from ui.state import UIState
 from ui.protocols import CallbackDispatcher
 
@@ -51,12 +53,14 @@ class ModelPanel:
         dispatcher: CallbackDispatcher,
         on_log: Callable[[str], None],
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        on_check_ollama: Optional[Callable[[], None]] = None,
     ) -> None:
         self._parent = parent_frame
         self._ui_state = ui_state
         self._dispatcher = dispatcher
         self._on_log = on_log
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
+        self._on_check_ollama = on_check_ollama
 
         # Model catalog mappings
         self._model_display_to_tag: dict[str, str] = {}
@@ -70,15 +74,21 @@ class ModelPanel:
         self.btn_download: Optional[ctk.CTkButton] = None
         self.lbl_modelo_info: Optional[ctk.CTkLabel] = None
         self.progress_download: Optional[ctk.CTkProgressBar] = None
+        self.lbl_tier_header: Optional[ctk.CTkLabel] = None
+        self.lbl_tier_info: Optional[ctk.CTkLabel] = None
+        self._tier_buttons: dict[str, ctk.CTkButton] = {}
 
         # Observer
         self._observer_id: Optional[int] = None
 
         # Ollama starting flag
         self._ollama_starting: bool = False
+        self._ollama_process: Optional[Any] = None
         
         # Active model tracking
         self._active_model_tag: Optional[str] = None
+        self._active_llm_tier: str = "balanced"
+        self._llm_tiers: dict[str, Optional[str]] = dict(resolve_llm_tiers())
 
     # ------------------------------------------------------------------
     # Model catalog
@@ -107,8 +117,9 @@ class ModelPanel:
 
     @property
     def default_display(self) -> str:
-        """Return the default model display name."""
-        return self.get_display_for_tag(DEFAULT_MODEL)
+        """Return the startup model display name (saved or default)."""
+        startup_model, _ = resolve_startup_model()
+        return self.get_display_for_tag(startup_model)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -157,6 +168,37 @@ class ModelPanel:
         )
         self.lbl_modelo_info.pack(fill="x", padx=10, pady=4)
 
+        self.lbl_tier_header = ctk.CTkLabel(
+            self._parent,
+            text="Tier LLM manual",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        self.lbl_tier_header.pack(fill="x", padx=10, pady=(8, 2))
+
+        for tier in LLM_TIERS:
+            button = ctk.CTkButton(
+                self._parent,
+                text=self._format_tier_button_text(tier),
+                command=lambda selected=tier: self._on_llm_tier_selected(selected),
+                width=110,
+                fg_color="#1f4f7a" if tier == self._active_llm_tier else "#2b3440",
+                hover_color="#286391",
+            )
+            button.pack(fill="x", padx=10, pady=2)
+            self._tier_buttons[tier] = button
+
+        self.lbl_tier_info = ctk.CTkLabel(
+            self._parent,
+            text="El tier cambia solo el modelo de futuros pedidos; perfil y memoria se conservan.",
+            font=ctk.CTkFont(size=10),
+            text_color="#8fa3b8",
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        self.lbl_tier_info.pack(fill="x", padx=10, pady=(2, 6))
+
         self.progress_download = ctk.CTkProgressBar(self._parent, width=150)
         self.progress_download.pack(fill="x", padx=10, pady=(4, 10))
         self.progress_download.set(0)
@@ -198,8 +240,9 @@ class ModelPanel:
         self._ui_state.ollama_state = state
         self._update_button_for_ollama_state()
 
-        if state == "ready" and on_check_ollama is not None:
-            on_check_ollama()
+        check_callback = on_check_ollama or self._on_check_ollama
+        if state == "ready" and check_callback is not None:
+            check_callback()
 
     def set_model_selection(self, display_name: str) -> None:
         """Set the model combobox to a specific display name."""
@@ -220,6 +263,22 @@ class ModelPanel:
         """Set the currently active model to update button state."""
         self._active_model_tag = tag
         self._update_button_for_ollama_state()
+        self._update_tier_buttons()
+
+    def restore_to_active_model(self, model_tag: str) -> None:
+        """Restore combobox to the actual active model after a failed switch."""
+        display = self.get_display_for_tag(model_tag)
+        if self.combo_modelos is not None:
+            self.combo_modelos.set(display)
+        self._active_model_tag = model_tag
+        self._update_button_for_ollama_state(model_tag)
+        self._update_tier_buttons()
+
+    def set_llm_tier_state(self, tiers: dict[str, Optional[str]], active_tier: str) -> None:
+        """Update visible tier mapping and active tier."""
+        self._llm_tiers = dict(tiers)
+        self._active_llm_tier = active_tier
+        self._update_tier_buttons()
 
     def set_download_progress_visible(self, visible: bool) -> None:
         """Show or hide the download progress bar."""
@@ -260,10 +319,30 @@ class ModelPanel:
                 "Usa el boton de Ollama/modelo para obtenerlo."
             )
         else:
+            self._dispatcher.dispatch("on_switch_model", tag)
             self._on_log(
-                "[Sistema] Ollama no esta listo. "
-                "Usa el boton de Ollama/modelo para prepararlo."
+                f"[Sistema] Ollama no esta listo. Cambio a '{tag}' queda pendiente hasta que Ollama responda."
             )
+
+    def _on_llm_tier_selected(self, tier: str) -> None:
+        """Handle explicit manual Quality/Balanced/Fast tier selection."""
+        model = self._llm_tiers.get(tier)
+        label = LLM_TIER_LABELS.get(tier, tier)
+        if not model:
+            self._on_log(f"[Sistema] Tier LLM {label} no configurado.")
+            self._update_tier_buttons()
+            return
+        if self._ui_state.ollama_state != "ready":
+            self._on_log("[Sistema] Ollama no esta listo para cambiar tier LLM.")
+            self._update_tier_buttons()
+            return
+        if not self._modelo_instalado(model):
+            self._on_log(f"[Sistema] Tier LLM {label} usa '{model}', pero no esta instalado.")
+            self._update_tier_buttons()
+            return
+
+        self._dispatcher.dispatch("on_switch_llm_tier", tier)
+        self._on_log(f"[Sistema] Cambiando tier LLM a {label}: {model}")
 
     def _on_download_model(self) -> None:
         """Handle Ollama/model button click."""
@@ -383,6 +462,28 @@ class ModelPanel:
         else:
             self.btn_download.configure(state="normal", text="Descargar modelo")
 
+        self._update_tier_buttons()
+
+    def _format_tier_button_text(self, tier: str) -> str:
+        label = LLM_TIER_LABELS.get(tier, tier)
+        model = self._llm_tiers.get(tier)
+        detail = self.get_display_for_tag(model) if model else "sin configurar"
+        active = "Activo: " if tier == self._active_llm_tier else ""
+        return f"{active}{label} - {detail}"
+
+    def _update_tier_buttons(self) -> None:
+        if not self._tier_buttons:
+            return
+        for tier, button in self._tier_buttons.items():
+            model = self._llm_tiers.get(tier)
+            is_active = tier == self._active_llm_tier
+            state = "normal" if model and self._ui_state.ollama_state == "ready" else "disabled"
+            button.configure(
+                text=self._format_tier_button_text(tier),
+                state="disabled" if is_active else state,
+                fg_color="#1f4f7a" if is_active else "#2b3440",
+            )
+
     # ------------------------------------------------------------------
     # Ollama start
     # ------------------------------------------------------------------
@@ -403,40 +504,39 @@ class ModelPanel:
         self._on_log("[Sistema] Iniciando Ollama...")
 
         import os
-        import subprocess
         import threading
-        import time
-        from config.settings import OLLAMA_MODELS_DIR
+        from config.settings import LOG_DIR, OLLAMA_MODELS_DIR
 
         def worker() -> None:
-            try:
-                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                subprocess.Popen(
-                    [ollama_exe, "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    env={**os.environ, "OLLAMA_MODELS": OLLAMA_MODELS_DIR},
-                )
-            except Exception as e:
-                self._on_log(f"[Sistema] No se pudo iniciar Ollama: {e}")
-                self._ollama_starting = False
+            manager = OllamaStartupManager(
+                is_ready=lambda: self._detectar_estado_ollama() == "ready",
+                timeout_seconds=60.0,
+                poll_interval_seconds=0.5,
+                stdout_log_path=os.path.join(LOG_DIR, "ollama_startup_stdout.log"),
+                stderr_log_path=os.path.join(LOG_DIR, "ollama_startup_stderr.log"),
+            )
+            result = manager.start_and_wait(ollama_exe, OLLAMA_MODELS_DIR)
+            self._ollama_process = result.process
+            self._ollama_starting = False
+
+            if result.status in {"ready", "already_running"}:
+                if result.status == "already_running":
+                    self._on_log("[Sistema] Ollama ya estaba iniciado.")
+                else:
+                    self._on_log("[Sistema] Ollama iniciado correctamente.")
                 self._schedule_ui_update(lambda: self.refresh_ollama_state())
                 return
 
-            for _ in range(20):
-                time.sleep(0.5)
-                if self._detectar_estado_ollama() == "ready":
-                    self._ollama_starting = False
-                    self._on_log("[Sistema] Ollama iniciado correctamente.")
-                    self._schedule_ui_update(lambda: self.refresh_ollama_state())
-                    return
+            if result.status == "process_exited_early":
+                self._on_log(f"[Sistema] Ollama se cerro durante el inicio: {result.diagnostic}")
+            elif result.status == "timeout_waiting_ready":
+                self._on_log(
+                    "[Sistema] Ollama no respondio despues de iniciar. "
+                    f"{result.diagnostic}"
+                )
+            else:
+                self._on_log(f"[Sistema] No se pudo iniciar Ollama: {result.diagnostic}")
 
-            self._ollama_starting = False
-            self._on_log(
-                "[Sistema] Ollama no respondio despues de iniciar. "
-                "Revisa la instalacion."
-            )
             self._schedule_ui_update(lambda: self.refresh_ollama_state())
 
         threading.Thread(target=worker, daemon=True).start()

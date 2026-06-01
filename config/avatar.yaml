@@ -12,7 +12,7 @@ avatar:
     angry: E:\VoiceAI\assets\avatar\kira\angry.png
     error: E:\VoiceAI\assets\avatar\kira\error.png
   obs:
-    enabled: true
+    enabled: false
     host: localhost
     port: 4455
     password: ''

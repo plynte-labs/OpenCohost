@@ -76,6 +76,16 @@ class TestOBSClientConnection:
         result = client.connect()
         assert result is False
 
+    def test_connect_refused_can_be_silent_for_retry_loop(self):
+        logs = []
+        cfg = OBSConfig(enabled=True, host="localhost", port=99999)
+        client = OBSClient(config=cfg, assets_folder=Path("/tmp"), on_log=logs.append)
+
+        result = client.connect(log_failures=False)
+
+        assert result is False
+        assert logs == []
+
 
 class TestOBSClientBridge:
     def test_subscribe_bridge(self):

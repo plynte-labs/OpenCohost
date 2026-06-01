@@ -1,12 +1,21 @@
+import json
 import os
-from config.storage import STORAGE_PATHS
+import sys
+from pathlib import Path
+from datetime import datetime
+from config.storage import STORAGE_PATHS, USER_DATA_DIR
 
 # ──────────────────────────────────────────────
 # Configuración global
 # ──────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+BASE_DIR = str(get_app_dir())
 TEMP_DIR = str(STORAGE_PATHS.temp_root)
-LOG_DIR = os.path.join(BASE_DIR, "logs")
+LOG_DIR = os.path.join(str(USER_DATA_DIR), "logs")
 HF_CACHE_DIR = str(STORAGE_PATHS.hf_home)
 HF_HUB_DIR = str(STORAGE_PATHS.hf_hub_cache)
 TORCH_CACHE_DIR = str(STORAGE_PATHS.torch_home)
@@ -20,9 +29,14 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # ──────────────────────────────────────────────
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
-LLM_MAX_TOKENS = 300
+LLM_MAX_TOKENS = 768
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
+DEFAULT_LLM_TIERS = {
+    "quality": "gemma4:e4b",
+    "balanced": "llama3",
+    "fast": "qwen3:1.7b",
+}
 
 # Catálogo curado de modelos recomendados para esta tarea
 MODELS_CATALOG = {
@@ -123,7 +137,7 @@ REGLAS:
 - Si alguien dice algo polémico, toma postura y defiéndela
 - Recuerda lo que se ha dicho antes y haz callbacks cuando sea relevante"""
 
-PROFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
+PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "perfiles.json")
 
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
 TTS_HEAVY_TIMEOUT = 180
@@ -154,9 +168,17 @@ PTT_HOTKEY_LIST = [
     "ScrollLock", "Insert", "Pause"
 ]
 
-PTT_CONFIG_FILE = os.path.join(BASE_DIR, "config", "ptt_settings.json")
-WINDOW_GEOMETRY_FILE = os.path.join(BASE_DIR, "config", "window_geometry.json")
-ACCIONES_LOG_FILE = os.path.join(BASE_DIR, "logs", "acciones.jsonl")
+PTT_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "ptt_settings.json")
+WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geometry.json")
+LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
+LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
+ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
+
+# Writable paths for Cohost, Music, and Avatar modules
+COHOST_PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "cohost_profiles.json")
+MUSIC_DIR = os.path.join(str(USER_DATA_DIR), "assets", "music")
+MUSIC_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "music_library.json")
+AVATAR_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "avatar.yaml")
 
 # ──────────────────────────────────────────────
 # Health Monitor configuration
@@ -173,4 +195,73 @@ RTF_RECOVERY_COUNT = 3       # consecutive measurements below threshold to recov
 OLLAMA_POLL_INTERVAL = 15    # seconds between Ollama health polls
 OLLAMA_FAILURE_THRESHOLD = 3 # consecutive failures before "down"
 OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
+OLLAMA_CHAT_TIMEOUT = 180    # max seconds to wait for an Ollama chat generation
 HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
+
+
+# ──────────────────────────────────────────────
+# Model persistence
+# ──────────────────────────────────────────────
+
+def resolve_startup_model() -> tuple[str, str]:
+    """Return (model_tag, source) for startup.
+
+    Sources:
+        'saved' — valid model read from last_model.json
+        'default' — no saved model found, using DEFAULT_MODEL
+        'invalid_saved_fallback' — saved model not in MODELS_CATALOG
+    """
+    try:
+        if os.path.exists(LAST_MODEL_FILE):
+            with open(LAST_MODEL_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved = data.get("model", "")
+            if saved and saved in MODELS_CATALOG:
+                return saved, "saved"
+            return DEFAULT_MODEL, "invalid_saved_fallback"
+    except Exception:
+        pass
+    return DEFAULT_MODEL, "default"
+
+
+def save_last_model(tag: str, source: str = "user_switch") -> None:
+    """Persist the last successfully-switched model.
+
+    Uses atomic write (temp file + os.replace) to avoid corruption.
+    """
+    try:
+        os.makedirs(os.path.dirname(LAST_MODEL_FILE), exist_ok=True)
+        tmp = LAST_MODEL_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "model": tag,
+                "saved_at": datetime.now().isoformat(),
+                "source": source,
+            }, f)
+        os.replace(tmp, LAST_MODEL_FILE)
+    except Exception:
+        pass
+
+
+def resolve_llm_tiers() -> dict[str, str]:
+    """Return configurable manual LLM tier slots with safe defaults.
+
+    The file is intentionally simple so operators can adjust the three manual
+    buttons without touching Python code:
+
+        config/llm_tiers.json
+        {"quality": "gemma4:e4b", "balanced": "llama3", "fast": "qwen3:1.7b"}
+    """
+    tiers = dict(DEFAULT_LLM_TIERS)
+    try:
+        if os.path.exists(LLM_TIERS_FILE):
+            with open(LLM_TIERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for tier in tiers:
+                    model = data.get(tier)
+                    if isinstance(model, str) and model.strip():
+                        tiers[tier] = model.strip()
+    except Exception:
+        pass
+    return tiers

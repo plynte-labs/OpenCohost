@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import re
 import time as _time_module
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
 
@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     GUARDRAIL_EMPTY = "ERR_GUARDRAIL_EMPTY"
     LLM_TIMEOUT = "ERR_LLM_TIMEOUT"
     OLLAMA_DOWN = "ERR_OLLAMA_DOWN"
+    GUARDRAIL_BREAKS_CHARACTER = "ERR_GUARDRAIL_BREAKS_CHARACTER"
 
     def human(self) -> str:
         _MAP = {
@@ -51,8 +52,18 @@ class ErrorCode(str, Enum):
             ErrorCode.GUARDRAIL_EMPTY: "El modelo no generó respuesta",
             ErrorCode.LLM_TIMEOUT: "El modelo tardó demasiado",
             ErrorCode.OLLAMA_DOWN: "Ollama no está respondiendo",
+            ErrorCode.GUARDRAIL_BREAKS_CHARACTER: "Kira rompió el contrato de personaje",
         }
         return _MAP.get(self, str(self.value))
+
+
+@dataclass(frozen=True)
+class CharacterContractResult:
+    """Carries metadata about a detected character contract break."""
+    ok: bool
+    subtype: str
+    matched_pattern: str
+    matched_text: str
 
 
 class RecoveryPolicy:
@@ -187,6 +198,8 @@ class AgendaTopic:
     turns_spoken: int = 0
     confidence: str = "LOW"   # Suggester metadata: HIGH | MEDIUM | LOW
     source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
+    editorial_card_id: str | None = None
+    editorial_card_consumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -293,6 +306,52 @@ class KiraAgendaController:
         r"=>",
     )
 
+    CHARACTER_CONTRACT_ENABLED: bool = True
+
+    # ── Character Contract Validator: precompiled regex patterns ──
+    # Order matters: most specific → least specific. Short-circuits on first match.
+
+    _PROMPT_LEAK_RE = re.compile(
+        r"\b(he|has)\s+(procesado|recibido|analizado|revisado)\s+(el|la|lo)\s+(contexto|sesi[oó]n|instrucci[oó]n|prompt)"
+        r"|"
+        r"\b(seg[uú]n|como\s+dicen|de\s+acuerdo\s+a)\s+(mis|las)\s+(instrucciones|indicaciones|directrices)",
+        re.IGNORECASE,
+    )
+
+    _PROCESSING_LEAK_RE = re.compile(
+        r"\b(he|has)\s+(procesado|recibido|analizado|revisado)\s+(el|la|lo|tu|su)\s+(contexto|sesi[oó]n|reflexi[oó]n|tema|informaci[oó]n)"
+        r"|"
+        r"\b(recib[ií]|proces[eé]|analic[eé]|revis[eé])\s+(el|la|lo|tu|su)\s+(contexto|sesi[oó]n|reflexi[oó]n|informaci[oó]n)",
+        re.IGNORECASE,
+    )
+
+    _ASSISTANT_IDENTITY_RE = re.compile(
+        r"\b(soy|yo\s+soy)\s+(una|un)\s+(ia|inteligencia\s+artificial|asistente|asistente\s+virtual|modelo\s+de\s+lenguaje|llm|chatbot)"
+        r"|"
+        r"\b(como|en\s+mi\s+calidad\s+de)\s+(ia|asistente|modelo)",
+        re.IGNORECASE,
+    )
+
+    _ASSISTANT_OFFER_RE = re.compile(
+        r"\b(estoy|me\s+encuentro)\s+(lista|listo|preparada|preparado|disponible)\s+para\s+(continuar|seguir|desarrollar|ayudarte|ayudar|colaborar|asistirte)",
+        re.IGNORECASE,
+    )
+
+    _META_QUESTION_RE = re.compile(
+        r"\b(quieres|quer[eé]s|deseas|prefieres)\s+que\s+(sigamos|continuemos|hablemos|profundicemos|cambiemos)"
+        r"|"
+        r"\bde\s+qu[eé]\s+(m[aá]s|otro)\s+(podr[ií]amos|quisieras|te\s+gustar[ií]a)\s+hablar",
+        re.IGNORECASE,
+    )
+
+    _CHARACTER_PATTERNS: tuple = (
+        ("prompt_leak",        _PROMPT_LEAK_RE),
+        ("processing_leak",    _PROCESSING_LEAK_RE),
+        ("assistant_identity", _ASSISTANT_IDENTITY_RE),
+        ("assistant_offer",    _ASSISTANT_OFFER_RE),
+        ("meta_question",      _META_QUESTION_RE),
+    )
+
     def __init__(
         self,
         *,
@@ -321,18 +380,29 @@ class KiraAgendaController:
         self.topics: list[AgendaTopic] = []
         self.active_topic: Optional[AgendaTopic] = None
         self.last_outputs: list[str] = []
+        # ── Metrics / audit (Phase 0: zero behaviour change) ────────
+        self.rejection_log: list[dict[str, object]] = []
+        self._last_similarity_overlap: float = 0.0
+        self._last_matched_phrase: str = ""
         # Cooldown / suggestion tracking (used by TopicSuggester integration)
         self._last_suggestion_time: float = 0.0
         self._session_suggestion_count: int = 0
         self._suggestion_cooldown_seconds: float = 120.0
         self._suggestion_session_cap: int = 5
+        self._character_repair_needed: bool = False
         self.profile: dict[str, str] = {
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
+        self._editorial_context_provider: Callable[[str], str | None] | None = None
 
     def set_profile(self, profile: dict[str, str]) -> None:
         style = self.sanitize_topic_text((profile or {}).get("style", ""), field="profile_style", required=False)
         self.profile = {"style": style or self.profile.get("style", "")}
+
+    def set_editorial_context_provider(self, provider: Callable[[str], str | None] | None) -> None:
+        """Set the callback used to resolve one-turn Editorial Cue Card context."""
+
+        self._editorial_context_provider = provider
 
     # ------------------------------------------------------------------
     # Topic lifecycle
@@ -347,6 +417,7 @@ class KiraAgendaController:
         approved: bool = False,
         priority: str = "normal",
         response_length: str = "normal",
+        editorial_card_id: str | None = None,
     ) -> AgendaTopic:
         safe_title = self.sanitize_topic_text(title, field="title")
         safe_angle = self.sanitize_topic_text(angle, field="angle", required=False)
@@ -362,6 +433,7 @@ class KiraAgendaController:
             priority=self.normalize_priority(priority),
             response_length=self.normalize_response_length(response_length),
             status=TopicStatus.APPROVED if approved else TopicStatus.DRAFTED,
+            editorial_card_id=self._sanitize_optional_identifier(editorial_card_id),
         )
         self.topics.append(topic)
         return topic
@@ -619,6 +691,7 @@ class KiraAgendaController:
             if not selected:
                 return AgendaAction.none()
             self.active_topic = selected
+            self._character_repair_needed = False
             selected.status = TopicStatus.ACTIVE
             self.state = AgendaState.OPEN_TOPIC
             return self._topic_action("Entrá al tema como comentario orgánico de stream. No anuncies que estás abriendo un tema.")
@@ -717,6 +790,8 @@ class KiraAgendaController:
     def register_failure(self, error: ErrorCode = ErrorCode.NONE, reason: str = "") -> None:
         self.recovery.record_failure(error, reason)
         self.failure_count = self.recovery.failure_count  # keep legacy counter in sync
+        if error == ErrorCode.GUARDRAIL_BREAKS_CHARACTER:
+            self._character_repair_needed = True
         # Force-complete: if the topic is already closing and we've failed
         # to generate a closing line 3+ times, just mark it done silently.
         # Prevents the infinite kira-agenda-stop retry cascade seen under
@@ -730,6 +805,7 @@ class KiraAgendaController:
             return
         if self.active_topic and self.recovery.failure_count >= 2:
             self.active_topic.turns_spoken = self.max_turns_per_topic
+            self._character_repair_needed = False
             self.state = AgendaState.WAITING_SIGNAL
             return
         # Degradation: lower response_length before pausing
@@ -764,29 +840,90 @@ class KiraAgendaController:
             return False
         error: ErrorCode = ErrorCode.NONE
         reason: str = ""
+        guardrail: str = ""                         # Phase 0a: specific sub-type
+        extra: dict[str, object] = {}               # Phase 0a: sub-type metadata
         if self.contains_internal_leak(clean):
-            error, reason = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')", "contains_internal_leak"
         elif self.is_repetition(clean):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior", "exact_repetition"
         elif self.has_looping_lines(output):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Repetía líneas dentro de la misma respuesta"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Repetía líneas dentro de la misma respuesta", "looping_lines"
         elif self.repeats_recent_line(clean):
-            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Repitió una frase de respuestas recientes"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Repitió una frase de respuestas recientes", "repeats_recent_line"
+            if self._last_matched_phrase:
+                extra["matched_phrase"] = self._last_matched_phrase[:80]
         elif self.is_too_similar_to_recent(clean):
-            error, reason = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3", "token_overlap"
+            extra["overlap_pct"] = round(self._last_similarity_overlap * 100, 1)
         elif self.reuses_looping_opening(clean):
-            error, reason = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'", "reused_opening"
         elif self.claims_inner_life(clean):
-            error, reason = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva"
+            error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva", "claims_inner_life"
+        elif self.CHARACTER_CONTRACT_ENABLED:
+            result = self.breaks_character(clean)
+            if result is not None:
+                error, reason, guardrail = (
+                    ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+                    f"Kira rompió contrato de personaje: {result.subtype}",
+                    "breaks_character",
+                )
+                extra = {
+                    "subtype": result.subtype,
+                    "matched_pattern": result.matched_pattern,
+                    "matched_text": result.matched_text,
+                }
+                if mutate:
+                    self._character_repair_needed = True
         if error != ErrorCode.NONE:
             if mutate:
                 self.register_failure(error=error, reason=reason)
+            # ── Phase 0a metrics: record every rejection with sub-type ──
+            record: dict[str, object] = {
+                "error": error.value,
+                "guardrail": guardrail,
+                "reason": reason,
+                "length": self.response_length,
+                "state": self.state.value,
+            }
+            record.update(extra)
+            self.rejection_log.append(record)
             return False
         if mutate:
             self.recovery.record_success()
             self.failure_count = 0
             self.record_accepted_output(clean)
         return True
+
+    # ── Phase 0: Metrics (zero behaviour change) ────────────────────
+
+    def get_metrics(self) -> dict[str, object]:
+        """Return aggregated rejection metrics for causal audit / dashboard."""
+        total = len(self.rejection_log)
+        by_type: dict[str, int] = {}
+        by_subtype: dict[str, int] = {}
+        total_overlap: float = 0.0
+        overlap_count: int = 0
+        for r in self.rejection_log:
+            err = str(r.get("error", "UNKNOWN"))
+            by_type[err] = by_type.get(err, 0) + 1
+            grd = str(r.get("guardrail", err))
+            by_subtype[grd] = by_subtype.get(grd, 0) + 1
+            ov = r.get("overlap_pct")
+            if isinstance(ov, (int, float)):
+                total_overlap += float(ov)
+                overlap_count += 1
+        return {
+            "total_rejections": total,
+            "by_error_code": by_type,
+            "by_guardrail": by_subtype,
+            "avg_similarity_overlap_pct": round(total_overlap / overlap_count, 1) if overlap_count else None,
+            "current_state": self.state.value,
+            "failure_count": self.recovery.failure_count,
+            "response_length": self.response_length,
+            "active_topic": self.active_topic.title if self.active_topic else None,
+            "topics_queued": len([t for t in self.topics if t.status == TopicStatus.QUEUED]),
+            "last_outputs_count": len(self.last_outputs),
+        }
 
     def enforce_live_safety_cap(self, output: str) -> str:
         """Trim agenda output to the configured live-safety cap on sentence boundaries."""
@@ -833,7 +970,9 @@ class KiraAgendaController:
         if not current_sentences:
             return False
         for recent in self.last_outputs[-5:]:
-            if current_sentences.intersection({s for s in self._sentences(recent) if len(s) > 24}):
+            matches = current_sentences.intersection({s for s in self._sentences(recent) if len(s) > 24})
+            if matches:
+                self._last_matched_phrase = next(iter(matches))
                 return True
         return False
 
@@ -851,6 +990,7 @@ class KiraAgendaController:
                 continue
             overlap = len(tokens & recent_tokens) / max(1, min(len(tokens), len(recent_tokens)))
             if overlap >= 0.78:
+                self._last_similarity_overlap = overlap
                 return True
         return False
 
@@ -876,10 +1016,34 @@ class KiraAgendaController:
         )
         return any(phrase in lowered for phrase in forbidden)
 
+    @staticmethod
+    def breaks_character(text: str) -> CharacterContractResult | None:
+        """Return CharacterContractResult if text breaks character contract, else None.
+
+        Iterates all precompiled CHARACTER_PATTERNS in priority order.
+        Short-circuits on the first match.  Returns None for empty/whitespace-only input.
+        """
+        if not text or not text.strip():
+            return None
+        lowered = text.lower()
+        for category, pattern in KiraAgendaController._CHARACTER_PATTERNS:
+            m = pattern.search(lowered)
+            if m:
+                return CharacterContractResult(
+                    ok=False,
+                    subtype=category,
+                    matched_pattern=category,
+                    matched_text=m.group(0)[:80],
+                )
+        return None
+
     def _topic_action(self, instruction: str) -> AgendaAction:
         self._pending_turns_spoken = self._next_block_size()
         self._pending_action_source = "kira-agenda"
-        prompt = self._build_prompt(instruction=instruction)
+        prompt = self._build_prompt(
+            instruction=instruction,
+            editorial_context=self._consume_editorial_context_block(),
+        )
         self.state = AgendaState.GENERATING
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=self._pending_turns_spoken)
 
@@ -922,7 +1086,17 @@ class KiraAgendaController:
         self.state = AgendaState.GENERATING
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
-    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "") -> str:
+    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "", editorial_context: str = "") -> str:
+        repair_prefix = ""
+        if self.CHARACTER_CONTRACT_ENABLED and self._character_repair_needed:
+            self._character_repair_needed = False
+            repair_prefix = (
+                "REESCRIBE: hablá como Kira, la co-host. "
+                "No menciones contexto, sesión, reflexión, procesamiento. "
+                "No preguntes qué hacer ni ofrezcas ayuda. "
+                "No digas que sos una IA. "
+                "Solo hablá natural como co-host de stream.\n\n"
+            )
         topic = self.active_topic
         title = topic.title if topic else "sin tema activo"
         angle = topic.angle if topic and topic.angle else "mantenerlo concreto, entretenido y seguro"
@@ -933,7 +1107,7 @@ class KiraAgendaController:
         block_size = self._pending_turns_spoken if topic else 1
         last = "\n".join(f"- {line}" for line in self.last_outputs[-3:]) or "- nada todavía"
         style = self.profile.get("style") or "Soná natural, como co-host de stream."
-        return (
+        return repair_prefix + (
             "TAREA: respondé al aire como Kira, co-host del stream, no como streamer.\n"
             "SALIDA PERMITIDA: solo la frase final que Kira diría por TTS.\n"
             "Debe sonar como una intervención natural en vivo, no como guion de presentación ni cierre de episodio.\n"
@@ -958,8 +1132,27 @@ class KiraAgendaController:
             f"RESTRICCIONES:\n{constraints}\n\n"
             f"PTT DEL STREAMER, SI EXISTE:\n{ptt_text or '- sin PTT'}\n\n"
             f"CHAT COMPACTO FILTRADO, SI EXISTE:\n{compact_chat or '- sin chat compacto fresco'}\n\n"
+            f"EDITORIAL CUE CARD, SI EXISTE; USAR UNA SOLA VEZ Y NO MENCIONAR LA ESTRUCTURA:\n{editorial_context or '- sin cue card editorial activo'}\n\n"
             f"ÚLTIMAS LÍNEAS DE KIRA; NO REPETIR NI PARAFRASEAR:\n{last}"
         )
+
+    def _consume_editorial_context_block(self) -> str:
+        topic = self.active_topic
+        if not topic or not topic.editorial_card_id or topic.editorial_card_consumed:
+            return ""
+        topic.editorial_card_consumed = True
+        provider = self._editorial_context_provider
+        if provider is None:
+            return ""
+        try:
+            return provider(topic.editorial_card_id) or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _sanitize_optional_identifier(value: str | None) -> str | None:
+        text = " ".join((value or "").split())
+        return text[:120] if text else None
 
     def _select_next_topic(self) -> Optional[AgendaTopic]:
         queued = self.queued_topics()
