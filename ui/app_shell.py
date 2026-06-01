@@ -886,6 +886,9 @@ class VocalAIApp(ctk.CTk):
             return
         self.kira_agenda.enable()
         self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
+        # Start music bed when co-host mode activates — it's an intentional segment
+        if hasattr(self, "audio_bed") and self.audio_bed.current_track is None and self.audio_bed.enabled:
+            self.audio_bed.request_mood("normal", force=True, boundary=True)
         self._kira_agenda_update_status()
         self._kira_agenda_tick()
 
@@ -959,8 +962,30 @@ class VocalAIApp(ctk.CTk):
         # co-host has exhausted all planned work.  Transition to OFF so
         # the tick stops, the UI reflects reality, and chat flows through
         # the standalone RF3 path without overhead.
+        # Moved AFTER next_action() so _select_next_topic() has a chance
+        # to pick the next queued topic before we declare the session done.
+
+        try:
+            action = self.kira_agenda.next_action(
+                motor_busy=getattr(self.motor_ia, "is_processing", False),
+                kira_speaking=getattr(self.motor_ia, "is_speaking", False),
+            )
+        except Exception:
+            # Safety net: if next_action ever throws (shouldn't — it's
+            # deterministic and runs on internal state only), log, skip
+            # this tick, and reschedule so Kira doesn't go permanently
+            # silent on a live stream.
+            logger.exception("KiraAgendaController.next_action() raised")
+            self._on_stream_admin_log(
+                "[Kira Agenda] Error interno en next_action; reintentando en el siguiente tick."
+            )
+            action = AgendaAction.none()
+
+        self._enqueue_kira_agenda_action(action)
+
         if (
-            self.kira_agenda.state == AgendaState.IDLE
+            action.kind == "none"
+            and self.kira_agenda.state == AgendaState.IDLE
             and self.kira_agenda.active_topic is None
             and not self.kira_agenda.queued_topics()
         ):
@@ -969,12 +994,6 @@ class VocalAIApp(ctk.CTk):
             self._kira_agenda_update_status()
             self._clear_obs_joyita("KiraJoyita")
             return
-
-        action = self.kira_agenda.next_action(
-            motor_busy=getattr(self.motor_ia, "is_processing", False),
-            kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-        )
-        self._enqueue_kira_agenda_action(action)
 
         # Auto-suggestion trigger: on 3rd consecutive IDLE+empty-queue tick (~13.5s)
         if self.kira_agenda.state == AgendaState.IDLE and not self.kira_agenda.queued_topics():
@@ -1910,9 +1929,6 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_speaking_start(self) -> None:
         if hasattr(self, "audio_bed"):
             self.audio_bed.duck()
-            # Auto-start music bed on first Kira response if nothing is playing yet
-            if self.audio_bed.current_track is None and self.audio_bed.enabled:
-                self.audio_bed.request_mood("normal", force=True, boundary=True)
         # Use controller state, not motor source, to decide if this speech
         # was initiated by the agenda state machine.  The controller may
         # emit chat/PTT/stop actions whose motor source does not start
