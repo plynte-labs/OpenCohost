@@ -18,6 +18,15 @@ runtime uncertainty before packaging or broad product polish.
 4. Check `git status --short` before editing; do not overwrite user changes.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
+
+## Product direction update ? 2026-06-05
+
+- The next product/release direction is **OpenCohost**.
+- User reports `OpenCohost.com` is purchased for 3 years.
+- User reports the target repo is secured at `plynte-labs/opencohost`.
+- Treat this as launch-readiness preparation first, not a blind rebrand.
+- Current Conductor track: `opencohost_launch_readiness_20260605`.
+
 ## Current project truth
 
 - VoiceAI has functional prototypes for local AI voice, TTS, SmartAggregator, stream
