@@ -35,6 +35,19 @@ Acceptance criteria:
 - [ ] Define what stays local-first and what may use cloud services.
 - [ ] Define whether VoiceAI remains an internal codename, legacy name, or removed branding.
 
+
+### Requirement: User-Facing Chassis Rename
+
+The project MUST rename only the user-visible chassis from VoiceAI/VocalAI to OpenCohost while preserving Kira and avoiding internal technical renames.
+
+Acceptance criteria:
+
+- [ ] Window title and visible product labels use OpenCohost.
+- [ ] User-facing startup/status/OAuth messages no longer say VoiceAI/VocalAI.
+- [ ] Kira remains the cohost/persona name in UI, prompts, avatar, agenda, and stream flows.
+- [ ] Internal classes, imports, package name, Engram project key, local paths, and runtime app IDs are not renamed in this phase.
+- [ ] Any future internal/repo/class rename is deferred to a separate dedicated track with full regression testing.
+
 ### Requirement: Release Readiness Audit
 
 The project MUST audit release blockers before packaging or migration.
@@ -96,6 +109,8 @@ Acceptance criteria:
 
 - Full UI redesign.
 - Full package installer.
+- Internal repo/package/class/module rename from VoiceAI/VocalAI to OpenCohost.
+- Local data path migration.
 - Legal trademark clearance.
 - Domain/DNS deployment.
 - New feature expansion unrelated to release readiness.

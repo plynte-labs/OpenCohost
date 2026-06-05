@@ -6,10 +6,20 @@
     - [ ] Decide whether Kira is product identity, default persona, or demo persona.
     - [ ] Decide whether VoiceAI remains internal codename or legacy reference.
     - [ ] Document local-first promise and cloud-service boundaries.
+- [ ] Task: Create OpenCohost identity map and staged rename boundary.
+    - [ ] Classify names as platform, persona, legacy/internal, or technical identifier.
+    - [ ] Decide which names can change in public docs before code changes.
+    - [ ] Decide which internal names must stay temporarily to protect runtime stability.
 - [ ] Task: Document naming risk and validation notes.
     - [ ] Record discarded names and why they were rejected.
     - [ ] Record OpenCohost SEO rationale as a hypothesis, not legal proof.
     - [ ] Add legal/trademark validation as external/non-code task.
+
+- [ ] Task: Rename user-facing chassis copy to OpenCohost.
+    - [ ] Update visible window title/product footer copy.
+    - [ ] Update user-facing startup/status/OAuth messages that say VoiceAI/VocalAI.
+    - [ ] Preserve Kira everywhere as persona/cohost identity.
+    - [ ] Do not rename internal classes, package names, imports, paths, or app IDs in this task.
 - [ ] Task: Conductor - User Manual Verification 'Product and Brand Boundary' (Protocol in workflow.md)
 
 ## Phase 2: Repo and Safety Audit
