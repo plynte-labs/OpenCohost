@@ -19,6 +19,8 @@ data/smart_aggregator/
 data/stream_admin/oauth_client.json
 data/stream_admin/oauth_tokens.json
 data/stream_admin/tokens/
+data/
+.coverage
 
 # ── Python ──
 *.py[cod]
