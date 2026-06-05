@@ -15,11 +15,11 @@
     - [ ] Record OpenCohost SEO rationale as a hypothesis, not legal proof.
     - [ ] Add legal/trademark validation as external/non-code task.
 
-- [ ] Task: Rename user-facing chassis copy to OpenCohost.
-    - [ ] Update visible window title/product footer copy.
-    - [ ] Update user-facing startup/status/OAuth messages that say VoiceAI/VocalAI.
-    - [ ] Preserve Kira everywhere as persona/cohost identity.
-    - [ ] Do not rename internal classes, package names, imports, paths, or app IDs in this task.
+- [x] Task: Rename user-facing chassis copy to OpenCohost.
+    - [x] Update visible window title/product footer copy.
+    - [x] Update user-facing startup/status/OAuth messages that say VoiceAI/VocalAI.
+    - [x] Preserve Kira everywhere as persona/cohost identity.
+    - [x] Do not rename internal classes, package names, imports, paths, or app IDs in this task.
 - [ ] Task: Conductor - User Manual Verification 'Product and Brand Boundary' (Protocol in workflow.md)
 
 ## Phase 2: Repo and Safety Audit

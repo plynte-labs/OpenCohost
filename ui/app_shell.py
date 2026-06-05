@@ -115,7 +115,7 @@ def _install_crash_handler() -> None:
             f.write(f"CRASH at {now}\n")
             f.write(f"Thread: {threading.current_thread().name}\n")
             f.write(tb_text)
-        sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
+        sys.stderr.write(f"\n[OpenCohost CRASH] {now}\n{tb_text}\n")
     def _handler(exc_type, exc_value, exc_tb):
         _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
         sys.__excepthook__(exc_type, exc_value, exc_tb)
@@ -132,7 +132,7 @@ class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"VocalAI — Qwen3-TTS + {DEFAULT_MODEL}")
+        self.title(f"OpenCohost — Qwen3-TTS + {DEFAULT_MODEL}")
         geo = _cargar_geometria()
         if geo:
             try:
@@ -229,7 +229,7 @@ class VocalAIApp(ctk.CTk):
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
-        logger.info("Aplicación VoiceAI iniciada.")
+        logger.info("Aplicación OpenCohost iniciada.")
     def _start_motor(self) -> None:
         """Start the IA motor thread after mainloop is running.
         Deferring this avoids 'main thread is not in main loop' errors
@@ -255,7 +255,7 @@ class VocalAIApp(ctk.CTk):
             logger.warning("Startup temp janitor failed: %s", exc)
             return
         if stats.get("removed"):
-            logger.info("Startup temp janitor removed %s VoiceAI artifact(s)", stats["removed"])
+            logger.info("Startup temp janitor removed %s legacy app artifact(s)", stats["removed"])
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
         if self.health_monitor and not getattr(self, "_motor_heartbeat_failure_reported", False):
@@ -401,7 +401,7 @@ class VocalAIApp(ctk.CTk):
         import webbrowser
         self.lbl_author = ctk.CTkLabel(
             status_bar_frame,
-            text="VoiceAI by FranGuh",
+            text="OpenCohost by FranGuh",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#3a86ff",
             cursor="hand2"
@@ -2314,7 +2314,7 @@ class VocalAIApp(ctk.CTk):
             model = self.motor_ia.current_model
             self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
             self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-            self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+            self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
             self.voice_panel._start_ptt_flush_watcher()
@@ -2523,7 +2523,7 @@ class VocalAIApp(ctk.CTk):
                     return
                 if not logged_once:
                     self._print_log(
-                        "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                        "[OBS] No se pudo conectar. OpenCohost reintentara cada 5s. "
                         "Abrí OBS y la conexión se restablecerá automáticamente."
                     )
                     logged_once = True
@@ -2531,7 +2531,7 @@ class VocalAIApp(ctk.CTk):
                 logger.exception("Fallo inesperado en loop de OBS")
                 if not logged_once:
                     self._print_log(
-                        "[OBS] Error inesperado conectando. VoiceAI seguira reintentando cada 5s."
+                        "[OBS] Error inesperado conectando. OpenCohost seguira reintentando cada 5s."
                     )
                     logged_once = True
             time.sleep(retry_delay)
@@ -2539,7 +2539,7 @@ class VocalAIApp(ctk.CTk):
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
-        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._safe_after(lambda: self.model_panel.set_active_model(model))
         self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
@@ -2584,7 +2584,7 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
         self._safe_after(lambda: self.progress_download.pack_forget())
         self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._actualizar_pipeline("idle")
         self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
@@ -2954,6 +2954,6 @@ class VocalAIApp(ctk.CTk):
         try:
             cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=0.0)
         except Exception as e:
-            logger.warning(f"No se pudo limpiar temporales VoiceAI al salir: {e}")
+            logger.warning(f"No se pudo limpiar temporales de la app al salir: {e}")
 
         self.destroy()
