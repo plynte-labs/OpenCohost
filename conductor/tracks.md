@@ -29,7 +29,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Manual LLM Tier Switching — Quality, Balanced, and Fast Models**
+- [x] **Track: Manual LLM Tier Switching — Quality, Balanced, and Fast Models**
   *Link: [./tracks/manual_llm_tier_switching_20260522/](./tracks/manual_llm_tier_switching_20260522/)*
 
 ---
@@ -39,7 +39,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Streaming Speech Pipeline — LLM Streaming to Sentence TTS Playback**
+- [~] **Track: Streaming Speech Pipeline — LLM Streaming to Sentence TTS Playback**
   *Link: [./tracks/streaming_speech_pipeline_20260529/](./tracks/streaming_speech_pipeline_20260529/)*
 
 ---
@@ -49,5 +49,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Ollama Offline UI/UX Guardrails — Prevent Unexpected Switches and Silent Freezing**
+- [x] **Track: Ollama Offline UI/UX Guardrails — Prevent Unexpected Switches and Silent Freezing**
   *Link: [./tracks/ollama_offline_ux_guardrails_20260601/](./tracks/ollama_offline_ux_guardrails_20260601/)*
