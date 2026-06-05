@@ -55,5 +55,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: OpenCohost Launch Readiness ? Brand, Repo Safety, and Release Validation**
+- [~] **Track: OpenCohost Launch Readiness ? Brand, Repo Safety, and Release Validation**
   *Link: [./tracks/opencohost_launch_readiness_20260605/](./tracks/opencohost_launch_readiness_20260605/)*
