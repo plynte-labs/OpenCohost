@@ -1,0 +1,2 @@
+#!/bin/sh
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/git-safety-check.ps1

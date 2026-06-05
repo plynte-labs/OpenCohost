@@ -62,6 +62,8 @@ without a fresh user decision.
 - Do not remove feature gates, filters, or validation without verifying current behavior first.
 - Never expose raw chat to LLM prompts, diagnostics, logs, or persistence.
 - Keep LiveVoice continuous and PTT separate unless the user explicitly asks to touch them.
+- Pre-commit safety hooks are expected to block private/runtime artifacts and obvious secrets.
+  Do not bypass them unless the user explicitly approves after manual review.
 
 ## Known useful test commands
 
