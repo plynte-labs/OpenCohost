@@ -57,3 +57,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [~] **Track: OpenCohost Launch Readiness ? Brand, Repo Safety, and Release Validation**
   *Link: [./tracks/opencohost_launch_readiness_20260605/](./tracks/opencohost_launch_readiness_20260605/)*
+
+---
+
+- [ ] **Track: OBS Runtime Connection Control — Connect on Toggle, Live Test, and Cancel Retry Loop**
+  *Link: [./tracks/obs_runtime_connection_control_20260605/](./tracks/obs_runtime_connection_control_20260605/)*
