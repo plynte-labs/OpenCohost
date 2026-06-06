@@ -25,7 +25,7 @@
     - [x] Verify no agenda-prefetch overlap with direct processing/speech
     - [x] Verify balanced `speaking_start` / `speaking_end`
     - [x] Verify empty/invalid TTS text balances speech events and clears source ownership
-- [ ] Task: Conductor - User Manual Verification 'Phase 2 - Deterministic Smoke Harness' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2 - Deterministic Smoke Harness' (Protocol in workflow.md)
 
 ## Phase 3 - Semi-Real Runtime Smoke
 
@@ -41,12 +41,12 @@
 
 ## Phase 4 - Release Validation Documentation
 
-- [ ] Task: Document how to run smoke validation
-    - [ ] Add command examples
-    - [ ] Document expected pass/fail output
-    - [ ] Document when to use deterministic vs semi-real mode
-- [ ] Task: Verify release-readiness usage
-    - [ ] Run focused unit tests related to cohost/audio/motor contracts
-    - [ ] Run deterministic smoke harness
-    - [ ] Run semi-real smoke only when operator explicitly opts in
+- [x] Task: Document how to run smoke validation
+    - [x] Add command examples
+    - [x] Document expected pass/fail output
+    - [x] Document when to use deterministic vs semi-real mode
+- [x] Task: Verify release-readiness usage
+    - [x] Run focused unit tests related to cohost/audio/motor contracts
+    - [x] Run deterministic smoke harness
+    - [x] Keep semi-real smoke opt-in only; not run without explicit operator request
 - [ ] Task: Conductor - User Manual Verification 'Phase 4 - Release Validation Documentation' (Protocol in workflow.md)
