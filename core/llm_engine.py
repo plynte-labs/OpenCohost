@@ -1172,6 +1172,7 @@ class MotorVocalIA(threading.Thread):
                 self._log("ERROR: Archivo de referencia no existe o no ha sido cargado.", level="error")
                 with self._lock:
                     self._speaking = False
+                    self._current_speech_source = None
                 self.ui_callback("speaking_end")
                 return
 
@@ -1207,6 +1208,7 @@ class MotorVocalIA(threading.Thread):
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
             with self._lock:
                 self._speaking = False
+                self._current_speech_source = None
             self.ui_callback("speaking_end")
             return
 
@@ -1370,6 +1372,7 @@ class MotorVocalIA(threading.Thread):
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")
         with self._lock:
             self._speaking = False
+            self._current_speech_source = None
         self.ui_callback("speaking_end")
 
         hilo_productor.join(timeout=2.0)
