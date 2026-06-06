@@ -170,6 +170,31 @@ def test_agenda_output_sanitizer_replaces_artificial_closings():
     assert "matices" in sanitized
 
 
+def test_tts_sanitizer_preserves_markdown_emphasis_content():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    text = "Esto es *importante*. Esto es **muy importante**. Y esto es ***crítico***."
+
+    assert motor._sanitize_tts_text_for_playback(text) == (
+        "Esto es importante. Esto es muy importante. Y esto es crítico."
+    )
+
+
+def test_tts_sanitizer_keeps_math_and_code_like_asterisks():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    text = "Cinco por diez es 5*10=50. En código a*b queda igual. Potencia: 2 ** 8."
+
+    assert motor._sanitize_tts_text_for_playback(text) == text
+
+
+def test_tts_sanitizer_fast_path_without_asterisks_returns_same_text():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    text = "Respuesta normal sin énfasis markdown."
+
+    assert motor._sanitize_tts_text_for_playback(text) is text
+
+
 def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     spoken = []

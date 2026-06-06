@@ -77,3 +77,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: Runtime Smoke Harness - Real App Cohost and Audio Safety Validation**
   *Link: [./tracks/runtime_smoke_harness_20260606/](./tracks/runtime_smoke_harness_20260606/)*
+
+---
+
+- [x] **Track: TTS Markdown Emphasis Sanitizer - Preserve Emphasized Words Without Breaking Expressions**
+  *Link: [./tracks/tts_markdown_emphasis_sanitizer_20260606/](./tracks/tts_markdown_emphasis_sanitizer_20260606/)*

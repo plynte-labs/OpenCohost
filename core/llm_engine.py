@@ -30,6 +30,9 @@ logger = get_logger()
 # enqueuing a Qwen chunk. Keep the consumer bounded, but do not give up sooner
 # than the producer's configured request timeout.
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
+_TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
+_TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
+
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -1117,6 +1120,22 @@ class MotorVocalIA(threading.Thread):
 
             self._hablar(dialogo, source=source)
 
+    @staticmethod
+    def _sanitize_tts_text_for_playback(text: str) -> str:
+        """Strip common Markdown emphasis markers without deleting speech text."""
+        if "*" not in text:
+            return text
+
+        def replace_emphasis(match: re.Match) -> str:
+            inner = match.group(2)
+            if not any(ch.isalpha() for ch in inner):
+                return match.group(0)
+            if any(ch in _TTS_MARKDOWN_OPERATOR_CHARS for ch in inner):
+                return match.group(0)
+            return inner
+
+        return _TTS_MARKDOWN_EMPHASIS_RE.sub(replace_emphasis, text)
+
     def _sanitize_agenda_output(self, text: str) -> str:
         """Last line of defense for autonomous agenda speech."""
         clean = " ".join((text or "").strip().split())
@@ -1156,7 +1175,7 @@ class MotorVocalIA(threading.Thread):
                 self.ui_callback("speaking_end")
                 return
 
-        texto_limpio = re.sub(r'\*[^*]+\*', '', texto_a_generar)
+        texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
         texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
 
         fragmentos_brutos = re.split(r'(?<=[.!?])\s+', texto_limpio)
