@@ -406,6 +406,132 @@ def test_poll_health_status_preserves_red_after_motor_failure_reported():
         _restore_app_shell_module(old_module)
 
 
+class _RecordingThread:
+    instances = []
+
+    def __init__(self, target, args=(), kwargs=None, daemon=False):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+        self.daemon = daemon
+        self.started = False
+        _RecordingThread.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def is_alive(self):
+        return self.started
+
+
+def _obs_config(enabled=True):
+    return SimpleNamespace(
+        obs=SimpleNamespace(
+            enabled=enabled,
+            host="localhost",
+            port=4455,
+            password="",
+            source_name="KiraAvatar",
+            scene_name="",
+        ),
+        assets_folder=Path("assets/avatar"),
+        state_images={},
+    )
+
+
+def test_obs_start_from_config_creates_runtime_client_and_one_retry_thread():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._obs_client = None
+        app._obs_retry_thread = None
+        app._obs_retry_cancel = None
+        app._avatar_bridge = MagicMock()
+        app._avatar_panel = MagicMock()
+        app._print_log = MagicMock()
+
+        _RecordingThread.instances = []
+        fake_client = MagicMock()
+
+        with patch("avatar.avatar_config.load_avatar_config", return_value=_obs_config(enabled=True)):
+            with patch.object(app_shell, "OBSClient", return_value=fake_client):
+                with patch.object(app_shell.threading, "Thread", _RecordingThread):
+                    app._obs_start_from_config()
+                    app._obs_start_from_config()
+
+        assert app._obs_client is fake_client
+        assert len(_RecordingThread.instances) == 1
+        assert _RecordingThread.instances[0].started is True
+
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_obs_stop_runtime_cancels_retry_disconnects_and_updates_panel():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        cancel_event = threading.Event()
+        obs_client = MagicMock()
+        app._obs_client = obs_client
+        app._obs_retry_cancel = cancel_event
+        app._obs_retry_thread = MagicMock()
+        app._avatar_panel = MagicMock()
+        app._print_log = MagicMock()
+
+        app._obs_stop_runtime()
+
+        assert cancel_event.is_set() is True
+        obs_client.disconnect.assert_called_once()
+        assert app._obs_client is None
+        app._avatar_panel.set_obs_client.assert_called_once_with(None)
+
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_on_closing_cancels_obs_retry_loop_before_destroy():
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        cancel_event = threading.Event()
+        obs_client = MagicMock()
+        app._closing = False
+        app._ui_state_sub_id = "sub-1"
+        app._ui_state = SimpleNamespace(unsubscribe=MagicMock())
+        app.status_bar = None
+        app._stop_speaking_alt_timer = MagicMock()
+        app._stop_inactivity_timer = MagicMock()
+        app._obs_client = obs_client
+        app._obs_retry_cancel = cancel_event
+        app._obs_retry_thread = MagicMock()
+        app._avatar_panel = MagicMock(cleanup=MagicMock(), set_obs_client=MagicMock())
+        app.ptt = SimpleNamespace(stop_listener=MagicMock())
+        app.health_monitor = None
+        app._avatar_bridge = SimpleNamespace(set_state=MagicMock())
+        app.smart_agg = None
+        app.stream_admin_ui = SimpleNamespace(chat_connected=False, cleanup=MagicMock())
+        app.winfo_x = MagicMock(return_value=1)
+        app.winfo_y = MagicMock(return_value=2)
+        app.winfo_width = MagicMock(return_value=3)
+        app.winfo_height = MagicMock(return_value=4)
+        app.motor_ia = SimpleNamespace(
+            command_queue=queue.Queue(),
+            release_owned_ollama_model=MagicMock(return_value=True),
+        )
+        app.destroy = MagicMock()
+
+        with patch.object(app_shell, "cleanup_voiceai_temp_artifacts"):
+            app.on_closing()
+
+        assert cancel_event.is_set() is True
+        obs_client.disconnect.assert_called_once()
+        assert app._obs_client is None
+
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_model_switch_pending_logs_ollama_blocker_when_motor_not_ready():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:

@@ -74,6 +74,12 @@ def panel(mock_parent):
     return p
 
 
+def _obs_widget(value):
+    widget = MagicMock()
+    widget.get.return_value = value
+    return widget
+
+
 # ---------------------------------------------------------------------------
 # 1. Panel builds without real assets
 # ---------------------------------------------------------------------------
@@ -209,6 +215,76 @@ class TestPreviewFallback:
 
         assert panel._preview_image_ref is idle_ref
         panel._preview_label.configure.assert_called_with(image=idle_ref, text="")
+
+
+class TestOBSLifecycleCallbacks:
+    def test_obs_toggle_on_saves_config_and_requests_runtime_enable(self, mock_parent):
+        from ui.avatar_panel import AvatarPanel
+
+        on_enable = MagicMock()
+        on_disable = MagicMock()
+        panel = AvatarPanel(
+            parent_frame=mock_parent,
+            on_obs_enable=on_enable,
+            on_obs_disable=on_disable,
+        )
+        panel._obs_switch = _obs_widget(True)
+        panel._obs_host_entry = _obs_widget("localhost")
+        panel._obs_port_entry = _obs_widget("4455")
+        panel._obs_pass_entry = _obs_widget("")
+        panel._obs_source_entry = _obs_widget("KiraAvatar")
+        panel._obs_connect_btn = MagicMock()
+
+        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+            panel._on_obs_toggle()
+
+        assert panel.config.obs.enabled is True
+        save_config.assert_called()
+        on_enable.assert_called_once()
+        on_disable.assert_not_called()
+
+    def test_obs_toggle_off_saves_config_and_requests_runtime_disable(self, mock_parent):
+        from ui.avatar_panel import AvatarPanel
+
+        on_enable = MagicMock()
+        on_disable = MagicMock()
+        panel = AvatarPanel(
+            parent_frame=mock_parent,
+            on_obs_enable=on_enable,
+            on_obs_disable=on_disable,
+        )
+        panel._obs_switch = _obs_widget(False)
+        panel._obs_host_entry = _obs_widget("localhost")
+        panel._obs_port_entry = _obs_widget("4455")
+        panel._obs_pass_entry = _obs_widget("")
+        panel._obs_source_entry = _obs_widget("KiraAvatar")
+        panel._obs_connect_btn = MagicMock()
+
+        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+            panel._on_obs_toggle()
+
+        assert panel.config.obs.enabled is False
+        save_config.assert_called()
+        on_disable.assert_called_once()
+        on_enable.assert_not_called()
+
+    def test_obs_connect_button_requests_live_runtime_connection(self, mock_parent):
+        from ui.avatar_panel import AvatarPanel
+
+        on_connect = MagicMock()
+        panel = AvatarPanel(parent_frame=mock_parent, on_obs_connect=on_connect)
+        panel._obs_host_entry = _obs_widget("localhost")
+        panel._obs_port_entry = _obs_widget("4455")
+        panel._obs_pass_entry = _obs_widget("")
+        panel._obs_source_entry = _obs_widget("KiraAvatar")
+        panel._obs_connect_btn = MagicMock()
+        panel._obs_status_label = MagicMock()
+
+        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+            panel._test_obs_connection()
+
+        save_config.assert_called_once_with(panel.config)
+        on_connect.assert_called_once()
 
     def test_load_failure_keeps_cached_idle_image(self, panel, tmp_path):
         panel.build()
