@@ -30,7 +30,6 @@ logger = get_logger()
 # enqueuing a Qwen chunk. Keep the consumer bounded, but do not give up sooner
 # than the producer's configured request timeout.
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
-
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -47,6 +46,7 @@ class MotorVocalIA(threading.Thread):
         self._processing = False
         self._speaking = False
         self._current_speech_source: Optional[str] = None
+        self._current_processing_source: Optional[str] = None
         self._downloading = False
         _startup_model, self._model_source = resolve_startup_model()
         self.current_model = _startup_model
@@ -125,6 +125,11 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             return self._current_speech_source
 
+    @property
+    def current_processing_source(self):
+        with self._lock:
+            return self._current_processing_source
+
     def run(self):
         self._log("Inicializando cliente ligero...")
         try:
@@ -183,17 +188,21 @@ class MotorVocalIA(threading.Thread):
             if self.motor_tts == "pesado" and not self.voz_referencia:
                 self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
                 return
-            if self._processing:
+            if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
                 self.enqueue(payload, priority=1, source="direct")
                 return
-            self._processing = True
+            with self._lock:
+                self._processing = True
+                self._current_processing_source = "direct"
             self.ui_callback("processing")
             try:
                 self._ejecutar_inferencia(payload, source="direct")
             finally:
-                self._processing = False
+                with self._lock:
+                    self._processing = False
+                    self._current_processing_source = None
                 self.ui_callback("idle")
                 # After finishing, check priority queue and accumulation
                 self._process_priority_queue()
@@ -511,12 +520,16 @@ class MotorVocalIA(threading.Thread):
                 accumulated = self._flush_accumulation()
                 if accumulated:
                     self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
-                    self._processing = True
+                    with self._lock:
+                        self._processing = True
+                        self._current_processing_source = "accumulated"
                     self.ui_callback("processing")
                     try:
                         self._ejecutar_inferencia(accumulated, source="accumulated")
                     finally:
-                        self._processing = False
+                        with self._lock:
+                            self._processing = False
+                            self._current_processing_source = None
                         self.ui_callback("idle")
                 return
 
@@ -524,23 +537,31 @@ class MotorVocalIA(threading.Thread):
 
         source_label = "PTT" if source == "ptt" else source
         self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
-        self._processing = True
+        with self._lock:
+            self._processing = True
+            self._current_processing_source = source
         self.ui_callback("processing")
         try:
             self._ejecutar_inferencia(payload, source=source)
         finally:
-            self._processing = False
+            with self._lock:
+                self._processing = False
+                self._current_processing_source = None
             self.ui_callback("idle")
             # After processing, check accumulation buffer
             accumulated = self._flush_accumulation()
             if accumulated:
                 self._log(f"Procesando acumulación posterior...")
-                self._processing = True
+                with self._lock:
+                    self._processing = True
+                    self._current_processing_source = "accumulated"
                 self.ui_callback("processing")
                 try:
                     self._ejecutar_inferencia(accumulated, source="accumulated")
                 finally:
-                    self._processing = False
+                    with self._lock:
+                        self._processing = False
+                        self._current_processing_source = None
                     self.ui_callback("idle")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):

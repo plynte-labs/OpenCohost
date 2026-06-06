@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core import llm_engine
+from ui import app_shell
 from smart_aggregator.kira_agenda_controller import (
     AgendaAction,
     AgendaState,
@@ -142,6 +143,73 @@ class TestGAP001PrefetchYieldsToPTT:
 
         motor.enqueue("chat message", priority=1, source="chat")
         assert motor.has_pending_priority_before(2) is True
+
+
+class TestCohostAudioArbitrationCrash:
+    """Regression tests for direct interaction racing agenda-prefetch playback."""
+
+    def test_direct_command_is_queued_while_agenda_is_speaking(self):
+        motor = _build_motor()
+        motor.is_ready = True
+        motor.motor_tts = "ligero"
+        with motor._lock:
+            motor._speaking = True
+            motor._current_speech_source = "kira-agenda"
+
+        with patch.object(motor, "_ejecutar_inferencia") as ejecutar:
+            motor._dispatch_command("process_context", "pregunta directa del operador")
+
+        ejecutar.assert_not_called()
+        assert [item[3] for item in motor._priority_queue] == ["direct"]
+        assert motor._priority_queue[0][0] == 1
+
+    def test_agenda_prefetch_does_not_play_while_direct_is_processing(self):
+        app = object.__new__(app_shell.VocalAIApp)
+        app.motor_ia = _build_motor()
+        app.motor_ia._prefetched_agenda = {
+            "payload": "prefetched prompt",
+            "dialogo": "respuesta agenda obsoleta",
+            "priority": 2,
+            "source": "kira-agenda",
+        }
+        app.motor_ia._prefetch_done.set()
+        with app.motor_ia._lock:
+            app.motor_ia._processing = True
+            app.motor_ia._current_processing_source = "direct"
+        action = AgendaAction(
+            kind="enqueue",
+            prompt="prefetched prompt",
+            priority=2,
+            source="kira-agenda",
+        )
+        app._kira_agenda_prefetched_action = action
+        app.kira_agenda = MagicMock()
+        app._on_stream_admin_log = MagicMock()
+        app._kira_agenda_update_status = MagicMock()
+
+        with patch.object(app.motor_ia, "play_prefetched_agenda", wraps=app.motor_ia.play_prefetched_agenda) as play:
+            assert app._kira_agenda_play_prefetched_if_ready() is False
+
+        play.assert_not_called()
+        assert app.motor_ia._prefetched_agenda is None
+        app._on_stream_admin_log.assert_called()
+
+    def test_rapid_direct_commands_queue_while_agenda_audio_is_active(self):
+        motor = _build_motor()
+        motor.is_ready = True
+        motor.motor_tts = "ligero"
+        with motor._lock:
+            motor._speaking = True
+            motor._current_speech_source = "kira-agenda"
+
+        with patch.object(motor, "_ejecutar_inferencia") as ejecutar:
+            for index in range(5):
+                motor._dispatch_command("process_context", f"pregunta directa {index}")
+
+        ejecutar.assert_not_called()
+        sources = [item[3] for item in motor._priority_queue]
+        assert sources == ["direct"] * 5
+        assert all(item[0] == 1 for item in motor._priority_queue)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

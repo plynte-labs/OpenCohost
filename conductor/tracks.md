@@ -62,3 +62,18 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [x] **Track: OBS Runtime Connection Control — Connect on Toggle, Live Test, and Cancel Retry Loop**
   *Link: [./tracks/obs_runtime_connection_control_20260605/](./tracks/obs_runtime_connection_control_20260605/)*
+
+---
+
+- [x] **Track: Cohost Audio Arbitration Crash - Prevent Agenda Prefetch Over Direct Interactions**
+  *Link: [./tracks/cohost_audio_arbitration_crash_20260606/](./tracks/cohost_audio_arbitration_crash_20260606/)*
+
+---
+
+- [ ] **Track: Crash Reporting Hardening - Python, Tk, Thread, and Native Fatal Logs**
+  *Link: [./tracks/crash_reporting_hardening_20260606/](./tracks/crash_reporting_hardening_20260606/)*
+
+---
+
+- [ ] **Track: Runtime Smoke Harness - Real App Cohost and Audio Safety Validation**
+  *Link: [./tracks/runtime_smoke_harness_20260606/](./tracks/runtime_smoke_harness_20260606/)*

@@ -1322,6 +1322,19 @@ class VocalAIApp(ctk.CTk):
             return False
         return bool(self.motor_ia.has_pending_priority_before(action.priority))
 
+    def _kira_agenda_has_non_agenda_audio_work(self) -> bool:
+        """Return True when a human/direct path owns processing or speech."""
+        processing_source = str(getattr(self.motor_ia, "current_processing_source", "") or "")
+        speech_source = str(getattr(self.motor_ia, "current_speech_source", "") or "")
+        processing = bool(getattr(self.motor_ia, "is_processing", False))
+        speaking = bool(getattr(self.motor_ia, "is_speaking", False))
+
+        if processing and not processing_source.startswith("kira-agenda"):
+            return True
+        if speaking and not speech_source.startswith("kira-agenda"):
+            return True
+        return False
+
     def _kira_agenda_consume_pending_chat_if_due(self) -> bool:
         compact_chat = getattr(self, "_kira_agenda_pending_compact_chat", "").strip()
         if not compact_chat or not hasattr(self, "kira_agenda"):
@@ -1353,6 +1366,10 @@ class VocalAIApp(ctk.CTk):
             return False
         if self._kira_agenda_has_higher_priority_pending(action):
             self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
+            self._kira_agenda_clear_prefetch()
+            return False
+        if self._kira_agenda_has_non_agenda_audio_work():
+            self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
             self._kira_agenda_clear_prefetch()
             return False
         if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
