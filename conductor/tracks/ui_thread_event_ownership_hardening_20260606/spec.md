@@ -2,9 +2,8 @@
 
 ## Status
 
-In progress. The first minimal slice hardens `MotorVocalIA` event dispatch by
-routing worker-thread motor events onto the Tk main loop before executing AppShell
-handlers. Broader recording/PTT/OBS worker callback ownership remains pending.
+Complete. Worker-thread UI scheduling now routes through a queue drained on the
+Tk main loop before executing AppShell handlers or delayed UI callbacks.
 
 ## Discovery
 
@@ -75,3 +74,18 @@ thread and emits frequent UI status events (`processing`, `speaking_start`,
 
 This avoids rewriting the UI while removing the most direct worker-thread path
 into Tk widget/timer mutation.
+
+## Completed Design
+
+The final hardening keeps the public behavior intact while strengthening the
+thread boundary:
+
+- `MotorVocalIA` events from worker threads enqueue `_handle_motor_event(...)`
+  instead of invoking handlers directly.
+- `_safe_after(...)` now supports delayed callbacks and queues work when called
+  off the main thread.
+- `_process_ui_tasks()` drains the queue on the Tk main loop and performs the
+  actual `after(...)` scheduling there.
+- PTT state callbacks, recording worker updates, OBS retry UI handoff, Stream
+  Admin worker handoffs, and panel `schedule_ui_update` callbacks use
+  `_safe_after(...)`.

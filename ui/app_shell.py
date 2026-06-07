@@ -119,6 +119,7 @@ class VocalAIApp(ctk.CTk):
             self.geometry("1100x700")
         self.minsize(800, 500)
         self.log_queue = queue.Queue()
+        self._ui_task_queue = queue.Queue()
         self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
         self._modo_compacto: bool = False
@@ -157,7 +158,9 @@ class VocalAIApp(ctk.CTk):
         # PTT Manager
         self.ptt = PTTManager(logger=logger)
         self.ptt.set_status_callback(self._on_ptt_status_change)
-        self.ptt.set_state_callback(self._actualizar_pipeline)
+        self.ptt.set_state_callback(
+            lambda estado: self._safe_after(lambda: self._actualizar_pipeline(estado))
+        )
         self.ptt.set_log_callback(lambda msg: self._print_log(msg))
         # Avatar state bridge (independent from Tkinter)
         self._avatar_bridge = AvatarStateBridge()
@@ -203,7 +206,8 @@ class VocalAIApp(ctk.CTk):
         # Initialize smart aggregator and stream admin
         self._init_smart_aggregator()
         self._init_stream_admin()
-        # Start log processing
+        # Start log and cross-thread UI task processing
+        self.after(50, self._process_ui_tasks)
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
@@ -473,7 +477,7 @@ class VocalAIApp(ctk.CTk):
             on_motor_event=self._on_motor_event,
             on_pipeline_change=self._actualizar_pipeline,
             dispositivo_seleccionado=self.dispositivo_seleccionado,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             external_primary_button=self._primary_speak_btn,
         )
         self.voice_panel.create_voice_panel()
@@ -639,7 +643,7 @@ class VocalAIApp(ctk.CTk):
             ui_state=self._ui_state,
             dispatcher=self._model_dispatcher,
             on_log=self._print_log,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None)),
         )
         self.model_panel.build()
@@ -653,7 +657,7 @@ class VocalAIApp(ctk.CTk):
         # Profile panel
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
-        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=lambda fn: self.after(0, fn))
+        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after)
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
@@ -812,7 +816,7 @@ class VocalAIApp(ctk.CTk):
             ui_state=self._ui_state,
             dispatcher=CallbackDispatcher(source="StreamAdminUI"),
             on_log=self._on_stream_admin_log,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
         )
         self.stream_admin_ui.build(stream_admin_panel)
         # Wire stream content frames to side_panel sub-tabs
@@ -863,7 +867,7 @@ class VocalAIApp(ctk.CTk):
         self._avatar_panel = AvatarPanel(
             parent_frame=avatar_panel_frame,
             on_log=lambda msg: self._print_log(msg),
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             on_obs_enable=lambda: self._obs_start_from_config(),
             on_obs_disable=lambda: self._obs_stop_runtime(),
             on_obs_connect=lambda: self._obs_connect_now(),
@@ -882,7 +886,7 @@ class VocalAIApp(ctk.CTk):
             log_queue=self.log_queue,
             text_kira_response=self.text_kira_response,
             on_log_action=None,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
         )
         self._advanced_mode_panel = self._advanced_panel.build()
         self.consola = self._advanced_panel.consola
@@ -1477,7 +1481,7 @@ class VocalAIApp(ctk.CTk):
                 if "Falta scope de escritura" in str(e):
                     hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
                 try:
-                    self.after(0, lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
+                    self._safe_after(lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
                 except Exception:
                     self._notify_operator("Stream Admin", str(e), level="error")
                 self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
@@ -1731,7 +1735,7 @@ class VocalAIApp(ctk.CTk):
                     self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado aviso: {e}")
                     if failures >= max_failures or "Token" in str(e) or "Permisos" in str(e):
                         self._on_stream_admin_log("[StreamAdmin] Chat autenticado detenido por fallos consecutivos. Reconecta cuando el proveedor esté estable.")
-                        self.after(0, self._stream_admin_disconnect_api_chat)
+                        self._safe_after(self._stream_admin_disconnect_api_chat)
                         break
                     delay = min(60.0, 5.0 * (2 ** (failures - 1)))
                 if self.stream_admin_ui._chat_stop:
@@ -1889,7 +1893,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_track_chat_user(self, message: dict) -> None:
         self.stream_admin_ui.track_chat_user(message)
-        self.after(0, self.stream_admin_ui.refresh_user_list)
+        self._safe_after(self.stream_admin_ui.refresh_user_list)
 
     def _stream_admin_refresh_user_list(self) -> None:
         frame_users = self.stream_admin_ui._widget("frame_stream_users")
@@ -1959,9 +1963,9 @@ class VocalAIApp(ctk.CTk):
         self.stream_admin_ui._sync_controls(state)
 
     def _on_stream_admin_log(self, msg: str) -> None:
-        self.after(0, lambda m=msg: self._append_stream_admin_log(m))
+        self._safe_after(lambda m=msg: self._append_stream_admin_log(m))
         clean = msg.replace("[StreamAdmin] ", "")
-        self.after(0, lambda m=clean: self._log_accion(m))
+        self._safe_after(lambda m=clean: self._log_accion(m))
 
     def _append_stream_admin_log(self, msg: str) -> None:
         if not hasattr(self, "_advanced_panel"):
@@ -2013,7 +2017,7 @@ class VocalAIApp(ctk.CTk):
             lbl_kira_chat_state=self.lbl_kira_chat_state,
             status_bar=self.status_bar,
             on_log=lambda msg: self.log_queue.put(msg),
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             on_track_chat_user=lambda msg: self._stream_admin_track_chat_user(msg),
             on_ingest_rf3=lambda evt, data: self._stream_admin_ingest_rf3_event(evt, data),
             on_joyita=lambda text: self._on_joyita_to_obs(text),
@@ -2261,7 +2265,28 @@ class VocalAIApp(ctk.CTk):
     # Motor event handler
     # ──────────────────────────────────────────────
 
-    def _safe_after(self, func) -> None:
+    def _process_ui_tasks(self) -> None:
+        task_queue = self.__dict__.get("_ui_task_queue")
+        if task_queue is None:
+            return
+
+        while True:
+            try:
+                delay_ms, func = task_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self.after(delay_ms, func)
+            except RuntimeError:
+                pass
+
+        if not self.__dict__.get("_closing", False):
+            try:
+                self.after(50, self._process_ui_tasks)
+            except RuntimeError:
+                pass
+
+    def _safe_after(self, func, delay_ms: int = 0) -> None:
         """Schedule a UI update on the main thread, safely handling startup race conditions.
 
         During startup the motor thread may fire events before Tkinter enters
@@ -2269,8 +2294,13 @@ class VocalAIApp(ctk.CTk):
         silently skip — the UI will be in its initial state and subsequent
         events will update it once the loop is running.
         """
+        if threading.current_thread() is not threading.main_thread():
+            task_queue = self.__dict__.get("_ui_task_queue")
+            if task_queue is not None:
+                task_queue.put((delay_ms, func))
+                return
         try:
-            self.after(0, func)
+            self.after(delay_ms, func)
         except RuntimeError:
             pass
 
@@ -2580,7 +2610,7 @@ class VocalAIApp(ctk.CTk):
                     active_client.on_state_change(self._avatar_bridge.get_state())
                     try:
                         if self.winfo_exists():
-                            self.after(0, lambda: self._avatar_panel.set_obs_client(active_client))
+                            self._safe_after(lambda: self._avatar_panel.set_obs_client(active_client))
                     except Exception:
                         pass
                     return
@@ -2719,7 +2749,7 @@ class VocalAIApp(ctk.CTk):
     def _hilo_grabacion(self) -> None:
         filepath = os.path.join(BASE_DIR, "referencia_grabada.wav")
         self._print_log(f"\n[Grabación] 🔴 GRABANDO {RECORDING_DURATION}s... Habla ahora.")
-        self.after(0, lambda: self.btn_grabar.configure(state="disabled", text="Grabando...", fg_color="darkred"))
+        self._safe_after(lambda: self.btn_grabar.configure(state="disabled", text="Grabando...", fg_color="darkred"))
         try:
             recording = sd.rec(int(RECORDING_DURATION * RECORDING_SAMPLERATE), samplerate=RECORDING_SAMPLERATE, channels=1, dtype="float32", device=self.dispositivo_seleccionado)
             sd.wait()
@@ -2736,14 +2766,14 @@ class VocalAIApp(ctk.CTk):
             def ask_use_audio():
                 response["use"] = messagebox.askyesno("Grabación Finalizada", "Audio capturado correctamente.\n\n¿Usar como voz de referencia para la IA?")
                 response_ready.set()
-            self.after(0, ask_use_audio)
+            self._safe_after(ask_use_audio)
             if not response_ready.wait(timeout=120):
                 self._print_log("[Grabación] Confirmación agotó tiempo; audio descartado por seguridad.")
             if response["use"]:
                 self._print_log("[Sistema] Perfil de voz enviado a la IA.")
                 self.motor_ia.command_queue.put(("set_voice", filepath))
-                self.after(0, lambda: self.btn_ws.configure(state="normal", fg_color="#555555"))
-                self.after(0, lambda: self.btn_enviar.configure(state="normal"))
+                self._safe_after(lambda: self.btn_ws.configure(state="normal", fg_color="#555555"))
+                self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
             else:
                 self._print_log("[Grabación] ❌ Descartada.")
                 if os.path.exists(filepath):
@@ -2752,7 +2782,7 @@ class VocalAIApp(ctk.CTk):
             self._print_log(f"[ERROR Grabación]: {e}")
             logger.exception("Error durante grabación")
         finally:
-            self.after(0, lambda: self.btn_grabar.configure(state="normal", text="🎤 Grabar", fg_color="#555555"))
+            self._safe_after(lambda: self.btn_grabar.configure(state="normal", text="🎤 Grabar", fg_color="#555555"))
 
     def _cargar_voz(self) -> None:
         filepath = filedialog.askopenfilename(title="Seleccionar muestra de voz", filetypes=[("Audio WAV", "*.wav")])
@@ -2779,7 +2809,7 @@ class VocalAIApp(ctk.CTk):
             self.btn_enviar.configure(state="normal")
             self.btn_voz.configure(text="WAV Cargado ✅", fg_color="#1f5a3a")
             self._print_log(f"[Sistema] Perfil de voz cargado ({duration:.1f}s).")
-            self.after(2000, lambda: self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555"))
+            self._safe_after(lambda: self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555"), delay_ms=2000)
 
     def _enviar_contexto_manual(self) -> None:
         texto = self.entry_chat.get().strip()
