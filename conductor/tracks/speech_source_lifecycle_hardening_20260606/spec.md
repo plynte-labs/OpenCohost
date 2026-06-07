@@ -48,3 +48,24 @@ harness track because it is a production behavior concern:
   TTS reference audio.
 - Existing cohost/direct priority tests continue to pass.
 - Runtime smoke harness reports `no_stale_speech_source: true`.
+
+## Approved Design
+
+`current_speech_source` is an ownership signal, not a historical diagnostic.
+The source is set before `speaking_start`, and it must be cleared before
+`speaking_end` is emitted so callbacks that react to `speaking_end` observe that
+audio ownership has already been released.
+
+The focused audit maps `_hablar()` to these production-relevant paths:
+
+- Missing heavy TTS reference: start event is emitted, source clears, end event
+  is emitted, and the method returns.
+- Empty, `None`, or otherwise invalid TTS text: text is normalized to an empty
+  string, no audio generation runs, source clears, and end event is emitted.
+- Normal TTS completion: source clears before the final end event.
+- Playback exception: playback failure is logged, temporary audio cleanup still
+  runs, source clears before the final end event.
+
+This keeps cohost/direct arbitration conservative: direct input may still wait
+while audio is actually speaking, but once `speaking_end` fires there must be no
+stale agenda ownership left to block or confuse the next decision.

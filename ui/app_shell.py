@@ -12,9 +12,7 @@ import json
 import logging
 import os
 import queue
-import sys
 import threading
-import traceback
 import time
 from typing import Any, Optional
 import customtkinter as ctk
@@ -25,6 +23,7 @@ from tkinter import filedialog
 import tkinter.messagebox as messagebox
 from pynput import keyboard, mouse
 from ui.state import UIState
+from ui.crash_reporting import install_crash_handler
 from ui.protocols import CallbackDispatcher, SmartAggregatorCallbacks
 from ui.ptt_manager import PTTManager
 from ui.voice_control import VoiceControlPanel
@@ -104,30 +103,7 @@ class _ButtonStub:
     def pack(self, **kw: object) -> None:
         pass
 # ── Global crash handler: log unhandled exceptions before the process dies ──
-_CRASH_LOG = os.environ.get("VOICEAI_CRASH_LOG", os.path.join("logs", "crash.log"))
-def _install_crash_handler() -> None:
-    """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
-    os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-    def _write_crash(tb_text: str) -> None:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"CRASH at {now}\n")
-            f.write(f"Thread: {threading.current_thread().name}\n")
-            f.write(tb_text)
-        sys.stderr.write(f"\n[OpenCohost CRASH] {now}\n{tb_text}\n")
-    def _handler(exc_type, exc_value, exc_tb):
-        _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-    def _thread_handler(args):
-        _write_crash("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
-        sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
-    sys.excepthook = _handler
-    threading.excepthook = _thread_handler
-    # Tkinter swallows exceptions by default — make it loud
-    import tkinter as _tk
-    _tk.Tk.report_callback_exception = _handler
-_install_crash_handler()
+install_crash_handler()
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
     def __init__(self) -> None:

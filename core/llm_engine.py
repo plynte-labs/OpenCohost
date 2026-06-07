@@ -1123,6 +1123,10 @@ class MotorVocalIA(threading.Thread):
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:
         """Strip common Markdown emphasis markers without deleting speech text."""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
         if "*" not in text:
             return text
 
@@ -1163,7 +1167,14 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             self._speaking = True
             self._current_speech_source = source
-        self.ui_callback("speaking_start")
+        try:
+            self.ui_callback("speaking_start")
+        except Exception:
+            with self._lock:
+                self._speaking = False
+                self._current_speech_source = None
+            logger.exception("UI callback failed during speaking_start")
+            raise
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 

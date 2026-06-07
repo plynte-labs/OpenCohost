@@ -29,6 +29,10 @@
 
 ## Phase 3 - Semi-Real Runtime Smoke
 
+Deferred note: keep this phase pending for now. The deterministic harness is useful
+for controlled regression checks, but semi-real pygame/audio validation must remain
+opt-in because it touches local audio/runtime behavior.
+
 - [ ] Task: Add opt-in real/semi-real mode design guardrails
     - [ ] Require explicit operator opt-in for real audio/device behavior
     - [ ] Define safe timeouts and cleanup behavior

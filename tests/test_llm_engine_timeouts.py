@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from core import llm_engine
 from config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 
@@ -522,6 +524,146 @@ def test_ptt_items_never_expire_via_ttl():
     motor._process_priority_queue()
 
     motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt")
+
+
+def test_tts_none_text_balances_events_and_clears_speech_source():
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+
+    motor._hablar(None, source="kira-agenda")
+
+    assert events == [
+        ("speaking_start", "kira-agenda"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_heavy_tts_missing_reference_balances_events_and_clears_speech_source():
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+
+    motor._hablar("Texto suficientemente largo para pedir audio.", source="kira-agenda")
+
+    assert events == [
+        ("speaking_start", "kira-agenda"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_heavy_tts_completion_clears_speech_source_before_speaking_end(tmp_path):
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+
+    class FakeMusic:
+        def load(self, path):
+            pass
+
+        def play(self):
+            pass
+
+        def get_busy(self):
+            return False
+
+        def unload(self):
+            pass
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = FakeMusic()
+
+    original_post = llm_engine.requests.post
+    try:
+        llm_engine.requests.post = MagicMock(
+            return_value=MagicMock(status_code=200, content=b"wav")
+        )
+        motor._hablar("Texto suficientemente largo para generar audio.", source="direct")
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert events == [
+        ("speaking_start", "direct"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_tts_playback_error_clears_speech_source_before_speaking_end(tmp_path):
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+
+    class FailingMusic:
+        def load(self, path):
+            raise RuntimeError("audio device unavailable")
+
+        def unload(self):
+            pass
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = FailingMusic()
+
+    original_post = llm_engine.requests.post
+    try:
+        llm_engine.requests.post = MagicMock(
+            return_value=MagicMock(status_code=200, content=b"wav")
+        )
+        motor._hablar("Texto suficientemente largo para generar audio.", source="direct")
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert events == [
+        ("speaking_start", "direct"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_speaking_start_callback_failure_clears_speech_source():
+    events = []
+
+    def failing_callback(event):
+        events.append((event, motor.current_speech_source))
+        if event == "speaking_start":
+            raise RuntimeError("ui callback failed")
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), failing_callback)
+
+    with pytest.raises(RuntimeError, match="ui callback failed"):
+        motor._hablar("Texto suficientemente largo para iniciar habla.", source="kira-agenda")
+
+    assert events == [("speaking_start", "kira-agenda")]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
 
 
 def test_heavy_tts_continues_after_connection_error(tmp_path):
