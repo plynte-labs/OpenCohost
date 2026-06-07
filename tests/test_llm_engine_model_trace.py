@@ -157,13 +157,8 @@ class TestModelSwitch:
         original_model = motor.current_model
         motor._speaking = True
 
-        # Simulate switch_model command handler
-        new_model = "qwen3:4b"
-        motor._desired_model = new_model
-        motor._pending_model_switch = new_model
-        motor._pending_switch_retries = 3
-        motor._pending_switch_next_at = time.monotonic() + 2.0
-        motor.ui_callback("model_switch_pending")
+        # Exercise the real dispatch handler
+        motor._dispatch_command("switch_model", "qwen3:4b")
 
         assert motor._pending_model_switch == "qwen3:4b"
         assert motor._desired_model == "qwen3:4b"
@@ -311,8 +306,13 @@ class TestRetryExhaustion:
         finally:
             settings.LAST_MODEL_FILE = original
 
-    def test_run_loop_recovers_selected_model_after_external_ollama_start(self, tmp_path, monkeypatch):
-        """Actual switch_model command should recover when Ollama starts externally."""
+    def test_run_loop_rejects_offline_switch_immediately(self, tmp_path, monkeypatch):
+        """Offline switch_model must fail immediately, NOT defer to retry queue.
+
+        Per ADR-006: when is_ready=False, switch_model emits 'model_switch_failed'
+        and does NOT set _pending_model_switch. The user must switch when Ollama
+        becomes ready.
+        """
         import config.settings as settings
 
         original = settings.LAST_MODEL_FILE
@@ -337,15 +337,13 @@ class TestRetryExhaustion:
             assert motor.is_ready is False
 
             motor.command_queue.put(("switch_model", "gemma4:e4b"))
-            assert _wait_until(lambda: "model_switch_pending" in ui_events)
+            assert _wait_until(lambda: "model_switch_failed" in ui_events)
             assert motor.current_model == "qwen3:1.7b"
-
-            motor._pending_switch_next_at = 0
-            assert _wait_until(lambda: "model_switch_applied" in ui_events)
-
-            assert fake_ollama.list.call_count == 2
-            assert motor.current_model == "gemma4:e4b"
             assert motor._pending_model_switch is None
+
+            # Ollama comes online — but the switch was already rejected
+            # The user's _desired_model is recorded but not applied automatically
+            assert motor._desired_model == "gemma4:e4b"
         finally:
             if motor is not None:
                 motor.command_queue.put(None)

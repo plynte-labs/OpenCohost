@@ -147,6 +147,10 @@ class ModelPanel:
         self.combo_modelos.set(self.default_display)
         self.combo_modelos.pack(fill="x", padx=10, pady=4)
 
+        # Guard: disable combo at startup when Ollama is not ready
+        if self._ui_state.ollama_state != "ready":
+            self.combo_modelos.configure(state="disabled")
+
         self.btn_download = ctk.CTkButton(
             self._parent,
             text="Revisando Ollama...",
@@ -319,9 +323,9 @@ class ModelPanel:
                 "Usa el boton de Ollama/modelo para obtenerlo."
             )
         else:
-            self._dispatcher.dispatch("on_switch_model", tag)
             self._on_log(
-                f"[Sistema] Ollama no esta listo. Cambio a '{tag}' queda pendiente hasta que Ollama responda."
+                f"[Sistema] Ollama no esta listo. "
+                f"Selecciona un modelo cuando Ollama este activo."
             )
 
     def _on_llm_tier_selected(self, tier: str) -> None:
@@ -448,9 +452,18 @@ class ModelPanel:
 
         if self._ollama_starting:
             self.btn_download.configure(state="disabled", text="Iniciando Ollama...")
+            if self.combo_modelos is not None:
+                self.combo_modelos.configure(state="disabled")
             return
 
         state = self._ui_state.ollama_state
+
+        # Combo state guard: disable when Ollama is not ready
+        if self.combo_modelos is not None:
+            if state != "ready":
+                self.combo_modelos.configure(state="disabled")
+            else:
+                self.combo_modelos.configure(state="normal")
 
         if state in _OLLAMA_BUTTON_CONFIG:
             config = _OLLAMA_BUTTON_CONFIG[state]
@@ -579,6 +592,26 @@ class ModelPanel:
         """Handle UIState changes that affect the model panel."""
         if key == "ollama_state":
             self._schedule_ui_update(lambda: self._update_button_for_ollama_state())
+        elif key == "model_status":
+            self._schedule_ui_update(lambda: self._handle_model_status_change(value))
+
+    # ------------------------------------------------------------------
+    # Model status handler
+    # ------------------------------------------------------------------
+
+    def _handle_model_status_change(self, value: str) -> None:
+        """Handle model_status state changes: loading indicator + combo guard."""
+        if value == "loading":
+            if self.lbl_modelo_info is not None:
+                self.lbl_modelo_info.configure(text="Cargando modelo en memoria...")
+            if self.combo_modelos is not None:
+                self.combo_modelos.configure(state="disabled")
+        else:
+            # Terminal state (ready, idle, error): re-enable combo if Ollama is ready
+            if self.lbl_modelo_info is not None:
+                self.update_model_info(self.get_selected_tag())
+            if self.combo_modelos is not None and self._ui_state.ollama_state == "ready":
+                self.combo_modelos.configure(state="normal")
 
     # ------------------------------------------------------------------
     # Lifecycle

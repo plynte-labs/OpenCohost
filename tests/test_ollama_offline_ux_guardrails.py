@@ -245,10 +245,7 @@ class TestOllamaOfflineUXGuardrailsSpec:
     def test_no_silent_deferred_model_switch_offline(self):
         """When is_ready=False, switch_model must NOT queue _pending_model_switch.
 
-        This test exercises the REAL MotorVocalIA state, not reimplemented logic.
-        The switch_model handler in run() currently sets _pending_model_switch
-        even when offline. This test will be RED until we change the handler
-        to reject immediately (fail-fast).
+        This test exercises the REAL _dispatch_command handler path.
         """
         motor, ui_cb = _make_motor()
         motor.is_ready = False
@@ -256,46 +253,16 @@ class TestOllamaOfflineUXGuardrailsSpec:
         # Verify clean initial state
         assert motor._pending_model_switch is None
 
-        # Simulate what the run() loop does for "switch_model" command.
-        # We directly execute the production logic path:
-        new_model = "gemma4:e4b"
-        motor._desired_model = new_model
-
-        # This is the REAL behavior from run() lines 201-211:
-        if not motor.is_ready:
-            # CURRENT behavior: queues it (BUG we're fixing)
-            # DESIRED behavior: reject immediately, don't set _pending_model_switch
-            # We test the DESIRED spec — this fails until production code changes.
-            pass
-        else:
-            motor._pending_model_switch = new_model
-
-        # The REAL code at llm_engine.py:208 sets _pending_model_switch = new_model
-        # when is_ready is False. To truly test this, we must check the real attribute
-        # AFTER calling the real handler. Since run() is a blocking loop, we test
-        # the motor state directly:
-        motor.command_queue.put(("switch_model", "gemma4:e4b"))
-
-        # Process the command as the real run loop would (without starting thread):
-        cmd = motor.command_queue.get()
-        tipo, payload = cmd
-
-        # Execute the REAL handler logic (extracted from run()):
-        assert tipo == "switch_model"
-        motor._desired_model = payload
-        if not motor.is_ready:
-            # Real code does: motor._pending_model_switch = payload
-            # We let it execute and then check the result.
-            # This line mirrors what the real code does — remove when testing
-            # the actual refactored code.
-            motor._pending_model_switch = payload  # simulates current buggy behavior
+        # Exercise the real dispatch handler
+        motor._dispatch_command("switch_model", "gemma4:e4b")
 
         # SPEC: _pending_model_switch must remain None when offline
-        # This WILL FAIL because the line above sets it (matching the current bug).
         assert motor._pending_model_switch is None, (
             "switch_model must NOT queue a pending switch when Ollama is offline. "
             f"Got _pending_model_switch={motor._pending_model_switch!r}"
         )
+        # SPEC: ui_callback must receive model_switch_failed
+        ui_cb.assert_called_with("model_switch_failed")
 
     # --- Spec 3: Auto-enable when Ollama becomes ready --------------------
 
@@ -368,24 +335,14 @@ class TestEdgeCaseRapidModelSwitch:
         """
         motor, ui_cb = _make_motor()
         motor.is_ready = True
+        motor._apply_model_switch = MagicMock()
 
-        # Queue two switches rapidly
-        motor.command_queue.put(("switch_model", "model_a"))
-        motor.command_queue.put(("switch_model", "model_b"))
-
-        # Process first command — sets desired + pending
-        cmd1 = motor.command_queue.get()
-        motor._desired_model = cmd1[1]
-
-        # Process second command — should supersede the first
-        cmd2 = motor.command_queue.get()
-        motor._desired_model = cmd2[1]
+        # Dispatch two switches rapidly via the real handler
+        motor._dispatch_command("switch_model", "model_a")
+        motor._dispatch_command("switch_model", "model_b")
 
         # After processing both, only model_b should be the target
         assert motor._desired_model == "model_b"
-        # _pending_model_switch should be model_b (not model_a)
-        if motor._pending_model_switch is not None:
-            assert motor._pending_model_switch == "model_b"
 
 
 class TestEdgeCaseCheckingStateSelection:
@@ -432,11 +389,8 @@ class TestEdgeCasePTTWhileOffline:
         motor, ui_cb = _make_motor()
         motor.is_ready = False
 
-        # Simulate what run() does for process_context when not ready:
-        # (from llm_engine.py:175-178)
-        payload = "Hey chat, what do you think about this?"
-        if not motor.is_ready:
-            ui_cb("ollama_unavailable")
+        # Exercise the real dispatch handler
+        motor._dispatch_command("process_context", "Hey chat, what do you think about this?")
 
         ui_cb.assert_called_with("ollama_unavailable")
 
@@ -445,18 +399,10 @@ class TestEdgeCasePTTWhileOffline:
         motor, ui_cb = _make_motor()
         motor.is_ready = False
 
-        # Currently, process_context when motor is busy enqueues to priority queue.
-        # But when offline, even if not busy, it should reject immediately.
-        # The real code already does this (continues after logging).
-        # This test verifies no phantom enqueue happens.
-
         initial_queue_len = len(motor._priority_queue)
 
-        # process_context handler when not ready:
-        if not motor.is_ready:
-            ui_cb("ollama_unavailable")
-        else:
-            motor.enqueue("test payload", priority=0, source="ptt")
+        # Exercise the real dispatch handler
+        motor._dispatch_command("process_context", "test ptt payload")
 
         assert len(motor._priority_queue) == initial_queue_len, (
             "PTT text must not be enqueued when Ollama is offline"

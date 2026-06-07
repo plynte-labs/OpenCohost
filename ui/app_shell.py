@@ -2300,6 +2300,7 @@ class VocalAIApp(ctk.CTk):
             handler()
 
     def _on_motor_ready(self) -> None:
+        self._ui_state.model_status = "ready"
         self._safe_after(lambda: self.btn_grabar.configure(state="normal"))
         self._safe_after(lambda: self.btn_voz.configure(state="normal"))
         self._safe_after(lambda: self.btn_ws.configure(state="normal"))
@@ -2319,6 +2320,7 @@ class VocalAIApp(ctk.CTk):
             self.voice_panel._start_ptt_flush_watcher()
 
     def _on_motor_model_warming(self) -> None:
+        self._ui_state.model_status = "loading"
         self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
         self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
         self._actualizar_pipeline("init")
@@ -2554,6 +2556,7 @@ class VocalAIApp(ctk.CTk):
         # Do NOT restore combobox — user's selection stays visible as intended target
 
     def _on_motor_switch_failed(self) -> None:
+        self._ui_state.model_status = "error"
         failure = getattr(self.motor_ia, "_last_switch_failure", None)
         actual_model = self.motor_ia.current_model
         if failure:

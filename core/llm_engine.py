@@ -6,6 +6,7 @@ import queue
 import time
 import uuid
 import asyncio
+import concurrent.futures
 import requests
 import edge_tts
 from collections import deque
@@ -161,97 +162,96 @@ class MotorVocalIA(threading.Thread):
                 break
 
             tipo, payload = comando
+            self._dispatch_command(tipo, payload)
 
-            if tipo == "set_voice":
-                self.voz_referencia = payload
-                if isinstance(payload, tuple):
-                    self.voz_referencia = payload[0]
-                self._log(f"Perfil de voz configurado: {self.voz_referencia}")
+    def _dispatch_command(self, tipo: str, payload) -> None:
+        """Dispatch a command tuple. Extracted from run() for testability."""
+        if tipo == "set_voice":
+            self.voz_referencia = payload
+            if isinstance(payload, tuple):
+                self.voz_referencia = payload[0]
+            self._log(f"Perfil de voz configurado: {self.voz_referencia}")
 
-            elif tipo == "check_ollama":
-                self._check_ollama_service()
+        elif tipo == "check_ollama":
+            self._check_ollama_service()
 
-            elif tipo == "process_context":
-                if not self.is_ready:
-                    self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
-                    self.ui_callback("ollama_unavailable")
-                    continue
-                if self.motor_tts == "pesado" and not self.voz_referencia:
-                    self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
-                    continue
-                if self._processing:
-                    # Motor busy — enqueue to priority queue instead of dropping
-                    self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                    self.enqueue(payload, priority=1, source="direct")
-                    continue
-                self._processing = True
-                self.ui_callback("processing")
-                try:
-                    self._ejecutar_inferencia(payload, source="direct")
-                finally:
-                    self._processing = False
-                    self.ui_callback("idle")
-                    # After finishing, check priority queue and accumulation
-                    self._process_priority_queue()
+        elif tipo == "process_context":
+            if not self.is_ready:
+                self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
+                self.ui_callback("ollama_unavailable")
+                return
+            if self.motor_tts == "pesado" and not self.voz_referencia:
+                self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
+                return
+            if self._processing:
+                # Motor busy — enqueue to priority queue instead of dropping
+                self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
+                self.enqueue(payload, priority=1, source="direct")
+                return
+            self._processing = True
+            self.ui_callback("processing")
+            try:
+                self._ejecutar_inferencia(payload, source="direct")
+            finally:
+                self._processing = False
+                self.ui_callback("idle")
+                # After finishing, check priority queue and accumulation
+                self._process_priority_queue()
 
-            elif tipo == "clear_history":
-                self.historial.clear()
-                self._log("Historial de conversación limpiado.")
+        elif tipo == "clear_history":
+            self.historial.clear()
+            self._log("Historial de conversación limpiado.")
 
-            elif tipo == "switch_model":
-                new_model = payload
-                self._desired_model = new_model
+        elif tipo == "switch_model":
+            new_model = payload
+            self._desired_model = new_model
 
-                if not self.is_ready:
-                    self._log(f"Switch a {new_model} pendiente: Ollama no está listo.", level="warning")
-                    self._pending_switch_not_ready_logged = False
-                    self._pending_model_switch = new_model
-                    self._pending_switch_retries = 3
-                    self._pending_switch_next_at = time.monotonic() + 2.0
-                    self.ui_callback("model_switch_pending")
-                    continue
+            if not self.is_ready:
+                self._log(f"Switch a {new_model} rechazado: Ollama no esta listo.", level="warning")
+                self.ui_callback("model_switch_failed")
+                return
 
-                if self._processing or self._speaking:
-                    self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
-                    self._pending_switch_not_ready_logged = False
-                    self._pending_model_switch = new_model
-                    self._pending_switch_retries = 3
-                    self._pending_switch_next_at = time.monotonic() + 2.0
-                    self.ui_callback("model_switch_pending")
-                    continue
+            if self._processing or self._speaking:
+                self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
+                self._pending_switch_not_ready_logged = False
+                self._pending_model_switch = new_model
+                self._pending_switch_retries = 3
+                self._pending_switch_next_at = time.monotonic() + 2.0
+                self.ui_callback("model_switch_pending")
+                return
 
-                self._apply_model_switch(new_model)
+            self._apply_model_switch(new_model)
 
-            elif tipo == "switch_llm_tier":
-                self.switch_llm_tier(str(payload))
-                
-            elif tipo == "set_motor_tts":
-                self.motor_tts = payload
-                nombre = "Ligero (Edge-TTS)" if payload == "ligero" else "Pesado (Qwen3-TTS)"
-                self._log(f"Motor de Voz cambiado a: {nombre}")
+        elif tipo == "switch_llm_tier":
+            self.switch_llm_tier(str(payload))
 
-            elif tipo == "set_profile":
-                self.system_prompt = payload.get("prompt", SYSTEM_PROMPT)
-                self.use_system_role = payload.get("use_system", False)
-                profile_name = payload.get("_profile_name", "desconocido")
-                self._current_profile_name = profile_name
-                self.historial.clear()
-                self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
+        elif tipo == "set_motor_tts":
+            self.motor_tts = payload
+            nombre = "Ligero (Edge-TTS)" if payload == "ligero" else "Pesado (Qwen3-TTS)"
+            self._log(f"Motor de Voz cambiado a: {nombre}")
 
-            elif tipo == "download_model":
-                if not self.is_ready:
-                    self._log("No se puede descargar modelo: Ollama no esta listo.", level="warning")
-                    self.ui_callback("ollama_unavailable")
-                    continue
-                model_tag = payload
-                if self._downloading:
-                    self._log("Ya hay una descarga en curso.", level="warning")
-                    continue
-                threading.Thread(
-                    target=self._download_model_worker,
-                    args=(model_tag,),
-                    daemon=True
-                ).start()
+        elif tipo == "set_profile":
+            self.system_prompt = payload.get("prompt", SYSTEM_PROMPT)
+            self.use_system_role = payload.get("use_system", False)
+            profile_name = payload.get("_profile_name", "desconocido")
+            self._current_profile_name = profile_name
+            self.historial.clear()
+            self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
+
+        elif tipo == "download_model":
+            if not self.is_ready:
+                self._log("No se puede descargar modelo: Ollama no esta listo.", level="warning")
+                self.ui_callback("ollama_unavailable")
+                return
+            model_tag = payload
+            if self._downloading:
+                self._log("Ya hay una descarga en curso.", level="warning")
+                return
+            threading.Thread(
+                target=self._download_model_worker,
+                args=(model_tag,),
+                daemon=True
+            ).start()
 
     def enqueue(self, payload: str, priority: int = 1, source: str = "chat") -> None:
         """Add a message to the priority queue.
@@ -738,12 +738,15 @@ class MotorVocalIA(threading.Thread):
         self._log(f"Preparando modelo {model} en memoria...")
         start = time.time()
         try:
-            self.ollama.generate(
-                model=model,
-                prompt="Responde solo: ok",
-                keep_alive=-1,
-                options={"num_predict": 1, "temperature": 0},
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    self.ollama.generate,
+                    model=model,
+                    prompt="Responde solo: ok",
+                    keep_alive=-1,
+                    options={"num_predict": 1, "temperature": 0},
+                )
+                future.result(timeout=120)
         except Exception as e:
             self._log(f"No se pudo preparar modelo {model}: {e}", level="warning")
             logger.warning("No se pudo preparar modelo %s: %s", model, e)
