@@ -2,8 +2,9 @@
 
 ## Status
 
-Pending design. This track records a structural risk discovered during
-`crash_reporting_hardening_20260606` exploration.
+In progress. The first minimal slice hardens `MotorVocalIA` event dispatch by
+routing worker-thread motor events onto the Tk main loop before executing AppShell
+handlers. Broader recording/PTT/OBS worker callback ownership remains pending.
 
 ## Discovery
 
@@ -60,3 +61,17 @@ logging problem.
 - Background thread callbacks do not directly mutate Tk widgets.
 - Existing cohost/direct orchestration behavior remains unchanged.
 - Existing UI smoke/focal tests continue to pass.
+
+## First Slice Decision
+
+Motor events are the highest-value target because `MotorVocalIA` is a daemon
+thread and emits frequent UI status events (`processing`, `speaking_start`,
+`speaking_end`, model/download state). The selected minimal routing pattern is:
+
+- If `_on_motor_event(...)` runs off the main thread, schedule `_handle_motor_event(...)`
+  with `_safe_after(...)` and return.
+- If already on the main thread, handle immediately.
+- Preserve existing handler methods and cohost/audio policy.
+
+This avoids rewriting the UI while removing the most direct worker-thread path
+into Tk widget/timer mutation.

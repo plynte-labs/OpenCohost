@@ -2275,6 +2275,12 @@ class VocalAIApp(ctk.CTk):
             pass
 
     def _on_motor_event(self, status: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self._safe_after(lambda status=status: self._handle_motor_event(status))
+            return
+        self._handle_motor_event(status)
+
+    def _handle_motor_event(self, status: str) -> None:
         handlers = {
             "ready": self._on_motor_ready,
             "model_warming": self._on_motor_model_warming,
