@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress. Focused design is approved; implementation must proceed in small, independently verifiable slices.
+Complete. Python/Tk/thread crash evidence, best-effort fatal logging, and safe child-process log pointers are implemented and verified.
 
 ## Why This Exists
 
@@ -42,7 +42,10 @@ This track must not:
 - Verify `py_compile` for the crash reporter and AppShell integration.
 - Run `git diff --check`.
 
-## Remaining Scope
+## Completed Scope
 
-- Add `faulthandler`/fatal log support as the next slice.
-- Consider safe crash bundle metadata only after fatal log behavior is verified.
+- Python/Tk/thread exception hooks write through a defensive crash writer.
+- Crash writer self-failure falls back to stderr.
+- `faulthandler` writes best-effort native/fatal crash evidence to a durable fatal log.
+- Crash entries point operators to relevant child-process log filenames without copying their contents.
+- UI thread event ownership remains a separate pending cause-prevention track.

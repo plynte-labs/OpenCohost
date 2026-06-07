@@ -6,6 +6,21 @@ import threading
 from ui import crash_reporting
 
 
+class FakeFaultHandler:
+    def __init__(self):
+        self.enabled_file = None
+        self.all_threads = None
+
+    def enable(self, *, file, all_threads):
+        self.enabled_file = file
+        self.all_threads = all_threads
+
+
+class FailingFaultHandler:
+    def enable(self, *, file, all_threads):
+        raise RuntimeError("faulthandler unavailable")
+
+
 def test_write_crash_creates_log_and_writes_stderr(tmp_path):
     crash_log = tmp_path / "logs" / "crash.log"
     stderr = io.StringIO()
@@ -15,6 +30,7 @@ def test_write_crash_creates_log_and_writes_stderr(tmp_path):
         crash_log=str(crash_log),
         stderr=stderr,
         timestamp="2026-06-06 20:00:00",
+        context_text="",
     )
 
     log_text = crash_log.read_text(encoding="utf-8")
@@ -33,6 +49,7 @@ def test_write_crash_falls_back_to_stderr_when_log_write_fails(tmp_path):
         crash_log=str(tmp_path),
         stderr=stderr,
         timestamp="2026-06-06 20:00:00",
+        context_text="",
     )
 
     stderr_text = stderr.getvalue()
@@ -48,7 +65,10 @@ def test_installed_sys_hook_writes_crash_log(tmp_path):
     sys.__excepthook__ = lambda exc_type, exc_value, exc_tb: None
 
     try:
-        crash_reporting.install_crash_handler(crash_log=str(crash_log))
+        crash_reporting.install_crash_handler(
+            crash_log=str(crash_log),
+            fatal_log=str(tmp_path / "fatal.log"),
+        )
         try:
             raise RuntimeError("hook boom")
         except RuntimeError:
@@ -58,6 +78,7 @@ def test_installed_sys_hook_writes_crash_log(tmp_path):
         sys.excepthook = original_excepthook
         threading.excepthook = original_threading_excepthook
         sys.__excepthook__ = original_sys_dunder_excepthook
+        crash_reporting._close_fatal_log_for_tests()
 
     assert "RuntimeError: hook boom" in crash_log.read_text(encoding="utf-8")
 
@@ -70,7 +91,10 @@ def test_installed_thread_hook_writes_crash_log(tmp_path):
     sys.__excepthook__ = lambda exc_type, exc_value, exc_tb: None
 
     try:
-        crash_reporting.install_crash_handler(crash_log=str(crash_log))
+        crash_reporting.install_crash_handler(
+            crash_log=str(crash_log),
+            fatal_log=str(tmp_path / "fatal.log"),
+        )
         try:
             raise RuntimeError("thread hook boom")
         except RuntimeError:
@@ -87,6 +111,7 @@ def test_installed_thread_hook_writes_crash_log(tmp_path):
         sys.excepthook = original_excepthook
         threading.excepthook = original_threading_excepthook
         sys.__excepthook__ = original_sys_dunder_excepthook
+        crash_reporting._close_fatal_log_for_tests()
 
     assert "RuntimeError: thread hook boom" in crash_log.read_text(encoding="utf-8")
 
@@ -103,7 +128,10 @@ def test_installed_tk_hook_uses_bound_method_signature(tmp_path):
     original_tk_hook = tk.Tk.report_callback_exception
 
     try:
-        crash_reporting.install_crash_handler(crash_log=str(crash_log))
+        crash_reporting.install_crash_handler(
+            crash_log=str(crash_log),
+            fatal_log=str(tmp_path / "fatal.log"),
+        )
         try:
             raise RuntimeError("tk hook boom")
         except RuntimeError:
@@ -119,5 +147,52 @@ def test_installed_tk_hook_uses_bound_method_signature(tmp_path):
         threading.excepthook = original_threading_excepthook
         sys.__excepthook__ = original_sys_dunder_excepthook
         tk.Tk.report_callback_exception = original_tk_hook
+        crash_reporting._close_fatal_log_for_tests()
 
     assert "RuntimeError: tk hook boom" in crash_log.read_text(encoding="utf-8")
+
+
+def test_build_safe_crash_context_points_to_logs_without_contents():
+    context = crash_reporting.build_safe_crash_context(
+        ["server_qwen_stderr.log", "ollama_startup_stderr.log"]
+    )
+
+    assert "server_qwen_stderr.log" in context
+    assert "ollama_startup_stderr.log" in context
+    assert "contents not copied" in context
+    assert "chat" not in context.lower()
+    assert "prompt" not in context.lower()
+
+
+def test_enable_fatal_log_creates_log_and_enables_all_threads(tmp_path):
+    fatal_log = tmp_path / "fatal.log"
+    fake_faulthandler = FakeFaultHandler()
+
+    try:
+        enabled = crash_reporting.enable_fatal_log(
+            fatal_log=str(fatal_log),
+            faulthandler_module=fake_faulthandler,
+        )
+
+        assert enabled is True
+        assert fake_faulthandler.enabled_file is not None
+        assert fake_faulthandler.all_threads is True
+        assert "FATAL LOG ENABLED" in fatal_log.read_text(encoding="utf-8")
+    finally:
+        crash_reporting._close_fatal_log_for_tests()
+
+
+def test_enable_fatal_log_falls_back_to_stderr_when_setup_fails(tmp_path):
+    fatal_log = tmp_path / "fatal.log"
+    stderr = io.StringIO()
+
+    enabled = crash_reporting.enable_fatal_log(
+        fatal_log=str(fatal_log),
+        stderr=stderr,
+        faulthandler_module=FailingFaultHandler(),
+    )
+
+    stderr_text = stderr.getvalue()
+    assert enabled is False
+    assert "[OpenCohost FATAL LOG SETUP FAILED]" in stderr_text
+    assert "faulthandler unavailable" in stderr_text
