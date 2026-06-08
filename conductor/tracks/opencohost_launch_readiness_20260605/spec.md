@@ -84,6 +84,79 @@ Acceptance criteria:
 - [ ] Include setup boundaries without overpromising one-click install.
 - [ ] Include brand/domain/repo notes only where appropriate.
 
+### Requirement: Public Documentation Language
+
+All public documentation artifacts MUST be written in English.
+
+Acceptance criteria:
+
+- [ ] README, architecture, contributor, security, license, testing, and agent-facing documentation are written in English.
+- [ ] Internal chat replies may remain Spanish when the user writes Spanish, but generated documentation artifacts stay English.
+- [ ] Documentation avoids local slang, private session language, and AI-agent-specific chat tone.
+
+### Requirement: Agent and Contributor Navigation Index
+
+The project MUST provide an index that helps human contributors and coding agents
+find the right documentation before touching code.
+
+Acceptance criteria:
+
+- [ ] Provide an agent/contributor index that links to README, architecture, methodology, testing, security, and contribution docs.
+- [ ] Explain which document to read first for common tasks: runtime debugging, UI changes, TTS/audio work, stream/admin changes, tests, and release work.
+- [ ] Include repo map guidance for key modules and files.
+- [ ] Keep the index short enough to scan quickly, with deeper links for details.
+
+### Requirement: Architecture and File Context Documentation
+
+The project MUST document what the major files/modules do and why they exist so
+new contributors can move safely through the codebase.
+
+Acceptance criteria:
+
+- [ ] Document the high-level runtime architecture: UI shell, MotorVocalIA, TTS, LLM, OBS, Stream Admin, SmartAggregator, crash reporting, and runtime safety.
+- [ ] Document ownership boundaries: what can be changed locally, what requires design, and what must not be mixed.
+- [ ] Document the important decisions already made: OpenCohost identity, Kira preservation, local-first direction, direct-audio arbitration, UI-thread ownership, crash evidence, and runtime validation gates.
+- [ ] Document known deferred tracks and why they are deferred.
+
+### Requirement: Work Methodology Documentation
+
+The project MUST document how OpenCohost work should be planned, implemented,
+reviewed, and validated.
+
+Acceptance criteria:
+
+- [ ] Document the controlled-validation methodology: small changes, real behavior proof, no blind expansion.
+- [ ] Document when to use Conductor tracks and when a tiny direct fix is acceptable.
+- [ ] Document PR/commit expectations: focused changes, no unrelated refactors, no runtime-private artifacts.
+- [ ] Document review expectations for runtime, UI, TTS/audio, privacy, and stream integrations.
+
+### Requirement: Testing and Validation Documentation
+
+The project MUST document the existing test surface in depth before broad
+external contribution.
+
+Acceptance criteria:
+
+- [ ] Catalog current automated tests by subsystem and purpose.
+- [ ] Document known test commands and required local environment assumptions.
+- [ ] Separate unit/focal tests from manual runtime validation and opt-in smoke/runtime tests.
+- [ ] Explain what cannot be proven by unit tests alone: pygame/audio device behavior, Tk mainloop/thread interaction, Qwen subprocess lifecycle, OBS websocket behavior, and real stream service interactions.
+- [ ] Document how to add tests without making runtime/audio/device tests mandatory for every contributor.
+
+### Requirement: Evidence-Backed Documentation
+
+The project MUST prevent public documentation from presenting guesses or future
+plans as current behavior.
+
+Acceptance criteria:
+
+- [ ] Documentation is produced in small module/workflow slices, not one broad pass.
+- [ ] Each slice lists source evidence from files, tests, configs, or committed track docs.
+- [ ] Claims are separated into current behavior, current configuration, known limitation, design decision, and future plan.
+- [ ] A module-by-module documentation track map defines output docs, evidence requirements, and acceptance criteria before public docs are drafted.
+- [ ] README is treated as a summary/router after core architecture/testing/module docs are validated.
+- [ ] Future plans live in Conductor tracks or clearly labeled roadmap/deferred sections.
+
 ### Requirement: Validation Before Expansion
 
 The project MUST preserve the current controlled-validation strategy.
@@ -119,3 +192,21 @@ Acceptance criteria:
 ## Success Criteria
 
 This track is successful when OpenCohost has a validated release-readiness map: product positioning, repo safety, public documentation plan, known blockers, and manual runtime validation checklist.
+
+## Repo Safety Audit Result - 2026-06-07
+
+Current status: NO-GO for public repository migration.
+
+The audit found no concrete OAuth secret checked into the reviewed config, and
+the current `.gitignore` / safety hook protect many future runtime artifacts.
+However, several ignored/private or machine-local files are already tracked:
+
+- `.engram/graph.db`
+- `.engram/config.json`
+- `Documents/*.md`
+- `config/music_library.json`
+- `config/avatar.yaml`
+- `perfiles.json`
+
+The detailed findings and recommended remediation order are documented in
+`repo_safety_audit.md`.
