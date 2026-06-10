@@ -277,9 +277,29 @@ class AdvancedModePanel:
             line: Content to append (converted to string).
             max_lines: Maximum number of lines to keep.
         """
-        safe_line = str(line).replace("\r", " ").replace("\n", " ")
+        self.append_batch_to_textbox(widget, [line], max_lines=max_lines)
+
+    def append_batch_to_textbox(
+        self, widget: ctk.CTkTextbox, lines: list, max_lines: int = 1000
+    ) -> None:
+        """Append a batch of lines to a textbox with a single layout pass.
+
+        Layout queries (``index``) and viewport shifts (``see``) run once per
+        batch instead of once per line, avoiding layout thrashing when log
+        bursts arrive (ADR-007).
+
+        Args:
+            widget: CTkTextbox to append to.
+            lines: Contents to append (each converted to string).
+            max_lines: Maximum number of lines to keep.
+        """
+        if not lines:
+            return
+        batch_text = (
+            "\n".join(str(line).replace("\r", " ").replace("\n", " ") for line in lines) + "\n"
+        )
         widget.configure(state="normal")
-        widget.insert("end", safe_line + "\n")
+        widget.insert("end", batch_text)
         try:
             total_lines = int(widget.index("end-1c").split(".")[0])
             excess = total_lines - int(max_lines)
@@ -294,17 +314,36 @@ class AdvancedModePanel:
     # Log queue processing
     # ------------------------------------------------------------------
 
+    # Max log messages processed per GUI tick (ADR-007: bounded queue
+    # consumption keeps the main thread responsive under log bursts).
+    PROCESS_LOGS_CHUNK_LIMIT = 20
+
     def process_logs(self) -> None:
-        """Process all pending messages in the log queue.
+        """Process pending log messages, bounded per GUI tick.
 
         Should be called periodically (e.g. via root.after(100, ...)).
+        Processes at most ``PROCESS_LOGS_CHUNK_LIMIT`` messages, flushes the
+        console in a single batched write, and reschedules itself when the
+        queue still has items so the event loop never starves.
         """
-        while True:
+        batch_messages: list[str] = []
+        processed = 0
+        while processed < self.PROCESS_LOGS_CHUNK_LIMIT:
             try:
                 msg = self._log_queue.get_nowait()
-                self.print_log(msg)
             except queue.Empty:
                 break
+            processed += 1
+            msg_str = str(msg)
+            self.update_kira_response(msg_str)
+            if self._logs_panel_visible and self.consola is not None:
+                batch_messages.append(msg_str)
+
+        if batch_messages:
+            self.append_batch_to_textbox(self.consola, batch_messages, max_lines=1500)
+
+        if processed >= self.PROCESS_LOGS_CHUNK_LIMIT and not self._log_queue.empty():
+            self._schedule_ui_update(self.process_logs)
 
     # ------------------------------------------------------------------
     # Action logging
@@ -403,6 +442,15 @@ class AdvancedModePanel:
 
         response = msg.strip()
         response = response.replace("🧠 ", "")
+
+        # Skip redundant rewrites: identical content would only trigger a
+        # full delete/insert layout reflow with no visible change (ADR-007).
+        try:
+            current_text = self.text_kira_response.get("1.0", "end-1c").strip()
+            if current_text == response:
+                return
+        except Exception:
+            pass
 
         self.text_kira_response.configure(state="normal")
         self.text_kira_response.delete("1.0", "end")
