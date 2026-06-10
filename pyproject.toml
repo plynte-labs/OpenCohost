@@ -40,3 +40,7 @@ heavy-tts = [
     "transformers>=4.40.0",
     "flask>=3.0.0",
 ]
+local-tts = [
+    "piper-tts>=1.3.0",
+    "onnxruntime>=1.18.0,<2",
+]
