@@ -32,6 +32,18 @@ runtime uncertainty before packaging or broad product polish.
 - VoiceAI has functional prototypes for local AI voice, TTS, SmartAggregator, stream
   workflows, and health monitoring.
 - The project has grown enough that blind expansion is risky.
+- Active local implementation checkpoint: `dynamic_model_management_20260608`
+  is in progress under a **thin client over Ollama** boundary.
+  - completed locally: Phase 1 (runtime validity + persistence) and
+    Phase 2 (installed-model discovery merge in `ModelPanel`)
+  - validated locally: focused model-management suite reached `154 passed`
+  - deferred intentionally: download/retry/watchdog orchestration
+- Active bug-recovery checkpoint: `heavy_model_inference_recovery_20260609`
+  is implemented locally but still needs manual runtime validation.
+  - completed locally: watchdog around first real chat after switch, stuck-processing recovery,
+    pending-switch escape path, and rollback to last known good model
+  - validated locally: focused recovery/model-management suite reached `159 passed`
+  - pending intentionally: real runtime verification against an actually heavy/stalling model
 - `health-monitor-auto-fallback` has been reconciled:
   - keep: HealthMonitor core, health pill, Vibe gate, heavy-TTS fallback gate
   - adjust only if needed: thresholds, docs wording, manual-vs-auto fallback policy

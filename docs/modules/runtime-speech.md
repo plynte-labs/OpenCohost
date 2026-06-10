@@ -69,6 +69,55 @@ flowchart LR
     motor --> events
 ```
 
+## Model Inventory and Acquisition Boundary
+
+### Quick path
+
+1. Use the UI model panel for models that are already visible.
+2. If the model is missing from the panel, install it through Ollama first.
+3. Let the panel rediscover it when Ollama returns to `ready`.
+
+### Current verified behavior
+
+`MotorVocalIA` and the model panel now follow a thin-client-over-Ollama
+boundary:
+
+- OpenCohost persists and restores the active model if it is either:
+  - part of the curated catalog, or
+  - a runtime-valid installed Ollama tag discovered locally
+- the panel discovers installed models from `ollama.list()`
+- the panel can download only the currently selected visible model
+- arbitrary manual tags are **not** entered directly into the UI today
+- when Ollama is stopped but installed, the model-panel button can start the
+  local Ollama server and then continue with normal discovery / preparation flow
+
+### Operator implication
+
+For a brand-new model that is not in the visible panel yet, the current
+operator path is:
+
+```powershell
+ollama pull <model-tag>
+```
+
+Example:
+
+```powershell
+ollama pull gemma4:12b
+```
+
+Once the model is installed, the runtime/UI path can discover it and use it
+without requiring a hardcoded catalog entry for persistence.
+
+### Important format note
+
+For the current OpenCohost runtime, the actionable input is the Ollama tag, not
+the Hugging Face page URL. For Gemma 4 12B, the relevant runtime tag is:
+
+```powershell
+gemma4:12b
+```
+
 ## Priority and Arbitration
 
 Current behavior:

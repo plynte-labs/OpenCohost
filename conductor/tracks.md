@@ -97,3 +97,28 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [x] **Track: UI Thread Event Ownership Hardening - Keep Tk Mutations on the Main Loop**
   *Link: [./tracks/ui_thread_event_ownership_hardening_20260606/](./tracks/ui_thread_event_ownership_hardening_20260606/)*
+
+---
+
+- [~] **Track: Thin Model Management over Ollama - Curated UX, Installed Discovery, and Stable Persistence**
+  *Link: [./tracks/dynamic_model_management_20260608/](./tracks/dynamic_model_management_20260608/)*
+
+---
+
+- [~] **Track: Heavy Model Inference Recovery - Watchdog, Cancel Path, and Rollback**
+  *Link: [./tracks/heavy_model_inference_recovery_20260609/](./tracks/heavy_model_inference_recovery_20260609/)*
+
+---
+
+- [~] **Track: UI Rendering Optimization - VSync, Antialiasing, and Layout Stability**
+  *Link: [./tracks/ui_rendering_optimization_20260609/](./tracks/ui_rendering_optimization_20260609/)*
+
+---
+
+- [ ] **Track: Portable TTS Runtime Path - Configurable Qwen Server Interpreter**
+  *Link: [./tracks/portable_tts_runtime_path_20260610/](./tracks/portable_tts_runtime_path_20260610/)*
+
+---
+
+- [ ] **Track: Local Light TTS - Piper/Kokoro Evaluation and Integration (post-Lite)**
+  *Link: [./tracks/local_light_tts_piper_20260610/](./tracks/local_light_tts_piper_20260610/)*

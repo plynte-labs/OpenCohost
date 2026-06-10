@@ -107,6 +107,71 @@ Design reason:
 - The UI must exist and the event loop must be able to schedule work before
   worker-thread callbacks try to update UI state.
 
+## Model Download and Activation UX
+
+### Quick path
+
+1. Start or detect Ollama from the model panel button.
+2. Select a model from the visible combo box.
+3. Click the same button:
+   - **Download model** if the selected tag is not installed
+   - **Activate model** if the selected tag is already installed
+
+### Current boundary
+
+The model panel is intentionally a **curated selection UI**, not a generic
+package manager for arbitrary Ollama tags.
+
+Current verified behavior:
+
+- The combo box is built from:
+  - curated tags in `config/settings.py`
+  - runtime discovery from `ollama.list()` when Ollama is ready
+- The button is stateful:
+  - opens Ollama download page if the app is missing
+  - starts Ollama if the service is stopped
+  - downloads the selected visible model if Ollama is ready and the model is not installed
+  - activates the selected visible model if it is already installed
+- The app can still start the local Ollama server from the UI. A verified runtime
+  log sequence is:
+  - `Iniciando Ollama...`
+  - `Ollama iniciado correctamente.`
+  - `Ollama disponible. Preparando modelo...`
+- The UI does **not** expose a free-form text field for arbitrary model tags.
+
+### What this means for new models
+
+If a model is not visible in the panel yet, the operator must currently install
+it outside the app with Ollama first, for example:
+
+```powershell
+ollama pull gemma4:12b
+```
+
+After that, once Ollama is in a ready state, the panel should discover the
+installed tag and append it to the visible list.
+
+### Hugging Face links vs runtime tags
+
+The model panel does not consume raw Hugging Face repository URLs as its primary
+runtime input. The current UI/runtime path expects an Ollama model tag such as:
+
+```powershell
+gemma4:12b
+```
+
+If the operator is looking at a Hugging Face model page, that page is reference
+material, not the string the current OpenCohost UI sends to the runtime.
+
+### Why this boundary exists
+
+This keeps the desktop UX simpler and avoids turning OpenCohost into a second
+model manager when Ollama already owns:
+
+- model download truth,
+- installed inventory truth,
+- pull/retry lifecycle.
+
 ## Tests and Validation
 
 | Test file | What it covers |
