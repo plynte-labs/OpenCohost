@@ -600,6 +600,64 @@ class TestProcessLogs:
             # Should not appear in consola since logs are hidden
             assert panel.consola._content == ""
 
+    def test_process_logs_bounded_per_tick(self, mock_ctk, ui_state, dispatcher, log_queue):
+        """A single tick processes at most PROCESS_LOGS_CHUNK_LIMIT messages (ADR-007)."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue)
+            panel.build()
+            panel._logs_panel_visible = True
+            # Disable the continuation so we observe a single tick only
+            panel._schedule_ui_update = lambda fn: None
+
+            limit = panel.PROCESS_LOGS_CHUNK_LIMIT
+            for i in range(limit + 5):
+                log_queue.put(f"[INFO] Burst {i}")
+
+            panel.process_logs()
+
+            assert log_queue.qsize() == 5
+            assert f"Burst {limit - 1}" in panel.consola._content
+            assert f"Burst {limit}" not in panel.consola._content
+
+    def test_process_logs_reschedules_when_queue_not_empty(self, mock_ctk, ui_state, dispatcher, log_queue):
+        """Leftover messages trigger a continuation via schedule_ui_update (ADR-007)."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue)
+            panel.build()
+            panel._logs_panel_visible = True
+            scheduled = []
+            panel._schedule_ui_update = lambda fn: scheduled.append(fn)
+
+            for i in range(panel.PROCESS_LOGS_CHUNK_LIMIT + 1):
+                log_queue.put(f"[INFO] Msg {i}")
+
+            panel.process_logs()
+            assert len(scheduled) == 1
+
+            # Running the continuation drains the rest without rescheduling again
+            scheduled[0]()
+            assert log_queue.empty()
+            assert len(scheduled) == 1
+
+    def test_process_logs_batches_console_writes(self, mock_ctk, ui_state, dispatcher, log_queue):
+        """One tick flushes the console with a single batched write (ADR-007)."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue)
+            panel.build()
+            panel._logs_panel_visible = True
+
+            see_calls = []
+            panel.consola.see = lambda pos: see_calls.append(pos)
+
+            for i in range(5):
+                log_queue.put(f"[INFO] Batched {i}")
+
+            panel.process_logs()
+
+            assert len(see_calls) == 1
+            for i in range(5):
+                assert f"Batched {i}" in panel.consola._content
+
 
 # ===================================================================
 # Kira response panel tests
@@ -654,6 +712,23 @@ class TestKiraResponsePanel:
 
             assert "Old response" not in kira_tb._content
             assert "New response" in kira_tb._content
+
+    def test_update_kira_response_skips_identical_content(self, mock_ctk, ui_state, dispatcher, log_queue):
+        """Identical content skips the delete/insert reflow cycle (ADR-007)."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb)
+
+            panel.update_kira_response("[Kira]: Same response")
+
+            inserts = []
+            original_insert = kira_tb.insert
+            kira_tb.insert = lambda pos, text: (inserts.append(text), original_insert(pos, text))
+
+            panel.update_kira_response("[Kira]: Same response")
+
+            assert inserts == []
+            assert "Same response" in kira_tb._content
 
 
 # ===================================================================

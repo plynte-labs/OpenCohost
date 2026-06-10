@@ -1,5 +1,11 @@
 # VoiceAI Agent Guide
 
+## Agent Startup Hook
+
+- FIRST read `AGENT_HANDOFF.md`. It is the portable handoff for Codex, ChatGPT, Antigravity, DeepSeek, and any other agent.
+- Treat `AGENT_HANDOFF.md` as the current operating snapshot, then use this file for repo rules.
+- Current project mode: **less expansion, more controlled validation**.
+
 ## Memory First
 
 - Before planning or coding, recover Engram context for project `voiceai` with `mem_context` first, then `mem_search` when needed.

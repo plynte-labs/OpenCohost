@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from core import llm_engine
 from config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 
@@ -170,6 +172,31 @@ def test_agenda_output_sanitizer_replaces_artificial_closings():
     assert "matices" in sanitized
 
 
+def test_tts_sanitizer_preserves_markdown_emphasis_content():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    text = "Esto es *importante*. Esto es **muy importante**. Y esto es ***crítico***."
+
+    assert motor._sanitize_tts_text_for_playback(text) == (
+        "Esto es importante. Esto es muy importante. Y esto es crítico."
+    )
+
+
+def test_tts_sanitizer_keeps_math_and_code_like_asterisks():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    text = "Cinco por diez es 5*10=50. En código a*b queda igual. Potencia: 2 ** 8."
+
+    assert motor._sanitize_tts_text_for_playback(text) == text
+
+
+def test_tts_sanitizer_fast_path_without_asterisks_returns_same_text():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    text = "Respuesta normal sin énfasis markdown."
+
+    assert motor._sanitize_tts_text_for_playback(text) is text
+
+
 def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     spoken = []
@@ -244,7 +271,9 @@ def test_output_guard_blocks_direct_generation_before_history_commit():
 
     dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
 
-    assert dialogo == ""
+    # R9 (AI self-ID) is global: blocked even for direct source. The spoken
+    # fallback line replaces dead air but never reaches LLM history.
+    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -259,7 +288,9 @@ def test_output_guard_blocks_chat_generation_before_history_commit():
 
     dialogo = motor._generar_dialogo("chat compactado", source="chat", commit_history=True)
 
-    assert dialogo == ""
+    # R10 still applies to chat sources; the fallback line is spoken instead
+    # of dead air and is never committed to LLM history.
+    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -499,6 +530,146 @@ def test_ptt_items_never_expire_via_ttl():
     motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt")
 
 
+def test_tts_none_text_balances_events_and_clears_speech_source():
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+
+    motor._hablar(None, source="kira-agenda")
+
+    assert events == [
+        ("speaking_start", "kira-agenda"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_heavy_tts_missing_reference_balances_events_and_clears_speech_source():
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+
+    motor._hablar("Texto suficientemente largo para pedir audio.", source="kira-agenda")
+
+    assert events == [
+        ("speaking_start", "kira-agenda"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_heavy_tts_completion_clears_speech_source_before_speaking_end(tmp_path):
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+
+    class FakeMusic:
+        def load(self, path):
+            pass
+
+        def play(self):
+            pass
+
+        def get_busy(self):
+            return False
+
+        def unload(self):
+            pass
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = FakeMusic()
+
+    original_post = llm_engine.requests.post
+    try:
+        llm_engine.requests.post = MagicMock(
+            return_value=MagicMock(status_code=200, content=b"wav")
+        )
+        motor._hablar("Texto suficientemente largo para generar audio.", source="direct")
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert events == [
+        ("speaking_start", "direct"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_tts_playback_error_clears_speech_source_before_speaking_end(tmp_path):
+    events = []
+
+    def record_event(event):
+        events.append((event, motor.current_speech_source))
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+
+    class FailingMusic:
+        def load(self, path):
+            raise RuntimeError("audio device unavailable")
+
+        def unload(self):
+            pass
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = FailingMusic()
+
+    original_post = llm_engine.requests.post
+    try:
+        llm_engine.requests.post = MagicMock(
+            return_value=MagicMock(status_code=200, content=b"wav")
+        )
+        motor._hablar("Texto suficientemente largo para generar audio.", source="direct")
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert events == [
+        ("speaking_start", "direct"),
+        ("speaking_end", None),
+    ]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
+def test_speaking_start_callback_failure_clears_speech_source():
+    events = []
+
+    def failing_callback(event):
+        events.append((event, motor.current_speech_source))
+        if event == "speaking_start":
+            raise RuntimeError("ui callback failed")
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), failing_callback)
+
+    with pytest.raises(RuntimeError, match="ui callback failed"):
+        motor._hablar("Texto suficientemente largo para iniciar habla.", source="kira-agenda")
+
+    assert events == [("speaking_start", "kira-agenda")]
+    assert motor.is_speaking is False
+    assert motor.current_speech_source is None
+
+
 def test_heavy_tts_continues_after_connection_error(tmp_path):
     events = []
     motor = llm_engine.MotorVocalIA(queue.Queue(), events.append)
@@ -552,3 +723,45 @@ def test_heavy_tts_continues_after_connection_error(tmp_path):
     assert len(music.loaded) == 1
     assert events[0] == "speaking_start"
     assert events[-1] == "speaking_end"
+
+
+# ---------------------------------------------------------------------------
+# Guardrail fallback lines (no-LLM spoken fallback on blocked output)
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_fallback_returns_line_for_direct():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    line = motor._guardrail_fallback_line("direct")
+    assert line in llm_engine.GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_returns_line_for_chat_sources():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    for source in ("ptt", "chat", "accumulated"):
+        assert motor._guardrail_fallback_line(source) in llm_engine.GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_empty_for_agenda_sources():
+    """Agenda has its own rejection/recovery path — no canned line."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    assert motor._guardrail_fallback_line("kira-agenda") == ""
+    assert motor._guardrail_fallback_line("kira-agenda-stop") == ""
+
+
+def test_guardrail_fallback_rotates_lines():
+    """Consecutive blocks never speak the same line twice in a row."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    lines = [motor._guardrail_fallback_line("direct") for _ in range(6)]
+    for a, b in zip(lines, lines[1:]):
+        assert a != b
+
+
+def test_guardrail_fallback_lines_pass_output_guard():
+    """Canned lines must never trip the guard themselves, for any source."""
+    from config.validation import output_guard
+
+    for line in llm_engine.GUARDRAIL_FALLBACK_LINES:
+        for source in ("direct", "chat", "kira-agenda"):
+            allowed, reason = output_guard(line, source=source)
+            assert allowed, f"fallback line blocked ({source}): {line!r} — {reason}"

@@ -69,10 +69,16 @@ class AvatarPanel:
         parent_frame: Any,
         on_log: Optional[Callable[[str], None]] = None,
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        on_obs_enable: Optional[Callable[[], None]] = None,
+        on_obs_disable: Optional[Callable[[], None]] = None,
+        on_obs_connect: Optional[Callable[[], None]] = None,
     ) -> None:
         self.parent = parent_frame
         self.on_log = on_log or (lambda m: None)
         self.schedule_ui = schedule_ui_update or (lambda fn: fn())
+        self.on_obs_enable = on_obs_enable
+        self.on_obs_disable = on_obs_disable
+        self.on_obs_connect = on_obs_connect
 
         # Configuration
         self.config = load_avatar_config()
@@ -412,9 +418,13 @@ class AvatarPanel:
         """Handle OBS enable/disable toggle."""
         enabled = self._obs_switch.get()
         self.config.obs.enabled = enabled
-        save_avatar_config(self.config)
+        self._save_obs_config_from_ui()
         self._update_obs_fields_state()
         self.on_log(f"[OBS] OBS integration {'enabled' if enabled else 'disabled'}")
+        if enabled and self.on_obs_enable:
+            self.on_obs_enable()
+        elif not enabled and self.on_obs_disable:
+            self.on_obs_disable()
 
     def _update_obs_fields_state(self) -> None:
         """Enable/disable OBS fields based on toggle state."""
@@ -425,11 +435,19 @@ class AvatarPanel:
                 widget.configure(state=state)
 
     def _test_obs_connection(self) -> None:
-        """Test OBS connection with current settings."""
+        """Request a live OBS runtime connection with current settings."""
         self._save_obs_config_from_ui()
 
         if self._obs_connect_btn:
             self._obs_connect_btn.configure(text="Conectando...", state="disabled")
+
+        if self.on_obs_connect:
+            try:
+                self.on_obs_connect()
+            finally:
+                if self._obs_connect_btn:
+                    self._obs_connect_btn.configure(text="Probar conexión", state="normal")
+            return
 
         def do_test():
             from avatar.obs_client import OBSClient, OBSConfig

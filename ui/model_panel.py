@@ -9,8 +9,9 @@ and exposes explicit methods for model selection and Ollama actions.
 from __future__ import annotations
 
 import shutil
+import threading
 import webbrowser
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
@@ -67,6 +68,7 @@ class ModelPanel:
         self._model_tag_to_display: dict[str, str] = {}
         self._model_display_list: list[str] = []
         self._build_model_catalog()
+        self._model_refresh_inflight: bool = False
 
         # Widget references
         self.lbl_model_header: Optional[ctk.CTkLabel] = None
@@ -94,13 +96,111 @@ class ModelPanel:
     # Model catalog
     # ------------------------------------------------------------------
 
-    def _build_model_catalog(self) -> None:
-        """Build display↔tag mappings from MODELS_CATALOG."""
+    def _canonical_model_tag(self, tag: str) -> str:
+        """Normalize discovered model tags for display and matching."""
+        normalized = str(tag or "").strip()
+        if normalized.endswith(":latest"):
+            return normalized[:-7]
+        return normalized
+
+    def _build_model_catalog(
+        self,
+        installed_model_tags: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Build display↔tag mappings from curated and discovered models."""
+        self._model_display_to_tag.clear()
+        self._model_tag_to_display.clear()
+        self._model_display_list.clear()
+
         for tag, info in MODELS_CATALOG.items():
             display = info["display"]
             self._model_display_to_tag[display] = tag
             self._model_tag_to_display[tag] = display
             self._model_display_list.append(display)
+
+        discovered = sorted(
+            {
+                self._canonical_model_tag(tag)
+                for tag in (installed_model_tags or [])
+                if self._canonical_model_tag(tag)
+            }
+        )
+        for tag in discovered:
+            if tag in self._model_tag_to_display:
+                continue
+            self._model_tag_to_display[tag] = tag
+            self._model_display_to_tag[tag] = tag
+            self._model_display_list.append(tag)
+
+    def _extract_model_tag(self, model: Any) -> str:
+        """Extract a model tag from Ollama discovery payloads."""
+        if isinstance(model, dict):
+            return str(model.get("model") or model.get("name") or "").strip()
+        return str(
+            getattr(model, "model", None) or getattr(model, "name", "") or ""
+        ).strip()
+
+    def _discover_installed_model_tags(self) -> set[str]:
+        """Return canonical installed model tags from Ollama."""
+        import ollama
+
+        discovered: set[str] = set()
+        response = ollama.list()
+        models = getattr(response, "models", None)
+        if models is None and isinstance(response, dict):
+            models = response.get("models", [])
+        for model in models or []:
+            tag = self._canonical_model_tag(self._extract_model_tag(model))
+            if tag:
+                discovered.add(tag)
+        return discovered
+
+    def _apply_model_catalog(
+        self,
+        installed_model_tags: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Apply curated + discovered catalog state to the visible widgets."""
+        selected_tag = self.get_selected_tag()
+        active_tag = self._active_model_tag or selected_tag or DEFAULT_MODEL
+        self._build_model_catalog(installed_model_tags)
+        self._llm_tiers = dict(resolve_llm_tiers(installed_model_tags))
+
+        if self.combo_modelos is not None:
+            self.combo_modelos.configure(values=self._model_display_list)
+            next_tag = active_tag if active_tag in self._model_tag_to_display else DEFAULT_MODEL
+            self.combo_modelos.set(self.get_display_for_tag(next_tag))
+
+        self.update_model_info(self.get_selected_tag())
+        self._update_button_for_ollama_state(self.get_selected_tag())
+
+    def _refresh_model_list(self) -> None:
+        """Discover installed models and update the catalog with fallback."""
+        try:
+            installed_model_tags = self._discover_installed_model_tags()
+        except Exception:
+            installed_model_tags = None
+        self._schedule_ui_update(
+            lambda: self._apply_model_catalog(installed_model_tags)
+        )
+
+    def _refresh_model_list_async(self) -> None:
+        """Refresh visible model choices without blocking the UI thread."""
+        if self._ui_state.ollama_state != "ready" or self._model_refresh_inflight:
+            return
+
+        self._model_refresh_inflight = True
+
+        def worker() -> None:
+            try:
+                self._refresh_model_list()
+            finally:
+                self._model_refresh_inflight = False
+
+        threading.Thread(
+            target=worker,
+            name="ModelPanelRefresh",
+            daemon=True,
+        ).start()
 
     def get_display_for_tag(self, tag: str) -> str:
         """Return the display name for a model tag."""
@@ -247,6 +347,8 @@ class ModelPanel:
         check_callback = on_check_ollama or self._on_check_ollama
         if state == "ready" and check_callback is not None:
             check_callback()
+        if state == "ready":
+            self._refresh_model_list_async()
 
     def set_model_selection(self, display_name: str) -> None:
         """Set the model combobox to a specific display name."""
@@ -592,6 +694,8 @@ class ModelPanel:
         """Handle UIState changes that affect the model panel."""
         if key == "ollama_state":
             self._schedule_ui_update(lambda: self._update_button_for_ollama_state())
+            if value == "ready":
+                self._refresh_model_list_async()
         elif key == "model_status":
             self._schedule_ui_update(lambda: self._handle_model_status_change(value))
 

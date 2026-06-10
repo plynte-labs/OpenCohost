@@ -568,3 +568,45 @@ El diseño completo vive en [`docs/KIRA_COHOST_AGENDA_MODE.md`](./KIRA_COHOST_AG
 - Requiere UI de agenda y más tests antes de implementación.
 - Kira será menos “libre”, pero mucho más confiable en vivo.
 - El MVP no incluirá vector DB ni escritura automática al chat.
+
+---
+
+## ADR-006: Mitigación de Lag de Renderizado, Antialiasing y VSync en CustomTkinter
+
+**Fecha:** 2026-06-09  
+**Estado:** Propuesta  
+**Rama:** `audit/ui-rendering-analysis`  
+
+### Contexto
+Los operadores reportaban stutters de pantalla, flickering, bordes pixelados y textos difusos en resoluciones altas o escaladas al interactuar con el dashboard o durante el scroll.
+
+### Decisión
+Mitigar el lag del canvas y mejorar la representación del renderizado en CustomTkinter:
+- Analizar y justificar la arquitectura de refresco en base a GDI/GDI+ en Windows.
+- Diseñar alineamientos de coordenadas a nivel de pixel para evitar distorsiones por subpixel en High DPI.
+- Elaborar un track de optimización específico para redibujado de componentes.
+
+### Por qué
+1. **Tkinter GDI limitaciones:** Tkinter no integra buffers nativos de GPU ni VSync, operando por rasterización de CPU y DWM. Reducir la sobrecarga en el thread principal disminuye el descarte de frames.
+2. **High DPI rendering:** El escalado manual de CustomTkinter sufre distorsiones cuando las coordenadas fraccionarias de los canvas se redondean a enteros, causando texturas pixeladas durante el movimiento.
+
+---
+
+## ADR-007: Cuellos de Botella de Rendimiento en UI — Procesamiento de Colas Acotado, Actualizaciones de Texto Agrupadas y Optimización de Tareas
+
+**Fecha:** 2026-06-09  
+**Estado:** Propuesta  
+**Rama:** `audit/ui-rendering-analysis`  
+
+### Contexto
+Actualizaciones de telemetría de alta frecuencia (RMS audio meters, logs de websocket, streaming de texto) saturaban el event queue del intérprete Tcl/Tk, congelando la interfaz.
+
+### Decisión
+Aplicar patrones de agrupamiento y throttling en el pipeline de la UI:
+- Reemplazar el loop infinito de lectura de cola `process_logs` por lecturas acotadas (chunks de max 20) liberando control al event loop.
+- Agrupar la inserción de texto en bloques en memoria (`append_batch_to_textbox`) para invocar el cálculo de posición (`index` / `see`) una única vez por lote en lugar de por línea.
+- Proteger actualizaciones de texto repetitivas mediante validaciones de igualdad de contenido en `update_kira_response`.
+
+### Por qué
+1. **Evitar layout thrashing:** Operaciones de tamaño y scroll en Tkinter recalculan todo el árbol de elementos. El procesamiento agrupado minimiza la propagación geométrica.
+2. **Protección de recursos del streamer:** Limitar la carga de CPU de la app de asistencia libera núcleos críticos para la codificación de OBS Studio y la ejecución estable de videojuegos en vivo.

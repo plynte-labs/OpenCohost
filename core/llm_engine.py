@@ -30,6 +30,19 @@ logger = get_logger()
 # enqueuing a Qwen chunk. Keep the consumer bounded, but do not give up sooner
 # than the producer's configured request timeout.
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
+_TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
+_TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
+
+# Spoken when the output guard blocks a response, so Kira never goes silent
+# mid-conversation. No LLM call involved. Lines must stay neutral and must
+# not match any output_guard pattern themselves. Agenda sources are excluded
+# (the agenda state machine has its own rejection/recovery path).
+GUARDRAIL_FALLBACK_LINES = (
+    "Uy, se me trabó la lengua. ¿Qué me decías?",
+    "Perdón, me distraje un segundo. ¿Puedes repetirlo?",
+    "Espera, se me cruzaron los cables. Dame un momento.",
+    "Mmm, mejor lo dejo ahí. ¿Seguimos con otra cosa?",
+)
 
 class MotorVocalIA(threading.Thread):
     """
@@ -47,6 +60,7 @@ class MotorVocalIA(threading.Thread):
         self._processing = False
         self._speaking = False
         self._current_speech_source: Optional[str] = None
+        self._current_processing_source: Optional[str] = None
         self._downloading = False
         _startup_model, self._model_source = resolve_startup_model()
         self.current_model = _startup_model
@@ -70,6 +84,10 @@ class MotorVocalIA(threading.Thread):
         self._warmed_model: Optional[str] = None
         self._ollama_chat_client = None
         self._last_llm_failure: Optional[dict] = None
+        self._last_known_good_model: Optional[str] = _startup_model
+        self._awaiting_first_success_after_switch: bool = False
+        self._inference_watchdog_timeout: float = float(OLLAMA_CHAT_TIMEOUT)
+        self._post_switch_watchdog_timeout: float = min(float(OLLAMA_CHAT_TIMEOUT), 45.0)
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
@@ -124,6 +142,11 @@ class MotorVocalIA(threading.Thread):
     def current_speech_source(self):
         with self._lock:
             return self._current_speech_source
+
+    @property
+    def current_processing_source(self):
+        with self._lock:
+            return self._current_processing_source
 
     def run(self):
         self._log("Inicializando cliente ligero...")
@@ -183,20 +206,19 @@ class MotorVocalIA(threading.Thread):
             if self.motor_tts == "pesado" and not self.voz_referencia:
                 self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
                 return
-            if self._processing:
+            if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
                 self.enqueue(payload, priority=1, source="direct")
                 return
-            self._processing = True
+            with self._lock:
+                self._processing = True
+                self._current_processing_source = "direct"
             self.ui_callback("processing")
             try:
                 self._ejecutar_inferencia(payload, source="direct")
             finally:
-                self._processing = False
-                self.ui_callback("idle")
-                # After finishing, check priority queue and accumulation
-                self._process_priority_queue()
+                self._complete_processing_cycle()
 
         elif tipo == "clear_history":
             self.historial.clear()
@@ -216,7 +238,7 @@ class MotorVocalIA(threading.Thread):
                 self._pending_switch_not_ready_logged = False
                 self._pending_model_switch = new_model
                 self._pending_switch_retries = 3
-                self._pending_switch_next_at = time.monotonic() + 2.0
+                self._pending_switch_next_at = time.monotonic()
                 self.ui_callback("model_switch_pending")
                 return
 
@@ -511,37 +533,37 @@ class MotorVocalIA(threading.Thread):
                 accumulated = self._flush_accumulation()
                 if accumulated:
                     self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
-                    self._processing = True
+                    with self._lock:
+                        self._processing = True
+                        self._current_processing_source = "accumulated"
                     self.ui_callback("processing")
                     try:
                         self._ejecutar_inferencia(accumulated, source="accumulated")
                     finally:
-                        self._processing = False
-                        self.ui_callback("idle")
+                        self._complete_processing_cycle(process_queue=False)
                 return
 
             priority, ts, payload, source = self._priority_queue.pop(0)
 
         source_label = "PTT" if source == "ptt" else source
         self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
-        self._processing = True
+        with self._lock:
+            self._processing = True
+            self._current_processing_source = source
         self.ui_callback("processing")
         try:
             self._ejecutar_inferencia(payload, source=source)
         finally:
+            self._complete_processing_cycle()
+
+    def _complete_processing_cycle(self, *, process_queue: bool = True) -> None:
+        with self._lock:
             self._processing = False
-            self.ui_callback("idle")
-            # After processing, check accumulation buffer
-            accumulated = self._flush_accumulation()
-            if accumulated:
-                self._log(f"Procesando acumulación posterior...")
-                self._processing = True
-                self.ui_callback("processing")
-                try:
-                    self._ejecutar_inferencia(accumulated, source="accumulated")
-                finally:
-                    self._processing = False
-                    self.ui_callback("idle")
+            self._current_processing_source = None
+        self.ui_callback("idle")
+        self._check_pending_model_switch()
+        if process_queue:
+            self._process_priority_queue()
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         try:
@@ -582,6 +604,7 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
 
         self.current_model = new_model
+        self._awaiting_first_success_after_switch = previous_model != new_model
         self._log(f"🔄 Modelo cambiado a: {new_model}")
 
     @property
@@ -645,6 +668,7 @@ class MotorVocalIA(threading.Thread):
             self.llm_tiers.switch_to(target_tier)
             self.current_model = target_model
             self._desired_model = target_model
+            self._awaiting_first_success_after_switch = previous_model != target_model
             self._loaded_model = (
                 target_model
                 if self._warmed_model == target_model
@@ -707,7 +731,7 @@ class MotorVocalIA(threading.Thread):
 
         self._apply_model_switch(model)
 
-    def _apply_model_switch(self, new_model: str) -> None:
+    def _apply_model_switch(self, new_model: str, *, persist_source: str = "user_switch") -> bool:
         """Execute model switch and persist on success."""
         previous_model = self.current_model
         self._pending_model_switch = None
@@ -716,8 +740,9 @@ class MotorVocalIA(threading.Thread):
         try:
             self._switch_and_prepare_model(new_model)
             self._desired_model = new_model
-            save_last_model(new_model, source="user_switch")
+            save_last_model(new_model, source=persist_source)
             self.ui_callback("model_switch_applied")
+            return True
         except Exception as e:
             self._log(f"Switch a {new_model} fallido: {e}", level="error")
             self.current_model = previous_model
@@ -728,6 +753,7 @@ class MotorVocalIA(threading.Thread):
                 "reason": f"switch_error: {e}",
             }
             self.ui_callback("model_switch_failed")
+            return False
 
     def _prepare_model(self, model: str) -> bool:
         """Warm the selected Ollama model so first real response is not a cold load."""
@@ -835,6 +861,19 @@ class MotorVocalIA(threading.Thread):
         finally:
             self._downloading = False
 
+    def _guardrail_fallback_line(self, source: str) -> str:
+        """Return a canned spoken line for guard-blocked responses.
+
+        Agenda sources return "" — the agenda state machine already handles
+        rejected outputs gracefully and a canned line would break topic flow.
+        Lines rotate to avoid immediate repetition on consecutive blocks.
+        """
+        if source.startswith("kira-agenda"):
+            return ""
+        idx = getattr(self, "_guardrail_fallback_idx", 0)
+        self._guardrail_fallback_idx = idx + 1
+        return GUARDRAIL_FALLBACK_LINES[idx % len(GUARDRAIL_FALLBACK_LINES)]
+
     def _generar_dialogo(self, contexto, source: str = "direct", *, commit_history: bool = True, log_prefix: str = "LLM") -> str:
         request_model = self.current_model
         self._log(f"Analizando contexto con {request_model}...")
@@ -872,16 +911,25 @@ class MotorVocalIA(threading.Thread):
             max_intentos = 2
             raw_content = ""
             respuesta = None
+            chat_timeout = self._resolve_chat_watchdog_timeout(request_model)
             
             for intento in range(max_intentos):
                 try:
-                    respuesta = self._ollama_chat(
+                    respuesta = self._ollama_chat_with_watchdog(
+                        timeout=chat_timeout,
                         model=request_model,
                         messages=messages,
                         keep_alive=-1,
                         options=opciones_llm
                     )
                 except Exception as e:
+                    if self._is_watchdog_timeout_error(e):
+                        self._recover_from_stalled_inference(
+                            request_model=request_model,
+                            source=source,
+                            timeout=chat_timeout,
+                        )
+                        return ""
                     if not self._is_ollama_transport_error(e):
                         raise
                     self._last_llm_failure = {
@@ -954,9 +1002,14 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
                 return ""
 
-            allowed, guard_reason = output_guard(dialogo)
+            self._mark_model_generation_success(request_model)
+            allowed, guard_reason = output_guard(dialogo, source=source)
             if not allowed:
                 self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
+                fallback = self._guardrail_fallback_line(source)
+                if fallback:
+                    self._log("Guardrail fallback: usando línea neutral sin LLM.")
+                    return fallback
                 return ""
 
             self._last_llm_failure = None
@@ -992,6 +1045,97 @@ class MotorVocalIA(threading.Thread):
     def _ollama_chat(self, **kwargs):
         client = self._ollama_chat_client or self.ollama
         return client.chat(**kwargs)
+
+    def _ollama_chat_with_watchdog(self, *, timeout: float, **kwargs):
+        result = {}
+        done = threading.Event()
+
+        def worker() -> None:
+            try:
+                result["response"] = self._ollama_chat(**kwargs)
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"OllamaChatWatchdog-{uuid.uuid4().hex[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        if not done.wait(timeout=max(0.1, float(timeout))):
+            raise TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
+        if "error" in result:
+            raise result["error"]
+        return result.get("response")
+
+    def _resolve_chat_watchdog_timeout(self, request_model: str) -> float:
+        if self._awaiting_first_success_after_switch and request_model == self.current_model:
+            return self._post_switch_watchdog_timeout
+        return self._inference_watchdog_timeout
+
+    @staticmethod
+    def _is_watchdog_timeout_error(exc: Exception) -> bool:
+        return isinstance(exc, TimeoutError) and str(exc).startswith("watchdog_timeout:")
+
+    def _mark_model_generation_success(self, model: str) -> None:
+        self._last_known_good_model = model
+        if self.current_model == model:
+            self._awaiting_first_success_after_switch = False
+
+    def _recover_from_stalled_inference(self, *, request_model: str, source: str, timeout: float) -> None:
+        message = f"watchdog_timeout after {timeout:.2f}s"
+        self._last_llm_failure = {
+            "model": request_model,
+            "source": source,
+            "attempt": 1,
+            "reason": "watchdog_timeout",
+            "message": message,
+        }
+        self._log(
+            f"Timeout de inferencia con {request_model} tras {timeout:.2f}s. Iniciando recuperación...",
+            level="error",
+        )
+        logger.warning(
+            "Inference watchdog timeout: model=%s source=%s timeout=%.2fs",
+            request_model,
+            source,
+            timeout,
+        )
+
+        if self._pending_model_switch:
+            self._pending_switch_next_at = time.monotonic()
+            self._log(
+                f"Recuperación: se aplicará el modelo pendiente {self._pending_model_switch} al quedar libre.",
+                level="warning",
+            )
+        else:
+            self._rollback_to_last_known_good_model(request_model)
+
+        self.ui_callback("llm_timeout_recovered")
+
+    def _rollback_to_last_known_good_model(self, failed_model: str) -> bool:
+        rollback_model = self._last_known_good_model
+        if not rollback_model or rollback_model == failed_model:
+            return False
+
+        self._log(
+            f"Recuperación: rollback automático de {failed_model} a {rollback_model}.",
+            level="warning",
+        )
+        if self._apply_model_switch(rollback_model, persist_source="recovery_rollback"):
+            self._awaiting_first_success_after_switch = False
+            return True
+        if self.current_model != rollback_model:
+            logger.warning(
+                "Rollback after stalled inference failed: failed_model=%s rollback_model=%s",
+                failed_model,
+                rollback_model,
+            )
+            return False
+        self._awaiting_first_success_after_switch = False
+        return True
 
     @staticmethod
     def _uses_reasoning_token_budget(model: str) -> bool:
@@ -1096,6 +1240,26 @@ class MotorVocalIA(threading.Thread):
 
             self._hablar(dialogo, source=source)
 
+    @staticmethod
+    def _sanitize_tts_text_for_playback(text: str) -> str:
+        """Strip common Markdown emphasis markers without deleting speech text."""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+        if "*" not in text:
+            return text
+
+        def replace_emphasis(match: re.Match) -> str:
+            inner = match.group(2)
+            if not any(ch.isalpha() for ch in inner):
+                return match.group(0)
+            if any(ch in _TTS_MARKDOWN_OPERATOR_CHARS for ch in inner):
+                return match.group(0)
+            return inner
+
+        return _TTS_MARKDOWN_EMPHASIS_RE.sub(replace_emphasis, text)
+
     def _sanitize_agenda_output(self, text: str) -> str:
         """Last line of defense for autonomous agenda speech."""
         clean = " ".join((text or "").strip().split())
@@ -1123,7 +1287,14 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             self._speaking = True
             self._current_speech_source = source
-        self.ui_callback("speaking_start")
+        try:
+            self.ui_callback("speaking_start")
+        except Exception:
+            with self._lock:
+                self._speaking = False
+                self._current_speech_source = None
+            logger.exception("UI callback failed during speaking_start")
+            raise
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
@@ -1132,10 +1303,11 @@ class MotorVocalIA(threading.Thread):
                 self._log("ERROR: Archivo de referencia no existe o no ha sido cargado.", level="error")
                 with self._lock:
                     self._speaking = False
+                    self._current_speech_source = None
                 self.ui_callback("speaking_end")
                 return
 
-        texto_limpio = re.sub(r'\*[^*]+\*', '', texto_a_generar)
+        texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
         texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
 
         fragmentos_brutos = re.split(r'(?<=[.!?])\s+', texto_limpio)
@@ -1167,6 +1339,7 @@ class MotorVocalIA(threading.Thread):
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
             with self._lock:
                 self._speaking = False
+                self._current_speech_source = None
             self.ui_callback("speaking_end")
             return
 
@@ -1330,6 +1503,7 @@ class MotorVocalIA(threading.Thread):
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")
         with self._lock:
             self._speaking = False
+            self._current_speech_source = None
         self.ui_callback("speaking_end")
 
         hilo_productor.join(timeout=2.0)

@@ -46,7 +46,7 @@ def _emergency_cleanup():
 
 def main():
     global _app_instance
-    logger.info("=== VoiceAI Starting ===")
+    logger.info("=== OpenCohost Starting ===")
     
     # Explicitly initialize environment vars and directories with robust permission error catch
     try:

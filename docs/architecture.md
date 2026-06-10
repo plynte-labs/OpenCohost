@@ -1,203 +1,206 @@
-# Arquitectura de VoiceAI
+# OpenCohost Architecture Map
 
-Aplicación de asistente de voz IA ("Kira") para streamers, con procesamiento 100% local-first.
+This document is a high-level architecture map for OpenCohost. It describes
+current verified repository structure and ownership boundaries without replacing
+the future module-specific docs.
 
-## Estructura de Directorios (Real)
+## Current Product Boundary
 
-```
-VoiceAI/
-├── main.py                     # Entry point — init theme, crea VocalAIApp, arranca mainloop
-├── server_qwen.py              # Servidor HTTP local para Qwen3-TTS (modo pesado)
-├── mudanza.py                  # Script de migración (legacy)
-│
-├── config/
-│   ├── __init__.py
-│   ├── settings.py             # Constantes globales, rutas, catálogo de modelos, timeouts
-│   ├── storage.py              # Resolver portable de cache/temp/Ollama (TEMP, HF, Torch)
-│   ├── storage.yaml            # Config editable de disco/cache por usuario
-│   ├── logger.py               # Logger estructurado (consola + archivo en logs/)
-│   ├── ptt_settings.json       # Configuración persistente de PTT (hotkey, estado)
-│   ├── window_geometry.json    # Posición/tamaño de ventana (persistencia multi-monitor)
-│   ├── smart_aggregator.yaml   # Config RF3: filtros, thresholds, vibe window
-│   └── stream_admin.yaml       # Config RF4: OAuth, moderación, presets
-│
-├── core/
-│   ├── __init__.py
-│   ├── llm_engine.py           # MotorVocalIA — hilo IA: Ollama, TTS, memoria conversacional
-│   └── profiles.py             # Carga/guardado de perfiles (personalidades/prompts)
-│
-├── ui/
-│   ├── __init__.py
-│   ├── app.py                  # VocalAIApp — ventana principal, delega a app_shell
-│   ├── app_shell.py            # AppShell — layout principal, coordina paneles y motor
-│   ├── protocols.py            # Interfaces/contratos entre componentes UI
-│   ├── state.py                # UIState — estado reactivo centralizado con dispatcher
-│   │
-│   ├── voice_control.py        # Panel de grabación: PTT, InputStream, anti-loop filter
-│   ├── ptt_manager.py          # PTTManager — global hotkey con pynput (keyboard + mouse)
-│   ├── model_panel.py          # Panel de modelos: selección, descarga, info de Ollama
-│   ├── profile_panel.py        # Panel de perfiles: selección y edición de personalidades
-│   ├── profiles_window.py      # Ventana modal para CRUD de perfiles
-│   ├── advanced_panel.py       # Panel avanzado (debug, config interna)
-│   ├── status_bar.py           # Barra de estado inferior
-│   │
-│   ├── smart_aggregator_ui.py  # UI del Smart Aggregator (RF3) — pestaña YT Chat
-│   └── stream_admin_ui.py      # UI de Stream Admin (RF4) — pestaña Stream Admin
-│
-├── smart_aggregator/           # RF3 — Procesador inteligente de chat
-│   ├── __init__.py
-│   ├── aggregator.py           # Orquestador headless del aggregator
-│   ├── message_filter.py       # Filtro: longitud, emotes, menciones, repetitivo, gibberish, ASCII art, quality score
-│   ├── intent_aggregator.py    # Agrupa chat por intención + entidades dinámicas (sin nombres hardcodeados)
-│   ├── vibe_thermometer.py     # Análisis de sentimiento del chat (1 LLM call)
-│   ├── activity_trigger.py     # Detector de picos de actividad (msgs/sec)
-│   ├── session_history.py      # Persistencia: SQLite + JSONL por sesión
-│   ├── chat_source.py          # Fuente de chat: YouTube Live (pytchat)
-│   └── ...                     # Tests, adapters, interfaces
-│
-├── stream_admin/               # RF4 — Gestión de stream (pausado en lectura)
-│   ├── __init__.py
-│   ├── admin_manager.py        # Orquestador headless del admin
-│   ├── providers.py            # Interfaz de proveedor (YouTube/Twitch)
-│   ├── youtube_provider.py     # Implementación YouTube Data API v3 + OAuth
-│   ├── moderation.py           # Motor de moderación: timeout, ban, slow mode
-│   ├── analytics.py            # Tracker de analíticas: viewers, subs, chat velocity
-│   └── ...                     # OAuth store, tests
-│
-├── docs/                       # Documentación del proyecto
-│   ├── architecture.md         # Este documento
-│   ├── DECISIONS.md            # Architecture Decision Records (el por qué)
-│   ├── TROUBLESHOOTING.md      # Bugs conocidos y cómo se resolvieron
-│   ├── changes.md              # Changelog técnico con notas de implementación
-│   ├── UI_ARCHITECTURE.md      # Detalle de la refactorización UI
-│   ├── KIRA_COHOST_AGENDA_MODE.md # Diseño definitivo del modo co-host semi-autónomo
-│   └── HANDOFF_RF*.md          # Handoffs por feature (RF1-RF4)
-│
-├── temp/                       # Audio temporal (chunks TTS, grabaciones)
-├── logs/                       # Logs de la aplicación
-├── Grabaciones/                # Grabaciones de voz del streamer (referencia TTS)
-├── modelos_f5/hub/             # Modelos Qwen3-TTS cacheados (offline)
-├── data/                       # Datos persistentes (OAuth tokens, sesiones)
-├── perfiles.json               # Perfiles de personalidad de Kira
-│
-├── tests/                      # Tests unitarios e integración
-├── conductor/                  # SDD/Conductor tracks y specs
-└── legacy/                     # Código legacy (monolito original)
+| Label | Meaning |
+|---|---|
+| OpenCohost | Current public product direction. |
+| Kira | Preserved cohost/persona identity. |
+| VoiceAI / VocalAI | Existing internal/project naming still present in modules, paths, package metadata, and some legacy docs. |
+
+Current behavior: public-facing app startup now logs OpenCohost, while many
+internal identifiers still use VoiceAI/VocalAI names. Internal renaming is
+deferred because broad renames would increase regression risk.
+
+## Entry Point
+
+| File | Current role |
+|---|---|
+| `main.py` | Applies storage environment setup, configures CustomTkinter theme, creates `VocalAIApp`, registers shutdown cleanup, and starts the Tk mainloop. |
+| `ui/app.py` | Thin compatibility layer that imports `VocalAIApp` from `ui.app_shell`. |
+| `ui/app_shell.py` | Main composition root for the desktop app: window, panels, motor wiring, runtime callbacks, OBS/avatar/stream/admin coordination, and shutdown. |
+
+## System Map
+
+```mermaid
+flowchart LR
+    main["main.py"]
+    app["ui/app.py"]
+    shell["ui/app_shell.py"]
+    state["ui/state.py"]
+    motor["core/llm_engine.py<br/>MotorVocalIA"]
+    health["core/health_monitor.py"]
+    crash["ui/crash_reporting.py"]
+    smart["smart_aggregator/"]
+    stream["stream_admin/"]
+    panels["ui/*_panel.py"]
+    config["config/"]
+    qwen["server_qwen.py"]
+    ollama["Ollama local service"]
+    obs["OBS websocket"]
+
+    main --> app --> shell
+    shell --> state
+    shell --> panels
+    shell --> motor
+    shell --> health
+    shell --> crash
+    shell --> smart
+    shell --> stream
+    motor --> ollama
+    motor --> qwen
+    panels --> state
+    smart --> motor
+    stream --> panels
+    shell --> obs
+    config --> shell
+    config --> motor
+    config --> health
 ```
 
-## Flujo de Información
+## Major Areas
 
-1. **Entry Point**: `python main.py` → configura tema customtkinter → crea `VocalAIApp` → `app.protocol("WM_DELETE_WINDOW", on_closing)` → `app.mainloop()`.
+| Area | Key files/directories | Current responsibility |
+|---|---|---|
+| UI shell and panels | `ui/app_shell.py`, `ui/state.py`, `ui/*_panel.py`, `ui/voice_control.py`, `ui/ptt_manager.py` | Desktop composition, Tk state, panel wiring, PTT/audio UI, avatar/OBS UI, status display, stream/admin UI. |
+| LLM and speech runtime | `core/llm_engine.py`, `core/llm_tiers.py`, `core/streaming_speech.py`, `core/sentence_splitter.py` | Motor thread, Ollama chat calls, model/tier state, speech generation, TTS chunking/splitting, speech lifecycle. |
+| Health and runtime safety | `core/health_monitor.py`, `ui/crash_reporting.py`, `core/temp_file_cleanup.py` | Health monitoring, Qwen process management, fallback signals, crash evidence, fatal logs, temp cleanup. |
+| SmartAggregator and agenda | `smart_aggregator/`, `core/editorial_cards.py`, `core/editorial_agenda_bridge.py` | Chat filtering, vibe/activity signals, agenda topics, cohost orchestration, editorial cards, topic suggestions. |
+| Stream integrations | `stream_admin/`, `ui/stream_admin_ui.py`, `smart_aggregator/chat_source.py` | YouTube/Twitch provider abstractions, OAuth storage, metadata/moderation/admin flows, chat source normalization. |
+| Configuration and storage | `config/settings.py`, `config/storage.py`, `config/*.yaml`, `config/*.json` | Paths, timeouts, model settings, stream admin settings, SmartAggregator settings, app/runtime storage resolution. |
+| Tests | `tests/` | Automated/focal tests for UI, runtime, aggregator, stream integrations, config, health, crash reporting, and deterministic smoke contracts. |
 
-2. **Inicialización diferida**: `AppShell.__init__()` construye la UI pero **NO** arranca el motor IA directamente. Usa `self.after(100, self._start_motor)` para garantizar que `mainloop()` esté activo antes de que el thread invoque callbacks UI.
+## Ownership Boundaries
 
-3. **Configuración**: Todos los componentes leen desde `config/settings.py` (constantes) y archivos YAML/JSON (config persistente).
+### UI Shell
 
-4. **Motor IA**: `MotorVocalIA` corre en hilo daemon. Comunicación asíncrona vía `command_queue` (UI → motor) y `ui_callback` (motor → UI). Gestiona Ollama (LLM), memoria conversacional, y pipeline TTS (edge-tts o Qwen3-TTS local).
+Current behavior:
 
-5. **UI**: `AppShell` coordina paneles delegados. `UIState` gestiona estado reactivo. Cada panel tiene responsabilidad única (modelos, perfiles, voz, admin, etc.).
+- `ui/app_shell.py` is the composition root.
+- `ui/state.py` provides a thread-aware state container.
+- UI-facing panels live in `ui/`.
 
-## Threading Model
+Design decision:
 
-VoiceAI usa múltiples hilos concurrentes. Este es el mapa completo:
+- Tk widget mutation must stay on the main loop.
+- Worker-originated UI work should be routed through queued/scheduled UI paths.
 
-| Hilo | Origen | Rol | Thread-safe | Notas |
-|------|--------|-----|-------------|-------|
-| **Main Thread** | `main.py` | Tkinter mainloop, eventos UI | N/A (single-threaded UI) | Único thread que puede modificar widgets |
-| **MotorVocalIA** | `app_shell.py` → `_start_motor()` | LLM inference, TTS pipeline, gestión de memoria | `command_queue` (thread-safe), `_lock` para flags | Daemon. Callbacks UI vía `self.after(0, ...)` |
-| **Productor TTS** | `llm_engine.py` → `_hablar()` | Genera chunks de audio (edge-tts o HTTP Qwen3) | `cola_audios` (Queue, thread-safe) | Daemon. Corre dentro del hilo MotorVocalIA |
-| **Download Worker** | `llm_engine.py` → `download_model` | Descarga modelos de Ollama con progreso | `log_queue` (thread-safe) | Daemon. Thread separado dentro del motor |
-| **PTT Keyboard Listener** | `ptt_manager.py` | Detecta key press/release global | Callbacks vía `after()` | Daemon. pynput.keyboard.Listener |
-| **PTT Mouse Listener** | `ptt_manager.py` | Detecta mouse press/release global | Callbacks vía `after()` | Daemon. pynput.mouse.Listener |
-| **Audio InputStream** | `voice_control.py` | Captura audio del micrófono (sounddevice) | Buffer en memoria, valida en release | Callback al main thread via `after()` |
-| **Log Dispatcher** | `state.py` | Procesa cola de logs y actualiza UI | `_dispatch_thread` | Usa `after()` para actualizar widgets |
-| **YouTube Chat Source** | `chat_source.py` | Recibe mensajes de YouTube Live (pytchat) | Callbacks thread-safe | `interruptable=False` para evitar signal error |
-| **Aggregator Worker** | `smart_aggregator_ui.py` | Procesa mensajes agregados del chat | Thread dedicado | Callbacks via `after()` |
-| **Stream Admin Worker** | `stream_admin_ui.py` | OAuth refresh, analíticas periódicas | Thread dedicado | Callbacks via `after()` |
+Known limitation:
 
-### Regla de Oro: Main Thread Only para UI
+- `ui/app_shell.py` is still a large coordination file. Do not perform broad
+  extraction without a dedicated design and regression plan.
 
-**Ningún hilo secundario puede modificar widgets directamente.** Todos los callbacks de hilos hacia la UI deben usar `self.after(0, callback)` para encolar la operación en el main loop.
+### Runtime Speech
 
-Excepción: `self.after()` solo funciona si `mainloop()` está activo. Por eso el motor IA se inicia diferido (`self.after(100, ...)`).
+Current behavior:
 
-### Contrato de Comunicación
+- `core/llm_engine.py` owns `MotorVocalIA`.
+- The motor handles Ollama interaction, model/tier state, conversation history,
+  TTS requests, and speech lifecycle state.
 
-```
-UI ──command_queue──> MotorVocalIA  (thread-safe Queue)
-MotorVocalIA ──ui_callback──> UI   (self.after(0, handler))
+Design decision:
 
-UI ──callbacks──> PTTManager       (pynput listeners → after())
-PTTManager ──on_release──> UI     (valida → envía a command_queue)
+- Direct user interaction must not be spoken over by agenda prefetch.
+- Speech source state must be cleared on normal completion and known failure
+  paths.
 
-UI ──llm_interface──> Aggregator   (inyectado, reutiliza motor)
-Aggregator ──callbacks──> UI      (after())
+Known limitation:
 
-PTT ──buffer + grace period──> voice_control.py ──flush──> MotorVocalIA
-YouTube Chat ──enqueue──> Priority Queue ──pop──> MotorVocalIA
-Overflow ──enqueue_accumulation──> Accumulation Buffer ──compact──> MotorVocalIA
-```
+- Real audio/device behavior still requires manual or opt-in runtime validation.
 
-### Dirección futura: Kira Co-host Agenda Mode
+### SmartAggregator
 
-El modo semi-autónomo definitivo no debe ser “Kira improvisa para siempre”. Debe ser un controlador determinista con agenda aprobada por el streamer: temas en cola, turnos cortos, PTT como prioridad máxima, chat compactado como señal secundaria, salidas seguras y stop de emergencia.
+Current behavior:
 
-Ver diseño completo en [`docs/KIRA_COHOST_AGENDA_MODE.md`](./KIRA_COHOST_AGENDA_MODE.md).
+- `smart_aggregator/` contains chat source contracts, filtering, vibe/activity
+  aggregation, agenda signals, and Kira agenda controller logic.
 
-### Flujo de PTT con Buffer y Cola Prioritaria
+Design decision:
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  PTT (F8 presionada)                                     │
-│    → Limpia buffer anterior                              │
-│    → Acumula transcripciones de LiveAudio (máx 500 chars)│
-│    → Al soltar: grace period 2s (delay STT)              │
-│    → Flush watcher envía buffer al motor                 │
-└──────────────────────────────────────────────────────────┘
+- Raw chat is not public diagnostic data.
+- Chat can feed in-memory counters and compact context, but raw chat must not be
+  exposed to LLM prompts, diagnostics, logs, or persistence.
 
-┌──────────────────────────────────────────────────────────┐
-│  Cola Prioritaria (máx 5 items)                          │
-│    Prioridad 0: PTT (streamer hablando)                  │
-│    Prioridad 1: YouTube chat (mensajes agregados)        │
-│    Overflow → Buffer de Acumulación                      │
-└──────────────────────────────────────────────────────────┘
+Known limitation:
 
-┌──────────────────────────────────────────────────────────┐
-│  Buffer de Acumulación (máx 50 items, 2000 chars, 2 min) │
-│    Guarda: overflow de cola + mensajes mientras ocupado  │
-│    Al motor libre: compacta todo en 1 consulta           │
-│    Limpia buffer después de enviar                       │
-└──────────────────────────────────────────────────────────┘
+- Module-specific public docs still need evidence-backed expansion.
 
-MotorVocalIA procesa SECUENCIALMENTE (nunca 2 a la vez):
-  1. Toma siguiente de cola prioritaria (PTT primero)
-  2. Ejecuta inferencia Ollama
-  3. Sintetiza TTS
-  4. Si hay acumulación → compacta y envía
-  5. Vuelve a esperar
-```
+### Stream Integrations
 
-## Reglas de Threading y Ciclo de Vida
+Current behavior:
 
-### Motor IA — arranque diferido
+- `stream_admin/` contains provider abstractions, OAuth storage, YouTube provider
+  code, Twitch provider placeholder/support code, analytics, and moderation.
+- `config/stream_admin.yaml` uses environment placeholders for YouTube OAuth
+  credentials and local token paths under `data/stream_admin/`.
 
-El hilo `MotorVocalIA` **NO** debe arrancarse directamente en `__init__`. Se difiere con
-`self.after(100, self._start_motor)` para garantizar que `mainloop()` ya esté activo antes
-de que el thread invoque callbacks UI (`self.after(0, ...)`).
+Design decision:
 
-**Sin el defer:** race condition → `RuntimeError: main thread is not in main loop` cuando
-`_check_ollama_service()` termina antes de que `mainloop()` arranque y llama `ui_callback("ready")`.
+- OAuth tokens and generated stream data are local/private artifacts.
 
-### Regla general
+Known limitation:
 
-Cualquier hilo que invoque callbacks hacia Tkinter (vía `self.after()`) solo debe iniciarse
-**después** de que `mainloop()` esté corriendo. Si el hilo necesita arrancar durante la
-construcción de la ventana, usar `self.after(delay_ms, thread.start)` para diferirlo.
+- Real YouTube/OAuth behavior needs real-service validation and should not be
+  implied by unit tests alone.
 
-## Agregar Nuevas Funciones
+### Health and Crash Evidence
 
-- **Para agregar una nueva configuración o un nuevo modelo de Ollama**, modifique `config/settings.py`.
-- **Para actualizar la forma en la que la IA responde o maneja memoria**, edite `core/llm_engine.py`.
-- **Para cambiar el comportamiento visual, agregar botones o ventanas**, busque en `ui/app_shell.py` o cree un nuevo archivo `.py` en la carpeta `ui/`.
-- **Para lógica de negocio o de backend adicional**, considere agregar un archivo en la carpeta `core/` y enlácelo con la UI a través de `app_shell.py`.
-- **Para nuevo módulo independiente**, crear carpeta en raíz con su propio `__init__.py` y conectar vía contratos/callbacks (ver RF3 smart_aggregator como referencia).
+Current behavior:
+
+- `core/health_monitor.py` contains VRAM/Ollama/RTF/Qwen process monitoring.
+- `ui/crash_reporting.py` installs Python/Tk/thread crash hooks and fatal log
+  setup.
+
+Design decision:
+
+- Crash evidence is layered: Python hooks, Tk hook, threading hook, fatal log,
+  and safe child-log path references.
+
+Known limitation:
+
+- Native crashes from audio/device libraries cannot be fully caught by ordinary
+  Python `try/except`.
+
+## Key Runtime Constraints
+
+- The app is local-first.
+- Qwen heavy TTS and Ollama are local service/process dependencies.
+- OBS and stream integrations depend on external services.
+- Real audio and GUI behavior have runtime constraints beyond unit tests.
+- Public docs must not claim installer/packaging readiness until validated.
+
+## Current Test Reference
+
+Use [`TESTING.md`](TESTING.md) for the current test catalog and validation
+boundaries. As of 2026-06-07, the repository has 53 `tests/test_*.py` files and
+1,736 pytest-collected items in the project environment.
+
+## Planned Module Docs
+
+The architecture map intentionally stays shallow. Deeper docs should be produced
+module by module:
+
+- [`docs/modules/ui-shell.md`](modules/ui-shell.md)
+- [`docs/modules/runtime-speech.md`](modules/runtime-speech.md)
+- `docs/modules/tts-audio.md`
+- `docs/modules/smart-aggregator.md`
+- `docs/modules/stream-integrations.md`
+- `docs/modules/runtime-safety.md`
+
+Each module doc must list evidence, current state, known limitations, deferred
+work, and verification status.
+
+## Deferred Work
+
+Deferred work should remain in Conductor tracks or clearly labeled roadmap
+sections. Current known deferred areas include:
+
+- semi-real runtime smoke/audio validation,
+- packaging/installer work,
+- broad Product UI work,
+- Qwen lifecycle hardening unless runtime validation proves it is needed,
+- full internal rename from VoiceAI/VocalAI to OpenCohost.

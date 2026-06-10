@@ -12,9 +12,7 @@ import json
 import logging
 import os
 import queue
-import sys
 import threading
-import traceback
 import time
 from typing import Any, Optional
 import customtkinter as ctk
@@ -25,6 +23,7 @@ from tkinter import filedialog
 import tkinter.messagebox as messagebox
 from pynput import keyboard, mouse
 from ui.state import UIState
+from ui.crash_reporting import install_crash_handler
 from ui.protocols import CallbackDispatcher, SmartAggregatorCallbacks
 from ui.ptt_manager import PTTManager
 from ui.voice_control import VoiceControlPanel
@@ -104,35 +103,12 @@ class _ButtonStub:
     def pack(self, **kw: object) -> None:
         pass
 # ── Global crash handler: log unhandled exceptions before the process dies ──
-_CRASH_LOG = os.environ.get("VOICEAI_CRASH_LOG", os.path.join("logs", "crash.log"))
-def _install_crash_handler() -> None:
-    """Log unhandled exceptions to a crash file so silent deaths leave a trace."""
-    os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-    def _write_crash(tb_text: str) -> None:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"CRASH at {now}\n")
-            f.write(f"Thread: {threading.current_thread().name}\n")
-            f.write(tb_text)
-        sys.stderr.write(f"\n[VoiceAI CRASH] {now}\n{tb_text}\n")
-    def _handler(exc_type, exc_value, exc_tb):
-        _write_crash("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-    def _thread_handler(args):
-        _write_crash("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
-        sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
-    sys.excepthook = _handler
-    threading.excepthook = _thread_handler
-    # Tkinter swallows exceptions by default — make it loud
-    import tkinter as _tk
-    _tk.Tk.report_callback_exception = _handler
-_install_crash_handler()
+install_crash_handler()
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"VocalAI — Qwen3-TTS + {DEFAULT_MODEL}")
+        self.title(f"OpenCohost — Qwen3-TTS + {DEFAULT_MODEL}")
         geo = _cargar_geometria()
         if geo:
             try:
@@ -143,6 +119,7 @@ class VocalAIApp(ctk.CTk):
             self.geometry("1100x700")
         self.minsize(800, 500)
         self.log_queue = queue.Queue()
+        self._ui_task_queue = queue.Queue()
         self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
         self._modo_compacto: bool = False
@@ -181,7 +158,9 @@ class VocalAIApp(ctk.CTk):
         # PTT Manager
         self.ptt = PTTManager(logger=logger)
         self.ptt.set_status_callback(self._on_ptt_status_change)
-        self.ptt.set_state_callback(self._actualizar_pipeline)
+        self.ptt.set_state_callback(
+            lambda estado: self._safe_after(lambda: self._actualizar_pipeline(estado))
+        )
         self.ptt.set_log_callback(lambda msg: self._print_log(msg))
         # Avatar state bridge (independent from Tkinter)
         self._avatar_bridge = AvatarStateBridge()
@@ -192,6 +171,8 @@ class VocalAIApp(ctk.CTk):
         self._inactivity_timeout_ms: int = 2 * 60 * 1000  # 2 minutes to sleeping
         # OBS WebSocket client (initialized after UI build to access config)
         self._obs_client: Optional[OBSClient] = None
+        self._obs_retry_thread: threading.Thread | None = None
+        self._obs_retry_cancel: threading.Event | None = None
         # ── Build UI structure ──
         self._build_ui()
         # Motor IA (deferred until mainloop is running to avoid
@@ -225,11 +206,12 @@ class VocalAIApp(ctk.CTk):
         # Initialize smart aggregator and stream admin
         self._init_smart_aggregator()
         self._init_stream_admin()
-        # Start log processing
+        # Start log and cross-thread UI task processing
+        self.after(50, self._process_ui_tasks)
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
-        logger.info("Aplicación VoiceAI iniciada.")
+        logger.info("Aplicación OpenCohost iniciada.")
     def _start_motor(self) -> None:
         """Start the IA motor thread after mainloop is running.
         Deferring this avoids 'main thread is not in main loop' errors
@@ -255,7 +237,7 @@ class VocalAIApp(ctk.CTk):
             logger.warning("Startup temp janitor failed: %s", exc)
             return
         if stats.get("removed"):
-            logger.info("Startup temp janitor removed %s VoiceAI artifact(s)", stats["removed"])
+            logger.info("Startup temp janitor removed %s legacy app artifact(s)", stats["removed"])
     def _poll_health_status(self) -> None:
         """Poll health monitor state and push to UI state (thread-safe via after)."""
         if self.health_monitor and not getattr(self, "_motor_heartbeat_failure_reported", False):
@@ -401,7 +383,7 @@ class VocalAIApp(ctk.CTk):
         import webbrowser
         self.lbl_author = ctk.CTkLabel(
             status_bar_frame,
-            text="VoiceAI by FranGuh",
+            text="OpenCohost by FranGuh",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#3a86ff",
             cursor="hand2"
@@ -495,7 +477,7 @@ class VocalAIApp(ctk.CTk):
             on_motor_event=self._on_motor_event,
             on_pipeline_change=self._actualizar_pipeline,
             dispositivo_seleccionado=self.dispositivo_seleccionado,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             external_primary_button=self._primary_speak_btn,
         )
         self.voice_panel.create_voice_panel()
@@ -661,7 +643,7 @@ class VocalAIApp(ctk.CTk):
             ui_state=self._ui_state,
             dispatcher=self._model_dispatcher,
             on_log=self._print_log,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None)),
         )
         self.model_panel.build()
@@ -675,7 +657,7 @@ class VocalAIApp(ctk.CTk):
         # Profile panel
         frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
-        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=lambda fn: self.after(0, fn))
+        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after)
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
@@ -834,7 +816,7 @@ class VocalAIApp(ctk.CTk):
             ui_state=self._ui_state,
             dispatcher=CallbackDispatcher(source="StreamAdminUI"),
             on_log=self._on_stream_admin_log,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
         )
         self.stream_admin_ui.build(stream_admin_panel)
         # Wire stream content frames to side_panel sub-tabs
@@ -885,7 +867,10 @@ class VocalAIApp(ctk.CTk):
         self._avatar_panel = AvatarPanel(
             parent_frame=avatar_panel_frame,
             on_log=lambda msg: self._print_log(msg),
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
+            on_obs_enable=lambda: self._obs_start_from_config(),
+            on_obs_disable=lambda: self._obs_stop_runtime(),
+            on_obs_connect=lambda: self._obs_connect_now(),
         )
         self._avatar_panel.build()
         self._avatar_panel.set_state_bridge(self._avatar_bridge)
@@ -901,7 +886,7 @@ class VocalAIApp(ctk.CTk):
             log_queue=self.log_queue,
             text_kira_response=self.text_kira_response,
             on_log_action=None,
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
         )
         self._advanced_mode_panel = self._advanced_panel.build()
         self.consola = self._advanced_panel.consola
@@ -1317,6 +1302,19 @@ class VocalAIApp(ctk.CTk):
             return False
         return bool(self.motor_ia.has_pending_priority_before(action.priority))
 
+    def _kira_agenda_has_non_agenda_audio_work(self) -> bool:
+        """Return True when a human/direct path owns processing or speech."""
+        processing_source = str(getattr(self.motor_ia, "current_processing_source", "") or "")
+        speech_source = str(getattr(self.motor_ia, "current_speech_source", "") or "")
+        processing = bool(getattr(self.motor_ia, "is_processing", False))
+        speaking = bool(getattr(self.motor_ia, "is_speaking", False))
+
+        if processing and not processing_source.startswith("kira-agenda"):
+            return True
+        if speaking and not speech_source.startswith("kira-agenda"):
+            return True
+        return False
+
     def _kira_agenda_consume_pending_chat_if_due(self) -> bool:
         compact_chat = getattr(self, "_kira_agenda_pending_compact_chat", "").strip()
         if not compact_chat or not hasattr(self, "kira_agenda"):
@@ -1348,6 +1346,10 @@ class VocalAIApp(ctk.CTk):
             return False
         if self._kira_agenda_has_higher_priority_pending(action):
             self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
+            self._kira_agenda_clear_prefetch()
+            return False
+        if self._kira_agenda_has_non_agenda_audio_work():
+            self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
             self._kira_agenda_clear_prefetch()
             return False
         if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
@@ -1479,7 +1481,7 @@ class VocalAIApp(ctk.CTk):
                 if "Falta scope de escritura" in str(e):
                     hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
                 try:
-                    self.after(0, lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
+                    self._safe_after(lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
                 except Exception:
                     self._notify_operator("Stream Admin", str(e), level="error")
                 self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
@@ -1733,7 +1735,7 @@ class VocalAIApp(ctk.CTk):
                     self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado aviso: {e}")
                     if failures >= max_failures or "Token" in str(e) or "Permisos" in str(e):
                         self._on_stream_admin_log("[StreamAdmin] Chat autenticado detenido por fallos consecutivos. Reconecta cuando el proveedor esté estable.")
-                        self.after(0, self._stream_admin_disconnect_api_chat)
+                        self._safe_after(self._stream_admin_disconnect_api_chat)
                         break
                     delay = min(60.0, 5.0 * (2 ** (failures - 1)))
                 if self.stream_admin_ui._chat_stop:
@@ -1891,7 +1893,7 @@ class VocalAIApp(ctk.CTk):
 
     def _stream_admin_track_chat_user(self, message: dict) -> None:
         self.stream_admin_ui.track_chat_user(message)
-        self.after(0, self.stream_admin_ui.refresh_user_list)
+        self._safe_after(self.stream_admin_ui.refresh_user_list)
 
     def _stream_admin_refresh_user_list(self) -> None:
         frame_users = self.stream_admin_ui._widget("frame_stream_users")
@@ -1961,9 +1963,9 @@ class VocalAIApp(ctk.CTk):
         self.stream_admin_ui._sync_controls(state)
 
     def _on_stream_admin_log(self, msg: str) -> None:
-        self.after(0, lambda m=msg: self._append_stream_admin_log(m))
+        self._safe_after(lambda m=msg: self._append_stream_admin_log(m))
         clean = msg.replace("[StreamAdmin] ", "")
-        self.after(0, lambda m=clean: self._log_accion(m))
+        self._safe_after(lambda m=clean: self._log_accion(m))
 
     def _append_stream_admin_log(self, msg: str) -> None:
         if not hasattr(self, "_advanced_panel"):
@@ -2015,7 +2017,7 @@ class VocalAIApp(ctk.CTk):
             lbl_kira_chat_state=self.lbl_kira_chat_state,
             status_bar=self.status_bar,
             on_log=lambda msg: self.log_queue.put(msg),
-            schedule_ui_update=lambda fn: self.after(0, fn),
+            schedule_ui_update=self._safe_after,
             on_track_chat_user=lambda msg: self._stream_admin_track_chat_user(msg),
             on_ingest_rf3=lambda evt, data: self._stream_admin_ingest_rf3_event(evt, data),
             on_joyita=lambda text: self._on_joyita_to_obs(text),
@@ -2263,7 +2265,28 @@ class VocalAIApp(ctk.CTk):
     # Motor event handler
     # ──────────────────────────────────────────────
 
-    def _safe_after(self, func) -> None:
+    def _process_ui_tasks(self) -> None:
+        task_queue = self.__dict__.get("_ui_task_queue")
+        if task_queue is None:
+            return
+
+        while True:
+            try:
+                delay_ms, func = task_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self.after(delay_ms, func)
+            except RuntimeError:
+                pass
+
+        if not self.__dict__.get("_closing", False):
+            try:
+                self.after(50, self._process_ui_tasks)
+            except RuntimeError:
+                pass
+
+    def _safe_after(self, func, delay_ms: int = 0) -> None:
         """Schedule a UI update on the main thread, safely handling startup race conditions.
 
         During startup the motor thread may fire events before Tkinter enters
@@ -2271,18 +2294,30 @@ class VocalAIApp(ctk.CTk):
         silently skip — the UI will be in its initial state and subsequent
         events will update it once the loop is running.
         """
+        if threading.current_thread() is not threading.main_thread():
+            task_queue = self.__dict__.get("_ui_task_queue")
+            if task_queue is not None:
+                task_queue.put((delay_ms, func))
+                return
         try:
-            self.after(0, func)
+            self.after(delay_ms, func)
         except RuntimeError:
             pass
 
     def _on_motor_event(self, status: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self._safe_after(lambda status=status: self._handle_motor_event(status))
+            return
+        self._handle_motor_event(status)
+
+    def _handle_motor_event(self, status: str) -> None:
         handlers = {
             "ready": self._on_motor_ready,
             "model_warming": self._on_motor_model_warming,
             "ollama_unavailable": self._on_motor_ollama_unavailable,
             "processing": self._on_motor_processing,
             "idle": self._on_motor_idle,
+            "llm_timeout_recovered": self._on_motor_llm_timeout_recovered,
             "speaking_start": self._on_motor_speaking_start,
             "speaking_end": self._on_motor_speaking_end,
             "model_changed": self._on_motor_model_changed,
@@ -2314,7 +2349,7 @@ class VocalAIApp(ctk.CTk):
             model = self.motor_ia.current_model
             self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
             self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-            self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+            self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         # Start PTT flush watcher thread
         if hasattr(self, "voice_panel"):
             self.voice_panel._start_ptt_flush_watcher()
@@ -2353,6 +2388,16 @@ class VocalAIApp(ctk.CTk):
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
         if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             self._kira_agenda_schedule_tick(500)
+
+    def _on_motor_llm_timeout_recovered(self) -> None:
+        failure = getattr(self.motor_ia, "_last_llm_failure", None) or {}
+        failed_model = failure.get("model", "?")
+        recovered_model = getattr(self.motor_ia, "current_model", failed_model)
+        self._print_log(
+            f"[Sistema] ⚠️ Recuperación por timeout de inferencia en {failed_model}. Modelo activo: {recovered_model}"
+        )
+        self._safe_after(lambda: self.model_panel.restore_to_active_model(recovered_model))
+        self._safe_after(lambda: self.model_panel.update_model_info(recovered_model))
 
     def _on_motor_speaking_start(self) -> None:
         if hasattr(self, "audio_bed"):
@@ -2477,11 +2522,36 @@ class VocalAIApp(ctk.CTk):
 
     def _init_obs_client(self) -> None:
         """Initialize OBS WebSocket client if enabled in config."""
+        self._obs_start_from_config()
+
+    def _obs_connect_now(self) -> None:
+        """Start or refresh the live OBS runtime connection from current config."""
+        self._obs_start_from_config()
+
+    def _obs_start_from_config(self, retry_delay: float = 5) -> bool:
+        """Create/refresh OBS runtime client and start one cancellable retry loop."""
         from avatar.avatar_config import load_avatar_config
         avatar_cfg = load_avatar_config()
 
         if not avatar_cfg.obs.enabled:
-            return
+            self._obs_stop_runtime()
+            return False
+
+        existing_thread = getattr(self, "_obs_retry_thread", None)
+        if (
+            getattr(self, "_obs_client", None) is not None
+            and existing_thread is not None
+            and existing_thread.is_alive()
+        ):
+            return True
+
+        existing_client = getattr(self, "_obs_client", None)
+        if existing_client is not None and getattr(existing_client, "is_connected", False):
+            try:
+                self._avatar_panel.set_obs_client(existing_client)
+            except Exception:
+                pass
+            return True
 
         try:
             self._obs_client = OBSClient(
@@ -2497,33 +2567,67 @@ class VocalAIApp(ctk.CTk):
                 state_images=avatar_cfg.state_images,
                 on_log=lambda msg: self._print_log(msg),
             )
-            # Connect in background thread to avoid blocking UI. Keep retrying so
-            # non-technical users can open OBS after VoiceAI without breaking the
-            # avatar bridge for the whole session.
-            threading.Thread(target=self._connect_obs_loop, daemon=True).start()
+            self._obs_retry_cancel = threading.Event()
+            self._obs_retry_thread = threading.Thread(
+                target=self._connect_obs_loop,
+                args=(self._obs_retry_cancel, self._obs_client, retry_delay),
+                daemon=True,
+            )
+            self._obs_retry_thread.start()
+            return True
         except Exception as e:
             self._print_log(f"[OBS] Failed to initialize: {e}")
+            return False
 
-    def _connect_obs_loop(self, retry_delay: float = 5) -> None:
+    def _obs_stop_runtime(self) -> None:
+        """Cancel OBS retry loop and disconnect the live runtime client."""
+        cancel_event = getattr(self, "_obs_retry_cancel", None)
+        if cancel_event is not None:
+            cancel_event.set()
+        obs_client = getattr(self, "_obs_client", None)
+        if obs_client is not None:
+            try:
+                obs_client.disconnect()
+            except Exception:
+                logger.exception("Fallo al desconectar OBS")
+        self._obs_client = None
+        try:
+            self._avatar_panel.set_obs_client(None)
+        except Exception:
+            pass
+
+    def _connect_obs_loop(
+        self,
+        cancel_event: threading.Event | None = None,
+        obs_client: OBSClient | None = None,
+        retry_delay: float = 5,
+    ) -> None:
         """Retry OBS connection without letting unexpected socket errors kill the thread."""
         logged_once = False
-        while getattr(self, "_obs_client", None) is not None:
+        managed_loop = cancel_event is not None
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             try:
-                obs_client = self._obs_client
-                if obs_client is None:
+                active_client = obs_client if obs_client is not None else self._obs_client
+                if active_client is None or active_client is not getattr(self, "_obs_client", None):
                     break
-                if obs_client.connect(log_failures=not logged_once):
-                    obs_client.subscribe_bridge(self._avatar_bridge)
-                    obs_client.on_state_change(self._avatar_bridge.get_state())
+                if active_client.connect(log_failures=not logged_once):
+                    if cancel_event is not None and cancel_event.is_set():
+                        break
+                    if active_client is not getattr(self, "_obs_client", None):
+                        break
+                    active_client.subscribe_bridge(self._avatar_bridge)
+                    active_client.on_state_change(self._avatar_bridge.get_state())
                     try:
                         if self.winfo_exists():
-                            self.after(0, lambda: self._avatar_panel.set_obs_client(obs_client))
+                            self._safe_after(lambda: self._avatar_panel.set_obs_client(active_client))
                     except Exception:
                         pass
                     return
                 if not logged_once:
                     self._print_log(
-                        "[OBS] No se pudo conectar. VoiceAI reintentara cada 5s. "
+                        "[OBS] No se pudo conectar. OpenCohost reintentara cada 5s. "
                         "Abrí OBS y la conexión se restablecerá automáticamente."
                     )
                     logged_once = True
@@ -2531,15 +2635,19 @@ class VocalAIApp(ctk.CTk):
                 logger.exception("Fallo inesperado en loop de OBS")
                 if not logged_once:
                     self._print_log(
-                        "[OBS] Error inesperado conectando. VoiceAI seguira reintentando cada 5s."
+                        "[OBS] Error inesperado conectando. OpenCohost seguira reintentando cada 5s."
                     )
                     logged_once = True
-            time.sleep(retry_delay)
+            if managed_loop:
+                if cancel_event is not None and cancel_event.wait(retry_delay):
+                    break
+            else:
+                time.sleep(retry_delay)
         # Client was destroyed (app closing)
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
-        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._safe_after(lambda: self.model_panel.set_active_model(model))
         self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
@@ -2584,7 +2692,7 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
         self._safe_after(lambda: self.progress_download.pack_forget())
         self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.title(f"VocalAI — Qwen3-TTS + {model}"))
+        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
         self._actualizar_pipeline("idle")
         self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
@@ -2652,7 +2760,7 @@ class VocalAIApp(ctk.CTk):
     def _hilo_grabacion(self) -> None:
         filepath = os.path.join(BASE_DIR, "referencia_grabada.wav")
         self._print_log(f"\n[Grabación] 🔴 GRABANDO {RECORDING_DURATION}s... Habla ahora.")
-        self.after(0, lambda: self.btn_grabar.configure(state="disabled", text="Grabando...", fg_color="darkred"))
+        self._safe_after(lambda: self.btn_grabar.configure(state="disabled", text="Grabando...", fg_color="darkred"))
         try:
             recording = sd.rec(int(RECORDING_DURATION * RECORDING_SAMPLERATE), samplerate=RECORDING_SAMPLERATE, channels=1, dtype="float32", device=self.dispositivo_seleccionado)
             sd.wait()
@@ -2669,14 +2777,14 @@ class VocalAIApp(ctk.CTk):
             def ask_use_audio():
                 response["use"] = messagebox.askyesno("Grabación Finalizada", "Audio capturado correctamente.\n\n¿Usar como voz de referencia para la IA?")
                 response_ready.set()
-            self.after(0, ask_use_audio)
+            self._safe_after(ask_use_audio)
             if not response_ready.wait(timeout=120):
                 self._print_log("[Grabación] Confirmación agotó tiempo; audio descartado por seguridad.")
             if response["use"]:
                 self._print_log("[Sistema] Perfil de voz enviado a la IA.")
                 self.motor_ia.command_queue.put(("set_voice", filepath))
-                self.after(0, lambda: self.btn_ws.configure(state="normal", fg_color="#555555"))
-                self.after(0, lambda: self.btn_enviar.configure(state="normal"))
+                self._safe_after(lambda: self.btn_ws.configure(state="normal", fg_color="#555555"))
+                self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
             else:
                 self._print_log("[Grabación] ❌ Descartada.")
                 if os.path.exists(filepath):
@@ -2685,7 +2793,7 @@ class VocalAIApp(ctk.CTk):
             self._print_log(f"[ERROR Grabación]: {e}")
             logger.exception("Error durante grabación")
         finally:
-            self.after(0, lambda: self.btn_grabar.configure(state="normal", text="🎤 Grabar", fg_color="#555555"))
+            self._safe_after(lambda: self.btn_grabar.configure(state="normal", text="🎤 Grabar", fg_color="#555555"))
 
     def _cargar_voz(self) -> None:
         filepath = filedialog.askopenfilename(title="Seleccionar muestra de voz", filetypes=[("Audio WAV", "*.wav")])
@@ -2712,7 +2820,7 @@ class VocalAIApp(ctk.CTk):
             self.btn_enviar.configure(state="normal")
             self.btn_voz.configure(text="WAV Cargado ✅", fg_color="#1f5a3a")
             self._print_log(f"[Sistema] Perfil de voz cargado ({duration:.1f}s).")
-            self.after(2000, lambda: self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555"))
+            self._safe_after(lambda: self.btn_voz.configure(text="📂 Cargar WAV", fg_color="#555555"), delay_ms=2000)
 
     def _enviar_contexto_manual(self) -> None:
         texto = self.entry_chat.get().strip()
@@ -2904,9 +3012,8 @@ class VocalAIApp(ctk.CTk):
         self._stop_speaking_alt_timer()
         self._stop_inactivity_timer()
 
-        # Disconnect OBS WebSocket
-        if self._obs_client is not None:
-            self._obs_client.disconnect()
+        # Disconnect OBS WebSocket and cancel any pending retry loop.
+        self._obs_stop_runtime()
 
         self.ptt.stop_listener()
 
@@ -2954,6 +3061,6 @@ class VocalAIApp(ctk.CTk):
         try:
             cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=0.0)
         except Exception as e:
-            logger.warning(f"No se pudo limpiar temporales VoiceAI al salir: {e}")
+            logger.warning(f"No se pudo limpiar temporales de la app al salir: {e}")
 
         self.destroy()

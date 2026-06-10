@@ -66,7 +66,7 @@ class YouTubeProvider(BaseStreamProvider):
                 code_data["code"] = params.get("code", [""])[0]
                 code_data["state"] = params.get("state", [""])[0]
                 code_data["error"] = params.get("error", [""])[0]
-                body = b"VoiceAI RF4 OAuth completado. Puedes cerrar esta ventana."
+                body = b"OpenCohost OAuth completado. Puedes cerrar esta ventana."
                 handler_self.send_response(200)
                 handler_self.send_header("Content-Type", "text/plain; charset=utf-8")
                 handler_self.send_header("Content-Length", str(len(body)))
