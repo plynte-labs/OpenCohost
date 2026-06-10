@@ -1,8 +1,9 @@
 import json
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Iterable, Optional
 from config.storage import STORAGE_PATHS, USER_DATA_DIR
 
 # ──────────────────────────────────────────────
@@ -112,6 +113,12 @@ MODELS_CATALOG = {
         "size_gb": 2.5,
         "family": "gemma",
     },
+    "gemma4:12b": {
+        "display": "Gemma 4 (12B)",
+        "desc": "Google - Multimodal, alto rendimiento. Ideal RTX 3060+.",
+        "size_gb": 7.2,
+        "family": "gemma",
+    },
 }
 
 SYSTEM_PROMPT = """Eres Kira, una co-host virtual de un stream en vivo. Tu personalidad:
@@ -203,21 +210,77 @@ HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
 # Model persistence
 # ──────────────────────────────────────────────
 
-def resolve_startup_model() -> tuple[str, str]:
+def _canonical_model_tag(tag: str) -> str:
+    """Normalize a model tag for persistence and runtime comparisons."""
+    normalized = str(tag or "").strip()
+    if normalized.endswith(":latest"):
+        return normalized[:-7]
+    return normalized
+
+
+def _normalize_installed_model_tags(
+    installed_model_tags: Iterable[str],
+) -> set[str]:
+    """Return canonical installed-model tags from any discovery source."""
+    normalized: set[str] = set()
+    for tag in installed_model_tags:
+        canonical = _canonical_model_tag(tag)
+        if canonical:
+            normalized.add(canonical)
+    return normalized
+
+
+def _discover_installed_model_tags() -> set[str]:
+    """Best-effort runtime discovery of locally installed Ollama models."""
+    try:
+        import ollama
+
+        return _normalize_installed_model_tags(
+            getattr(model, "model", "")
+            for model in getattr(ollama.list(), "models", [])
+        )
+    except Exception:
+        return set()
+
+
+def is_runtime_model_available(
+    tag: str,
+    installed_model_tags: Optional[Iterable[str]] = None,
+) -> bool:
+    """Return whether a tag is safe to use as a runtime model candidate."""
+    canonical = _canonical_model_tag(tag)
+    if not canonical:
+        return False
+    if canonical in MODELS_CATALOG:
+        return True
+
+    normalized = (
+        _normalize_installed_model_tags(installed_model_tags)
+        if installed_model_tags is not None
+        else _discover_installed_model_tags()
+    )
+    return canonical in normalized
+
+
+def resolve_startup_model(
+    installed_model_tags: Optional[Iterable[str]] = None,
+) -> tuple[str, str]:
     """Return (model_tag, source) for startup.
 
     Sources:
-        'saved' — valid model read from last_model.json
-        'default' — no saved model found, using DEFAULT_MODEL
-        'invalid_saved_fallback' — saved model not in MODELS_CATALOG
+        'saved' - saved curated model read from last_model.json
+        'saved_runtime' - saved non-curated model still available at runtime
+        'default' - no saved model found, using DEFAULT_MODEL
+        'invalid_saved_fallback' - saved model is not runtime-valid
     """
     try:
         if os.path.exists(LAST_MODEL_FILE):
             with open(LAST_MODEL_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            saved = data.get("model", "")
-            if saved and saved in MODELS_CATALOG:
-                return saved, "saved"
+            saved = _canonical_model_tag(data.get("model", ""))
+            if saved and is_runtime_model_available(saved, installed_model_tags):
+                source = "saved" if saved in MODELS_CATALOG else "saved_runtime"
+                return saved, source
             return DEFAULT_MODEL, "invalid_saved_fallback"
     except Exception:
         pass
@@ -243,7 +306,9 @@ def save_last_model(tag: str, source: str = "user_switch") -> None:
         pass
 
 
-def resolve_llm_tiers() -> dict[str, str]:
+def resolve_llm_tiers(
+    installed_model_tags: Optional[Iterable[str]] = None,
+) -> dict[str, str]:
     """Return configurable manual LLM tier slots with safe defaults.
 
     The file is intentionally simple so operators can adjust the three manual
@@ -260,8 +325,14 @@ def resolve_llm_tiers() -> dict[str, str]:
             if isinstance(data, dict):
                 for tier in tiers:
                     model = data.get(tier)
-                    if isinstance(model, str) and model.strip():
-                        tiers[tier] = model.strip()
+                    if not isinstance(model, str):
+                        continue
+                    candidate = _canonical_model_tag(model)
+                    if candidate and is_runtime_model_available(
+                        candidate,
+                        installed_model_tags,
+                    ):
+                        tiers[tier] = candidate
     except Exception:
         pass
     return tiers

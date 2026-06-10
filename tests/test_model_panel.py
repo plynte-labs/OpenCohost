@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -257,6 +258,68 @@ class TestModelCatalog:
         expected = MODELS_CATALOG[DEFAULT_MODEL]["display"]
         assert model_panel.default_display == expected
 
+    def test_apply_model_catalog_appends_discovered_models_after_curated(
+        self, model_panel
+    ):
+        curated = list(model_panel.model_display_list)
+
+        model_panel._apply_model_catalog({"bespoke:9b"})
+
+        assert model_panel.combo_modelos.values[: len(curated)] == curated
+        assert model_panel.combo_modelos.values[-1] == "bespoke:9b"
+
+    def test_apply_model_catalog_deduplicates_curated_latest_tag(self, model_panel):
+        curated = list(model_panel.model_display_list)
+
+        model_panel._apply_model_catalog({"llama3:latest", "gemma4:12b"})
+
+        assert model_panel.combo_modelos.values == curated
+
+    def test_discover_installed_model_tags_normalizes_and_skips_invalid(
+        self, model_panel
+    ):
+        mock_ollama = MagicMock()
+        mock_ollama.list.return_value.models = [
+            SimpleNamespace(model="llama3:latest"),
+            {"model": " bespoke:9b "},
+            SimpleNamespace(model=""),
+            {},
+        ]
+
+        with patch.dict("sys.modules", {"ollama": mock_ollama}):
+            assert model_panel._discover_installed_model_tags() == {
+                "llama3",
+                "bespoke:9b",
+            }
+
+    def test_refresh_model_list_falls_back_to_curated_on_discovery_failure(
+        self, model_panel
+    ):
+        curated = list(model_panel.model_display_list)
+
+        with patch.object(
+            model_panel,
+            "_discover_installed_model_tags",
+            side_effect=RuntimeError("boom"),
+        ):
+            model_panel._refresh_model_list()
+
+        assert model_panel.combo_modelos.values == curated
+
+    def test_extreme_merge_keeps_curated_first_and_deduplicated(self, model_panel):
+        curated = list(model_panel.model_display_list)
+        installed = {f"lab{i}:1b" for i in range(30)}
+        installed.update({"llama3:latest", "qwen3:4b", "gemma4:12b", " bespoke:9b "})
+
+        model_panel._apply_model_catalog(installed)
+
+        values = model_panel.combo_modelos.values
+        assert values[: len(curated)] == curated
+        assert values.count(model_panel.get_display_for_tag("llama3")) == 1
+        assert values.count(model_panel.get_display_for_tag("qwen3:4b")) == 1
+        assert "bespoke:9b" in values
+        assert "lab29:1b" in values
+
 
 # ---------------------------------------------------------------------------
 # 3. UI Construction
@@ -462,7 +525,7 @@ class TestModelSelection:
         assert len(received) == 0
         model_panel._on_log.assert_called()
 
-    def test_on_model_changed_ollama_not_ready_dispatches_pending_intent(self, model_panel, dispatcher):
+    def test_on_model_changed_ollama_not_ready_does_not_dispatch_switch(self, model_panel, dispatcher):
         from config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
@@ -475,9 +538,10 @@ class TestModelSelection:
         with patch.object(model_panel, "update_model_info"):
             model_panel._on_model_changed(display)
 
-        assert received == [tag]
+        assert received == []
         model_panel._on_log.assert_any_call(
-            f"[Sistema] Ollama no esta listo. Cambio a '{tag}' queda pendiente hasta que Ollama responda."
+            "[Sistema] Ollama no esta listo. "
+            "Selecciona un modelo cuando Ollama este activo."
         )
 
 
@@ -707,6 +771,24 @@ class TestObserverIntegration:
             time.sleep(0.15)
             # Button should have been updated (text won't be "Revisando Ollama...")
             assert panel.btn_download.text != "Revisando Ollama..."
+        panel.cleanup()
+
+    def test_ready_state_change_triggers_model_refresh(
+        self, mock_ctk, ui_state, dispatcher, on_log
+    ):
+        panel = ModelPanel(
+            parent_frame=MagicMock(),
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            on_log=on_log,
+        )
+        with patch("ui.model_panel.ctk", mock_ctk):
+            panel.build()
+
+        with patch.object(panel, "_refresh_model_list_async") as mock_refresh:
+            panel._on_state_change("ollama_state", "ready")
+
+        mock_refresh.assert_called_once()
         panel.cleanup()
 
 
