@@ -13,13 +13,15 @@ from collections import deque
 from typing import Optional
 
 from config.settings import (
-    DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE, 
+    DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
     LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
+    TTS_LOCAL_MODEL_PATH,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
 )
+from core.tts_piper import PiperEngine
 from core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from config.logger import get_logger
 from config.validation import output_guard
@@ -32,6 +34,30 @@ logger = get_logger()
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 _TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
 _TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """Walk the exception cause chain; return True only for network-offline errors.
+
+    Classified as connection errors: socket.gaierror, ssl.SSLError,
+    aiohttp.ClientConnectorError.  asyncio.TimeoutError and all other
+    exceptions return False.
+    """
+    import ssl
+    seen: set = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, (socket.gaierror, ssl.SSLError)):
+            return True
+        try:
+            import aiohttp
+            if isinstance(e, aiohttp.ClientConnectorError):
+                return True
+        except ImportError:
+            pass
+        e = e.__cause__ or e.__context__  # type: ignore[assignment]
+    return False
+
 
 # Spoken when the output guard blocks a response, so Kira never goes silent
 # mid-conversation. No LLM call involved. Lines must stay neutral and must
@@ -89,6 +115,11 @@ class MotorVocalIA(threading.Thread):
         self._inference_watchdog_timeout: float = float(OLLAMA_CHAT_TIMEOUT)
         self._post_switch_watchdog_timeout: float = min(float(OLLAMA_CHAT_TIMEOUT), 45.0)
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
+
+        # Offline fallback: latches True on first Edge-TTS connection error;
+        # subsequent chunks skip Edge-TTS for the rest of the session.
+        self._edge_tts_offline: bool = False
+        self._piper = PiperEngine(TTS_LOCAL_MODEL_PATH)
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
         self.health_monitor = None
@@ -168,6 +199,8 @@ class MotorVocalIA(threading.Thread):
             return
 
         self._check_ollama_service()
+        if TTS_LOCAL_MODEL_PATH:
+            self._piper.load()
         self._log(f"Modelo inicial: {self.current_model} (fuente: {self._model_source})")
         self._log("Motor IA inicializado. Esperando comandos...")
 
@@ -1382,6 +1415,24 @@ class MotorVocalIA(threading.Thread):
                 if not self._speaking:
                     break
 
+                # Fast-path: Edge-TTS is known offline for this session — go
+                # straight to Piper without attempting a network call.
+                if effective_motor == "ligero" and self._edge_tts_offline:
+                    archivo_chunk_wav = os.path.join(
+                        TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
+                    )
+                    if self._piper.is_available():
+                        if self._piper.synthesize(oracion, archivo_chunk_wav):
+                            cola_audios.put((archivo_chunk_wav, i, oracion))
+                        else:
+                            cola_audios.put(None)
+                            error_count += 1
+                    else:
+                        # Piper gone / never loaded — drop chunk silently
+                        cola_audios.put(None)
+                        error_count += 1
+                    continue
+
                 ext = ".mp3" if effective_motor == "ligero" else ".wav"
                 archivo_chunk = os.path.join(TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}{ext}")
                 try:
@@ -1441,6 +1492,33 @@ class MotorVocalIA(threading.Thread):
                     error_count += 1
 
                 except Exception as e:
+                    # Connection-error detection: only network-offline errors trigger
+                    # Piper fallback. asyncio.TimeoutError and other errors do NOT.
+                    if effective_motor == "ligero" and _is_connection_error(e):
+                        self._edge_tts_offline = True
+                        if self._piper.is_available():
+                            self._log(
+                                "Edge-TTS sin conexion; usando TTS local (Piper) "
+                                "por el resto de la sesion."
+                            )
+                            archivo_chunk_wav = os.path.join(
+                                TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
+                            )
+                            if self._piper.synthesize(oracion, archivo_chunk_wav):
+                                cola_audios.put((archivo_chunk_wav, i, oracion))
+                            else:
+                                cola_audios.put(None)
+                                error_count += 1
+                        else:
+                            self._log(
+                                "TTS local no disponible: instala piper-tts y "
+                                "configura TTS_LOCAL_MODEL_PATH",
+                                level="warning",
+                            )
+                            cola_audios.put(None)
+                            error_count += 1
+                        continue
+
                     if effective_motor == "ligero":
                         self._log("ERROR: Edge-TTS requiere internet. Si estas offline usa Pesado (Qwen3-TTS).", level="error")
                         logger.warning(f"TTS ligero fallo; timeout configurado {TTS_LIGHT_TIMEOUT}s: {e}")
