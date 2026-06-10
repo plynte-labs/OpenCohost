@@ -342,13 +342,27 @@ def runtime_check(message: dict[str, Any]) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def output_guard(response: str) -> tuple[bool, str]:
+# Sources where the streamer is talking to Kira directly. Stream-context
+# rules (R10 meta-commentary, R11 negative engagement) do not apply there:
+# blocking a direct reply produces dead air, and the streamer can steer the
+# conversation live. Identity and safety rules still apply to every source.
+STREAMER_SOURCES = frozenset({"direct", "ptt"})
+
+
+def output_guard(response: str, source: str = "chat") -> tuple[bool, str]:
     """Validate a TTS response before it reaches voice output.
+
+    Args:
+        response: Candidate text for voice output.
+        source: Origin of the generation ("direct", "ptt", "chat",
+            "accumulated", "kira-agenda", ...). Defaults to "chat" so
+            callers that do not pass a source keep the strictest behavior.
 
     Returns:
         (allowed, reason) — allowed=True means the response passes all checks.
         reason explains why a response was blocked.
     """
+    streamer_facing = source in STREAMER_SOURCES
     # R9: No AI self-identification
     for pat in _AI_SELF_ID_PATTERNS:
         if pat.search(response):
@@ -362,31 +376,34 @@ def output_guard(response: str) -> tuple[bool, str]:
             )
             return False, reason
 
-    # R10: No meta-commentary
-    for pat in _META_COMMENTARY_PATTERNS:
-        if pat.search(response):
-            reason = (
-                f"Non-negotiable violation [no_meta_commentary]: "
-                f"response contains audience engagement commentary"
-            )
-            log_non_negotiable_block(
-                "no_meta_commentary", "output_guard",
-                preview=response[:120],
-            )
-            return False, reason
+    # R10/R11 are stream-context rules: they protect the live audience
+    # experience, not the streamer's own conversation with Kira.
+    if not streamer_facing:
+        # R10: No meta-commentary
+        for pat in _META_COMMENTARY_PATTERNS:
+            if pat.search(response):
+                reason = (
+                    f"Non-negotiable violation [no_meta_commentary]: "
+                    f"response contains audience engagement commentary"
+                )
+                log_non_negotiable_block(
+                    "no_meta_commentary", "output_guard",
+                    preview=response[:120],
+                )
+                return False, reason
 
-    # R11: No negative engagement commentary (stream-killer)
-    for pat in _NEGATIVE_ENGAGEMENT_PATTERNS:
-        if pat.search(response):
-            reason = (
-                f"Non-negotiable violation [no_negative_engagement]: "
-                f"response contains negative engagement/emotion/silence commentary"
-            )
-            log_non_negotiable_block(
-                "no_negative_engagement", "output_guard",
-                preview=response[:120],
-            )
-            return False, reason
+        # R11: No negative engagement commentary (stream-killer)
+        for pat in _NEGATIVE_ENGAGEMENT_PATTERNS:
+            if pat.search(response):
+                reason = (
+                    f"Non-negotiable violation [no_negative_engagement]: "
+                    f"response contains negative engagement/emotion/silence commentary"
+                )
+                log_non_negotiable_block(
+                    "no_negative_engagement", "output_guard",
+                    preview=response[:120],
+                )
+                return False, reason
 
     # R3: Never promise
     for pat in _PROMISE_PATTERNS:

@@ -2317,6 +2317,7 @@ class VocalAIApp(ctk.CTk):
             "ollama_unavailable": self._on_motor_ollama_unavailable,
             "processing": self._on_motor_processing,
             "idle": self._on_motor_idle,
+            "llm_timeout_recovered": self._on_motor_llm_timeout_recovered,
             "speaking_start": self._on_motor_speaking_start,
             "speaking_end": self._on_motor_speaking_end,
             "model_changed": self._on_motor_model_changed,
@@ -2387,6 +2388,16 @@ class VocalAIApp(ctk.CTk):
         self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
         if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
             self._kira_agenda_schedule_tick(500)
+
+    def _on_motor_llm_timeout_recovered(self) -> None:
+        failure = getattr(self.motor_ia, "_last_llm_failure", None) or {}
+        failed_model = failure.get("model", "?")
+        recovered_model = getattr(self.motor_ia, "current_model", failed_model)
+        self._print_log(
+            f"[Sistema] ⚠️ Recuperación por timeout de inferencia en {failed_model}. Modelo activo: {recovered_model}"
+        )
+        self._safe_after(lambda: self.model_panel.restore_to_active_model(recovered_model))
+        self._safe_after(lambda: self.model_panel.update_model_info(recovered_model))
 
     def _on_motor_speaking_start(self) -> None:
         if hasattr(self, "audio_bed"):

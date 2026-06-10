@@ -271,7 +271,9 @@ def test_output_guard_blocks_direct_generation_before_history_commit():
 
     dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
 
-    assert dialogo == ""
+    # R9 (AI self-ID) is global: blocked even for direct source. The spoken
+    # fallback line replaces dead air but never reaches LLM history.
+    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -286,7 +288,9 @@ def test_output_guard_blocks_chat_generation_before_history_commit():
 
     dialogo = motor._generar_dialogo("chat compactado", source="chat", commit_history=True)
 
-    assert dialogo == ""
+    # R10 still applies to chat sources; the fallback line is spoken instead
+    # of dead air and is never committed to LLM history.
+    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -719,3 +723,45 @@ def test_heavy_tts_continues_after_connection_error(tmp_path):
     assert len(music.loaded) == 1
     assert events[0] == "speaking_start"
     assert events[-1] == "speaking_end"
+
+
+# ---------------------------------------------------------------------------
+# Guardrail fallback lines (no-LLM spoken fallback on blocked output)
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_fallback_returns_line_for_direct():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    line = motor._guardrail_fallback_line("direct")
+    assert line in llm_engine.GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_returns_line_for_chat_sources():
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    for source in ("ptt", "chat", "accumulated"):
+        assert motor._guardrail_fallback_line(source) in llm_engine.GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_empty_for_agenda_sources():
+    """Agenda has its own rejection/recovery path — no canned line."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    assert motor._guardrail_fallback_line("kira-agenda") == ""
+    assert motor._guardrail_fallback_line("kira-agenda-stop") == ""
+
+
+def test_guardrail_fallback_rotates_lines():
+    """Consecutive blocks never speak the same line twice in a row."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    lines = [motor._guardrail_fallback_line("direct") for _ in range(6)]
+    for a, b in zip(lines, lines[1:]):
+        assert a != b
+
+
+def test_guardrail_fallback_lines_pass_output_guard():
+    """Canned lines must never trip the guard themselves, for any source."""
+    from config.validation import output_guard
+
+    for line in llm_engine.GUARDRAIL_FALLBACK_LINES:
+        for source in ("direct", "chat", "kira-agenda"):
+            allowed, reason = output_guard(line, source=source)
+            assert allowed, f"fallback line blocked ({source}): {line!r} — {reason}"

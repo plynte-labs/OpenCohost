@@ -454,3 +454,59 @@ class TestFourLayerIntegration:
         # Layer 3
         allowed, _ = output_guard("Hola, bienvenidos al stream.")
         assert allowed is True
+
+
+class TestOutputGuardSourceScoping:
+    """Stream-context rules (R10/R11) only apply to non-streamer sources."""
+
+    META_COMMENTARY = "Tu audiencia está muy activa hoy, están diciendo muchas cosas."
+    NEGATIVE_ENGAGEMENT = "el chat está muerto, qué aburrido"
+
+    def test_meta_commentary_allowed_for_direct(self):
+        allowed, _ = output_guard(self.META_COMMENTARY, source="direct")
+        assert allowed is True
+
+    def test_meta_commentary_allowed_for_ptt(self):
+        allowed, _ = output_guard(self.META_COMMENTARY, source="ptt")
+        assert allowed is True
+
+    def test_meta_commentary_blocked_for_chat(self):
+        allowed, reason = output_guard(self.META_COMMENTARY, source="chat")
+        assert allowed is False
+        assert "no_meta_commentary" in reason
+
+    def test_meta_commentary_blocked_for_agenda(self):
+        allowed, reason = output_guard(self.META_COMMENTARY, source="kira-agenda")
+        assert allowed is False
+        assert "no_meta_commentary" in reason
+
+    def test_meta_commentary_blocked_by_default(self):
+        """No source argument keeps the strictest behavior (backward compat)."""
+        allowed, _ = output_guard(self.META_COMMENTARY)
+        assert allowed is False
+
+    def test_negative_engagement_allowed_for_direct(self):
+        allowed, _ = output_guard(self.NEGATIVE_ENGAGEMENT, source="direct")
+        assert allowed is True
+
+    def test_negative_engagement_blocked_for_accumulated(self):
+        allowed, reason = output_guard(self.NEGATIVE_ENGAGEMENT, source="accumulated")
+        assert allowed is False
+        assert "no_negative_engagement" in reason
+
+    def test_ai_self_id_blocked_for_all_sources(self):
+        """Identity rule R9 is global — applies even to streamer sources."""
+        for source in ("direct", "ptt", "chat", "kira-agenda"):
+            allowed, reason = output_guard(
+                "Soy una inteligencia artificial, no lo sé.", source=source
+            )
+            assert allowed is False, f"R9 should block for source={source}"
+            assert "no_ai_self_identification" in reason
+
+    def test_doxxing_blocked_for_streamer_sources(self):
+        """Safety rules stay global for streamer sources."""
+        allowed, _ = output_guard(
+            "El número de teléfono es 555-123-4567 por si quieres llamar.",
+            source="direct",
+        )
+        assert allowed is False
