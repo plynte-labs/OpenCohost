@@ -8,7 +8,10 @@ import uuid
 import asyncio
 import concurrent.futures
 import requests
-import edge_tts
+try:
+    import edge_tts
+except ImportError:
+    edge_tts = None  # optional cloud-TTS dependency; Piper offline path stays available
 from collections import deque
 from typing import Optional
 
@@ -118,7 +121,12 @@ class MotorVocalIA(threading.Thread):
 
         # Offline fallback: latches True on first Edge-TTS connection error;
         # subsequent chunks skip Edge-TTS for the rest of the session.
-        self._edge_tts_offline: bool = False
+        # Also latched True at startup when the edge_tts package is absent.
+        if edge_tts is None:
+            logger.info("Edge-TTS is not installed; using Piper for light-engine synthesis.")
+            self._edge_tts_offline: bool = True
+        else:
+            self._edge_tts_offline: bool = False
         self._piper = PiperEngine(TTS_LOCAL_MODEL_PATH)
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
@@ -1414,9 +1422,10 @@ class MotorVocalIA(threading.Thread):
                 if not self._speaking:
                     break
 
-                # Fast-path: Edge-TTS is known offline for this session — go
-                # straight to Piper without attempting a network call.
-                if effective_motor == "ligero" and self._edge_tts_offline:
+                # Fast-path: Edge-TTS is known offline for this session (or the
+                # package is not installed) — go straight to Piper without
+                # attempting a network call.
+                if effective_motor == "ligero" and (self._edge_tts_offline or edge_tts is None):
                     archivo_chunk_wav = os.path.join(
                         TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
                     )
