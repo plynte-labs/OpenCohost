@@ -102,7 +102,7 @@ The system SHALL provide smoke checks that can later be run after installation:
 
 ## Acceptance Criteria
 
-- Focused automated tests pass in `E:\Miniconda\envs\flux_env\python.exe`.
+- Focused automated tests pass in `python`.
 - A manual 7-topic Kira agenda stress test plan exists and has been executed or explicitly marked pending.
 - Repeated interruption tests cover at least three interruption timings.
 - Synthetic chat load tests cover low, medium, and high/noisy traffic profiles.

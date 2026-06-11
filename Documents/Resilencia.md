@@ -26,13 +26,13 @@ Edited probar.py
 
 Let me verify the regex line is correct now:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import py_compile; py_compile.compile(r'e:\VoiceAI\probar.py', doraise=True); print('OK')"`
+Ran command: `python -c "import py_compile; py_compile.compile(r'probar.py', doraise=True); print('OK')"`
 
 Let me also verify the regex works correctly with a quick test:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import re; texto='Sinceramente, hoy no creo que sea el mejor dia. Pero si tuviera que elegir, diria que si! Estoy listo para pasar un buen rato.'; oraciones = re.split(r'(?<=[.!?;:])\s+', texto); oraciones = [o.strip() for o in oraciones if o.strip() and len(o.strip()) > 2]; print(f'Fragmentos: {len(oraciones)}'); [print(f'  [{i}] {o}') for i, o in enumerate(oraciones)]"`
+Ran command: `python -c "import re; texto='Sinceramente, hoy no creo que sea el mejor dia. Pero si tuviera que elegir, diria que si! Estoy listo para pasar un buen rato.'; oraciones = re.split(r'(?<=[.!?;:])\s+', texto); oraciones = [o.strip() for o in oraciones if o.strip() and len(o.strip()) > 2]; print(f'Fragmentos: {len(oraciones)}'); [print(f'  [{i}] {o}') for i, o in enumerate(oraciones)]"`
 Edited test_regex.py
-Ran command: `E:\Miniconda\envs\flux_env\python.exe e:\VoiceAI\temp\test_regex.py`
+Ran command: `python temp\test_regex.py`
 
 Regex splits perfectly. Let me do a final check of the complete file:
 

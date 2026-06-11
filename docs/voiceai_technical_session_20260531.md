@@ -1,7 +1,7 @@
 # VoiceAI Technical Live Session Backup — 2026-05-31
 
 **Date**: May 31, 2026  
-**Host / Author**: FranGuh & Kira (co-host)  
+**Host / Author**: OpenCohost Contributors & Kira (co-host)  
 **Model / Vibe**: `gemma4:e4b` under the **Técnico** (Technical / Cynical) profile  
 **Status**: Framed & Saved for Future Agentic Personality Calibration  
 

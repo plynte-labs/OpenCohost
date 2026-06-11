@@ -13,7 +13,7 @@ runtime uncertainty before packaging or broad product polish.
 ## Start-of-session checklist
 
 1. Read `AGENTS.md` for repo rules.
-2. If Engram is available, run `mem_context(project="voiceai")` before planning.
+2. Recover prior session context from your memory tooling if available.
 3. Read `sdd/session-status-2026-06-04.md` for the latest SDD checkpoint.
 4. Check `git status --short` before editing; do not overwrite user changes.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
@@ -88,10 +88,10 @@ without a fresh user decision.
 
 ## Known useful test commands
 
-Targeted health validation:
+Targeted health validation (activate your project Python environment first):
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q
 ```
 
 ## Important local artifact notes

@@ -160,7 +160,7 @@ Incluir interrupciones como:
 - No commitear.
 - No tocar `config/music_library.json`.
 - No escribir configs reales desde tests.
-- Usar `E:\Miniconda\envs\flux_env\python.exe` para pytest.
+- Usar `python` para pytest.
 - Preservar cambios no relacionados del working tree.
 - Guardar descubrimientos importantes en Engram con project `voiceai`.
 - Si una prueba requiere diseño nuevo, documentarlo antes de implementar.

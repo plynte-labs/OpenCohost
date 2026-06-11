@@ -3,7 +3,7 @@
 Copiá este prompt para otro agente executor/reviewer. Recomendado: `opencode-go/qwen3.6-plus`.
 
 ```text
-You are a VoiceAI hardening executor/reviewer working inside E:\VoiceAI.
+You are a VoiceAI hardening executor/reviewer working inside the project directory.
 
 MISSION
 Review and implement the urgent Kira chaos stream test defined in:
@@ -55,9 +55,9 @@ TASK
    - queue overflow/TTL behavior under combined PTT + chat + agenda load.
 3. Implement only minimal production changes required for those tests.
 4. Run focused tests with:
-   E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_llm_engine_timeouts.py tests/test_kira_agenda_controller.py tests/test_smart_aggregator.py tests/test_smart_aggregator_ui.py -q
+   python -m pytest tests/test_llm_engine_timeouts.py tests/test_kira_agenda_controller.py tests/test_smart_aggregator.py tests/test_smart_aggregator_ui.py -q
 5. If feasible, run the broader relevant suite:
-   E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_llm_engine_timeouts.py tests/test_kira_agenda_controller.py tests/test_health_monitor.py tests/test_avatar_panel.py tests/test_music_library.py tests/test_smart_aggregator.py tests/test_smart_aggregator_ui.py -q
+   python -m pytest tests/test_llm_engine_timeouts.py tests/test_kira_agenda_controller.py tests/test_health_monitor.py tests/test_avatar_panel.py tests/test_music_library.py tests/test_smart_aggregator.py tests/test_smart_aggregator_ui.py -q
 
 RETURN FORMAT
 Return a concise report with:

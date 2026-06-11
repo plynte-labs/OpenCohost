@@ -2,9 +2,9 @@ storage:
   # Portable storage configuration.
   # Use "auto" to keep the project portable across PCs.
   # Example override for a specific machine:
-  #   cache_root: "D:/VoiceAI/cache"
-  #   temp_root: "D:/VoiceAI/temp"
-  #   ollama_models: "D:/OllamaStorage"
+  #   cache_root: "/path/to/your/cache"
+  #   temp_root: "/path/to/your/temp"
+  #   ollama_models: "/path/to/ollama/storage"
   cache_root: "auto"
   temp_root: "auto"
   ollama_models: "auto"

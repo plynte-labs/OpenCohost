@@ -82,7 +82,7 @@ Recommendation:
 Evidence:
 
 - `config/music_library.json` is tracked.
-- It contains absolute `E:\VoiceAI\assets\music\...` paths.
+- It contains absolute `assets\music\...` paths.
 - It includes original music filenames/titles.
 - `.gitignore` now ignores `config/music_library.json`, but the file remains
   tracked.
@@ -102,7 +102,7 @@ Recommendation:
 Evidence:
 
 - `config/avatar.yaml` is tracked.
-- `state_images` point to `E:\VoiceAI\assets\avatar\kira\...`.
+- `state_images` point to `assets\avatar\kira\...`.
 
 Risk:
 
@@ -135,11 +135,11 @@ Recommendation:
 
 Evidence examples:
 
-- `README.md` references `E:\Miniconda\envs\xtts_env\python.exe` and
-  `E:\Miniconda\envs\flux_env\python.exe`.
+- `README.md` references `python` and
+  `python`.
 - `core/health_monitor.py` has `QwenProcessManager.XTTS_PYTHON` set to
-  `E:\Miniconda\envs\xtts_env\python.exe`.
-- `mudanza.py` references `E:\VoiceAI\modelos_f5`.
+  `python`.
+- `mudanza.py` references `modelos_f5`.
 - Local services assume:
   - Ollama on `127.0.0.1:11434`
   - Qwen/Flask TTS on `127.0.0.1:5000`

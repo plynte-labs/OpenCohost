@@ -115,10 +115,10 @@ def test_storage_paths_ollama_env_var_respected():
         "ollama_models": "auto",
     }
 
-    with patch.dict(os.environ, {"OLLAMA_MODELS": "F:/CustomOllama"}, clear=False):
+    with patch.dict(os.environ, {"OLLAMA_MODELS": "F:/CustomOllama"}, clear=False):  # path-ok: test exercises drive-letter path handling
         paths = resolve_storage_paths(config)
 
-    assert str(paths.ollama_models) == str(Path("F:/CustomOllama").resolve())
+    assert str(paths.ollama_models) == str(Path("F:/CustomOllama").resolve())  # path-ok: test exercises drive-letter path handling
 
 
 def test_storage_paths_empty_string_treated_as_auto():

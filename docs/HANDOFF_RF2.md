@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-05-04  
 **Rama de trabajo:** `feature/rf2-ui-ux`  
-**Ambiente de ejecución:** `E:\Miniconda\envs\flux_env\python.exe main.py`
+**Ambiente de ejecución:** `python main.py` (activate your project Python environment first)
 
 ---
 
