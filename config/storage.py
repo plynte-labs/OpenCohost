@@ -1,4 +1,4 @@
-"""Centralized storage/cache configuration for VoiceAI.
+"""Centralized storage/cache configuration for OpenCohost.
 
 This module must stay lightweight: it is imported before heavy ML libraries so
 TEMP/TMP/HF/Torch/Ollama paths are set before those libraries initialize.
@@ -27,9 +27,9 @@ def get_app_dir() -> Path:
 def get_user_data_dir() -> Path:
     if getattr(sys, "frozen", False):
         if sys.platform == "win32":
-            return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "VoiceAI"
+            return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "OpenCohost"
         else:
-            return Path.home() / ".config" / "VoiceAI"
+            return Path.home() / ".config" / "OpenCohost"
     return Path(__file__).resolve().parent.parent
 
 

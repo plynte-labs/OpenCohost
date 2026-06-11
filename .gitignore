@@ -74,3 +74,6 @@ config/music_library.json
 Documents/
 WhatIs.md
 config/last_model.json
+
+# ── Runtime user state (seeded from config/default_profiles.json on first run) ──
+perfiles.json

@@ -235,7 +235,7 @@ class QwenProcessManager:
 
     SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
     HEALTH_URL = "http://127.0.0.1:5000/health"
-    APP_ID = "voiceai-qwen-tts"
+    APP_ID = "opencohost-qwen-tts"
 
     def __init__(self) -> None:
         self._process: Optional[subprocess.Popen] = None
