@@ -1,2 +1,15 @@
 #!/bin/sh
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/git-safety-check.ps1
+
+# Run pre-commit hooks (detect-secrets + no-abs-paths).
+# Resolves pre-commit via PATH or the active conda env exposed via CONDA_PREFIX.
+_pre_commit=""
+if command -v pre-commit >/dev/null 2>&1; then
+    _pre_commit="pre-commit"
+elif [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PREFIX/Scripts/pre-commit.exe" ]; then
+    _pre_commit="$CONDA_PREFIX/Scripts/pre-commit.exe"
+fi
+
+if [ -n "$_pre_commit" ]; then
+    "$_pre_commit" run --hook-stage pre-commit
+fi
