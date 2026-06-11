@@ -7,11 +7,13 @@ thin in the launcher).
 """
 
 import importlib.util
+import io
 import json
 import os
 import sys
 import types
 import unittest
+import zipfile as _zipfile
 from unittest.mock import MagicMock, patch, call
 
 # ---------------------------------------------------------------------------
@@ -366,6 +368,198 @@ class TestBranding(unittest.TestCase):
 
     def test_ollama_download_url_in_constants(self):
         self.assertIn("ollama.com", _launcher.OLLAMA_DOWNLOAD_URL)
+
+
+# ===========================================================================
+# 8. Pre-release version string parsing
+# ===========================================================================
+
+
+class TestVersionTuplePreRelease(unittest.TestCase):
+    def test_beta_suffix_stripped(self):
+        # "1.2.0b1" must parse as (1, 2, 0) — the beta label is a PEP 440
+        # pre-release marker, not a malformed version.
+        self.assertEqual(_version_tuple("1.2.0b1"), (1, 2, 0))
+
+    def test_rc_suffix_stripped(self):
+        self.assertEqual(_version_tuple("2.0.0rc1"), (2, 0, 0))
+
+    def test_alpha_suffix_stripped(self):
+        self.assertEqual(_version_tuple("1.0.0a3"), (1, 0, 0))
+
+    def test_plain_version_unchanged(self):
+        # Stripping logic must not alter plain numeric versions.
+        self.assertEqual(_version_tuple("1.2.3"), (1, 2, 3))
+
+    def test_leading_v_with_prerelease(self):
+        self.assertEqual(_version_tuple("v1.2.0b1"), (1, 2, 0))
+
+    def test_all_non_numeric_segment_is_none(self):
+        # A segment with no leading digits is still malformed.
+        self.assertIsNone(_version_tuple("1.x.3"))
+
+
+class TestInstalledVersionSatisfiesPreRelease(unittest.TestCase):
+    def test_prerelease_installed_satisfies_release(self):
+        # "1.2.0b1" installed, meta says "1.2.0" — same base version, satisfies.
+        self.assertTrue(installed_version_satisfies("1.2.0b1", "1.2.0"))
+
+    def test_release_installed_satisfies_prerelease_meta(self):
+        # "1.2.0" installed, meta says "1.2.0rc1" — installed is newer, satisfies.
+        self.assertTrue(installed_version_satisfies("1.2.0", "1.2.0rc1"))
+
+    def test_prerelease_both_same_base(self):
+        # Both parse to the same tuple — equal, so satisfies.
+        self.assertTrue(installed_version_satisfies("1.2.0b1", "1.2.0rc2"))
+
+    def test_older_prerelease_does_not_satisfy_newer(self):
+        # "1.1.0b1" -> (1, 1, 0) < (1, 2, 0) — does not satisfy.
+        self.assertFalse(installed_version_satisfies("1.1.0b1", "1.2.0"))
+
+
+# ===========================================================================
+# 9. Zip-slip guard
+# ===========================================================================
+
+
+def _make_zip_bytes(*members):
+    """Return in-memory bytes of a ZIP archive with the given member names (empty content)."""
+    buf = io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        for name in members:
+            zf.writestr(name, "evil content")
+    return buf.getvalue()
+
+
+class TestZipSlipGuard(unittest.TestCase):
+    """unpack_src_zip() must reject archives with path-traversal member names."""
+
+    def _call_unpack(self, zip_bytes, tmp_dir):
+        import tempfile
+        zip_path = os.path.join(tmp_dir, "test.zip")
+        with open(zip_path, "wb") as fh:
+            fh.write(zip_bytes)
+        target = os.path.join(tmp_dir, "app")
+        _launcher.unpack_src_zip(zip_path, target)
+
+    def test_dotdot_member_raises_launcher_error(self):
+        import tempfile
+        bad_zip = _make_zip_bytes("../evil.txt")
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(_launcher.LauncherError) as ctx:
+                self._call_unpack(bad_zip, td)
+            self.assertIn("Zip-slip", str(ctx.exception))
+
+    def test_nested_dotdot_raises_launcher_error(self):
+        import tempfile
+        bad_zip = _make_zip_bytes("subdir/../../../evil.txt")
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(_launcher.LauncherError):
+                self._call_unpack(bad_zip, td)
+
+    def test_safe_zip_does_not_raise(self):
+        import tempfile
+        safe_zip = _make_zip_bytes("topdir/main.py", "topdir/README.md")
+        with tempfile.TemporaryDirectory() as td:
+            # Should not raise — just complete normally.
+            try:
+                self._call_unpack(safe_zip, td)
+            except _launcher.LauncherError as exc:
+                self.fail("Safe zip raised LauncherError: %s" % exc)
+
+
+# ===========================================================================
+# 10. wait_for_app_window — injectable callables (no real sleeping)
+# ===========================================================================
+
+
+class TestWaitForAppWindow(unittest.TestCase):
+    """wait_for_app_window() must return the correct outcome string for each
+    scenario.  All callables are injected so the tests are instant and offline.
+    """
+
+    _wait = staticmethod(_launcher.wait_for_app_window)
+
+    def test_found_immediately(self):
+        # Window appears on the very first poll.
+        result = self._wait(
+            find_window=lambda: True,
+            proc_alive=lambda: True,
+            timeout=5.0,
+            interval=0.5,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result, "found")
+
+    def test_found_after_several_ticks(self):
+        calls = [0]
+
+        def find_window():
+            calls[0] += 1
+            return calls[0] >= 3  # found on 3rd poll
+
+        result = self._wait(
+            find_window=find_window,
+            proc_alive=lambda: True,
+            timeout=10.0,
+            interval=0.5,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result, "found")
+
+    def test_died_when_proc_exits(self):
+        # Process dies on the first check after the window is not found.
+        result = self._wait(
+            find_window=lambda: False,
+            proc_alive=lambda: False,
+            timeout=10.0,
+            interval=0.5,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result, "died")
+
+    def test_timeout_when_window_never_appears(self):
+        # No window, proc alive, but timeout is reached.
+        elapsed = [0.0]
+
+        def fake_sleep(interval):
+            elapsed[0] += interval
+
+        result = self._wait(
+            find_window=lambda: False,
+            proc_alive=lambda: True,
+            timeout=1.0,
+            interval=0.5,
+            sleep=fake_sleep,
+        )
+        self.assertEqual(result, "timeout")
+
+    def test_no_sleep_called_when_found_immediately(self):
+        sleep_calls = []
+        self._wait(
+            find_window=lambda: True,
+            proc_alive=lambda: True,
+            timeout=5.0,
+            interval=0.5,
+            sleep=sleep_calls.append,
+        )
+        self.assertEqual(sleep_calls, [])
+
+    def test_proc_alive_none_does_not_return_died(self):
+        # When proc_alive is not provided, "died" must never be returned.
+        elapsed = [0.0]
+
+        def fake_sleep(interval):
+            elapsed[0] += interval
+
+        result = self._wait(
+            find_window=lambda: False,
+            proc_alive=None,
+            timeout=0.5,
+            interval=0.5,
+            sleep=fake_sleep,
+        )
+        self.assertEqual(result, "timeout")
 
 
 if __name__ == "__main__":

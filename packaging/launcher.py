@@ -333,14 +333,28 @@ def venv_app_exe(install_root, platform=None):
 # ---------------------------------------------------------------------------
 
 def _version_tuple(version):
-    """Parse 'v1.2.3' / '1.2.3' into an int tuple; None when malformed."""
+    """Parse 'v1.2.3' / '1.2.3' / '1.2.0b1' into an int tuple; None when malformed.
+
+    PEP 440 pre-release suffixes (e.g. 'b1', 'rc2', 'a3') are stripped from
+    each dotted segment before conversion so that '1.2.0b1' parses as (1, 2, 0).
+    A segment that is entirely non-numeric (e.g. 'dev', 'x') still produces
+    None so that genuinely malformed strings fall back to string equality.
+    """
     if not version or not isinstance(version, str):
         return None
     cleaned = version.strip()
     if cleaned[:1] in ("v", "V"):
         cleaned = cleaned[1:]
     try:
-        return tuple(int(part) for part in cleaned.split("."))
+        parts = []
+        for part in cleaned.split("."):
+            # Strip any trailing non-numeric characters (pre-release labels).
+            numeric = re.sub(r"[^0-9].*$", "", part)
+            if numeric == "":
+                # Segment is entirely non-numeric — genuinely malformed.
+                return None
+            parts.append(int(numeric))
+        return tuple(parts)
     except ValueError:
         return None
 
@@ -503,13 +517,27 @@ def uv_version(uv_path):
 
 
 def ensure_uv(install_root, reporter, cancel=None):
-    """Find or download uv; verify it runs. Returns (path, version)."""
+    """Find or download uv; verify it runs. Returns (path, version).
+
+    If a previously-downloaded uv binary exists but cannot be executed (corrupt
+    or truncated), the bad file is deleted and one re-download is attempted
+    before raising LauncherError.
+    """
     uv_path = find_uv(install_root)
     if uv_path is None:
         uv_path = download_uv(install_root, reporter, cancel=cancel)
     version = uv_version(uv_path)
     if version is None:
-        raise LauncherError("uv at %s is not runnable" % uv_path)
+        # The binary exists but is not runnable — attempt recovery.
+        LOG.warning("uv at %s is not runnable; deleting and re-downloading.", uv_path)
+        try:
+            os.unlink(uv_path)
+        except OSError:
+            pass
+        uv_path = download_uv(install_root, reporter, cancel=cancel)
+        version = uv_version(uv_path)
+        if version is None:
+            raise LauncherError("uv at %s is not runnable after re-download" % uv_path)
     LOG.info("uv %s at %s", version, uv_path)
     return uv_path, version
 
@@ -566,31 +594,40 @@ def download_with_retries(url, dest, expected_sha256=None, reporter=None, cancel
 
 def _download_once(url, dest, reporter=None, cancel=None):
     name = os.path.basename(dest)
-    with _http_open(url) as response:
-        total = int(response.headers.get("Content-Length") or 0)
-        done = 0
-        last_report = 0.0
-        with open(dest, "wb") as fh:
-            while True:
-                if cancel is not None and cancel.cancelled():
-                    raise CancelledError()
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                now = time.monotonic()
-                if reporter and now - last_report > 0.25:
-                    last_report = now
-                    mb_done = done / (1024.0 * 1024.0)
-                    if total:
-                        mb_total = total / (1024.0 * 1024.0)
-                        reporter.status(
-                            "Downloading %s (%.1f / %.1f MB)" % (name, mb_done, mb_total)
-                        )
-                        reporter.progress(0.05 + 0.25 * (done / total))
-                    else:
-                        reporter.status("Downloading %s (%.1f MB)" % (name, mb_done))
+    try:
+        with _http_open(url) as response:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            last_report = 0.0
+            with open(dest, "wb") as fh:
+                while True:
+                    if cancel is not None and cancel.cancelled():
+                        raise CancelledError()
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    done += len(chunk)
+                    now = time.monotonic()
+                    if reporter and now - last_report > 0.25:
+                        last_report = now
+                        mb_done = done / (1024.0 * 1024.0)
+                        if total:
+                            mb_total = total / (1024.0 * 1024.0)
+                            reporter.status(
+                                "Downloading %s (%.1f / %.1f MB)" % (name, mb_done, mb_total)
+                            )
+                            reporter.progress(0.05 + 0.25 * (done / total))
+                        else:
+                            reporter.status("Downloading %s (%.1f MB)" % (name, mb_done))
+    except Exception:
+        # Remove any partial file so a later run does not misread a truncated
+        # download as a complete one.
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
     LOG.info("Downloaded %s (%d bytes)", url, done)
 
 
@@ -613,6 +650,14 @@ def unpack_src_zip(zip_path, target_dir):
     staging = tempfile.mkdtemp(prefix="opencohost-src-", dir=os.path.dirname(target_dir))
     try:
         with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                # Reject absolute paths and path traversal sequences.
+                if os.path.isabs(member) or ".." in member.split("/"):
+                    raise LauncherError(
+                        "Zip-slip detected: archive member %r contains an unsafe path. "
+                        "The downloaded archive may be corrupted or tampered with. "
+                        "Delete the cached zip and retry." % member
+                    )
             zf.extractall(staging)
         entries = os.listdir(staging)
         if len(entries) == 1 and os.path.isdir(os.path.join(staging, entries[0])):
