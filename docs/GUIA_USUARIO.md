@@ -1,4 +1,4 @@
-# Guía de Uso — VoiceAI (Kira)
+# Guía de Uso — OpenCohost (Kira)
 
 Guía rápida para streamers. Todo lo que necesitás saber para usar Kira sin sorpresas.
 
@@ -132,7 +132,7 @@ Botón **"Editar perfiles"** → ventana modal para crear/editar personalidades 
 
 ## 7. Disco, Cache y Temporales
 
-VoiceAI usa archivos pesados: modelos, audios temporales y caches de IA. Para no saturar el disco C:, podés elegir dónde guardar esos datos.
+OpenCohost usa archivos pesados: modelos, audios temporales y caches de IA. Para no saturar el disco C:, podés elegir dónde guardar esos datos.
 
 Archivo:
 
@@ -167,7 +167,7 @@ Esto configura por proceso:
 - `TORCH_HOME` → cache de Torch
 - `OLLAMA_MODELS` → modelos de Ollama
 
-**Importante:** si Ollama ya estaba abierto antes de iniciar VoiceAI, cerralo y volvé a iniciarlo desde VoiceAI para que tome la ruta configurada.
+**Importante:** si Ollama ya estaba abierto antes de iniciar OpenCohost, cerralo y volvé a iniciarlo desde OpenCohost para que tome la ruta configurada.
 
 ---
 
@@ -203,4 +203,4 @@ Esto configura por proceso:
 | TTS timeout | Si usás modo pesado, verificá que `server_qwen.py` esté corriendo |
 | Chat YouTube no conecta | Verificá el video_id y que el stream esté en vivo |
 | Kira habla sola | Asegurate de que PTT esté ON y que no haya feedback micrófono-parlantes |
-| Disco C: al 100% | Configurá `config/storage.yaml` a otro disco y reiniciá VoiceAI/Ollama |
+| Disco C: al 100% | Configurá `config/storage.yaml` a otro disco y reiniciá OpenCohost/Ollama |

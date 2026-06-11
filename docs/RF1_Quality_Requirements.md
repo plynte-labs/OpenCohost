@@ -99,5 +99,5 @@ Para considerar RF1.1 y RF1.2 completos, se debe cumplir:
 
 1. **Entorno compartido:** No se debe degradar ni eliminar paquetes existentes en `flux_env`.
 2. **Sin overlay:** La detección de teclas es por software (`pynput`), no requiere hook de bajo nivel ni drivers.
-3. **Permisos:** Se asume que el usuario ejecuta VoiceAI con permisos normales (no admin requerido para teclas estándar).
+3. **Permisos:** Se asume que el usuario ejecuta OpenCohost con permisos normales (no admin requerido para teclas estándar).
 

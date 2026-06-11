@@ -8,7 +8,7 @@
 
 ## 1. Contexto actual
 
-VoiceAI tiene una UI funcional pero básica. Los indicadores de estado son limitados (solo texto), no hay persistencia de geometría de ventana, y no hay panel separado para acciones administrativas.
+OpenCohost tiene una UI funcional pero básica. Los indicadores de estado son limitados (solo texto), no hay persistencia de geometría de ventana, y no hay panel separado para acciones administrativas.
 
 ### Lo que YA existe y se puede reutilizar
 - `lbl_status` en `frame_top`: muestra `⏳ Inicializando...`, `✅ Listo`, `🔄 Procesando...`, `📥 Descargando modelo...`

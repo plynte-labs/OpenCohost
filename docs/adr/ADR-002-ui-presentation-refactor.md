@@ -6,7 +6,7 @@
 
 ## Context
 
-The VoiceAI UI had accumulated visual debt: overloaded panels, invisible tab navigation, hardcoded colors without a system, and wide scroll-heavy layouts. The user identified 9 UX pain points during a roast session. The underlying architecture (UIState, CallbackDispatcher, modular panels) was solid — the issues were purely presentation-layer.
+The OpenCohost UI had accumulated visual debt: overloaded panels, invisible tab navigation, hardcoded colors without a system, and wide scroll-heavy layouts. The user identified 9 UX pain points during a roast session. The underlying architecture (UIState, CallbackDispatcher, modular panels) was solid — the issues were purely presentation-layer.
 
 ## Decision
 

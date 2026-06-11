@@ -7,7 +7,7 @@
 
 ## Context
 
-VoiceAI is a live-streaming AI assistant that manages LLM inference, TTS, model switching, and health monitoring in real-time. Test reliability is non-negotiable: a false-positive test that masks a model-switch bug can mean the streamer loses AI assistance mid-broadcast with no warning.
+OpenCohost is a live-streaming AI assistant that manages LLM inference, TTS, model switching, and health monitoring in real-time. Test reliability is non-negotiable: a false-positive test that masks a model-switch bug can mean the streamer loses AI assistance mid-broadcast with no warning.
 
 This audit was triggered by the discovery that `test_no_silent_deferred_model_switch_offline` in `tests/test_ollama_offline_ux_guardrails.py` was a **false green** — it passed by reimplementing production logic inline instead of calling the real handler. That pattern turned out to not be isolated.
 

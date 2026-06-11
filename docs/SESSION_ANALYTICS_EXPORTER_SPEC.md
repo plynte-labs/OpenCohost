@@ -1,6 +1,6 @@
 # Session Analytics Exporter — Spec adicional no prioritario
 
-Este documento define una idea futura para que VoiceAI genere analíticas locales de sesión sin consumirlas dentro de la app. La app solo debe producir datos; un dashboard/programa externo puede leerlos después bajo responsabilidad del streamer.
+Este documento define una idea futura para que OpenCohost genere analíticas locales de sesión sin consumirlas dentro de la app. La app solo debe producir datos; un dashboard/programa externo puede leerlos después bajo responsabilidad del streamer.
 
 > Estado: **adicional / no prioritario / no implementar todavía**.
 >
@@ -12,7 +12,7 @@ Este documento define una idea futura para que VoiceAI genere analíticas locale
 |---|---|
 | Activación | Módulo global **OFF por defecto**. |
 | UI | Nueva tab de configuración. Al activarlo, las categorías internas quedan ON por defecto. |
-| Consumo | VoiceAI **no** muestra gráficos ni dashboard. Solo genera datos. |
+| Consumo | OpenCohost **no** muestra gráficos ni dashboard. Solo genera datos. |
 | Storage | SQLite local mensual: `data/session_analytics/YYYY-MM.sqlite`. |
 | Alcance | Plataforma + canal + sesión + métricas + chat post-filtro + highlights + prompt/profile history. |
 | Raw chat | No guardar chat crudo completo. Guardar solo mensajes aceptados post-filtro y highlights seleccionados. |
@@ -28,7 +28,7 @@ Este documento define una idea futura para que VoiceAI genere analíticas locale
 
 ## No objetivos
 
-- No crear gráficos dentro de VoiceAI.
+- No crear gráficos dentro de OpenCohost.
 - No usar estas analíticas como input directo para el LLM durante el stream.
 - No guardar chat rechazado/raw completo.
 - No crear una DB por sesión.
@@ -44,7 +44,7 @@ Este documento define una idea futura para que VoiceAI genere analíticas locale
 - nombre visible del canal.
 - URL de sesión si existe.
 - inicio/fin.
-- versión de VoiceAI.
+- versión de OpenCohost.
 - configuración activa del exporter.
 
 ### Chat post-filtro
@@ -122,7 +122,7 @@ Regla: dos ejecuciones sobre la misma sesión y configuración deberían produci
 ## Arquitectura propuesta
 
 ```txt
-VoiceAI runtime
+OpenCohost runtime
   ↓ eventos mínimos
 AnalyticsEventBus / queue bounded
   ↓
@@ -259,7 +259,7 @@ Controles:
 - Retención configurable.
 - Compactación/VACUUM.
 - Migraciones versionadas.
-- Herramienta de inspección mínima fuera de VoiceAI.
+- Herramienta de inspección mínima fuera de OpenCohost.
 
 ### Fase 3 — Semántica/vectorial
 
@@ -286,7 +286,7 @@ embeddings(id, entity_type, entity_id, model, vector_blob, created_at_ms)
 - Los tópicos tienen evidencia determinística auditable; el resumen LLM no es la única fuente de verdad.
 - La DB mensual permite consultar por plataforma, canal y sesión.
 - El prompt completo solo se guarda cuando cambia.
-- El dashboard externo puede leer los datos sin depender del proceso de VoiceAI.
+- El dashboard externo puede leer los datos sin depender del proceso de OpenCohost.
 - Tests cubren: módulo apagado, cola llena, DB bloqueada, error de escritura, duplicados y cambio de prompt.
 
 ## Preguntas abiertas

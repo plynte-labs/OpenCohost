@@ -1,4 +1,4 @@
-# Troubleshooting — VoiceAI
+# Troubleshooting — OpenCohost
 
 Bugs conocidos, su causa raíz, y cómo se resolvieron. Para que el futuro yo (o cualquier agente) no pierda tiempo reinventando la rueda.
 

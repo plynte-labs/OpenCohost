@@ -60,7 +60,7 @@ El streamer debe conservar control total sobre acciones que afecten metadata o m
 | **Categoría** | Robustez |
 
 **Descripción:**  
-RF4 debe tolerar errores de red, rate limits, tokens expirados, scopes insuficientes y APIs no disponibles sin cerrar VoiceAI ni bloquear RF3/Core.
+RF4 debe tolerar errores de red, rate limits, tokens expirados, scopes insuficientes y APIs no disponibles sin cerrar OpenCohost ni bloquear RF3/Core.
 
 **Criterios:**
 
@@ -149,7 +149,7 @@ Para considerar RF4 listo para MVP seguro:
 - [ ] Anuncios de moderación al chat son opcionales y apagados por defecto.
 - [ ] Analíticas se muestran e inyectan con frecuencia configurable.
 - [ ] RF4 registra acciones en `logs/acciones.jsonl`.
-- [ ] Fallos de API/token no crashean VoiceAI.
+- [ ] Fallos de API/token no crashean OpenCohost.
 
 ---
 

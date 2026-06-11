@@ -7,7 +7,7 @@
 
 ## Context
 
-VoiceAI es una app de desktop con GUI (customtkinter) que depende de Ollama como servicio externo para LLM. Antes de empaquetarla para distribución a usuarios finales, necesitamos identificar qué está listo, qué bloquea, y qué riesgos existen.
+OpenCohost es una app de desktop con GUI (customtkinter) que depende de Ollama como servicio externo para LLM. Antes de empaquetarla para distribución a usuarios finales, necesitamos identificar qué está listo, qué bloquea, y qué riesgos existen.
 
 ### Conexión con el Contexto Histórico del Proyecto
 

@@ -10,7 +10,7 @@
 
 ## 1. Alcance
 
-Este documento define los requerimientos funcionales para el módulo **Stream Admin Mode** de VoiceAI. Su propósito es permitir que Kira ayude al streamer con tareas administrativas del stream: lectura y modificación segura de metadata, moderación asistida/automática y uso de analíticas en tiempo real como contexto conversacional.
+Este documento define los requerimientos funcionales para el módulo **Stream Admin Mode** de OpenCohost. Su propósito es permitir que Kira ayude al streamer con tareas administrativas del stream: lectura y modificación segura de metadata, moderación asistida/automática y uso de analíticas en tiempo real como contexto conversacional.
 
 RF4 debe priorizar la seguridad del usuario. La primera etapa debe operar en **modo solo lectura** para validar OAuth, permisos, tokens, lectura de datos y UI antes de permitir acciones que modifiquen el stream.
 

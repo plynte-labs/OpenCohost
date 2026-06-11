@@ -9,7 +9,7 @@
 
 ## 1. Alcance
 
-Optimizar la interfaz gráfica de VoiceAI para entornos de streaming multi-monitor, agregar indicadores visuales claros del estado del pipeline de IA, y preparar un panel de registro de acciones administrativas.
+Optimizar la interfaz gráfica de OpenCohost para entornos de streaming multi-monitor, agregar indicadores visuales claros del estado del pipeline de IA, y preparar un panel de registro de acciones administrativas.
 
 ---
 
@@ -23,7 +23,7 @@ Optimizar la interfaz gráfica de VoiceAI para entornos de streaming multi-monit
 | **Prioridad** | Media |
 
 **Descripción:**  
-La ventana de VoiceAI debe poder moverse libremente a un segundo monitor sin degradar rendimiento ni requerir overlays. El sistema actual ya usa CustomTkinter (ventana desktop nativa, sin DirectX/Vulkan), por lo que el objetivo principal es persistir geometría y opcionalmente ofrecer modo compacto.
+La ventana de OpenCohost debe poder moverse libremente a un segundo monitor sin degradar rendimiento ni requerir overlays. El sistema actual ya usa CustomTkinter (ventana desktop nativa, sin DirectX/Vulkan), por lo que el objetivo principal es persistir geometría y opcionalmente ofrecer modo compacto.
 
 **Sub-requerimientos:**
 
