@@ -88,10 +88,10 @@ without a fresh user decision.
 
 ## Known useful test commands
 
-Targeted health validation:
+Targeted health validation (activate your project Python environment first):
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q
 ```
 
 ## Important local artifact notes
