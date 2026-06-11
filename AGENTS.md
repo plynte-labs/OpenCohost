@@ -8,9 +8,9 @@
 
 ## Memory First
 
-- Before planning or coding, recover Engram context for project `voiceai` with `mem_context` first, then `mem_search` when needed.
-- Treat recovered memories as constraints, especially offline TTS behavior, cached model paths, Hugging Face offline mode, Qwen3-TTS startup, and timeout decisions.
-- Save meaningful decisions, discoveries, bug fixes, and completed-track summaries back to Engram with `mem_save` or `mem_session_summary`.
+- Before planning or coding, recover prior session context from your memory tooling if available.
+- Treat recovered context as constraints, especially offline TTS behavior, cached model paths, Hugging Face offline mode, Qwen3-TTS startup, and timeout decisions.
+- Save meaningful decisions, discoveries, bug fixes, and completed-track summaries back to memory before finishing.
 
 ## Known Project Context
 

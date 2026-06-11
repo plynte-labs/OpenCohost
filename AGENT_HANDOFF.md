@@ -13,7 +13,7 @@ runtime uncertainty before packaging or broad product polish.
 ## Start-of-session checklist
 
 1. Read `AGENTS.md` for repo rules.
-2. If Engram is available, run `mem_context(project="voiceai")` before planning.
+2. Recover prior session context from your memory tooling if available.
 3. Read `sdd/session-status-2026-06-04.md` for the latest SDD checkpoint.
 4. Check `git status --short` before editing; do not overwrite user changes.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.

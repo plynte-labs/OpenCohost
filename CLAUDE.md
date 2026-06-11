@@ -95,7 +95,3 @@ python -m pytest tests/test_health_monitor.py tests/test_health_integration.py t
 ```
 
 Activate your project Python environment before running these commands.
-
-## Engram project key
-
-`voiceai` — use `project: "voiceai"` in all `mem_save` / `mem_search` calls.
