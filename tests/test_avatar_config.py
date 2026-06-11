@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from avatar.avatar_config import (
+from opencohost.avatar.avatar_config import (
     AvatarConfig,
     OBSConfig,
     VALID_STATES,

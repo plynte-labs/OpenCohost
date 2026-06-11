@@ -2,7 +2,7 @@
 
 import pytest
 
-from smart_aggregator.kira_agenda_controller import (
+from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaState,
     ErrorCode,
     KiraAgendaController,
@@ -903,7 +903,7 @@ def test_suggestion_approve_reject_preserves_confidence_metadata():
 
 def test_confidence_and_source_defaults_on_agenda_topic():
     """AgendaTopic defaults confidence to LOW and source to empty string."""
-    from smart_aggregator.kira_agenda_controller import AgendaTopic
+    from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic
 
     topic = AgendaTopic(title="Test")
     assert topic.confidence == "LOW"

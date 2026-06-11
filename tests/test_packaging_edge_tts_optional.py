@@ -27,7 +27,7 @@ if ROOT_DIR not in sys.path:
 
 def _make_motor():
     """Return a fresh MotorVocalIA with mocked pygame/ollama (no real I/O)."""
-    from core.llm_engine import MotorVocalIA
+    from opencohost.core.llm_engine import MotorVocalIA
 
     log_q: queue.Queue = queue.Queue()
     ui_events: list = []
@@ -46,7 +46,7 @@ def _make_motor():
 class TestEdgeTtsAbsentSetsOfflineLatch:
     def test_none_module_sets_latch_true(self, monkeypatch):
         """Monkeypatching edge_tts to None must set _edge_tts_offline=True."""
-        import core.llm_engine as eng
+        import opencohost.core.llm_engine as eng
 
         # Simulate the package being absent by setting the module-level name to None
         monkeypatch.setattr(eng, "edge_tts", None, raising=False)
@@ -60,7 +60,7 @@ class TestEdgeTtsAbsentSetsOfflineLatch:
 
     def test_none_module_does_not_raise_on_construction(self, monkeypatch):
         """Constructing MotorVocalIA with edge_tts=None must not raise."""
-        import core.llm_engine as eng
+        import opencohost.core.llm_engine as eng
 
         monkeypatch.setattr(eng, "edge_tts", None, raising=False)
 
@@ -72,7 +72,7 @@ class TestEdgeTtsAbsentSetsOfflineLatch:
     def test_none_module_logs_not_installed(self, monkeypatch, caplog):
         """A log message mentioning Edge-TTS not installed must appear in the log."""
         import logging
-        import core.llm_engine as eng
+        import opencohost.core.llm_engine as eng
 
         monkeypatch.setattr(eng, "edge_tts", None, raising=False)
 
@@ -92,7 +92,7 @@ class TestEdgeTtsAbsentSetsOfflineLatch:
 class TestEdgeTtsPresentKeepsNormalBehavior:
     def test_latch_is_false_when_edge_tts_available(self):
         """When edge_tts module is importable, _edge_tts_offline starts False."""
-        import core.llm_engine as eng
+        import opencohost.core.llm_engine as eng
 
         # Only run this test if edge_tts is actually importable
         if eng.edge_tts is None:

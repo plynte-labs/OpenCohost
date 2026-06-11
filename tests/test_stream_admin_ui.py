@@ -21,13 +21,13 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
-from ui.stream_admin_ui import StreamAdminUI
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.stream_admin_ui import StreamAdminUI
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STREAM_ADMIN_UI = ROOT / "ui" / "stream_admin_ui.py"
+STREAM_ADMIN_UI = ROOT / "opencohost" / "ui" / "stream_admin_ui.py"
 
 
 def read_stream_admin_source() -> str:

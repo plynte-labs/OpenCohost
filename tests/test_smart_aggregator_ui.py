@@ -23,9 +23,9 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
-from ui.smart_aggregator_ui import SmartAggregatorUI
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
 
 
 # ---------------------------------------------------------------------------
@@ -447,14 +447,14 @@ class TestToggleConnection:
 
     def test_connect_warns_when_no_video_id(self, smart_agg_ui, mock_widgets):
         mock_widgets["entry_video"].get.return_value = ""
-        with patch("ui.smart_aggregator_ui.messagebox") as mock_mb:
+        with patch("opencohost.ui.smart_aggregator_ui.messagebox") as mock_mb:
             smart_agg_ui.toggle_connection()
             mock_mb.showwarning.assert_called_once()
 
     def test_connect_shows_error_on_exception(self, smart_agg_ui, mock_aggregator, mock_widgets):
         mock_widgets["entry_video"].get.return_value = "dQw4w9WgXcQ"
         mock_aggregator.connect.side_effect = Exception("network error")
-        with patch("ui.smart_aggregator_ui.messagebox") as mock_mb:
+        with patch("opencohost.ui.smart_aggregator_ui.messagebox") as mock_mb:
             smart_agg_ui.toggle_connection()
             mock_mb.showerror.assert_called_once()
 

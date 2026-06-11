@@ -22,7 +22,7 @@ if ROOT_DIR not in sys.path:
 def test_frozen_without_env_var_defaults_false(monkeypatch):
     """Simulated packaged build without override env var → flag is False."""
     import importlib
-    import config.settings as settings_mod
+    import opencohost.config.settings as settings_mod
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.delenv("OPENCOHOST_EXPERIMENTAL_TTS", raising=False)
@@ -40,7 +40,7 @@ def test_frozen_without_env_var_defaults_false(monkeypatch):
 
 def test_frozen_with_env_var_override_is_true(monkeypatch):
     """Packaged build with OPENCOHOST_EXPERIMENTAL_TTS=1 → flag is True."""
-    import config.settings as settings_mod
+    import opencohost.config.settings as settings_mod
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("OPENCOHOST_EXPERIMENTAL_TTS", "1")
@@ -57,7 +57,7 @@ def test_frozen_with_env_var_override_is_true(monkeypatch):
 
 def test_dev_mode_defaults_true(monkeypatch):
     """Non-frozen (dev) environment without env var → flag is True."""
-    import config.settings as settings_mod
+    import opencohost.config.settings as settings_mod
 
     # Ensure sys.frozen is absent
     if hasattr(sys, "frozen"):
@@ -75,7 +75,7 @@ def test_dev_mode_defaults_true(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_flag_is_exported_from_settings():
-    """EXPERIMENTAL_HEAVY_TTS_ENABLED must be importable from config.settings."""
-    from config.settings import EXPERIMENTAL_HEAVY_TTS_ENABLED
+    """EXPERIMENTAL_HEAVY_TTS_ENABLED must be importable from opencohost.config.settings."""
+    from opencohost.config.settings import EXPERIMENTAL_HEAVY_TTS_ENABLED
 
     assert isinstance(EXPERIMENTAL_HEAVY_TTS_ENABLED, bool)

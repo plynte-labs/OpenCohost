@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from core.editorial_agenda_bridge import EditorialAgendaBridge
-from core.editorial_cards import EditorialCardStatus, EditorialCardStore
-from smart_aggregator import AgendaState, KiraAgendaController, TopicStatus
+from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+from opencohost.smart_aggregator import AgendaState, KiraAgendaController, TopicStatus
 
 
 def test_bridge_create_arm_link_inject_and_mark_used(tmp_path) -> None:

@@ -1,6 +1,6 @@
 """Tests for guarded Co-host profile persistence helpers."""
 
-from core.cohost_profiles import normalize_cohost_profile, sanitize_profile_name
+from opencohost.core.cohost_profiles import normalize_cohost_profile, sanitize_profile_name
 
 
 def test_normalize_cohost_profile_caps_style_and_preserves_defaults():

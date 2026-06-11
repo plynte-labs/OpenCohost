@@ -19,9 +19,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core import llm_engine
-from ui import app_shell
-from smart_aggregator.kira_agenda_controller import (
+from opencohost.core import llm_engine
+from opencohost.ui import app_shell
+from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaAction,
     AgendaState,
     KiraAgendaController,

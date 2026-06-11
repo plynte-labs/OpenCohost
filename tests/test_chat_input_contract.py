@@ -2,7 +2,7 @@
 
 import pytest
 
-from smart_aggregator.chat_input_contract import (
+from opencohost.smart_aggregator.chat_input_contract import (
     ChatContextPacket,
     ChatContextPacketBuilder,
     ChatEventDetector,

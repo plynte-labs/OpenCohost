@@ -27,7 +27,7 @@ if ROOT_DIR not in sys.path:
 class TestMusicLibraryAbsentAssets:
     def test_load_does_not_crash_when_dir_absent(self, tmp_path):
         """MusicLibrary.load() returns silently when neither dir nor config exist."""
-        from core.music_library import MusicLibrary
+        from opencohost.core.music_library import MusicLibrary
 
         absent_dir = tmp_path / "music"
         absent_config = tmp_path / "music_library.json"
@@ -46,7 +46,7 @@ class TestMusicLibraryAbsentAssets:
 
     def test_counts_by_mood_empty_when_no_tracks(self, tmp_path):
         """counts_by_mood() returns empty dict (no crash) when library is empty."""
-        from core.music_library import MusicLibrary
+        from opencohost.core.music_library import MusicLibrary
 
         library = MusicLibrary(
             library_dir=tmp_path / "music",
@@ -58,7 +58,7 @@ class TestMusicLibraryAbsentAssets:
 
     def test_select_for_mood_returns_none_when_empty(self, tmp_path):
         """select_for_mood() returns None gracefully when no tracks are loaded."""
-        from core.music_library import MusicLibrary
+        from opencohost.core.music_library import MusicLibrary
 
         library = MusicLibrary(
             library_dir=tmp_path / "music",
@@ -76,7 +76,7 @@ class TestMusicLibraryAbsentAssets:
 class TestAvatarConfigAbsentImages:
     def test_absent_state_images_returns_none(self):
         """AvatarConfig with no state_images returns None for any state."""
-        from avatar.avatar_config import AvatarConfig, VALID_STATES
+        from opencohost.avatar.avatar_config import AvatarConfig, VALID_STATES
 
         config = AvatarConfig(state_images={})
         for state in VALID_STATES:
@@ -87,7 +87,7 @@ class TestAvatarConfigAbsentImages:
 
     def test_load_avatar_config_with_absent_yaml_returns_defaults(self, tmp_path):
         """load_avatar_config() with nonexistent YAML must return a valid default."""
-        from avatar.avatar_config import load_avatar_config, AvatarConfig
+        from opencohost.avatar.avatar_config import load_avatar_config, AvatarConfig
 
         absent_config = tmp_path / "avatar.yaml"
         assert not absent_config.exists()
@@ -102,7 +102,7 @@ class TestAvatarConfigAbsentImages:
 
     def test_load_avatar_config_with_absent_assets_folder_does_not_crash(self, tmp_path):
         """load_avatar_config succeeds when assets/avatar/kira/ does not exist."""
-        from avatar.avatar_config import load_avatar_config
+        from opencohost.avatar.avatar_config import load_avatar_config
 
         absent_config = tmp_path / "avatar.yaml"
         # Write minimal YAML pointing to an absent folder

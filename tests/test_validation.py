@@ -5,8 +5,8 @@ Covers spec scenarios: T11, T12, T13.
 
 import pytest
 
-from config.presets import default_config
-from config.schema import (
+from opencohost.config.presets import default_config
+from opencohost.config.schema import (
     ActionPolicy,
     CreatorConfig,
     CreatorPolicy,
@@ -15,7 +15,7 @@ from config.schema import (
     NonNegotiableRule,
     ScalePolicy,
 )
-from config.validation import (
+from opencohost.config.validation import (
     log_non_negotiable_block,
     output_guard,
     runtime_check,
@@ -374,7 +374,7 @@ class TestFourLayerIntegration:
 
     def test_all_11_non_negotiables_have_description(self):
         """Ensure all 11 rule IDs have descriptions in the module."""
-        from config.validation import _NN_DESCRIPTIONS, NON_NEGOTIABLE_IDS
+        from opencohost.config.validation import _NN_DESCRIPTIONS, NON_NEGOTIABLE_IDS
         for rule_id in NON_NEGOTIABLE_IDS:
             assert rule_id in _NN_DESCRIPTIONS, f"Missing description for {rule_id}"
 

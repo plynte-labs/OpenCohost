@@ -1,7 +1,7 @@
 import threading
 import queue
 
-from ui import app_shell
+from opencohost.ui import app_shell
 
 
 def test_motor_event_from_worker_thread_is_scheduled_before_handling():

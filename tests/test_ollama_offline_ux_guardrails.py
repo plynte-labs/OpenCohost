@@ -23,10 +23,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
-from ui.model_panel import ModelPanel
-from core.llm_engine import MotorVocalIA
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.model_panel import ModelPanel
+from opencohost.core.llm_engine import MotorVocalIA
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +159,9 @@ def on_log():
 @pytest.fixture()
 def built_panel(mock_ctk, ui_state, dispatcher, on_log):
     """ModelPanel built with mocked ctk — default ollama_state is 'checking'."""
-    from config.settings import DEFAULT_MODEL
+    from opencohost.config.settings import DEFAULT_MODEL
 
-    with patch("ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
+    with patch("opencohost.ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
         with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
             panel = ModelPanel(
                 parent_frame=MagicMock(),
@@ -169,7 +169,7 @@ def built_panel(mock_ctk, ui_state, dispatcher, on_log):
                 dispatcher=dispatcher,
                 on_log=on_log,
             )
-            with patch("ui.model_panel.ctk", mock_ctk):
+            with patch("opencohost.ui.model_panel.ctk", mock_ctk):
                 panel.build()
     yield panel
     panel.cleanup()
@@ -207,11 +207,11 @@ class TestOllamaOfflineUXGuardrailsSpec:
         self, mock_ctk, ui_state, dispatcher, on_log, ollama_state,
     ):
         """Model combo and button must be disabled for ALL non-ready Ollama states."""
-        from config.settings import DEFAULT_MODEL
+        from opencohost.config.settings import DEFAULT_MODEL
 
         ui_state.ollama_state = ollama_state
 
-        with patch("ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
+        with patch("opencohost.ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
             with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
                 panel = ModelPanel(
                     parent_frame=MagicMock(),
@@ -219,7 +219,7 @@ class TestOllamaOfflineUXGuardrailsSpec:
                     dispatcher=dispatcher,
                     on_log=on_log,
                 )
-                with patch("ui.model_panel.ctk", mock_ctk):
+                with patch("opencohost.ui.model_panel.ctk", mock_ctk):
                     panel.build()
 
         assert panel.combo_modelos.state == "disabled", (
@@ -270,11 +270,11 @@ class TestOllamaOfflineUXGuardrailsSpec:
         self, mock_ctk, ui_state, dispatcher, on_log,
     ):
         """UI must auto-enable when ollama_state transitions to 'ready'."""
-        from config.settings import DEFAULT_MODEL
+        from opencohost.config.settings import DEFAULT_MODEL
 
         ui_state.ollama_state = "service_stopped"
 
-        with patch("ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
+        with patch("opencohost.ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
             with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
                 panel = ModelPanel(
                     parent_frame=MagicMock(),
@@ -282,7 +282,7 @@ class TestOllamaOfflineUXGuardrailsSpec:
                     dispatcher=dispatcher,
                     on_log=on_log,
                 )
-                with patch("ui.model_panel.ctk", mock_ctk):
+                with patch("opencohost.ui.model_panel.ctk", mock_ctk):
                     panel.build()
 
         # Pre-condition: should be disabled (part of Spec 1)
@@ -361,7 +361,7 @@ class TestEdgeCaseCheckingStateSelection:
         received = []
         dispatcher.subscribe("on_switch_model", lambda t: received.append(t))
 
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         display = MODELS_CATALOG[tag]["display"]

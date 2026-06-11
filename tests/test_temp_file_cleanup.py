@@ -1,6 +1,6 @@
 import logging
 
-from core.temp_file_cleanup import cleanup_voiceai_temp_artifacts, register_temp_file_cleanup
+from opencohost.core.temp_file_cleanup import cleanup_voiceai_temp_artifacts, register_temp_file_cleanup
 
 
 class FakeResponse:

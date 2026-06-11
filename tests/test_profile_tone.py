@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from config.settings import BASE_DIR
+from opencohost.config.settings import BASE_DIR
 
 PERFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
 

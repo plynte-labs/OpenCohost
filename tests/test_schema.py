@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from config.schema import (
+from opencohost.config.schema import (
     VALID_MAX_RESPONSE_LENGTHS,
     ActionPolicy,
     ActionResult,

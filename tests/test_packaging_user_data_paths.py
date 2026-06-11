@@ -20,8 +20,8 @@ if ROOT_DIR not in sys.path:
 
 def test_editorial_cards_path_is_under_user_data_dir():
     """cards.db must be resolved under USER_DATA_DIR, not BASE_DIR."""
-    from config.storage import USER_DATA_DIR
-    from config.settings import EDITORIAL_CARDS_DB
+    from opencohost.config.storage import USER_DATA_DIR
+    from opencohost.config.settings import EDITORIAL_CARDS_DB
 
     user_data = str(USER_DATA_DIR)
     assert EDITORIAL_CARDS_DB.startswith(user_data), (
@@ -36,8 +36,8 @@ def test_editorial_cards_path_is_under_user_data_dir():
 
 def test_reference_wav_default_path_is_under_user_data_dir():
     """Default path for referencia_grabada.wav must be under USER_DATA_DIR."""
-    from config.storage import USER_DATA_DIR
-    from config.settings import REFERENCE_WAV_PATH
+    from opencohost.config.storage import USER_DATA_DIR
+    from opencohost.config.settings import REFERENCE_WAV_PATH
 
     user_data = str(USER_DATA_DIR)
     assert REFERENCE_WAV_PATH.startswith(user_data), (
@@ -56,7 +56,7 @@ def test_paths_are_not_under_base_dir_when_different():
     We can only verify that the constants exist and do not reference the legacy
     hard-coded join pattern os.path.join(BASE_DIR, ...) values.
     """
-    from config.settings import EDITORIAL_CARDS_DB, REFERENCE_WAV_PATH
+    from opencohost.config.settings import EDITORIAL_CARDS_DB, REFERENCE_WAV_PATH
 
     # Sanity: both paths are strings
     assert isinstance(EDITORIAL_CARDS_DB, str) and len(EDITORIAL_CARDS_DB) > 0

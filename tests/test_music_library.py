@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from core.music_library import MusicLibrary, MusicTrack, is_supported_audio_path
+from opencohost.core.music_library import MusicLibrary, MusicTrack, is_supported_audio_path
 
 
 def write_wav(path: Path) -> None:

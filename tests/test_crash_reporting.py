@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import sys
 import threading
 
-from ui import crash_reporting
+from opencohost.ui import crash_reporting
 
 
 class FakeFaultHandler:

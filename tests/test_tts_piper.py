@@ -25,7 +25,7 @@ if ROOT_DIR not in sys.path:
 
 def _make_engine(model_path: str = "/fake/model.onnx"):
     """Return a PiperEngine without triggering any real imports."""
-    from core.tts_piper import PiperEngine
+    from opencohost.core.tts_piper import PiperEngine
     return PiperEngine(model_path)
 
 
@@ -36,14 +36,14 @@ def _make_engine(model_path: str = "/fake/model.onnx"):
 class TestLoad:
     def test_load_returns_false_when_piper_not_installed(self):
         """_PIPER_AVAILABLE=False → load() returns False, does not raise."""
-        with patch("core.tts_piper._PIPER_AVAILABLE", False):
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", False):
             engine = _make_engine()
             assert engine.load() is False
             assert engine.is_available() is False
 
     def test_load_returns_false_on_empty_path(self):
         """Empty model path → load() returns False without calling PiperVoice."""
-        with patch("core.tts_piper._PIPER_AVAILABLE", True):
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True):
             engine = _make_engine(model_path="")
             assert engine.load() is False
             assert engine.is_available() is False
@@ -52,8 +52,8 @@ class TestLoad:
         """FileNotFoundError from PiperVoice.load → load() returns False."""
         mock_voice_cls = MagicMock()
         mock_voice_cls.load.side_effect = FileNotFoundError("no such file")
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice = mock_voice_cls
             engine = _make_engine()
             assert engine.load() is False
@@ -63,8 +63,8 @@ class TestLoad:
         """Any Exception from PiperVoice.load → load() returns False, does not raise."""
         mock_voice_cls = MagicMock()
         mock_voice_cls.load.side_effect = RuntimeError("onnx crash")
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice = mock_voice_cls
             engine = _make_engine()
             assert engine.load() is False
@@ -74,8 +74,8 @@ class TestLoad:
         mock_voice_instance = MagicMock()
         mock_voice_cls = MagicMock()
         mock_voice_cls.load.return_value = mock_voice_instance
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice = mock_voice_cls
             engine = _make_engine()
             assert engine.load() is True
@@ -101,8 +101,8 @@ class TestSynthesizeSuccess:
         mock_voice = MagicMock()
         mock_voice.synthesize_wav.side_effect = fake_synthesize_wav
 
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice.load.return_value = mock_voice
             engine = _make_engine()
             engine.load()
@@ -123,8 +123,8 @@ class TestSynthesizeFailure:
         mock_voice = MagicMock()
         mock_voice.synthesize_wav.side_effect = RuntimeError("synthesis failed")
 
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice.load.return_value = mock_voice
             engine = _make_engine()
             engine.load()
@@ -146,8 +146,8 @@ class TestIsAvailable:
         mock_voice_instance = MagicMock()
         mock_voice_cls = MagicMock()
         mock_voice_cls.load.return_value = mock_voice_instance
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice = mock_voice_cls
             engine = _make_engine()
             engine.load()
@@ -163,7 +163,7 @@ class TestIsConnectionError:
 
     @pytest.fixture(autouse=True)
     def import_helper(self):
-        from core.llm_engine import _is_connection_error
+        from opencohost.core.llm_engine import _is_connection_error
         self.fn = _is_connection_error
 
     def test_gaierror_returns_true(self):
@@ -222,8 +222,8 @@ class TestThreadSafety:
         mock_voice = MagicMock()
         mock_voice.synthesize_wav.side_effect = fake_synthesize_wav
 
-        with patch("core.tts_piper._PIPER_AVAILABLE", True), \
-             patch("core.tts_piper._piper_voice") as mock_piper_voice:
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
             mock_piper_voice.PiperVoice.load.return_value = mock_voice
             engine = _make_engine()
             engine.load()

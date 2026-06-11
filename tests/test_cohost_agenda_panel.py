@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from smart_aggregator.kira_agenda_controller import KiraAgendaController, TopicStatus
-from ui.cohost_agenda_panel import CoHostAgendaPanel
+from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController, TopicStatus
+from opencohost.ui.cohost_agenda_panel import CoHostAgendaPanel
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PANEL = ROOT / "ui" / "cohost_agenda_panel.py"
+PANEL = ROOT / "opencohost" / "ui" / "cohost_agenda_panel.py"
 
 
 def source() -> str:

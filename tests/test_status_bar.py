@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ui.state import UIState
-from ui.status_bar import StatusBar
+from opencohost.ui.state import UIState
+from opencohost.ui.status_bar import StatusBar
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def status_bar(mock_ctk, mock_parent, ui_state):
             bar.lbl_tts_status_pill = None
             bar.lbl_chat_status_pill = None
             # Manually call create_status_pills with mocked ctk
-            with patch("ui.status_bar.ctk", mock_ctk):
+            with patch("opencohost.ui.status_bar.ctk", mock_ctk):
                 bar.create_status_pills()
     yield bar
     bar.cleanup()
@@ -127,7 +127,7 @@ class TestStatusBarInit:
 
     def test_create_pills_creates_widgets(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         assert bar.lbl_status is not None
         assert bar.lbl_mic_status_pill is not None
@@ -137,14 +137,14 @@ class TestStatusBarInit:
 
     def test_create_pills_subscribes_to_ui_state(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         assert bar._observer_id is not None
         bar.cleanup()
 
     def test_create_pills_only_once(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
             first_id = bar._observer_id
             bar.create_status_pills()
@@ -435,7 +435,7 @@ class TestPipelineState:
 class TestObserverIntegration:
     def test_subscribe_called_on_create_pills(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         assert bar._observer_id is not None
         assert bar._observer_id in ui_state._observers
@@ -443,7 +443,7 @@ class TestObserverIntegration:
 
     def test_cleanup_removes_observer(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         sub_id = bar._observer_id
         bar.cleanup()
@@ -452,7 +452,7 @@ class TestObserverIntegration:
 
     def test_cleanup_is_idempotent(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         bar.cleanup()
         bar.cleanup()  # Should not raise
@@ -460,7 +460,7 @@ class TestObserverIntegration:
 
     def test_model_status_change_triggers_pill_update(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.model_status = "ready"
         time.sleep(0.15)
@@ -469,7 +469,7 @@ class TestObserverIntegration:
 
     def test_mic_status_change_triggers_pill_update(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.mic_status = "listening"
         time.sleep(0.15)
@@ -479,7 +479,7 @@ class TestObserverIntegration:
 
     def test_tts_status_change_triggers_pill_update(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.tts_status = "speaking"
         time.sleep(0.15)
@@ -489,7 +489,7 @@ class TestObserverIntegration:
 
     def test_chat_status_change_triggers_pill_update(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.chat_status = "connected"
         time.sleep(0.15)
@@ -499,7 +499,7 @@ class TestObserverIntegration:
 
     def test_cleanup_prevents_further_updates(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         bar.cleanup()
         ui_state.mic_status = "listening"
@@ -509,7 +509,7 @@ class TestObserverIntegration:
 
     def test_on_state_change_ignores_unknown_keys(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         original_text = bar.lbl_mic_status_pill.text
         bar._on_state_change("unknown_key", "some_value")
@@ -518,7 +518,7 @@ class TestObserverIntegration:
 
     def test_on_state_change_ignores_non_string_values(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         bar._on_state_change("mic_status", 123)  # Should not raise or update
         bar.cleanup()
@@ -532,7 +532,7 @@ class TestObserverIntegration:
 class TestBatchUpdates:
     def test_batch_update_multiple_statuses(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.update(
             mic_status="listening",
@@ -547,7 +547,7 @@ class TestBatchUpdates:
 
     def test_batch_update_all_error(self, mock_ctk, mock_parent, ui_state):
         bar = StatusBar(parent_frame=mock_parent, ui_state=ui_state)
-        with patch("ui.status_bar.ctk", mock_ctk):
+        with patch("opencohost.ui.status_bar.ctk", mock_ctk):
             bar.create_status_pills()
         ui_state.update(
             mic_status="disconnected",

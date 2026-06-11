@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from ui.protocols import (
+from opencohost.ui.protocols import (
     CallbackDispatcher,
     MotorEventCallback,
     ProfileSaveCallback,

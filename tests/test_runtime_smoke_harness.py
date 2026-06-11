@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import queue
 
-from core import llm_engine
+from opencohost.core import llm_engine
 from tools import runtime_smoke_harness as harness
 
 

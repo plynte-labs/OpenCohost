@@ -1,7 +1,7 @@
 """Tests for smart_aggregator.url_parser.parse_chat_url()."""
 
 import pytest
-from smart_aggregator.url_parser import parse_chat_url
+from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 
 class TestParseChatUrl:

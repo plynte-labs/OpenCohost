@@ -65,7 +65,7 @@ def pynput_mocks():
     }):
         # Remove cached import if present
         for mod in list(sys.modules.keys()):
-            if mod == "ui.ptt_manager" or mod.startswith("ui.ptt_manager."):
+            if mod == "opencohost.ui.ptt_manager" or mod.startswith("opencohost.ui.ptt_manager."):
                 del sys.modules[mod]
         yield mock_keyboard_module, mock_mouse_module
 
@@ -96,7 +96,7 @@ def hotkey_list():
 @pytest.fixture
 def ptt_manager_class(pynput_mocks):
     """Import and return the PTTManager class with mocked pynput."""
-    from ui.ptt_manager import PTTManager
+    from opencohost.ui.ptt_manager import PTTManager
     return PTTManager
 
 
@@ -116,64 +116,64 @@ class TestHotkeyMapping:
 
     def test_kb_map_contains_f1_through_f12(self, ptt_manager):
         """All F1-F12 keys must be in the keyboard map."""
-        from ui.ptt_manager import _PTT_KB_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP
         for i in range(1, 13):
             assert f"F{i}" in _PTT_KB_MAP
 
     def test_kb_map_contains_scroll_lock(self, ptt_manager):
         """ScrollLock must be in the keyboard map."""
-        from ui.ptt_manager import _PTT_KB_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP
         assert "ScrollLock" in _PTT_KB_MAP
 
     def test_kb_map_contains_insert(self, ptt_manager):
         """Insert must be in the keyboard map."""
-        from ui.ptt_manager import _PTT_KB_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP
         assert "Insert" in _PTT_KB_MAP
 
     def test_kb_map_contains_pause(self, ptt_manager):
         """Pause must be in the keyboard map."""
-        from ui.ptt_manager import _PTT_KB_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP
         assert "Pause" in _PTT_KB_MAP
 
     def test_mouse_map_contains_mouse4(self, ptt_manager):
         """Mouse4 must be in the mouse map."""
-        from ui.ptt_manager import _PTT_MOUSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_MOUSE_MAP
         assert "Mouse4" in _PTT_MOUSE_MAP
 
     def test_mouse_map_contains_mouse5(self, ptt_manager):
         """Mouse5 must be in the mouse map."""
-        from ui.ptt_manager import _PTT_MOUSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_MOUSE_MAP
         assert "Mouse5" in _PTT_MOUSE_MAP
 
     def test_reverse_map_contains_all_kb_keys(self, ptt_manager):
         """All keyboard keys must have reverse mappings."""
-        from ui.ptt_manager import _PTT_KB_MAP, _PTT_REVERSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP, _PTT_REVERSE_MAP
         for display_name, pynput_key in _PTT_KB_MAP.items():
             assert pynput_key in _PTT_REVERSE_MAP
             assert _PTT_REVERSE_MAP[pynput_key] == display_name
 
     def test_reverse_map_contains_all_mouse_keys(self, ptt_manager):
         """All mouse buttons must have reverse mappings."""
-        from ui.ptt_manager import _PTT_MOUSE_MAP, _PTT_REVERSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_MOUSE_MAP, _PTT_REVERSE_MAP
         for display_name, pynput_button in _PTT_MOUSE_MAP.items():
             assert pynput_button in _PTT_REVERSE_MAP
             assert _PTT_REVERSE_MAP[pynput_button] == display_name
 
     def test_kb_map_values_are_not_none(self, ptt_manager):
         """Keyboard map values should be pynput keyboard.Key objects."""
-        from ui.ptt_manager import _PTT_KB_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP
         for display_name, pynput_key in _PTT_KB_MAP.items():
             assert pynput_key is not None
 
     def test_mouse_map_values_are_not_none(self, ptt_manager):
         """Mouse map values should be pynput mouse.Button objects."""
-        from ui.ptt_manager import _PTT_MOUSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_MOUSE_MAP
         for display_name, pynput_button in _PTT_MOUSE_MAP.items():
             assert pynput_button is not None
 
     def test_reverse_map_total_count(self, ptt_manager):
         """Reverse map should contain all keys from both maps."""
-        from ui.ptt_manager import _PTT_KB_MAP, _PTT_MOUSE_MAP, _PTT_REVERSE_MAP
+        from opencohost.ui.ptt_manager import _PTT_KB_MAP, _PTT_MOUSE_MAP, _PTT_REVERSE_MAP
         expected_count = len(_PTT_KB_MAP) + len(_PTT_MOUSE_MAP)
         assert len(_PTT_REVERSE_MAP) == expected_count
 

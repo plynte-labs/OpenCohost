@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from smart_aggregator.agenda_signal import (
+from opencohost.smart_aggregator.agenda_signal import (
     AGENDA_SIGNAL_SHADOW_MODE,
     PRIORITY_LEVELS,
     RESPONSE_GOALS,
@@ -423,7 +423,7 @@ class TestShadowModeIntegration:
     def test_shadow_mode_does_not_affect_cohost_behavior(self):
         """T7: Cohost behavior identical with shadow ON vs OFF."""
         # Verify that AgendaSignal import does not change any controller state
-        from smart_aggregator.kira_agenda_controller import (
+        from opencohost.smart_aggregator.kira_agenda_controller import (
             AgendaState,
             KiraAgendaController,
             RecoveryPolicy,
@@ -445,7 +445,7 @@ class TestShadowModeIntegration:
     def test_feature_flag_disables_shadow(self, monkeypatch):
         """T8: AGENDA_SIGNAL_SHADOW_MODE=False removes all shadow overhead."""
         # Patch the flag to False
-        import smart_aggregator.agenda_signal as ag_mod
+        import opencohost.smart_aggregator.agenda_signal as ag_mod
 
         monkeypatch.setattr(ag_mod, "AGENDA_SIGNAL_SHADOW_MODE", False)
 

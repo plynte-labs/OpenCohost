@@ -18,9 +18,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
-from ui.profile_panel import ProfilePanel
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.profile_panel import ProfilePanel
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ def profile_panel(mock_ctk, mock_parent, ui_state, dispatcher, on_log, sample_pr
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
     yield panel
     panel.cleanup()
@@ -256,7 +256,7 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.lbl_profile_header is not None
@@ -272,7 +272,7 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.combo_perfiles.get() == "Kira (Default)"
@@ -286,7 +286,7 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel._observer_id is not None
@@ -301,7 +301,7 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles({})
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.combo_perfiles.values == []
@@ -315,7 +315,7 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert set(panel.combo_perfiles.values) == set(sample_profiles.keys())
@@ -436,7 +436,7 @@ class TestProfileSave:
         received = []
         dispatcher.subscribe("on_set_profile", lambda p: received.append(p))
 
-        with patch("ui.profile_panel.guardar_perfiles") as mock_guardar:
+        with patch("opencohost.ui.profile_panel.guardar_perfiles") as mock_guardar:
             profile_panel._on_perfiles_guardados(new_profiles)
 
         mock_guardar.assert_called_once_with(new_profiles)
@@ -448,7 +448,7 @@ class TestProfileSave:
 
         new_profiles = {"New Only": {"voice": "new.wav"}}
 
-        with patch("ui.profile_panel.guardar_perfiles"):
+        with patch("opencohost.ui.profile_panel.guardar_perfiles"):
             profile_panel._on_perfiles_guardados(new_profiles)
 
         assert profile_panel.combo_perfiles.get() == "New Only"
@@ -461,7 +461,7 @@ class TestProfileSave:
             "New Profile": {"voice": "new.wav"},
         }
 
-        with patch("ui.profile_panel.guardar_perfiles"):
+        with patch("opencohost.ui.profile_panel.guardar_perfiles"):
             profile_panel._on_perfiles_guardados(new_profiles)
 
         assert profile_panel.combo_perfiles.get() == "Kira (Default)"
@@ -481,7 +481,7 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel._observer_id is not None
@@ -496,7 +496,7 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         sub_id = panel._observer_id
@@ -512,7 +512,7 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         panel.cleanup()
@@ -531,7 +531,7 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         ui_state.current_profile = "Streamer Mode"
@@ -554,7 +554,7 @@ class TestEdgeCases:
             on_log=on_log,
         )
         panel.set_profiles({})
-        with patch("ui.profile_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.combo_perfiles.values == []
