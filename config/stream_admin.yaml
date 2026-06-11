@@ -33,7 +33,7 @@ metadata:
       description: "Stream con Kira como co-host virtual. Jugamos, reaccionamos y leemos al chat en vivo."
       tags:
         - kira
-        - voiceai
+        - opencohost
         - gaming
     - name: Just Chatting
       title: "Kira Live - Platicando con el chat"
