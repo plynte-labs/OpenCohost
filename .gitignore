@@ -34,6 +34,11 @@ data/
 *.egg-info/
 dist/
 build/
+
+# ── Launcher build artifacts ──
+# _release_meta.py is generated at release-build time (see packaging/build_release_meta.py)
+packaging/_release_meta.py
+packaging/vendor/
 *.egg
 *.whl
 
@@ -88,3 +93,6 @@ opencode.json
 
 # Engram persistent memory database (internal)
 .engram/
+
+# ── Local documentation ──
+docs/reportar_falso_positivo.md
