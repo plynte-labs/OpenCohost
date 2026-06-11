@@ -12,8 +12,8 @@ result.txt
 result_predict.txt
 
 # ── Configuración generada en runtime ──
-config/ptt_settings.json
-config/window_geometry.json
+opencohost/config/ptt_settings.json
+opencohost/config/window_geometry.json
 logs/acciones.jsonl
 data/smart_aggregator/
 data/stream_admin/oauth_client.json
@@ -70,10 +70,10 @@ VoiceAItemp*/
 
 # ── User assets ──
 assets/music/
-config/music_library.json
+opencohost/config/music_library.json
 Documents/
 WhatIs.md
-config/last_model.json
+opencohost/config/last_model.json
 
 # ── Runtime user state (seeded from config/default_profiles.json on first run) ──
 perfiles.json

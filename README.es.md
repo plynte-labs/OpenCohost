@@ -65,11 +65,11 @@ python -m pip install -r requirements.txt
 
 ```powershell
 # Terminal 1 — aplicación principal (LLM + UI + pipeline de audio)
-python main.py
+python -m opencohost
 
 # Terminal 2 — servidor Qwen3-TTS (solo necesario para clonación de voz local de alta calidad)
 # Ejecutar en el entorno que tiene torch + qwen-tts instalados
-python server_qwen.py
+python opencohost/server_qwen.py
 ```
 
 Kira usará Edge-TTS (liviano, en línea) si el servidor Qwen3-TTS no está disponible.
@@ -80,14 +80,14 @@ Si usas Qwen3-TTS, configura la variable de entorno `XTTS_PYTHON` apuntando al i
 
 ```powershell
 $env:XTTS_PYTHON = "ruta/a/tu/entorno-tts/python.exe"
-python main.py
+python -m opencohost
 ```
 
-O establece `tools.xtts_python` en `config/storage.yaml`.
+O establece `tools.xtts_python` en `opencohost/config/storage.yaml`.
 
 ### Configurar rutas de almacenamiento
 
-Para mover los modelos de Ollama, caché o archivos temporales a una unidad diferente, edita `config/storage.yaml`:
+Para mover los modelos de Ollama, caché o archivos temporales a una unidad diferente, edita `opencohost/config/storage.yaml`:
 
 ```yaml
 storage:
@@ -99,14 +99,16 @@ storage:
 ## Arquitectura
 
 ```
-OpenCohost/
-├── main.py               # Punto de entrada
+opencohost/
+├── __main__.py           # Punto de entrada (python -m opencohost)
 ├── server_qwen.py        # Servidor TTS multi-motor (Flask)
 ├── config/
 │   ├── logger.py         # Logging estructurado (consola + archivos rotativos)
 │   ├── settings.py       # Constantes, catálogo de modelos, system prompt
 │   ├── storage.py        # Resolución de rutas portables para cache/temp
-│   └── storage.yaml      # Overrides de rutas de almacenamiento
+│   ├── storage.yaml      # Overrides de rutas de almacenamiento
+│   ├── default_profiles.json  # Perfiles de personalidad predeterminados
+│   └── stream_admin.yaml      # Configuración de Stream Admin
 ├── core/
 │   ├── llm_engine.py     # Orquestación LLM, memoria, pipeline TTS
 │   ├── health_monitor.py # Salud de servicios, fallback de TTS
@@ -115,10 +117,7 @@ OpenCohost/
 │   ├── app_shell.py      # Shell principal de UI (UIState observer thread-safe)
 │   └── model_panel.py    # Panel de gestión de modelos
 ├── smart_aggregator/     # Agregador de YouTube Live Chat (RF3)
-├── stream_admin/         # Panel Stream Admin: OAuth, metadata, moderación (RF4)
-└── config/
-    ├── default_profiles.json  # Perfiles de personalidad predeterminados
-    └── stream_admin.yaml      # Configuración de Stream Admin
+└── stream_admin/         # Panel Stream Admin: OAuth, metadata, moderación (RF4)
 ```
 
 ## Perfiles de personalidad

@@ -23,9 +23,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from core import llm_engine
-from smart_aggregator.kira_agenda_controller import AgendaAction
-from ui import app_shell
+from opencohost.core import llm_engine
+from opencohost.smart_aggregator.kira_agenda_controller import AgendaAction
+from opencohost.ui import app_shell
 
 
 REQUIRED_INVARIANTS = (
