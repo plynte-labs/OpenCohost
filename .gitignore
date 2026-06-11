@@ -61,6 +61,12 @@ session-*.md
 
 # ── Debug scripts ──
 debug_*.py
+debug_obs.py
+mudanza.py
+
+# ── Local tooling dirs ──
+.opencode/
+VoiceAItemppytest-basetemp/
 
 # ── User assets ──
 assets/music/
