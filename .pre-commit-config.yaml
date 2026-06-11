@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: 01886c8a910c64595c47f186ca1ffc0b77fa5458  # v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: .secrets.baseline
+
+  - repo: local
+    hooks:
+      - id: no-abs-paths
+        name: Block drive-letter absolute paths
+        language: python
+        entry: python tools/check_abs_paths.py
+        types_or: [python, markdown, yaml, toml, json]
