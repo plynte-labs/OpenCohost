@@ -383,13 +383,13 @@ class VocalAIApp(ctk.CTk):
         import webbrowser
         self.lbl_author = ctk.CTkLabel(
             status_bar_frame,
-            text="OpenCohost by FranGuh",
+            text="OpenCohost",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#3a86ff",
             cursor="hand2"
         )
         self.lbl_author.pack(side="right", padx=(20, 8), pady=8)
-        self.lbl_author.bind("<Button-1>", lambda e: webbrowser.open_new_tab("https://github.com/Franguh"))
+        self.lbl_author.bind("<Button-1>", lambda e: webbrowser.open_new_tab("https://github.com/plynte-labs/opencohost"))
         self.lbl_author.bind("<Enter>", lambda e: self.lbl_author.configure(text_color="#5390ff", font=ctk.CTkFont(size=12, weight="bold", underline=True)))
         self.lbl_author.bind("<Leave>", lambda e: self.lbl_author.configure(text_color="#3a86ff", font=ctk.CTkFont(size=12, weight="bold", underline=False)))
 

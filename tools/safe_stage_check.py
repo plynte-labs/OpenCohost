@@ -20,7 +20,6 @@ from typing import Iterable, Sequence
 
 
 PROJECT_NAME = "voiceai"
-DEFAULT_ENGRAM_EXE = Path(r"E:\Job\bin\engram.exe")
 
 SENSITIVE_UNTRACKED_PREFIXES = (
     "data/",
@@ -183,8 +182,6 @@ def find_engram_exe() -> str | None:
     env_value = os.environ.get("ENGRAM_EXE")
     if env_value and Path(env_value).exists():
         return env_value
-    if DEFAULT_ENGRAM_EXE.exists():
-        return str(DEFAULT_ENGRAM_EXE)
     return shutil.which("engram") or shutil.which("engram.exe")
 
 

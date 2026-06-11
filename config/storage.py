@@ -1,4 +1,4 @@
-"""Centralized storage/cache configuration for VoiceAI.
+"""Centralized storage/cache configuration for OpenCohost.
 
 This module must stay lightweight: it is imported before heavy ML libraries so
 TEMP/TMP/HF/Torch/Ollama paths are set before those libraries initialize.
@@ -27,9 +27,9 @@ def get_app_dir() -> Path:
 def get_user_data_dir() -> Path:
     if getattr(sys, "frozen", False):
         if sys.platform == "win32":
-            return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "VoiceAI"
+            return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "OpenCohost"
         else:
-            return Path.home() / ".config" / "VoiceAI"
+            return Path.home() / ".config" / "OpenCohost"
     return Path(__file__).resolve().parent.parent
 
 
@@ -55,6 +55,38 @@ def load_storage_config(config_file: Path | None = None) -> dict[str, Any]:
     with open(config_file, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return data.get("storage", {}) or {}
+
+
+def _load_tools_config(config_file: Path | None = None) -> dict[str, Any]:
+    """Load the top-level ``tools:`` section from storage.yaml."""
+    config_file = config_file or STORAGE_CONFIG_FILE
+    if yaml is None or not config_file.exists():
+        return {}
+    with open(config_file, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("tools", {}) or {}
+
+
+def resolve_xtts_python(config_file: Path | None = None) -> Path | None:
+    """Resolve the XTTS Python interpreter path.
+
+    Resolution order:
+      1. ``XTTS_PYTHON`` environment variable (wins if non-empty)
+      2. ``tools.xtts_python`` key in ``config/storage.yaml`` (if not "auto" / empty)
+      3. ``None`` — caller must degrade gracefully
+
+    Returns a :class:`~pathlib.Path` or ``None``.
+    """
+    env_value = os.environ.get("XTTS_PYTHON", "").strip()
+    if env_value:
+        return Path(env_value)
+
+    tools = _load_tools_config(config_file)
+    yaml_value = str(tools.get("xtts_python", "")).strip()
+    if yaml_value and yaml_value.lower() != "auto":
+        return Path(yaml_value)
+
+    return None
 
 
 def _resolve_path(value: str | None, fallback: Path) -> Path:
