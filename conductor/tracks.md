@@ -105,7 +105,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Heavy Model Inference Recovery - Watchdog, Cancel Path, and Rollback**
+- [x] **Track: Heavy Model Inference Recovery - Watchdog, Cancel Path, and Rollback**
   *Link: [./tracks/heavy_model_inference_recovery_20260609/](./tracks/heavy_model_inference_recovery_20260609/)*
 
 ---

@@ -31,7 +31,8 @@ runtime uncertainty before packaging or broad product polish.
 
 - `public_repo_migration_20260610` is implemented and verified: a 4-PR
   feature-branch chain (PRs #12, #13, #15, #16) on tracker
-  `feat/public-repo-migration`, awaiting owner review and merge.
+  `feat/public-repo-migration` — MERGED to `master` on 2026-06-11 (see the
+  validation update section below).
   - Preventive pre-commit guard active: detect-secrets (pinned) + drive-letter
     path hook (`tools/check_abs_paths.py`); full-tree run exits 0.
   - Identity renamed to OpenCohost / plynte-labs; curated default profiles ship
@@ -46,7 +47,30 @@ runtime uncertainty before packaging or broad product polish.
   track's `validation_log.md`) and `opencohost_repo_export_20260610`
   (fresh-history export runbook; blocked on chain merge).
 - Owner items open: OBS WebSocket password rotation, `detect-secrets audit
-  .secrets.baseline`, `Documents/` public-curation decision, Gates 1 and 2.
+  .secrets.baseline`, `Documents/` public-curation decision. (Gate 1 passed and
+  Gate 2 is partial as of 2026-06-11 — see the validation update below.)
+
+## Validation update — 2026-06-11
+
+- Migration chain MERGED to `master` (PRs #16-#20; `origin/master` @ ec0a95c).
+- **Gate 1 (heavy model inference recovery): PASS** — real watchdog timeout on
+  `gemma:26b` (45s window), automatic rollback to `gemma4:e4b`, stalled model
+  unloaded, no zombie process. `heavy_model_inference_recovery_20260609` is
+  closed (`[x]` in `conductor/tracks.md`).
+- **Gate 2 (Piper offline fallback): PARTIAL PASS** — offline trigger and three
+  full Piper pipelines proven in a live session. Pending: the online positive
+  half, plus a fix task added to the gate's scope: the missing-reference hard
+  block (`core/llm_engine.py:239-241`) drops user messages before the LLM runs
+  and must route through the auto-fallback gate instead
+  (`reason=missing_reference`).
+- **Gate 3: PARTIAL PASS** — Evidence C postponed by owner. Pending discussion:
+  how the Qwen-TTS server should start (manual launch is unfriendly UX).
+- **Gate 4 (runtime smoke harness): PASS** — re-stamped on `master` @ ec0a95c
+  (deterministic mode, exit 0, all five invariants true).
+- Future proposal candidate recorded: request replay after watchdog recovery
+  (`conductor/recovery_request_replay_idea.md`) — user requests are currently
+  dropped when the inference watchdog fires.
+- Evidence details: `conductor/tracks/runtime_validation_gates_20260610/validation_log.md`.
 
 ## Current project truth
 
@@ -59,12 +83,12 @@ runtime uncertainty before packaging or broad product polish.
     Phase 2 (installed-model discovery merge in `ModelPanel`)
   - validated locally: focused model-management suite reached `154 passed`
   - deferred intentionally: download/retry/watchdog orchestration
-- Active bug-recovery checkpoint: `heavy_model_inference_recovery_20260609`
-  is implemented locally but still needs manual runtime validation.
-  - completed locally: watchdog around first real chat after switch, stuck-processing recovery,
+- Closed bug-recovery checkpoint: `heavy_model_inference_recovery_20260609`
+  is implemented AND runtime-validated (Gate 1 PASS, 2026-06-11).
+  - completed: watchdog around first real chat after switch, stuck-processing recovery,
     pending-switch escape path, and rollback to last known good model
-  - validated locally: focused recovery/model-management suite reached `159 passed`
-  - pending intentionally: real runtime verification against an actually heavy/stalling model
+  - validated: focused recovery/model-management suite `159 passed` + real
+    watchdog/rollback event against `gemma:26b` (logs/voiceai_20260611_084746.log)
 - `health-monitor-auto-fallback` has been reconciled:
   - keep: HealthMonitor core, health pill, Vibe gate, heavy-TTS fallback gate
   - adjust only if needed: thresholds, docs wording, manual-vs-auto fallback policy
