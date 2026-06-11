@@ -11,8 +11,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SHELL = ROOT / "ui" / "app_shell.py"
-AVATAR_PANEL = ROOT / "ui" / "avatar_panel.py"
+APP_SHELL = ROOT / "opencohost" / "ui" / "app_shell.py"
+AVATAR_PANEL = ROOT / "opencohost" / "ui" / "avatar_panel.py"
 INVENTORY = ROOT / "conductor" / "tracks" / "product_ui_kira_avatar_refactor_20260513" / "inventory.md"
 
 
@@ -187,7 +187,7 @@ def test_music_mood_tab_is_wired_next_to_avatar_obs() -> None:
 
 def test_music_panel_exposes_list_and_confirmed_delete_source_wiring() -> None:
     """Music panel must list imported tracks and expose a delete control through AppShell confirmation."""
-    music_panel = read_text(ROOT / "ui" / "music_panel.py")
+    music_panel = read_text(ROOT / "opencohost" / "ui" / "music_panel.py")
     app_shell = read_text(APP_SHELL)
 
     assert "combo_delete_track" in music_panel
@@ -221,7 +221,7 @@ def test_destructive_music_and_agenda_cleanup_require_confirmation() -> None:
 
 
 def test_audio_bed_state_mutation_is_locked() -> None:
-    source = read_text(ROOT / "core" / "audio_bed.py")
+    source = read_text(ROOT / "opencohost" / "core" / "audio_bed.py")
 
     assert "threading.RLock()" in source
     assert "with self._lock:" in source

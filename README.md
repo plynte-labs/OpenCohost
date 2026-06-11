@@ -65,11 +65,11 @@ python -m pip install -r requirements.txt
 
 ```powershell
 # Terminal 1 — main app (LLM + UI + audio pipeline)
-python main.py
+python -m opencohost
 
 # Terminal 2 — Qwen3-TTS server (only needed for high-quality local voice cloning)
 # Run this in the environment that has torch + qwen-tts installed
-python server_qwen.py
+python opencohost/server_qwen.py
 ```
 
 Kira's voice will use Edge-TTS (lightweight, online) if the Qwen3-TTS server is not available.
@@ -80,14 +80,14 @@ If you are using Qwen3-TTS, set the environment variable `XTTS_PYTHON` to the Py
 
 ```powershell
 $env:XTTS_PYTHON = "path/to/your/tts-env/python.exe"
-python main.py
+python -m opencohost
 ```
 
-Or set `tools.xtts_python` in `config/storage.yaml`.
+Or set `tools.xtts_python` in `opencohost/config/storage.yaml`.
 
 ### Configure storage paths
 
-To move Ollama models, cache, or temp files to a different drive, edit `config/storage.yaml`:
+To move Ollama models, cache, or temp files to a different drive, edit `opencohost/config/storage.yaml`:
 
 ```yaml
 storage:
@@ -99,14 +99,16 @@ storage:
 ## Architecture
 
 ```
-OpenCohost/
-├── main.py               # Entry point
+opencohost/
+├── __main__.py           # Entry point (python -m opencohost)
 ├── server_qwen.py        # Multi-engine TTS server (Flask)
 ├── config/
 │   ├── logger.py         # Structured logging (console + rotating files)
 │   ├── settings.py       # Constants, model catalog, system prompt
 │   ├── storage.py        # Portable path resolution for cache/temp
-│   └── storage.yaml      # Storage path overrides
+│   ├── storage.yaml      # Storage path overrides
+│   ├── default_profiles.json  # Seeded personality profiles
+│   └── stream_admin.yaml      # Stream Admin configuration
 ├── core/
 │   ├── llm_engine.py     # LLM orchestration, memory, TTS pipeline
 │   ├── health_monitor.py # Service health, TTS fallback gate
@@ -115,10 +117,7 @@ OpenCohost/
 │   ├── app_shell.py      # Main UI shell (thread-safe UIState observer)
 │   └── model_panel.py    # Model management panel
 ├── smart_aggregator/     # YouTube Live Chat aggregator (RF3)
-├── stream_admin/         # Stream Admin panel: OAuth, metadata, moderation (RF4)
-└── config/
-    ├── default_profiles.json  # Seeded personality profiles
-    └── stream_admin.yaml      # Stream Admin configuration
+└── stream_admin/         # Stream Admin panel: OAuth, metadata, moderation (RF4)
 ```
 
 ## Personality Profiles

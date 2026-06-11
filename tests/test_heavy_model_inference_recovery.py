@@ -16,12 +16,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.settings import DEFAULT_MODEL
+from opencohost.config.settings import DEFAULT_MODEL
 
 
 def _make_motor(*, last_model_data=None, tmp_dir=None):
     """Create a MotorVocalIA with mocked dependencies."""
-    import config.settings as settings
+    import opencohost.config.settings as settings
 
     original_last_model_file = settings.LAST_MODEL_FILE
     if tmp_dir is not None:
@@ -38,7 +38,7 @@ def _make_motor(*, last_model_data=None, tmp_dir=None):
         ui_events.append(event)
 
     try:
-        from core.llm_engine import MotorVocalIA
+        from opencohost.core.llm_engine import MotorVocalIA
 
         motor = MotorVocalIA(log_queue, ui_callback)
     finally:

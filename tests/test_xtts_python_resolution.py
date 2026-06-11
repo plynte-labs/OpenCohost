@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config.storage import resolve_xtts_python
-from core.health_monitor import LIFECYCLE_FAILED, QwenProcessManager
+from opencohost.config.storage import resolve_xtts_python
+from opencohost.core.health_monitor import LIFECYCLE_FAILED, QwenProcessManager
 
 
 # ──────────────────────────────────────────────
@@ -135,9 +135,9 @@ class TestQwenDegradationWhenNoPython:
 
         env = {k: v for k, v in os.environ.items() if k != "XTTS_PYTHON"}
         with patch.dict(os.environ, env, clear=True):
-            with patch("config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
+            with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
                     result = mgr.start()
 
         assert result is False
@@ -150,7 +150,7 @@ class TestQwenDegradationWhenNoPython:
 
         env = {k: v for k, v in os.environ.items() if k != "XTTS_PYTHON"}
         with patch.dict(os.environ, env, clear=True):
-            with patch("config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
+            with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
                 mgr.start()
 
@@ -163,7 +163,7 @@ class TestQwenDegradationWhenNoPython:
 
         env = {k: v for k, v in os.environ.items() if k != "XTTS_PYTHON"}
         with patch.dict(os.environ, env, clear=True):
-            with patch("config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
+            with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
                 try:
                     mgr.start()
@@ -177,9 +177,9 @@ class TestQwenDegradationWhenNoPython:
 
         env = {k: v for k, v in os.environ.items() if k != "XTTS_PYTHON"}
         with patch.dict(os.environ, env, clear=True):
-            with patch("config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
+            with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("core.health_monitor.logger") as mock_logger:
+                with patch("opencohost.core.health_monitor.logger") as mock_logger:
                     mgr.start()
 
         # At least one warning should mention how to fix the problem
@@ -194,10 +194,10 @@ class TestQwenDegradationWhenNoPython:
         yaml_cfg.write_text("tools:\n  xtts_python: auto\n", encoding="utf-8")
 
         with patch.dict(os.environ, {"XTTS_PYTHON": "/fake/python"}, clear=False):
-            with patch("config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
+            with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
-                    with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch("opencohost.core.health_monitor.LOG_DIR", str(tmp_path)):
+                    with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
                         with patch.object(mgr, "_check_health", return_value=True):
                             mock_popen.return_value.poll.return_value = None
                             result = mgr.start()

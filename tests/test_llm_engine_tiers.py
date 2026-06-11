@@ -1,8 +1,8 @@
 import queue
 from unittest.mock import MagicMock
 
-from core.llm_engine import MotorVocalIA
-from core.llm_tiers import LLMTierConfig
+from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.core.llm_tiers import LLMTierConfig
 
 
 def _ready_motor():

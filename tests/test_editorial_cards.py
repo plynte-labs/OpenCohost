@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from core.editorial_cards import (
+from opencohost.core.editorial_cards import (
     EditorialCard,
     EditorialCardRating,
     EditorialCardRatingValue,

@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core import llm_engine
-from config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
+from opencohost.core import llm_engine
+from opencohost.config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 
 
 def test_audio_queue_timeout_waits_for_heavy_tts_plus_margin():
@@ -573,7 +573,7 @@ def test_heavy_tts_missing_reference_balances_events_and_clears_speech_source():
         except Exception:
             pass
 
-    with patch("core.llm_engine.asyncio") as mock_asyncio:
+    with patch("opencohost.core.llm_engine.asyncio") as mock_asyncio:
         mock_asyncio.run.side_effect = fake_asyncio_run
         mock_asyncio.wait_for = _asyncio.wait_for
         mock_asyncio.TimeoutError = _asyncio.TimeoutError
@@ -776,7 +776,7 @@ def test_guardrail_fallback_rotates_lines():
 
 def test_guardrail_fallback_lines_pass_output_guard():
     """Canned lines must never trip the guard themselves, for any source."""
-    from config.validation import output_guard
+    from opencohost.config.validation import output_guard
 
     for line in llm_engine.GUARDRAIL_FALLBACK_LINES:
         for source in ("direct", "chat", "kira-agenda"):
@@ -850,7 +850,7 @@ def test_productor_no_ref_falls_back_to_ligero_with_missing_reference_reason(tmp
             pass
         # Write a stub mp3 so the chunk path exists
         import os, uuid
-        from config.settings import TEMP_DIR
+        from opencohost.config.settings import TEMP_DIR
         stub = os.path.join(TEMP_DIR, f"tts_stub_{uuid.uuid4().hex[:4]}.mp3")
         open(stub, "wb").close()
 
@@ -860,7 +860,7 @@ def test_productor_no_ref_falls_back_to_ligero_with_missing_reference_reason(tmp
     motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
     motor.pygame.mixer.music.unload = MagicMock()
 
-    with patch("core.llm_engine.asyncio") as mock_asyncio:
+    with patch("opencohost.core.llm_engine.asyncio") as mock_asyncio:
         mock_asyncio.run.side_effect = fake_asyncio_run
         import asyncio as real_asyncio
         mock_asyncio.wait_for = real_asyncio.wait_for
@@ -948,7 +948,7 @@ def test_productor_no_ref_with_passing_health_gate_logs_single_coherent_fallback
     motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
     motor.pygame.mixer.music.unload = MagicMock()
 
-    with patch("core.llm_engine.asyncio") as mock_asyncio:
+    with patch("opencohost.core.llm_engine.asyncio") as mock_asyncio:
         mock_asyncio.run.side_effect = fake_asyncio_run
         mock_asyncio.wait_for = real_asyncio.wait_for
         mock_asyncio.TimeoutError = real_asyncio.TimeoutError

@@ -12,8 +12,14 @@ result.txt
 result_predict.txt
 
 # ── Configuración generada en runtime ──
+# Dev-mode USER_DATA_DIR is the repo root (see opencohost/config/storage.py)
 config/ptt_settings.json
 config/window_geometry.json
+config/music_library.json
+config/last_model.json
+# Stale pre-restructure leftovers; runtime never writes here anymore
+opencohost/config/ptt_settings.json
+opencohost/config/window_geometry.json
 logs/acciones.jsonl
 data/smart_aggregator/
 data/stream_admin/oauth_client.json
@@ -66,14 +72,14 @@ mudanza.py
 
 # ── Local tooling dirs ──
 .opencode/
-VoiceAItemppytest-basetemp/
+VoiceAItemp*/
 
 # ── User assets ──
 assets/music/
-config/music_library.json
+opencohost/config/music_library.json
 Documents/
 WhatIs.md
-config/last_model.json
+opencohost/config/last_model.json
 
 # ── Runtime user state (seeded from config/default_profiles.json on first run) ──
 perfiles.json

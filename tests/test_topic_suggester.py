@@ -2,7 +2,7 @@
 
 import pytest
 
-from smart_aggregator.topic_suggester import (
+from opencohost.smart_aggregator.topic_suggester import (
     TopicSuggestion,
     compute_confidence,
     generate_suggestions,

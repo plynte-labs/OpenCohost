@@ -22,7 +22,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from config.settings import DEFAULT_MODEL
+from opencohost.config.settings import DEFAULT_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ def _make_motor(*, last_model_data=None, tmp_dir=None):
     Returns:
         (motor, log_queue, ui_events) tuple.
     """
-    import config.settings as settings
+    import opencohost.config.settings as settings
 
     original_last_model_file = settings.LAST_MODEL_FILE
     if tmp_dir is not None:
@@ -57,7 +57,7 @@ def _make_motor(*, last_model_data=None, tmp_dir=None):
         ui_events.append(event)
 
     try:
-        from core.llm_engine import MotorVocalIA
+        from opencohost.core.llm_engine import MotorVocalIA
         motor = MotorVocalIA(log_queue, ui_callback)
     finally:
         if tmp_dir is not None:
@@ -129,7 +129,7 @@ class TestStartupModelResolution:
 class TestModelSwitch:
     def test_switch_while_ready_applies(self, tmp_path):
         """Switch command when ready -> model_switch_applied, save called."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -168,7 +168,7 @@ class TestModelSwitch:
 
     def test_pending_switch_applies_after_idle(self, tmp_path):
         """Set pending -> simulate idle -> switch applies."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -232,7 +232,7 @@ class TestRetryExhaustion:
         The user should be able to choose a model first, start/check Ollama next,
         and have the selected model prepared automatically once Ollama is ready.
         """
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -272,7 +272,7 @@ class TestRetryExhaustion:
 
     def test_pending_switch_rechecks_ollama_readiness_without_user_check_spam(self, tmp_path):
         """Pending switch should recover when Ollama starts outside the motor loop."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -313,7 +313,7 @@ class TestRetryExhaustion:
         and does NOT set _pending_model_switch. The user must switch when Ollama
         becomes ready.
         """
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -383,7 +383,7 @@ class TestRetryExhaustion:
         Warming the stale current model first adds exactly the delay the user is
         trying to avoid when selecting a heavier Gemma model before Ollama is up.
         """
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -425,7 +425,7 @@ class TestRetryExhaustion:
 
     def test_pending_model_prepare_failure_does_not_persist_or_mark_active(self, tmp_path):
         """If pending Gemma cannot warm, keep the previous model as source of truth."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -539,7 +539,7 @@ class TestModelTrace:
 class TestPersistence:
     def test_persistence_roundtrip(self, tmp_path):
         """save_last_model -> resolve_startup_model returns saved value."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")
@@ -560,7 +560,7 @@ class TestPersistence:
 
     def test_persistence_invalid_model_fallback(self, tmp_path):
         """Saved model not in catalog -> fallback."""
-        import config.settings as settings
+        import opencohost.config.settings as settings
 
         original = settings.LAST_MODEL_FILE
         settings.LAST_MODEL_FILE = os.path.join(str(tmp_path), "last_model.json")

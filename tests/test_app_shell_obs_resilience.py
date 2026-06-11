@@ -10,6 +10,17 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+# Pre-import every module the app shell imports lazily inside the methods
+# under test. patch.dict(sys.modules, ...) evicts modules first imported
+# inside its window, leaving orphaned module objects: mock.patch then resolves
+# its target through the stale parent-package attribute while the lazy import
+# re-imports a fresh module, so the patch never reaches the code under test.
+import opencohost.ui.app_shell  # noqa: F401
+import opencohost.avatar.avatar_config  # noqa: F401
+import opencohost.avatar.obs_client  # noqa: F401
+import opencohost.smart_aggregator.chat_input_contract  # noqa: F401
+import opencohost.smart_aggregator.url_parser  # noqa: F401
+
 
 def _import_app_shell_with_ui_deps_mocked():
     class DummyWidget:
@@ -28,19 +39,19 @@ def _import_app_shell_with_ui_deps_mocked():
         "pynput.keyboard": MagicMock(),
         "pynput.mouse": MagicMock(),
     }
-    old_module = sys.modules.pop("ui.app_shell", None)
+    old_module = sys.modules.pop("opencohost.ui.app_shell", None)
     with patch.dict(sys.modules, modules):
-        module = importlib.import_module("ui.app_shell")
+        module = importlib.import_module("opencohost.ui.app_shell")
 
     return module, old_module
 
 
 def _restore_app_shell_module(old_module) -> None:
     if old_module is not None:
-        sys.modules["ui.app_shell"] = old_module
+        sys.modules["opencohost.ui.app_shell"] = old_module
         return
-    sys.modules.pop("ui.app_shell", None)
-    ui_module = sys.modules.get("ui")
+    sys.modules.pop("opencohost.ui.app_shell", None)
+    ui_module = sys.modules.get("opencohost.ui")
     if ui_module is not None and hasattr(ui_module, "app_shell"):
         delattr(ui_module, "app_shell")
 
@@ -256,7 +267,7 @@ def test_stream_admin_chat_url_validation_uses_non_blocking_notification():
         app._print_log = MagicMock()
 
         with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
-            with patch("smart_aggregator.url_parser.parse_chat_url", side_effect=ValueError("bad url")):
+            with patch("opencohost.smart_aggregator.url_parser.parse_chat_url", side_effect=ValueError("bad url")):
                 app._on_stream_admin_connect_chat_live()
 
         mock_showwarning.assert_not_called()
@@ -453,7 +464,7 @@ def test_obs_start_from_config_creates_runtime_client_and_one_retry_thread():
         _RecordingThread.instances = []
         fake_client = MagicMock()
 
-        with patch("avatar.avatar_config.load_avatar_config", return_value=_obs_config(enabled=True)):
+        with patch("opencohost.avatar.avatar_config.load_avatar_config", return_value=_obs_config(enabled=True)):
             with patch.object(app_shell, "OBSClient", return_value=fake_client):
                 with patch.object(app_shell.threading, "Thread", _RecordingThread):
                     app._obs_start_from_config()
@@ -611,7 +622,7 @@ def test_avatar_preview_missing_transient_state_keeps_cached_idle_image():
             get_image_for_state=MagicMock(return_value=None),
         )
 
-        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+        with patch("opencohost.avatar.avatar_config.load_avatar_config", return_value=config):
             app._on_avatar_state_for_preview(SimpleNamespace(value="thinking"))
 
         assert app._kira_avatar_ref is idle_ref
@@ -650,7 +661,7 @@ def test_avatar_preview_second_state_cancels_pending_update_and_schedules_latest
         assert app._kira_avatar_preview_after_id == "after-2"
         assert len(scheduled) == 2
 
-        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+        with patch("opencohost.avatar.avatar_config.load_avatar_config", return_value=config):
             scheduled[1]()
 
         config.get_image_for_state.assert_called_once_with("speaking")
@@ -707,7 +718,7 @@ def test_avatar_preview_load_failure_keeps_cached_idle_image():
         image_module.open = MagicMock(side_effect=OSError("bad image"))
         image_module.Resampling = SimpleNamespace(LANCZOS=object())
 
-        with patch("avatar.avatar_config.load_avatar_config", return_value=config):
+        with patch("opencohost.avatar.avatar_config.load_avatar_config", return_value=config):
             with patch.object(app_shell.os.path, "isfile", return_value=True):
                 with patch.dict(sys.modules, {"PIL": SimpleNamespace(Image=image_module), "PIL.Image": image_module}):
                     app._on_avatar_state_for_preview(SimpleNamespace(value="speaking"))

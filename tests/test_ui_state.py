@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ui.state import (
+from opencohost.ui.state import (
     VALID_CHAT_STATUSES,
     VALID_MIC_STATUSES,
     VALID_MODEL_STATUSES,

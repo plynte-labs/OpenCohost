@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "opencohost"
-version = "0.1.0"
+dynamic = ["version"]
 description = "OpenCohost — local-first AI streaming co-host"
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.9"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
 authors = [
     { name = "plynte-labs / OpenCohost Contributors" }
 ]
@@ -22,7 +22,12 @@ dependencies = [
     "customtkinter>=5.2.0",
     "ollama>=0.2.1",
     "requests>=2.31.0",
+    # websocket-client (websocket.*) — kept for backward compat; shipped code uses websockets (async)
     "websocket-client>=1.8.0",
+    # websockets — async WebSocket client used by opencohost/ui/voice_control.py
+    "websockets>=12.0",
+    # numpy — used by opencohost/ui/app_shell.py and opencohost/ui/voice_control.py for RMS computation
+    "numpy>=1.26.0",
     "sounddevice>=0.4.6",
     "soundfile>=0.12.1",
     "pygame>=2.5.2",
@@ -44,7 +49,35 @@ local-tts = [
     "piper-tts>=1.3.0",
     "onnxruntime>=1.18.0,<2",
 ]
+# cloud-tts: enables Edge-TTS (Microsoft cloud text-to-speech).
+# When absent, the app falls back to Piper (local-tts) automatically.
+cloud-tts = [
+    "edge-tts>=6.1.0",
+]
+# integrations: optional platform integrations; none required for core operation.
+#   pytchat  — YouTube live-chat polling (opencohost/smart_aggregator/chat_source.py)
+#   obsws-python — OBS WebSocket control (opencohost/avatar/obs_client.py)
+#   nvidia-ml-py — NVIDIA VRAM monitoring; installs as the `pynvml` module (opencohost/core/health_monitor.py)
+integrations = [
+    "pytchat>=0.5.5",
+    "obsws-python>=1.7.0",
+    "nvidia-ml-py>=12.0.0",
+]
 dev = [
     "pre-commit>=4.6.0",
     "detect-secrets==1.5.0",
+    "pytest>=8.0",
 ]
+
+[project.gui-scripts]
+opencohost = "opencohost.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/plynte-labs/opencohost"
+Issues = "https://github.com/plynte-labs/opencohost/issues"
+
+[tool.hatch.version]
+path = "opencohost/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["opencohost"]

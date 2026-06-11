@@ -8,11 +8,11 @@ Agent instructions for this repository. Read this before planning any work.
 The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor)
 that runs entirely on the user's hardware using Ollama + Qwen3-TTS/F5-TTS.
 
-Key subsystems:
-- `core/` — LLM engine, TTS engine, speech pipeline, health monitor
-- `ui/` — CustomTkinter shell; thread-safe via UIState observer pattern
+Key subsystems (all app code lives in the `opencohost/` package):
+- `opencohost/core/` — LLM engine, TTS engine, speech pipeline, health monitor
+- `opencohost/ui/` — CustomTkinter shell; thread-safe via UIState observer pattern
 - `conductor/` — Spec-Driven Development tracks and product guidelines
-- `config/` — YAML-based settings, storage, and model registry
+- `opencohost/config/` — YAML-based settings, storage, and model registry
 
 Target: streamers who want a supervised AI co-host without cloud subscriptions.
 Product direction: **OpenCohost** (`opencohost_launch_readiness_20260605` track).
@@ -78,10 +78,10 @@ Do not invert this order without a user decision.
 | `conductor/tracks.md` | All tracks and their status (`[x]` done, `[~]` in progress, `[ ]` pending) |
 | `conductor/product.md` | Product vision and non-goals |
 | `conductor/tech-stack.md` | Full stack: Python 3.13, CustomTkinter, Ollama, Qwen3-TTS, F5-TTS |
-| `config/settings.py` | Central settings and feature flags |
-| `core/llm_engine.py` | LLM orchestration and tier switching |
-| `ui/app_shell.py` | Main UI shell — thread-safety boundary |
-| `ui/model_panel.py` | Model management panel |
+| `opencohost/config/settings.py` | Central settings and feature flags |
+| `opencohost/core/llm_engine.py` | LLM orchestration and tier switching |
+| `opencohost/ui/app_shell.py` | Main UI shell — thread-safety boundary |
+| `opencohost/ui/model_panel.py` | Model management panel |
 | `docs/adr/` | Architectural Decision Records |
 
 ## Test commands

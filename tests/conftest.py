@@ -21,7 +21,7 @@ def root_dir():
 @pytest.fixture(scope="session")
 def config_dir(root_dir):
     """Return the config directory path."""
-    return os.path.join(root_dir, "config")
+    return os.path.join(root_dir, "opencohost", "config")
 
 
 @pytest.fixture(scope="session")

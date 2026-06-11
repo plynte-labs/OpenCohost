@@ -32,7 +32,7 @@ if ROOT_DIR not in sys.path:
 def _make_motor():
     """Return a fresh MotorVocalIA with mocked pygame/ollama."""
     import queue as q
-    from core.llm_engine import MotorVocalIA
+    from opencohost.core.llm_engine import MotorVocalIA
 
     log_queue = q.Queue()
     ui_events: list = []
@@ -55,7 +55,7 @@ def _run_producer_one_chunk(motor, text: str, mock_piper=None):
     Returns the list of items put into cola_audios (excluding "FIN").
     Patches asyncio.run to avoid actual network calls.
     """
-    from core import llm_engine as eng
+    from opencohost.core import llm_engine as eng
 
     cola: queue.Queue = queue.Queue()
     motor._hablar_cola = cola  # not used directly, we call productor logic
@@ -85,7 +85,7 @@ def _synthesize_ligero_chunk(motor, oracion: str, edge_side_effect, piper_availa
     Returns (items_from_queue, motor._edge_tts_offline)
     """
     import asyncio as _asyncio
-    from core.llm_engine import _is_connection_error
+    from opencohost.core.llm_engine import _is_connection_error
 
     # Set motor.motor_tts to ligero
     motor.motor_tts = "ligero"
@@ -125,7 +125,7 @@ def _synthesize_ligero_chunk(motor, oracion: str, edge_side_effect, piper_availa
     motor._piper = mock_piper_engine
 
     with patch("asyncio.run", side_effect=fake_asyncio_run), \
-         patch("core.llm_engine.asyncio") as mock_asyncio_mod:
+         patch("opencohost.core.llm_engine.asyncio") as mock_asyncio_mod:
         # We need asyncio.run to be our fake, asyncio.wait_for to pass through
         mock_asyncio_mod.run.side_effect = fake_asyncio_run
         mock_asyncio_mod.wait_for = asyncio.wait_for
@@ -134,7 +134,7 @@ def _synthesize_ligero_chunk(motor, oracion: str, edge_side_effect, piper_availa
         # Run just the chunk logic manually by invoking a simplified version
         # of the productor. We do it inline to keep tests isolated.
         import os as _os
-        from config.settings import TEMP_DIR, TTS_LIGHT_TIMEOUT
+        from opencohost.config.settings import TEMP_DIR, TTS_LIGHT_TIMEOUT
         import uuid
 
         error_count = 0
@@ -314,9 +314,9 @@ class TestSubsequentChunkSkipsEdgeTTS:
 class TestPesadoPathUnaffected:
     def test_gaierror_on_pesado_does_not_set_flag(self):
         """pesado motor + any error → _edge_tts_offline stays False; Piper not called."""
-        from core.llm_engine import _is_connection_error
+        from opencohost.core.llm_engine import _is_connection_error
         import os as _os
-        from config.settings import TEMP_DIR
+        from opencohost.config.settings import TEMP_DIR
         import uuid
 
         motor, *_ = _make_motor()

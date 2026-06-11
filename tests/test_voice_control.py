@@ -218,7 +218,7 @@ def _mock_external_modules():
 
     # Cleanup: remove cached voice_control module so other tests can re-import
     for mod in list(sys.modules.keys()):
-        if mod == "ui.voice_control" or mod.startswith("ui.voice_control."):
+        if mod == "opencohost.ui.voice_control" or mod.startswith("opencohost.ui.voice_control."):
             del sys.modules[mod]
 
 
@@ -229,7 +229,7 @@ def _mock_external_modules():
 @pytest.fixture()
 def ui_state():
     """Fresh UIState instance, shut down after each test."""
-    from ui.state import UIState
+    from opencohost.ui.state import UIState
     s = UIState()
     yield s
     s.shutdown(timeout=2.0)
@@ -272,10 +272,10 @@ def voice_panel_class():
     """Import VoiceControlPanel with all external modules already mocked."""
     # Clear any cached import
     for mod in list(sys.modules.keys()):
-        if mod == "ui.voice_control" or mod.startswith("ui.voice_control."):
+        if mod == "opencohost.ui.voice_control" or mod.startswith("opencohost.ui.voice_control."):
             del sys.modules[mod]
 
-    from ui.voice_control import VoiceControlPanel
+    from opencohost.ui.voice_control import VoiceControlPanel
 
     # Fix implementation bug: set_state() calls _start_rms_animation / _stop_rms_animation
     # but the actual public methods are start_rms_animation / stop_rms_animation
@@ -458,7 +458,7 @@ class TestWebSocketConnect:
         assert voice_panel._ws_connected is True
 
     def test_connect_starts_ws_thread(self, voice_panel):
-        with patch("ui.voice_control.threading.Thread") as mock_thread:
+        with patch("opencohost.ui.voice_control.threading.Thread") as mock_thread:
             voice_panel.connect_ws()
             mock_thread.assert_called_once()
 
@@ -469,7 +469,7 @@ class TestWebSocketConnect:
 
     def test_connect_when_already_connected_is_noop(self, voice_panel):
         voice_panel._ws_connected = True
-        with patch("ui.voice_control.threading.Thread") as mock_thread:
+        with patch("opencohost.ui.voice_control.threading.Thread") as mock_thread:
             voice_panel.connect_ws()
             mock_thread.assert_not_called()
 
@@ -539,11 +539,11 @@ class TestWebSocketReconnection:
             connect_call_count += 1
             raise Exception("Connection refused")
 
-        with patch("ui.voice_control.WS_RECONNECT_BASE_DELAY", 1.0):
-            with patch("ui.voice_control.WS_RECONNECT_MAX_DELAY", 8.0):
-                with patch("ui.voice_control.WS_MAX_RETRIES", 3):
-                    with patch("ui.voice_control.websockets.connect", failing_connect):
-                        with patch("ui.voice_control.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("opencohost.ui.voice_control.WS_RECONNECT_BASE_DELAY", 1.0):
+            with patch("opencohost.ui.voice_control.WS_RECONNECT_MAX_DELAY", 8.0):
+                with patch("opencohost.ui.voice_control.WS_MAX_RETRIES", 3):
+                    with patch("opencohost.ui.voice_control.websockets.connect", failing_connect):
+                        with patch("opencohost.ui.voice_control.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                             asyncio.run(voice_panel._ws_reconnect_loop())
 
         assert mock_sleep.call_count >= 2
@@ -557,11 +557,11 @@ class TestWebSocketReconnection:
         def failing_connect(*args, **kwargs):
             raise Exception("Connection refused")
 
-        with patch("ui.voice_control.WS_RECONNECT_BASE_DELAY", 0.01):
-            with patch("ui.voice_control.WS_RECONNECT_MAX_DELAY", 0.02):
-                with patch("ui.voice_control.WS_MAX_RETRIES", 2):
-                    with patch("ui.voice_control.websockets.connect", failing_connect):
-                        with patch("ui.voice_control.asyncio.sleep", new_callable=AsyncMock):
+        with patch("opencohost.ui.voice_control.WS_RECONNECT_BASE_DELAY", 0.01):
+            with patch("opencohost.ui.voice_control.WS_RECONNECT_MAX_DELAY", 0.02):
+                with patch("opencohost.ui.voice_control.WS_MAX_RETRIES", 2):
+                    with patch("opencohost.ui.voice_control.websockets.connect", failing_connect):
+                        with patch("opencohost.ui.voice_control.asyncio.sleep", new_callable=AsyncMock):
                             asyncio.run(voice_panel._ws_reconnect_loop())
 
         assert voice_panel._ws_connected is False
@@ -578,11 +578,11 @@ class TestWebSocketReconnection:
                 voice_panel._ws_should_reconnect = False
             raise Exception("Connection refused")
 
-        with patch("ui.voice_control.WS_RECONNECT_BASE_DELAY", 0.01):
-            with patch("ui.voice_control.WS_RECONNECT_MAX_DELAY", 0.02):
-                with patch("ui.voice_control.WS_MAX_RETRIES", 10):
-                    with patch("ui.voice_control.websockets.connect", failing_connect):
-                        with patch("ui.voice_control.asyncio.sleep", new_callable=AsyncMock):
+        with patch("opencohost.ui.voice_control.WS_RECONNECT_BASE_DELAY", 0.01):
+            with patch("opencohost.ui.voice_control.WS_RECONNECT_MAX_DELAY", 0.02):
+                with patch("opencohost.ui.voice_control.WS_MAX_RETRIES", 10):
+                    with patch("opencohost.ui.voice_control.websockets.connect", failing_connect):
+                        with patch("opencohost.ui.voice_control.asyncio.sleep", new_callable=AsyncMock):
                             asyncio.run(voice_panel._ws_reconnect_loop())
 
         assert voice_panel._ws_should_reconnect is False

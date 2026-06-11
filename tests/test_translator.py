@@ -5,12 +5,12 @@ Covers spec scenario T6.
 
 import pytest
 
-from config.schema import (
+from opencohost.config.schema import (
     ActionPolicy,
     ChatEvent,
     EventAction,
 )
-from config.translator import (
+from opencohost.config.translator import (
     MAPPING_TABLE,
     ConfigTranslator,
     list_settings,

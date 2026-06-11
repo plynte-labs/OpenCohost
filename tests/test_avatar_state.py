@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from avatar.avatar_state import AvatarState, AvatarStateBridge
+from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
 
 
 class TestAvatarStateEnum:

@@ -6,18 +6,18 @@ Tests: all 12 ChatEvents, edge cases, non-negotiable enforcement.
 
 import pytest
 
-from config.presets import (
+from opencohost.config.presets import (
     default_config,
     preset_comunidad,
     preset_show,
     preset_tecnico,
 )
-from config.schema import (
+from opencohost.config.schema import (
     ActionResult,
     ChatEvent,
     CreatorConfig,
 )
-from config.simulator import (
+from opencohost.config.simulator import (
     ConfigSimulator,
     SimResult,
     simulate_with_config,

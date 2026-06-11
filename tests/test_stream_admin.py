@@ -12,10 +12,10 @@ import os
 import pytest
 import yaml
 
-from stream_admin import AdminManager
-from stream_admin.moderation import ModerationEngine
-from stream_admin.oauth_store import OAuthStore
-from stream_admin.providers import ProviderUnsupportedError
+from opencohost.stream_admin import AdminManager
+from opencohost.stream_admin.moderation import ModerationEngine
+from opencohost.stream_admin.oauth_store import OAuthStore
+from opencohost.stream_admin.providers import ProviderUnsupportedError
 
 
 def write_config(path, token_path):

@@ -5,7 +5,7 @@ Covers spec scenarios: T1, T4, T5, T14.
 
 import pytest
 
-from config.presets import (
+from opencohost.config.presets import (
     default_config,
     duplicate_preset,
     load_preset,
@@ -14,7 +14,7 @@ from config.presets import (
     preset_show,
     preset_tecnico,
 )
-from config.schema import (
+from opencohost.config.schema import (
     ActionPolicy,
     ChatEvent,
     CreatorConfig,

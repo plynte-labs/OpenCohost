@@ -19,9 +19,9 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
-from ui.model_panel import ModelPanel
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.model_panel import ModelPanel
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +164,8 @@ def on_log():
 @pytest.fixture()
 def model_panel(mock_ctk, mock_parent, ui_state, dispatcher, on_log):
     """ModelPanel instance with mocked customtkinter, built."""
-    from config.settings import DEFAULT_MODEL
-    with patch("ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
+    from opencohost.config.settings import DEFAULT_MODEL
+    with patch("opencohost.ui.model_panel.resolve_startup_model", return_value=(DEFAULT_MODEL, "default")):
         with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
             panel = ModelPanel(
                 parent_frame=mock_parent,
@@ -173,7 +173,7 @@ def model_panel(mock_ctk, mock_parent, ui_state, dispatcher, on_log):
                 dispatcher=dispatcher,
                 on_log=on_log,
             )
-            with patch("ui.model_panel.ctk", mock_ctk):
+            with patch("opencohost.ui.model_panel.ctk", mock_ctk):
                 panel.build()
         yield panel
         panel.cleanup()
@@ -232,7 +232,7 @@ class TestModelPanelInit:
 
 class TestModelCatalog:
     def test_get_display_for_tag(self, model_panel):
-        from config.settings import DEFAULT_MODEL, MODELS_CATALOG
+        from opencohost.config.settings import DEFAULT_MODEL, MODELS_CATALOG
 
         expected = MODELS_CATALOG[DEFAULT_MODEL]["display"]
         assert model_panel.get_display_for_tag(DEFAULT_MODEL) == expected
@@ -241,7 +241,7 @@ class TestModelCatalog:
         assert model_panel.get_display_for_tag("unknown_tag") == "unknown_tag"
 
     def test_get_tag_for_display(self, model_panel):
-        from config.settings import DEFAULT_MODEL, MODELS_CATALOG
+        from opencohost.config.settings import DEFAULT_MODEL, MODELS_CATALOG
 
         display = MODELS_CATALOG[DEFAULT_MODEL]["display"]
         assert model_panel.get_tag_for_display(display) == DEFAULT_MODEL
@@ -253,7 +253,7 @@ class TestModelCatalog:
         assert len(model_panel.model_display_list) > 0
 
     def test_default_display(self, model_panel):
-        from config.settings import DEFAULT_MODEL, MODELS_CATALOG
+        from opencohost.config.settings import DEFAULT_MODEL, MODELS_CATALOG
 
         expected = MODELS_CATALOG[DEFAULT_MODEL]["display"]
         assert model_panel.default_display == expected
@@ -334,7 +334,7 @@ class TestUIConstruction:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.lbl_model_header is not None
@@ -351,7 +351,7 @@ class TestUIConstruction:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.combo_modelos.get() == panel.default_display
@@ -364,7 +364,7 @@ class TestUIConstruction:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel._observer_id is not None
@@ -378,7 +378,7 @@ class TestUIConstruction:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.progress_download._packed is False
@@ -391,7 +391,7 @@ class TestUIConstruction:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel.combo_modelos.values == panel.model_display_list
@@ -405,7 +405,7 @@ class TestUIConstruction:
 
 class TestModelInfoUpdate:
     def test_update_model_info(self, model_panel):
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         with patch.object(model_panel, "_modelo_instalado", return_value=True):
@@ -416,7 +416,7 @@ class TestModelInfoUpdate:
         assert model_panel.lbl_modelo_info.text == expected_text
 
     def test_update_model_info_not_installed(self, model_panel):
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         with patch.object(model_panel, "_modelo_instalado", return_value=False):
@@ -492,7 +492,7 @@ class TestButtonUpdate:
 
 class TestModelSelection:
     def test_on_model_changed_installed_model(self, model_panel, dispatcher):
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         display = MODELS_CATALOG[tag]["display"]
@@ -509,7 +509,7 @@ class TestModelSelection:
         model_panel._on_log.assert_called()
 
     def test_on_model_changed_not_installed(self, model_panel, dispatcher):
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         display = MODELS_CATALOG[tag]["display"]
@@ -526,7 +526,7 @@ class TestModelSelection:
         model_panel._on_log.assert_called()
 
     def test_on_model_changed_ollama_not_ready_does_not_dispatch_switch(self, model_panel, dispatcher):
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         display = MODELS_CATALOG[tag]["display"]
@@ -553,14 +553,14 @@ class TestModelSelection:
 class TestDownloadModel:
     def test_on_download_app_missing(self, model_panel):
         with patch.object(model_panel, "_detectar_estado_ollama", return_value="app_missing"):
-            with patch("ui.model_panel.webbrowser.open") as mock_open:
+            with patch("opencohost.ui.model_panel.webbrowser.open") as mock_open:
                 model_panel._on_download_model()
 
         mock_open.assert_called_once_with("https://ollama.com/download")
 
     def test_on_download_package_missing(self, model_panel):
         with patch.object(model_panel, "_detectar_estado_ollama", return_value="package_missing"):
-            with patch("ui.model_panel.messagebox.showwarning") as mock_warn:
+            with patch("opencohost.ui.model_panel.messagebox.showwarning") as mock_warn:
                 model_panel._on_download_model()
 
         mock_warn.assert_called_once()
@@ -574,7 +574,7 @@ class TestDownloadModel:
 
     def test_on_download_activates_installed_model(self, model_panel, dispatcher):
         model_panel._ui_state.ollama_state = "ready"
-        from config.settings import MODELS_CATALOG
+        from opencohost.config.settings import MODELS_CATALOG
 
         tag = list(MODELS_CATALOG.keys())[0]
         display = MODELS_CATALOG[tag]["display"]
@@ -669,7 +669,7 @@ class TestPublicMethods:
         assert model_panel.get_selected_display() == "Test Display"
 
     def test_get_selected_tag(self, model_panel):
-        from config.settings import DEFAULT_MODEL
+        from opencohost.config.settings import DEFAULT_MODEL
 
         display = model_panel.default_display
         model_panel.combo_modelos.set(display)
@@ -713,7 +713,7 @@ class TestObserverIntegration:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         assert panel._observer_id is not None
@@ -727,7 +727,7 @@ class TestObserverIntegration:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         sub_id = panel._observer_id
@@ -742,7 +742,7 @@ class TestObserverIntegration:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         panel.cleanup()
@@ -762,7 +762,7 @@ class TestObserverIntegration:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         # Prevent live ollama call during button update
@@ -782,7 +782,7 @@ class TestObserverIntegration:
             dispatcher=dispatcher,
             on_log=on_log,
         )
-        with patch("ui.model_panel.ctk", mock_ctk):
+        with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
         with patch.object(panel, "_refresh_model_list_async") as mock_refresh:

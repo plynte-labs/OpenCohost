@@ -20,15 +20,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from smart_aggregator.session_history import SessionHistory
-from smart_aggregator.message_filter import MessageFilter
-from smart_aggregator.chat_source import YouTubeChatSource, TwitchChatSource
-from smart_aggregator.vibe_thermometer import VibeThermometer
-from smart_aggregator.activity_trigger import ActivityTrigger
-from smart_aggregator.aggregator import Aggregator
-from smart_aggregator.intent_aggregator import IntentAggregator, IntentClassifier
-from smart_aggregator.filter_policy import get_preset, list_presets, PRESETS
-from smart_aggregator.diagnostics import FilterDiagnostics
+from opencohost.smart_aggregator.session_history import SessionHistory
+from opencohost.smart_aggregator.message_filter import MessageFilter
+from opencohost.smart_aggregator.chat_source import YouTubeChatSource, TwitchChatSource
+from opencohost.smart_aggregator.vibe_thermometer import VibeThermometer
+from opencohost.smart_aggregator.activity_trigger import ActivityTrigger
+from opencohost.smart_aggregator.aggregator import Aggregator
+from opencohost.smart_aggregator.intent_aggregator import IntentAggregator, IntentClassifier
+from opencohost.smart_aggregator.filter_policy import get_preset, list_presets, PRESETS
+from opencohost.smart_aggregator.diagnostics import FilterDiagnostics
 
 MOCK_MESSAGES_20 = [
     {"user": f"user{i}", "text": f"Mensaje de prueba numero {i} para Kira", "timestamp": time.time() + i}

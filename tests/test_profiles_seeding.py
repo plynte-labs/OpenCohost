@@ -39,7 +39,7 @@ VALID_DEFAULTS = {
 
 def _call_cargar(profiles_path: str, defaults_path: str) -> dict:
     """Call cargar_perfiles() with patched paths. Always uses fresh patch context."""
-    import core.profiles as prof_mod
+    import opencohost.core.profiles as prof_mod
     with (
         patch.object(prof_mod, "PROFILES_FILE", profiles_path),
         patch.object(prof_mod, "DEFAULT_PROFILES_FILE", defaults_path),
@@ -137,7 +137,7 @@ def test_fallback_when_defaults_empty_dict(tmp_path):
 
 def test_seeded_profiles_have_no_attribution(tmp_path):
     """None of the seeded profiles should contain personal attribution text."""
-    real_defaults = Path(__file__).resolve().parent.parent / "config" / "default_profiles.json"
+    real_defaults = Path(__file__).resolve().parent.parent / "opencohost" / "config" / "default_profiles.json"
     if not real_defaults.exists():
         pytest.skip("config/default_profiles.json not yet created")
 
@@ -157,7 +157,7 @@ def test_seeded_profiles_have_no_attribution(tmp_path):
 
 def test_real_defaults_file_has_expected_profiles(tmp_path):
     """config/default_profiles.json must contain exactly the 6 curated profiles."""
-    real_defaults = Path(__file__).resolve().parent.parent / "config" / "default_profiles.json"
+    real_defaults = Path(__file__).resolve().parent.parent / "opencohost" / "config" / "default_profiles.json"
     if not real_defaults.exists():
         pytest.skip("config/default_profiles.json not yet created")
 

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from smart_aggregator.chat_source import (
+from opencohost.smart_aggregator.chat_source import (
     ChatSource,
     NormalizedChatMessage,
     TwitchChatSource,
@@ -136,7 +136,7 @@ class TestNormalizedChatMessage:
 class TestYouTubeChatSourceCallbackContent:
     """Verify callback dicts include new platform/source_id fields (REQ-16)."""
 
-    @patch("smart_aggregator.chat_source.pytchat", create=True)
+    @patch("opencohost.smart_aggregator.chat_source.pytchat", create=True)
     def test_on_connect_includes_platform_and_source_id(
         self, mock_pytchat, smart_aggregator_config
     ):
@@ -171,7 +171,7 @@ class TestYouTubeChatSourceCallbackContent:
         assert info["source_id"] == "test12345678"
         assert info["video_id"] == "test12345678"  # backward compat
 
-    @patch("smart_aggregator.chat_source.pytchat", create=True)
+    @patch("opencohost.smart_aggregator.chat_source.pytchat", create=True)
     def test_on_message_includes_platform_and_source_id(
         self, mock_pytchat, smart_aggregator_config
     ):
@@ -213,7 +213,7 @@ class TestYouTubeChatSourceCallbackContent:
         assert msg["text"] == "hello world"
         assert "timestamp" in msg
 
-    @patch("smart_aggregator.chat_source.pytchat", create=True)
+    @patch("opencohost.smart_aggregator.chat_source.pytchat", create=True)
     def test_youtube_custom_emote_text_is_not_changed(
         self, mock_pytchat, smart_aggregator_config
     ):

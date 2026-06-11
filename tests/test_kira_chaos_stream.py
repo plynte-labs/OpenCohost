@@ -19,13 +19,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core import llm_engine
-from smart_aggregator.kira_agenda_controller import (
+from opencohost.core import llm_engine
+from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaState,
     KiraAgendaController,
     TopicStatus,
 )
-from ui.smart_aggregator_ui import SmartAggregatorUI
+from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
 
 
 # ---------------------------------------------------------------------------

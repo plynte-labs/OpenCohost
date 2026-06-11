@@ -18,22 +18,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock customtkinter BEFORE importing the panel (no display in test env)
+# Mocked customtkinter, applied per-test via the autouse fixture below.
+# Never assign this into sys.modules at module level: collection imports this
+# file early and the leaked mock would hijack `patch("customtkinter.X")`
+# targets for every later test file in the run.
 _ctk_mock = MagicMock()
 _ctk_mock.CTkFrame.return_value = MagicMock()
 _ctk_mock.CTkLabel.return_value = MagicMock()
 _ctk_mock.CTkButton.return_value = MagicMock()
 _ctk_mock.CTkFont.return_value = MagicMock()
 _ctk_mock.CTkImage.return_value = MagicMock()
-sys.modules["customtkinter"] = _ctk_mock
 
 # Ensure the project root is on the path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from avatar.avatar_config import VALID_STATES, AvatarConfig, assign_image_to_state
-from avatar.avatar_state import AvatarState, AvatarStateBridge
+from opencohost.avatar.avatar_config import VALID_STATES, AvatarConfig, assign_image_to_state
+from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +66,24 @@ def sample_image(tmp_path):
     return img
 
 
+@pytest.fixture(autouse=True)
+def _patch_panel_ctk():
+    """Force the panel module to use the mocked ctk regardless of import cache.
+
+    Full-suite collection imports app_shell (and thus avatar_panel) with the
+    real customtkinter before the module-level sys.modules mock above can take
+    effect. Real CTk widgets walk ``widget.master`` looking for a Tk root,
+    which never terminates against MagicMock parents.
+    """
+    import opencohost.ui.avatar_panel as _panel_module
+    with patch.object(_panel_module, "ctk", _ctk_mock):
+        yield
+
+
 @pytest.fixture()
 def panel(mock_parent):
     """Build an AvatarPanel with mocked dependencies."""
-    from ui.avatar_panel import AvatarPanel
+    from opencohost.ui.avatar_panel import AvatarPanel
     on_log = MagicMock()
     schedule_ui = MagicMock(side_effect=lambda fn: fn())
     p = AvatarPanel(parent_frame=mock_parent, on_log=on_log, schedule_ui_update=schedule_ui)
@@ -125,8 +141,8 @@ class TestImageSelection:
         # Patch the config's assets folder for this test
         panel.config.assets_folder = asset_dir
 
-        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
-            with patch("ui.avatar_panel.save_avatar_config") as save_config:
+        with patch("opencohost.ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
+            with patch("opencohost.ui.avatar_panel.save_avatar_config") as save_config:
                 panel._choose_image("idle")
 
         save_config.assert_called_once_with(panel.config)
@@ -139,8 +155,8 @@ class TestImageSelection:
         panel.build()
         panel.config.assets_folder = tmp_path / "avatars"
 
-        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
-            with patch("ui.avatar_panel.save_avatar_config") as save_config:
+        with patch("opencohost.ui.avatar_panel.filedialog.askopenfilename", return_value=str(sample_image)):
+            with patch("opencohost.ui.avatar_panel.save_avatar_config") as save_config:
                 panel._choose_image("idle")
 
         save_config.assert_called_once_with(panel.config)
@@ -153,7 +169,7 @@ class TestImageSelection:
         panel.build()
         original_images = dict(panel.config.state_images)
 
-        with patch("ui.avatar_panel.filedialog.askopenfilename", return_value=""):
+        with patch("opencohost.ui.avatar_panel.filedialog.askopenfilename", return_value=""):
             panel._choose_image("idle")
 
         assert panel.config.state_images == original_images
@@ -210,7 +226,7 @@ class TestPreviewFallback:
         panel.config.state_images = {"idle": tmp_path / "idle.png"}
         panel._current_state = "thinking"
 
-        with patch("ui.avatar_panel.os.path.isfile", return_value=False):
+        with patch("opencohost.ui.avatar_panel.os.path.isfile", return_value=False):
             panel._update_preview()
 
         assert panel._preview_image_ref is idle_ref
@@ -219,7 +235,7 @@ class TestPreviewFallback:
 
 class TestOBSLifecycleCallbacks:
     def test_obs_toggle_on_saves_config_and_requests_runtime_enable(self, mock_parent):
-        from ui.avatar_panel import AvatarPanel
+        from opencohost.ui.avatar_panel import AvatarPanel
 
         on_enable = MagicMock()
         on_disable = MagicMock()
@@ -235,7 +251,7 @@ class TestOBSLifecycleCallbacks:
         panel._obs_source_entry = _obs_widget("KiraAvatar")
         panel._obs_connect_btn = MagicMock()
 
-        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+        with patch("opencohost.ui.avatar_panel.save_avatar_config") as save_config:
             panel._on_obs_toggle()
 
         assert panel.config.obs.enabled is True
@@ -244,7 +260,7 @@ class TestOBSLifecycleCallbacks:
         on_disable.assert_not_called()
 
     def test_obs_toggle_off_saves_config_and_requests_runtime_disable(self, mock_parent):
-        from ui.avatar_panel import AvatarPanel
+        from opencohost.ui.avatar_panel import AvatarPanel
 
         on_enable = MagicMock()
         on_disable = MagicMock()
@@ -260,7 +276,7 @@ class TestOBSLifecycleCallbacks:
         panel._obs_source_entry = _obs_widget("KiraAvatar")
         panel._obs_connect_btn = MagicMock()
 
-        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+        with patch("opencohost.ui.avatar_panel.save_avatar_config") as save_config:
             panel._on_obs_toggle()
 
         assert panel.config.obs.enabled is False
@@ -269,7 +285,7 @@ class TestOBSLifecycleCallbacks:
         on_enable.assert_not_called()
 
     def test_obs_connect_button_requests_live_runtime_connection(self, mock_parent):
-        from ui.avatar_panel import AvatarPanel
+        from opencohost.ui.avatar_panel import AvatarPanel
 
         on_connect = MagicMock()
         panel = AvatarPanel(parent_frame=mock_parent, on_obs_connect=on_connect)
@@ -280,7 +296,7 @@ class TestOBSLifecycleCallbacks:
         panel._obs_connect_btn = MagicMock()
         panel._obs_status_label = MagicMock()
 
-        with patch("ui.avatar_panel.save_avatar_config") as save_config:
+        with patch("opencohost.ui.avatar_panel.save_avatar_config") as save_config:
             panel._test_obs_connection()
 
         save_config.assert_called_once_with(panel.config)
@@ -299,7 +315,7 @@ class TestOBSLifecycleCallbacks:
         image_module.Resampling = SimpleNamespace(LANCZOS=object())
 
         with patch.dict(sys.modules, {"PIL": SimpleNamespace(Image=image_module), "PIL.Image": image_module}):
-            with patch("ui.avatar_panel.os.path.isfile", return_value=True):
+            with patch("opencohost.ui.avatar_panel.os.path.isfile", return_value=True):
                 panel._update_preview()
 
         assert panel._preview_image_ref is idle_ref
@@ -313,23 +329,23 @@ class TestOBSLifecycleCallbacks:
 class TestSourceSafety:
     def test_no_hardcoded_user_paths(self):
         """The avatar panel must not contain hardcoded user paths."""
-        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        source = (ROOT / "opencohost" / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
         assert "C:\\Users\\" not in source  # path-ok: test exercises drive-letter path handling
         assert "Downloads" not in source
 
     def test_no_real_obs_controls(self):
         """The panel must not expose working OBS controls — only Próximamente."""
-        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        source = (ROOT / "opencohost" / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
         # No actual OBS WebSocket implementation
         assert "websocket.connect" not in source
         assert "Próximamente" in source
 
     def test_uses_filedialog_not_hardcoded(self):
         """Image selection must use filedialog, not hardcoded paths."""
-        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        source = (ROOT / "opencohost" / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
         assert "filedialog.askopenfilename" in source
 
     def test_copies_to_managed_folder(self):
         """The panel must copy images to a managed folder."""
-        source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
+        source = (ROOT / "opencohost" / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
         assert "assign_image_to_state" in source

@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.health_monitor import HealthMonitor, MonitorState
-from ui.state import UIState
+from opencohost.core.health_monitor import HealthMonitor, MonitorState
+from opencohost.ui.state import UIState
 
 
 # ──────────────────────────────────────────────
@@ -24,7 +24,7 @@ class TestMotorVocalIAHealthFallback:
 
     def test_health_monitor_none_backward_compat(self):
         """When health_monitor is None, original behavior is unchanged."""
-        from core.llm_engine import MotorVocalIA
+        from opencohost.core.llm_engine import MotorVocalIA
 
         log_queue = MagicMock()
         callback = MagicMock()
@@ -36,7 +36,7 @@ class TestMotorVocalIAHealthFallback:
 
     def test_health_monitor_wired_to_motor(self):
         """HealthMonitor can be wired to MotorVocalIA."""
-        from core.llm_engine import MotorVocalIA
+        from opencohost.core.llm_engine import MotorVocalIA
 
         log_queue = MagicMock()
         callback = MagicMock()
@@ -87,8 +87,8 @@ class TestSmartAggregatorUIHealthGate:
 
     def _make_mock_ui(self, health_monitor=None):
         """Create a SmartAggregatorUI with mocked dependencies."""
-        from ui.smart_aggregator_ui import SmartAggregatorUI
-        from ui.protocols import CallbackDispatcher
+        from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
+        from opencohost.ui.protocols import CallbackDispatcher
 
         ui_state = UIState()
         dispatcher = CallbackDispatcher(source="test")
@@ -227,7 +227,7 @@ class TestUIStateHealthPropagation:
 
     def test_health_status_valid_values(self):
         """All valid health status values work."""
-        from ui.state import VALID_HEALTH_STATUSES
+        from opencohost.ui.state import VALID_HEALTH_STATUSES
 
         state = UIState()
         for val in VALID_HEALTH_STATUSES:

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from avatar.obs_client import OBSClient, OBSConfig
-from avatar.avatar_state import AvatarState, AvatarStateBridge
+from opencohost.avatar.obs_client import OBSClient, OBSConfig
+from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
 
 
 class TestOBSConfig:
@@ -53,8 +53,8 @@ class TestOBSClientConnection:
         with patch.dict("sys.modules", {"obsws_python": mock_obs}):
             # Force reimport to pick up the mock
             import importlib
-            import avatar.obs_client
-            importlib.reload(avatar.obs_client)
+            import opencohost.avatar.obs_client
+            importlib.reload(opencohost.avatar.obs_client)
 
             cfg = OBSConfig(enabled=True, host="localhost", port=4455)
             client = OBSClient(config=cfg, assets_folder=Path("/tmp"))

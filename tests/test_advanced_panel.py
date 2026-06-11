@@ -24,8 +24,8 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from ui.state import UIState
-from ui.protocols import CallbackDispatcher
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +189,23 @@ def log_queue():
 # Helper to create AdvancedModePanel with mocked ctk
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _patch_panel_ctk(mock_ctk):
+    """Force the panel module to use the mocked ctk regardless of import cache.
+
+    When the full suite runs, collection imports app_shell (and thus
+    advanced_panel) with the real customtkinter before any sys.modules patch
+    applies. Real CTk widgets walk ``widget.master`` looking for a Tk root,
+    which never terminates against MagicMock parents.
+    """
+    import opencohost.ui.advanced_panel as _panel_module
+    with patch.object(_panel_module, "ctk", mock_ctk):
+        yield
+
+
 def _make_panel(mock_ctk, ui_state, dispatcher, log_queue=None, **kwargs):
     """Create an AdvancedModePanel with mocked customtkinter."""
-    from ui.advanced_panel import AdvancedModePanel
+    from opencohost.ui.advanced_panel import AdvancedModePanel
 
     parent = MagicMock()
     parent.grid = MagicMock()
