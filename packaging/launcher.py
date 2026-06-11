@@ -260,14 +260,17 @@ def load_release_meta(src_dir=None):
 # Wheel spec
 # ---------------------------------------------------------------------------
 
-def build_wheel_spec(package_name, extras=None):
-    """Return a PEP 508 install spec for the wheel, e.g. ``opencohost[cloud-tts,local-tts]``.
+def build_wheel_spec(package_ref, extras=None):
+    """Return an install spec with extras, e.g. ``.[cloud-tts,local-tts]``.
 
-    Always includes WHEEL_EXTRAS (cloud-tts, local-tts) unless caller passes
-    explicit extras.
+    ``package_ref`` must be the local source reference (``"."`` — the unpacked
+    source tree; run_uv_install sets cwd to it). A bare package name would
+    resolve against PyPI, where opencohost is not published and the name
+    could be squatted. Always includes WHEEL_EXTRAS (cloud-tts, local-tts)
+    unless caller passes explicit extras.
     """
     chosen = list(extras) if extras is not None else list(WHEEL_EXTRAS)
-    return "%s[%s]" % (package_name, ",".join(chosen))
+    return "%s[%s]" % (package_ref, ",".join(chosen))
 
 
 # ---------------------------------------------------------------------------
@@ -1207,7 +1210,7 @@ def run_bootstrap(meta, install_root, portable, reporter, cancel=None,
     uv_path, uv_ver = ensure_uv(install_root, reporter, cancel=cancel)
     reporter.progress(0.40)
 
-    wheel_spec = build_wheel_spec("opencohost")
+    wheel_spec = build_wheel_spec(".")
     run_uv_install(uv_path, install_root, wheel_spec, reporter, cancel=cancel)
 
     exe = venv_app_exe(install_root)
@@ -1464,7 +1467,7 @@ def cmd_self_test(args, meta, install_root, portable):
         "  app home:         %s" % resolve_app_home(install_root),
         "  app executable:   %s (exists: %s)" % (exe, "yes" if os.path.isfile(exe) else "no"),
         "  installed.json:   %s" % (json.dumps(installed) if installed else "missing"),
-        "  wheel spec:       %s" % build_wheel_spec("opencohost"),
+        "  wheel spec:       %s" % build_wheel_spec("."),
         "  uv:               %s" % (
             "%s (version %s)" % (uv_path, uv_ver or "NOT RUNNABLE")
             if uv_path else "not found (would download %s)" % _uv_release_asset()
