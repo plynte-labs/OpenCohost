@@ -193,6 +193,36 @@ MUSIC_DIR = os.path.join(str(USER_DATA_DIR), "assets", "music")
 MUSIC_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "music_library.json")
 AVATAR_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "avatar.yaml")
 
+# Paths that must live under USER_DATA_DIR so packaged builds under
+# Program Files (read-only) do not crash on first write.
+EDITORIAL_CARDS_DB = os.path.join(str(USER_DATA_DIR), "data", "editorial_cards", "cards.db")
+REFERENCE_WAV_PATH = os.path.join(str(USER_DATA_DIR), "referencia_grabada.wav")
+
+
+# ──────────────────────────────────────────────
+# Experimental feature flags
+# ──────────────────────────────────────────────
+
+def _resolve_experimental_heavy_tts() -> bool:
+    """Return whether the experimental Qwen3-TTS heavy-TTS UI option is visible.
+
+    Logic:
+      - Frozen (packaged) builds default to False — the engine gates and
+        auto-fallback remain active; only the UI affordance is hidden.
+      - OPENCOHOST_EXPERIMENTAL_TTS=1 overrides to True in any environment.
+      - Dev builds (not frozen) default to True.
+    """
+    env_override = os.environ.get("OPENCOHOST_EXPERIMENTAL_TTS", "")
+    if env_override == "1":
+        return True
+    if getattr(sys, "frozen", False):
+        return False
+    return True
+
+
+EXPERIMENTAL_HEAVY_TTS_ENABLED: bool = _resolve_experimental_heavy_tts()
+
+
 # ──────────────────────────────────────────────
 # Health Monitor configuration
 # ──────────────────────────────────────────────

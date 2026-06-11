@@ -44,6 +44,8 @@ from config.settings import (
     RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
     PTT_DEFAULT_HOTKEY, PTT_HOTKEY_LIST, PTT_CONFIG_FILE,
     WINDOW_GEOMETRY_FILE, ACCIONES_LOG_FILE,
+    EDITORIAL_CARDS_DB, REFERENCE_WAV_PATH,
+    EXPERIMENTAL_HEAVY_TTS_ENABLED,
 )
 from config.logger import get_logger
 from core.profiles import cargar_perfiles, guardar_perfiles
@@ -136,7 +138,7 @@ class VocalAIApp(ctk.CTk):
         self.music_library = MusicLibrary()
         self.music_library.load()
         self.audio_bed = AudioBedEngine(self.music_library, on_log=lambda msg: self._print_log(msg))
-        self.editorial_cards = EditorialCardStore(os.path.join(BASE_DIR, "data", "editorial_cards", "cards.db"))
+        self.editorial_cards = EditorialCardStore(EDITORIAL_CARDS_DB)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self.lista_dispositivos = self._obtener_dispositivos_entrada()
@@ -709,7 +711,13 @@ class VocalAIApp(ctk.CTk):
         self.switch_modo_ligero = ctk.CTkSwitch(frame_tts_memory, text="🎛️ TTS: Ligero", onvalue="ligero", offvalue="pesado", command=self._al_cambiar_motor_tts)
         self.switch_modo_ligero.pack(fill="x", padx=10, pady=4)
         self.switch_modo_ligero.select()
-        ctk.CTkLabel(frame_tts_memory, text="Ligero: rápido, usa Edge-TTS (cloud). Pesado: Qwen3-TTS local, requiere descarga previa del modelo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
+        if EXPERIMENTAL_HEAVY_TTS_ENABLED:
+            ctk.CTkLabel(frame_tts_memory, text="Ligero: rápido, usa Edge-TTS (cloud). Pesado: Qwen3-TTS local, requiere descarga previa del modelo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
+        else:
+            # Heavy-TTS is experimental; hidden in packaged builds.
+            # Engine-side gates and auto-fallback remain active regardless.
+            self.switch_modo_ligero.configure(state="disabled")
+            ctk.CTkLabel(frame_tts_memory, text="TTS: Edge-TTS (cloud) / Piper (local fallback).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
@@ -2758,7 +2766,7 @@ class VocalAIApp(ctk.CTk):
             self._print_log("[Grabación] Acción cancelada.")
 
     def _hilo_grabacion(self) -> None:
-        filepath = os.path.join(BASE_DIR, "referencia_grabada.wav")
+        filepath = REFERENCE_WAV_PATH
         self._print_log(f"\n[Grabación] 🔴 GRABANDO {RECORDING_DURATION}s... Habla ahora.")
         self._safe_after(lambda: self.btn_grabar.configure(state="disabled", text="Grabando...", fg_color="darkred"))
         try:

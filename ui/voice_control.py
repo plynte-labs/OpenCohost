@@ -33,7 +33,7 @@ from config.settings import (
     WS_URI, WS_TIMEOUT, WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_MAX_DELAY, WS_MAX_RETRIES,
     RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
-    BASE_DIR, TEMP_DIR,
+    BASE_DIR, TEMP_DIR, REFERENCE_WAV_PATH,
 )
 from config.logger import get_logger
 from ui.state import UIState
@@ -591,7 +591,7 @@ class VoiceControlPanel:
             return
 
         if filepath is None:
-            filepath = os.path.join(BASE_DIR, "referencia_grabada.wav")
+            filepath = REFERENCE_WAV_PATH
 
         self._is_recording = True
         self._recording_thread = threading.Thread(
