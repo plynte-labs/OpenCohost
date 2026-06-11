@@ -211,9 +211,11 @@ No backend, audio, TTS, OAuth, RF3, RF4, memory, or model logic should change in
 
 ## Validation Commands
 
-- `E:\Miniconda\envs\flux_env\python.exe -m compileall .`
-- `E:\Miniconda\envs\flux_env\python.exe smart_aggregator\test_local.py`
-- `E:\Miniconda\envs\flux_env\python.exe stream_admin\test_local.py`
+Activate your project Python environment, then:
+
+- `python -m compileall .`
+- `python smart_aggregator\test_local.py`
+- `python stream_admin\test_local.py`
 
 If tests require credentials or live services, skip live-service execution and document the reason.
 

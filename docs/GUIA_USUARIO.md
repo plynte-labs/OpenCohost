@@ -149,14 +149,16 @@ storage:
   ollama_models: "auto"
 ```
 
-Si querés forzar otro disco:
+Si querés forzar otro disco, editá `config/storage.yaml`:
 
 ```yaml
 storage:
-  cache_root: "D:/VoiceAI/cache"
-  temp_root: "D:/VoiceAI/temp"
-  ollama_models: "D:/OllamaStorage"
+  cache_root: "/path/to/your/cache"
+  temp_root: "/path/to/your/temp"
+  ollama_models: "/path/to/ollama/storage"
 ```
+
+En Windows, podés usar rutas como `D:/OpenCohost/cache` si querés otro disco. <!-- path-ok: storage config example -->
 
 Esto configura por proceso:
 

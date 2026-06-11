@@ -15,7 +15,7 @@ The test suite is **solid for a live-streaming AI app**. No catastrophic false p
 
 ## 🔴 False Positives (tests that pass but don't test what they claim)
 
-### FP-1: `test_switch_while_speaking_is_pending` — [test_llm_engine_model_trace.py:154-172](file:///e:/VoiceAI/tests/test_llm_engine_model_trace.py#L154-L172)
+### FP-1: `test_switch_while_speaking_is_pending` — [test_llm_engine_model_trace.py:154-172](tests/test_llm_engine_model_trace.py#L154-L172)
 
 **Severity: HIGH** — Same pattern as the guardrails false-green we already fixed.
 
@@ -34,7 +34,7 @@ motor._pending_switch_retries = 3
 
 ---
 
-### FP-2: `test_unavailable_when_pynvml_not_installed` — [test_health_monitor.py:35-39](file:///e:/VoiceAI/tests/test_health_monitor.py#L35-L39)
+### FP-2: `test_unavailable_when_pynvml_not_installed` — [test_health_monitor.py:35-39](tests/test_health_monitor.py#L35-L39)
 
 **Severity: LOW** — Assertion is meaningless.
 
@@ -48,7 +48,7 @@ This accepts ALL possible values. It will pass whether pynvml is installed or no
 
 ---
 
-### FP-3: `test_is_port_in_use` — [test_health_monitor.py:398-401](file:///e:/VoiceAI/tests/test_health_monitor.py#L398-L401)
+### FP-3: `test_is_port_in_use` — [test_health_monitor.py:398-401](tests/test_health_monitor.py#L398-L401)
 
 **Severity: LOW** — Environment-dependent, no useful assertion.
 
@@ -65,27 +65,27 @@ This passes regardless of whether port 5000 is in use. It only checks the return
 
 ## 🟡 Weak/Insignificant Tests
 
-### WK-1: `test_poll_does_not_crash` — [test_health_monitor.py:41-45](file:///e:/VoiceAI/tests/test_health_monitor.py#L41-L45)
+### WK-1: `test_poll_does_not_crash` — [test_health_monitor.py:41-45](tests/test_health_monitor.py#L41-L45)
 
 "Should not raise" tests are valid as smoke tests but add zero regression value. If poll() starts returning wrong results instead of crashing, this test won't catch it.
 
-### WK-2: `test_free_mb_is_float` — [test_health_monitor.py:53-57](file:///e:/VoiceAI/tests/test_health_monitor.py#L53-L57)
+### WK-2: `test_free_mb_is_float` — [test_health_monitor.py:53-57](tests/test_health_monitor.py#L53-L57)
 
 Checking that `free_mb` returns a float is a type-level assertion. Useful only if there was ever a risk of returning `None` or `int`. Low value.
 
-### WK-3: `test_status_values` — [test_health_monitor.py:47-51](file:///e:/VoiceAI/tests/test_health_monitor.py#L47-L51)
+### WK-3: `test_status_values` — [test_health_monitor.py:47-51](tests/test_health_monitor.py#L47-L51)
 
 Same as FP-2 — accepts all valid values without asserting a specific state.
 
-### WK-4: `test_idle_seconds_zero_initially` — [test_health_monitor.py:202-205](file:///e:/VoiceAI/tests/test_health_monitor.py#L202-L205)
+### WK-4: `test_idle_seconds_zero_initially` — [test_health_monitor.py:202-205](tests/test_health_monitor.py#L202-L205)
 
 Checking a default value. Not wrong, just trivial. Combined with `test_is_running_false_initially` and `test_is_manual_false_initially`, these 3 tests could be a single `test_initial_state` parametrized test.
 
-### WK-5: `test_custom_values` in TestMonitorState — [test_health_monitor.py:724-738](file:///e:/VoiceAI/tests/test_health_monitor.py#L724-L738)
+### WK-5: `test_custom_values` in TestMonitorState — [test_health_monitor.py:724-738](tests/test_health_monitor.py#L724-L738)
 
 Tests that a dataclass accepts keyword arguments. Python guarantees this.
 
-### WK-6: `test_all_fields_validation` — [test_validation.py:170-174](file:///e:/VoiceAI/tests/test_validation.py#L170-L174)
+### WK-6: `test_all_fields_validation` — [test_validation.py:170-174](tests/test_validation.py#L170-L174)
 
 Exact duplicate of `test_valid_default_config_passes` at line 68.
 

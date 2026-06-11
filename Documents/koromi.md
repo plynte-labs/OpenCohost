@@ -15,12 +15,12 @@ Este es el paso que suele ser "tedioso", pero es indispensable.
 1.  Ve a la página oficial de *releases* de `espeak-ng` en GitHub:
     [https://github.com/espeak-ng/espeak-ng/releases](https://github.com/espeak-ng/espeak-ng/releases)
 2.  Descarga el instalador para Windows (usualmente un archivo `.msi` o `.exe` que diga `win64`).
-3.  Ejecuta el instalador. **Muy Importante:** Durante la instalación, fíjate bien en qué carpeta se está instalando (por defecto suele ser `C:\Program Files\eSpeak NG`).
+3.  Ejecuta el instalador. **Muy Importante:** Durante la instalación, fíjate bien en qué carpeta se está instalando (por defecto suele ser `C:\Program Files\eSpeak NG`). <!-- path-ok: standard Windows system install path -->
 4.  **Agregar al PATH (Crucial):**
     *   Abre el menú de inicio de Windows y escribe "Variables de entorno". Selecciona "Editar las variables de entorno del sistema".
     *   Haz clic en el botón "Variables de entorno...".
     *   En "Variables del sistema", busca la variable llamada `Path`, selecciónala y dale a "Editar...".
-    *   Haz clic en "Nuevo" y pega la ruta completa donde se instaló `espeak-ng` (ej. `C:\Program Files\eSpeak NG`).
+    *   Haz clic en "Nuevo" y pega la ruta completa donde se instaló `espeak-ng` (ej. `C:\Program Files\eSpeak NG`). <!-- path-ok: standard Windows system install path -->
     *   Dale "Aceptar" a todas las ventanas.
 5.  **Verificación:** Abre una *nueva* ventana de terminal (CMD o PowerShell) y escribe `espeak-ng --version`. Si te devuelve la versión, está correctamente instalado.
 
@@ -58,7 +58,7 @@ import tkinter.messagebox as messagebox
 from tkinter import filedialog
 
 # Redirigimos descargas al disco E:
-cache_dir = r"E:\VoiceAI\modelos_kokoro"
+cache_dir = r"modelos_kokoro"
 os.makedirs(cache_dir, exist_ok=True)
 os.environ["HF_HOME"] = cache_dir
 

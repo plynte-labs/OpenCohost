@@ -1,17 +1,17 @@
 Let me first research what small models are available in Ollama that support system roles and work well in Spanish:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import ollama; models = ollama.list(); print('Installed models:'); [print(f'  {m.model} ({m.details.parameter_size}, {m.details.quantization_level}, {m.size/(1024**3):.1f}GB)') for m in models]"`
+Ran command: `python -c "import ollama; models = ollama.list(); print('Installed models:'); [print(f'  {m.model} ({m.details.parameter_size}, {m.details.quantization_level}, {m.size/(1024**3):.1f}GB)') for m in models]"`
 Searched web: "ollama small models under 4B parameters 2025 2026 qwen3 phi4-mini llama3.2 system role support Spanish"
 
 Now let me check Ollama's available tags for these models:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import ollama; mlist = ollama.list(); [print(f'{m[0]} | {m[1].get(\"parameter_size\",\"?\")} | {m[1].get(\"quantization_level\",\"?\")} | {m[1].get(\"family\",\"?\")}') for m in [(mod.model, mod.details.__dict__ if hasattr(mod.details,'__dict__') else {}) for mod in mlist.models]]"`
+Ran command: `python -c "import ollama; mlist = ollama.list(); [print(f'{m[0]} | {m[1].get(\"parameter_size\",\"?\")} | {m[1].get(\"quantization_level\",\"?\")} | {m[1].get(\"family\",\"?\")}') for m in [(mod.model, mod.details.__dict__ if hasattr(mod.details,'__dict__') else {}) for mod in mlist.models]]"`
 Edited list_models.py
-Ran command: `E:\Miniconda\envs\flux_env\python.exe e:\VoiceAI\temp\list_models.py`
+Ran command: `python temp\list_models.py`
 
 Now I have the full picture. Let me check the Ollama Python API for pull with progress:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import ollama; help(ollama.pull)" 2>&1 | Select-Object -First 30`
+Ran command: `python -c "import ollama; help(ollama.pull)" 2>&1 | Select-Object -First 30`
 
 Now let me view the current probar.py structure to plan the UI changes:
 
@@ -39,11 +39,11 @@ Edited probar.py
 
 Now let me compile-check:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "import py_compile; py_compile.compile(r'e:\VoiceAI\probar.py', doraise=True); print('OK')"`
+Ran command: `python -c "import py_compile; py_compile.compile(r'probar.py', doraise=True); print('OK')"`
 
 Let me verify the complete file structure makes sense by checking the line count and key sections:
 
-Ran command: `E:\Miniconda\envs\flux_env\python.exe -c "with open(r'e:\VoiceAI\probar.py', encoding='utf-8') as f: lines = f.readlines(); print(f'Total lines: {len(lines)}')"`
+Ran command: `python -c "with open(r'probar.py', encoding='utf-8') as f: lines = f.readlines(); print(f'Total lines: {len(lines)}')"`
 
 Everything compiles. Here's the summary:
 

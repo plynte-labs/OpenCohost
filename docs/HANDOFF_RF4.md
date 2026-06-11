@@ -3,7 +3,7 @@
 **Fecha:** 2026-05-04  
 **Módulo:** Gestión de Stream / Admin Mode  
 **Estado:** MVP base implementado, pendiente validación OAuth real  
-**Ambiente de ejecución esperado:** `E:\Miniconda\envs\flux_env\python.exe main.py`
+**Ambiente de ejecución esperado:** `python main.py` (activate your project Python environment first)
 
 ---
 

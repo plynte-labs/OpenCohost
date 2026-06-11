@@ -57,8 +57,12 @@ Save the final decisions, discoveries, and completed track summary in Engram wit
 
 ## Terminal Engram Examples
 
+If using the Engram CLI directly (path depends on your installation), the commands follow this pattern:
+
 ```powershell
-E:\Job\bin\engram.exe context voiceai
-E:\Job\bin\engram.exe search "Qwen3-TTS offline" --project voiceai
-E:\Job\bin\engram.exe save "VoiceAI decision" "Decision/details here." --type decision --project voiceai
+engram context voiceai
+engram search "Qwen3-TTS offline" --project voiceai
+engram save "OpenCohost decision" "Decision/details here." --type decision --project voiceai
 ```
+
+Set `ENGRAM_EXE` in your environment if the `engram` binary is not on your `PATH`.

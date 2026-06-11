@@ -33,7 +33,7 @@ The high-risk dual-audit findings around Co-host Agenda prefetch/lifecycle, comp
 ## Focused verification
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_music_library.py tests/test_product_ui_refactor_safety.py tests/test_cohost_agenda_panel.py tests/test_kira_agenda_controller.py tests/test_llm_engine_timeouts.py
+python -m pytest tests/test_music_library.py tests/test_product_ui_refactor_safety.py tests/test_cohost_agenda_panel.py tests/test_kira_agenda_controller.py tests/test_llm_engine_timeouts.py
 ```
 
 Latest result: `89 passed`.

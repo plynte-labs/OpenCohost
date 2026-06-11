@@ -52,7 +52,7 @@
     - [x] Store reason codes for usefulness/failure analysis.
     - [x] Avoid storing raw chat in rating records.
 - [x] Task: Run focused store/model tests
-    - [x] Use `E:\Miniconda\envs\flux_env\python.exe` for pytest.
+    - [x] Use `python` for pytest.
     - [x] Fix only regressions inside the new editorial-card boundary.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3 — Implement EditorialCardStore MVP' (Protocol in workflow.md)
 

@@ -29,7 +29,7 @@ Support these states in the first version:
 
 ### 2. User-managed image loading
 
-- Do not hardcode local paths like `C:\Users\...\Downloads`.
+- Do not hardcode local paths like `C:\Users\...\Downloads`. <!-- path-ok: Windows path anti-pattern example -->
 - The Avatar/OBS panel must provide a button per state: `Elegir imagen` / `Cambiar imagen`.
 - Selecting an image should use a normal file picker.
 - Supported formats for MVP: `.png`, `.jpg`, `.jpeg`, `.webp` if the current image library supports it safely.

@@ -59,7 +59,7 @@ def test_process_exits_early_reports_stderr_snippet() -> None:
         monotonic=lambda: 0.0,
     )
 
-    result = manager.start_and_wait("C:/Ollama/ollama.exe", "D:/ollama-models")
+    result = manager.start_and_wait("C:/Ollama/ollama.exe", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "process_exited_early"
     assert result.process is proc
@@ -85,7 +85,7 @@ def test_slow_readiness_before_configured_timeout_returns_ready() -> None:
         poll_interval_seconds=5.0,
     )
 
-    result = manager.start_and_wait("ollama", "D:/ollama-models")
+    result = manager.start_and_wait("ollama", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "ready"
     assert result.process is proc
@@ -103,7 +103,7 @@ def test_ready_before_start_reports_already_running_without_duplicate_process() 
         monotonic=lambda: 0.0,
     )
 
-    result = manager.start_and_wait("ollama", "D:/ollama-models")
+    result = manager.start_and_wait("ollama", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "already_running"
     assert result.process is None
@@ -155,11 +155,11 @@ def test_timeout_waiting_ready_reports_process_and_model_path_context(tmp_path) 
         stderr_log_path=str(stderr_log),
     )
 
-    result = manager.start_and_wait("ollama", "D:/ollama-models")
+    result = manager.start_and_wait("ollama", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "timeout_waiting_ready"
     assert result.process is proc
-    assert "D:/ollama-models" in result.diagnostic
+    assert "D:/ollama-models" in result.diagnostic  # path-ok: test exercises drive-letter path handling
     assert "loading manifest" in result.diagnostic
 
 
@@ -177,7 +177,7 @@ def test_timeout_does_not_block_reading_live_stderr_pipe_without_log_path() -> N
         poll_interval_seconds=1.0,
     )
 
-    result = manager.start_and_wait("ollama", "D:/ollama-models")
+    result = manager.start_and_wait("ollama", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "timeout_waiting_ready"
     assert "sin stderr capturado" in result.diagnostic
@@ -192,7 +192,7 @@ def test_popen_raises_reports_process_exited_early() -> None:
         monotonic=lambda: 0.0,
     )
 
-    result = manager.start_and_wait("C:/NoExiste/ollama.exe", "D:/ollama-models")
+    result = manager.start_and_wait("C:/NoExiste/ollama.exe", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     assert result.status == "process_exited_early"
     assert result.process is None
@@ -201,7 +201,7 @@ def test_popen_raises_reports_process_exited_early() -> None:
 
 
 def _raise_file_not_found(*args, **kwargs):
-    raise FileNotFoundError("[WinError 2] No such file or directory: 'C:/NoExiste/ollama.exe'")
+    raise FileNotFoundError("[WinError 2] No such file or directory: 'C:/NoExiste/ollama.exe'")  # path-ok: test exercises drive-letter path handling
 
 
 def test_flaky_readiness_eventually_succeeds() -> None:
@@ -223,7 +223,7 @@ def test_flaky_readiness_eventually_succeeds() -> None:
         poll_interval_seconds=1.0,
     )
 
-    result = manager.start_and_wait("ollama", "D:/ollama-models")
+    result = manager.start_and_wait("ollama", "D:/ollama-models")  # path-ok: test exercises drive-letter path handling
 
     # The second call to is_ready returns True, so it should succeed
     assert result.status == "ready"

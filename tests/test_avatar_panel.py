@@ -314,7 +314,7 @@ class TestSourceSafety:
     def test_no_hardcoded_user_paths(self):
         """The avatar panel must not contain hardcoded user paths."""
         source = (ROOT / "ui" / "avatar_panel.py").read_text(encoding="utf-8")
-        assert "C:\\Users\\" not in source
+        assert "C:\\Users\\" not in source  # path-ok: test exercises drive-letter path handling
         assert "Downloads" not in source
 
     def test_no_real_obs_controls(self):

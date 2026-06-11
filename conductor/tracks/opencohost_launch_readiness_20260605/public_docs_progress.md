@@ -29,7 +29,7 @@ All public documentation artifacts are written in English.
 - Focused runtime-speech verification:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_runtime_smoke_harness.py tests/test_kira_orchestration_gaps.py tests/test_llm_engine_timeouts.py tests/test_streaming_speech_pipeline.py tests/test_sentence_splitter.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_runtime_smoke_harness.py tests/test_kira_orchestration_gaps.py tests/test_llm_engine_timeouts.py tests/test_streaming_speech_pipeline.py tests/test_sentence_splitter.py -q
 ```
 
 Result:

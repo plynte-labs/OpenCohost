@@ -78,7 +78,7 @@
 ## Phase 6 — Final Verification and Installer Gate
 
 - [ ] Task: Run focused hardening suite
-    - [ ] Run agenda/interruption/chat/failure tests in `E:\Miniconda\envs\flux_env\python.exe`.
+    - [ ] Run agenda/interruption/chat/failure tests in `python`.
     - [ ] Record failing scenarios and triage severity.
 - [ ] Task: Run full relevant regression suite
     - [ ] Run core, UI, smart_aggregator, health monitor, avatar, and music tests.
