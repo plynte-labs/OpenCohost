@@ -132,11 +132,11 @@ def test_start_env_includes_ollama_models_path() -> None:
         base_env={"EXISTING": "1"},
     )
 
-    result = manager.start_and_wait("ollama", "E:/custom-ollama-models")
+    result = manager.start_and_wait("ollama", "/fake/custom-ollama-models")
 
     assert result.status == "ready"
     assert captured["args"] == ["ollama", "serve"]
-    assert captured["env"] == {"EXISTING": "1", "OLLAMA_MODELS": "E:/custom-ollama-models"}
+    assert captured["env"] == {"EXISTING": "1", "OLLAMA_MODELS": "/fake/custom-ollama-models"}
 
 
 def test_timeout_waiting_ready_reports_process_and_model_path_context(tmp_path) -> None:
