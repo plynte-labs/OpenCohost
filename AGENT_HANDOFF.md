@@ -27,6 +27,27 @@ runtime uncertainty before packaging or broad product polish.
 - Treat this as launch-readiness preparation first, not a blind rebrand.
 - Current Conductor track: `opencohost_launch_readiness_20260605`.
 
+## Migration and validation update — 2026-06-10
+
+- `public_repo_migration_20260610` is implemented and verified: a 4-PR
+  feature-branch chain (PRs #12, #13, #15, #16) on tracker
+  `feat/public-repo-migration`, awaiting owner review and merge.
+  - Preventive pre-commit guard active: detect-secrets (pinned) + drive-letter
+    path hook (`tools/check_abs_paths.py`); full-tree run exits 0.
+  - Identity renamed to OpenCohost / plynte-labs; curated default profiles ship
+    in `config/default_profiles.json` with first-run seeding.
+  - Sensitive/user-state files untracked: `perfiles.json`,
+    `config/music_library.json`, `opencode.json`, `.engram/`.
+- Tracks closed: `local_light_tts_piper_20260610` (Piper offline fallback
+  implemented on `feat/local-piper-tts`; one manual offline gate pending) and
+  `portable_tts_runtime_path_20260610` (delivered by migration PR2).
+- New P0 tracks: `runtime_validation_gates_20260610` (Gate 3 partial pass,
+  Gate 4 preliminary pass on chain tip; Gates 1-2 owner-pending — see the
+  track's `validation_log.md`) and `opencohost_repo_export_20260610`
+  (fresh-history export runbook; blocked on chain merge).
+- Owner items open: OBS WebSocket password rotation, `detect-secrets audit
+  .secrets.baseline`, `Documents/` public-curation decision, Gates 1 and 2.
+
 ## Current project truth
 
 - VoiceAI has functional prototypes for local AI voice, TTS, SmartAggregator, stream

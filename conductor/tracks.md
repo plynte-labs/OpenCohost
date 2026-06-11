@@ -125,7 +125,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Runtime Validation Gates - Real-World Proof for Implemented Systems**
+- [~] **Track: Runtime Validation Gates - Real-World Proof for Implemented Systems**
   *Link: [./tracks/runtime_validation_gates_20260610/](./tracks/runtime_validation_gates_20260610/)*
 
 ---
