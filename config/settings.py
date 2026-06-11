@@ -149,9 +149,12 @@ PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "perfiles.json")
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
 TTS_HEAVY_TIMEOUT = 180
 TTS_LIGHT_TIMEOUT = 45
-# Absolute path to a local Piper ONNX voice model file.
-# Empty string (default) disables offline TTS fallback entirely.
-TTS_LOCAL_MODEL_PATH: str = ""
+# Path to a local Piper ONNX voice model file. Resolved relative to the
+# storage cache root so packaged builds and storage.yaml overrides work.
+# If the file is missing, PiperEngine.load() disables the offline fallback.
+TTS_LOCAL_MODEL_PATH: str = os.path.join(
+    str(STORAGE_PATHS.cache_root), "piper", "es_AR-daniela-high.onnx"
+)
 WS_URI = "ws://127.0.0.1:8765"
 WS_RECONNECT_BASE_DELAY = 1.0
 WS_RECONNECT_MAX_DELAY = 30.0
