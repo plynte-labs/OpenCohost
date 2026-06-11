@@ -8,3 +8,9 @@ storage:
   cache_root: "auto"
   temp_root: "auto"
   ollama_models: "auto"
+
+tools:
+  # Path to the Python interpreter used to launch the Qwen TTS server.
+  # "auto" means unset — set XTTS_PYTHON env var or specify an absolute path here.
+  # Example: xtts_python: "/home/user/miniconda3/envs/xtts_env/python"
+  xtts_python: "auto"

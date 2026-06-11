@@ -19,18 +19,18 @@ from config.storage import (
 
 
 def test_storage_paths_custom_disk_overrides():
-    """Ollama on D:, HF cache on E: — common multi-disk setup."""
+    """Custom cache, temp and ollama_models paths are resolved correctly."""
     config = {
-        "cache_root": "E:/VoiceAI/cache",
-        "temp_root": "D:/VoiceAI/temp",
-        "ollama_models": "D:/OllamaStorage",
+        "cache_root": "/fake/opencohost-cache",
+        "temp_root": "/fake/opencohost-temp",
+        "ollama_models": "/fake/ollama-storage",
     }
 
     paths = resolve_storage_paths(config)
 
-    assert paths.cache_root == Path("E:/VoiceAI/cache").resolve()
-    assert paths.temp_root == Path("D:/VoiceAI/temp").resolve()
-    assert paths.ollama_models == Path("D:/OllamaStorage").resolve()
+    assert paths.cache_root == Path("/fake/opencohost-cache").resolve()
+    assert paths.temp_root == Path("/fake/opencohost-temp").resolve()
+    assert paths.ollama_models == Path("/fake/ollama-storage").resolve()
     assert paths.hf_home == paths.cache_root
     assert paths.hf_hub_cache == paths.cache_root / "hub"
     assert paths.torch_home == paths.cache_root / "torch"
