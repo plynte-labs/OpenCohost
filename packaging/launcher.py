@@ -794,12 +794,34 @@ def launch_app(install_root, portable, environ=None, platform=None, debug=False,
 
 
 def _find_app_window():
-    """Truthy when the app's top-level window exists (Windows only)."""
+    """Truthy when the app's top-level window exists (Windows only).
+
+    The app sets a dynamic title ("OpenCohost — Qwen3-TTS + <model>"), so an
+    exact FindWindowW match would never fire; enumerate windows and match by
+    title prefix instead.
+    """
     if sys.platform != "win32":
         return None
     try:
         import ctypes
-        return ctypes.windll.user32.FindWindowW(None, APP_WINDOW_TITLE) or None
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _on_window(hwnd, _lparam):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if buf.value.startswith(APP_WINDOW_TITLE):
+                    found.append(hwnd)
+                    return False  # stop enumeration
+            return True
+
+        user32.EnumWindows(_on_window, 0)
+        return found[0] if found else None
     except Exception:
         return None
 
