@@ -40,15 +40,16 @@ runtime uncertainty before packaging or broad product polish.
   - Sensitive/user-state files untracked: `perfiles.json`,
     `config/music_library.json`, `opencode.json`, `.engram/`.
 - Tracks closed: `local_light_tts_piper_20260610` (Piper offline fallback
-  implemented on `feat/local-piper-tts`; one manual offline gate pending) and
+  implemented; offline gate PASSED 2026-06-11, branch content already in
+  `master` via the migration chain — fully closed) and
   `portable_tts_runtime_path_20260610` (delivered by migration PR2).
 - New P0 tracks: `runtime_validation_gates_20260610` (Gate 3 partial pass,
   Gate 4 preliminary pass on chain tip; Gates 1-2 owner-pending — see the
   track's `validation_log.md`) and `opencohost_repo_export_20260610`
   (fresh-history export runbook; blocked on chain merge).
 - Owner items open: OBS WebSocket password rotation, `detect-secrets audit
-  .secrets.baseline`, `Documents/` public-curation decision. (Gate 1 passed and
-  Gate 2 is partial as of 2026-06-11 — see the validation update below.)
+  .secrets.baseline`, `Documents/` public-curation decision. (Gates 1, 2 and 4
+  passed as of 2026-06-11 — see the validation update below.)
 
 ## Validation update — 2026-06-11
 
@@ -57,14 +58,18 @@ runtime uncertainty before packaging or broad product polish.
   `gemma:26b` (45s window), automatic rollback to `gemma4:e4b`, stalled model
   unloaded, no zombie process. `heavy_model_inference_recovery_20260609` is
   closed (`[x]` in `conductor/tracks.md`).
-- **Gate 2 (Piper offline fallback): PARTIAL PASS** — offline trigger and three
-  full Piper pipelines proven in a live session. Pending: the online positive
-  half, plus a fix task added to the gate's scope: the missing-reference hard
-  block (`core/llm_engine.py:239-241`) drops user messages before the LLM runs
-  and must route through the auto-fallback gate instead
-  (`reason=missing_reference`).
-- **Gate 3: PARTIAL PASS** — Evidence C postponed by owner. Pending discussion:
-  how the Qwen-TTS server should start (manual launch is unfriendly UX).
+- **Gate 2 (Piper offline fallback): PASS** — offline trigger and three full
+  Piper pipelines proven live (morning session), online positive half proven in
+  a later session (Edge-TTS speaks while connected, fallback does not engage).
+  Gate text amended: Edge-TTS resumes on next app start (sticky-per-session
+  fallback is the accepted design). Fix delivered under this gate's scope:
+  missing-reference hard blocks removed and routed through the auto-fallback
+  gate (`reason=missing_reference`) — PR #22, TDD + fresh review, 129 passed.
+- **Gate 3: PARTIAL PASS** — Evidence C postponed by owner. Startup decision
+  (2026-06-11): attach-only with clear guidance for the OpenCohost launch;
+  demand-driven managed auto-start deferred to the post-launch
+  `qwen-tts-lifecycle-hardening` proposal (12GB VRAM contention between the
+  LLM and heavy TTS needs real lifecycle design, not a patch).
 - **Gate 4 (runtime smoke harness): PASS** — re-stamped on `master` @ ec0a95c
   (deterministic mode, exit 0, all five invariants true).
 - Future proposal candidate recorded: request replay after watchdog recovery
