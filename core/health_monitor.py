@@ -26,6 +26,7 @@ from typing import Optional
 
 import requests
 
+from config.storage import resolve_xtts_python
 from config.settings import (
     HEALTH_POLL_INTERVAL,
     LOG_DIR,
@@ -232,7 +233,6 @@ class QwenProcessManager:
     Detects manually-started servers and avoids killing them.
     """
 
-    XTTS_PYTHON = r"E:\Miniconda\envs\xtts_env\python.exe"
     SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
     HEALTH_URL = "http://127.0.0.1:5000/health"
     APP_ID = "voiceai-qwen-tts"
@@ -264,13 +264,28 @@ class QwenProcessManager:
                 setattr(self, handle_name, None)
 
     def start(self) -> bool:
-        """Launch server_qwen.py via subprocess. Returns True if healthy."""
+        """Launch server_qwen.py via subprocess. Returns True if healthy.
+
+        When XTTS_PYTHON cannot be resolved (env var unset, storage.yaml "auto"),
+        logs an actionable warning and returns False without raising — mirrors the
+        PiperEngine.load() never-raise contract.
+        """
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 logger.debug("QwenProcessManager: server already running")
                 return True
 
-        cmd = [self.XTTS_PYTHON, self.SERVER_SCRIPT]
+        xtts_python = resolve_xtts_python()
+        if xtts_python is None:
+            logger.warning(
+                "QwenProcessManager: XTTS_PYTHON interpreter not configured — "
+                "set the XTTS_PYTHON environment variable or set "
+                "tools.xtts_python in config/storage.yaml. Qwen TTS unavailable."
+            )
+            self._lifecycle_state = LIFECYCLE_FAILED
+            return False
+
+        cmd = [str(xtts_python), self.SERVER_SCRIPT]
         logger.info(f"QwenProcessManager: starting Qwen server: {' '.join(cmd)}")
 
         try:

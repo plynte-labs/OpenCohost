@@ -211,28 +211,34 @@ class TestQwenProcessManager:
 
     def test_windows_start_uses_new_process_group_for_ctrl_break(self):
         """Windows managed Qwen must be in its own group for CTRL_BREAK_EVENT."""
+        from pathlib import Path
+
         mgr = QwenProcessManager()
 
-        with patch("core.health_monitor.sys.platform", "win32"):
-            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
-                with patch.object(mgr, "_check_health", return_value=True):
-                    mock_popen.return_value.poll.return_value = None
+        with patch("core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("core.health_monitor.sys.platform", "win32"):
+                with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                    with patch.object(mgr, "_check_health", return_value=True):
+                        mock_popen.return_value.poll.return_value = None
 
-                    assert mgr.start() is True
+                        assert mgr.start() is True
 
         flags = mock_popen.call_args.kwargs["creationflags"]
         assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
 
     def test_start_redirects_qwen_output_to_dedicated_logs(self, tmp_path):
         """Qwen startup tracebacks must be preserved in logs, not swallowed."""
+        from pathlib import Path
+
         mgr = QwenProcessManager()
 
-        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
-            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
-                with patch.object(mgr, "_check_health", return_value=True):
-                    mock_popen.return_value.poll.return_value = None
+        with patch("core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+                with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                    with patch.object(mgr, "_check_health", return_value=True):
+                        mock_popen.return_value.poll.return_value = None
 
-                    assert mgr.start() is True
+                        assert mgr.start() is True
 
         kwargs = mock_popen.call_args.kwargs
         assert kwargs["stdout"] is not subprocess.DEVNULL
@@ -244,18 +250,21 @@ class TestQwenProcessManager:
 
     def test_start_closes_stale_qwen_log_handles_before_reopening(self, tmp_path):
         """Restart attempts must not leak old Qwen subprocess log handles."""
+        from pathlib import Path
+
         mgr = QwenProcessManager()
         stale_stdout = MagicMock()
         stale_stderr = MagicMock()
         mgr._stdout_log = stale_stdout
         mgr._stderr_log = stale_stderr
 
-        with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
-            with patch("core.health_monitor.subprocess.Popen") as mock_popen:
-                with patch.object(mgr, "_check_health", return_value=True):
-                    mock_popen.return_value.poll.return_value = None
+        with patch("core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("core.health_monitor.LOG_DIR", str(tmp_path)):
+                with patch("core.health_monitor.subprocess.Popen") as mock_popen:
+                    with patch.object(mgr, "_check_health", return_value=True):
+                        mock_popen.return_value.poll.return_value = None
 
-                    assert mgr.start() is True
+                        assert mgr.start() is True
 
         stale_stdout.close.assert_called_once()
         stale_stderr.close.assert_called_once()
