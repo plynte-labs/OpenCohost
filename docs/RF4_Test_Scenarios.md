@@ -14,7 +14,7 @@
 
 **Precondiciones:**
 
-- VoiceAI ejecutándose en `flux_env`.
+- OpenCohost ejecutándose en `flux_env`.
 - Credenciales OAuth configuradas.
 - `stream_admin.yaml` con `provider.mode: read_only`.
 
@@ -23,7 +23,7 @@
 1. Abrir pestaña `Stream Admin`.
 2. Presionar `Conectar YouTube`.
 3. Completar autorización OAuth.
-4. Volver a VoiceAI.
+4. Volver a OpenCohost.
 
 **Resultado esperado:**
 
@@ -229,7 +229,7 @@
 
 **Pasos:**
 
-1. Iniciar VoiceAI.
+1. Iniciar OpenCohost.
 2. Abrir `Stream Admin`.
 3. Intentar leer metadata.
 
@@ -237,7 +237,7 @@
 
 - La UI muestra sesión expirada o permisos inválidos.
 - Botones de escritura quedan deshabilitados.
-- VoiceAI no crashea.
+- OpenCohost no crashea.
 - No se borra configuración no relacionada.
 
 **Estado actual:** Pendiente.

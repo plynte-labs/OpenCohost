@@ -1,4 +1,4 @@
-# Architecture Decision Records — VoiceAI
+# Architecture Decision Records — OpenCohost
 
 Decisiones de arquitectura y diseño tomadas durante el desarrollo. Cada registro explica el **por qué**, no solo el **qué**.
 
@@ -11,7 +11,7 @@ Decisiones de arquitectura y diseño tomadas durante el desarrollo. Cada registr
 **Revisable cuando:** Usuarios pidan modelos cloud o se resuelva gestión segura de API keys
 
 ### Contexto
-VoiceAI maneja credenciales de streaming (YouTube OAuth), audio de voz del streamer, y datos de chat en tiempo real. Todo esto es información sensible de un creador de contenido.
+OpenCohost maneja credenciales de streaming (YouTube OAuth), audio de voz del streamer, y datos de chat en tiempo real. Todo esto es información sensible de un creador de contenido.
 
 ### Decisión
 Todo el procesamiento es **local-first**:
@@ -114,7 +114,7 @@ Si se habilita escritura:
 **Estado:** Activa
 
 ### Contexto
-VoiceAI tiene dos motores TTS:
+OpenCohost tiene dos motores TTS:
 - **Pesado**: Qwen3-TTS local — funciona offline, clona voz del streamer
 - **Ligero**: edge-tts (Microsoft) — requiere internet, voz genérica
 
@@ -458,7 +458,7 @@ storage:
   ollama_models: "/path/to/ollama/storage"
 ```
 
-VoiceAI aplica por proceso:
+OpenCohost aplica por proceso:
 
 - `TEMP`, `TMP`
 - `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`
@@ -474,7 +474,7 @@ VoiceAI aplica por proceso:
 
 ### Tradeoffs aceptados
 
-- Si Ollama ya estaba corriendo antes de VoiceAI, puede seguir usando su ruta vieja hasta reiniciarlo
+- Si Ollama ya estaba corriendo antes de OpenCohost, puede seguir usando su ruta vieja hasta reiniciarlo
 - Mover caches existentes entre discos sigue siendo responsabilidad del usuario o de una futura herramienta de migración
 - El pagefile de Windows puede seguir usando C: si el sistema operativo está configurado así
 

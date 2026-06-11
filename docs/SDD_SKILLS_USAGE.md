@@ -1,6 +1,6 @@
 # SDD / Skills Usage
 
-VoiceAI has Conductor SDD skills installed in:
+OpenCohost has Conductor SDD skills installed in:
 
 ```text
 .agents/skills/
@@ -14,7 +14,7 @@ Before any SDD work, recover project memory from Engram:
 Use Engram memory for project voiceai. First call mem_context, then mem_search if needed, and treat the recovered memories as constraints.
 ```
 
-This is required because VoiceAI already has important project memory about offline TTS, cached Qwen3-TTS startup, local Hugging Face model resolution, and heavy TTS timeouts.
+This is required because OpenCohost already has important project memory about offline TTS, cached Qwen3-TTS startup, local Hugging Face model resolution, and heavy TTS timeouts.
 
 ## Available Conductor Skills
 
@@ -25,7 +25,7 @@ This is required because VoiceAI already has important project memory about offl
 - `conductor-review`: review a track before closing it.
 - `conductor-revert`: revert a track only when explicitly requested.
 
-## Existing VoiceAI Skill
+## Existing OpenCohost Skill
 
 - `vocalai-ui-ux-architect`
 
@@ -46,7 +46,7 @@ Use conductor-implement to implement the approved track one task at a time.
 Before closing:
 
 ```text
-Use conductor-review and any relevant VoiceAI-specific skill to verify the implementation against the spec and previous project memory.
+Use conductor-review and any relevant OpenCohost-specific skill to verify the implementation against the spec and previous project memory.
 ```
 
 After meaningful work:

@@ -652,7 +652,7 @@ def test_tc3_7_youtube_api():
 
 ### Estado Final
 
-RF3 Smart Aggregator quedó funcional para uso real con YouTube Live en modo integrado con VoiceAI. El camino actual es correcto: RF3 opera como módulo independiente, el core LLM/TTS no fue modificado, y la UI solo actúa como capa de conexión, visualización y callbacks.
+RF3 Smart Aggregator quedó funcional para uso real con YouTube Live en modo integrado con OpenCohost. El camino actual es correcto: RF3 opera como módulo independiente, el core LLM/TTS no fue modificado, y la UI solo actúa como capa de conexión, visualización y callbacks.
 
 El sistema ya puede:
 
@@ -837,6 +837,6 @@ Estos valores son adecuados para pruebas reales y streams con actividad moderada
 
 ### Criterio de Cierre
 
-RF3 se considera completado satisfactoriamente como Smart Aggregator funcional integrado a VoiceAI para lectura, filtrado, persistencia, análisis, detección de picos y respuestas automáticas controladas al chat de YouTube Live.
+RF3 se considera completado satisfactoriamente como Smart Aggregator funcional integrado a OpenCohost para lectura, filtrado, persistencia, análisis, detección de picos y respuestas automáticas controladas al chat de YouTube Live.
 
 Queda fuera del cierre actual la administración de metadata de YouTube (`TC3.7`) porque pertenece a una integración API/OAuth distinta.

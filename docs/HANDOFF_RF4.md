@@ -9,7 +9,7 @@
 
 ## 1. Contexto Actual
 
-VoiceAI ya tiene RF3 Smart Aggregator integrado para YouTube Live Chat. RF4 debe construirse encima del contexto operativo de RF3, pero sin mezclarse con su código interno.
+OpenCohost ya tiene RF3 Smart Aggregator integrado para YouTube Live Chat. RF4 debe construirse encima del contexto operativo de RF3, pero sin mezclarse con su código interno.
 
 RF4 debe encargarse de tareas administrativas del stream:
 

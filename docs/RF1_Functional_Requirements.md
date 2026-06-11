@@ -10,7 +10,7 @@
 
 ## 1. Alcance
 
-Este documento define los requerimientos funcionales para el subsistema de **Push-to-Talk (PTT)** de VoiceAI. Su propósito es sustituir la escucha continua por un sistema de captura bajo demanda, eliminando falsos positivos y reduciendo la carga computacional durante sesiones de streaming/gaming.
+Este documento define los requerimientos funcionales para el subsistema de **Push-to-Talk (PTT)** de OpenCohost. Su propósito es sustituir la escucha continua por un sistema de captura bajo demanda, eliminando falsos positivos y reduciendo la carga computacional durante sesiones de streaming/gaming.
 
 ---
 
@@ -53,7 +53,7 @@ La interfaz gráfica debe incluir un control tipo switch (`CTkSwitch`) que permi
 | **Actor** | Usuario (Streamer) |
 
 **Descripción:**  
-El usuario debe poder configurar una tecla o botón de mouse que actúe como disparador del PTT, detectable globalmente (incluso cuando la ventana de VoiceAI no tiene el foco).
+El usuario debe poder configurar una tecla o botón de mouse que actúe como disparador del PTT, detectable globalmente (incluso cuando la ventana de OpenCohost no tiene el foco).
 
 **Comportamiento:**
 - Un dropdown en la UI lista las teclas predefinidas: `F1`–`F12`, `Mouse4`, `Mouse5`, `ScrollLock`, `Insert`. ✅ Implementado

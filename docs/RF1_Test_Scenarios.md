@@ -12,7 +12,7 @@
 ### TEST-PTT-001 — Activar PTT y recibir transcripción vía WebSocket
 
 **Precondiciones:**
-- VoiceAI ejecutándose y conectada a LiveAudio (WebSocket).
+- OpenCohost ejecutándose y conectada a LiveAudio (WebSocket).
 - Modo PTT = OFF.
 - Audio de referencia cargado.
 

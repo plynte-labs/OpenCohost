@@ -1,8 +1,8 @@
-# VoiceAI UI Architecture
+# OpenCohost UI Architecture
 
 ## Overview
 
-The VoiceAI UI has been refactored from a 2722-line God class (`ui/app.py`) into a modular architecture with 16 modules, totaling ~4000 lines across well-defined boundaries. A presentation-only refinement pass (2026-05-17) added collapsible card patterns and custom product tabs.
+The OpenCohost UI has been refactored from a 2722-line God class (`ui/app.py`) into a modular architecture with 16 modules, totaling ~4000 lines across well-defined boundaries. A presentation-only refinement pass (2026-05-17) added collapsible card patterns and custom product tabs.
 
 ## Module Diagram
 

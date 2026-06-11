@@ -1,4 +1,4 @@
-# Test Suite Audit — Core VoiceAI Files
+# Test Suite Audit — Core OpenCohost Files
 
 **Scope**: 7 core test files (195 tests, all GREEN)  
 **Date**: 2026-06-01  

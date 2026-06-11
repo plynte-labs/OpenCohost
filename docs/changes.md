@@ -1,4 +1,4 @@
-Este es el **Documento de Especificación de Requerimientos y Arquitectura Sugerida (v1.0)** para el proyecto **VoiceAI - Kira**. Este documento define la transición de un sistema reactivo de bucle abierto a uno de control determinista gestionado por el usuario, optimizado para entornos de alto rendimiento (Streaming/Gaming).
+Este es el **Documento de Especificación de Requerimientos y Arquitectura Sugerida (v1.0)** para el proyecto **OpenCohost - Kira**. Este documento define la transición de un sistema reactivo de bucle abierto a uno de control determinista gestionado por el usuario, optimizado para entornos de alto rendimiento (Streaming/Gaming).
 
 ---
 
@@ -70,7 +70,7 @@ Este es el **Documento de Especificación de Requerimientos y Arquitectura Suger
 
 **Respuesta natural RF3 — 2026-05-04:** Se ajustó el prompt de picos para que Kira reaccione directo como co-host y no describa el análisis con frases técnicas como “energía del flujo” o “mensaje destacado”.
 
-**Cierre funcional RF3 — 2026-05-04:** RF3 queda cerrado satisfactoriamente como Smart Aggregator funcional integrado a VoiceAI. El detalle de funcionalidades, comportamiento esperado, casos cubiertos, configuración operativa y próximos pasos quedó documentado en `docs/RF3_Smart_Aggregator_Spec.md`, sección `Cierre Funcional RF3`.
+**Cierre funcional RF3 — 2026-05-04:** RF3 queda cerrado satisfactoriamente como Smart Aggregator funcional integrado a OpenCohost. El detalle de funcionalidades, comportamiento esperado, casos cubiertos, configuración operativa y próximos pasos quedó documentado en `docs/RF3_Smart_Aggregator_Spec.md`, sección `Cierre Funcional RF3`.
 
 ---
 
