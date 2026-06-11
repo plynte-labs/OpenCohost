@@ -22,7 +22,7 @@ parametrized tests expand into multiple collected items.
 The current project environment successfully collected the suite with:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest --collect-only -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local
+python -m pytest --collect-only -q
 ```
 
 Result:
@@ -131,7 +131,7 @@ map, not a perfect ownership model.
 Use this before editing test docs or CI configuration:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest --collect-only -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local
+python -m pytest --collect-only -q
 ```
 
 ### Run focused tests
@@ -139,7 +139,7 @@ E:\Miniconda\envs\flux_env\python.exe -m pytest --collect-only -q -o cache_dir=E
 Prefer focused tests while working on a module:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_<area>.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_<area>.py -q
 ```
 
 ### Known targeted health validation
@@ -147,7 +147,7 @@ E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_<area>.py -q -o cache
 Current handoff reference:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q
 ```
 
 ## What Automated Tests Prove Well

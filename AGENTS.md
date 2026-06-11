@@ -8,14 +8,14 @@
 
 ## Memory First
 
-- Before planning or coding, recover Engram context for project `voiceai` with `mem_context` first, then `mem_search` when needed.
-- Treat recovered memories as constraints, especially offline TTS behavior, cached model paths, Hugging Face offline mode, Qwen3-TTS startup, and timeout decisions.
-- Save meaningful decisions, discoveries, bug fixes, and completed-track summaries back to Engram with `mem_save` or `mem_session_summary`.
+- Before planning or coding, recover prior session context from your memory tooling if available.
+- Treat recovered context as constraints, especially offline TTS behavior, cached model paths, Hugging Face offline mode, Qwen3-TTS startup, and timeout decisions.
+- Save meaningful decisions, discoveries, bug fixes, and completed-track summaries back to memory before finishing.
 
 ## Known Project Context
 
 - VoiceAI has prior work to make TTS usable without internet after the first model download.
-- Cached Qwen3-TTS models are under `E:\VoiceAI\modelos_f5\hub`.
+- Cached Qwen3-TTS models are stored under `modelos_f5/hub` inside the project directory (path is machine-local and gitignored).
 - When the model is already cached, startup should prefer local resolution and force HF/Transformers offline mode to avoid unnecessary network access.
 - Heavy TTS requests may need longer timeouts to avoid chunk failures.
 

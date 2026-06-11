@@ -2,12 +2,12 @@
 
 ## ⚠️ Entorno Obligatorio
 
-**Python:** `E:\Miniconda\envs\flux_env\python.exe`
+**Python:** activate your project Python environment; use `python` from the activated shell.
 
 **PROHIBIDO:**
 - ❌ `pip install` / `pip uninstall` / `conda install`
-- ❌ Modificar, actualizar o eliminar paquetes del entorno `flux_env`
-- ❌ Usar `python` sin la ruta completa
+- ❌ Modificar, actualizar o eliminar paquetes del entorno de proyecto
+- ❌ Usar `python` sin activar el entorno correcto primero
 
 Si necesitas una dependencia nueva, **consulta primero**.
 
@@ -238,8 +238,8 @@ history:
 ### Limpieza de DB existente:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --dry-run
-E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
+python scripts/cleanup_smart_aggregator_db.py --dry-run
+python scripts/cleanup_smart_aggregator_db.py --execute
 ```
 
 El script borra datos legacy raw de `messages` y el `chat_log.jsonl`; preserva `context_snapshots`.
@@ -343,13 +343,13 @@ El `Aggregator` mantiene `is_busy_callback`: si retorna `True` (por ejemplo, `Mo
 **[Respuesta AIWorker]: Decisión 7 — Orden de implementación real**
 Se siguió el orden sugerido por el spec: RF3.4 → RF3.1 → RF3.5 → RF3.2 → RF3.3 → Orquestador → Config → Tests. Esto permitió validar cada componente de abajo hacia arriba, asegurando que `Aggregator` tuviera todas sus dependencias listas antes de ser cableado.
 
-**[WorkerSeniorAI]: Correcciones de revisión — 2026-05-04**
-Se corrigió RF3 para alinearlo con las restricciones críticas: `VibeThermometer` ya no usa Ollama directamente y depende de `llm_interface`; `ActivityTrigger` calcula mensajes/segundo con ventana configurable y timestamps del mensaje; `YouTubeChatSource.connect()` evita deadlock al reconectar y ya no recomienda ejecutar `pip install`; `Aggregator` acepta `llm_interface`, permite sesión headless para pruebas y solo alimenta el vibe con mensajes filtrados; `SessionHistory.cleanup_old_sessions()` elimina del JSONL por `session_id`; `test_local.py` valida emojis reales, acciones de trigger, retención SQLite+JSONL y orquestación con config temporal. Verificado con `E:\Miniconda\envs\flux_env\python.exe -c "from smart_aggregator import Aggregator; print('Import OK')"` y `E:\Miniconda\envs\flux_env\python.exe smart_aggregator/test_local.py`.
+**Correcciones de revisión — 2026-05-04**
+Se corrigió RF3 para alinearlo con las restricciones críticas: `VibeThermometer` ya no usa Ollama directamente y depende de `llm_interface`; `ActivityTrigger` calcula mensajes/segundo con ventana configurable y timestamps del mensaje; `YouTubeChatSource.connect()` evita deadlock al reconectar y ya no recomienda ejecutar `pip install`; `Aggregator` acepta `llm_interface`, permite sesión headless para pruebas y solo alimenta el vibe con mensajes filtrados; `SessionHistory.cleanup_old_sessions()` elimina del JSONL por `session_id`; `test_local.py` valida emojis reales, acciones de trigger, retención SQLite+JSONL y orquestación con config temporal. Verificado con `python -c "from smart_aggregator import Aggregator; print('Import OK')"` y `python smart_aggregator/test_local.py`.
 
-**[WorkerSeniorAI]: Integración UI autorizada — 2026-05-04**
-El usuario autorizó la opción 2 para el paso 3: integrar RF3 desde `ui/app.py` mediante un adapter LLM silencioso, sin modificar `core/llm_engine.py`. La UI instancia `Aggregator`, inyecta `llm_interface` usando el modelo activo de `MotorVocalIA`, registra `busy_callback` para no competir cuando Kira está procesando/hablando, agrega controles para pegar URL o `video_id` de YouTube Live y conecta callbacks de log, vibe, actividad y contexto agregado. Kira no recibe cada mensaje individual; solo se envía contexto agregado cuando `ActivityTrigger` detecta pico, evitando spam al LLM/TTS. Verificado con `E:\Miniconda\envs\flux_env\python.exe -m py_compile ui\app.py` y `test_local.py`.
+**Integración UI autorizada — 2026-05-04**
+El usuario autorizó la opción 2 para el paso 3: integrar RF3 desde `ui/app_shell.py` mediante un adapter LLM silencioso, sin modificar `core/llm_engine.py`. La UI instancia `Aggregator`, inyecta `llm_interface` usando el modelo activo de `MotorVocalIA`, registra `busy_callback` para no competir cuando Kira está procesando/hablando, agrega controles para pegar URL o `video_id` de YouTube Live y conecta callbacks de log, vibe, actividad y contexto agregado. Kira no recibe cada mensaje individual; solo se envía contexto agregado cuando `ActivityTrigger` detecta pico, evitando spam al LLM/TTS. Verificado con `python -m py_compile ui\app_shell.py` y `test_local.py`.
 
-**[WorkerSeniorAI]: Prueba de live y manejo de errores — 2026-05-04**
+**Prueba de live y manejo de errores — 2026-05-04**
 Se probó el live `https://www.youtube.com/watch?v=-MtbPcNE8ls` (`video_id=-MtbPcNE8ls`). Desde el entorno de ejecución, YouTube devolvió `429` en fetch web y `pytchat` falló con timeout SSL al iniciar handshake. Se añadieron callbacks `on_source_error`, `on_source_connect` y `on_source_disconnect` al `Aggregator`, y `YouTubeChatSource` notifica desconexión al terminar retries, para que la UI muestre errores de YouTube y restaure el botón de conexión si la red/YouTube rechaza la conexión.
 
 **[WorkerSeniorAI]: Corrección `pytchat` en thread UI — 2026-05-04**
@@ -643,8 +643,8 @@ def test_tc3_7_youtube_api():
 - [ ] TC3.7.1 - TC3.7.3: YouTube API (pendiente de API key real)
 - [x] `core/llm_engine.py` / `motor_ia.py` no se modificó
 - [x] `ui/app.py` solo contiene integración autorizada por el usuario: instanciación RF3, callbacks, adapter LLM silencioso y UI de YouTube
-- [x] `E:\Miniconda\envs\flux_env\python.exe -c "from smart_aggregator import Aggregator; print('Import OK')"` funciona
-- [x] `E:\Miniconda\envs\flux_env\python.exe smart_aggregator/test_local.py` pasa sin errores
+- [x] `python -c "from smart_aggregator import Aggregator; print('Import OK')"` funciona
+- [x] `python smart_aggregator/test_local.py` pasa sin errores
 
 ---
 

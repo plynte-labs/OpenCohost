@@ -336,7 +336,7 @@ def test_music_import_errors_use_non_blocking_notification():
         app._music_update_panel = MagicMock()
         app._notify_operator = MagicMock()
 
-        with patch.object(app_shell.filedialog, "askopenfilenames", return_value=["C:/tmp/bad.mp3"]):
+        with patch.object(app_shell.filedialog, "askopenfilenames", return_value=["C:/tmp/bad.mp3"]):  # path-ok: test exercises drive-letter path handling
             with patch.object(app_shell.messagebox, "showwarning") as mock_showwarning:
                 app._music_import_track("calma")
 
@@ -371,7 +371,7 @@ def test_load_voice_invalid_wav_uses_non_blocking_error_notification():
         app.update_idletasks = MagicMock()
         app._notify_operator = MagicMock()
 
-        with patch.object(app_shell.filedialog, "askopenfilename", return_value="C:/tmp/bad.wav"):
+        with patch.object(app_shell.filedialog, "askopenfilename", return_value="C:/tmp/bad.wav"):  # path-ok: test exercises drive-letter path handling
             with patch.object(app_shell.sf, "read", side_effect=RuntimeError("archivo roto")):
                 with patch.object(app_shell.messagebox, "showerror") as mock_showerror:
                     app._cargar_voz()

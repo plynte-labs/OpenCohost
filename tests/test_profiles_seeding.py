@@ -132,11 +132,11 @@ def test_fallback_when_defaults_empty_dict(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 5 — seeded profiles must not contain "creada por FranGuh"
+# Scenario 5 — seeded profiles must not contain personal attribution strings
 # ---------------------------------------------------------------------------
 
 def test_seeded_profiles_have_no_attribution(tmp_path):
-    """None of the seeded profiles should contain the personal attribution string."""
+    """None of the seeded profiles should contain personal attribution text."""
     real_defaults = Path(__file__).resolve().parent.parent / "config" / "default_profiles.json"
     if not real_defaults.exists():
         pytest.skip("config/default_profiles.json not yet created")
@@ -145,7 +145,8 @@ def test_seeded_profiles_have_no_attribution(tmp_path):
     result = _call_cargar(profiles_file, str(real_defaults))
 
     for name, profile in result.items():
-        assert "creada por FranGuh" not in profile.get("prompt", ""), (
+        prompt = profile.get("prompt", "")
+        assert "creada por " not in prompt.lower(), (
             f"Profile '{name}' still contains personal attribution"
         )
 

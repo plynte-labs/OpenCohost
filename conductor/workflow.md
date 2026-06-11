@@ -116,11 +116,11 @@ Before marking any task complete, verify:
 
 ### Setup
 ```powershell
-# Client environment (flux_env)
-E:\Miniconda\envs\flux_env\python.exe -m pip install -r requirements.txt
+# Activate your project Python environment, then:
+python -m pip install -r requirements.txt
 
-# TTS server environment (xtts_env)
-E:\Miniconda\envs\xtts_env\python.exe -m pip install -r requirements.txt
+# For the TTS server, activate that environment separately:
+# python -m pip install -r requirements.txt
 ```
 
 ### Daily Development

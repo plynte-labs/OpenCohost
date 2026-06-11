@@ -428,9 +428,9 @@ Resumen del chat por intenciones dominantes:
 
 ### Contexto
 
-VoiceAI usa modelos y audio temporal pesado: Ollama, Hugging Face/Qwen, Torch, chunks TTS y archivos temporales de librerías. En una PC concreta, mover todo a `E:` puede resolver disco C: al 100%, pero hardcodear `E:\...` rompería portabilidad en otra máquina.
+OpenCohost usa modelos y audio temporal pesado: Ollama, Hugging Face/Qwen, Torch, chunks TTS y archivos temporales de librerías. En una PC con poco espacio en el disco del sistema, mover todo a otro disco puede resolver el disco C: al 100%, pero hardcodear rutas absolutas rompería portabilidad en otra máquina.
 
-Además, aunque VoiceAI ya escribía muchos temporales en `E:\VoiceAI\temp`, las variables de Windows `TEMP`/`TMP` seguían apuntando a `C:\Users\...\AppData\Local\Temp`. Librerías como Torch, requests, soundfile o edge-tts pueden usar esas rutas sin pasar por nuestro `TEMP_DIR`.
+Además, las variables de Windows `TEMP`/`TMP` pueden seguir apuntando a la carpeta temporal del usuario del sistema. Librerías como Torch, requests, soundfile o edge-tts pueden usar esas rutas sin pasar por nuestro `TEMP_DIR`.
 
 ### Decisión
 
@@ -449,13 +449,13 @@ storage:
 - `temp_root` → `temp` dentro del proyecto
 - `ollama_models` → respeta `OLLAMA_MODELS` existente o usa cache local
 
-El usuario puede forzar otro disco:
+El usuario puede forzar otra ruta (por ejemplo, otro disco en Windows):
 
 ```yaml
 storage:
-  cache_root: "D:/VoiceAI/cache"
-  temp_root: "D:/VoiceAI/temp"
-  ollama_models: "D:/OllamaStorage"
+  cache_root: "/path/to/your/cache"
+  temp_root: "/path/to/your/temp"
+  ollama_models: "/path/to/ollama/storage"
 ```
 
 VoiceAI aplica por proceso:
@@ -520,7 +520,7 @@ Si hace falta debugging, debe hacerse con logs temporales explícitos fuera de `
 Se agregó:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe scripts/cleanup_smart_aggregator_db.py --execute
+python scripts/cleanup_smart_aggregator_db.py --execute
 ```
 
 El script elimina la tabla legacy `messages` y `chat_log.jsonl`, preservando `context_snapshots`.

@@ -77,3 +77,8 @@ config/last_model.json
 
 # ── Runtime user state (seeded from config/default_profiles.json on first run) ──
 perfiles.json
+CLAUDE.local.md
+opencode.json
+
+# Engram persistent memory database (internal)
+.engram/

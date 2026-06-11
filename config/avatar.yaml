@@ -3,14 +3,14 @@ avatar:
   mode: image_states
   assets_folder: ''
   state_images:
-    idle: E:\VoiceAI\assets\avatar\kira\idle.png
-    listening: E:\VoiceAI\assets\avatar\kira\listening.png
-    thinking: E:\VoiceAI\assets\avatar\kira\thinking.png
-    speaking: E:\VoiceAI\assets\avatar\kira\speaking.png
-    speaking_alt: E:\VoiceAI\assets\avatar\kira\speaking_alt.png
-    sleeping: E:\VoiceAI\assets\avatar\kira\sleeping.png
-    angry: E:\VoiceAI\assets\avatar\kira\angry.png
-    error: E:\VoiceAI\assets\avatar\kira\error.png
+    idle: assets/avatar/kira/idle.png
+    listening: assets/avatar/kira/listening.png
+    thinking: assets/avatar/kira/thinking.png
+    speaking: assets/avatar/kira/speaking.png
+    speaking_alt: assets/avatar/kira/speaking_alt.png
+    sleeping: assets/avatar/kira/sleeping.png
+    angry: assets/avatar/kira/angry.png
+    error: assets/avatar/kira/error.png
   obs:
     enabled: false
     host: localhost

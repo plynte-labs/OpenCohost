@@ -3,7 +3,7 @@
 **Fecha:** 2026-05-04  
 **Rama de trabajo:** `feature/rf1-ptt-hotkey`  
 **Responsable de preparación:** Agente OpenCode  
-**Ambiente de ejecución:** `E:\Miniconda\envs\flux_env\python.exe main.py`
+**Ambiente de ejecución:** `python main.py` (activate your project Python environment first)
 
 ---
 

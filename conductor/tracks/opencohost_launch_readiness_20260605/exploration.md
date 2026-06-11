@@ -16,7 +16,7 @@ This means the rename is not a single search-and-replace. It is a brand architec
 - `README.md`, `AGENTS.md`, `AGENT_HANDOFF.md`, `docs/**` — public/internal documentation naming.
 - `pyproject.toml` — Python package metadata currently names the project `voiceai`.
 - `main.py`, `ui/app.py`, `ui/app_shell.py` — app entry and `VocalAIApp` class/factory naming.
-- `config/storage.py`, `config/avatar.yaml`, `config/storage.yaml` — local app data paths and absolute `E:\VoiceAI` references.
+- `config/storage.py`, `config/avatar.yaml`, `config/storage.yaml` — local app data paths and absolute the project directory references.
 - `config/logger.py`, `core/health_monitor.py` — logger names and app identifiers like `VoiceAI` / `voiceai-qwen-tts`.
 - `perfiles.json`, `core/profiles.py`, `config/settings.py` — Kira persona prompts and default system prompt.
 - `avatar/**`, `ui/**`, `smart_aggregator/**`, `stream_admin/**` — Kira as avatar/persona/workflow identity.

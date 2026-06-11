@@ -88,12 +88,10 @@ Do not invert this order without a user decision.
 
 ```powershell
 # Focused model + recovery suite (use after any core/ or ui/ change)
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_llm_tiers.py tests/test_model_panel.py tests/test_heavy_model_inference_recovery.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_llm_tiers.py tests/test_model_panel.py tests/test_heavy_model_inference_recovery.py -q
 
 # Health monitor suite
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q -o cache_dir=E:\VoiceAI\temp\.pytest_cache_local --basetemp=E:\VoiceAI\temp\pytest-basetemp
+python -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q
 ```
 
-## Engram project key
-
-`voiceai` — use `project: "voiceai"` in all `mem_save` / `mem_search` calls.
+Activate your project Python environment before running these commands.

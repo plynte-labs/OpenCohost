@@ -65,7 +65,7 @@
 
 - [x] Task: Run focused automated regression
     - [x] Run tests for health monitor, AppShell OBS resilience, temp cleanup, LLM timeout/lifecycle-adjacent behavior.
-    - [x] Use `E:\Miniconda\envs\flux_env\python.exe` for pytest.
+    - [x] Use `python` for pytest.
     - [x] Confirm no websocket/runtime warnings are reintroduced.
 - [ ] Task: Manual startup validation
     - [ ] Start VoiceAI with Ollama not ready and confirm non-critical startup state.
@@ -88,7 +88,7 @@
 ## Final Review Notes — 2026-05-25
 
 - Automated QA verdict: PASS WITH WARNINGS.
-- Focused regression after QA fix: `E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_obs_client.py tests/test_app_shell_obs_resilience.py tests/test_health_monitor.py tests/test_temp_file_cleanup.py tests/test_llm_engine_timeouts.py tests/test_llm_engine_tiers.py -q` → `134 passed`.
+- Focused regression after QA fix: `python -m pytest tests/test_obs_client.py tests/test_app_shell_obs_resilience.py tests/test_health_monitor.py tests/test_temp_file_cleanup.py tests/test_llm_engine_timeouts.py tests/test_llm_engine_tiers.py -q` → `134 passed`.
 - User log review: `logs/voiceai_20260524_232748.log` confirmed owned Ollama model release on close and exposed remaining OBS retry ERROR spam.
 - Final fix: `OBSClient.connect(log_failures=False)` supports silent retry-loop attempts; `AppShell` forwards `not logged_once` so the operator gets one notice instead of repeated ERROR logs.
 - Learned: AppShell's `logged_once` gate was insufficient because `OBSClient.connect()` logged internally on every refused connection; lifecycle retry policy must be enforced at the lowest logging layer that sees the failure.
