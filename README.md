@@ -1,116 +1,172 @@
-# VoiceAI — Kira, tu co-host virtual para Stream v1.0.0
+# OpenCohost — Local-First AI Streaming Co-Host
 
-Aplicación de escritorio que crea un co-host de IA (**Kira**) con procesamiento local-first: LLM y TTS pesado corren en tu GPU sin suscripciones ni censura corporativa. Algunas funciones opcionales (Edge-TTS, YouTube Chat, Stream Admin) usan Internet.
+OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor) that runs entirely on your hardware using Ollama and local TTS models. No cloud subscriptions. No latency spikes mid-stream.
 
-## Arquitectura
+> Spanish version: [README.es.md](README.es.md)
 
-| Componente | Tecnología |
+## What Kira Does
+
+- Listens to your stream via a local WebSocket transcription feed
+- Responds via voice using local LLM inference (Ollama) and local TTS
+- Maintains a sliding conversation window across a stream session
+- Switches between a lightweight TTS engine (Edge-TTS, 0% GPU) and a high-quality local voice engine (Qwen3-TTS zero-shot cloning)
+- Monitors its own health: if TTS becomes unavailable, Kira degrades gracefully rather than crashing
+
+## Features
+
+| Feature | Status |
 |---|---|
-| **UI** | CustomTkinter (ventana desktop) |
-| **LLM** | Ollama — 11 modelos en catálogo (default: `llama3`) |
-| **TTS Ligero** | Edge-TTS — voz `es-MX-DaliaNeural`, 0% GPU |
-| **TTS Pesado** | Qwen3-TTS 0.6B — clonación zero-shot (servidor Flask `:5000`) |
-| **Audio** | sounddevice (grabar) + pygame (reproducir) |
-| **Transcripción** | WebSocket → LiveAudio (Whisper) |
+| Manual chat input with voice response | Stable |
+| Push-to-talk with global hotkey | Stable |
+| Lightweight TTS (Edge-TTS) | Stable |
+| Local TTS (Qwen3-TTS zero-shot cloning) | Stable |
+| Piper offline TTS fallback | Stable |
+| WebSocket live transcription feed | Stable |
+| Streaming TTS pipeline (speaks before LLM finishes) | Stable |
+| Conversational memory (10-turn sliding window) | Stable |
+| Personality profiles (editable from UI) | Stable |
+| LLM model catalog with one-click switching | Stable |
+| Ollama lifecycle management from the UI | Stable |
+| Smart Chat Aggregator (YouTube Live) | Stable |
+| Stream Admin panel (YouTube OAuth, Twitch placeholder) | MVP |
+| Health monitor with TTS fallback gate | Stable |
+| Compact mode for second-monitor streaming | Stable |
 
-## Estructura del Proyecto
+## Requirements
 
-```
-VoiceAI/
-├── main.py              # Punto de entrada
-├── server_qwen.py       # Servidor TTS multi-motor (Flask)
-├── config/
-│   ├── logger.py        # Logging estructurado (consola + archivo)
-│   └── settings.py      # Constantes, catálogo de modelos, system prompt
-├── core/
-│   ├── llm_engine.py    # Motor IA: Ollama, memoria, pipeline TTS
-│   └── profiles.py      # Carga/guardado de perfiles de personalidad
-├── smart_aggregator/    # RF3: agregador inteligente de chat YouTube Live
-├── ui/
-│   ├── app.py           # Interfaz principal (Kira, configuración, Stream Admin, logs)
-│   └── profiles_window.py  # Editor visual de perfiles
-├── perfiles.json        # Perfiles de personalidad de la IA
-├── Grabaciones/         # Audios de referencia grabados
-├── legacy/              # Versiones anteriores del código
-└── modelos_f5/          # Modelos descargados de HuggingFace
-```
+### Hardware
 
-## Cómo Ejecutar
+| Tier | GPU VRAM | Use case |
+|---|---|---|
+| Minimum | 6 GB | Edge-TTS only; Ollama on a smaller model |
+| Recommended | 12 GB | Concurrent LLM + Qwen3-TTS |
+| Ideal | 24 GB | Dedicated GPU server; Ollama + full TTS without contention |
+
+### Software
+
+- Python 3.13 (activated conda or venv environment)
+- [Ollama](https://ollama.com/) installed and running
+- `customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`, `pytchat` (main environment)
+- `flask`, `torch`, `torchaudio`, `soundfile`, `qwen-tts`, `edge-tts` (TTS server environment, optional — only if using Qwen3-TTS)
+
+## Setup
+
+> These commands assume your Python environment is already activated. Replace `python` with the path to your environment's interpreter if you are not in an activated shell.
 
 ```powershell
-# Terminal 1 — Servidor TTS (requiere xtts_env con PyTorch + Flask)
-E:\Miniconda\envs\xtts_env\python.exe server_qwen.py
+# Install main dependencies
+python -m pip install -r requirements.txt
 
-# Terminal 2 — Cliente (requiere flux_env con Ollama + sounddevice + websockets)
-E:\Miniconda\envs\flux_env\python.exe main.py
+# (Optional) Install TTS server dependencies in a separate environment
+# python -m pip install flask torch torchaudio soundfile qwen-tts edge-tts
 ```
 
-## Features Actuales
+### Run
 
--   **Chat manual**: escribe texto, la IA responde por voz
--   **Grabación de referencia**: captura tu voz y clónala con Qwen3-TTS
--   **2 motores TTS**: Ligero (Edge-TTS, 0% GPU) y Pesado (Qwen3-TTS, clonación)
--   **WebSocket Live**: conexión a transcripciones en vivo con reconexión automática
--   **Pipeline TTS por fragmentos**: la IA empieza a hablar apenas se genera la primera oración
--   **Memoria conversacional**: sliding window de 10 turnos
--   **Perfiles de personalidad**: 5 perfiles editables desde la UI
--   **Catálogo de modelos**: descarga y cambia entre 11 LLMs desde la interfaz
--   **Gestión de Ollama desde la UI**: detecta si Ollama falta, está apagado o listo; el mismo botón permite instalar, iniciar, descargar o activar modelos
--   **Estados de UI**: indicadores visuales (procesando / listo), bloqueo de botones
--   **Logging estructurado**: archivos rotativos en `logs/`
--   **Smart Chat Aggregator RF3**: conexión a YouTube Live Chat, filtros, anti-spam, vibe, triggers y pestaña `YT Chat`
--   **Stream Admin RF4 MVP**: pestaña `Stream Admin`, YouTube OAuth/API preparado, Twitch placeholder, metadata, moderación, analíticas y mensajes al chat bajo permisos
--   **UI/UX refactor seguro**: vista principal `Kira`, configuración lateral tabulada, `Stream Admin` administrativo y logs inferiores bajo `Mostrar logs`
+```powershell
+# Terminal 1 — main app (LLM + UI + audio pipeline)
+python main.py
 
-## Roadmap (docs/changes.md)
+# Terminal 2 — Qwen3-TTS server (only needed for high-quality local voice cloning)
+# Run this in the environment that has torch + qwen-tts installed
+python server_qwen.py
+```
 
-### Implementados
+Kira's voice will use Edge-TTS (lightweight, online) if the Qwen3-TTS server is not available.
 
--   **Push-to-Talk** con hotkey global (pynput) ✅
--   **Indicadores de pipeline**: Escuchando / Procesando LLM / Sintetizando Voz ✅
--   **Modo compacto** para minimizar espacio en monitor ✅
--   **Panel de acciones Kira** con persistencia y mensajes simulados ✅
--   **Smart Chat Aggregator** para YouTube Live Chat: filtrado, vibe, triggers, historial y UI separada ✅
--   **RF4 Stream Admin MVP base**: módulo `stream_admin/`, UI, config YAML, OAuth local seguro MVP, YouTube provider y Twitch placeholder ✅
--   **Refactor UI/UX seguro**: jerarquía visual centrada en Kira, estados operativos claros y Stream Admin secundario ✅
+### Configure TTS Python path
 
-### Por Implementar
+If you are using Qwen3-TTS, set the environment variable `XTTS_PYTHON` to the Python interpreter in your TTS environment:
 
--   **Silero VAD** como filtro de audio previo a Whisper
--   **Hardening RF4 OAuth/tokens**: migrar tokens locales a keyring/Windows Credential Manager y ampliar validaciones live reales
--   **RAG / Memoria a largo plazo**: ChromaDB para recordar streams anteriores
--   **Avatar visual**: fuente de navegador OBS con boca animada
--   **Entrenamiento de voz local**: finetuning de modelos VITS
+```powershell
+$env:XTTS_PYTHON = "path/to/your/tts-env/python.exe"
+python main.py
+```
 
-## Requisitos de Hardware
+Or set `tools.xtts_python` in `config/storage.yaml`.
 
--   **Mínimo**: GPU con 6 GB VRAM (ej. RTX 2060)
--   **Recomendado**: GPU con 12 GB VRAM (ej. RTX 3060) para correr LLM + TTS simultáneamente
--   **Servidor dedicado ideal**: GPU con 24 GB VRAM (ej. RTX 3090) + 64 GB RAM (ver `docs/futureserver.md`)
+### Configure storage paths
 
-## Dependencias
+To move Ollama models, cache, or temp files to a different drive, edit `config/storage.yaml`:
 
-**Cliente** (flux_env):
-`customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`, `pytchat`
+```yaml
+storage:
+  # cache_root: "/path/to/your/cache"
+  # temp_root: "/path/to/your/temp"
+  # ollama_models: "/path/to/ollama/storage"
+```
 
-## Ollama y Modelos
+## Architecture
 
-La app valida Ollama al iniciar y mantiene desactivadas las acciones que dependen del LLM si el servicio no está disponible. En la configuración de modelos hay un único botón contextual:
+```
+OpenCohost/
+├── main.py               # Entry point
+├── server_qwen.py        # Multi-engine TTS server (Flask)
+├── config/
+│   ├── logger.py         # Structured logging (console + rotating files)
+│   ├── settings.py       # Constants, model catalog, system prompt
+│   ├── storage.py        # Portable path resolution for cache/temp
+│   └── storage.yaml      # Storage path overrides
+├── core/
+│   ├── llm_engine.py     # LLM orchestration, memory, TTS pipeline
+│   ├── health_monitor.py # Service health, TTS fallback gate
+│   └── profiles.py       # Personality profile load/save
+├── ui/
+│   ├── app_shell.py      # Main UI shell (thread-safe UIState observer)
+│   └── model_panel.py    # Model management panel
+├── smart_aggregator/     # YouTube Live Chat aggregator (RF3)
+├── stream_admin/         # Stream Admin panel: OAuth, metadata, moderation (RF4)
+└── config/
+    ├── default_profiles.json  # Seeded personality profiles
+    └── stream_admin.yaml      # Stream Admin configuration
+```
 
--   `Instalar Ollama`: abre la página oficial de descarga cuando no se encuentra el binario de Ollama.
--   `Iniciar Ollama`: intenta ejecutar `ollama serve` cuando Ollama está instalado pero el servicio local no responde.
--   `Descargar modelo`: descarga el modelo seleccionado cuando Ollama está listo pero el modelo no existe localmente.
--   `Activar modelo`: cambia al modelo seleccionado cuando ya está instalado.
--   `Instalar dependencia Python`: avisa que falta el paquete `ollama` en el entorno Python activo.
+## Personality Profiles
 
-El servicio se comprueba contra `http://127.0.0.1:11434/api/tags`. Si Ollama deja de estar disponible, el motor IA marca el estado como no listo y bloquea procesamiento, cambio de modelo y descargas hasta que el servicio vuelva a responder.
+On first run, OpenCohost seeds a set of default personality profiles into your local `perfiles.json` (ignored by git):
 
-**RF4 OAuth YouTube**:
-OAuth/API oficial de YouTube usa `requests` y stdlib en el MVP. Las credenciales pueden guardarse desde la pestaña `Stream Admin` (`Client ID`, `Secret`, `Guardar OAuth`) y quedan en `data/stream_admin/oauth_client.json`, ignorado por git. También se soportan `YOUTUBE_OAUTH_CLIENT_ID` y `YOUTUBE_OAUTH_CLIENT_SECRET` por variables de entorno.
+| Profile | Persona |
+|---|---|
+| Akira | Default co-host — balanced and sharp |
+| Akira (Learn) | Learning mode — educational and encouraging |
+| Comunidad | Community mode — warm and inclusive |
+| Calmado | Calm mode — slower pace, grounded tone |
+| Técnico | Technical mode — precise, dry, cynical |
+| Show | High-energy performance mode |
 
-**Servidor TTS** (xtts_env):
-`flask`, `torch`, `torchaudio`, `soundfile`, `qwen-tts`, `edge-tts`
+Kira's name and base personality are preserved across all profiles.
 
-## Licencia
+## Ollama Integration
 
-Este proyecto está bajo la Licencia **MIT**. Consulta el archivo [LICENSE](file:///e:/VoiceAI/LICENSE) para ver el texto completo.
+The app validates Ollama at startup and disables actions that depend on the LLM if the service is unavailable. The model panel provides a single contextual button:
+
+- **Install Ollama** — opens the official download page when the binary is not found
+- **Start Ollama** — runs `ollama serve` when installed but not responding
+- **Download model** — pulls the selected model when Ollama is ready but the model is missing locally
+- **Activate model** — switches to the selected model when already installed
+- **Install Python dependency** — alerts when the `ollama` Python package is missing from the active environment
+
+The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing, model switching, and downloads until the service responds again.
+
+## Stream Admin (RF4)
+
+The Stream Admin panel supports YouTube OAuth/API for reading and writing chat, metadata, moderation, and analytics. A Twitch provider placeholder is included. OAuth credentials are stored in `data/stream_admin/oauth_client.json` (gitignored). Environment variables `YOUTUBE_OAUTH_CLIENT_ID` and `YOUTUBE_OAUTH_CLIENT_SECRET` are also supported.
+
+## Testing
+
+```powershell
+# Full test collection
+python -m pytest --collect-only -q
+
+# Focused model + recovery suite
+python -m pytest tests/test_llm_tiers.py tests/test_model_panel.py tests/test_heavy_model_inference_recovery.py -q
+
+# Health monitor suite
+python -m pytest tests/test_health_monitor.py tests/test_health_integration.py tests/test_app_shell_obs_resilience.py -q
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for the full test surface.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
