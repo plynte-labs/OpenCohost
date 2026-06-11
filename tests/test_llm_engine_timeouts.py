@@ -549,6 +549,10 @@ def test_tts_none_text_balances_events_and_clears_speech_source():
 
 
 def test_heavy_tts_missing_reference_balances_events_and_clears_speech_source():
+    """_hablar with no reference must fall back to ligero and complete cleanly."""
+    from unittest.mock import patch, MagicMock
+    import asyncio as _asyncio
+
     events = []
 
     def record_event(event):
@@ -557,13 +561,26 @@ def test_heavy_tts_missing_reference_balances_events_and_clears_speech_source():
     motor = llm_engine.MotorVocalIA(queue.Queue(), record_event)
     motor.motor_tts = "pesado"
     motor.voz_referencia = None
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music.load = MagicMock()
+    motor.pygame.mixer.music.play = MagicMock()
+    motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
+    motor.pygame.mixer.music.unload = MagicMock()
 
-    motor._hablar("Texto suficientemente largo para pedir audio.", source="kira-agenda")
+    def fake_asyncio_run(coro, *args, **kwargs):
+        try:
+            coro.close()
+        except Exception:
+            pass
 
-    assert events == [
-        ("speaking_start", "kira-agenda"),
-        ("speaking_end", None),
-    ]
+    with patch("core.llm_engine.asyncio") as mock_asyncio:
+        mock_asyncio.run.side_effect = fake_asyncio_run
+        mock_asyncio.wait_for = _asyncio.wait_for
+        mock_asyncio.TimeoutError = _asyncio.TimeoutError
+        motor._hablar("Texto suficientemente largo para pedir audio.", source="kira-agenda")
+
+    assert events[0] == ("speaking_start", "kira-agenda")
+    assert events[-1] == ("speaking_end", None)
     assert motor.is_speaking is False
     assert motor.current_speech_source is None
 
@@ -765,3 +782,185 @@ def test_guardrail_fallback_lines_pass_output_guard():
         for source in ("direct", "chat", "kira-agenda"):
             allowed, reason = output_guard(line, source=source)
             assert allowed, f"fallback line blocked ({source}): {line!r} — {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Missing-reference auto-fallback (fix/missing-reference-fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_process_context_no_ref_does_not_drop_message():
+    """process_context must NOT short-circuit when heavy TTS lacks a reference."""
+    inference_calls = []
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.is_ready = True
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+    motor._ejecutar_inferencia = lambda payload, source: inference_calls.append(payload)
+
+    motor._dispatch_command("process_context", "hello world")
+
+    assert inference_calls == ["hello world"], (
+        "Message was dropped before LLM ran — hard-block still present"
+    )
+
+
+def test_process_context_no_ref_does_not_log_falta_audio():
+    """The old hard-block log 'Falta audio de referencia' must not fire."""
+    log_messages = []
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.is_ready = True
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+    motor._log = lambda msg, **kw: log_messages.append(msg)
+    motor._ejecutar_inferencia = lambda payload, source: None
+
+    motor._dispatch_command("process_context", "hello world")
+
+    assert not any("Falta audio de referencia" in m for m in log_messages), (
+        "Old hard-block log message still present"
+    )
+
+
+def test_productor_no_ref_falls_back_to_ligero_with_missing_reference_reason(tmp_path):
+    """Synthesis producer must fall back to ligero with reason=missing_reference when no reference audio."""
+    from unittest.mock import patch, MagicMock
+
+    log_messages = []
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.is_ready = True
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+    motor.health_monitor = None  # no health monitor — isolates missing_reference path
+
+    original_log = motor._log
+    motor._log = lambda msg, **kw: log_messages.append(msg)
+
+    # Run _hablar with a valid text; patch Edge-TTS asyncio.run to succeed so
+    # the producer can complete without a real network call.
+    import asyncio as _asyncio
+
+    def fake_asyncio_run(coro, *args, **kwargs):
+        try:
+            coro.close()
+        except Exception:
+            pass
+        # Write a stub mp3 so the chunk path exists
+        import os, uuid
+        from config.settings import TEMP_DIR
+        stub = os.path.join(TEMP_DIR, f"tts_stub_{uuid.uuid4().hex[:4]}.mp3")
+        open(stub, "wb").close()
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music.load = MagicMock()
+    motor.pygame.mixer.music.play = MagicMock()
+    motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
+    motor.pygame.mixer.music.unload = MagicMock()
+
+    with patch("core.llm_engine.asyncio") as mock_asyncio:
+        mock_asyncio.run.side_effect = fake_asyncio_run
+        import asyncio as real_asyncio
+        mock_asyncio.wait_for = real_asyncio.wait_for
+        mock_asyncio.TimeoutError = real_asyncio.TimeoutError
+        motor._hablar(
+            "Texto suficientemente largo para producir al menos un chunk de audio.",
+            source="direct",
+        )
+
+    fallback_logs = [m for m in log_messages if "missing_reference" in m]
+    assert fallback_logs, (
+        "Expected 'Auto-fallback to Edge-TTS: requested=pesado effective=ligero "
+        "reason=missing_reference' in logs, got: " + repr(log_messages)
+    )
+    assert "Auto-fallback to Edge-TTS: requested=pesado effective=ligero reason=missing_reference" in fallback_logs[0]
+
+
+def test_productor_with_ref_does_not_trigger_missing_reference_fallback(tmp_path):
+    """When reference audio is present, missing_reference fallback must NOT appear in logs."""
+    from unittest.mock import patch, MagicMock
+
+    log_messages = []
+
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.is_ready = True
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = str(ref)
+    motor.health_monitor = None
+
+    motor._log = lambda msg, **kw: log_messages.append(msg)
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music.load = MagicMock()
+    motor.pygame.mixer.music.play = MagicMock()
+    motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
+    motor.pygame.mixer.music.unload = MagicMock()
+
+    # Patch requests.post so the heavy TTS path returns a valid wav
+    original_post = llm_engine.requests.post
+    try:
+        llm_engine.requests.post = MagicMock(
+            return_value=MagicMock(status_code=200, content=b"wav")
+        )
+        motor._hablar(
+            "Texto suficientemente largo para producir al menos un chunk de audio.",
+            source="direct",
+        )
+    finally:
+        llm_engine.requests.post = original_post
+
+    assert not any("missing_reference" in m for m in log_messages), (
+        "missing_reference fallback triggered despite reference being present"
+    )
+
+
+def test_productor_no_ref_with_passing_health_gate_logs_single_coherent_fallback():
+    """With a passing health gate and no reference audio, logs must not claim effective=pesado before falling back."""
+    from unittest.mock import patch, MagicMock
+
+    log_messages = []
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.is_ready = True
+    motor.motor_tts = "pesado"
+    motor.voz_referencia = None
+    hm = MagicMock()
+    hm.heavy_tts_block_reason = MagicMock(return_value=None)
+    motor.health_monitor = hm
+
+    motor._log = lambda msg, **kw: log_messages.append(msg)
+
+    import asyncio as real_asyncio
+
+    def fake_asyncio_run(coro, *args, **kwargs):
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music.load = MagicMock()
+    motor.pygame.mixer.music.play = MagicMock()
+    motor.pygame.mixer.music.get_busy = MagicMock(return_value=False)
+    motor.pygame.mixer.music.unload = MagicMock()
+
+    with patch("core.llm_engine.asyncio") as mock_asyncio:
+        mock_asyncio.run.side_effect = fake_asyncio_run
+        mock_asyncio.wait_for = real_asyncio.wait_for
+        mock_asyncio.TimeoutError = real_asyncio.TimeoutError
+        motor._hablar(
+            "Texto suficientemente largo para producir al menos un chunk de audio.",
+            source="direct",
+        )
+
+    assert any("reason=missing_reference" in m for m in log_messages), (
+        "Expected missing_reference fallback, got: " + repr(log_messages)
+    )
+    assert not any("effective=pesado" in m for m in log_messages), (
+        "Log must not claim effective=pesado when the engine falls back, got: "
+        + repr(log_messages)
+    )

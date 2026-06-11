@@ -236,9 +236,6 @@ class MotorVocalIA(threading.Thread):
                 self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
                 self.ui_callback("ollama_unavailable")
                 return
-            if self.motor_tts == "pesado" and not self.voz_referencia:
-                self._log("ERROR: Falta audio de referencia (Modo Qwen3-TTS).", level="warning")
-                return
             if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
@@ -1331,15 +1328,6 @@ class MotorVocalIA(threading.Thread):
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
-        if self.motor_tts == "pesado":
-            if not ruta_absoluta_ref or not os.path.exists(ruta_absoluta_ref):
-                self._log("ERROR: Archivo de referencia no existe o no ha sido cargado.", level="error")
-                with self._lock:
-                    self._speaking = False
-                    self._current_speech_source = None
-                self.ui_callback("speaking_end")
-                return
-
         texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
         texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
 
@@ -1389,6 +1377,17 @@ class MotorVocalIA(threading.Thread):
             fallback_reason = ""
 
             # Health-based auto-fallback: check before heavy TTS
+            # Missing-reference auto-fallback: must run before the health gate
+            # so its "effective=pesado" log only fires when heavy TTS will
+            # actually be used.
+            if effective_motor == "pesado" and not self.voz_referencia:
+                effective_motor = "ligero"
+                fallback_reason = "missing_reference"
+                self._log(
+                    "Auto-fallback to Edge-TTS: "
+                    f"requested=pesado effective=ligero reason={fallback_reason}"
+                )
+
             if effective_motor == "pesado":
                 hm = getattr(self, "health_monitor", None)
                 if hm is not None:
