@@ -48,8 +48,21 @@ Pushing the tag triggers `.github/workflows/release.yml`. The workflow:
 Open the draft release at `https://github.com/plynte-labs/opencohost/releases`.
 
 - Verify the attached assets are present and the auto-generated release notes look correct.
+- Spot-check the checksums: download `SHA256SUMS.txt` and the zip, then compare:
+
+  ```powershell
+  Get-FileHash opencohost-src-X.Y.Z.zip -Algorithm SHA256
+  # must match the line in SHA256SUMS.txt
+  ```
+
 - Edit the description if needed.
 - Click **Publish release**.
+
+> **Publishing is effectively permanent**: the download URL and SHA256 are
+> baked into the launcher exe at build time. If an asset must be replaced
+> after publishing, delete the release AND the tag, then re-tag (see
+> "Re-running a failed release") so the exe is rebuilt with the new hash —
+> never swap an asset in place on a published release.
 
 Publishing makes the assets publicly downloadable. The launcher exe fetches
 `opencohost-src-X.Y.Z.zip` from this URL on first run, verifies the SHA256,

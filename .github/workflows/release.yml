@@ -13,6 +13,9 @@ defaults:
 
 env:
   UV_VERSION: "0.11.6"
+  # SHA256 of uv-x86_64-pc-windows-msvc.zip for UV_VERSION; verified before
+  # the binary is vendored into the launcher exe. Update together.
+  UV_WINDOWS_ZIP_SHA256: "99aa60edd017a256dbf378f372d1cff3292dbc6696e0ea01716d9158d773ab77"
 
 jobs:
   build-src:
@@ -50,9 +53,10 @@ jobs:
                   "Tag %s does not match opencohost.__version__ == %s"
                   % (tag, pkg_version)
               )
+          repo = os.environ["GITHUB_REPOSITORY"]
           url = (
-              "https://github.com/plynte-labs/opencohost/releases/download/"
-              "v%s/opencohost-src-%s.zip" % (pkg_version, pkg_version)
+              "https://github.com/%s/releases/download/"
+              "v%s/opencohost-src-%s.zip" % (repo, pkg_version, pkg_version)
           )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("version=%s\n" % pkg_version)
@@ -110,6 +114,7 @@ jobs:
       - name: Vendor pinned uv binary into packaging/vendor/
         run: |
           python - <<'EOF'
+          import hashlib
           import io
           import os
           import sys
@@ -117,12 +122,19 @@ jobs:
           import urllib.request
 
           version = os.environ["UV_VERSION"]
+          expected_sha256 = os.environ["UV_WINDOWS_ZIP_SHA256"]
           asset = "uv-x86_64-pc-windows-msvc.zip"
           url = "https://github.com/astral-sh/uv/releases/download/%s/%s" % (
               version,
               asset,
           )
           data = urllib.request.urlopen(url).read()
+          actual = hashlib.sha256(data).hexdigest()
+          if actual != expected_sha256:
+              sys.exit(
+                  "uv zip checksum mismatch: expected %s got %s"
+                  % (expected_sha256, actual)
+              )
           exe = "uv.exe"
           os.makedirs(os.path.join("packaging", "vendor"), exist_ok=True)
           target = os.path.join("packaging", "vendor", exe)
