@@ -15,8 +15,10 @@ import re
 import sys
 from pathlib import Path
 
-# Matches any drive-letter absolute path, e.g. E:\path or C:/path
-_DRIVE_LETTER_RE = re.compile(r"[A-Za-z]:[/\\]")
+# Matches Windows drive-letter absolute paths (single letter, colon, slash/backslash).
+# Negative lookbehind ensures the letter is not preceded by another letter,
+# which prevents false positives on URL schemes like https:// or http://.
+_DRIVE_LETTER_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[/\\]")
 _PRAGMA_TOKEN = "path-ok"
 
 

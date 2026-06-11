@@ -1,7 +1,11 @@
 """Tests for tools/check_abs_paths.py — stdlib-only absolute-path hook.
 
-TDD RED phase: tests written before implementation exists.
+TDD RED → GREEN: tests written before implementation, then implementation added.
 Covers: drive-letter detection, pragma escape, file-type filtering, clean pass.
+
+Fixture strings containing drive-letter patterns are built via concatenation
+so the test SOURCE FILE itself is clean (no literal drive-letter on any line).
+The actual content written to tmp files is identical to the inline form.
 """
 import subprocess
 import sys
@@ -12,6 +16,18 @@ import pytest
 
 SCRIPT = Path(__file__).parent.parent / "tools" / "check_abs_paths.py"
 PYTHON = sys.executable
+
+# Drive-letter fixture fragments — built by concatenation so source is hook-clean.
+# Each fragment is a partial token; joining at runtime produces the full path.
+_DL_BACK = "E:" + "\\" + "real" + "\\" + "path"
+_DL_FWD = "C:" + "/" + "some" + "/" + "path"
+_DL_FWD2 = "D:" + "/" + "project"
+_DL_DOCS = "E:" + "/" + "voiceAi" + "/" + "README.md"
+_DL_YAML = "C:" + "\\\\" + "Users" + "\\\\" + "foo"
+_DL_JSON = "E:" + "/" + "voiceAi"
+_DL_MIX_BAD = "E:" + "\\" + "real" + "\\" + "path"
+_DL_SMALL = "E:" + "/" + "real"
+_DL_STAGE = "E:" + "\\" + "real" + "\\" + "path"
 
 
 def _run(files: list[Path]) -> subprocess.CompletedProcess:
@@ -36,9 +52,8 @@ def _write(tmp_path: Path, name: str, content: str) -> Path:
 
 def test_backslash_drive_letter_detected(tmp_path):
     """A backslash drive-letter path in a .py file must cause exit 1."""
-    f = _write(tmp_path, "bad.py", r"""
-        path = r"E:\real\path"
-    """)
+    content = f'path = r"{_DL_BACK}"\n'
+    f = _write(tmp_path, "bad.py", content)
     result = _run([f])
     assert result.returncode == 1
     assert "bad.py" in result.stdout
@@ -46,9 +61,8 @@ def test_backslash_drive_letter_detected(tmp_path):
 
 def test_forward_slash_drive_letter_detected(tmp_path):
     """A forward-slash drive-letter path in a .py file must cause exit 1."""
-    f = _write(tmp_path, "bad.py", """
-        path = "C:/some/path"
-    """)
+    content = f'path = "{_DL_FWD}"\n'
+    f = _write(tmp_path, "bad.py", content)
     result = _run([f])
     assert result.returncode == 1
     assert "bad.py" in result.stdout
@@ -56,9 +70,8 @@ def test_forward_slash_drive_letter_detected(tmp_path):
 
 def test_drive_letter_in_markdown_detected(tmp_path):
     """A drive-letter path in a .md file must cause exit 1."""
-    f = _write(tmp_path, "doc.md", """
-        See `E:/voiceAi/README.md` for details.
-    """)
+    content = f"See `{_DL_DOCS}` for details.\n"
+    f = _write(tmp_path, "doc.md", content)
     result = _run([f])
     assert result.returncode == 1
     assert "doc.md" in result.stdout
@@ -66,26 +79,24 @@ def test_drive_letter_in_markdown_detected(tmp_path):
 
 def test_drive_letter_in_yaml_detected(tmp_path):
     """A drive-letter path in a .yaml file must cause exit 1."""
-    f = _write(tmp_path, "config.yaml", """
-        base_dir: "C:\\\\Users\\\\foo"
-    """)
+    content = f'base_dir: "{_DL_YAML}"\n'
+    f = _write(tmp_path, "config.yaml", content)
     result = _run([f])
     assert result.returncode == 1
 
 
 def test_drive_letter_in_toml_detected(tmp_path):
     """A drive-letter path in a .toml file must cause exit 1."""
-    f = _write(tmp_path, "config.toml", """
-        [paths]
-        root = "D:/project"
-    """)
+    content = f'[paths]\nroot = "{_DL_FWD2}"\n'
+    f = _write(tmp_path, "config.toml", content)
     result = _run([f])
     assert result.returncode == 1
 
 
 def test_drive_letter_in_json_detected(tmp_path):
     """A drive-letter path in a .json file must cause exit 1."""
-    f = _write(tmp_path, "settings.json", '{"path": "E:/voiceAi"}')
+    content = f'{{"path": "{_DL_JSON}"}}'
+    f = _write(tmp_path, "settings.json", content)
     result = _run([f])
     assert result.returncode == 1
 
@@ -97,19 +108,16 @@ def test_drive_letter_in_json_detected(tmp_path):
 
 def test_pragma_escapes_violation(tmp_path):
     """A line containing 'path-ok' pragma must be skipped even if it has a drive-letter."""
-    f = _write(tmp_path, "ok.py", r"""
-        # Example path for docs: E:\real\path  # path-ok
-    """)
+    content = f"# Example path for docs: {_DL_BACK}  # path-ok\n"
+    f = _write(tmp_path, "ok.py", content)
     result = _run([f])
     assert result.returncode == 0, result.stdout
 
 
 def test_pragma_only_on_same_line(tmp_path):
     """The pragma on one line must NOT suppress a violation on a different line."""
-    f = _write(tmp_path, "mixed.py", r"""
-        # path-ok (this line is safe)
-        bad = r"E:\real\path"
-    """)
+    content = "# path-ok (this line is safe)\n" + f'bad = r"{_DL_MIX_BAD}"\n'
+    f = _write(tmp_path, "mixed.py", content)
     result = _run([f])
     assert result.returncode == 1
 
@@ -146,7 +154,7 @@ def test_no_files_clean():
 def test_multiple_files_one_violation(tmp_path):
     """When multiple files are passed, a single violation still causes exit 1."""
     clean = _write(tmp_path, "clean.py", 'x = "/fake/path"')
-    bad = _write(tmp_path, "bad.py", 'path = "C:/bad"')
+    bad = _write(tmp_path, "bad.py", f'path = "{_DL_FWD}"')
     result = _run([clean, bad])
     assert result.returncode == 1
     assert "bad.py" in result.stdout
@@ -155,7 +163,7 @@ def test_multiple_files_one_violation(tmp_path):
 
 def test_violation_output_format(tmp_path):
     """Output must include filename and line number on violation."""
-    f = _write(tmp_path, "bad.py", 'x = "E:/real"\n')
+    f = _write(tmp_path, "bad.py", f'x = "{_DL_SMALL}"\n')
     result = _run([f])
     assert result.returncode == 1
     # Expect "bad.py:N: ..." format
@@ -174,13 +182,15 @@ def test_script_is_invocable():
 
 def test_subprocess_blocked_drive_letter(tmp_path):
     """Seeded drive-letter path blocked — matches spec scenario."""
-    f = _write(tmp_path, "stage.py", r'exe = r"E:\real\path"')
+    content = f'exe = r"{_DL_STAGE}"'
+    f = _write(tmp_path, "stage.py", content)
     result = _run([f])
     assert result.returncode == 1
 
 
 def test_subprocess_pragma_allowed(tmp_path):
     """Pragma-escaped line allowed — matches spec scenario."""
-    f = _write(tmp_path, "stage.py", r'# Example: E:\docs\example  # path-ok')
+    content = f"# Example: {_DL_STAGE}  # path-ok"
+    f = _write(tmp_path, "stage.py", content)
     result = _run([f])
     assert result.returncode == 0
