@@ -12,6 +12,12 @@ result.txt
 result_predict.txt
 
 # ── Configuración generada en runtime ──
+# Dev-mode USER_DATA_DIR is the repo root (see opencohost/config/storage.py)
+config/ptt_settings.json
+config/window_geometry.json
+config/music_library.json
+config/last_model.json
+# Stale pre-restructure leftovers; runtime never writes here anymore
 opencohost/config/ptt_settings.json
 opencohost/config/window_geometry.json
 logs/acciones.jsonl
