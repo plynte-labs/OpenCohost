@@ -1,8 +1,0 @@
-{
-  "track_id": "product_ui_kira_avatar_refactor_20260513",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-05-13T00:00:00Z",
-  "updated_at": "2026-05-13T00:00:00Z",
-  "description": "Refactor VoiceAI UI into a product-centered Kira experience with classified configuration panels and future 2D/3D/OBS avatar module"
-}
