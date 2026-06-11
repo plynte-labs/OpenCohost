@@ -115,10 +115,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Portable TTS Runtime Path - Configurable Qwen Server Interpreter**
+- [x] **Track: Portable TTS Runtime Path - Configurable Qwen Server Interpreter**
   *Link: [./tracks/portable_tts_runtime_path_20260610/](./tracks/portable_tts_runtime_path_20260610/)*
 
 ---
 
-- [ ] **Track: Local Light TTS - Piper/Kokoro Evaluation and Integration (post-Lite)**
+- [x] **Track: Local Light TTS - Piper/Kokoro Evaluation and Integration (post-Lite)**
   *Link: [./tracks/local_light_tts_piper_20260610/](./tracks/local_light_tts_piper_20260610/)*

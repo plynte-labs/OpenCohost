@@ -79,3 +79,6 @@ config/last_model.json
 perfiles.json
 CLAUDE.local.md
 opencode.json
+
+# Engram persistent memory database (internal)
+.engram/

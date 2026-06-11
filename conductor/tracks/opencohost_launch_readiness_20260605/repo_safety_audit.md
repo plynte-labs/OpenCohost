@@ -223,3 +223,34 @@ This is not a runtime blocker for local development. It is a publication blocker
 the current branch can continue as an internal/audit branch, but OpenCohost
 public migration should wait until the blockers above are resolved or explicitly
 accepted.
+
+## Status update — 2026-06-10 (public_repo_migration_20260610)
+
+The `public_repo_migration_20260610` SDD change (PR chain #12-#16 on tracker
+`feat/public-repo-migration`) resolved most blockers above:
+
+1. `.engram/` — untracked and gitignored (was still tracked, including the
+   memory database `graph.db`; caught during track closure, fixed on PR4 branch).
+2. `Documents/` — tracked files sanitized of paths/identifiers in PR4.
+   OPEN: the curate-vs-remove decision for public scope (notably
+   `ROADMAP_COMERCIAL.md`, which is business content).
+3. `config/music_library.json` — untracked (vestigial user state; runtime reads
+   from user data dir).
+4. Machine-specific paths — fixed: `resolve_xtts_python()` chain in
+   `config/storage.py`, relative `config/avatar.yaml` paths, README rewritten.
+5. `perfiles.json` — curated public defaults shipped in
+   `config/default_profiles.json` (6 profiles, attribution stripped); live file
+   untracked.
+6. Guard — `.pre-commit-config.yaml` with detect-secrets (pinned) + the
+   `tools/check_abs_paths.py` drive-letter hook; full-tree run exits 0.
+
+Additional outcomes beyond the original audit: identity rename to
+OpenCohost/plynte-labs (pyproject, LICENSE, AppData, UI), bilingual README,
+agent docs stripped of internal tooling references (`CLAUDE.local.md` holds
+machine-local context, untracked), `opencode.json` untracked.
+
+Remaining before public push: merge the PR chain, owner manual items (OBS
+password rotation, `detect-secrets audit .secrets.baseline`), the `Documents/`
+curation decision, and the fresh-history export to `plynte-labs/opencohost`.
+
+Go / No-Go: GO once the PR chain merges and the items above close.
