@@ -427,6 +427,34 @@ class CoHostAgendaPanel:
         safety_mode = self.normalize_safety_mode(self._get("combo_safety_mode"))
         return turns, rhythm, length, safety_mode
 
+    def apply_session_settings(self, turns: object, rhythm: str, response_length: str, safety_mode: str) -> None:
+        """Reflect controller session settings in the session widgets.
+
+        Called after startup restore: the dispatch paths (enable, add topic,
+        bulk import) push the WIDGET values via on_session_settings before
+        acting, so widgets left at hardcoded defaults would silently clobber
+        whatever persistence restored into the controller.
+        """
+        values = {
+            "combo_turns": str(self.clamp_turn_limit(turns)),
+            "combo_rhythm": self._option_label(self.RHYTHMS, rhythm, self.normalize_rhythm, "Normal"),
+            "combo_length": self._option_label(self.RESPONSE_LENGTHS, response_length, self.normalize_response_length, "Normal"),
+            "combo_safety_mode": self._option_label(self.SAFETY_MODES, safety_mode, self.normalize_safety_mode, "Live_safe"),
+        }
+        for name, value in values.items():
+            widget = self._widgets.get(name)
+            if widget is not None:
+                widget.set(value)
+
+    @staticmethod
+    def _option_label(options: list[str], value: str, normalize, fallback: str) -> str:
+        """Map a normalized controller value back to its widget option label."""
+        normalized = normalize(value)
+        for option in options:
+            if normalize(option) == normalized:
+                return option
+        return fallback
+
     def _dispatch_enable(self) -> None:
         turns, rhythm, length, safety_mode = self._session_settings()
         self._on_session_settings(turns, rhythm, length, safety_mode)

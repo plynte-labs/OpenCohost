@@ -293,6 +293,67 @@ def _make_panel_with_batch_scheduler(**extra_kwargs):
     return panel, scheduled_callbacks
 
 
+class _FakeOptionMenu:
+    """Minimal stand-in for a ctk.CTkOptionMenu."""
+
+    def __init__(self, value: str = "") -> None:
+        self._value = value
+
+    def set(self, value: str) -> None:
+        self._value = value
+
+    def get(self) -> str:
+        return self._value
+
+
+class TestApplySessionSettings:
+    """Restored controller settings must reach the session widgets.
+
+    Regression for the restart-restore clobber: _dispatch_enable /
+    _dispatch_add_topic / _dispatch_bulk_import push the WIDGET values via
+    on_session_settings before acting, so widgets left at hardcoded defaults
+    silently overwrite whatever persistence restored into the controller.
+    """
+
+    def _panel_with_fake_combos(self) -> CoHostAgendaPanel:
+        panel = CoHostAgendaPanel()
+        for name in ("combo_turns", "combo_rhythm", "combo_length", "combo_safety_mode"):
+            panel._widgets[name] = _FakeOptionMenu()
+        return panel
+
+    def test_apply_session_settings_reflects_restored_values(self) -> None:
+        panel = self._panel_with_fake_combos()
+
+        panel.apply_session_settings(4, "calmo", "corta", "monologue")
+
+        assert panel._widgets["combo_turns"].get() == "4"
+        assert panel._widgets["combo_rhythm"].get() == "Calmo"
+        assert panel._widgets["combo_length"].get() == "Corta"
+        assert panel._widgets["combo_safety_mode"].get() == "Monologue"
+        # Closing the loop: dispatch paths now push the restored values
+        assert panel._session_settings() == (4, "calmo", "corta", "monologue")
+
+    def test_apply_session_settings_handles_accented_rhythm(self) -> None:
+        panel = self._panel_with_fake_combos()
+
+        panel.apply_session_settings(3, "dinamico", "normal", "live_safe")
+
+        assert panel._widgets["combo_rhythm"].get() == "Dinámico"
+
+    def test_apply_session_settings_falls_back_on_unknown_values(self) -> None:
+        panel = self._panel_with_fake_combos()
+
+        panel.apply_session_settings("???", "marciano", "gigante", "yolo")
+
+        assert panel._widgets["combo_rhythm"].get() == "Normal"
+        assert panel._widgets["combo_length"].get() == "Normal"
+        assert panel._widgets["combo_safety_mode"].get() == "Live_safe"
+
+    def test_apply_session_settings_tolerates_missing_widgets(self) -> None:
+        panel = CoHostAgendaPanel()  # no widgets built at all
+        panel.apply_session_settings(3, "normal", "normal", "live_safe")  # must not raise
+
+
 class TestBatchSuggestions:
     """Incremental batch rendering for update_suggestions (ADR-006 Phase 3)."""
 

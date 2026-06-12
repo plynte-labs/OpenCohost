@@ -25,19 +25,29 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
+
+from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION: int = 1
 # Safety bound for pathological DBs; the UI should never ingest more rows.
 RESTORE_CAP: int = 50
-# Both paths run on the Tk main thread; never wait for a writer lock longer
-# than these (sqlite default is 5s — a visible freeze).
+# Saves can fire from the Tk main thread AND from chat-source daemon threads
+# (both funnel through _kira_agenda_update_status); never wait for a writer
+# lock longer than these (sqlite default is 5s — a visible freeze).
 READ_TIMEOUT_SECONDS: float = 0.5
 WRITE_TIMEOUT_SECONDS: float = 1.0
+# Pre-filter bounds for rows read back from disk: anything bigger than this
+# was not written by us and sanitizing it element-by-element could stall the
+# launch (a 500k-element constraints array costs ~4.6s of regex checks).
+_MAX_TITLE_RAW = 200
+_MAX_ANGLE_RAW = 2000
+_MAX_CONSTRAINTS_RAW = 4000
 
 # Statuses worth surviving a restart. ACTIVE is demoted to queued on save:
 # the runtime context (state machine, Kira's conversational memory) dies
@@ -50,10 +60,17 @@ class AgendaPersistence:
 
     def __init__(self, db_path: str | Path, log_fn: Callable[[str], None] | None = None) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.warning("agenda persistence dir creation failed (fail-open): %s", exc)
         self._log = log_fn or (lambda message: None)
+        self._save_lock = threading.Lock()
         self._last_fingerprint: str | None = None
         self._write_failure_warned = False
+        # Set when load_into could not READ the disk state: saving would then
+        # overwrite a queue we never saw, so this session goes read-only.
+        self._load_failed = False
 
     # ------------------------------------------------------------------
     # Save
@@ -65,7 +82,26 @@ class AgendaPersistence:
         Returns True only when a write actually happened. Fail-open: any
         storage error logs, warns the operator once, and returns False —
         the in-memory agenda stays the source of truth for the session.
+
+        Thread-safe: saves can fire concurrently from the Tk thread and the
+        chat-source thread; the lock keeps fingerprint+write atomic.
         """
+        with self._save_lock:
+            return self._save_if_changed_locked(controller)
+
+    def _save_if_changed_locked(self, controller: Any) -> bool:
+        if self._load_failed:
+            # Never overwrite a disk state we could not read: a transient
+            # lock at startup must not let an empty session wipe the queue.
+            if not self._write_failure_warned:
+                self._write_failure_warned = True
+                self._log(
+                    "[Kira Agenda] Persistencia en modo solo-lectura: no se pudo leer "
+                    "la cola guardada al iniciar; esta sesión no guardará cambios para "
+                    "no pisar lo que hay en disco. Reiniciá la app para reintentar."
+                )
+            return False
+
         payload = self._snapshot(controller)
         fingerprint = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         if fingerprint == self._last_fingerprint:
@@ -116,6 +152,9 @@ class AgendaPersistence:
             return False
 
         self._last_fingerprint = fingerprint
+        # A healthy write closes any prior degradation episode: a future,
+        # distinct failure should warn again instead of staying silent.
+        self._write_failure_warned = False
         return True
 
     # ------------------------------------------------------------------
@@ -143,6 +182,8 @@ class AgendaPersistence:
                 ).fetchall()
         except Exception as exc:
             logger.warning("agenda persistence load failed (fail-open): %s", exc)
+            # Go read-only for the session: see _save_if_changed_locked.
+            self._load_failed = True
             return 0
 
         if settings_row is not None:
@@ -156,9 +197,18 @@ class AgendaPersistence:
         restored = 0
         for row in rows:
             try:
-                constraints = json.loads(row["constraints"] or "[]")
+                raw_constraints = str(row["constraints"] or "[]")
+                if (
+                    len(str(row["title"])) > _MAX_TITLE_RAW
+                    or len(str(row["angle"] or "")) > _MAX_ANGLE_RAW
+                    or len(raw_constraints) > _MAX_CONSTRAINTS_RAW
+                ):
+                    logger.warning("agenda persistence skipped an oversized row (fail-open)")
+                    continue
+                constraints = json.loads(raw_constraints)
                 if not isinstance(constraints, list):
                     constraints = []
+                constraints = constraints[: KiraAgendaController.MAX_CONSTRAINTS]
                 topic = controller.add_topic(
                     str(row["title"]),
                     str(row["angle"] or ""),

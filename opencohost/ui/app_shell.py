@@ -871,6 +871,8 @@ class VocalAIApp(ctk.CTk):
         )
         self.cohost_agenda_panel.build(cohost_panel_frame)
         self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
+        # Reflect restored session settings so dispatch paths do not clobber them with widget defaults.
+        self.cohost_agenda_panel.apply_session_settings(self.kira_agenda.max_turns_per_topic, self.kira_agenda.rhythm, self.kira_agenda.response_length, self.kira_agenda.safety_mode)
 
         music_panel_frame = ctk.CTkFrame(tab_product_music, fg_color="#0f151c", corner_radius=18)
         music_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)

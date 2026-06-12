@@ -315,6 +315,116 @@ def test_load_sets_fingerprint_so_startup_does_not_rewrite(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Judge findings — load-failure wipe, warn-flag reset, hostile rows, threads
+# ---------------------------------------------------------------------------
+
+def test_failed_load_makes_persistence_read_only_and_preserves_disk(tmp_path: Path) -> None:
+    """BLOCKER regression: a transient lock at startup must NOT let the empty
+    session wipe the queue that is sitting intact on disk."""
+    seeder, db = make_persistence(tmp_path)
+    seeder.save_if_changed(controller_with_queue())  # 3 topics on disk
+
+    warnings: list[str] = []
+    loader = AgendaPersistence(db, log_fn=warnings.append)
+    with patch(
+        "opencohost.core.agenda_persistence.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ):
+        assert loader.load_into(KiraAgendaController()) == 0
+
+    # Lock cleared; a save from the (empty) session must be refused
+    assert loader.save_if_changed(KiraAgendaController()) is False
+    assert loader.save_if_changed(KiraAgendaController()) is False
+    assert len(warnings) == 1, "read-only degradation warns the operator once"
+
+    # Disk untouched: a later healthy launch restores everything
+    fresh = KiraAgendaController()
+    assert AgendaPersistence(db).load_into(fresh) == 3
+
+
+def test_warn_flag_resets_after_successful_write(tmp_path: Path) -> None:
+    """Two distinct failure episodes must warn twice, not once per process."""
+    warnings: list[str] = []
+    persistence, _db = make_persistence(tmp_path, log_fn=warnings.append)
+    ctrl = controller_with_queue()
+
+    with patch(
+        "opencohost.core.agenda_persistence.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("disk I/O error"),
+    ):
+        persistence.save_if_changed(ctrl)
+    assert len(warnings) == 1
+
+    assert persistence.save_if_changed(ctrl) is True  # healthy again
+
+    extra = ctrl.add_topic("Tema extra", approved=True)
+    ctrl.queue_topic(extra.id)
+    with patch(
+        "opencohost.core.agenda_persistence.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("disk I/O error"),
+    ):
+        persistence.save_if_changed(ctrl)
+    assert len(warnings) == 2
+
+
+def test_oversized_constraints_row_is_skipped(tmp_path: Path) -> None:
+    """A hostile row with a huge constraints array must not stall the launch
+    sanitizing 100k elements — it is skipped outright."""
+    import json as _json
+
+    persistence, db = make_persistence(tmp_path)
+    persistence.save_if_changed(controller_with_queue())
+
+    huge = _json.dumps(["x"] * 100_000)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO agenda_topics (position, title, angle, constraints, priority, response_length, status, editorial_card_id, editorial_card_consumed) "
+            "VALUES (50, 'Tema hostil', '', ?, 'normal', 'normal', 'queued', NULL, 0)",
+            (huge,),
+        )
+
+    fresh = KiraAgendaController()
+    restored = AgendaPersistence(db).load_into(fresh)
+
+    assert restored == 3
+    assert all(t.title != "Tema hostil" for t in fresh.topics)
+
+
+def test_constructor_fails_open_when_directory_creation_fails(tmp_path: Path) -> None:
+    with patch("opencohost.core.agenda_persistence.Path.mkdir", side_effect=PermissionError("denied")):
+        persistence = AgendaPersistence(str(tmp_path / "sub" / "cards.db"))
+    assert persistence is not None  # launch never breaks
+
+
+def test_concurrent_saves_do_not_corrupt_disk(tmp_path: Path) -> None:
+    """save_if_changed can be reached from the chat-source thread and the Tk
+    thread; concurrent calls must serialize, never raise, and leave disk
+    matching the controller."""
+    import threading
+
+    persistence, db = make_persistence(tmp_path)
+    ctrl = controller_with_queue()
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(10):
+                persistence.save_if_changed(ctrl)
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []
+    fresh = KiraAgendaController()
+    assert AgendaPersistence(db).load_into(fresh) == 3
+
+
+# ---------------------------------------------------------------------------
 # app_shell wiring (source-level, no CTk import)
 # ---------------------------------------------------------------------------
 
@@ -333,3 +443,6 @@ class TestAppShellPersistenceWiring:
         src = self._source()
         assert "save_if_changed" in src
         assert "persist_fn" in src
+
+    def test_app_shell_pushes_restored_settings_into_panel(self) -> None:
+        assert "apply_session_settings" in self._source()
