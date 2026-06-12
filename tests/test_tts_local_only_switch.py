@@ -234,9 +234,21 @@ class TestTtsLocalOnlySettings:
 # ===========================================================================
 
 class TestMotorLocalOnlyProperty:
-    def test_default_is_false(self):
-        """MotorVocalIA.tts_local_only starts False (backward compat)."""
-        motor, *_ = _make_motor()
+    def test_default_is_false(self, tmp_path):
+        """MotorVocalIA.tts_local_only starts False (backward compat).
+
+        Patches the loader to a missing file so the test never depends on
+        the real user config left behind by an app session.
+        """
+        from unittest.mock import patch
+        from opencohost.config import settings
+
+        missing = str(tmp_path / "absent.json")
+        with patch(
+            "opencohost.core.llm_engine.load_tts_local_only",
+            lambda: settings.load_tts_local_only(missing),
+        ):
+            motor, *_ = _make_motor()
         assert motor.tts_local_only is False
 
     def test_can_be_set_to_true(self):
@@ -247,15 +259,21 @@ class TestMotorLocalOnlyProperty:
 
     def test_set_tts_local_only_command_enables(self):
         """Dispatching set_tts_local_only True updates tts_local_only."""
+        from unittest.mock import patch
+
         motor, *_ = _make_motor()
-        motor._dispatch_command("set_tts_local_only", True)
+        with patch("opencohost.core.llm_engine.save_tts_local_only"):
+            motor._dispatch_command("set_tts_local_only", True)
         assert motor.tts_local_only is True
 
     def test_set_tts_local_only_command_disables(self):
         """Dispatching set_tts_local_only False updates tts_local_only."""
+        from unittest.mock import patch
+
         motor, *_ = _make_motor()
         motor.tts_local_only = True
-        motor._dispatch_command("set_tts_local_only", False)
+        with patch("opencohost.core.llm_engine.save_tts_local_only"):
+            motor._dispatch_command("set_tts_local_only", False)
         assert motor.tts_local_only is False
 
 
