@@ -49,6 +49,7 @@ from opencohost.config.settings import (
     load_tts_local_only,
 )
 from opencohost.config.logger import get_logger
+from opencohost.core.agenda_persistence import AgendaPersistence
 from opencohost.core.topic_inbox import TopicInboxStore
 from opencohost.ui.topic_inbox_bridge import TopicInboxBridge
 from opencohost.ui.tts_speed_control import build_tts_speed_selector
@@ -206,7 +207,9 @@ class VocalAIApp(ctk.CTk):
         self._kira_agenda_prefetched_action: AgendaAction | None = None
         self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
-        self._topic_inbox_bridge = TopicInboxBridge(TopicInboxStore(EDITORIAL_CARDS_DB), log_fn=self._on_stream_admin_log)
+        self._agenda_persistence = AgendaPersistence(EDITORIAL_CARDS_DB, log_fn=self._on_stream_admin_log)
+        self._agenda_persistence.load_into(self.kira_agenda)
+        self._topic_inbox_bridge = TopicInboxBridge(TopicInboxStore(EDITORIAL_CARDS_DB), log_fn=self._on_stream_admin_log, persist_fn=lambda: self._agenda_persistence.save_if_changed(self.kira_agenda))
         self._topic_inbox_bridge.start_polling(lambda fn, delay: self._safe_after(fn, delay), self._kira_agenda_update_status)
         self.after(100, self._start_motor)
         # Wire motor_ia to voice control panel
@@ -868,6 +871,8 @@ class VocalAIApp(ctk.CTk):
         )
         self.cohost_agenda_panel.build(cohost_panel_frame)
         self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
+        # Reflect restored session settings so dispatch paths do not clobber them with widget defaults.
+        self.cohost_agenda_panel.apply_session_settings(self.kira_agenda.max_turns_per_topic, self.kira_agenda.rhythm, self.kira_agenda.response_length, self.kira_agenda.safety_mode)
 
         music_panel_frame = ctk.CTkFrame(tab_product_music, fg_color="#0f151c", corner_radius=18)
         music_panel_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
@@ -1393,6 +1398,9 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_update_status(self) -> None:
         if not hasattr(self, "stream_admin_ui") or not hasattr(self, "kira_agenda"):
             return
+        # Write-through persistence: every agenda mutation funnels through
+        # this method; the call is a no-op when nothing actually changed.
+        self._agenda_persistence.save_if_changed(self.kira_agenda)
         active = self.kira_agenda.active_topic
         queued = len(self.kira_agenda.queued_topics())
         recovery = self.kira_agenda.recovery
