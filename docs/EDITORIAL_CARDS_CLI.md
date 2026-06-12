@@ -145,6 +145,49 @@ Create (or update) a card with an optional expiry date. Accepts `YYYY-MM-DD`
 or full ISO 8601 format. Dates in the past are rejected with exit 1. Expired
 cards are excluded from auto-attach candidates and cannot be armed.
 
+## Topic inbox (`topic ...`)
+
+Agents can also propose *stream topics* (not cards) for human review. A
+proposal is just a title + angle; the operator approves or discards it in the
+app UI. **Approval is never available via CLI** — `topic approve` always exits
+1 with an explanation. This is a deliberate human-only gate.
+
+Proposals are untrusted input: validation runs at propose time AND again at
+read time inside the app, so writing rows directly to SQLite does not bypass
+the gate. Limits: title 120 chars, angle 600 chars, 8 tags (40 chars each),
+source 80 chars, 30 pending proposals; code/HTML content is rejected.
+Re-proposing a title that normalizes to the same slug
+(accents/emoji/case-insensitive) updates the existing pending row instead of
+duplicating it; punctuation-only titles never dedupe.
+
+**Word-boundary caveat for agents**: the code/HTML filter rejects text
+containing any of these words (case-insensitive, whole-word): `function`,
+`class`, `import`, `from`, `select`, `insert`, `update`, `delete`, `drop`,
+`script`. A title like "Lessons from the 90s" fails with "title contains
+code or HTML" — rephrase (e.g. "Lessons of the 90s"). This mirrors the
+app-wide agenda filter; refining it is a pending product decision.
+
+### `topic propose --title TEXT --angle TEXT [--tag TEXT]... [--source TEXT]`
+
+Insert (or dedupe-update) a proposal. Prints `<ti_id> proposed` (or the full
+row with `--json`). Exit 1 on validation failure or when the inbox is full.
+`--from-json` reads `{"title", "angle", "tags", "source"}` from stdin instead.
+
+### `topic list [--json]`
+
+Pending proposals with the angle visible. Text mode hides rows that fail
+read-time validation (count is reported); `--json` returns
+`{"valid": [...], "invalid": [...]}` with `invalid_reason` per bad row.
+
+### `topic discard <topic_id>`
+
+Discard a pending proposal. Exit 1 if the id is unknown or not pending.
+
+### `topic approve <topic_id>`
+
+Always refused (exit 1): approval happens in the OpenCohost app, in the
+agenda suggestions panel, where the operator reads title and angle first.
+
 ## Card lifecycle
 
 ```

@@ -95,6 +95,28 @@ so Kira can receive curated internet/stream-topic context.
 - Runtime validation pending: create + arm a card via CLI, then confirm the
   agenda bridge injects `<editorial_context>` into a real Kira prompt.
 
+## Topic inbox — 2026-06-12
+
+Backlog #2 delivered (branch `feat/topic-inbox`): external agents propose
+stream topics; the operator approves in the app UI.
+
+- Core: `opencohost/core/topic_inbox.py` — same DB as editorial cards;
+  validation at write AND read time (rows failing read-time validation are
+  never approvable, even via direct SQLite writes — edge case 5); caps
+  (title 120 / angle 600 / 8 tags / 30 pending); slug dedupe; fail-open.
+- CLI: `python -m opencohost.editorial_cli topic propose/list/discard`
+  (+`--from-json`). `topic approve` is always refused — human-only gate.
+  Contract: `docs/EDITORIAL_CARDS_CLI.md`.
+- UI: `opencohost/ui/topic_inbox_bridge.py` polls every 7s fail-open;
+  proposals render in the suggestions panel tagged 🤖 with the angle
+  visible; approve creates an APPROVED+QUEUED agenda topic.
+- Known sharp edge: the code/HTML rejection patterns (mirrored from
+  BULK_CODE_PATTERNS by design) reject titles containing common words like
+  "from"/"update"/"delete". Same behavior as agenda topics today; refine
+  only with a product decision.
+- Runtime validation pending (owner): propose via CLI while the app runs →
+  suggestion appears within ~7s → approve → topic enters the agenda queue.
+
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
 The packaging & distribution track executed Phases 2–4 end-to-end in one day
