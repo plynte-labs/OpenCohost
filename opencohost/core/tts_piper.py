@@ -17,6 +17,13 @@ except ImportError:
     _piper_voice = None  # type: ignore[assignment]
     _PIPER_AVAILABLE = False
 
+try:
+    # Available since piper-tts 1.2; older versions only support the
+    # two-argument synthesize_wav call (model-default speaking rate).
+    from piper.config import SynthesisConfig as _SynthesisConfig
+except ImportError:
+    _SynthesisConfig = None  # type: ignore[assignment]
+
 
 class PiperEngine:
     """
@@ -26,8 +33,14 @@ class PiperEngine:
     threads cannot race on the same voice object.
     """
 
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, length_scale: float = 1.0) -> None:
         self._model_path = model_path
+        # 1.0 = model default; >1.0 slows speech down proportionally.
+        # Requires SynthesisConfig (piper-tts >= 1.2); silently ignored otherwise.
+        self._length_scale = float(length_scale or 1.0)
+        self._syn_config = None
+        if _SynthesisConfig is not None and self._length_scale != 1.0:
+            self._syn_config = _SynthesisConfig(length_scale=self._length_scale)
         self._voice = None
         self._lock = threading.Lock()
 
@@ -77,6 +90,18 @@ class PiperEngine:
         """Return True only if a voice model was successfully loaded."""
         return self._voice is not None
 
+    def set_length_scale(self, length_scale: float) -> None:
+        """Change the speaking rate at runtime (1.0 = default; >1.0 = slower).
+
+        Takes the synthesis lock so an in-flight synthesize() always uses a
+        consistent config. No-op rate-wise on piper-tts without SynthesisConfig.
+        """
+        with self._lock:
+            self._length_scale = float(length_scale or 1.0)
+            self._syn_config = None
+            if _SynthesisConfig is not None and self._length_scale != 1.0:
+                self._syn_config = _SynthesisConfig(length_scale=self._length_scale)
+
     def synthesize(self, text: str, output_path: str) -> bool:
         """
         Synthesize *text* and write the result as a WAV file to *output_path*.
@@ -87,7 +112,10 @@ class PiperEngine:
         with self._lock:
             try:
                 with wave.open(output_path, "wb") as wav_file:
-                    self._voice.synthesize_wav(text, wav_file)
+                    if self._syn_config is not None:
+                        self._voice.synthesize_wav(text, wav_file, syn_config=self._syn_config)
+                    else:
+                        self._voice.synthesize_wav(text, wav_file)
                 return True
             except Exception as exc:
                 logger.warning("Piper: error en sintesis: %s", exc)

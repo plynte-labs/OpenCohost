@@ -51,6 +51,7 @@ from opencohost.config.settings import (
 from opencohost.config.logger import get_logger
 from opencohost.core.topic_inbox import TopicInboxStore
 from opencohost.ui.topic_inbox_bridge import TopicInboxBridge
+from opencohost.ui.tts_speed_control import build_tts_speed_selector
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
 from opencohost.core.audio_bed import AudioBedEngine
@@ -730,6 +731,7 @@ class VocalAIApp(ctk.CTk):
         if load_tts_local_only():
             self.switch_local_only.select()
         ctk.CTkLabel(frame_tts_memory, text="ON: nada de texto sale de tu PC, voz algo menos natural. OFF: voz ligera más natural vía Edge-TTS (envía el texto a servidores de Microsoft).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
+        self.tts_speed_selector = build_tts_speed_selector(frame_tts_memory, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
@@ -1363,25 +1365,26 @@ class VocalAIApp(ctk.CTk):
             return False
         if self._kira_agenda_has_higher_priority_pending(action):
             self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
-            self._kira_agenda_clear_prefetch()
-            return False
+            return self._kira_agenda_clear_prefetch()
         if self._kira_agenda_has_non_agenda_audio_work():
             self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
-            self._kira_agenda_clear_prefetch()
-            return False
+            return self._kira_agenda_clear_prefetch()
         if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
             return False
-        self.kira_agenda.start_prefetched_action(action)
+        if not self.kira_agenda.start_prefetched_action(action):
+            self._on_stream_admin_log("[Kira Agenda] Prefetch descartado: el tema ya se completó.")
+            return self._kira_agenda_clear_prefetch()
         self._kira_agenda_prefetched_action = None
         if self.motor_ia.play_prefetched_agenda():
             self._kira_agenda_update_status()
             return True
         return False
 
-    def _kira_agenda_clear_prefetch(self) -> None:
+    def _kira_agenda_clear_prefetch(self) -> bool:
         self._kira_agenda_prefetched_action = None
         if hasattr(self.motor_ia, "clear_prefetched_agenda"):
             self.motor_ia.clear_prefetched_agenda()
+        return False
 
     def _is_kira_agenda_speech_source(self) -> bool:
         source = getattr(self.motor_ia, "current_speech_source", "") or ""
@@ -2728,11 +2731,7 @@ class VocalAIApp(ctk.CTk):
             self.lbl_kira_tts_state.configure(text="TTS: idle", fg_color="#1b2633")
 
     def _al_cambiar_tts_local_only(self) -> None:
-        """Callback for the Solo TTS local (Piper) privacy switch.
-
-        Dispatches set_tts_local_only to the engine (which persists the setting).
-        Takes effect immediately without restart.
-        """
+        """Dispatch set_tts_local_only to the engine (persists; immediate effect)."""
         enabled = bool(self.switch_local_only.get())
         self.motor_ia.command_queue.put(("set_tts_local_only", enabled))
 

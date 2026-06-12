@@ -526,6 +526,50 @@ class TestGAP004EmergencyStopVsPrefetchThread:
         assert action.kind == "enqueue" or action.kind == "none"
 
 
+class TestDoubleClosingPrefetch:
+    """Regression: a closing prefetched while the closing line itself was
+    playing must not be spoken after the topic completes (orphan audio that
+    sounds like the same goodbye repeated with different wording)."""
+
+    def test_stale_closing_prefetch_is_discarded_after_topic_completes(self):
+        app = object.__new__(app_shell.VocalAIApp)
+        app.motor_ia = _build_motor()
+        app.motor_ia._prefetched_agenda = {
+            "payload": "closing prompt",
+            "dialogo": "segunda despedida duplicada",
+            "priority": 2,
+            "source": "kira-agenda-stop",
+        }
+        app.motor_ia._prefetch_done.set()
+
+        ctrl, _topic_id = _build_agenda_with_topic(turns=1)
+        ctrl.next_action()
+        ctrl.mark_generation_accepted()
+        closing = ctrl.prefetch_action_after_current_speech()
+        assert closing.source == "kira-agenda-stop"
+        ctrl.mark_speech_complete()
+        ctrl.start_prefetched_action(closing)
+        ctrl.mark_generation_accepted()
+        ctrl.mark_speech_complete()  # closing finished → topic completed
+        assert ctrl.active_topic is None
+
+        app.kira_agenda = ctrl
+        app._kira_agenda_prefetched_action = AgendaAction(
+            kind="enqueue",
+            prompt="closing prompt",
+            priority=2,
+            source="kira-agenda-stop",
+        )
+        app._on_stream_admin_log = MagicMock()
+        app._kira_agenda_update_status = MagicMock()
+
+        with patch.object(app.motor_ia, "play_prefetched_agenda", wraps=app.motor_ia.play_prefetched_agenda) as play:
+            assert app._kira_agenda_play_prefetched_if_ready() is False
+
+        play.assert_not_called()
+        assert app.motor_ia._prefetched_agenda is None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Cross-gap: Combined orchestration sequence
 # ═══════════════════════════════════════════════════════════════════════════

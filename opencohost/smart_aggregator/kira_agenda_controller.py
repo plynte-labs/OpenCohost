@@ -724,6 +724,10 @@ class KiraAgendaController:
         """
         if self.state != AgendaState.SPEAKING or not self.active_topic:
             return AgendaAction.none()
+        if self.active_topic.status == TopicStatus.CLOSING:
+            # The closing line is already playing; prefetching again would
+            # generate a second goodbye for the same topic.
+            return AgendaAction.none()
         projected_turns = min(
             self.max_turns_per_topic,
             self.active_topic.turns_spoken + max(1, self._pending_turns_spoken),
@@ -741,10 +745,14 @@ class KiraAgendaController:
             turns=max(1, turns),
         )
 
-    def start_prefetched_action(self, action: AgendaAction) -> None:
-        """Adopt a previously previewed agenda action right before cached TTS."""
+    def start_prefetched_action(self, action: AgendaAction) -> bool:
+        """Adopt a previously previewed agenda action right before cached TTS.
+
+        Returns True when adopted; False means the action is stale (e.g. the
+        topic already completed) and the cached audio must not be played.
+        """
         if action.kind != "enqueue" or not self.active_topic:
-            return
+            return False
         self._pending_turns_spoken = max(1, action.turns)
         self._pending_action_source = action.source
         if action.source == "kira-agenda-stop":
@@ -752,6 +760,7 @@ class KiraAgendaController:
             self.state = AgendaState.TOPIC_CLOSING
         else:
             self.state = AgendaState.GENERATING
+        return True
 
     def chat_signal_due(self) -> bool:
         """Return True when a compact chat pulse may steer the next agenda beat."""

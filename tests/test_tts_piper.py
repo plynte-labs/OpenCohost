@@ -155,6 +155,80 @@ class TestIsAvailable:
 
 
 # ---------------------------------------------------------------------------
+# Speaking-rate control — length_scale via SynthesisConfig
+# ---------------------------------------------------------------------------
+
+class _FakeSynthesisConfig:
+    """Stub so the tests do not depend on the installed piper-tts version."""
+
+    def __init__(self, length_scale=1.0):
+        self.length_scale = length_scale
+
+
+class TestLengthScale:
+    def _loaded_engine(self, mock_piper_voice, length_scale=None):
+        from opencohost.core.tts_piper import PiperEngine
+
+        def fake_synthesize_wav(text, wav_file, **kwargs):
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\x00" * 44)
+
+        mock_voice = MagicMock()
+        mock_voice.synthesize_wav.side_effect = fake_synthesize_wav
+        mock_piper_voice.PiperVoice.load.return_value = mock_voice
+        if length_scale is None:
+            engine = PiperEngine("/fake/model.onnx")
+        else:
+            engine = PiperEngine("/fake/model.onnx", length_scale=length_scale)
+        engine.load()
+        return engine, mock_voice
+
+    def test_default_engine_passes_no_syn_config(self, tmp_path):
+        """length_scale=1.0 (default) must keep the legacy two-arg call."""
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
+            engine, mock_voice = self._loaded_engine(mock_piper_voice)
+            assert engine.synthesize("hola", str(tmp_path / "out.wav")) is True
+
+        kwargs = mock_voice.synthesize_wav.call_args.kwargs
+        assert "syn_config" not in kwargs
+
+    def test_custom_length_scale_passes_syn_config(self, tmp_path):
+        """length_scale != 1.0 must reach synthesize_wav via syn_config."""
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._SynthesisConfig", _FakeSynthesisConfig), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
+            engine, mock_voice = self._loaded_engine(mock_piper_voice, length_scale=1.2)
+            assert engine.synthesize("hola", str(tmp_path / "out.wav")) is True
+
+        syn_config = mock_voice.synthesize_wav.call_args.kwargs["syn_config"]
+        assert syn_config.length_scale == pytest.approx(1.2)
+
+    def test_missing_synthesis_config_falls_back_to_default_call(self, tmp_path):
+        """Older piper-tts without SynthesisConfig must not crash synthesis."""
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._SynthesisConfig", None), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
+            engine, mock_voice = self._loaded_engine(mock_piper_voice, length_scale=1.2)
+            assert engine.synthesize("hola", str(tmp_path / "out.wav")) is True
+
+        kwargs = mock_voice.synthesize_wav.call_args.kwargs
+        assert "syn_config" not in kwargs
+
+    def test_motor_wires_length_scale_from_settings(self):
+        """MotorVocalIA must build its PiperEngine with the persisted speed."""
+        import queue
+        from opencohost.core import llm_engine
+
+        with patch("opencohost.core.llm_engine.load_tts_speed", return_value=1.23):
+            motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+        assert motor._piper._length_scale == pytest.approx(1.23)
+
+
+# ---------------------------------------------------------------------------
 # Task 3.5 — _is_connection_error() classification
 # ---------------------------------------------------------------------------
 

@@ -24,6 +24,7 @@ from opencohost.config.settings import (
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
+    load_tts_speed, save_tts_speed,
 )
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
@@ -133,7 +134,7 @@ class MotorVocalIA(threading.Thread):
             self._edge_tts_offline: bool = True
         else:
             self._edge_tts_offline: bool = False
-        self._piper = PiperEngine(TTS_LOCAL_MODEL_PATH)
+        self._piper = PiperEngine(TTS_LOCAL_MODEL_PATH, length_scale=load_tts_speed())
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
         self.health_monitor = None
@@ -306,6 +307,12 @@ class MotorVocalIA(threading.Thread):
                 "ON" if enabled else "OFF",
                 "disabled — all light synthesis via Piper" if enabled else "enabled",
             )
+
+        elif tipo == "set_tts_speed":
+            scale = float(payload)
+            self._piper.set_length_scale(scale)
+            save_tts_speed(scale)
+            logger.info("Piper speech rate set to length_scale=%.2f", scale)
 
         elif tipo == "set_profile":
             self.system_prompt = payload.get("prompt", SYSTEM_PROMPT)
