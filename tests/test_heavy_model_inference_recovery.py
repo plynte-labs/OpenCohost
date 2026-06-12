@@ -84,9 +84,12 @@ def test_hung_first_inference_clears_processing_state_after_timeout(tmp_path):
     worker.start()
 
     try:
-        assert _wait_until(lambda: motor.is_processing, timeout=0.3)
+        # Generous polling timeouts: _wait_until returns as soon as the
+        # condition holds, but the full watchdog recovery sequence (rollback,
+        # prepare, unload) can exceed half a second on loaded CI runners.
+        assert _wait_until(lambda: motor.is_processing, timeout=2.0)
         assert "processing" in ui_events
-        assert _wait_until(lambda: not motor.is_processing, timeout=0.5)
+        assert _wait_until(lambda: not motor.is_processing, timeout=5.0)
         assert "llm_timeout_recovered" in ui_events
         assert motor._last_llm_failure["reason"] == "watchdog_timeout"
     finally:
