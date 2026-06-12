@@ -49,6 +49,7 @@ from opencohost.config.settings import (
     load_tts_local_only,
 )
 from opencohost.config.logger import get_logger
+from opencohost.ui.tts_speed_control import build_tts_speed_selector
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
 from opencohost.core.audio_bed import AudioBedEngine
@@ -725,6 +726,7 @@ class VocalAIApp(ctk.CTk):
         if load_tts_local_only():
             self.switch_local_only.select()
         ctk.CTkLabel(frame_tts_memory, text="ON: nada de texto sale de tu PC, voz algo menos natural. OFF: voz ligera más natural vía Edge-TTS (envía el texto a servidores de Microsoft).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
+        self.tts_speed_selector = build_tts_speed_selector(frame_tts_memory, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
@@ -2743,11 +2745,7 @@ class VocalAIApp(ctk.CTk):
             self.lbl_kira_tts_state.configure(text="TTS: idle", fg_color="#1b2633")
 
     def _al_cambiar_tts_local_only(self) -> None:
-        """Callback for the Solo TTS local (Piper) privacy switch.
-
-        Dispatches set_tts_local_only to the engine (which persists the setting).
-        Takes effect immediately without restart.
-        """
+        """Dispatch set_tts_local_only to the engine (persists; immediate effect)."""
         enabled = bool(self.switch_local_only.get())
         self.motor_ia.command_queue.put(("set_tts_local_only", enabled))
 
