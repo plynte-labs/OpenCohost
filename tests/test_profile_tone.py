@@ -9,13 +9,20 @@ import re
 
 import pytest
 
-from opencohost.config.settings import BASE_DIR
+from opencohost.config.settings import BASE_DIR, PACKAGE_CONFIG_DIR
 
 PERFILES_FILE = os.path.join(BASE_DIR, "perfiles.json")
+DEFAULT_PROFILES_FILE = os.path.join(PACKAGE_CONFIG_DIR, "default_profiles.json")
 
 
 def _load_profiles() -> dict:
-    with open(PERFILES_FILE, "r", encoding="utf-8") as f:
+    """Load the user's seeded profiles, or the seed source when absent.
+
+    perfiles.json is gitignored user state; on clean environments (CI) the
+    canonical contract lives in default_profiles.json, which seeds it.
+    """
+    path = PERFILES_FILE if os.path.isfile(PERFILES_FILE) else DEFAULT_PROFILES_FILE
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -113,6 +120,10 @@ class TestProfileExistence:
         for name in ["Comunidad", "Calmado", "Técnico", "Show"]:
             assert name in profiles, f"Missing profile: {name}"
 
+    @pytest.mark.skipif(
+        not os.path.isfile(PERFILES_FILE),
+        reason="legacy preservation only applies to an existing user perfiles.json",
+    )
     def test_legacy_profiles_preserved(self):
         profiles = _load_profiles()
         for name in ["Akira", "Akira (Learn)", "Gemma", "Hagg", "Vacio", "Akira (Uncensored)"]:

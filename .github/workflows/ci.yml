@@ -31,8 +31,11 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Sync dependencies (dev)
-        run: uv sync --locked --extra dev
+      - name: Sync dependencies (dev + integrations)
+        # integrations provides pytchat (and friends) — chat_source raises at
+        # construction when pytchat is absent, and its tests exercise that
+        # integration with the package importable.
+        run: uv sync --locked --extra dev --extra integrations
 
       - name: Tests
         run: uv run pytest tests/ -q
