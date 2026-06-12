@@ -117,6 +117,7 @@ jobs:
           import hashlib
           import io
           import os
+          import ssl
           import sys
           import zipfile
           import urllib.request
@@ -128,7 +129,9 @@ jobs:
               version,
               asset,
           )
-          data = urllib.request.urlopen(url).read()
+          data = urllib.request.urlopen(
+              url, context=ssl.create_default_context()
+          ).read()
           actual = hashlib.sha256(data).hexdigest()
           if actual != expected_sha256:
               sys.exit(
@@ -151,6 +154,28 @@ jobs:
             --version "${{ needs.build-src.outputs.version }}" \
             --url "${{ needs.build-src.outputs.src_url }}" \
             --sha256 "${{ needs.build-src.outputs.src_sha256 }}"
+
+      - name: Bundle CA certificates for clean-Windows SSL verification
+        run: |
+          python - <<'EOF'
+          # Install certifi, then copy its bundled cacert.pem into packaging/vendor/
+          # so the frozen launcher can verify HTTPS downloads on machines where the
+          # Windows AuthRoot CTL has not been lazily populated by a browser yet.
+          import subprocess
+          import sys
+          import shutil
+          import os
+
+          subprocess.check_call(
+              [sys.executable, "-m", "pip", "install", "--quiet", "certifi==2026.5.20"],
+              stdout=subprocess.DEVNULL,
+          )
+          import certifi
+          os.makedirs(os.path.join("packaging", "vendor"), exist_ok=True)
+          dest = os.path.join("packaging", "vendor", "cacert.pem")
+          shutil.copy(certifi.where(), dest)
+          print("Bundled cacert.pem from certifi %s -> %s" % (certifi.__version__, dest))
+          EOF
 
       - name: Install build tooling (PyInstaller)
         run: uv pip install --system pyinstaller

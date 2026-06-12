@@ -46,6 +46,7 @@ import platform as _platform_mod
 import queue
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -93,6 +94,49 @@ OLLAMA_MISSING_MESSAGE = (
 
 
 # ---------------------------------------------------------------------------
+# SSL context — bundled CA bundle for clean Windows installs
+# ---------------------------------------------------------------------------
+
+_SSL_CONTEXT = None  # module-level cache; built once by _ssl_context()
+
+
+def _ssl_context():
+    """Return a cached SSLContext that trusts both the OS store and a bundled pem.
+
+    Background: on a clean Windows install the AuthRoot CTL is populated lazily
+    the first time a user visits a site in a browser.  A frozen Python binary
+    never triggers that update, so github.com's root CA may be absent from the
+    Windows cert store and every HTTPS download fails with
+    CERTIFICATE_VERIFY_FAILED.
+
+    Fix: augment the OS-level context with a bundled cacert.pem (copied from
+    certifi by the CI build step) when one is present.  The pem is a DATA FILE;
+    certifi is never imported at runtime — stdlib only.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+
+    ctx = ssl.create_default_context()
+
+    # Search the same directories used for other bundled assets (icons, uv).
+    for directory in _bundled_data_dirs():
+        pem = os.path.join(directory, "cacert.pem")
+        if os.path.isfile(pem):
+            try:
+                ctx.load_verify_locations(cafile=pem)
+                LOG.info("Loaded bundled CA bundle: %s", pem)
+            except ssl.SSLError as exc:
+                LOG.warning("Bundled cacert.pem is invalid, ignoring: %s", exc)
+            except OSError as exc:
+                LOG.warning("Could not read bundled cacert.pem: %s", exc)
+            break
+
+    _SSL_CONTEXT = ctx
+    return _SSL_CONTEXT
+
+
+# ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
@@ -133,7 +177,10 @@ def check_ollama(http_url=OLLAMA_HTTP_URL, timeout=OLLAMA_TIMEOUT):
             http_url,
             headers={"User-Agent": "OpenCohost-Launcher"},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        # context= is inert for the plain-http localhost ping (urllib only uses
+        # it for https), but it keeps the no-naked-urlopen contract uniform and
+        # future-proofs a switch to an https endpoint.
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as response:
             response.read()
         http_ok = True
         LOG.info("Ollama HTTP ping OK at %s", http_url)
@@ -569,7 +616,7 @@ def verify_sha256(path, expected):
 
 def _http_open(url, timeout=60):
     request = urllib.request.Request(url, headers={"User-Agent": "OpenCohost-Launcher"})
-    return urllib.request.urlopen(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=_ssl_context())
 
 
 def download_with_retries(url, dest, expected_sha256=None, reporter=None, cancel=None,
