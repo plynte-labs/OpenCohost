@@ -349,6 +349,51 @@ def test_hostile_typed_rows_injected_directly_do_not_break_list_pending(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# 15e. Rows outside the ti_ namespace are invalid at read-time
+# ---------------------------------------------------------------------------
+
+def test_non_ti_namespace_row_lands_in_invalid(tmp_path: Path) -> None:
+    """A hostile row with a foreign id but valid-looking content must never
+    surface as approvable: the UI routes approve/reject by the ti_ prefix,
+    so a non-ti_ row would render but be impossible to dismiss."""
+    store, db = make_store(tmp_path)
+    valid_propose(store)  # ensure table exists
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO topic_inbox (id, title, angle, tags, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            ("evil-no-prefix", "Looks Totally Legit", "Nice angle.", "[]", "attacker", now, now),
+        )
+
+    result = store.list_pending()
+    assert "evil-no-prefix" in [r["id"] for r in result["invalid"]]
+    assert "evil-no-prefix" not in [r["id"] for r in result["valid"]]
+
+
+# ---------------------------------------------------------------------------
+# 15f. Read path uses a short SQLite busy timeout (UI thread protection)
+# ---------------------------------------------------------------------------
+
+def test_list_pending_uses_short_read_timeout(tmp_path: Path) -> None:
+    """list_pending runs on the Tk main thread every poll; a writer holding
+    the lock must stall it for READ_TIMEOUT_SECONDS, not sqlite's 5s default."""
+    from unittest.mock import patch
+    from opencohost.core.topic_inbox import READ_TIMEOUT_SECONDS
+
+    store, _db = make_store(tmp_path)
+    valid_propose(store)
+
+    with patch("opencohost.core.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
+        store.list_pending()
+
+    assert connect.call_args.kwargs.get("timeout") == READ_TIMEOUT_SECONDS
+    assert READ_TIMEOUT_SECONDS < 5.0
+
+
+# ---------------------------------------------------------------------------
 # 15. Fail-open: corrupt DB returns empty dict
 # ---------------------------------------------------------------------------
 

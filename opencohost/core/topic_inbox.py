@@ -39,6 +39,12 @@ ANGLE_MAX: int = 600
 TAGS_MAX: int = 8
 TAG_MAX_CHARS: int = 40
 PENDING_CAP: int = 30
+# Id namespace: the UI routes approve/reject by this prefix, so rows outside
+# it are quarantined at read-time (they would render but be undismissable).
+ID_PREFIX: str = "ti_"
+# list_pending runs on the UI thread; never wait for a writer lock longer
+# than this (sqlite default is 5s — a visible freeze).
+READ_TIMEOUT_SECONDS: float = 0.5
 
 # ---------------------------------------------------------------------------
 # Code/HTML detection patterns
@@ -142,7 +148,7 @@ class TopicInboxStore:
                     "Approve or discard some before adding more."
                 )
 
-            new_id = "ti_" + uuid4().hex
+            new_id = ID_PREFIX + uuid4().hex
             conn.execute(
                 """INSERT INTO topic_inbox
                    (id, title, angle, tags, source, status, created_at, updated_at)
@@ -161,7 +167,7 @@ class TopicInboxStore:
         Returns {'valid': [...], 'invalid': [...]} — never raises (fail-open).
         """
         try:
-            with self._connect() as conn:
+            with self._connect(timeout=READ_TIMEOUT_SECONDS) as conn:
                 self._ensure_table(conn)
                 rows = conn.execute(
                     "SELECT * FROM topic_inbox WHERE status='proposed' ORDER BY created_at ASC"
@@ -175,6 +181,10 @@ class TopicInboxStore:
 
         for row in rows:
             d = _row_to_dict(row)
+            if not str(d.get("id") or "").startswith(ID_PREFIX):
+                d["invalid_reason"] = f"id outside the {ID_PREFIX} namespace"
+                invalid.append(d)
+                continue
             try:
                 error = self._validate_row(d["title"], d["angle"], d["tags"])
             except Exception as exc:
@@ -247,8 +257,8 @@ class TopicInboxStore:
             """
         )
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    def _connect(self, timeout: float = 5.0) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         return conn
 

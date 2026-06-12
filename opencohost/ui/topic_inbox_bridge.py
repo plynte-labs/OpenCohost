@@ -19,12 +19,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from opencohost.core.topic_inbox import ID_PREFIX as INBOX_ID_PREFIX
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_MS = 7000
-INBOX_ID_PREFIX = "ti_"
 INBOX_SOURCE_TAG = "🤖"
 
 
@@ -141,9 +141,14 @@ class TopicInboxBridge:
 
         try:
             topic = agenda_controller.add_topic(row["title"], row["angle"], approved=True)
-            agenda_controller.queue_topic(topic.id)
         except (ValueError, KeyError) as exc:
             self._log(f"[Topic Inbox] No se pudo aprobar “{str(row['title'])[:40]}”: {exc}")
+            return False
+        try:
+            agenda_controller.queue_topic(topic.id)
+        except (ValueError, KeyError) as exc:
+            agenda_controller.topics.remove(topic)
+            self._log(f"[Topic Inbox] No se pudo encolar “{str(row['title'])[:40]}”: {exc}")
             return False
 
         if not self._store.approve(topic_id):

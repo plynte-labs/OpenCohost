@@ -232,6 +232,51 @@ def test_approve_unknown_id_returns_false(tmp_path: Path) -> None:
     assert bridge.approve("ti_nope", ctrl) is False
 
 
+def test_non_ti_pending_row_never_renders(tmp_path: Path) -> None:
+    """A hostile row with a foreign id must not reach the suggestions panel
+    (it would be undismissable: approve/reject route by the ti_ prefix)."""
+    import sqlite3
+    from datetime import datetime, timezone
+
+    bridge, store = make_bridge(tmp_path)
+    store.propose(title="Legit Topic", angle="ok", tags=[], source="bot")
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(str(tmp_path / "cards.db")) as conn:
+        conn.execute(
+            """INSERT INTO topic_inbox (id, title, angle, tags, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            ("evil-no-prefix", "Looks Totally Legit", "Nice angle.", "[]", "attacker", now, now),
+        )
+    bridge.refresh()
+
+    ids = [s["topic_id"] for s in bridge.pending_suggestions()]
+    assert "evil-no-prefix" not in ids
+    assert len(ids) == 1
+
+
+def test_approve_rolls_back_topic_when_queue_fails(tmp_path: Path) -> None:
+    """If queue_topic raises after add_topic, the orphan APPROVED topic must
+    not remain in the controller."""
+    bridge, store = make_bridge(tmp_path)
+    row = store.propose(title="Queue Fails Topic", angle="a", tags=[], source="bot")
+    bridge.refresh()
+    ctrl = KiraAgendaController()
+    original_queue = ctrl.queue_topic
+
+    def broken_queue(topic_id: str) -> None:
+        raise ValueError("queue exploded")
+
+    ctrl.queue_topic = broken_queue  # type: ignore[method-assign]
+    try:
+        assert bridge.approve(row["id"], ctrl) is False
+    finally:
+        ctrl.queue_topic = original_queue  # type: ignore[method-assign]
+
+    assert all(t.title != "Queue Fails Topic" for t in ctrl.topics)
+    # Row stays pending — nothing was claimed
+    assert any(r["id"] == row["id"] for r in store.list_pending()["valid"])
+
+
 def test_approve_routes_controller_drafted_topics_too(tmp_path: Path) -> None:
     """Non-ti_ ids follow the legacy path: APPROVED then QUEUED."""
     bridge, _store = make_bridge(tmp_path)
