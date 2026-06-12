@@ -23,6 +23,7 @@ from opencohost.config.settings import (
     TTS_LOCAL_MODEL_PATH,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
+    load_tts_local_only, save_tts_local_only,
 )
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
@@ -118,6 +119,11 @@ class MotorVocalIA(threading.Thread):
         self._inference_watchdog_timeout: float = float(OLLAMA_CHAT_TIMEOUT)
         self._post_switch_watchdog_timeout: float = min(float(OLLAMA_CHAT_TIMEOUT), 45.0)
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
+
+        # Privacy gate: when True, Edge-TTS is NEVER invoked — all light-engine
+        # synthesis routes to Piper regardless of online status. Default False
+        # preserves existing behavior. Loaded from disk; updated via set_tts_local_only.
+        self.tts_local_only: bool = load_tts_local_only()
 
         # Offline fallback: latches True on first Edge-TTS connection error;
         # subsequent chunks skip Edge-TTS for the rest of the session.
@@ -289,6 +295,16 @@ class MotorVocalIA(threading.Thread):
             self.motor_tts = payload
             nombre = "Ligero (Edge-TTS)" if payload == "ligero" else "Pesado (Qwen3-TTS)"
             self._log(f"Motor de Voz cambiado a: {nombre}")
+
+        elif tipo == "set_tts_local_only":
+            enabled = bool(payload)
+            self.tts_local_only = enabled
+            save_tts_local_only(enabled)
+            logger.info(
+                "TTS local-only switched %s (Edge-TTS %s)",
+                "ON" if enabled else "OFF",
+                "disabled — all light synthesis via Piper" if enabled else "enabled",
+            )
 
         elif tipo == "set_profile":
             self.system_prompt = payload.get("prompt", SYSTEM_PROMPT)
@@ -1380,6 +1396,11 @@ class MotorVocalIA(threading.Thread):
 
         def productor():
             nonlocal error_count
+            # Snapshot tts_local_only ONCE at utterance start so a mid-utterance
+            # toggle cannot send remaining chunks to Edge-TTS.  The toggle takes
+            # effect from the NEXT utterance only.
+            local_only = self.tts_local_only
+
             # Determine effective motor for this request
             effective_motor = self.motor_tts
             fallback_reason = ""
@@ -1421,6 +1442,35 @@ class MotorVocalIA(threading.Thread):
             for i, oracion in enumerate(oraciones):
                 if not self._speaking:
                     break
+
+                # Privacy fast-path: local_only is a snapshot taken at utterance
+                # start (see top of productor()).  Using the snapshot ensures a
+                # mid-utterance toggle cannot redirect remaining chunks to Edge-TTS;
+                # the toggle applies from the next utterance only.
+                # If Piper is unavailable, drop the chunk (degraded) rather than
+                # silently re-enabling Edge-TTS (which would betray the privacy promise).
+                if effective_motor == "ligero" and local_only:
+                    archivo_chunk_wav = os.path.join(
+                        TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
+                    )
+                    if self._piper.is_available():
+                        if self._piper.synthesize(oracion, archivo_chunk_wav):
+                            cola_audios.put((archivo_chunk_wav, i, oracion))
+                        else:
+                            logger.warning(
+                                "TTS local-only: Piper synthesis failed for chunk %d "
+                                "(chunk dropped; Edge-TTS not attempted)", i
+                            )
+                            cola_audios.put(None)
+                            error_count += 1
+                    else:
+                        logger.warning(
+                            "TTS local-only: Piper unavailable for chunk %d "
+                            "(chunk dropped; Edge-TTS not attempted)", i
+                        )
+                        cola_audios.put(None)
+                        error_count += 1
+                    continue
 
                 # Fast-path: Edge-TTS is known offline for this session (or the
                 # package is not installed) — go straight to Piper without

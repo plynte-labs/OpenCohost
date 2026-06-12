@@ -142,8 +142,37 @@ def generar_audio():
     try:
         # ── RUTA 1: MOTOR LIGERO (Edge-TTS | 0% GPU) ──
         if motor_solicitado == 'ligero':
+            # Privacy guard: read tts_local_only flag directly from the persisted
+            # JSON file using stdlib only.  This server runs in a SEPARATE Python
+            # environment (xtts_env) that does NOT have opencohost installed, so we
+            # cannot import opencohost.config.settings — hence the inline read.
+            # The file path mirrors TTS_LOCAL_ONLY_FILE from settings.py:
+            #   USER_DATA_DIR (dev=repo root, packaged=%APPDATA%/OpenCohost)
+            #   └─ config/tts_local_only.json
+            # In both cases the repo root is two levels above __file__
+            # (opencohost/server_qwen.py → opencohost/ → repo root).
+            _tts_local_only_flag = False
+            try:
+                import json as _json
+                _flag_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "config", "tts_local_only.json",
+                )
+                if os.path.exists(_flag_path):
+                    with open(_flag_path, "r", encoding="utf-8") as _f:
+                        _tts_local_only_flag = bool(
+                            _json.load(_f).get("tts_local_only", False)
+                        )
+            except Exception:
+                _tts_local_only_flag = False
+
+            if _tts_local_only_flag:
+                return jsonify({
+                    "error": "tts_local_only is enabled; light synthesis must stay local"
+                }), 400
+
             logger.info(f"[{request_id}] Motor LIGERO: '{texto[:60]}...'")
-            voz_edge = "es-MX-DaliaNeural" 
+            voz_edge = "es-MX-DaliaNeural"
             async def generar_edge():
                 communicate = edge_tts.Communicate(texto, voz_edge)
                 await communicate.save(archivo_salida)
