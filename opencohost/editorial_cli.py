@@ -378,6 +378,113 @@ def _cmd_delete(args: argparse.Namespace, use_json: bool) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Topic inbox subcommand handlers
+# ---------------------------------------------------------------------------
+
+def _cmd_topic(args: argparse.Namespace, use_json: bool) -> int:
+    """Dispatch `topic <action>` to the matching handler."""
+    handlers = {
+        "propose": _cmd_topic_propose,
+        "list": _cmd_topic_list,
+        "discard": _cmd_topic_discard,
+        "approve": _cmd_topic_approve,
+    }
+    handler = handlers.get(getattr(args, "topic_action", None) or "")
+    if handler is None:
+        _error("usage: topic {propose,list,discard,approve} ...", use_json=use_json)
+        return 2
+    return handler(args, use_json)
+
+
+def _cmd_topic_propose(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.topic_inbox import (
+        TopicInboxCapError,
+        TopicInboxStore,
+        TopicInboxValidationError,
+    )
+
+    if args.from_json:
+        try:
+            data = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as exc:
+            _error(f"invalid JSON on stdin: {exc}", use_json=use_json)
+            return 1
+        title = data.get("title", "")
+        angle = data.get("angle", "")
+        tags = data.get("tags") or []
+        source = data.get("source", "")
+    else:
+        title = args.title or ""
+        angle = args.angle or ""
+        tags = args.tag or []
+        source = args.source or ""
+
+    store = TopicInboxStore(args.db)
+    try:
+        row = store.propose(title=title, angle=angle, tags=tags, source=source)
+    except (TopicInboxValidationError, TopicInboxCapError) as exc:
+        _error(str(exc), use_json=use_json)
+        return 1
+
+    if use_json:
+        _print_json(row)
+    else:
+        print(f"{row['id']} {row['status']}")
+    return 0
+
+
+def _cmd_topic_list(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.topic_inbox import TopicInboxStore
+
+    store = TopicInboxStore(args.db)
+    result = store.list_pending()
+
+    if use_json:
+        _print_json(result)
+        return 0
+
+    valid = result["valid"]
+    invalid = result["invalid"]
+    if not valid and not invalid:
+        print("(no pending topic proposals)")
+        return 0
+    for row in valid:
+        tags = ", ".join(row["tags"]) if row["tags"] else "-"
+        print(f"{row['id']}  [{row['source'] or 'unknown'}]  {row['title']}")
+        print(f"    angle: {row['angle']}")
+        print(f"    tags:  {tags}")
+    if invalid:
+        print(f"({len(invalid)} invalid row(s) hidden — failed read-time validation; "
+              "use --json for details)")
+    return 0
+
+
+def _cmd_topic_discard(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.topic_inbox import TopicInboxStore
+
+    store = TopicInboxStore(args.db)
+    if not store.discard(args.topic_id):
+        _error(f"topic not found or not proposed: {args.topic_id}", use_json=use_json)
+        return 1
+    if use_json:
+        _print_json({"id": args.topic_id, "status": "discarded"})
+    else:
+        print(f"{args.topic_id} discarded")
+    return 0
+
+
+def _cmd_topic_approve(args: argparse.Namespace, use_json: bool) -> int:
+    """Always refused: approval is a human-only gate in the app UI."""
+    _error(
+        "topic approval is human-only and not available from the CLI: open the "
+        "OpenCohost app and approve the proposal from the agenda suggestions "
+        "panel, where the operator can read the title and angle first",
+        use_json=use_json,
+    )
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -478,6 +585,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     delete_p.add_argument("card_id", metavar="CARD_ID")
 
+    # -- topic (inbox) ---------------------------------------------------------
+    topic_p = sub.add_parser(
+        "topic",
+        help="Topic inbox: agents propose stream topics; humans approve in the app UI",
+    )
+    topic_sub = topic_p.add_subparsers(dest="topic_action", metavar="ACTION")
+    topic_sub.required = True
+
+    propose_p = topic_sub.add_parser("propose", help="Propose a topic for human review")
+    propose_p.add_argument("--from-json", action="store_true", dest="from_json",
+                           help="Read topic fields from a JSON object on stdin")
+    propose_p.add_argument("--title", metavar="TEXT", help="Topic title (max 120 chars)")
+    propose_p.add_argument("--angle", metavar="TEXT", help="Suggested angle (max 600 chars)")
+    propose_p.add_argument("--tag", metavar="TEXT", action="append", dest="tag",
+                           default=[], help="Add a tag (repeatable, max 8)")
+    propose_p.add_argument("--source", metavar="TEXT", default="",
+                           help="Identifier of the proposing agent")
+
+    list_p2 = topic_sub.add_parser("list", help="List pending proposals (valid/invalid buckets)")
+    list_p2.add_argument("--json", dest="json_sub", action="store_true", default=False,
+                         help="JSON output")
+
+    discard_p = topic_sub.add_parser("discard", help="Discard a pending proposal")
+    discard_p.add_argument("topic_id", metavar="TOPIC_ID")
+
+    approve_p = topic_sub.add_parser(
+        "approve",
+        help="Refused: approval is human-only, in the app UI",
+    )
+    approve_p.add_argument("topic_id", metavar="TOPIC_ID")
+
     return parser
 
 
@@ -512,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         "rearm": _cmd_rearm,
         "disable": _cmd_disable,
         "delete": _cmd_delete,
+        "topic": _cmd_topic,
     }
 
     handler = dispatch.get(args.subcommand)
