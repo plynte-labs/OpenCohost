@@ -127,7 +127,9 @@ def test_hung_inference_allows_switch_back_to_last_known_good_model(tmp_path):
         assert _wait_until(lambda: motor.is_processing, timeout=0.3)
         motor._dispatch_command("switch_model", DEFAULT_MODEL)
         assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=0.6)
-        assert "model_switch_applied" in ui_events
+        # The UI event is dispatched asynchronously after the model switch;
+        # on loaded CI runners it can land after current_model updates.
+        assert _wait_until(lambda: "model_switch_applied" in ui_events, timeout=2.0)
     finally:
         release.set()
         worker.join(timeout=1.0)
@@ -199,7 +201,9 @@ def test_hung_first_inference_rolls_back_to_last_known_good_model(tmp_path):
 
     try:
         assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=0.6)
-        assert "model_switch_applied" in ui_events
+        # The UI event is dispatched asynchronously after the model switch;
+        # on loaded CI runners it can land after current_model updates.
+        assert _wait_until(lambda: "model_switch_applied" in ui_events, timeout=2.0)
         assert motor._desired_model == DEFAULT_MODEL
     finally:
         release.set()
