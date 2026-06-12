@@ -100,7 +100,13 @@ def _run_one_light_chunk(motor, oracion: str):
         # Simulate a successful Edge-TTS call (writes nothing — file stays absent)
         # The test only cares whether asyncio.run was reached.
 
-    import opencohost.core.llm_engine as eng
+    import opencohost.core.llm_engine as eng  # noqa: F401  (kept for parity with productor)
+
+    # CI runners do not have edge_tts installed (eng.edge_tts is None there).
+    # Treat the module as present so path selection is environment-independent:
+    # offline tests drive motor._edge_tts_offline explicitly, and the Edge call
+    # itself is always faked via fake_asyncio_run — never really invoked.
+    edge_module_missing = False
 
     # Snapshot tts_local_only ONCE before the loop, mirroring the `local_only`
     # snapshot introduced in productor() (opencohost/core/llm_engine.py ~line 1400).
@@ -143,7 +149,7 @@ def _run_one_light_chunk(motor, oracion: str):
         else:
             inner_queue.put(None)
     # ── existing offline fast-path (pass-through) ──────────────────────────
-    elif effective_motor == "ligero" and (motor._edge_tts_offline or eng.edge_tts is None):
+    elif effective_motor == "ligero" and (motor._edge_tts_offline or edge_module_missing):
         archivo_chunk_wav = os.path.join(
             TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
         )
@@ -447,8 +453,11 @@ def _run_multi_chunk(motor, oraciones: list[str], flip_after_chunk: int):
     Because the snapshot is taken before the loop, the toggle must NOT affect
     any chunk in the current utterance.
     """
-    import opencohost.core.llm_engine as eng
     from opencohost.config.settings import TEMP_DIR
+
+    # See _run_one_light_chunk: simulate Edge-TTS as installed so the helper is
+    # environment-independent (CI lacks the edge_tts package).
+    edge_module_missing = False
 
     edge_call_count = 0
     inner_queue: queue.Queue = queue.Queue(maxsize=10)
@@ -498,7 +507,7 @@ def _run_multi_chunk(motor, oraciones: list[str], flip_after_chunk: int):
                     inner_queue.put(None)
             else:
                 inner_queue.put(None)
-        elif effective_motor == "ligero" and (motor._edge_tts_offline or eng.edge_tts is None):
+        elif effective_motor == "ligero" and (motor._edge_tts_offline or edge_module_missing):
             archivo_chunk_wav = os.path.join(
                 TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
             )

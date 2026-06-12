@@ -719,31 +719,12 @@ class VocalAIApp(ctk.CTk):
             # Engine-side gates and auto-fallback remain active regardless.
             self.switch_modo_ligero.configure(state="disabled")
             ctk.CTkLabel(frame_tts_memory, text="TTS: Edge-TTS (cloud) / Piper (local fallback).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
-        # Privacy switch: Solo TTS local (Piper)
-        # When ON: Edge-TTS is never invoked — all light synthesis uses Piper.
-        # When OFF: Edge-TTS is the light-engine preference (current default).
-        self.switch_local_only = ctk.CTkSwitch(
-            frame_tts_memory,
-            text="Solo TTS local (Piper)",
-            onvalue=True,
-            offvalue=False,
-            command=self._al_cambiar_tts_local_only,
-        )
+        # Privacy switch: when ON, Edge-TTS is never invoked — all light synthesis uses Piper.
+        self.switch_local_only = ctk.CTkSwitch(frame_tts_memory, text="Solo TTS local (Piper)", onvalue=True, offvalue=False, command=self._al_cambiar_tts_local_only)
         self.switch_local_only.pack(fill="x", padx=10, pady=(4, 0))
         if load_tts_local_only():
             self.switch_local_only.select()
-        ctk.CTkLabel(
-            frame_tts_memory,
-            text=(
-                "ON: nada de texto sale de tu PC, voz algo menos natural. "
-                "OFF: voz ligera más natural vía Edge-TTS (envía el texto a servidores de Microsoft)."
-            ),
-            font=ctk.CTkFont(size=10),
-            text_color="#8fa3b8",
-            anchor="w",
-            justify="left",
-            wraplength=400,
-        ).pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(frame_tts_memory, text="ON: nada de texto sale de tu PC, voz algo menos natural. OFF: voz ligera más natural vía Edge-TTS (envía el texto a servidores de Microsoft).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
         self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
