@@ -895,6 +895,9 @@ class VocalAIApp(ctk.CTk):
             text_kira_response=self.text_kira_response,
             on_log_action=None,
             schedule_ui_update=self._safe_after,
+            # Phase 2 debounce: routes delayed callbacks through _safe_after which
+            # handles both main-thread (self.after) and cross-thread (task queue) paths.
+            schedule_ui_update_after=lambda delay, fn: self._safe_after(fn, delay),
         )
         self._advanced_mode_panel = self._advanced_panel.build()
         self.consola = self._advanced_panel.consola

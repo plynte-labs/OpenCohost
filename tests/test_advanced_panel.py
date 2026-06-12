@@ -848,6 +848,230 @@ class TestEdgeCases:
 
             assert "None" in textbox._content
 
+
+# ===================================================================
+# Phase 2 — Kira token-stream debounce tests (ADR-007, FR2/AC3)
+# ===================================================================
+
+
+def _make_panel_with_delay(mock_ctk, ui_state, dispatcher, log_queue=None, **kwargs):
+    """Create an AdvancedModePanel wired with a delay-scheduler for Phase 2 tests.
+
+    The delay scheduler records (delay_ms, fn) tuples in ``scheduled_delayed``
+    so tests can inspect and manually trigger flushes without real timers.
+    """
+    from opencohost.ui.advanced_panel import AdvancedModePanel
+
+    parent = MagicMock()
+    parent.grid = MagicMock()
+    parent.grid_remove = MagicMock()
+    parent.grid_rowconfigure = MagicMock()
+    parent.configure = MagicMock()
+
+    scheduled_delayed = []
+
+    def _delay_scheduler(delay_ms, fn):
+        scheduled_delayed.append((delay_ms, fn))
+
+    panel = AdvancedModePanel(
+        parent_frame=parent,
+        ui_state=ui_state,
+        dispatcher=dispatcher,
+        log_queue=log_queue or queue.Queue(),
+        on_log_action=None,
+        schedule_ui_update=lambda fn: fn(),
+        schedule_ui_update_after=_delay_scheduler,
+        **kwargs,
+    )
+    panel._scheduled_delayed = scheduled_delayed
+    return panel
+
+
+class TestKiraDebounce:
+    """Token-stream debounce: update_kira_response buffers and coalesces writes (ADR-007 Phase 2)."""
+
+    # --- (a) burst produces exactly ONE write with the LAST content ---
+
+    def test_burst_of_updates_produces_single_write_with_last_content(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """N rapid calls must result in exactly one textbox write showing the last token."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            insert_calls = []
+            original_insert = kira_tb.insert
+            kira_tb.insert = lambda pos, text: (insert_calls.append(text), original_insert(pos, text))
+
+            # Simulate 5 rapid token updates
+            for i in range(1, 6):
+                panel.update_kira_response(f"[Kira]: Token {i}")
+
+            # No write yet — window not triggered
+            assert insert_calls == []
+
+            # Trigger the scheduled flush
+            assert len(panel._scheduled_delayed) == 1
+            _delay, flush_fn = panel._scheduled_delayed[0]
+            flush_fn()
+
+            # Exactly ONE insert with the LAST content
+            assert len(insert_calls) == 1
+            assert "Token 5" in insert_calls[0]
+
+    # --- (b) flush clears pending; subsequent update schedules a new window ---
+
+    def test_after_flush_new_update_schedules_fresh_window(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """After the flush fires, the next update must schedule a brand-new timer."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            panel.update_kira_response("[Kira]: First batch")
+            assert len(panel._scheduled_delayed) == 1
+
+            # Fire the flush — clears pending flag
+            panel._scheduled_delayed[0][1]()
+
+            # New update must schedule a second window
+            panel.update_kira_response("[Kira]: Second batch")
+            assert len(panel._scheduled_delayed) == 2
+
+            # Fire second flush — content must be Second batch
+            panel._scheduled_delayed[1][1]()
+            assert "Second batch" in kira_tb._content
+
+    # --- (c) single isolated update still renders ---
+
+    def test_single_update_renders_after_flush(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """A single call must still write to the textbox when the flush fires."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            panel.update_kira_response("[Kira]: Only message")
+            assert len(panel._scheduled_delayed) == 1
+
+            panel._scheduled_delayed[0][1]()
+            assert "Only message" in kira_tb._content
+
+    # --- (d) identical-content equality guard still works post-flush ---
+
+    def test_equality_guard_still_blocks_redundant_reflow_after_flush(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """If the buffer content equals current textbox content, the flush is a no-op."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            # Write initial content directly so kira_tb._content is set
+            panel.update_kira_response("[Kira]: Same content")
+            panel._scheduled_delayed[0][1]()  # flush → writes "Same content"
+
+            insert_calls = []
+            original_insert = kira_tb.insert
+            kira_tb.insert = lambda pos, text: (insert_calls.append(text), original_insert(pos, text))
+
+            # Second call with identical content — should schedule but flush is a no-op
+            panel.update_kira_response("[Kira]: Same content")
+            panel._scheduled_delayed[1][1]()  # flush → equality guard fires
+
+            assert insert_calls == []
+
+    # --- (e) delay passed to the scheduler is exactly KIRA_FLUSH_INTERVAL_MS ---
+
+    def test_delay_passed_to_scheduler_is_flush_interval(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """The delay_ms argument to the after-scheduler must equal KIRA_FLUSH_INTERVAL_MS."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            from opencohost.ui.advanced_panel import AdvancedModePanel
+
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            panel.update_kira_response("[Kira]: Timing check")
+
+            assert len(panel._scheduled_delayed) == 1
+            delay_ms, _ = panel._scheduled_delayed[0]
+            assert delay_ms == AdvancedModePanel.KIRA_FLUSH_INTERVAL_MS
+
+    # --- coalescing: second call during pending window must NOT add a second timer ---
+
+    def test_burst_does_not_add_extra_scheduler_calls(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """While a flush is pending, further updates only overwrite the buffer — no extra timers."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            for i in range(10):
+                panel.update_kira_response(f"[Kira]: Update {i}")
+
+            # Only ONE timer scheduled regardless of how many calls came in
+            assert len(panel._scheduled_delayed) == 1
+
+    def test_flush_after_cleanup_does_not_raise_or_write(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """A debounce timer that fires after cleanup() must silently no-op.
+
+        Sequence:
+          1. Schedule a flush via update_kira_response.
+          2. Call cleanup() — must clear text_kira_response to None.
+          3. Fire the recorded scheduled fn — must not raise and must not
+             write to the textbox (the None guard short-circuits the flush).
+        """
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            kira_tb = mock_ctk.CTkTextbox()
+            panel = _make_panel_with_delay(
+                mock_ctk, ui_state, dispatcher, log_queue, text_kira_response=kira_tb
+            )
+
+            # Trigger a pending flush
+            panel.update_kira_response("[Kira]: About to be cleaned up")
+            assert len(panel._scheduled_delayed) == 1
+            _delay, flush_fn = panel._scheduled_delayed[0]
+
+            # Simulate app close — cleanup before the timer fires
+            panel.cleanup()
+
+            # Confirm cleanup cleared the widget reference
+            assert panel.text_kira_response is None
+            assert panel._kira_flush_pending is False
+            assert panel._kira_response_buffer is None
+
+            # Record writes that would hit the textbox
+            write_calls = []
+            original_insert = kira_tb.insert
+            kira_tb.insert = lambda pos, text: write_calls.append(text)
+
+            # Fire the stale timer — must not raise, must not write
+            flush_fn()
+
+            assert write_calls == [], (
+                f"Stale flush wrote to textbox after cleanup: {write_calls}"
+            )
+
     def test_process_logs_handles_malformed_queue_item(self, mock_ctk, ui_state, dispatcher, log_queue):
         with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
             panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue)
