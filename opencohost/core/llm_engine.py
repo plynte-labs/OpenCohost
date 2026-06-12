@@ -172,6 +172,7 @@ class MotorVocalIA(threading.Thread):
         self.agenda_output_recorder = None
         self.agenda_output_transformer = None
         self.agenda_controller = None               # Phase 0: metrics access
+        self.direct_editorial_context_provider = None  # set externally by app_shell
 
     @property
     def is_speaking(self):
@@ -940,10 +941,32 @@ class MotorVocalIA(threading.Thread):
             for msg in self.historial:
                 messages.append(msg)
 
-            if self.use_system_role:
-                messages.append({'role': 'user', 'content': contexto})
+            # Editorial direct-mode enrichment: inject matching ARMED card context for
+            # host-direct queries. NON-CONSUMING — card stays ARMED for the agenda path.
+            # Never inject for chat/aggregator-driven sources.
+            editorial_block = ""
+            if source == "direct":
+                provider = self.direct_editorial_context_provider
+                if provider is not None:
+                    try:
+                        editorial_block = provider(contexto) or ""
+                    except Exception:
+                        editorial_block = ""
+
+            if editorial_block:
+                enriched = f"{contexto}\n\n{editorial_block}"
+                logger.info(
+                    "editorial direct context injected (source=%s, len=%d)",
+                    source,
+                    len(editorial_block),
+                )
             else:
-                prompt_completo = f"{self.system_prompt}\n\n[Mensaje del usuario]: {contexto}"
+                enriched = contexto
+
+            if self.use_system_role:
+                messages.append({'role': 'user', 'content': enriched})
+            else:
+                prompt_completo = f"{self.system_prompt}\n\n[Mensaje del usuario]: {enriched}"
                 messages.append({'role': 'user', 'content': prompt_completo})
 
             opciones_llm = {

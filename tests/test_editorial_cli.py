@@ -290,3 +290,280 @@ def test_link_wrong_topic_id_exits_1(tmp_path: Path) -> None:
     assert card_data["status"] == "armed", (
         f"Card should still be armed after mismatch, got: {card_data['status']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: create --expires flag
+# ---------------------------------------------------------------------------
+
+def test_create_with_future_expires_succeeds(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    from datetime import date, timedelta
+    future_date = (date.today() + timedelta(days=30)).isoformat()
+
+    code, out, err = run([
+        "--db", db, "create",
+        "--topic", "Expires Future Card",
+        "--summary", "Summary for expiry test.",
+        "--take", "Take for expiry test.",
+        "--expires", future_date,
+    ])
+    assert code == 0, f"create --expires failed: {err}"
+    assert "ec_" in out
+
+
+def test_create_with_future_expires_json_has_expires_at(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    from datetime import date, timedelta
+    future_date = (date.today() + timedelta(days=30)).isoformat()
+
+    run([
+        "--db", db, "create",
+        "--topic", "Expires Future JSON",
+        "--summary", "Summary for expiry JSON test.",
+        "--take", "Take for expiry JSON test.",
+        "--expires", future_date,
+    ])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    data = json.loads(out)
+    assert len(data) == 1
+    # expires_at is set via show
+    card_id = data[0]["id"]
+    code2, out2, _ = run(["--db", db, "show", card_id, "--json"])
+    card = json.loads(out2)
+    assert card["expires_at"] is not None
+
+
+def test_create_with_past_expires_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    code, out, err = run([
+        "--db", db, "create",
+        "--topic", "Expires Past Card",
+        "--summary", "Summary for past expiry test.",
+        "--take", "Take for past expiry test.",
+        "--expires", "2000-01-01",
+    ])
+    assert code == 1
+    assert "past" in err.lower() or "expires" in err.lower()
+
+
+def test_create_with_invalid_expires_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    code, out, err = run([
+        "--db", db, "create",
+        "--topic", "Invalid Expires Card",
+        "--summary", "Summary for invalid expiry.",
+        "--take", "Take for invalid expiry.",
+        "--expires", "not-a-date",
+    ])
+    assert code == 1
+    assert err.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: rearm subcommand
+# ---------------------------------------------------------------------------
+
+def _create_used_card(db: str, topic: str = "Rearm Test Card") -> str:
+    """Create, arm, activate, and mark-used a card. Returns card_id."""
+    from opencohost.core.editorial_cards import EditorialCardStore
+    run(["--db", db, "create",
+         "--topic", topic,
+         "--summary", f"Summary for {topic}.",
+         "--take", f"Take for {topic}."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+    run(["--db", db, "arm", card_id])
+    # Activate + mark used via store
+    store = EditorialCardStore(db)
+    slug = topic.lower().replace(" ", "-")
+    store.activate_for_topic(slug)
+    store.mark_used(card_id)
+    return card_id
+
+
+def test_rearm_used_card_succeeds(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    card_id = _create_used_card(db)
+
+    code, out, err = run(["--db", db, "rearm", card_id])
+    assert code == 0, f"rearm failed: {err}"
+    assert "armed" in out.lower()
+
+
+def test_rearm_used_card_json_output(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    card_id = _create_used_card(db, "Rearm JSON Card")
+
+    code, out, err = run(["--db", db, "--json", "rearm", card_id])
+    assert code == 0, f"rearm failed: {err}"
+    data = json.loads(out)
+    assert data["id"] == card_id
+    assert data["status"] == "armed"
+
+
+def test_rearm_expired_card_needs_clear_expiry_flag(tmp_path: Path) -> None:
+    """Rearming an expired card without --clear-expiry should exit 1 with helpful message."""
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Expired Rearm Card",
+         "--summary", "Summary for expired rearm.",
+         "--take", "Take for expired rearm."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    from opencohost.core.editorial_cards import EditorialCardStore
+    with EditorialCardStore(db)._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired' WHERE id = ?",
+            (card_id,),
+        )
+
+    code, out, err = run(["--db", db, "rearm", card_id])
+    assert code == 1
+    assert "clear-expiry" in err.lower() or "EXPIRED" in err
+
+
+def test_rearm_with_clear_expiry_flag_succeeds(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Clear Expiry Rearm",
+         "--summary", "Summary for clear expiry.",
+         "--take", "Take for clear expiry."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    from opencohost.core.editorial_cards import EditorialCardStore
+    with EditorialCardStore(db)._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired', expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (card_id,),
+        )
+
+    code, out, err = run(["--db", db, "rearm", "--clear-expiry", card_id])
+    assert code == 0, f"rearm --clear-expiry failed: {err}"
+    assert "armed" in out.lower()
+
+
+def test_rearm_missing_card_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    code, out, err = run(["--db", db, "rearm", "ec_doesnotexist"])
+    assert code == 1
+
+
+def test_rearm_draft_card_exits_1(tmp_path: Path) -> None:
+    """Rearming a DRAFT card must fail (only USED/EXPIRED are eligible)."""
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Draft Rearm Fail",
+         "--summary", "Summary for draft rearm.",
+         "--take", "Take for draft rearm."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    code, _, err = run(["--db", db, "rearm", card_id])
+    assert code == 1
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: disable subcommand
+# ---------------------------------------------------------------------------
+
+def test_disable_armed_card_succeeds(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Disable Armed",
+         "--summary", "Summary for disable armed.",
+         "--take", "Take for disable armed."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+    run(["--db", db, "arm", card_id])
+
+    code, out, err = run(["--db", db, "disable", card_id])
+    assert code == 0, f"disable failed: {err}"
+    assert "expired" in out.lower() or "disabled" in out.lower()
+
+
+def test_disable_json_output(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Disable JSON Test",
+         "--summary", "Summary for disable JSON.",
+         "--take", "Take for disable JSON."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    code, out, err = run(["--db", db, "--json", "disable", card_id])
+    assert code == 0, f"disable --json failed: {err}"
+    data = json.loads(out)
+    assert data["id"] == card_id
+    assert data["status"] == "expired"
+
+
+def test_disable_used_card_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    card_id = _create_used_card(db, "Disable Used Test")
+    code, out, err = run(["--db", db, "disable", card_id])
+    assert code == 1
+
+
+def test_disable_missing_card_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    code, out, err = run(["--db", db, "disable", "ec_doesnotexist"])
+    assert code == 1
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: delete subcommand
+# ---------------------------------------------------------------------------
+
+def test_delete_card_succeeds(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Delete Test Card",
+         "--summary", "Summary for delete test.",
+         "--take", "Take for delete test."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    code, out, err = run(["--db", db, "delete", card_id])
+    assert code == 0, f"delete failed: {err}"
+    assert "deleted" in out.lower() or card_id in out
+
+
+def test_delete_json_output(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Delete JSON Card",
+         "--summary", "Summary for delete JSON test.",
+         "--take", "Take for delete JSON test."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    code, out, err = run(["--db", db, "--json", "delete", card_id])
+    assert code == 0
+    data = json.loads(out)
+    assert data["id"] == card_id
+    assert data["deleted"] is True
+
+
+def test_delete_missing_card_exits_1(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    code, out, err = run(["--db", db, "delete", "ec_doesnotexist"])
+    assert code == 1
+
+
+def test_delete_removed_card_no_longer_in_list(tmp_path: Path) -> None:
+    db = str(tmp_path / "cards.db")
+    run(["--db", db, "create",
+         "--topic", "Gone Card",
+         "--summary", "Summary for gone card.",
+         "--take", "Take for gone card."])
+    code, out, _ = run(["--db", db, "list", "--json"])
+    card_id = json.loads(out)[0]["id"]
+
+    run(["--db", db, "delete", card_id])
+
+    code2, out2, _ = run(["--db", db, "list", "--json"])
+    data = json.loads(out2)
+    assert not any(c["id"] == card_id for c in data)

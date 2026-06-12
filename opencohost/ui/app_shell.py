@@ -184,6 +184,7 @@ class VocalAIApp(ctk.CTk):
         self.kira_agenda = KiraAgendaController()
         self.editorial_agenda = EditorialAgendaBridge(self.editorial_cards, self.kira_agenda)
         self.editorial_agenda.register_provider()
+        self.motor_ia.direct_editorial_context_provider = self.editorial_agenda.resolve_direct_context
         self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
         self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
         self.motor_ia.agenda_output_recorder = self._record_accepted_kira_agenda_output

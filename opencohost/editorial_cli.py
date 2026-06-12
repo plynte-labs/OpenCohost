@@ -141,6 +141,25 @@ def _cmd_create(args: argparse.Namespace, use_json: bool) -> int:
         discussion_hooks = args.hook or []
         triggers = args.trigger or []
 
+    # Parse optional --expires date
+    expires_at = None
+    if getattr(args, "expires", None):
+        from datetime import date as _date
+        try:
+            try:
+                d = _date.fromisoformat(args.expires)
+                expires_at = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            except ValueError:
+                expires_at = datetime.fromisoformat(args.expires)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            _error(f"invalid date: {args.expires!r}", use_json=use_json)
+            return 1
+        if expires_at <= datetime.now(timezone.utc):
+            _error(f"expires date is in the past: {args.expires!r}", use_json=use_json)
+            return 1
+
     try:
         card = store.upsert(
             EditorialCard(
@@ -150,6 +169,7 @@ def _cmd_create(args: argparse.Namespace, use_json: bool) -> int:
                 counterpoints=counterpoints,
                 discussion_hooks=discussion_hooks,
                 triggers=triggers,
+                expires_at=expires_at,
             )
         )
     except EditorialCardValidationError as exc:
@@ -290,6 +310,73 @@ def _cmd_link(args: argparse.Namespace, use_json: bool) -> int:
     return 0
 
 
+def _cmd_rearm(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+
+    store = EditorialCardStore(args.db)
+    card = store.get(args.card_id)
+    if card is None:
+        _error(f"card not found: {args.card_id}", use_json=use_json)
+        return 1
+    # Expired cards without --clear-expiry: warn the operator
+    if card.status is EditorialCardStatus.EXPIRED and not args.clear_expiry:
+        _error(
+            f"card {args.card_id!r} is EXPIRED; use --clear-expiry to also null expires_at, "
+            "otherwise the card will remain expired next time it is checked",
+            use_json=use_json,
+        )
+        return 1
+    result = store.rearm(args.card_id, clear_expiry=args.clear_expiry)
+    if not result:
+        _error(
+            f"could not rearm card {args.card_id!r}: card missing or status not USED/EXPIRED",
+            use_json=use_json,
+        )
+        return 1
+    if use_json:
+        _print_json({"id": args.card_id, "status": "armed"})
+    else:
+        print(f"{args.card_id} re-armed")
+    return 0
+
+
+def _cmd_disable(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+
+    store = EditorialCardStore(args.db)
+    card = store.get(args.card_id)
+    if card is None:
+        _error(f"card not found: {args.card_id}", use_json=use_json)
+        return 1
+    if card.status is EditorialCardStatus.USED:
+        _error(
+            f"card {args.card_id!r} is USED and cannot be disabled; history is preserved",
+            use_json=use_json,
+        )
+        return 1
+    store.disable(args.card_id)
+    if use_json:
+        _print_json({"id": args.card_id, "status": "expired"})
+    else:
+        print(f"{args.card_id} disabled (expired)")
+    return 0
+
+
+def _cmd_delete(args: argparse.Namespace, use_json: bool) -> int:
+    from opencohost.core.editorial_cards import EditorialCardStore
+
+    store = EditorialCardStore(args.db)
+    result = store.delete(args.card_id)
+    if not result:
+        _error(f"card not found: {args.card_id}", use_json=use_json)
+        return 1
+    if use_json:
+        _print_json({"id": args.card_id, "deleted": True})
+    else:
+        print(f"{args.card_id} deleted")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -336,6 +423,8 @@ def _build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("--trigger", metavar="TEXT", action="append",
                           dest="trigger", default=[],
                           help="Add a trigger keyword (repeatable, max 8)")
+    create_p.add_argument("--expires", metavar="DATE", dest="expires",
+                          help="Set expiry date (ISO 8601 or YYYY-MM-DD). Past dates are rejected.")
 
     # -- list -----------------------------------------------------------------
     list_p = sub.add_parser("list", help="List all cards")
@@ -360,6 +449,34 @@ def _build_parser() -> argparse.ArgumentParser:
     link_p.add_argument("topic_id", metavar="TOPIC_ID",
                         help="Agenda topic identifier (slug)")
     link_p.add_argument("card_id", metavar="CARD_ID")
+
+    # -- rearm ----------------------------------------------------------------
+    rearm_p = sub.add_parser(
+        "rearm",
+        help="Move a USED or EXPIRED card back to ARMED state",
+    )
+    rearm_p.add_argument("card_id", metavar="CARD_ID")
+    rearm_p.add_argument(
+        "--clear-expiry",
+        action="store_true",
+        dest="clear_expiry",
+        default=False,
+        help="Also null out expires_at so the card does not immediately re-expire",
+    )
+
+    # -- disable --------------------------------------------------------------
+    disable_p = sub.add_parser(
+        "disable",
+        help="Move any non-USED card to EXPIRED (idempotent on already-expired cards)",
+    )
+    disable_p.add_argument("card_id", metavar="CARD_ID")
+
+    # -- delete ---------------------------------------------------------------
+    delete_p = sub.add_parser(
+        "delete",
+        help="Hard-delete a card and its ratings",
+    )
+    delete_p.add_argument("card_id", metavar="CARD_ID")
 
     return parser
 
@@ -392,6 +509,9 @@ def main(argv: list[str] | None = None) -> int:
         "show": _cmd_show,
         "arm": _cmd_arm,
         "link": _cmd_link,
+        "rearm": _cmd_rearm,
+        "disable": _cmd_disable,
+        "delete": _cmd_delete,
     }
 
     handler = dispatch.get(args.subcommand)
