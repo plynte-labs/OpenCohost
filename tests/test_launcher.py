@@ -651,7 +651,9 @@ class TestUrlOpenContextContract(unittest.TestCase):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
-            if "urlopen(" in line and "context=" not in line:
+            if "urlopen(" in line and not _re.search(
+                r"urlopen\([^)]*context\s*=", line
+            ):
                 violations.append("line %d: %s" % (lineno, stripped))
 
         self.assertEqual(

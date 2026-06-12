@@ -177,6 +177,9 @@ def check_ollama(http_url=OLLAMA_HTTP_URL, timeout=OLLAMA_TIMEOUT):
             http_url,
             headers={"User-Agent": "OpenCohost-Launcher"},
         )
+        # context= is inert for the plain-http localhost ping (urllib only uses
+        # it for https), but it keeps the no-naked-urlopen contract uniform and
+        # future-proofs a switch to an https endpoint.
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as response:
             response.read()
         http_ok = True

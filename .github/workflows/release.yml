@@ -117,6 +117,7 @@ jobs:
           import hashlib
           import io
           import os
+          import ssl
           import sys
           import zipfile
           import urllib.request
@@ -128,7 +129,9 @@ jobs:
               version,
               asset,
           )
-          data = urllib.request.urlopen(url).read()
+          data = urllib.request.urlopen(
+              url, context=ssl.create_default_context()
+          ).read()
           actual = hashlib.sha256(data).hexdigest()
           if actual != expected_sha256:
               sys.exit(
@@ -164,7 +167,7 @@ jobs:
           import os
 
           subprocess.check_call(
-              [sys.executable, "-m", "pip", "install", "--quiet", "certifi==2025.4.26"],
+              [sys.executable, "-m", "pip", "install", "--quiet", "certifi==2026.5.20"],
               stdout=subprocess.DEVNULL,
           )
           import certifi
