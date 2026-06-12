@@ -77,6 +77,50 @@ runtime uncertainty before packaging or broad product polish.
   dropped when the inference watchdog fires.
 - Evidence details: `conductor/tracks/runtime_validation_gates_20260610/validation_log.md`.
 
+## Packaging update — 2026-06-11 (track paused, mark of record)
+
+The packaging & distribution track executed Phases 2–4 end-to-end in one day
+(PRs #26, #28, #29, #30 — all merged to `master`):
+
+- **Phase 2 — package restructure (DONE)**: all app code lives in the
+  installable `opencohost/` package; hatchling build, `gui-scripts` entry
+  point (`python -m opencohost` / `opencohost`), `uv.lock`, version 0.1.0.
+  Full suite green for the first time ever: 1850 → 1926 tests. Root-caused
+  the owner's two "PC crashes" to a test-suite OOM (CustomTkinter widgets
+  walking MagicMock parents — fixed).
+- **Phase 3 — launcher (DONE, code-complete)**: `packaging/launcher.py`
+  (stdlib-only uv bootstrapper, splash with progress, Ollama preflight,
+  `--update`/`--debug`/`--headless`/`--self-test`), PyInstaller spec,
+  82 unit tests. Critical fixes already in: install from unpacked source
+  (named spec would have hit PyPI), window-title prefix match, PEP 440
+  pre-releases, zip-slip guard, bundled CA certificates (see below).
+- **Phase 4 — CI + release (DONE, proven)**: `ci.yml` runs the full suite on
+  every PR (windows-latest, ~4.5 min). `release.yml` on `v*` tags builds
+  `opencohost-src-<ver>.zip` + `OpenCohost-Setup-<ver>.exe` + `SHA256SUMS.txt`
+  into a DRAFT release — ran end-to-end successfully for `v0.1.0`.
+  Owner runbook: `docs/RELEASE.md`.
+- **Phase 5 — clean-machine validation (PAUSED, NOT passed)**: first VM run
+  failed at download with `SSL: CERTIFICATE_VERIFY_FAILED` — clean Windows
+  lacks GitHub's root CAs (lazy AuthRoot population; frozen Python never
+  triggers it). Fix merged (PR #30: cacert.pem bundled into the exe) but
+  **no exe containing the fix has been built yet** — the `v0.1.0` exe
+  predates it. The launcher is NOT yet validated on a clean machine.
+
+To resume Phase 5 later (in order):
+1. Bump `__version__` to `0.1.1`, tag `v0.1.1`, push tag → new draft exe.
+2. Repo visibility decision: the launcher downloads anonymously, so the
+   release must live on a PUBLIC repo (make this repo public, or export to
+   `plynte-labs/opencohost`). Private repo → 404 after the SSL fix.
+3. Publish the draft (draft assets are not anonymously downloadable).
+4. VM: delete `%LOCALAPPDATA%\OpenCohost`, run the new exe; on failure read
+   `bootstrap.log` there. Known-good shortcut while testing: opening
+   github.com in Edge inside the VM populates the OS cert store.
+
+Maintenance (time-sensitive): GitHub forces Node 24 for actions on
+2026-06-16 — bump `actions/checkout@v4`, `setup-python@v5`,
+`upload/download-artifact@v4`, `setup-uv@v5` to Node-24-ready majors.
+`windows-latest` redirects to `windows-2025-vs2026` from 2026-06-15.
+
 ## Current project truth
 
 - VoiceAI has functional prototypes for local AI voice, TTS, SmartAggregator, stream
@@ -118,7 +162,9 @@ Treat these as release-readiness gates.
 Do not pick these up unless the user explicitly re-prioritizes them:
 
 - `knowledge_card_mvp`
-- packaging / installer work
+- packaging Phase 5 resumption (see "Packaging update — 2026-06-11"; Phases
+  2–4 are DONE and the pipeline is operational — only the clean-machine
+  validation and the repo-visibility decision remain)
 - broad hardening and failure testing
 - first-run readiness wizard
 - large Product UI implementation
