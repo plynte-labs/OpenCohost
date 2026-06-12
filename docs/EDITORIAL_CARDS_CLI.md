@@ -32,9 +32,13 @@ python -m opencohost.editorial_cli [--db PATH] [--json] <subcommand> ...
   operation on both sides, so the CLI can run while OpenCohost is open.
   Writers serialize; a concurrent writer waits up to ~5s (sqlite3 default)
   before failing with "database is locked". Treat that error as retryable.
-- **No restart needed.** The agenda bridge resolves ARMED cards by topic
-  slug on each agenda turn, so a card created and armed now is eligible on
-  Kira's next agenda action.
+- **Arming is preparation, not injection.** `arm`/`link` manage card state
+  in the database. Injecting the prompt block into a live Kira turn
+  additionally requires the running app to attach the card to the active
+  agenda topic (`topic.editorial_card_id`), and that attachment is not yet
+  wired to any operator path — runtime auto-attach by topic match is the
+  planned follow-up. Until it lands, prepared cards are not consumed by
+  the agenda.
 
 ## Idempotency and retries
 
@@ -97,13 +101,14 @@ Full card detail.
 
 ### `arm <card_id>`
 
-DRAFT → ARMED. ARMED cards become eligible for prompt injection on the next
-agenda turn matching their topic slug.
+DRAFT → ARMED. ARMED is the eligible-for-attachment state; it does not by
+itself cause prompt injection (see Execution model).
 
 ### `link <topic_id> <card_id>`
 
-Activates an ARMED card for its topic (store-level equivalent of the app's
-agenda linking). For the minimal flow `arm` is usually enough.
+Store-level activation (ARMED → ACTIVE) for the card's topic slug. This
+updates card state only — it does not attach the card to a live agenda
+topic inside a running app.
 
 `topic_id` must equal the card's topic slug; if they do not match the command exits 1 with an error describing the mismatch.
 
