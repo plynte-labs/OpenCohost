@@ -3,6 +3,7 @@
 import pytest
 
 from opencohost.smart_aggregator.kira_agenda_controller import (
+    AgendaAction,
     AgendaState,
     ErrorCode,
     KiraAgendaController,
@@ -276,6 +277,47 @@ def test_start_prefetched_action_adopts_cached_turn_metadata():
     controller.mark_speech_complete()
 
     assert topic.turns_spoken == 4
+
+
+def test_prefetch_preview_returns_none_while_closing_speech_plays():
+    """Regression: prefetching while the closing line itself is playing must
+    not generate a second closing for the same topic (heard on stream as the
+    same goodbye spoken twice with different wording)."""
+    controller = KiraAgendaController(max_turns_per_topic=2, turn_batch_size=2)
+    topic = controller.add_topic("Tema que cierra", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    closing = controller.prefetch_action_after_current_speech()
+    assert closing.source == "kira-agenda-stop"
+    controller.mark_speech_complete()
+    controller.start_prefetched_action(closing)
+    controller.mark_generation_accepted()
+    assert topic.status == TopicStatus.CLOSING
+
+    second = controller.prefetch_action_after_current_speech()
+
+    assert second.kind == "none"
+
+
+def test_start_prefetched_action_reports_adoption():
+    """start_prefetched_action returns True only when the controller adopts
+    the cached action; False lets the caller discard stale prefetched audio."""
+    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=2)
+    topic = controller.add_topic("Tema adoptable", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    action = controller.prefetch_action_after_current_speech()
+    controller.mark_speech_complete()
+
+    assert controller.start_prefetched_action(action) is True
+
+    orphan = AgendaAction(kind="enqueue", prompt="x", source="kira-agenda-stop", priority=2)
+    controller.active_topic = None
+    assert controller.start_prefetched_action(orphan) is False
 
 
 def test_angle_limit_accepts_real_generated_angle_but_stays_capped():

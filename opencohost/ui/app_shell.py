@@ -1367,25 +1367,26 @@ class VocalAIApp(ctk.CTk):
             return False
         if self._kira_agenda_has_higher_priority_pending(action):
             self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
-            self._kira_agenda_clear_prefetch()
-            return False
+            return self._kira_agenda_clear_prefetch()
         if self._kira_agenda_has_non_agenda_audio_work():
             self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
-            self._kira_agenda_clear_prefetch()
-            return False
+            return self._kira_agenda_clear_prefetch()
         if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
             return False
-        self.kira_agenda.start_prefetched_action(action)
+        if not self.kira_agenda.start_prefetched_action(action):
+            self._on_stream_admin_log("[Kira Agenda] Prefetch descartado: el tema ya se completó.")
+            return self._kira_agenda_clear_prefetch()
         self._kira_agenda_prefetched_action = None
         if self.motor_ia.play_prefetched_agenda():
             self._kira_agenda_update_status()
             return True
         return False
 
-    def _kira_agenda_clear_prefetch(self) -> None:
+    def _kira_agenda_clear_prefetch(self) -> bool:
         self._kira_agenda_prefetched_action = None
         if hasattr(self.motor_ia, "clear_prefetched_agenda"):
             self.motor_ia.clear_prefetched_agenda()
+        return False
 
     def _is_kira_agenda_speech_source(self) -> bool:
         source = getattr(self.motor_ia, "current_speech_source", "") or ""
