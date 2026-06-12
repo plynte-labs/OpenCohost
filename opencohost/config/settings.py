@@ -190,6 +190,7 @@ PTT_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "ptt_settings.json"
 WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geometry.json")
 LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
 LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
+TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
 
 # Writable paths for Cohost, Music, and Avatar modules
@@ -343,6 +344,50 @@ def save_last_model(tag: str, source: str = "user_switch") -> None:
                 "source": source,
             }, f)
         os.replace(tmp, LAST_MODEL_FILE)
+    except Exception:
+        pass
+
+
+def load_tts_local_only(config_file: Optional[str] = None) -> bool:
+    """Load the tts_local_only preference from disk.
+
+    Returns False (default) when the file is absent, unreadable, or corrupted.
+    The default of False preserves existing behavior (Edge-TTS allowed).
+
+    Args:
+        config_file: Override path for testing. Uses TTS_LOCAL_ONLY_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_LOCAL_ONLY_FILE
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("tts_local_only", False))
+    except Exception:
+        return False
+
+
+def save_tts_local_only(value: bool, config_file: Optional[str] = None) -> None:
+    """Persist the tts_local_only preference using an atomic write.
+
+    Uses the same temp-file + os.replace pattern as save_last_model to
+    avoid corruption on interrupted writes.
+
+    Args:
+        value: True to enable local-only TTS (Piper only); False to allow Edge-TTS.
+        config_file: Override path for testing. Uses TTS_LOCAL_ONLY_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_LOCAL_ONLY_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "tts_local_only": bool(value),
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        os.replace(tmp, path)
     except Exception:
         pass
 
