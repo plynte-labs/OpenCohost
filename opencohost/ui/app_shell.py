@@ -49,6 +49,8 @@ from opencohost.config.settings import (
     load_tts_local_only,
 )
 from opencohost.config.logger import get_logger
+from opencohost.core.topic_inbox import TopicInboxStore
+from opencohost.ui.topic_inbox_bridge import TopicInboxBridge
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
 from opencohost.core.audio_bed import AudioBedEngine
@@ -58,7 +60,7 @@ from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.health_monitor import HealthMonitor
 from opencohost.core.temp_file_cleanup import cleanup_voiceai_temp_artifacts
 from opencohost.core.music_library import MusicLibrary
-from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy, TopicStatus
+from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy
 from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
 from opencohost.stream_admin import AdminManager
 logger = get_logger()
@@ -203,6 +205,8 @@ class VocalAIApp(ctk.CTk):
         self._kira_agenda_prefetched_action: AgendaAction | None = None
         self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
+        self._topic_inbox_bridge = TopicInboxBridge(TopicInboxStore(EDITORIAL_CARDS_DB), log_fn=self._on_stream_admin_log)
+        self._topic_inbox_bridge.start_polling(lambda fn, delay: self._safe_after(fn, delay), self._kira_agenda_update_status)
         self.after(100, self._start_motor)
         # Wire motor_ia to voice control panel
         if hasattr(self, "voice_panel"):
@@ -1185,22 +1189,13 @@ class VocalAIApp(ctk.CTk):
             delattr(self, "_kira_agenda_previous_filter_policy")
 
     def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
-        """Approve a DRAFTED suggestion: mark APPROVED then QUEUED."""
-        try:
-            self.kira_agenda.approve_topic(topic_id)
-            self.kira_agenda.queue_topic(topic_id)
-        except (ValueError, KeyError):
-            pass
+        """Approve a suggestion (DRAFTED topic or inbox proposal) and queue it."""
+        self._topic_inbox_bridge.approve(topic_id, self.kira_agenda)
         self._kira_agenda_update_status()
 
     def _kira_agenda_reject_suggestion(self, topic_id: str) -> None:
-        """Reject a DRAFTED suggestion: mark SKIPPED."""
-        try:
-            topic = next((t for t in self.kira_agenda.topics if t.id == topic_id), None)
-            if topic is not None and topic.status == TopicStatus.DRAFTED:
-                topic.status = TopicStatus.SKIPPED
-        except (ValueError, KeyError, AttributeError):
-            pass
+        """Reject a suggestion: skip DRAFTED topics, discard inbox proposals."""
+        self._topic_inbox_bridge.reject(topic_id, self.kira_agenda)
         self._kira_agenda_update_status()
 
     def _kira_agenda_tick(self) -> None:
@@ -1427,18 +1422,8 @@ class VocalAIApp(ctk.CTk):
                 error_code=recovery.error_code.human(),
                 error_reasons=recovery.last_reasons,
             ))
-            # Forward DRAFTED suggestions to the panel
-            drafted = self.kira_agenda.drafted_topics()
-            suggestions_list = [
-                {
-                    "title": t.title,
-                    "angle": t.angle,
-                    "confidence": getattr(t, "confidence", "LOW"),
-                    "source": getattr(t, "source", ""),
-                    "topic_id": t.id,
-                }
-                for t in drafted
-            ]
+            # Forward DRAFTED + inbox proposals to the suggestions panel
+            suggestions_list = self._topic_inbox_bridge.build_suggestions(self.kira_agenda)
             self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
         # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
         # Only update on state transitions to avoid overwriting pipeline-driven TTS state
