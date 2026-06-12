@@ -155,9 +155,17 @@ app UI. **Approval is never available via CLI** — `topic approve` always exits
 Proposals are untrusted input: validation runs at propose time AND again at
 read time inside the app, so writing rows directly to SQLite does not bypass
 the gate. Limits: title 120 chars, angle 600 chars, 8 tags (40 chars each),
-30 pending proposals; code/HTML content is rejected. Re-proposing a title
-that normalizes to the same slug (accents/emoji/case-insensitive) updates the
-existing pending row instead of duplicating it.
+source 80 chars, 30 pending proposals; code/HTML content is rejected.
+Re-proposing a title that normalizes to the same slug
+(accents/emoji/case-insensitive) updates the existing pending row instead of
+duplicating it; punctuation-only titles never dedupe.
+
+**Word-boundary caveat for agents**: the code/HTML filter rejects text
+containing any of these words (case-insensitive, whole-word): `function`,
+`class`, `import`, `from`, `select`, `insert`, `update`, `delete`, `drop`,
+`script`. A title like "Lessons from the 90s" fails with "title contains
+code or HTML" — rephrase (e.g. "Lessons of the 90s"). This mirrors the
+app-wide agenda filter; refining it is a pending product decision.
 
 ### `topic propose --title TEXT --angle TEXT [--tag TEXT]... [--source TEXT]`
 

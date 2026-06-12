@@ -24,6 +24,7 @@ import logging
 import re
 import sqlite3
 import unicodedata
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -38,6 +39,7 @@ TITLE_MAX: int = 120
 ANGLE_MAX: int = 600
 TAGS_MAX: int = 8
 TAG_MAX_CHARS: int = 40
+SOURCE_MAX: int = 80
 PENDING_CAP: int = 30
 # Id namespace: the UI routes approve/reject by this prefix, so rows outside
 # it are quarantined at read-time (they would render but be undismissable).
@@ -45,6 +47,9 @@ ID_PREFIX: str = "ti_"
 # list_pending runs on the UI thread; never wait for a writer lock longer
 # than this (sqlite default is 5s — a visible freeze).
 READ_TIMEOUT_SECONDS: float = 0.5
+# approve/discard run on the UI thread too (button press); bounded wait,
+# slightly longer than reads because they must win over a CLI writer.
+WRITE_TIMEOUT_SECONDS: float = 1.0
 
 # ---------------------------------------------------------------------------
 # Code/HTML detection patterns
@@ -104,24 +109,27 @@ class TopicInboxStore:
         Raises TopicInboxCapError when the pending queue is already full.
         Returns the stored row as a dict.
         """
-        error = self._validate_row(title, angle, tags)
+        error = self._validate_row(title, angle, tags, source)
         if error:
             raise TopicInboxValidationError(error)
 
         slug = self._slug(title)
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             self._ensure_table(conn)
 
-            # Dedupe by normalized slug against every proposed row
+            # Dedupe by normalized slug against every proposed row. An empty
+            # slug (punctuation-only title) never matches: distinct titles
+            # like '...' and '---' must not upsert-overwrite each other.
             deduped_id: str | None = None
-            all_proposed = conn.execute(
-                "SELECT id, title FROM topic_inbox WHERE status='proposed'"
-            ).fetchall()
-            for row_id, row_title in all_proposed:
-                if self._slug(row_title) == slug:
-                    deduped_id = row_id
-                    break
+            if slug:
+                all_proposed = conn.execute(
+                    "SELECT id, title FROM topic_inbox WHERE status='proposed'"
+                ).fetchall()
+                for row_id, row_title in all_proposed:
+                    if self._slug(row_title) == slug:
+                        deduped_id = row_id
+                        break
 
             now = _utc_now()
 
@@ -167,7 +175,7 @@ class TopicInboxStore:
         Returns {'valid': [...], 'invalid': [...]} — never raises (fail-open).
         """
         try:
-            with self._connect(timeout=READ_TIMEOUT_SECONDS) as conn:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
                 self._ensure_table(conn)
                 rows = conn.execute(
                     "SELECT * FROM topic_inbox WHERE status='proposed' ORDER BY created_at ASC"
@@ -181,12 +189,12 @@ class TopicInboxStore:
 
         for row in rows:
             d = _row_to_dict(row)
-            if not str(d.get("id") or "").startswith(ID_PREFIX):
+            if not _is_valid_inbox_id(d.get("id")):
                 d["invalid_reason"] = f"id outside the {ID_PREFIX} namespace"
                 invalid.append(d)
                 continue
             try:
-                error = self._validate_row(d["title"], d["angle"], d["tags"])
+                error = self._validate_row(d["title"], d["angle"], d["tags"], d.get("source"))
             except Exception as exc:
                 # Defense-in-depth: a validator crash on a hostile row must
                 # bucket the row as invalid, never break the polling caller.
@@ -201,7 +209,7 @@ class TopicInboxStore:
 
     def list_all(self, status_filter: str | None = None) -> list[dict]:
         """Return all rows, optionally filtered by status. No read-time validation (audit use)."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             self._ensure_table(conn)
             if status_filter is not None:
                 rows = conn.execute(
@@ -215,10 +223,29 @@ class TopicInboxStore:
         return [_row_to_dict(row) for row in rows]
 
     def approve(self, id: str) -> bool:
-        """Set status='approved' for a proposed row. Returns True if 1 row updated."""
+        """Set status='approved' for a proposed row. Returns True if 1 row updated.
+
+        Defense-in-depth: the row's content is re-validated here, so a caller
+        holding only an id can never promote a row a direct-SQLite attacker
+        wrote past the propose() gate.
+        """
+        if not _is_valid_inbox_id(id):
+            return False
         now = _utc_now()
-        with self._connect() as conn:
+        with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
             self._ensure_table(conn)
+            row = conn.execute(
+                "SELECT * FROM topic_inbox WHERE id=? AND status='proposed'", (id,)
+            ).fetchone()
+            if row is None:
+                return False
+            d = _row_to_dict(row)
+            try:
+                error = self._validate_row(d["title"], d["angle"], d["tags"], d.get("source"))
+            except Exception as exc:
+                error = f"validation crashed: {exc}"
+            if error:
+                return False
             cursor = conn.execute(
                 "UPDATE topic_inbox SET status='approved', updated_at=? WHERE id=? AND status='proposed'",
                 (now, id),
@@ -228,7 +255,7 @@ class TopicInboxStore:
     def discard(self, id: str) -> bool:
         """Set status='discarded' for a proposed row. Returns True if 1 row updated."""
         now = _utc_now()
-        with self._connect() as conn:
+        with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
             self._ensure_table(conn)
             cursor = conn.execute(
                 "UPDATE topic_inbox SET status='discarded', updated_at=? WHERE id=? AND status='proposed'",
@@ -282,13 +309,18 @@ class TopicInboxStore:
         text = " ".join(text.split())
         return text
 
-    def _validate_row(self, title: str, angle: str, tags: list) -> str | None:
+    def _validate_row(self, title: str, angle: str, tags: list, source: object = "") -> str | None:
         """Return an error string if invalid, None if valid.
 
         Checks: types, emptiness, length limits, code/HTML patterns.
         Type checks matter at read-time: SQLite stores any type in TEXT
         columns, so a direct INSERT can put integers where strings belong.
         """
+        # Source checks (rendered in a UI label — bound its size)
+        if source is not None and not isinstance(source, str):
+            return "source must be a string"
+        if source and len(source) > SOURCE_MAX:
+            return f"source exceeds {SOURCE_MAX} characters"
         # Title checks
         if not isinstance(title, str) or not title.strip():
             return "title must be a non-empty string"
@@ -322,6 +354,15 @@ class TopicInboxStore:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _is_valid_inbox_id(value: object) -> bool:
+    """True for ids inside the ti_ namespace with a non-empty suffix.
+
+    The bare prefix ('ti_') is rejected: propose() always appends a uuid, so
+    a suffix-less id can only come from a direct DB write.
+    """
+    return isinstance(value, str) and value.startswith(ID_PREFIX) and len(value) > len(ID_PREFIX)
+
 
 def _looks_like_code(text: str) -> bool:
     """Return True if text matches any code/HTML detection pattern."""

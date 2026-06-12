@@ -394,6 +394,154 @@ def test_list_pending_uses_short_read_timeout(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 15g. Empty-slug titles must not dedupe into each other
+# ---------------------------------------------------------------------------
+
+def test_punctuation_only_titles_do_not_collide(tmp_path: Path) -> None:
+    """'...' and '---' both normalize to an empty slug; they must be stored
+    as separate rows, not silently upsert-overwrite each other."""
+    store, _ = make_store(tmp_path)
+    row_a = store.propose(title="...", angle="First agent content.", tags=[], source="bot-a")
+    row_b = store.propose(title="---", angle="Second agent content.", tags=[], source="bot-b")
+
+    assert row_a["id"] != row_b["id"]
+    pending = store.list_pending()["valid"]
+    angles = {r["angle"] for r in pending}
+    assert {"First agent content.", "Second agent content."} <= angles
+
+
+# ---------------------------------------------------------------------------
+# 15h. Bare "ti_" id (prefix only) is quarantined
+# ---------------------------------------------------------------------------
+
+def test_bare_prefix_id_lands_in_invalid(tmp_path: Path) -> None:
+    store, db = make_store(tmp_path)
+    valid_propose(store)
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO topic_inbox (id, title, angle, tags, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            ("ti_", "Looks Totally Legit", "Nice angle.", "[]", "attacker", now, now),
+        )
+
+    result = store.list_pending()
+    assert "ti_" in [r["id"] for r in result["invalid"]]
+    assert "ti_" not in [r["id"] for r in result["valid"]]
+    # And it is not approvable either
+    assert store.approve("ti_") is False
+
+
+# ---------------------------------------------------------------------------
+# 15i. Source field is validated at write and read time
+# ---------------------------------------------------------------------------
+
+def test_oversized_source_rejected_at_propose(tmp_path: Path) -> None:
+    from opencohost.core.topic_inbox import SOURCE_MAX
+
+    store, _ = make_store(tmp_path)
+    with pytest.raises(TopicInboxValidationError):
+        store.propose(title="Valid title", angle="Valid angle.", tags=[], source="A" * (SOURCE_MAX + 1))
+
+
+def test_oversized_source_injected_directly_lands_in_invalid(tmp_path: Path) -> None:
+    store, db = make_store(tmp_path)
+    valid_propose(store)
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO topic_inbox (id, title, angle, tags, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            ("ti_" + "ab" * 16, "Looks Totally Legit", "Nice angle.", "[]", "S" * 100_000, now, now),
+        )
+
+    result = store.list_pending()
+    assert ("ti_" + "ab" * 16) in [r["id"] for r in result["invalid"]]
+
+
+# ---------------------------------------------------------------------------
+# 15j. UI-triggered writes use a bounded lock wait
+# ---------------------------------------------------------------------------
+
+def test_approve_and_discard_use_short_write_timeout(tmp_path: Path) -> None:
+    """approve/discard run on the Tk main thread (button press); a CLI writer
+    holding the lock must not freeze the UI for sqlite's 5s default."""
+    from unittest.mock import patch
+    from opencohost.core.topic_inbox import WRITE_TIMEOUT_SECONDS
+
+    store, _ = make_store(tmp_path)
+    row = valid_propose(store)
+
+    with patch("opencohost.core.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
+        store.approve(row["id"])
+        store.discard(row["id"])
+
+    for call in connect.call_args_list:
+        assert call.kwargs.get("timeout") == WRITE_TIMEOUT_SECONDS
+    assert WRITE_TIMEOUT_SECONDS < 5.0
+
+
+# ---------------------------------------------------------------------------
+# 15k. Connections are closed, not just committed
+# ---------------------------------------------------------------------------
+
+def test_store_closes_sqlite_connections(tmp_path: Path) -> None:
+    """`with sqlite3.connect(...)` only commits on exit; the store must close
+    every connection (the 7s polling loop runs for the app's lifetime)."""
+    from unittest.mock import patch
+
+    store, _ = make_store(tmp_path)
+    created: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        created.append(conn)
+        return conn
+
+    with patch("opencohost.core.topic_inbox.sqlite3.connect", side_effect=recording_connect):
+        row = store.propose(title="Close Me", angle="a", tags=[], source="bot")
+        store.list_pending()
+        store.list_all()
+        store.approve(row["id"])
+        store.discard(row["id"])
+
+    assert created, "test must capture real connections"
+    for conn in created:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
+# ---------------------------------------------------------------------------
+# 15l. approve() re-validates content (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+def test_approve_refuses_invalid_content_row(tmp_path: Path) -> None:
+    """Even when called directly with a known id, approve() must not promote
+    a row whose content fails validation (direct-SQLite attacker)."""
+    store, db = make_store(tmp_path)
+    valid_propose(store)
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    evil_id = "ti_" + "cd" * 16
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO topic_inbox (id, title, angle, tags, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            (evil_id, "<script>alert(1)</script>", "x", "[]", "attacker", now, now),
+        )
+
+    assert store.approve(evil_id) is False
+    statuses = {r["id"]: r["status"] for r in store.list_all()}
+    assert statuses[evil_id] == "proposed"
+
+
+# ---------------------------------------------------------------------------
 # 15. Fail-open: corrupt DB returns empty dict
 # ---------------------------------------------------------------------------
 
