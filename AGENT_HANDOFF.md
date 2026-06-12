@@ -77,6 +77,24 @@ runtime uncertainty before packaging or broad product polish.
   dropped when the inference watchdog fires.
 - Evidence details: `conductor/tracks/runtime_validation_gates_20260610/validation_log.md`.
 
+## Editorial cards CLI — 2026-06-11 (uncommitted on master)
+
+Outcome of the Kira memory/context audit (engram topic
+`architecture/kira-memory-subsystem`): the user chose to wire the existing
+editorial cards backend through a CLI usable by humans AND external agents,
+so Kira can receive curated internet/stream-topic context.
+
+- Shipped (strict TDD, 22 tests green, NOT committed yet):
+  `opencohost/editorial_cli.py` (`python -m opencohost.editorial_cli`),
+  `EditorialCardStore.list_all()`, `tests/test_editorial_cli.py`.
+- Agent/operator contract: `docs/EDITORIAL_CARDS_CLI.md` (execution model,
+  idempotency, exit codes, retry policy).
+- Conversational memory itself is unchanged (20-message deque, no
+  summarization) — deferred by design to pending track
+  `kira_history_summarization_20260611` in `conductor/tracks.md`.
+- Runtime validation pending: create + arm a card via CLI, then confirm the
+  agenda bridge injects `<editorial_context>` into a real Kira prompt.
+
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
 The packaging & distribution track executed Phases 2–4 end-to-end in one day
@@ -107,7 +125,9 @@ The packaging & distribution track executed Phases 2–4 end-to-end in one day
   predates it. The launcher is NOT yet validated on a clean machine.
 
 To resume Phase 5 later (in order):
-1. Bump `__version__` to `0.1.1`, tag `v0.1.1`, push tag → new draft exe.
+1. ~~Bump `__version__` to `0.1.1`, tag `v0.1.1`, push tag → new draft exe.~~
+   DONE 2026-06-11: `v0.1.1` draft built green (first exe with the CA fix);
+   Node-24 action bumps landed (PR #31 + pinned `setup-uv@v8.2.0`).
 2. Repo visibility decision: the launcher downloads anonymously, so the
    release must live on a PUBLIC repo (make this repo public, or export to
    `plynte-labs/opencohost`). Private repo → 404 after the SSL fix.
