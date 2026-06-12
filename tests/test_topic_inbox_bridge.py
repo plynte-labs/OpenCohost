@@ -303,6 +303,35 @@ def test_reject_routes_both_namespaces(tmp_path: Path) -> None:
     assert store.list_pending()["valid"] == []
 
 
+def test_approve_persists_topic_before_claiming_inbox_row(tmp_path: Path) -> None:
+    """Crash-ordering contract: if the app dies mid-approve, a visible
+    duplicate beats a silent loss — so the agenda topic must be persisted
+    BEFORE the inbox row is claimed."""
+    bridge, store = make_bridge(tmp_path)
+    row = store.propose(title="Tema persistido primero", angle="a", tags=[], source="bot")
+    bridge.refresh()
+    ctrl = KiraAgendaController()
+
+    calls: list[str] = []
+    bridge._persist_fn = lambda: calls.append("persist")
+    original_approve = store.approve
+    store.approve = lambda topic_id: (calls.append("claim"), original_approve(topic_id))[1]  # type: ignore[method-assign]
+
+    assert bridge.approve(row["id"], ctrl) is True
+
+    assert calls == ["persist", "claim"]
+
+
+def test_approve_works_without_persist_fn(tmp_path: Path) -> None:
+    """persist_fn is optional — the bridge must not require it."""
+    bridge, store = make_bridge(tmp_path)
+    row = store.propose(title="Sin persistencia", angle="a", tags=[], source="bot")
+    bridge.refresh()
+    ctrl = KiraAgendaController()
+
+    assert bridge.approve(row["id"], ctrl) is True
+
+
 # ---------------------------------------------------------------------------
 # Discard routing + id namespace
 # ---------------------------------------------------------------------------

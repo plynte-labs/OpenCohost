@@ -31,9 +31,18 @@ INBOX_SOURCE_TAG = "🤖"
 class TopicInboxBridge:
     """Polls TopicInboxStore and adapts proposals for the agenda panel."""
 
-    def __init__(self, store: Any, log_fn: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        log_fn: Callable[[str], None] | None = None,
+        persist_fn: Callable[[], Any] | None = None,
+    ) -> None:
         self._store = store
         self._log = log_fn or (lambda message: None)
+        # Called after the agenda topic is created but BEFORE the inbox row
+        # is claimed: if the app dies in between, the operator sees the
+        # proposal again (visible duplicate) instead of losing both.
+        self._persist_fn = persist_fn
         self._pending_cache: list[dict] = []
         self._known_ids: frozenset[str] = frozenset()
 
@@ -150,6 +159,12 @@ class TopicInboxBridge:
             agenda_controller.topics.remove(topic)
             self._log(f"[Topic Inbox] No se pudo encolar “{str(row['title'])[:40]}”: {exc}")
             return False
+
+        if self._persist_fn is not None:
+            try:
+                self._persist_fn()
+            except Exception as exc:
+                logger.warning("topic inbox persist hook failed (fail-open): %s", exc)
 
         if not self._store.approve(topic_id):
             agenda_controller.topics.remove(topic)
