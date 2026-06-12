@@ -9,17 +9,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SHELL = ROOT / "opencohost" / "ui" / "app_shell.py"
 AVATAR_PANEL = ROOT / "opencohost" / "ui" / "avatar_panel.py"
 INVENTORY = ROOT / "conductor" / "tracks" / "product_ui_kira_avatar_refactor_20260513" / "inventory.md"
 
+# conductor/tracks/ is a local planning workspace, intentionally untracked in
+# the public repo — the inventory checks only make sense where it exists.
+requires_inventory = pytest.mark.skipif(
+    not INVENTORY.exists(), reason="local planning artifact inventory.md not present"
+)
+
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+@requires_inventory
 def test_inventory_covers_current_ui_modules_and_product_categories() -> None:
     """The refactor inventory must be the safety map for every major UI module."""
     inventory = read_text(INVENTORY)
@@ -47,6 +56,7 @@ def test_inventory_covers_current_ui_modules_and_product_categories() -> None:
         assert category in inventory
 
 
+@requires_inventory
 def test_inventory_documents_duplicate_and_phantom_controls() -> None:
     """Known confusing controls must stay visible in the plan until resolved."""
     inventory = read_text(INVENTORY)

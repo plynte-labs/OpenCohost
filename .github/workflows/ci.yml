@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UV_VERSION: "0.11.6"
+
+jobs:
+  test:
+    # Windows-only: the suite exercises Windows-specific paths and the product
+    # ships as a Windows exe. Ubuntu support has not been verified against the
+    # full 1900+ test corpus.
+    name: test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Sync dependencies (dev + integrations)
+        # integrations provides pytchat (and friends) — chat_source raises at
+        # construction when pytchat is absent, and its tests exercise that
+        # integration with the package importable.
+        run: uv sync --locked --extra dev --extra integrations
+
+      - name: Tests
+        run: uv run pytest tests/ -q

@@ -187,26 +187,31 @@ class TestBuildWheelSpec(unittest.TestCase):
     """build_wheel_spec() must always install cloud-tts and local-tts extras."""
 
     def test_default_extras(self):
-        spec = build_wheel_spec("opencohost")
+        spec = build_wheel_spec(".")
         self.assertIn("cloud-tts", spec)
         self.assertIn("local-tts", spec)
 
     def test_returns_string(self):
-        self.assertIsInstance(build_wheel_spec("opencohost"), str)
+        self.assertIsInstance(build_wheel_spec("."), str)
 
-    def test_contains_package_name(self):
-        spec = build_wheel_spec("opencohost")
-        self.assertIn("opencohost", spec)
-
-    def test_format_pep508(self):
-        # Must be in PEP 508 extras notation: pkg[extra1,extra2]
-        spec = build_wheel_spec("opencohost")
-        self.assertRegex(spec, r"opencohost\[.*cloud-tts.*\]")
-        self.assertRegex(spec, r"opencohost\[.*local-tts.*\]")
+    def test_format_local_path_with_extras(self):
+        # Must be local-path-with-extras notation: .[extra1,extra2]
+        spec = build_wheel_spec(".")
+        self.assertRegex(spec, r"^\.\[.*cloud-tts.*\]$")
+        self.assertRegex(spec, r"^\.\[.*local-tts.*\]$")
 
     def test_custom_extras(self):
-        spec = build_wheel_spec("opencohost", extras=["cloud-tts", "local-tts", "integrations"])
+        spec = build_wheel_spec(".", extras=["cloud-tts", "local-tts", "integrations"])
         self.assertIn("integrations", spec)
+
+    def test_bootstrap_installs_from_local_source_not_pypi(self):
+        # The bootstrap must install the unpacked source tree, never a named
+        # PyPI spec: "opencohost[...]" would resolve against PyPI (the package
+        # is not published there, and the name could be squatted).
+        import inspect
+        src = inspect.getsource(_launcher.run_bootstrap)
+        self.assertIn('build_wheel_spec(".")', src)
+        self.assertNotIn('build_wheel_spec("opencohost")', src)
 
 
 # ===========================================================================
