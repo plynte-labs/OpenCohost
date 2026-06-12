@@ -446,3 +446,34 @@ class TestAppShellPersistenceWiring:
 
     def test_app_shell_pushes_restored_settings_into_panel(self) -> None:
         assert "apply_session_settings" in self._source()
+
+    def test_settings_push_happens_after_restore_not_inside_build_ui(self) -> None:
+        """Crash regression (2026-06-12 17:02): apply_session_settings was
+        called inside _build_ui, which runs BEFORE kira_agenda exists —
+        the app died at launch (tkinter masks the missing attribute as a
+        '_tkinter.tkapp has no attribute' error). The push must live in
+        __init__, AFTER load_into populates the controller."""
+        import ast
+
+        tree = ast.parse(self._source())
+
+        def attribute_calls(fn_node: ast.FunctionDef) -> list[str]:
+            return [
+                node.func.attr
+                for node in ast.walk(fn_node)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            ]
+
+        app_cls = next(
+            n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "VocalAIApp"
+        )
+        fns = {n.name: n for n in app_cls.body if isinstance(n, ast.FunctionDef)}
+
+        assert "apply_session_settings" not in attribute_calls(fns["_build_ui"]), (
+            "_build_ui runs before kira_agenda exists; pushing settings there crashes launch"
+        )
+        init_calls = attribute_calls(fns["__init__"])
+        assert "apply_session_settings" in init_calls, "settings push missing from __init__"
+        assert init_calls.index("load_into") < init_calls.index("apply_session_settings"), (
+            "settings must be pushed AFTER the restore populates the controller"
+        )
