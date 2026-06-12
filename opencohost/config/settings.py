@@ -160,6 +160,10 @@ TTS_LIGHT_TIMEOUT = 45
 TTS_LOCAL_MODEL_PATH: str = os.path.join(
     str(STORAGE_PATHS.cache_root), "piper", "es_AR-daniela-high.onnx"
 )
+# Piper speaking-rate control: 1.0 keeps the voice model default; values
+# above 1.0 slow speech down proportionally (1.15 ≈ 15% slower).
+# Ignored when the installed piper-tts does not expose SynthesisConfig.
+TTS_LOCAL_LENGTH_SCALE: float = 1.15
 WS_URI = "ws://127.0.0.1:8765"
 WS_RECONNECT_BASE_DELAY = 1.0
 WS_RECONNECT_MAX_DELAY = 30.0
@@ -191,6 +195,7 @@ WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geomet
 LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
 LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
 TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
+TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
 
 # Writable paths for Cohost, Music, and Avatar modules
@@ -385,6 +390,52 @@ def save_tts_local_only(value: bool, config_file: Optional[str] = None) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({
                 "tts_local_only": bool(value),
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def load_tts_speed(config_file: Optional[str] = None) -> float:
+    """Load the persisted Piper length_scale from disk.
+
+    Returns TTS_LOCAL_LENGTH_SCALE (default) when the file is absent,
+    unreadable, or corrupted. Values are clamped to [0.5, 2.0] so a bad
+    file can never produce unusable speech.
+
+    Args:
+        config_file: Override path for testing. Uses TTS_SPEED_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_SPEED_FILE
+    try:
+        if not os.path.exists(path):
+            return TTS_LOCAL_LENGTH_SCALE
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        value = float(data.get("tts_speed", TTS_LOCAL_LENGTH_SCALE))
+        return max(0.5, min(2.0, value))
+    except Exception:
+        return TTS_LOCAL_LENGTH_SCALE
+
+
+def save_tts_speed(value: float, config_file: Optional[str] = None) -> None:
+    """Persist the Piper length_scale using an atomic write.
+
+    Uses the same temp-file + os.replace pattern as save_tts_local_only to
+    avoid corruption on interrupted writes.
+
+    Args:
+        value: Piper length_scale (1.0 = model default; >1.0 = slower).
+        config_file: Override path for testing. Uses TTS_SPEED_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_SPEED_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "tts_speed": float(value),
                 "saved_at": datetime.now().isoformat(),
             }, f)
         os.replace(tmp, path)
