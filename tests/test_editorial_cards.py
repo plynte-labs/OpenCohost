@@ -157,3 +157,36 @@ def test_rating_records_store_utility_without_raw_chat(tmp_path) -> None:
             rating=EditorialCardRatingValue.NOT_USEFUL,
             raw_chat="usuario: texto crudo",
         )
+
+
+def test_list_all_returns_empty_for_fresh_db(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    assert store.list_all() == []
+
+
+def test_list_all_orders_by_updated_at_desc(tmp_path) -> None:
+    import time
+
+    store = EditorialCardStore(tmp_path / "cards.db")
+    first = store.upsert(
+        EditorialCard(
+            topic="Topic Alpha",
+            summary="First card summary here.",
+            streamer_take="My angle on alpha.",
+        )
+    )
+    # Small sleep so updated_at timestamps differ on Windows (1-second resolution)
+    time.sleep(1.1)
+    second = store.upsert(
+        EditorialCard(
+            topic="Topic Beta",
+            summary="Second card summary here.",
+            streamer_take="My angle on beta.",
+        )
+    )
+
+    cards = store.list_all()
+    assert len(cards) == 2
+    # Most recently updated first
+    assert cards[0].id == second.id
+    assert cards[1].id == first.id

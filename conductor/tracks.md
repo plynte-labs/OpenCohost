@@ -136,3 +136,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: OpenCohost Repo Export - Land the Migration and Move to plynte-labs**
   *Link: [./tracks/opencohost_repo_export_20260610/](./tracks/opencohost_repo_export_20260610/)*
+
+---
+
+- [ ] **Track: Kira Conversational Memory - Direct-Path History Summarization**
+  *Link: [./tracks/kira_history_summarization_20260611/](./tracks/kira_history_summarization_20260611/)*
+  *Status 2026-06-11: Deferred by design (option B of the Kira memory audit).
+  Direct-path LLM history is a 20-message deque with no summarization, cleared
+  on model/profile switch. Editorial cards CLI (shipped 2026-06-11) covers the
+  curated-context axis; this track covers conversational memory. Do not start
+  before runtime validation gates pass. Audit details in engram topic
+  architecture/kira-memory-subsystem.*

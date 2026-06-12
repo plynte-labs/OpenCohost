@@ -312,6 +312,15 @@ class EditorialCardStore:
             ).fetchall()
         return [self._rating_from_row(row) for row in rows]
 
+    def list_all(self) -> list[EditorialCard]:
+        """Return all cards ordered by updated_at descending (most recently changed first)."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM editorial_cards ORDER BY updated_at DESC, id ASC"
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(
