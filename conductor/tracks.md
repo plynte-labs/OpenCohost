@@ -9,8 +9,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Empaquetado y Distribución (Smart Wrapper / Install UI)**
+- [~] **Track: Empaquetado y Distribución (Smart Wrapper / Install UI)**
   *Link: [./tracks/packaging_deploy_20260510/](./tracks/packaging_deploy_20260510/)*
+  *Status 2026-06-11: Phases 2-4 DONE and merged (PRs #26, #28, #29, #30 —
+  opencohost/ package, launcher + 82 tests, CI, tag-driven release pipeline;
+  v0.1.0 draft built end-to-end). Phase 5 (clean-machine validation) PAUSED —
+  resume steps in AGENT_HANDOFF.md "Packaging update — 2026-06-11".*
 
 ---
 
