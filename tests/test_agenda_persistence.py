@@ -302,6 +302,22 @@ def test_schema_version_is_stamped(tmp_path: Path) -> None:
     assert row is not None and int(row[0]) == SCHEMA_VERSION
 
 
+def test_load_reports_restored_count_to_operator_log(tmp_path: Path) -> None:
+    """Runtime-gate observability: a successful restore must be visible in
+    the operator log; an empty restore stays silent (no first-run noise)."""
+    seeder, db = make_persistence(tmp_path)
+    seeder.save_if_changed(controller_with_queue())
+
+    messages: list[str] = []
+    AgendaPersistence(db, log_fn=messages.append).load_into(KiraAgendaController())
+    assert any("3" in m for m in messages), "restore count must reach the operator log"
+
+    empty_db = str(tmp_path / "empty.db")
+    silent: list[str] = []
+    AgendaPersistence(empty_db, log_fn=silent.append).load_into(KiraAgendaController())
+    assert silent == []
+
+
 def test_load_sets_fingerprint_so_startup_does_not_rewrite(tmp_path: Path) -> None:
     persistence, db = make_persistence(tmp_path)
     persistence.save_if_changed(controller_with_queue())
@@ -477,3 +493,29 @@ class TestAppShellPersistenceWiring:
         assert init_calls.index("load_into") < init_calls.index("apply_session_settings"), (
             "settings must be pushed AFTER the restore populates the controller"
         )
+
+    def test_init_refreshes_agenda_ui_after_restore(self) -> None:
+        """Runtime-gate regression (2026-06-12): topics restored correctly
+        into the controller but the panel never rendered them — nothing
+        triggered a status update after load_into, so the operator saw an
+        empty queue and concluded the restore failed."""
+        import ast
+
+        tree = ast.parse(self._source())
+        app_cls = next(
+            n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "VocalAIApp"
+        )
+        init_fn = next(
+            n for n in app_cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+        )
+        init_calls = [
+            node.func.attr
+            for node in ast.walk(init_fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        assert "_kira_agenda_update_status" in init_calls, (
+            "__init__ must refresh the agenda UI after restoring topics"
+        )
+        assert init_calls.index("apply_session_settings") < init_calls.index(
+            "_kira_agenda_update_status"
+        ), "the refresh must come after both restore and settings push"

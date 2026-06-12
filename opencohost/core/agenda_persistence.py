@@ -230,6 +230,11 @@ class AgendaPersistence:
         self._last_fingerprint = json.dumps(
             self._snapshot(controller), sort_keys=True, ensure_ascii=False
         )
+        if restored:
+            self._log(
+                f"[Kira Agenda] Restaurados {restored} tema(s) de la sesión anterior. "
+                "La agenda arranca en OFF: activala cuando quieras que Kira los hostee."
+            )
         return restored
 
     # ------------------------------------------------------------------
