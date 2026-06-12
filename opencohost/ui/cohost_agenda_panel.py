@@ -28,6 +28,16 @@ class CoHostAgendaPanel:
         r"=>",
     )
 
+    # ------------------------------------------------------------------
+    # Batch rendering constants (ADR-006 Phase 3)
+    # ------------------------------------------------------------------
+    # Render suggestions in chunks so large lists do not block the Tk main
+    # thread.  The first chunk is rendered synchronously (perceived
+    # responsiveness); remaining chunks yield control via a 10 ms delayed
+    # callback between each step.
+    BATCH_SIZE: int = 20
+    BATCH_YIELD_MS: int = 10
+
     def __init__(
         self,
         *,
@@ -42,6 +52,7 @@ class CoHostAgendaPanel:
         on_emergency_stop: Optional[Callable[[], None]] = None,
         on_approve_suggestion: Optional[Callable[[str], None]] = None,
         on_reject_suggestion: Optional[Callable[[str], None]] = None,
+        schedule_ui_update_after: Optional[Callable[[int, Callable[[], None]], None]] = None,
     ) -> None:
         self._on_add_topic = on_add_topic or (lambda title, angle, constraints, priority, length, turns: None)
         self._on_session_settings = on_session_settings or (lambda turns, rhythm, length, safety_mode: None)
@@ -54,11 +65,25 @@ class CoHostAgendaPanel:
         self._on_emergency_stop = on_emergency_stop or (lambda: None)
         self._on_approve_suggestion = on_approve_suggestion or (lambda topic_id: None)
         self._on_reject_suggestion = on_reject_suggestion or (lambda topic_id: None)
+        # Injectable delayed scheduler (ADR-006 Phase 3).  Signature:
+        #   (delay_ms: int, fn: Callable[[], None]) -> None
+        # In production this is wired to root.after; in tests a recording
+        # lambda collects (delay_ms, fn) pairs for manual firing.
+        # The fallback calls fn() immediately — safe for unit tests that
+        # do not inject a scheduler.
+        self._schedule_ui_update_after: Callable[[int, Callable[[], None]], None] = (
+            schedule_ui_update_after or (lambda _delay, fn: fn())
+        )
         self._widgets: dict[str, Any] = {}
         self._constraint_tags: list[str] = []
         self._profiles: dict[str, dict[str, Any]] = {}
         self._suggestion_widgets: list[dict[str, Any]] = []
         self._profile_expanded = False
+        # Generation counter for batch supersession (ADR-006 Phase 3).
+        # Incremented each time update_suggestions is called; each batch
+        # step checks its captured generation against the current value and
+        # exits silently if they differ (stale batch).
+        self._suggestion_generation: int = 0
 
     def build(self, parent: Any) -> Any:
         parent.grid_columnconfigure(0, weight=1)
@@ -643,11 +668,26 @@ class CoHostAgendaPanel:
     }
 
     def update_suggestions(self, suggestions: list[dict]) -> None:
-        """Render the 'Sugerencias de Kira' section with confidence badges."""
+        """Render the 'Sugerencias de Kira' section with incremental batch rendering.
+
+        Large lists are rendered in chunks of BATCH_SIZE items.  The first
+        chunk renders synchronously in this call for perceived responsiveness;
+        remaining chunks are deferred via BATCH_YIELD_MS delayed callbacks
+        (ADR-006 Phase 3, Pattern 3).
+
+        Supersession: calling this method again while a previous batch is still
+        in flight increments the generation counter.  Each batch step checks
+        its captured generation before rendering and exits silently if stale,
+        so the old sequence never interleaves with the new data.
+        """
         frame = self._widgets.get("suggestions_frame")
         container = self._widgets.get("suggestions_container")
         if frame is None or container is None:
             return
+
+        # Advance the generation counter to supersede any in-flight batch.
+        self._suggestion_generation += 1
+        generation = self._suggestion_generation
 
         # Clear existing suggestion widgets
         for child in container.winfo_children():
@@ -661,9 +701,69 @@ class CoHostAgendaPanel:
         frame.grid()
         # Sort by confidence: HIGH first
         conf_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        sorted_suggestions = sorted(suggestions, key=lambda s: conf_order.get(s.get("confidence", "LOW"), 3))
-        for row_idx, suggestion in enumerate(sorted_suggestions):
+        sorted_suggestions = sorted(
+            suggestions,
+            key=lambda s: conf_order.get(s.get("confidence", "LOW"), 3),
+        )
+
+        # Render first chunk synchronously for immediate visual feedback.
+        first_chunk = sorted_suggestions[: self.BATCH_SIZE]
+        for row_idx, suggestion in enumerate(first_chunk):
             self._render_suggestion(container, suggestion, row_idx)
+
+        # If the full list fits in one chunk, we are done — no scheduling.
+        if len(sorted_suggestions) <= self.BATCH_SIZE:
+            return
+
+        # Schedule the remaining chunks with a yield between each batch step.
+        self._schedule_batch_step(sorted_suggestions, self.BATCH_SIZE, generation)
+
+    def _schedule_batch_step(
+        self,
+        items: list[dict],
+        start: int,
+        generation: int,
+    ) -> None:
+        """Schedule a single batch step via the injectable delayed scheduler.
+
+        Each step renders BATCH_SIZE rows starting at *start*, then schedules
+        the next step if more items remain.  If the panel has been cleaned up
+        or a newer update_suggestions call has superseded this batch (generation
+        mismatch), the step exits silently without rendering or rescheduling.
+        """
+        def _step() -> None:
+            # Teardown guard: widgets dict is cleared by cleanup(). Render to
+            # the CURRENT container reference, never a stale closure capture —
+            # a rebuild cycle could otherwise leave us drawing on a destroyed
+            # widget even though the guard passed.
+            container_ref = self._widgets.get("suggestions_container")
+            if container_ref is None:
+                return
+            # Supersession guard: a newer call has already taken over.
+            if self._suggestion_generation != generation:
+                return
+
+            chunk = items[start : start + self.BATCH_SIZE]
+            for offset, suggestion in enumerate(chunk):
+                self._render_suggestion(container_ref, suggestion, start + offset)
+
+            next_start = start + self.BATCH_SIZE
+            if next_start < len(items):
+                self._schedule_batch_step(items, next_start, generation)
+
+        self._schedule_ui_update_after(self.BATCH_YIELD_MS, _step)
+
+    def cleanup(self) -> None:
+        """Disarm any pending batch callbacks before the panel is destroyed.
+
+        Clears the suggestions_container widget reference so that any
+        in-flight batch step hits the teardown guard in _schedule_batch_step
+        and exits silently rather than operating on destroyed widgets.
+        """
+        # Remove the container reference so in-flight batch steps self-abort.
+        self._widgets.pop("suggestions_container", None)
+        # Advance the generation counter as an additional supersession signal.
+        self._suggestion_generation += 1
 
     def _render_suggestion(self, parent: Any, suggestion: dict, row: int) -> None:
         """Render a single suggestion row: title, angle, confidence badge, buttons."""
