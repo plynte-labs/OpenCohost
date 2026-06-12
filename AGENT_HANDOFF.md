@@ -117,6 +117,25 @@ stream topics; the operator approves in the app UI.
 - Runtime validation pending (owner): propose via CLI while the app runs →
   suggestion appears within ~7s → approve → topic enters the agenda queue.
 
+## Agenda persistence — 2026-06-12
+
+Backlog #3 delivered (branch `feat/agenda-persistence`): queued/approved
+agenda topics and session settings survive app restarts.
+
+- `opencohost/core/agenda_persistence.py` — agenda_topics/agenda_settings/
+  agenda_meta tables in cards.db; write-through on real change (fingerprint
+  gate); bounded Tk-thread timeouts; fail-open with one-time operator
+  warning; restore via filtered SELECT (cap 50) through the controller
+  sanitizer.
+- Deliberate non-features (owner decisions): runtime counters never persist
+  (ACTIVE re-hosts fresh as queued); the agenda switch always starts OFF
+  after a restart (broadcast safety); COMPLETED/SKIPPED/DRAFTED are not
+  persisted. The recurring-topic library is a future proposal track.
+- Inbox approve now persists the topic BEFORE claiming the ti_ row
+  (crash leaves a visible duplicate, never a silent loss).
+- Runtime validation pending (owner): queue topics → kill the app →
+  relaunch → queue intact, agenda OFF.
+
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
 The packaging & distribution track executed Phases 2–4 end-to-end in one day
