@@ -193,3 +193,213 @@ def test_session_control_buttons_are_outside_topic_form_and_stateful() -> None:
     assert "btn_agenda_emergency" in text
     assert "_update_session_buttons" in text
     assert "state=\"disabled\"" in text
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Incremental batch rendering for update_suggestions (ADR-006 P3)
+# ---------------------------------------------------------------------------
+# These tests use a recording scheduler to drive batch callbacks manually,
+# mirroring the TestKiraDebounce pattern from test_advanced_panel.py.
+# Widgets are replaced with lightweight fakes so ctk is never imported at
+# module level (avoids the OOM crash documented in the Phase 2 bugfix).
+# ---------------------------------------------------------------------------
+
+
+def _make_suggestion(idx: int, confidence: str = "HIGH") -> dict:
+    """Build a minimal suggestion dict for testing."""
+    return {
+        "title": f"Suggestion {idx}",
+        "angle": f"Angle {idx}",
+        "confidence": confidence,
+        "source": "test",
+        "topic_id": f"topic-{idx}",
+    }
+
+
+class _FakeContainer:
+    """Minimal widget stand-in for the suggestions container."""
+
+    def __init__(self) -> None:
+        self._children: list["_FakeFrame"] = []
+
+    def winfo_children(self) -> list:
+        return list(self._children)
+
+    def _register_child(self, child: "_FakeFrame") -> None:
+        self._children.append(child)
+
+
+class _FakeFrame:
+    """Minimal stand-in for a ctk.CTkFrame suggestion row."""
+
+    def __init__(self, parent: _FakeContainer, row: int) -> None:
+        self.parent = parent
+        self.row = row
+        self._destroyed = False
+        parent._register_child(self)
+
+    def destroy(self) -> None:
+        self._destroyed = True
+        self.parent._children = [c for c in self.parent._children if c is not self]
+
+
+class _FakeSuggestionsFrame:
+    """Stand-in for the top-level suggestions_frame."""
+
+    def __init__(self) -> None:
+        self._visible = True
+
+    def grid(self, **_kw) -> None:
+        self._visible = True
+
+    def grid_remove(self) -> None:
+        self._visible = False
+
+
+def _make_panel_with_batch_scheduler(**extra_kwargs):
+    """Return a (panel, scheduled_callbacks) pair.
+
+    The panel is constructed with a recording scheduler that appends
+    (delay_ms, fn) tuples to *scheduled_callbacks* instead of using
+    real timers.  The _render_suggestion method is monkey-patched to
+    record rendered rows without importing customtkinter.
+    """
+    scheduled_callbacks: list[tuple[int, object]] = []
+
+    def _recording_scheduler(delay_ms: int, fn) -> None:
+        scheduled_callbacks.append((delay_ms, fn))
+
+    panel = CoHostAgendaPanel(
+        schedule_ui_update_after=_recording_scheduler,
+        **extra_kwargs,
+    )
+
+    container = _FakeContainer()
+    frame = _FakeSuggestionsFrame()
+    panel._widgets["suggestions_frame"] = frame
+    panel._widgets["suggestions_container"] = container
+
+    rendered_rows: list[tuple[int, dict]] = []
+
+    def _fake_render(parent, suggestion, row):
+        # Create a fake frame so winfo_children stays consistent
+        _FakeFrame(parent, row)
+        rendered_rows.append((row, suggestion))
+
+    panel._render_suggestion = _fake_render  # type: ignore[method-assign]
+    panel._rendered_rows = rendered_rows  # expose for assertions
+    panel._fake_container = container
+
+    return panel, scheduled_callbacks
+
+
+class TestBatchSuggestions:
+    """Incremental batch rendering for update_suggestions (ADR-006 Phase 3)."""
+
+    # (a) Large list: first chunk sync, rest scheduled, all rendered in order
+
+    def test_large_list_first_chunk_sync_rest_scheduled_all_rendered(self) -> None:
+        """50 items: first 20 rendered synchronously, remainder via scheduled callbacks."""
+        panel, sched = _make_panel_with_batch_scheduler()
+        suggestions = [_make_suggestion(i) for i in range(50)]
+
+        panel.update_suggestions(suggestions)
+
+        # First 20 rendered immediately (synchronous)
+        assert len(panel._rendered_rows) == 20
+
+        # Remaining 30 need at least one scheduled callback
+        assert len(sched) >= 1
+
+        # Fire all scheduled callbacks until none remain
+        while sched:
+            _delay, fn = sched.pop(0)
+            fn()
+
+        # All 50 rendered, in row order
+        assert len(panel._rendered_rows) == 50
+        row_indices = [r for r, _ in panel._rendered_rows]
+        assert row_indices == list(range(50))
+
+    # (b) Re-entry mid-batch: second call cancels first; only second list rendered
+
+    def test_reentry_mid_batch_cancels_previous_renders_second_list(self) -> None:
+        """A second update_suggestions call while the first batch is pending must
+        supersede it — the final rendered set is exactly the second list."""
+        panel, sched = _make_panel_with_batch_scheduler()
+
+        first = [_make_suggestion(i) for i in range(50)]
+        second = [_make_suggestion(100 + i) for i in range(5)]
+
+        # Start first batch
+        panel.update_suggestions(first)
+        assert len(panel._rendered_rows) == 20  # first chunk rendered sync
+        assert len(sched) >= 1  # continuation scheduled
+
+        # Snapshot the render log: everything appended after this index
+        # belongs to the second call (and any stale callbacks fired later).
+        before_second = len(panel._rendered_rows)
+
+        # Issue second update before the continuation fires
+        panel.update_suggestions(second)
+
+        second_ids = [s["topic_id"] for s in second]
+        rendered_after_second = [
+            s.get("topic_id") for _, s in panel._rendered_rows[before_second:]
+        ]
+        # Second list is small (5 <= BATCH_SIZE) → rendered fully and in order
+        assert rendered_after_second == second_ids
+
+        # Fire whatever is still scheduled — stale first-list callbacks must
+        # be no-ops and append nothing
+        while sched:
+            _delay, fn = sched.pop(0)
+            fn()
+
+        rendered_final = [
+            s.get("topic_id") for _, s in panel._rendered_rows[before_second:]
+        ]
+        assert rendered_final == second_ids, (
+            f"Stale first-batch items found: {[t for t in rendered_final if t not in second_ids]}"
+        )
+
+    # (c) Small list (<= BATCH_SIZE): fully synchronous, zero scheduled callbacks
+
+    def test_small_list_renders_synchronously_no_scheduler_calls(self) -> None:
+        """A list of <= BATCH_SIZE items must render fully synchronously."""
+        panel, sched = _make_panel_with_batch_scheduler()
+        suggestions = [_make_suggestion(i) for i in range(20)]
+
+        panel.update_suggestions(suggestions)
+
+        assert len(panel._rendered_rows) == 20
+        assert len(sched) == 0, "Small list must not schedule any deferred callbacks"
+
+    # (d) Teardown safety: scheduled callback after cleanup is a no-op
+
+    def test_scheduled_callback_after_cleanup_is_noop(self) -> None:
+        """A pending batch callback that fires after cleanup() must not raise."""
+        panel, sched = _make_panel_with_batch_scheduler()
+        suggestions = [_make_suggestion(i) for i in range(50)]
+
+        panel.update_suggestions(suggestions)
+        assert len(sched) >= 1
+
+        # Simulate teardown before the scheduled callback fires
+        panel.cleanup()
+
+        # Fire the stale callback — must be a silent no-op
+        for _delay, fn in sched:
+            fn()  # must not raise
+
+    # (e) Yield delay constant is 10 ms
+
+    def test_yield_delay_constant_is_10ms(self) -> None:
+        """BATCH_YIELD_MS must equal 10 (ADR-006 Phase 3)."""
+        assert CoHostAgendaPanel.BATCH_YIELD_MS == 10
+
+    # (f) BATCH_SIZE constant is 20
+
+    def test_batch_size_constant_is_20(self) -> None:
+        """BATCH_SIZE must equal 20 (ADR-006 Phase 3)."""
+        assert CoHostAgendaPanel.BATCH_SIZE == 20

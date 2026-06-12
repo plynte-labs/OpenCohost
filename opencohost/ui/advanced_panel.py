@@ -67,6 +67,14 @@ class AdvancedModePanel:
         frame = panel.build()
     """
 
+    # Maximum log entries processed in a single tick (ADR-007 Phase 1).
+    PROCESS_LOGS_CHUNK_LIMIT: int = 20
+
+    # Debounce window for Kira token-stream writes, in milliseconds (ADR-007 Phase 2).
+    # Accumulates incoming dialogue updates and flushes at most once per window,
+    # converting O(tokens) full layout reflows into at most one per 75 ms.
+    KIRA_FLUSH_INTERVAL_MS: int = 75
+
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
@@ -79,6 +87,7 @@ class AdvancedModePanel:
         log_queue: queue.Queue,
         on_log_action: Optional[Callable[[str], None]],
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        schedule_ui_update_after: Optional[Callable[[int, Callable[[], None]], None]] = None,
         acciones_file: str = ACCIONES_LOG_FILE,
         text_kira_response: Optional[ctk.CTkTextbox] = None,
     ) -> None:
@@ -90,7 +99,10 @@ class AdvancedModePanel:
             dispatcher: CallbackDispatcher for safe callback invocation.
             log_queue: Queue of log messages from other threads.
             on_log_action: Optional callback when an action is logged.
-            schedule_ui_update: Function to schedule UI updates (default: direct call).
+            schedule_ui_update: Function to schedule zero-delay UI updates (default: direct call).
+            schedule_ui_update_after: Function to schedule a delayed UI update;
+                signature ``(delay_ms: int, fn: Callable[[], None]) -> None``.
+                Defaults to an immediate call (``fn()``), suitable for tests.
             acciones_file: Path to the actions log file.
             text_kira_response: Optional CTkTextbox for Kira response display.
         """
@@ -100,12 +112,19 @@ class AdvancedModePanel:
         self._log_queue = log_queue
         self._on_log_action = on_log_action
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
+        self._schedule_ui_update_after = schedule_ui_update_after or (lambda _delay, fn: fn())
         self._acciones_file = acciones_file
         self.text_kira_response = text_kira_response
 
         # Internal state
         self._logs_panel_visible: bool = False
         self._observer_id: int | None = None
+
+        # Kira token-stream debounce state (ADR-007 Phase 2).
+        # _kira_response_buffer holds the latest incoming content;
+        # _kira_flush_pending is True while a scheduled flush is in flight.
+        self._kira_response_buffer: str | None = None
+        self._kira_flush_pending: bool = False
 
         # Widget references (set by build())
         self._frame: ctk.CTkFrame | None = None
@@ -314,10 +333,6 @@ class AdvancedModePanel:
     # Log queue processing
     # ------------------------------------------------------------------
 
-    # Max log messages processed per GUI tick (ADR-007: bounded queue
-    # consumption keeps the main thread responsive under log bursts).
-    PROCESS_LOGS_CHUNK_LIMIT = 20
-
     def process_logs(self) -> None:
         """Process pending log messages, bounded per GUI tick.
 
@@ -430,7 +445,18 @@ class AdvancedModePanel:
     # ------------------------------------------------------------------
 
     def update_kira_response(self, msg: str) -> None:
-        """Update the Kira response panel if the message is from Kira.
+        """Buffer a Kira response update and schedule a debounced flush.
+
+        During LLM token streaming this method is called once per token.
+        Instead of triggering a full delete/insert reflow on every call,
+        we accumulate the latest content in a buffer and schedule a single
+        flush after KIRA_FLUSH_INTERVAL_MS (ADR-007 Phase 2, FR2/AC3).
+
+        While a flush is pending further calls only overwrite the buffer;
+        no additional timers are created (coalescing).  When the flush fires
+        it writes the most-recent buffered content in one pass and clears
+        the pending flag so the next incoming update can schedule a new
+        window.
 
         Args:
             msg: Message to check and potentially display.
@@ -440,21 +466,45 @@ class AdvancedModePanel:
         if "[Kira]:" not in msg:
             return
 
-        response = msg.strip()
-        response = response.replace("🧠 ", "")
+        response = msg.strip().replace("🧠 ", "")
+
+        # Overwrite the buffer with the latest content.
+        self._kira_response_buffer = response
+
+        # If a flush is already scheduled, coalescing is enough — no second timer.
+        if self._kira_flush_pending:
+            return
+
+        self._kira_flush_pending = True
+        self._schedule_ui_update_after(self.KIRA_FLUSH_INTERVAL_MS, self._flush_kira_response)
+
+    def _flush_kira_response(self) -> None:
+        """Write the buffered Kira response to the textbox (called by the debounce timer).
+
+        Performs a single delete/insert cycle for the most-recent content that
+        accumulated in the buffer during the debounce window.  The equality
+        guard (ADR-007 Phase 1) still short-circuits the reflow when the
+        buffered content matches what is already displayed.
+        """
+        content = self._kira_response_buffer
+        self._kira_response_buffer = None
+        self._kira_flush_pending = False
+
+        if content is None or self.text_kira_response is None:
+            return
 
         # Skip redundant rewrites: identical content would only trigger a
         # full delete/insert layout reflow with no visible change (ADR-007).
         try:
             current_text = self.text_kira_response.get("1.0", "end-1c").strip()
-            if current_text == response:
+            if current_text == content:
                 return
         except Exception:
             pass
 
         self.text_kira_response.configure(state="normal")
         self.text_kira_response.delete("1.0", "end")
-        self.text_kira_response.insert("end", response + "\n")
+        self.text_kira_response.insert("end", content + "\n")
         self.text_kira_response.configure(state="disabled")
 
     # ------------------------------------------------------------------
@@ -471,11 +521,20 @@ class AdvancedModePanel:
     # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        """Unsubscribe from UIState observer.
+        """Unsubscribe from UIState observer and disarm pending debounce timers.
 
         Call this before the parent window is destroyed to prevent
-        stale callbacks.
+        stale callbacks.  Clearing ``text_kira_response`` to ``None`` ensures
+        that any debounce timer scheduled within the last 75 ms (KIRA_FLUSH_INTERVAL_MS)
+        will hit the existing None guard in ``_flush_kira_response`` and exit early
+        instead of calling ``configure`` on a destroyed widget.
         """
         if self._observer_id is not None:
             self._ui_state.unsubscribe(self._observer_id)
             self._observer_id = None
+
+        # Clear the Kira textbox reference so any in-flight debounce timer
+        # short-circuits harmlessly rather than operating on a destroyed widget.
+        self.text_kira_response = None
+        self._kira_flush_pending = False
+        self._kira_response_buffer = None

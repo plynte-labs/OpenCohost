@@ -848,6 +848,9 @@ class VocalAIApp(ctk.CTk):
             on_emergency_stop=lambda: self._kira_agenda_emergency_stop(),
             on_approve_suggestion=lambda topic_id: self._kira_agenda_approve_suggestion(topic_id),
             on_reject_suggestion=lambda topic_id: self._kira_agenda_reject_suggestion(topic_id),
+            # Phase 3 batch rendering: delayed yield between suggestion chunks
+            # routed through _safe_after (main-thread and cross-thread safe).
+            schedule_ui_update_after=lambda delay, fn: self._safe_after(fn, delay),
         )
         self.cohost_agenda_panel.build(cohost_panel_frame)
         self.cohost_agenda_panel.set_profiles(self.cohost_profiles, self._current_cohost_profile)
@@ -895,6 +898,9 @@ class VocalAIApp(ctk.CTk):
             text_kira_response=self.text_kira_response,
             on_log_action=None,
             schedule_ui_update=self._safe_after,
+            # Phase 2 debounce: routes delayed callbacks through _safe_after which
+            # handles both main-thread (self.after) and cross-thread (task queue) paths.
+            schedule_ui_update_after=lambda delay, fn: self._safe_after(fn, delay),
         )
         self._advanced_mode_panel = self._advanced_panel.build()
         self.consola = self._advanced_panel.consola
@@ -3010,6 +3016,8 @@ class VocalAIApp(ctk.CTk):
             self.status_bar.cleanup()
         if hasattr(self, "_advanced_panel"):
             self._advanced_panel.cleanup()
+        if hasattr(self, "cohost_agenda_panel"):
+            self.cohost_agenda_panel.cleanup()
         if hasattr(self, "smart_agg_ui"):
             self.smart_agg_ui.cleanup()
         if hasattr(self, "stream_admin_ui"):
