@@ -200,6 +200,7 @@ class AgendaTopic:
     source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
     editorial_card_id: str | None = None
     editorial_card_consumed: bool = False
+    editorial_attach_attempted: bool = False
 
 
 @dataclass(frozen=True)
@@ -394,6 +395,7 @@ class KiraAgendaController:
             "style": "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.",
         }
         self._editorial_context_provider: Callable[[str], str | None] | None = None
+        self._auto_attach_provider: Callable[[object], bool] | None = None
 
     def set_profile(self, profile: dict[str, str]) -> None:
         style = self.sanitize_topic_text((profile or {}).get("style", ""), field="profile_style", required=False)
@@ -403,6 +405,11 @@ class KiraAgendaController:
         """Set the callback used to resolve one-turn Editorial Cue Card context."""
 
         self._editorial_context_provider = provider
+
+    def set_auto_attach_provider(self, provider: Callable[[object], bool] | None) -> None:
+        """Set the callback used to attempt auto-attach of editorial cards to topics."""
+
+        self._auto_attach_provider = provider
 
     # ------------------------------------------------------------------
     # Topic lifecycle
@@ -1138,7 +1145,21 @@ class KiraAgendaController:
 
     def _consume_editorial_context_block(self) -> str:
         topic = self.active_topic
-        if not topic or not topic.editorial_card_id or topic.editorial_card_consumed:
+        if not topic:
+            return ""
+        # Auto-attach: attempt once per topic if no card is already linked
+        if (
+            topic.editorial_card_id is None
+            and not topic.editorial_attach_attempted
+            and self._auto_attach_provider is not None
+        ):
+            topic.editorial_attach_attempted = True
+            try:
+                self._auto_attach_provider(topic)
+            except Exception:
+                pass
+        # Original logic
+        if not topic.editorial_card_id or topic.editorial_card_consumed:
             return ""
         topic.editorial_card_consumed = True
         provider = self._editorial_context_provider

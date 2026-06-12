@@ -454,7 +454,7 @@ class SmartAggregatorUI:
         chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
         last_lines = self._recent_kira_lines(3)
         prompt = self._build_kira_chat_prompt(chat_context, highlight, last_lines)
-        self._motor_ia.command_queue.put(("process_context", prompt))
+        self._motor_ia.enqueue(prompt, priority=1, source="chat")
         if top_intents:
             top = top_intents[0]
             self._on_log(

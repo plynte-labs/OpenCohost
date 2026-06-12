@@ -190,3 +190,342 @@ def test_list_all_orders_by_updated_at_desc(tmp_path) -> None:
     # Most recently updated first
     assert cards[0].id == second.id
     assert cards[1].id == first.id
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: list_armed, rearm, disable, delete
+# ---------------------------------------------------------------------------
+
+def _make_store_card(store: EditorialCardStore, topic: str) -> "EditorialCard":
+    from opencohost.core.editorial_cards import EditorialCard
+    return store.upsert(EditorialCard(
+        topic=topic,
+        summary="Summary for test card.",
+        streamer_take="My take on this topic.",
+    ))
+
+
+def test_list_armed_returns_only_armed_non_expired_cards(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    from datetime import timedelta
+
+    draft = _make_store_card(store, "Draft Topic Card")
+    armed = _make_store_card(store, "Armed Topic Card")
+    store.arm(armed.id)
+
+    expired_card = _make_store_card(store, "Expired Topic Card")
+    store.arm(expired_card.id)
+    # Manually set expires_at to the past via upsert trick
+    from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", expired_card.id),
+        )
+
+    result = store.list_armed()
+    ids = [c.id for c in result]
+    assert armed.id in ids
+    assert draft.id not in ids
+    assert expired_card.id not in ids
+
+
+def test_list_armed_empty_when_no_armed_cards(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    _make_store_card(store, "Draft Card Only")
+    assert store.list_armed() == []
+
+
+def test_rearm_moves_used_card_back_to_armed(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Rearm Test Used")
+    store.arm(card.id)
+    store.activate_for_topic(card.topic_slug)
+    store.mark_used(card.id)
+
+    assert store.get(card.id).status is EditorialCardStatus.USED
+    result = store.rearm(card.id)
+    assert result is True
+    assert store.get(card.id).status is EditorialCardStatus.ARMED
+
+
+def test_rearm_moves_expired_card_back_to_armed(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Rearm Test Expired")
+    store.arm(card.id)
+    # Force expired
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired' WHERE id = ?",
+            (card.id,),
+        )
+
+    result = store.rearm(card.id)
+    assert result is True
+    assert store.get(card.id).status is EditorialCardStatus.ARMED
+
+
+def test_rearm_clear_expiry_nulls_expires_at(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Rearm Clear Expiry")
+    store.arm(card.id)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired', expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (card.id,),
+        )
+
+    result = store.rearm(card.id, clear_expiry=True)
+    assert result is True
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.ARMED
+    assert refreshed.expires_at is None
+
+
+def test_rearm_draft_card_returns_false(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Rearm Draft Test")
+    # DRAFT -> rearm should return False (not eligible)
+    result = store.rearm(card.id)
+    assert result is False
+
+
+def test_rearm_missing_card_returns_false(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    assert store.rearm("ec_doesnotexist") is False
+
+
+# Fix 3: rearm on expired-without-clear-expiry returns False, status unchanged
+
+def test_rearm_expired_without_clear_expiry_returns_false(tmp_path) -> None:
+    """store.rearm on a card that is EXPIRED and has a past expires_at, without
+    clear_expiry=True, must return False and leave status as EXPIRED.
+
+    Rationale: the card would be immediately re-expired on the next list_armed()
+    check, so arming it is a no-op that misrepresents the card's state.
+    """
+    from datetime import timedelta
+
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Expired No Clear Expiry")
+    store.arm(card.id)
+    # Force an already-past expiry date and EXPIRED status
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired', expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (card.id,),
+        )
+
+    result = store.rearm(card.id, clear_expiry=False)
+    assert result is False, "rearm without clear_expiry on past-expires_at card must return False"
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.EXPIRED, "status must remain EXPIRED"
+
+
+def test_rearm_expired_with_clear_expiry_arms_and_nulls_expires_at(tmp_path) -> None:
+    """store.rearm with clear_expiry=True must set ARMED and expires_at=None."""
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Expired With Clear Expiry")
+    store.arm(card.id)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET status = 'expired', expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (card.id,),
+        )
+
+    result = store.rearm(card.id, clear_expiry=True)
+    assert result is True, "rearm with clear_expiry=True must succeed"
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.ARMED
+    assert refreshed.expires_at is None
+
+
+def test_disable_moves_armed_card_to_expired(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Disable Armed Card")
+    store.arm(card.id)
+
+    result = store.disable(card.id)
+    assert result is True
+    assert store.get(card.id).status is EditorialCardStatus.EXPIRED
+
+
+def test_disable_moves_draft_card_to_expired(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Disable Draft Card")
+    # DRAFT -> disable is valid
+    result = store.disable(card.id)
+    assert result is True
+    assert store.get(card.id).status is EditorialCardStatus.EXPIRED
+
+
+def test_disable_used_card_returns_false(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Disable Used Card Test")
+    store.arm(card.id)
+    store.activate_for_topic(card.topic_slug)
+    store.mark_used(card.id)
+
+    result = store.disable(card.id)
+    assert result is False
+    assert store.get(card.id).status is EditorialCardStatus.USED
+
+
+def test_disable_already_expired_is_idempotent(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Disable Idempotent Test")
+    store.arm(card.id)
+    store.disable(card.id)
+
+    result = store.disable(card.id)
+    assert result is True  # idempotent
+    assert store.get(card.id).status is EditorialCardStatus.EXPIRED
+
+
+def test_disable_missing_card_returns_false(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    assert store.disable("ec_doesnotexist") is False
+
+
+def test_delete_removes_card_from_store(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Delete Me Card")
+
+    result = store.delete(card.id)
+    assert result is True
+    assert store.get(card.id) is None
+
+
+def test_delete_removes_associated_ratings(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = _make_store_card(store, "Delete With Ratings")
+    from opencohost.core.editorial_cards import EditorialCardRating, EditorialCardRatingValue
+    store.record_rating(EditorialCardRating(
+        card_id=card.id,
+        rating=EditorialCardRatingValue.USEFUL,
+    ))
+    assert len(store.ratings_for_card(card.id)) == 1
+
+    store.delete(card.id)
+    # Card gone, ratings gone
+    assert store.get(card.id) is None
+    # ratings_for_card on unknown card should return empty
+    assert store.ratings_for_card(card.id) == []
+
+
+def test_delete_missing_card_returns_false(tmp_path) -> None:
+    store = EditorialCardStore(tmp_path / "cards.db")
+    assert store.delete("ec_doesnotexist") is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: AgendaTopic has editorial_attach_attempted field
+# ---------------------------------------------------------------------------
+
+def test_agenda_topic_has_editorial_attach_attempted_field() -> None:
+    from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic
+    topic = AgendaTopic(title="Test Topic")
+    assert hasattr(topic, "editorial_attach_attempted")
+    assert topic.editorial_attach_attempted is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: KiraAgendaController has set_auto_attach_provider
+# ---------------------------------------------------------------------------
+
+def test_controller_has_set_auto_attach_provider() -> None:
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+    controller = KiraAgendaController()
+    assert hasattr(controller, "set_auto_attach_provider")
+    assert hasattr(controller, "_auto_attach_provider")
+    assert controller._auto_attach_provider is None
+
+
+def test_set_auto_attach_provider_stores_callback() -> None:
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+    controller = KiraAgendaController()
+    sentinel = object()
+    controller.set_auto_attach_provider(sentinel)
+    assert controller._auto_attach_provider is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: bridge has auto_attach and register_provider wires it
+# ---------------------------------------------------------------------------
+
+def test_bridge_has_auto_attach_method(tmp_path) -> None:
+    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+    store = EditorialCardStore(tmp_path / "cards.db")
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    assert hasattr(bridge, "auto_attach")
+
+
+def test_register_provider_wires_auto_attach(tmp_path) -> None:
+    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+    store = EditorialCardStore(tmp_path / "cards.db")
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    bridge.register_provider()
+    # Verify the provider is the bridge's auto_attach method (compare by __func__ identity)
+    assert controller._auto_attach_provider is not None
+    assert controller._auto_attach_provider.__func__ is bridge.auto_attach.__func__
+    assert controller._auto_attach_provider.__self__ is bridge
+
+
+def test_auto_attach_returns_false_when_no_armed_cards(tmp_path) -> None:
+    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
+    store = EditorialCardStore(tmp_path / "cards.db")
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    topic = AgendaTopic(title="GTA retraso confirmado")
+    result = bridge.auto_attach(topic)
+    assert result is False
+
+
+def test_auto_attach_attaches_matching_card(tmp_path) -> None:
+    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
+    store = EditorialCardStore(tmp_path / "cards.db")
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    bridge.register_provider()
+
+    # Create + arm a matching card
+    card = store.upsert(EditorialCard(
+        topic="GTA retraso",
+        summary="El retraso de GTA se confirmo oficialmente.",
+        streamer_take="Es una decision acertada para la calidad del juego.",
+    ))
+    store.arm(card.id)
+
+    # Add topic to controller so link_card_to_topic can find it
+    ctrl_topic = controller.add_topic("GTA retraso confirmado noticias", approved=True)
+    controller.queue_topic(ctrl_topic.id)
+
+    result = bridge.auto_attach(ctrl_topic)
+    assert result is True
+    # Card should now be ACTIVE
+    assert store.get(card.id).status is EditorialCardStatus.ACTIVE
+
+
+def test_auto_attach_returns_false_on_corrupt_store(tmp_path) -> None:
+    """auto_attach must be fail-open: exception -> False, no crash."""
+    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
+
+    # Write garbage to the DB file so sqlite3 fails
+    corrupt_db = tmp_path / "corrupt.db"
+    corrupt_db.write_bytes(b"not a sqlite database at all")
+
+    store = EditorialCardStore.__new__(EditorialCardStore)
+    store.db_path = corrupt_db
+
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    topic = AgendaTopic(title="GTA retraso confirmado")
+    result = bridge.auto_attach(topic)
+    assert result is False

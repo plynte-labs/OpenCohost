@@ -321,6 +321,80 @@ class EditorialCardStore:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def list_armed(self) -> list[EditorialCard]:
+        """Return all ARMED, non-expired cards."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM editorial_cards WHERE status = ?",
+                (EditorialCardStatus.ARMED.value,),
+            ).fetchall()
+        cards = [self._from_row(row) for row in rows]
+        return [c for c in cards if not c.is_expired()]
+
+    def rearm(self, card_id: str, *, clear_expiry: bool = False) -> bool:
+        """Move a USED or EXPIRED card back to ARMED.
+
+        Returns False if the card is not found or its status is not eligible
+        (only USED and EXPIRED cards can be re-armed).
+
+        When clear_expiry is False and the card already has a past expires_at,
+        arming it would produce an ARMED-yet-immediately-expired card.  In that
+        case return False without changing the card's state.  Use
+        clear_expiry=True to null out expires_at and produce a clean ARMED card.
+        """
+        card = self.get(card_id)
+        if card is None:
+            return False
+        if card.status not in {EditorialCardStatus.USED, EditorialCardStatus.EXPIRED}:
+            return False
+        # Reject if the existing expiry is in the past and caller did not ask to
+        # clear it — the resulting ARMED card would be immediately re-expired.
+        if not clear_expiry and card.expires_at is not None and card.is_expired():
+            return False
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            if clear_expiry:
+                conn.execute(
+                    "UPDATE editorial_cards SET status = ?, expires_at = NULL, updated_at = ? WHERE id = ?",
+                    (EditorialCardStatus.ARMED.value, _dt_to_text(now), card_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE editorial_cards SET status = ?, updated_at = ? WHERE id = ?",
+                    (EditorialCardStatus.ARMED.value, _dt_to_text(now), card_id),
+                )
+        return True
+
+    def disable(self, card_id: str) -> bool:
+        """Move any non-USED card to EXPIRED. Idempotent when already EXPIRED.
+
+        Returns False if the card is not found or is in USED status (history
+        must be preserved for used cards).
+        """
+        card = self.get(card_id)
+        if card is None:
+            return False
+        if card.status is EditorialCardStatus.USED:
+            return False
+        if card.status is EditorialCardStatus.EXPIRED:
+            return True  # Already expired — idempotent
+        self._set_status(card.id, EditorialCardStatus.EXPIRED)
+        return True
+
+    def delete(self, card_id: str) -> bool:
+        """Hard-delete a card and its associated ratings.
+
+        Returns False if the card does not exist.
+        """
+        card = self.get(card_id)
+        if card is None:
+            return False
+        with self._connect() as conn:
+            conn.execute("DELETE FROM editorial_card_ratings WHERE card_id = ?", (card_id,))
+            conn.execute("DELETE FROM editorial_cards WHERE id = ?", (card_id,))
+        return True
+
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(

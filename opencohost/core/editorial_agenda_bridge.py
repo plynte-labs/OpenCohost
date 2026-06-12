@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
+
+log = logging.getLogger(__name__)
 
 
 class EditorialAgendaBridge:
@@ -14,9 +18,13 @@ class EditorialAgendaBridge:
         self.controller = controller
 
     def register_provider(self) -> None:
-        """Allow Agenda prompt assembly to resolve linked card ids on demand."""
+        """Allow Agenda prompt assembly to resolve linked card ids on demand.
 
+        Also registers the auto-attach provider so armed cards are matched to
+        incoming agenda topics automatically at generation time.
+        """
         self.controller.set_editorial_context_provider(self.resolve_prompt_block)
+        self.controller.set_auto_attach_provider(self.auto_attach)
 
     def create_or_update_card(
         self,
@@ -67,6 +75,63 @@ class EditorialAgendaBridge:
         if card is None or card.status is not EditorialCardStatus.ACTIVE or card.is_expired():
             return None
         return card.to_prompt_block()
+
+    def auto_attach(self, topic: "AgendaTopic") -> bool:
+        """Try to match an armed editorial card to *topic* using token-overlap scoring.
+
+        Returns True when a card was successfully linked; False on no match,
+        ambiguity, or any store/matching error (fail-open).
+        """
+        try:
+            cards = self.store.list_armed()
+            eligible = [c for c in cards if not c.is_expired()]
+            from opencohost.core.editorial_matching import match_score, select_card
+            text = (topic.title or "") + (" " + topic.angle if topic.angle else "")
+            candidates = [c for c in eligible if match_score(text, c) >= 0.8]
+            card = select_card(text, eligible)
+            if card is None:
+                if len(candidates) > 1:
+                    log.info(
+                        "editorial auto-attach: ambiguous (%d candidates) for topic %r — skipping",
+                        len(candidates),
+                        topic.title,
+                    )
+                else:
+                    log.info(
+                        "editorial auto-attach: no candidate for topic %r",
+                        topic.title,
+                    )
+                return False
+            result = self.link_card_to_topic(topic.id, card.id)
+            if result:
+                log.info(
+                    "editorial auto-attach: attached card %s to topic %r",
+                    card.id,
+                    topic.title,
+                )
+            return result
+        except Exception as exc:
+            log.warning("editorial auto-attach: store error: %s", exc)
+            return False
+
+    def resolve_direct_context(self, query_text: str) -> str | None:
+        """Return an editorial context block for a direct host query, or None.
+
+        NON-CONSUMING: does NOT activate, mark used, or change card status.
+        The card stays ARMED so the agenda path can still attach it.
+        Fail-open: any store/matching exception logs a warning and returns None.
+        """
+        try:
+            cards = self.store.list_armed()
+            eligible = [c for c in cards if not c.is_expired()]
+            from opencohost.core.editorial_matching import select_card
+            card = select_card(query_text, eligible)
+            if card is None:
+                return None
+            return card.to_prompt_block()
+        except Exception as exc:
+            log.warning("editorial direct context: store error: %s", exc)
+            return None
 
     def mark_used_after_successful_generation(self) -> bool:
         """Mark the linked card used once Agenda accepts a generated response."""

@@ -962,7 +962,9 @@ class TestOnAggregatedContext:
         ui.on_aggregated_context({"context": []})
         assert mock_motor_ia.command_queue.empty()
 
-    def test_sends_to_command_queue(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
+    def test_sends_via_enqueue_not_command_queue(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
+        # Non-busy path must use enqueue(source="chat"), NOT command_queue.put("process_context")
+        # so chat content is never tagged source="direct" and editorial injection cannot fire.
         mock_motor_ia.is_processing = False
         ui = SmartAggregatorUI(
             ui_state=ui_state,
@@ -972,10 +974,54 @@ class TestOnAggregatedContext:
         )
         context = [{"user": "Alice", "text": "This is a test message from the chat"}]
         ui.on_aggregated_context({"context": context})
-        assert not mock_motor_ia.command_queue.empty()
-        item = mock_motor_ia.command_queue.get()
-        assert item[0] == "process_context"
-        assert "Alice" in item[1]
+        # Must have called enqueue with source="chat"
+        mock_motor_ia.enqueue.assert_called_once()
+        call_kwargs = mock_motor_ia.enqueue.call_args
+        assert call_kwargs.kwargs.get("source") == "chat" or (
+            len(call_kwargs.args) >= 3 and call_kwargs.args[2] == "chat"
+        ), f"enqueue must be called with source='chat', got: {call_kwargs}"
+        # command_queue must remain empty — we no longer put("process_context") on it
+        assert mock_motor_ia.command_queue.empty()
+
+    def test_non_busy_enqueue_prompt_contains_message(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
+        # The prompt passed to enqueue must contain the chat text.
+        mock_motor_ia.is_processing = False
+        ui = SmartAggregatorUI(
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            smart_agg=mock_aggregator,
+            motor_ia=mock_motor_ia,
+        )
+        context = [{"user": "Alice", "text": "This is a test message from the chat"}]
+        ui.on_aggregated_context({"context": context})
+        mock_motor_ia.enqueue.assert_called_once()
+        prompt_arg = mock_motor_ia.enqueue.call_args.args[0]
+        assert "Alice" in prompt_arg
+
+    def test_non_busy_enqueue_armed_trigger_no_editorial_injection(
+        self, ui_state, dispatcher, mock_aggregator, mock_motor_ia
+    ):
+        # ISOLATION INVARIANT: even when a trigger-matching ARMED card exists,
+        # chat content going through the non-busy SmartAggregator path must
+        # arrive at the engine tagged source="chat" — so _generar_dialogo does
+        # NOT call the editorial context provider.
+        mock_motor_ia.is_processing = False
+        ui = SmartAggregatorUI(
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            smart_agg=mock_aggregator,
+            motor_ia=mock_motor_ia,
+        )
+        context = [{"user": "viewer", "text": "gta 6 delay confirmed stream"}]
+        ui.on_aggregated_context({"context": context})
+        mock_motor_ia.enqueue.assert_called_once()
+        # source kwarg must be "chat" — if the engine receives this, it will
+        # not call direct_editorial_context_provider (engine-level guard).
+        _, kwargs = mock_motor_ia.enqueue.call_args
+        assert kwargs.get("source") == "chat", (
+            "Non-busy SmartAggregator path must tag source='chat' so the engine "
+            "never applies editorial injection to chat-originated content."
+        )
 
     def test_limits_context_to_12(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
         mock_motor_ia.is_processing = False
@@ -987,11 +1033,13 @@ class TestOnAggregatedContext:
         )
         context = [{"user": f"User{i}", "text": f"Message {i}"} for i in range(20)]
         ui.on_aggregated_context({"context": context})
-        item = mock_motor_ia.command_queue.get()
+        # Now via enqueue, not command_queue
+        mock_motor_ia.enqueue.assert_called_once()
+        prompt_arg = mock_motor_ia.enqueue.call_args.args[0]
         # Only last 12 should be in prompt
-        assert "User19" in item[1]
-        assert "User8" in item[1]
-        assert "User7" not in item[1]
+        assert "User19" in prompt_arg
+        assert "User8" in prompt_arg
+        assert "User7" not in prompt_arg
 
     def test_logs_when_sent(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
         log_messages = []
