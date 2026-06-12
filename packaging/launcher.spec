@@ -41,6 +41,13 @@ vendor_uv = os.path.join(HERE, "vendor", "uv.exe" if IS_WINDOWS else "uv")
 if os.path.exists(vendor_uv):
     datas.append((vendor_uv, "."))
 
+# CI copies certifi's cacert.pem to packaging/vendor/cacert.pem so the
+# launcher can verify HTTPS downloads on clean Windows installs where the
+# OS AuthRoot CTL has not been populated yet.  Include only when present.
+vendor_pem = os.path.join(HERE, "vendor", "cacert.pem")
+if os.path.exists(vendor_pem):
+    datas.append((vendor_pem, "."))
+
 # Release builds generate packaging/_release_meta.py (VERSION, SRC_ZIP_URL,
 # SRC_ZIP_SHA256). Declare it as a hidden import only when it exists so dev
 # builds (no metadata -> --src-dir mode) still work.

@@ -567,5 +567,99 @@ class TestWaitForAppWindow(unittest.TestCase):
         self.assertEqual(result, "timeout")
 
 
+# ===========================================================================
+# 11. SSL context — _ssl_context() helper
+# ===========================================================================
+
+
+class TestSslContext(unittest.TestCase):
+    """_ssl_context() must return a valid SSLContext and cache it."""
+
+    def setUp(self):
+        # Reset the module-level cache before each test so tests are isolated.
+        _launcher._SSL_CONTEXT = None
+
+    def tearDown(self):
+        _launcher._SSL_CONTEXT = None
+
+    def test_returns_ssl_context(self):
+        import ssl
+        ctx = _launcher._ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+    def test_cached_same_object(self):
+        ctx1 = _launcher._ssl_context()
+        ctx2 = _launcher._ssl_context()
+        self.assertIs(ctx1, ctx2)
+
+    def test_graceful_degradation_with_invalid_pem(self):
+        """A corrupt/empty bundled pem must not prevent context creation."""
+        import ssl
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            bad_pem = os.path.join(td, "cacert.pem")
+            with open(bad_pem, "w") as fh:
+                fh.write("NOT A VALID PEM FILE\n")
+            with patch.object(_launcher, "_bundled_data_dirs", return_value=[td]):
+                ctx = _launcher._ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+    def test_graceful_degradation_no_pem(self):
+        """When no pem file is present the context still builds."""
+        import ssl
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            # td contains no cacert.pem
+            with patch.object(_launcher, "_bundled_data_dirs", return_value=[td]):
+                ctx = _launcher._ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+    def test_graceful_degradation_pem_path_missing(self):
+        """When the directory itself does not exist the context still builds."""
+        import ssl
+        with patch.object(_launcher, "_bundled_data_dirs", return_value=["/nonexistent/path"]):
+            ctx = _launcher._ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+
+# ===========================================================================
+# 12. urlopen call-site contract — no naked urlopen without context=
+# ===========================================================================
+
+
+class TestUrlOpenContextContract(unittest.TestCase):
+    """Every urllib.request.urlopen() call in launcher.py must pass context=.
+
+    This is a source-level grep test that prevents regressions when new
+    download sites are added without wiring up the SSL context.
+    """
+
+    def test_no_naked_urlopen(self):
+        with open(_LAUNCHER_PATH, "r", encoding="utf-8") as fh:
+            source = fh.read()
+
+        import re as _re
+        # Find every urlopen( call site.
+        # A "naked" call is one that does NOT have context= somewhere before
+        # the closing parenthesis on the same logical line.
+        # We use a line-by-line scan: for each line containing urlopen(, check
+        # that `context=` also appears on the same line.  Multi-line calls are
+        # not used in the launcher, so a per-line check is sufficient and
+        # avoids false positives from comments.
+        violations = []
+        for lineno, line in enumerate(source.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "urlopen(" in line and "context=" not in line:
+                violations.append("line %d: %s" % (lineno, stripped))
+
+        self.assertEqual(
+            violations,
+            [],
+            "Found urlopen() calls missing context=:\n%s" % "\n".join(violations),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
