@@ -36,7 +36,7 @@ runtime uncertainty before packaging or broad product polish.
   - Preventive pre-commit guard active: detect-secrets (pinned) + drive-letter
     path hook (`tools/check_abs_paths.py`); full-tree run exits 0.
   - Identity renamed to OpenCohost / plynte-labs; curated default profiles ship
-    in `config/default_profiles.json` with first-run seeding.
+    in `opencohost/config/default_profiles.json` with first-run seeding.
   - Sensitive/user-state files untracked: `perfiles.json`,
     `config/music_library.json`, `opencode.json`, `.engram/`.
 - Tracks closed: `local_light_tts_piper_20260610` (Piper offline fallback
@@ -141,6 +141,39 @@ agenda topics and session settings survive app restarts.
   acciones.jsonl as "Restaurados N tema(s)"). Track CLOSED
   (PRs #39 + #40 + #41 merged).
 
+## Audit — 2026-06-12
+
+Dual-reviewer audit run on 2026-06-12. Key findings:
+
+**(a) Node-24 verified done.** All five GitHub Actions were checked at their
+pinned tags and confirmed node24 (see Packaging section below for details).
+No action required before the 2026-06-16 deadline.
+
+**(b) Four tracks audited — all remain OPEN.** Earlier session notes created
+an impression that some were closeable; that was premature. Corrected status:
+- `runtime_smoke_harness_20260606` — track folder is ABSENT from
+  `conductor/tracks/`; cannot verify closure from local files. Stays [~].
+- `ui_rendering_optimization_20260609` — Phases 1–3 done in progress.md,
+  but Phase 4 (DPI/canvas snapping, FR4) has no progress entry — unstarted,
+  not formally N/A. Stays [~].
+- `runtime_validation_gates_20260610` — Gate 3 is PARTIAL (Evidence C
+  PENDING, owner-postponed but not closed). Stays [~].
+- `dynamic_model_management_20260608` — Phase 3 tasks all [ ]; "deferred"
+  was an over-read — only the download-resilience sub-slice is deferred,
+  not Phase 3 core. Stays [~].
+
+**(c) Repo hygiene / audit track proposal created** at
+`conductor/tracks/repo_hygiene_audit_20260612/proposal.md`. Collects
+low/medium code-hygiene findings from this audit (gitignore gap, dead code,
+filter pattern duplication, stale path refs). PROPOSAL ONLY — not yet
+scheduled or implemented.
+
+**(d) Two findings are pipeline-memory prerequisites** (R3: commit-before-TTS
+history pollution; R4: injection-laundering in the future digest) and one is
+a `dynamic_model_management_20260608` test gap (R2: watchdog pending-switch
+sub-branch untested at `opencohost/core/llm_engine.py:~1191-1198`). All
+three are documented in the proposal and routed to their respective tracks.
+
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
 The packaging & distribution track executed Phases 2–4 end-to-end in one day
@@ -182,10 +215,14 @@ To resume Phase 5 later (in order):
    `bootstrap.log` there. Known-good shortcut while testing: opening
    github.com in Edge inside the VM populates the OS cert store.
 
-Maintenance (time-sensitive): GitHub forces Node 24 for actions on
-2026-06-16 — bump `actions/checkout@v4`, `setup-python@v5`,
-`upload/download-artifact@v4`, `setup-uv@v5` to Node-24-ready majors.
-`windows-latest` redirects to `windows-2025-vs2026` from 2026-06-15.
+Node-24 action bumps: DONE and verified (PR #31 + follow-up pin commit
+2026-06-11). All five actions confirmed node24:
+`actions/checkout@v6`, `actions/setup-python@v6`,
+`actions/upload-artifact@v7`, `actions/download-artifact@v8`,
+`astral-sh/setup-uv@v8.2.0`.
+The `windows-latest` → `windows-2025-vs2026` redirect (2026-06-15) is
+automatic GitHub infra — NON-BLOCKING, no file change required. One
+validation CI run on or after that date is advisable but optional.
 
 ## Current project truth
 
