@@ -1739,12 +1739,31 @@ class MotorVocalIA(threading.Thread):
         chunks_played = 0
         try:
             while True:
+                # Bug 4 fix: check _speaking before dequeuing the next chunk.
+                # emergency_stop() sets _speaking=False externally; without this
+                # guard the consumer drains the entire pre-filled queue even after
+                # teardown is requested.
+                with self._lock:
+                    if not self._speaking:
+                        break
+
                 item = cola_audios.get(timeout=TTS_AUDIO_QUEUE_TIMEOUT)
 
                 if item == "FIN":
                     break
                 if item is None:
                     continue
+
+                # Second _speaking check after dequeue — emergency_stop may have
+                # fired while we were blocked on cola_audios.get().
+                with self._lock:
+                    if not self._speaking:
+                        try:
+                            if os.path.exists(item[0]):
+                                os.remove(item[0])
+                        except (OSError, TypeError):
+                            pass
+                        break
 
                 archivo_chunk, idx, oracion_texto = item
 
@@ -1757,10 +1776,27 @@ class MotorVocalIA(threading.Thread):
                     self.pygame.mixer.music.play()
 
                     while self.pygame.mixer.music.get_busy():
+                        # Bug 4 fix: honour external _speaking=False inside the
+                        # busy-wait so a playing chunk is stopped promptly on
+                        # emergency teardown instead of draining to completion.
+                        with self._lock:
+                            if not self._speaking:
+                                break
                         time.sleep(0.05)
+
+                    # Bug 4 fix: if _speaking was cleared externally, stop the
+                    # mixer explicitly before unload() — pygame keeps playing
+                    # until stop() or end-of-track; unload() alone does not stop.
+                    with self._lock:
+                        interrupted = not self._speaking
+                    if interrupted:
+                        self.pygame.mixer.music.stop()
 
                     self.pygame.mixer.music.unload()
                     chunks_played += 1
+
+                    if interrupted:
+                        break
 
                 except Exception as e:
                     logger.warning(f"Error reproduciendo chunk {idx}: {e}")
@@ -1778,6 +1814,24 @@ class MotorVocalIA(threading.Thread):
             logger.exception("Error en consumidor de audio")
         finally:
             total_elapsed = time.time() - start_tts
+            # Fix 1: drain any remaining items left in cola_audios by the producer
+            # after an early break (pre-dequeue guard, post-dequeue guard, or
+            # interrupted-chunk break).  Without this, 1-3 temp .wav files leak
+            # per emergency stop because the producer thread may have already
+            # enqueued chunks that the consumer never got to consume.
+            # Sentinels ("FIN" / None) are skipped — only real chunk tuples have
+            # a temp file path at index 0.
+            while True:
+                try:
+                    _leftover = cola_audios.get_nowait()
+                    if isinstance(_leftover, tuple):
+                        try:
+                            if os.path.exists(_leftover[0]):
+                                os.remove(_leftover[0])
+                        except (OSError, TypeError):
+                            pass
+                except queue.Empty:
+                    break
         self._log(f"✅ Pipeline TTS completado: {chunks_played}/{len(oraciones)} fragmentos en {total_elapsed:.2f}s")
         if error_count > 0:
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")

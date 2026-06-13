@@ -65,8 +65,15 @@ class AudioBedEngine:
             return self._play_selected(self.desired_mood)
 
     def on_boundary(self) -> bool:
+        # Bug 2 fix: do NOT call _mark_interaction() here.
+        # on_boundary fires on every Kira speaking-end; calling _mark_interaction
+        # perpetually resets _last_interaction, making the idle-drain threshold
+        # (max_play_seconds * idle_loop_limit) unreachable under sustained Kira
+        # activity.  Reserve _mark_interaction for genuine human-initiated events
+        # (PTT, chat send, direct mood request via request_mood).
         with self._lock:
-            self._mark_interaction()
+            if not self.enabled:
+                return False
             if self.transition_pending or self._can_transition_now():
                 self.transition_pending = False
                 return self._play_selected(self.desired_mood)
@@ -151,7 +158,17 @@ class AudioBedEngine:
             self.stop(emergency=False)
 
     def _can_transition_now(self) -> bool:
+        # Bug 3 fix: when current_track is None (i.e. music was explicitly stopped)
+        # and there is no pending transition, return False so on_boundary() never
+        # auto-restarts music without an explicit request_mood() call.
+        # Also honour _idle_stopped: the idle-drain mechanism set it precisely to
+        # prevent auto-restart after the loop limit was reached (#751 regression).
+        if self._idle_stopped:
+            return False
+        if not self.current_track and not self.transition_pending:
+            return False
         if not self.current_track:
+            # transition_pending is True but there is nothing playing yet — allow
             return True
         elapsed = time.time() - self.started_at
         return elapsed >= self.policy.min_play_seconds or elapsed >= self.policy.max_play_seconds
