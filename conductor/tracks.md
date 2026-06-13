@@ -153,3 +153,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   on model/profile switch. Editorial cards CLI (shipped 2026-06-11) covers the
   curated-context axis; this track covers conversational memory. Audit details in
   engram topic architecture/kira-memory-subsystem.*
+
+---
+
+- [ ] **Track: Repo Hygiene Audit - Consolidated Low/Med Cleanup Findings**
+  *Link: [./tracks/repo_hygiene_audit_20260612/](./tracks/repo_hygiene_audit_20260612/)*
+  *Status 2026-06-12: PROPOSAL ONLY — not started. Consolidated low/med
+  cleanup findings from the 2026-06-12 dual-reviewer audit: gitignore gap,
+  dead code, filter pattern duplication, stale path refs. See proposal.md.*
