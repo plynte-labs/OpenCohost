@@ -139,14 +139,20 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Kira Conversational Memory - Direct-Path History Summarization**
+- [~] **Track: Kira Conversational Memory - Direct-Path History Summarization**
   *Link: [./tracks/kira_history_summarization_20260611/](./tracks/kira_history_summarization_20260611/)*
+  *Status 2026-06-13: L1 (intra-session memory digest) implemented on branch
+  feat/pipeline-memory — strict TDD (50 tests), passed a 3-round dual adversarial
+  review (Judgment Day APPROVED). Owner-approved design D1/D2/D3 + E3 defense-in-depth.
+  Awaiting owner runtime validation gate before closure. Future layers (L2 session
+  snapshots, L3 long-term retrieval) captured as an aim-high RFC at
+  ./tracks/kira_memory_architecture_rfc_20260612/. Non-blocking follow-ups at
+  ./tracks/pipeline_memory_followups_20260612/.*
   *Status 2026-06-11: Deferred by design (option B of the Kira memory audit).
   Direct-path LLM history is a 20-message deque with no summarization, cleared
   on model/profile switch. Editorial cards CLI (shipped 2026-06-11) covers the
-  curated-context axis; this track covers conversational memory. Do not start
-  before runtime validation gates pass. Audit details in engram topic
-  architecture/kira-memory-subsystem.*
+  curated-context axis; this track covers conversational memory. Audit details in
+  engram topic architecture/kira-memory-subsystem.*
 
 ---
 
