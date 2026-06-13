@@ -136,6 +136,29 @@ agenda topics and session settings survive app restarts.
 - Runtime validation pending (owner): queue topics → kill the app →
   relaunch → queue intact, agenda OFF.
 
+## Pipeline memory L1 — 2026-06-13 (implemented, PR open, runtime gate pending)
+
+Kira's intra-session memory digest (backlog #5 / `kira_history_summarization`
+track, L1 slice). Branch `feat/pipeline-memory`, NOT yet merged.
+
+- Owner-approved design after a deep walkthrough: D1 deterministic truncation
+  ledger, D2 survival matrix (survives watchdog/model-switch, dies on
+  profile-change/clear, RAM-only), D3 direct-path-only injection wrapped in a
+  read-only `<memoria_de_fondo>` block, capped ~600 chars, re-sanitized.
+- E3 defense-in-depth: Spanish injection-marker floor + structural isolation
+  (the primary, language-agnostic gate) + a SYSTEM_PROMPT read-only rule.
+- Strict TDD (50 focused tests); passed a 3-round dual adversarial review
+  (Judgment Day APPROVED, 0 critical / 0 real warnings). The review caught and
+  fixed 3 real bugs the broad suite missed (inverted `[hace N]` counter,
+  agenda-reply digest leak on cross-source eviction, a `_commit_history` race).
+- Future layers L2 (session snapshots) and L3 (long-term retrieval) are an
+  aim-high RFC at `conductor/tracks/kira_memory_architecture_rfc_20260612/`.
+- Non-blocking follow-up tickets (wrapper-breakout scrub, clear()-under-lock,
+  chat→direct bleed verification) at
+  `conductor/tracks/pipeline_memory_followups_20260612/`.
+- **Runtime validation pending (owner):** converse, force a model switch /
+  watchdog recovery, and confirm Kira keeps the thread via the digest.
+
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
 The packaging & distribution track executed Phases 2–4 end-to-end in one day
