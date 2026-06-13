@@ -133,8 +133,13 @@ agenda topics and session settings survive app restarts.
   persisted. The recurring-topic library is a future proposal track.
 - Inbox approve now persists the topic BEFORE claiming the ti_ row
   (crash leaves a visible duplicate, never a silent loss).
-- Runtime validation pending (owner): queue topics → kill the app →
-  relaunch → queue intact, agenda OFF.
+- **Runtime gate PASSED (owner, 2026-06-12)**: Task-Manager kill →
+  relaunch → queue intact and ordered, settings survive enable, agenda
+  OFF. The gate caught and we fixed two real defects: an init-order
+  launch crash (PR #40) and an invisible restore — the panel never
+  refreshed after load (PR #41; restore is now logged to
+  acciones.jsonl as "Restaurados N tema(s)"). Track CLOSED
+  (PRs #39 + #40 + #41 merged).
 
 ## Packaging update — 2026-06-11 (track paused, mark of record)
 
