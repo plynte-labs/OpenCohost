@@ -55,6 +55,25 @@ _HEALTH_STATUS_COLORS: dict[str, str] = {
     "red": "#cc3333",
 }
 
+_ENGINE_STATUS_COLORS: dict[str, str] = {
+    "qwen_active": "#1f5a3a",     # green — heavy/cloned voice is what spoke
+    "edge_fallback": "#cc8800",   # amber — fell back to Edge
+    "qwen_starting": "#33558a",   # blue — Qwen warming up
+    "not_configured": "#555555",  # grey — voice cloning not set up
+    "piper_local": "#1f5a3a",     # green — local light engine
+    "unknown": "#666666",
+}
+
+# Module-level constant — hoisted from _recompute_rollup so it is allocated once,
+# not on every state-change call (FIX E: ui_declutter_20260614 adversarial review).
+_ROLLUP_CONFIG: dict[str, tuple[str, str]] = {
+    "OK":    ("Sistema: OK",     "#1b2633"),
+    "QUIET": ("Sistema: ...",    "#444444"),
+    "INFO":  ("Sistema: activo", "#1f3f6f"),
+    "WARN":  ("Sistema: alerta", "#cc8800"),
+    "CRIT":  ("Sistema: error",  "#cc3333"),
+}
+
 # ---------------------------------------------------------------------------
 # Pipeline state → display text + main label color
 # ---------------------------------------------------------------------------
@@ -93,13 +112,25 @@ class StatusBar:
         self._observer_id: int | None = None
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
 
+        # Sistema rollup state — tracks per-dimension health for the aggregated pill.
+        # Values are the last status string received from each dimension.
+        # Initial values reflect the "unknown/startup" state before any update.
+        self._sistema_state: dict[str, str] = {
+            "model": "loading",
+            "mic": "disconnected",
+            "tts": "idle",
+            "health": "unknown",
+        }
+
         # Widget references
         self.lbl_status: ctk.CTkLabel | None = None
+        self.lbl_sistema_pill: ctk.CTkLabel | None = None
         self.lbl_model_status_pill: ctk.CTkLabel | None = None
         self.lbl_mic_status_pill: ctk.CTkLabel | None = None
         self.lbl_tts_status_pill: ctk.CTkLabel | None = None
         self.lbl_chat_status_pill: ctk.CTkLabel | None = None
         self.lbl_health_status_pill: ctk.CTkLabel | None = None
+        self.lbl_engine_status_pill: ctk.CTkLabel | None = None
 
     # ------------------------------------------------------------------
     # Pill creation
@@ -118,6 +149,22 @@ class StatusBar:
             text_color="#ffaa00",
         )
         self.lbl_status.pack(side="left", padx=(12, 8), pady=10)
+
+        # Sistema rollup pill — aggregates model + mic + TTS + health into a
+        # single always-visible indicator. Turns amber/red only on degradation;
+        # stays dim ("Sistema: OK") during normal steady-state operation.
+        # Initial text/color reflect WARN (model=loading, mic=disconnected startup state).
+        # _recompute_rollup() immediately overwrites these to keep them in sync.
+        self.lbl_sistema_pill = ctk.CTkLabel(
+            self._parent,
+            text="Sistema: alerta",
+            fg_color="#cc8800",
+            corner_radius=12,
+            font=ctk.CTkFont(size=11, weight="normal"),
+        )
+        self.lbl_sistema_pill.pack(side="left", padx=4, pady=8)
+        # Synchronise pill display with actual startup _sistema_state values
+        self._recompute_rollup()
 
         self.lbl_model_status_pill = ctk.CTkLabel(
             self._parent,
@@ -152,6 +199,12 @@ class StatusBar:
         )
         self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
 
+        self.lbl_engine_status_pill = ctk.CTkLabel(
+            self._parent, text="Voz: --",
+            fg_color="#1b2633", corner_radius=12,
+        )
+        self.lbl_engine_status_pill.pack(side="left", padx=4, pady=8)
+
         # Subscribe to UIState observer for automatic pill updates
         if self._observer_id is not None:
             self._ui_state.unsubscribe(self._observer_id)
@@ -162,11 +215,14 @@ class StatusBar:
     # ------------------------------------------------------------------
 
     def update_model_status(self, status: str) -> None:
-        """Update the model status pill.
+        """Update the model status pill and the Sistema rollup.
 
         Args:
             status: One of ``loading``, ``ready``, ``error``, ``offline``.
         """
+        # Always update rollup cache and recompute — even when the individual pill is None.
+        self._sistema_state["model"] = status
+        self._recompute_rollup()
         if self.lbl_model_status_pill is None:
             return
         color = self._get_status_color("model_status", status)
@@ -174,11 +230,14 @@ class StatusBar:
         self.lbl_model_status_pill.configure(text=text, fg_color=color)
 
     def update_mic_status(self, status: str) -> None:
-        """Update the mic status pill.
+        """Update the mic status pill and the Sistema rollup.
 
         Args:
             status: One of ``disconnected``, ``idle``, ``listening``, ``recording``.
         """
+        # Always update rollup cache and recompute — even when the individual pill is None.
+        self._sistema_state["mic"] = status
+        self._recompute_rollup()
         if self.lbl_mic_status_pill is None:
             return
         color = self._get_status_color("mic_status", status)
@@ -186,11 +245,14 @@ class StatusBar:
         self.lbl_mic_status_pill.configure(text=text, fg_color=color)
 
     def update_tts_status(self, status: str) -> None:
-        """Update the TTS status pill.
+        """Update the TTS status pill and the Sistema rollup.
 
         Args:
             status: One of ``idle``, ``generating``, ``speaking``, ``error``.
         """
+        # Always update rollup cache and recompute — even when the individual pill is None.
+        self._sistema_state["tts"] = status
+        self._recompute_rollup()
         if self.lbl_tts_status_pill is None:
             return
         color = self._get_status_color("tts_status", status)
@@ -210,16 +272,63 @@ class StatusBar:
         self.lbl_chat_status_pill.configure(text=text, fg_color=color)
 
     def update_health_status(self, status: str) -> None:
-        """Update the health status pill.
+        """Update the health status pill and the Sistema rollup.
 
         Args:
             status: One of ``unknown``, ``green``, ``yellow``, ``red``.
         """
+        # Always update rollup cache and recompute — even when the individual pill is None.
+        self._sistema_state["health"] = status
+        self._recompute_rollup()
         if self.lbl_health_status_pill is None:
             return
         color = _HEALTH_STATUS_COLORS.get(status, "#666666")
         label = status if status != "unknown" else "--"
         self.lbl_health_status_pill.configure(text=f"Health: {label}", fg_color=color)
+
+    def update_engine_status(self, status: str, reason: str = "") -> None:
+        """Update the engine (voice) badge pill with the EFFECTIVE engine.
+
+        Visibility gating (owner decision 2026-06-14):
+        - qwen_active, piper_local: badge uses dim color (#1b2633) — normal steady-state,
+          no need to draw operator attention.
+        - qwen_starting: badge uses INFO-visible amber (#cc8800) — Edge speaks during Qwen
+          warmup and the operator should understand the transient voice change.
+        - edge_fallback, not_configured, unknown: badge uses the standard alert color —
+          operator must notice the fallback.
+
+        Args:
+            status: One of the qwen_markers.ENGINE_STATUSES values.
+            reason: Free-form fallback reason, shown for ``edge_fallback``.
+        """
+        if self.lbl_engine_status_pill is None:
+            return
+        text = self._engine_status_text(status, reason)
+        # Visibility rule: dim on normal steady-state; visible on fallback or startup warmup.
+        if status in ("qwen_active", "piper_local"):
+            color = "#1b2633"  # dim — normal operation, no operator action needed
+        elif status == "qwen_starting":
+            # Owner decision: qwen_starting → INFO-visible (amber) because Edge
+            # is speaking during warmup and the operator should know.
+            color = "#cc8800"
+        else:
+            # edge_fallback, not_configured, unknown — use the standard alert color
+            color = _ENGINE_STATUS_COLORS.get(status, "#666666")
+        self.lbl_engine_status_pill.configure(text=text, fg_color=color)
+
+    def _engine_status_text(self, status: str, reason: str = "") -> str:
+        """Display text for the engine badge — always the EFFECTIVE engine."""
+        if status == "qwen_active":
+            return "Voz: Qwen clonada"
+        if status == "qwen_starting":
+            return "Voz: Qwen iniciando"
+        if status == "not_configured":
+            return "Voz: clonación no configurada"
+        if status == "piper_local":
+            return "Voz: Piper local"
+        if status == "edge_fallback":
+            return f"Voz: Edge respaldo: {reason}" if reason else "Voz: Edge respaldo"
+        return "Voz: --"
 
     def update_pipeline_state(self, state: str) -> None:
         """Update the main status label based on pipeline state.
@@ -258,6 +367,49 @@ class StatusBar:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _recompute_rollup(self) -> None:
+        """Recompute the Sistema rollup pill from the current _sistema_state.
+
+        Priority table (highest wins):
+          CRIT  — model=error | health=red | tts=error
+          WARN  — model=loading | health=yellow | mic=disconnected
+          INFO  — tts in (generating, paused) | mic=recording
+          QUIET — health=unknown (and no higher severity)
+          OK    — all nominal
+
+        Display:
+          OK    → "Sistema: OK"     / dim dark #1b2633
+          QUIET → "Sistema: ..."    / grey #444444
+          INFO  → "Sistema: activo" / blue #1f3f6f
+          WARN  → "Sistema: alerta" / amber #cc8800
+          CRIT  → "Sistema: error"  / red #cc3333
+        """
+        if self.lbl_sistema_pill is None:
+            return
+
+        s = self._sistema_state
+
+        if s.get("model") == "error" or s.get("health") == "red" or s.get("tts") == "error":
+            severity = "CRIT"
+        elif (
+            s.get("model") == "loading"
+            or s.get("health") == "yellow"
+            or s.get("mic") == "disconnected"
+        ):
+            severity = "WARN"
+        elif (
+            s.get("tts") in ("generating", "paused", "speaking")
+            or s.get("mic") in ("recording", "listening")
+        ):
+            severity = "INFO"
+        elif s.get("health") == "unknown":
+            severity = "QUIET"
+        else:
+            severity = "OK"
+
+        text, color = _ROLLUP_CONFIG[severity]
+        self.lbl_sistema_pill.configure(text=text, fg_color=color)
 
     def _get_status_color(self, status_type: str, status: str) -> str:
         """Return the pill background color for a status type/value pair."""
@@ -309,6 +461,9 @@ class StatusBar:
             "tts_status": self.update_tts_status,
             "chat_status": self.update_chat_status,
             "health_status": self.update_health_status,
+            "engine_status": lambda v: self.update_engine_status(
+                v, self._ui_state.get("engine_reason", "")
+            ),
         }
         handler = handlers.get(key)
         if handler and isinstance(value, str):

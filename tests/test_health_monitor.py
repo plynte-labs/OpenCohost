@@ -745,3 +745,72 @@ class TestMonitorState:
         assert state.vram_status == "normal"
         assert state.free_vram_mb == 4096.0
         assert state.overall_status == "green"
+
+
+# ──────────────────────────────────────────────
+# Phase 0 — Qwen TTS lifecycle foundations (T0.2, T0.4)
+# ──────────────────────────────────────────────
+
+def test_lifecycle_and_keepwarm_constants():
+    """T0.2 — keep-warm / blip constants and the new STOPPED lifecycle state exist."""
+    from opencohost.config.settings import (
+        QWEN_BLIP_BACKOFF,
+        QWEN_KEEP_WARM_SECONDS,
+        QWEN_VRAM_FOOTPRINT_MB,
+    )
+    from opencohost.core.health_monitor import LIFECYCLE_STOPPED
+    assert QWEN_KEEP_WARM_SECONDS == 30
+    # blip backoff + VRAM footprint are owner-pending values — pin existence/type, not the number
+    assert isinstance(QWEN_BLIP_BACKOFF, (int, float)) and QWEN_BLIP_BACKOFF > 0
+    assert isinstance(QWEN_VRAM_FOOTPRINT_MB, (int, float)) and QWEN_VRAM_FOOTPRINT_MB > 0
+    assert LIFECYCLE_STOPPED == "stopped"
+
+
+def test_stop_resets_idle_and_lifecycle():
+    """T0.4 — stopping an OWNED server resets the idle clock and marks it STOPPED."""
+    from opencohost.core.health_monitor import LIFECYCLE_READY, LIFECYCLE_STOPPED
+    mgr = QwenProcessManager()
+    mgr._is_manual = False
+    proc = MagicMock()
+    proc.poll.return_value = 0  # already exited -> stop() takes the fast path
+    mgr._process = proc
+    mgr._last_health_time = time.time() - 1000
+    mgr._lifecycle_state = LIFECYCLE_READY
+
+    mgr.stop()
+
+    assert mgr.idle_seconds == 0.0
+    assert mgr.lifecycle_state == LIFECYCLE_STOPPED
+
+
+def test_stop_manual_does_not_reset():
+    """T0.4 — a manual/external server is never auto-stopped, so its state is untouched."""
+    from opencohost.core.health_monitor import LIFECYCLE_READY
+    mgr = QwenProcessManager()
+    mgr._is_manual = True
+    mgr._lifecycle_state = LIFECYCLE_READY
+    mgr._last_health_time = time.time() - 50
+
+    mgr.stop()
+
+    assert mgr.lifecycle_state == LIFECYCLE_READY  # no reset on the manual path
+
+
+def test_stop_preserves_failed_verdict():
+    """T0.4 — stop() cleaning up a FAILED startup must NOT mask the failure as STOPPED.
+
+    start() sets FAILED on a startup timeout and then calls stop(); the idle-clock reset
+    must not overwrite that failure verdict (the health pill / failure classifier rely on it).
+    """
+    from opencohost.core.health_monitor import LIFECYCLE_FAILED
+    mgr = QwenProcessManager()
+    mgr._is_manual = False
+    proc = MagicMock()
+    proc.poll.return_value = 0  # already exited
+    mgr._process = proc
+    mgr._lifecycle_state = LIFECYCLE_FAILED
+
+    mgr.stop()
+
+    assert mgr.lifecycle_state == LIFECYCLE_FAILED  # failure verdict preserved
+    assert mgr.idle_seconds == 0.0

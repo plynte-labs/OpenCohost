@@ -19,6 +19,7 @@ config/music_library.json
 config/last_model.json
 config/llm_tiers.json
 config/tts_local_only.json
+config/tts_speed.json
 # Stale pre-restructure leftovers; runtime never writes here anymore
 opencohost/config/ptt_settings.json
 opencohost/config/window_geometry.json
@@ -88,7 +89,7 @@ Documents/
 WhatIs.md
 opencohost/config/last_model.json
 
-# ── Runtime user state (seeded from config/default_profiles.json on first run) ──
+# ── Runtime user state (seeded from opencohost/config/default_profiles.json on first run) ──
 perfiles.json
 CLAUDE.local.md
 opencode.json

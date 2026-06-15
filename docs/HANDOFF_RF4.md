@@ -1,5 +1,18 @@
 # Handoff — Preparación RF4 Stream Admin Mode
 
+> **ESTADO 2026-06-13: LEGACY (congelado). RF4 / stream_admin queda fuera del alcance del producto.**
+> La moderación se delega a Nightbot (documentado en la guía del streamer) y los cambios de
+> título/categoría quedan a cargo del streamer (panel de YouTube) o de automatización externa
+> (patrón de cuenta burner "OpenClaw"). Motivo: RF4 es un "nice-to-have" de alta complejidad
+> (OAuth, escritura, vault de credenciales) para algo que no es el núcleo del co-host, y el
+> código está inactivo desde 2026-05-14 (los commits posteriores fueron solo la migración de
+> packaging que arrastró el archivo). El código y los tests existentes se conservan, NO se
+> eliminan; no se le conecta funcionalidad nueva. Si en el futuro aparece una opción claramente
+> mejor o demanda real, se puede retomar desde este registro — no está en el roadmap cercano.
+> Decisión registrada en engram (topic `audit/youtube-compliance`) y en
+> `conductor/tracks/youtube_chat_compliance_audit_20260614/proposal.md` §6.
+> Antes de cualquier ELIMINACIÓN futura: verificar si `app_shell` instancia `stream_admin_ui`.
+
 **Fecha:** 2026-05-04  
 **Módulo:** Gestión de Stream / Admin Mode  
 **Estado:** MVP base implementado, pendiente validación OAuth real  

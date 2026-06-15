@@ -18,8 +18,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Product UI Refactor — Kira-Centered Layout + Avatar/OBS Module**
+- [ ] **Track: Product UI Refactor — Kira-Centered Layout + Avatar/OBS Module**
   *Link: [./tracks/product_ui_kira_avatar_refactor_20260513/](./tracks/product_ui_kira_avatar_refactor_20260513/)*
+  *Status 2026-06-13: RECLASSIFIED [~]→[ ] — listed as "Deferred for now, do not implement
+  without a fresh user decision" in AGENT_HANDOFF.md, which contradicts in-progress. The
+  conductor folder is absent; WIP lives on branch feature/kira-product-ui-redesign.*
 
 ---
 
@@ -28,8 +31,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Startup and Model Lifecycle Polish for Ollama, OBS, and Memory Release**
+- [x] **Track: Startup and Model Lifecycle Polish for Ollama, OBS, and Memory Release**
   *Link: [./tracks/startup_model_lifecycle_polish_20260522/](./tracks/startup_model_lifecycle_polish_20260522/)*
+  *Status 2026-06-13: CLOSED — work merged alongside manual_llm_tier_switching_20260522
+  (commit 903b9af "polish startup and model lifecycle", merged via 5adbc8d); that track is
+  already [x]. No open tasks identifiable and the folder was never created. Reopen if a
+  concrete open item surfaces.*
 
 ---
 
@@ -79,8 +86,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Runtime Smoke Harness - Real App Cohost and Audio Safety Validation**
+- [x] **Track: Runtime Smoke Harness - Real App Cohost and Audio Safety Validation**
   *Link: [./tracks/runtime_smoke_harness_20260606/](./tracks/runtime_smoke_harness_20260606/)*
+  *Status 2026-06-13: CLOSED — Gate 4 PASSED and re-stamped on master @ ec0a95c
+  (deterministic mode, exit 0, all five invariants true). Evidence lives in
+  runtime_validation_gates_20260610/validation_log.md. The track folder was never
+  created; the closure record is in the validation_gates track.*
 
 ---
 
@@ -161,3 +172,71 @@ This file tracks all major tracks for the project. Each track has its own detail
   *Status 2026-06-12: PROPOSAL ONLY — not started. Consolidated low/med
   cleanup findings from the 2026-06-12 dual-reviewer audit: gitignore gap,
   dead code, filter pattern duplication, stale path refs. See proposal.md.*
+
+---
+
+- [ ] **Track: Viewer Queue Backpressure - Bounded Queue and Sectioned Accumulation**
+  *Link: [./tracks/viewer_queue_backpressure_20260613/](./tracks/viewer_queue_backpressure_20260613/)*
+  *Status 2026-06-13: PROPOSAL ONLY — not started, awaiting user approval.
+  Origin: 2026-06-13 live 24k-viewer benchmark (O7). Bounded viewer-query queue
+  + opt-in sectioned-accumulation config toggle (live-control vs immediacy).
+  Framed as a turn-taking/flow-control feature, NOT a crash fix (the 20min
+  "deadlock" was refuted as operator absence). Blocked on two prerequisites in
+  kira_history_summarization_20260611 (runaway-generation cap + operator
+  priority=0 lane). Does NOT touch PTT-accumulate. See proposal.md.*
+
+---
+
+- [ ] **Track: YouTube Chat Compliance Audit — Terms of Service & API Analysis**
+  *Link: [./tracks/youtube_chat_compliance_audit_20260614/](./tracks/youtube_chat_compliance_audit_20260614/)*
+  *Status 2026-06-14: PROPOSAL ONLY — not started. Surfaced from user request to audit live chat consumption against YouTube policies. The current pytchat integration scrapes YouTube internal endpoints, violating general ToS Section 4 (automated access). Transition to the official YouTube Data API v3 is proposed. See proposal.md.*
+  *Status 2026-06-13: RESCOPED (owner decision). Heavy remediation DROPPED — no OAuth,
+  no dual-backend, no shared credential vault. New scope: (a) Twitch stays first-class
+  (compliant anonymous IRC, already shipped); (b) moderation is OUT of product scope,
+  delegated to Nightbot via docs — RF4/stream_admin marked LEGACY (frozen, see
+  docs/HANDOFF_RF4.md); (c) YouTube becomes opt-in, READ-ONLY via the streamer's own
+  Data API v3 key (no OAuth: videos.list → activeLiveChatId → liveChatMessages.list),
+  key encrypted locally, with a documented quota ceiling. Rationale: keep OpenCohost
+  focused on the co-host, preserve local-first (no cloud aggregators), stay compliant
+  without API/moderation complexity. proposal.md rewritten; spec.md and plan.md carry
+  "superseded" banners. Open item: verify liveChatMessages.list quota cost before
+  publishing the ceiling. Door left open (distant) if a clearly better option appears.
+  No implementation authorized — direction only.*
+
+---
+
+- [~] **Track: OpenCohost UI Declutter — Status Bar Rollup and RF4 Panel Hide**
+  *Link: [./tracks/opencohost_ui_declutter_20260614/](./tracks/opencohost_ui_declutter_20260614/)*
+  *Status 2026-06-14: Track 1 (main-thread freeze elimination) DONE at ada82d5.
+  Track 2 (this track) implemented under Strict TDD on branch
+  feat/ui-polish-freeze-declutter-20260614. NOT COMMITTED.
+  Part A shipped: STREAM_ADMIN_ENABLED=False. RF4 legacy panels (metadata,
+  moderation, Kira-chat) HIDDEN, not deleted. Moderation delegated to Nightbot.
+  RF3 Chat Live kept. Code conserved per HANDOFF_RF4.md.
+  Part B: Sistema rollup pill added (5 severity levels); engine badge visibility
+  gated (dim on steady-state, amber on qwen_starting per owner decision).
+  Part C: Cleanup deferred to stream_admin_legacy_removal_20260614 (NO-PRIORITY).*
+
+---
+
+- [ ] **Track: Stream Admin Legacy Removal — Eventual RF4 Code Deletion (NO-PRIORITY)**
+  *Link: [./tracks/stream_admin_legacy_removal_20260614/](./tracks/stream_admin_legacy_removal_20260614/)*
+  *Status 2026-06-14: NOT STARTED, NO-PRIORITY. RF4 metadata/moderation/Kira-chat
+  panels are currently HIDDEN via STREAM_ADMIN_ENABLED=False (see ui_declutter_20260614).
+  This track covers eventual deletion of the RF4 code after: (1) full dep audit,
+  (2) youtube_chat_compliance_audit_20260614 resolved, (3) owner authorizes deletion.
+  RF3 Chat Live is NOT in scope. See proposal.md and HANDOFF_RF4.md.*
+
+---
+
+- [ ] **Track: Qwen TTS Lifecycle Hardening — Auto-Manage, Visible Progress, Switch-Driven Stop**
+  *Link: [./tracks/qwen_tts_lifecycle_hardening_20260613/](./tracks/qwen_tts_lifecycle_hardening_20260613/)*
+  *Status 2026-06-13: INVESTIGATION captured + runtime contract owner-approved (A–G).
+  Origin: owner runtime-validation of heavy vs light TTS surfaced (1) a release-blocking
+  bug — APP_ID drift (server_qwen.py "voiceai-qwen-tts" vs HealthMonitor
+  "opencohost-qwen-tts") made heavy TTS silently fall back to Edge forever; fixed in
+  server_qwen.py:102 (uncommitted, engram #1931). (2) Decision to finish the deferred
+  self-managing lifecycle: eager start on switch-to-Pesado, keep-warm 30s then stop,
+  VRAM-gated via existing VRAMGuard, progress in the in-app console, Edge during startup.
+  ~80% already built in QwenProcessManager. PACKAGING of the heavy env is PARKED (out of
+  current scope). Next: spec + TDD implementation of the lifecycle wiring. See investigation.md.*

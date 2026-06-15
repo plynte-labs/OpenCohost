@@ -99,7 +99,7 @@ def _from_pretrained_kwargs(model_path, device):
 # ──────────────────────────────────────────────
 app = Flask(__name__)
 _tts_lock = threading.Lock()
-APP_ID = "voiceai-qwen-tts"
+APP_ID = "opencohost-qwen-tts"
 
 logger.info("Inicializando Motor Pesado (Qwen3-TTS 0.6B)...")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"

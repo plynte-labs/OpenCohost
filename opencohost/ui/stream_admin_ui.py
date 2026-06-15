@@ -34,6 +34,7 @@ import tkinter.messagebox as messagebox
 
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.config.settings import STREAM_ADMIN_ENABLED
 
 
 class StreamAdminUI:
@@ -361,6 +362,9 @@ class StreamAdminUI:
         self._widgets["lbl_stream_pending"] = lbl_pending
 
     def _build_metadata_tab(self, tab: Any) -> None:
+        # RF4 LEGACY: hidden when STREAM_ADMIN_ENABLED=False (see settings.py comment).
+        if not STREAM_ADMIN_ENABLED:
+            return
         frame_meta = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_meta.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_meta.grid_columnconfigure(0, weight=1)
@@ -431,6 +435,9 @@ class StreamAdminUI:
         self._widgets["text_stream_description"] = text_desc
 
     def _build_moderation_tab(self, tab: Any) -> None:
+        # RF4 LEGACY: hidden when STREAM_ADMIN_ENABLED=False (see settings.py comment).
+        if not STREAM_ADMIN_ENABLED:
+            return
         frame_mod = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_mod.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         frame_mod.grid_columnconfigure(0, weight=1)
@@ -483,6 +490,11 @@ class StreamAdminUI:
         self._widgets["frame_stream_users"] = frame_users
 
     def _build_chat_tab(self, tab: Any) -> None:
+        # RF4 LEGACY: Kira Chat panel hidden when STREAM_ADMIN_ENABLED=False.
+        # RF3 Chat Live (_build_chat_live_tab) is NOT gated — it remains reachable.
+        # See settings.py STREAM_ADMIN_ENABLED comment for full rationale.
+        if not STREAM_ADMIN_ENABLED:
+            return
         frame_chat = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
         frame_chat.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         frame_chat.grid_columnconfigure(0, weight=1)

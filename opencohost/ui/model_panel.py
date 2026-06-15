@@ -83,9 +83,16 @@ class ModelPanel:
         # Observer
         self._observer_id: Optional[int] = None
 
+        # Installed model cache — populated by _apply_model_catalog (off-main worker result);
+        # read by _modelo_instalado O(1) without calling ollama.list() on the main thread.
+        self._installed_model_cache: set[str] = set()
+
         # Ollama starting flag
         self._ollama_starting: bool = False
         self._ollama_process: Optional[Any] = None
+
+        # Fallback re-probe timer handle (fix: orphaned-timer leak)
+        self._invalidate_fallback_timer: threading.Timer | None = None
         
         # Active model tracking
         self._active_model_tag: Optional[str] = None
@@ -163,6 +170,12 @@ class ModelPanel:
         selected_tag = self.get_selected_tag()
         active_tag = self._active_model_tag or selected_tag or DEFAULT_MODEL
         self._build_model_catalog(installed_model_tags)
+        # Update cache BEFORE any UI call that reads it (e.g. update_model_info →
+        # _modelo_instalado). Guard: None means Ollama is DOWN — keep last good cache.
+        if installed_model_tags is not None:
+            self._installed_model_cache = {
+                self._canonical_model_tag(t) for t in installed_model_tags if t
+            }
         self._llm_tiers = dict(resolve_llm_tiers(installed_model_tags))
 
         if self.combo_modelos is not None:
@@ -484,6 +497,11 @@ class ModelPanel:
 
         Returns one of: ``checking``, ``ready``, ``package_missing``,
         ``app_missing``, ``service_stopped``.
+
+        TODO (Phase 6): move the requests.get(timeout=1.0) probe off the main
+        thread.  The 1 s cap is acceptable for the current single-shot startup
+        call, but if Ollama is slow (not down) this blocks the event loop for
+        up to 1 s per invocation.  See design doc for fix approach.
         """
         try:
             import ollama  # noqa: F401
@@ -526,18 +544,60 @@ class ModelPanel:
         return None
 
     def _modelo_instalado(self, model_tag: str) -> bool:
-        """Check if an Ollama model is installed."""
-        try:
-            import ollama
+        """Check if an Ollama model is installed using the in-memory cache.
 
-            for mod in ollama.list().models:
-                if mod.model == model_tag or mod.model == f"{model_tag}:latest":
-                    return True
-                if ":" not in model_tag and mod.model.startswith(model_tag + ":"):
-                    return True
+        Returns False (conservative) when the cache is empty and schedules an
+        async refresh so the UI self-corrects within ~250 ms. Never calls
+        ollama.list() on the main thread.
+        """
+        cache = self._installed_model_cache
+        if not cache:
+            # Cold-start or post-invalidation: schedule a refresh if not already running.
+            self._refresh_model_list_async()
             return False
-        except Exception:
-            return False
+        tag = str(model_tag or "").strip()
+        canonical = self._canonical_model_tag(tag)
+        # 1. Exact match against canonical cache entries.
+        #    _canonical_model_tag strips :latest, so both "llama3" and "llama3:latest"
+        #    inputs produce the same canonical key — the :latest suffix branch is
+        #    unreachable and has been removed.
+        if canonical in cache:
+            return True
+        # 2. Prefix match — caller has "phi3" (no colon), cache has "phi3:mini"
+        if ":" not in canonical:
+            prefix = canonical + ":"
+            if any(entry.startswith(prefix) for entry in cache):
+                return True
+        return False
+
+    def _invalidate_model_cache(self) -> None:
+        """Clear the installed model cache and trigger an async re-probe.
+
+        If ollama_state is not yet 'ready' (e.g. model still loading right after
+        a download), _refresh_model_list_async exits early.  Schedule one delayed
+        fallback re-probe so the just-downloaded model reliably appears as installed
+        even if the state update arrives slightly later (fix #6).
+        """
+        self._installed_model_cache = set()
+        self._refresh_model_list_async()
+        # Fallback: if the async refresh could not run because ollama_state is not
+        # yet 'ready', schedule a delayed re-probe via a daemon timer.  The timer
+        # fires on a worker thread and marshals back to the UI thread via
+        # _schedule_ui_update.  1.5 s is conservative; in practice the state
+        # transitions within 250 ms of the download completing.
+        if self._ui_state.ollama_state != "ready":
+            # Cancel any previously scheduled fallback to prevent stacked un-cancelled
+            # timers (dedup fix).  Each _invalidate_model_cache call replaces the handle.
+            if self._invalidate_fallback_timer is not None:
+                self._invalidate_fallback_timer.cancel()
+                self._invalidate_fallback_timer = None
+            t = threading.Timer(
+                1.5,
+                lambda: self._schedule_ui_update(self._refresh_model_list_async),
+            )
+            t.daemon = True
+            t.start()
+            self._invalidate_fallback_timer = t
 
     # ------------------------------------------------------------------
     # Button update logic
@@ -722,11 +782,14 @@ class ModelPanel:
     # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        """Unsubscribe from UIState observer.
+        """Unsubscribe from UIState observer and cancel any pending timers.
 
         Call this before the parent window is destroyed to prevent
         stale callbacks.
         """
+        if self._invalidate_fallback_timer is not None:
+            self._invalidate_fallback_timer.cancel()
+            self._invalidate_fallback_timer = None
         if self._observer_id is not None:
             self._ui_state.unsubscribe(self._observer_id)
             self._observer_id = None
