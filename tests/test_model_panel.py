@@ -1108,7 +1108,9 @@ class TestOnClosingCallsModelPanelCleanup:
         import ast
         import pathlib
 
-        source = pathlib.Path("E:/VoiceAI/opencohost/ui/app_shell.py").read_text(encoding="utf-8")
+        source = (
+            pathlib.Path(__file__).resolve().parents[1] / "opencohost" / "ui" / "app_shell.py"
+        ).read_text(encoding="utf-8")
         tree = ast.parse(source)
 
         found = False

@@ -1251,7 +1251,7 @@ class VocalAIApp(ctk.CTk):
                 pass
             self._kira_agenda_tick_id = None
         # Cancel any pending prefetch retry (fix #B).
-        if getattr(self, "_prefetch_retry_id", None) is not None:
+        if self.__dict__.get("_prefetch_retry_id") is not None:
             try:
                 self.after_cancel(self._prefetch_retry_id)
             except Exception:
@@ -1482,7 +1482,7 @@ class VocalAIApp(ctk.CTk):
         # fix #B: non-blocking check (timeout=0); retry via after() if not ready yet.
         if not self.motor_ia.wait_prefetched_agenda(timeout=0):
             # Cancel any existing retry before scheduling a new one (double-schedule guard).
-            if self._prefetch_retry_id is not None:
+            if self.__dict__.get("_prefetch_retry_id") is not None:
                 try:
                     self.after_cancel(self._prefetch_retry_id)
                 except Exception:
@@ -1506,7 +1506,7 @@ class VocalAIApp(ctk.CTk):
     def _kira_agenda_clear_prefetch(self) -> bool:
         self._kira_agenda_prefetched_action = None
         # Cancel any pending prefetch retry to avoid a leaked timer (fix #4).
-        if getattr(self, "_prefetch_retry_id", None) is not None:
+        if self.__dict__.get("_prefetch_retry_id") is not None:
             try:
                 self.after_cancel(self._prefetch_retry_id)
             except Exception:
@@ -3170,7 +3170,7 @@ class VocalAIApp(ctk.CTk):
         self._closing = True
         logger.info("Cerrando aplicación...")
         # Cancel prefetch retry timer (fix #B) to avoid callbacks after teardown.
-        if getattr(self, "_prefetch_retry_id", None) is not None:
+        if self.__dict__.get("_prefetch_retry_id") is not None:
             try:
                 self.after_cancel(self._prefetch_retry_id)
             except Exception:
