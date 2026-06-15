@@ -19,9 +19,46 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
-## LATEST SNAPSHOT — UI Declutter shipped (2026-06-14)
+## LATEST SNAPSHOT — UI polish + audio-teardown MERGED to master (2026-06-15)
 
-**Track: ui_declutter_20260614 / feat/ui-polish-freeze-declutter-20260614 — NOT COMMITTED**
+**`feat/ui-polish-freeze-declutter-20260614` MERGED to `master` via PR #46 (commit
+`5505629`). CI green. The branch itself is kept (not deleted).**
+
+What landed on master in this branch:
+- **Main-thread freeze elimination** (Phase 5 of `ui_rendering_optimization`) — ADR-008.
+- **UI declutter** — RF4 stream-admin panels hidden behind `STREAM_ADMIN_ENABLED=False`,
+  the `Sistema` rollup pill, de-bloated state bar — ADR-009.
+- **Toplevel focus fix** — `opencohost/ui/window_utils.py` (`show_toplevel` / `raise_window`)
+  defers the raise past CTkToplevel's `after(5, deiconify)`; adopted by `gear_popover.py`.
+- **In-flight WIP baseline** (commit `6d77b56`): Qwen TTS lifecycle Phase 1 visible engine
+  badge (`qwen_markers.py`, `state.engine_status`, startup self-check), model-panel
+  installed-model discovery, and the `server_qwen.py` APP_ID heavy-TTS fallback fix.
+- **PR #45 (audio-teardown) is MERGED** (was on master at `9fdc1a5`; merged into this branch).
+  Two conflicts resolved: union in `_kira_agenda_emergency_stop` (prefetch-retry cancel +
+  motor-interrupt + audio-bed hard-stop, single guarded `drop_pending_sources`); app_shell
+  line-budget guard raised to `<3270` (real merged file = 3256 lines).
+
+CI bugfix (commit `81be9cb`, merged): the full-suite CI caught 5 failures a local SUBSET run
+missed — 4× RecursionError (read `_prefetch_retry_id` via `self.__dict__.get(...)`, not
+`getattr`, because tests build the app with `object.__new__` bypassing `__init__`) + 1
+hardcoded test path made portable. LESSON: run the FULL `tests/` suite before any PR.
+
+Cleanup done: both leftover `.claude/worktrees/` removed; `fix/audio-teardown-stop`
+local+remote branch deleted. The `viewer_queue_backpressure_20260613` board edit is preserved
+at `conductor/tracks/viewer_queue_backpressure_20260613/board_entry.patch` (proposal still
+awaiting owner approval).
+
+**Owner runtime gates still OPEN:** (1) gear popover raises on top on Windows + first-boot
+freeze gone + `Sistema` pill reflects state; (2) carried from PR#45 — music stops *deferred*
+on soft-stop, *immediate* on emergency-stop. The Qwen lifecycle Phase 1 badge shipped, but
+the full self-managing lifecycle (eager start / keep-warm / VRAM-gated stop) is NOT built —
+track `qwen_tts_lifecycle_hardening_20260613` stays open.
+
+---
+
+## SNAPSHOT — UI Declutter shipped (2026-06-14, now merged via PR #46)
+
+**Track: ui_declutter_20260614 / feat/ui-polish-freeze-declutter-20260614 — MERGED to master (PR #46, 2026-06-15)**
 
 ### Active flags
 

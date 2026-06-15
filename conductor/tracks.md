@@ -205,11 +205,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: OpenCohost UI Declutter — Status Bar Rollup and RF4 Panel Hide**
+- [x] **Track: OpenCohost UI Declutter — Status Bar Rollup and RF4 Panel Hide**
   *Link: [./tracks/opencohost_ui_declutter_20260614/](./tracks/opencohost_ui_declutter_20260614/)*
-  *Status 2026-06-14: Track 1 (main-thread freeze elimination) DONE at ada82d5.
-  Track 2 (this track) implemented under Strict TDD on branch
-  feat/ui-polish-freeze-declutter-20260614. NOT COMMITTED.
+  *Status 2026-06-15: MERGED to master via PR #46 (commit 5505629, CI green).
+  Track 1 (main-thread freeze elimination) DONE at ada82d5; Track 2 (this track)
+  under Strict TDD; plus the operator_console_focus_fix slice (window_utils
+  show_toplevel/raise_window) and a CI bugfix (81be9cb). Owner runtime validation
+  of the visible UI behaviour still pending.
   Part A shipped: STREAM_ADMIN_ENABLED=False. RF4 legacy panels (metadata,
   moderation, Kira-chat) HIDDEN, not deleted. Moderation delegated to Nightbot.
   RF3 Chat Live kept. Code conserved per HANDOFF_RF4.md.
@@ -235,7 +237,9 @@ This file tracks all major tracks for the project. Each track has its own detail
   Origin: owner runtime-validation of heavy vs light TTS surfaced (1) a release-blocking
   bug — APP_ID drift (server_qwen.py "voiceai-qwen-tts" vs HealthMonitor
   "opencohost-qwen-tts") made heavy TTS silently fall back to Edge forever; fixed in
-  server_qwen.py:102 (uncommitted, engram #1931). (2) Decision to finish the deferred
+  server_qwen.py (MERGED to master via PR #46, 2026-06-15; engram #1931). The Phase 1
+  visible engine badge (qwen_markers.py + state.engine_status + startup self-check) also
+  merged via PR #46. (2) Decision to finish the deferred
   self-managing lifecycle: eager start on switch-to-Pesado, keep-warm 30s then stop,
   VRAM-gated via existing VRAMGuard, progress in the in-app console, Edge during startup.
   ~80% already built in QwenProcessManager. PACKAGING of the heavy env is PARKED (out of
