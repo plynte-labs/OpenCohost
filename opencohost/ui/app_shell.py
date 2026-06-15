@@ -1205,7 +1205,41 @@ class VocalAIApp(ctk.CTk):
         action = self.kira_agenda.soft_stop()
         self._enqueue_kira_agenda_action(action)
         self._on_stream_admin_log("[Kira Agenda] Stop suave solicitado.")
+        # Fix 3: defer the graceful audio_bed.stop() so it fires only AFTER
+        # Kira finishes her in-flight closing speech.  Setting this flag here
+        # tells _check_pending_audio_bed_stop (called from _on_motor_speaking_end)
+        # to call audio_bed.stop(emergency=False) once the agenda is fully OFF.
+        if hasattr(self, "audio_bed"):
+            self._pending_audio_bed_stop = True
+            # Round 2 fix: when soft_stop() fast-exits (agenda already OFF/IDLE/
+            # WAITING_SIGNAL with no active topic), no speech is enqueued so
+            # _on_motor_speaking_end never fires.  Call the helper synchronously
+            # here so the graceful stop fires immediately in that case.  When the
+            # agenda IS still speaking, the helper's state != OFF guard returns
+            # early and the existing deferred path (_on_motor_speaking_end) still
+            # handles it — both call sites are intentionally kept.
+            self._check_pending_audio_bed_stop()
         self._kira_agenda_update_status()
+
+    def _check_pending_audio_bed_stop(self) -> None:
+        """Fire the deferred graceful audio-bed stop if the agenda has finished.
+
+        Called from _on_motor_speaking_end after each speech segment ends.
+        Does nothing if the pending flag is not set or the agenda is still active.
+        """
+        if not getattr(self, "_pending_audio_bed_stop", False):
+            return
+        if not hasattr(self, "audio_bed"):
+            self._pending_audio_bed_stop = False
+            return
+        # Only fire once the agenda has fully wound down (state OFF).
+        # Intermediate states (SPEAKING, GENERATING, TOPIC_CLOSING) mean the
+        # closing speech is still being delivered — do not stop the music yet.
+        from opencohost.smart_aggregator.kira_agenda_controller import AgendaState
+        if hasattr(self, "kira_agenda") and self.kira_agenda.state != AgendaState.OFF:
+            return
+        self._pending_audio_bed_stop = False
+        self.audio_bed.stop(emergency=False)
 
     def _kira_agenda_emergency_stop(self) -> None:
         self._kira_agenda_prefetched_action = None
@@ -1223,8 +1257,22 @@ class VocalAIApp(ctk.CTk):
             except Exception:
                 pass
             self._prefetch_retry_id = None
-        if hasattr(self.motor_ia, "drop_pending_sources"):
-            self.motor_ia.drop_pending_sources(("kira-agenda",))
+        # Bug 4 fix: set _speaking=False on the motor so the in-flight _hablar
+        # thread's consumer loop exits immediately instead of draining the full
+        # pre-filled audio queue.  Do this before drop_pending_sources so the
+        # engine sees the interrupt signal first.
+        if hasattr(self, "motor_ia"):
+            with self.motor_ia._lock:
+                self.motor_ia._speaking = False
+            if hasattr(self.motor_ia, "drop_pending_sources"):
+                self.motor_ia.drop_pending_sources(("kira-agenda",))
+        # Bug 1 fix: hard-stop the music bed immediately on emergency teardown.
+        # Secondary fix: clear any stale _pending_audio_bed_stop flag set by a
+        # prior soft_stop, so a deferred speaking_end callback cannot trigger an
+        # unwanted graceful stop after the hard stop has already fired.
+        if hasattr(self, "audio_bed"):
+            self._pending_audio_bed_stop = False
+            self.audio_bed.stop(emergency=True)
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
         self._kira_agenda_restore_chat_filter()
         self._clear_obs_joyita("KiraJoyita")
@@ -2564,6 +2612,10 @@ class VocalAIApp(ctk.CTk):
             self.audio_bed.unduck()
             if agenda_speech or self.audio_bed.current_track is not None:
                 self.audio_bed.on_boundary()
+        # Fix 3: fire the deferred graceful audio-bed stop if soft_stop was
+        # called while Kira was speaking.  This runs AFTER mark_speech_complete()
+        # so the agenda state is already settled (OFF when closing speech ended).
+        self._check_pending_audio_bed_stop()
         estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
         self._actualizar_pipeline(estado)
         if hasattr(self, "_avatar_bridge"):

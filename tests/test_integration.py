@@ -206,15 +206,15 @@ class TestAppShellStructure:
             lines = f.readlines()
         # Baseline was already 3066 lines on master before the package
         # restructure; ui_rendering_optimization_20260609 owns shrinking it.
-        # Raised 3100 -> 3200 (2026-06-14): ui_main_thread_freeze_elimination
+        # Raised 3100 -> 3270 (2026-06-15): ui_main_thread_freeze_elimination
         # (Phase 5) added the async agenda-load callback (_on_agenda_loaded),
-        # the non-blocking prefetch retry, and model-cache wiring.
-        # Track 2 adversarial review (FIX C) extracted the gear popover (~90 lines)
-        # into opencohost/ui/gear_popover.py, leaving only a thin wrapper (~20 lines).
-        # After FIX D removed the duplicate _compacto_active attr, net result is 3204
-        # (below the old 3350; slightly over 3200 due to existing baseline depth).
+        # the non-blocking prefetch retry, and model-cache wiring; Track 2 (FIX C)
+        # extracted the gear popover into opencohost/ui/gear_popover.py.  This merge
+        # with master also absorbed PR#45's audio-teardown wiring (Bug 1 audio-bed
+        # hard-stop + Bug 4 motor _speaking=False) into _kira_agenda_emergency_stop,
+        # so the real merged figure is ~3256, not 3204 or 3148.
         # Target < 3200 remains owned by ui_rendering_optimization_20260609.
-        assert len(lines) < 3209, f"app_shell.py has {len(lines)} lines, expected < 3209"
+        assert len(lines) < 3270, f"app_shell.py has {len(lines)} lines, expected < 3270"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell
