@@ -31,6 +31,8 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
+from opencohost.ui.window_utils import raise_window, show_toplevel
+
 
 def open_gear_popover(
     parent: Any,
@@ -73,7 +75,7 @@ def open_gear_popover(
     if existing is not None:
         try:
             if existing.winfo_exists():
-                existing.focus()
+                raise_window(existing)
                 return None
         except Exception:
             pass
@@ -152,5 +154,10 @@ def open_gear_popover(
     # <Destroy> bind clears the reference when the window is closed by any
     # means (e.g. parent window teardown), not just the WM_DELETE_WINDOW protocol.
     popover.bind("<Destroy>", lambda e: popover_ref_setter(None) if e.widget is popover else None)
+
+    # Raise the popover above the parent after all widgets are built.
+    # Uses a deferred raise to land after CTkToplevel's own after(5, deiconify)
+    # dance on Windows. modal=False — the gear popover is non-modal by design.
+    show_toplevel(popover, parent, modal=False)
 
     return popover

@@ -1,6 +1,10 @@
 import customtkinter as ctk
 import tkinter.messagebox as mb
 
+# NOTE: This window is made modal by the caller via grab_set() after creation.
+# It could adopt window_utils.show_toplevel(modal=True) in a future pass once
+# the profiles flow is refactored — but do NOT change it here without a
+# dedicated proposal, as grab_set ordering matters for the save callback.
 class ConfiguradorPerfiles(ctk.CTkToplevel):
     def __init__(self, parent, perfiles, on_save_callback):
         super().__init__(parent)
