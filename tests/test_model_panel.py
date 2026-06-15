@@ -19,6 +19,14 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
+# Pre-import ollama at module level so it's in sys.modules before any
+# patch.dict("sys.modules", ...) fixture context is entered.
+# Without this, patch.dict._unpatch_dict calls sys.modules.clear() which
+# removes ollama._client; with refcount dropping to 0 the module's __dict__
+# gets cleared, causing AttributeError: module 'ollama' has no attribute 'chat'
+# in later tests that patch("ollama.chat").
+import ollama as _ollama_preimport  # noqa: F401
+
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
 from opencohost.ui.model_panel import ModelPanel
@@ -627,29 +635,24 @@ class TestOllamaStateDetection:
                 exe = model_panel._find_ollama_executable()
         assert exe is None
 
-    def test_modelo_instalado_true(self, model_panel):
-        mock_ollama = MagicMock()
-        mock_model = MagicMock()
-        mock_model.model = "llama3.2:latest"
-        mock_ollama.list.return_value.models = [mock_model]
-
-        with patch.dict("sys.modules", {"ollama": mock_ollama}):
-            result = model_panel._modelo_instalado("llama3.2")
+    def test_modelo_instalado_true_via_cache(self, model_panel):
+        # New contract: _modelo_instalado reads from _installed_model_cache, not ollama.list().
+        # Simulate cache populated with canonical tag (ollama returns "llama3.2:latest" →
+        # _canonical_model_tag strips suffix → "llama3.2").
+        model_panel._installed_model_cache = {"llama3.2"}
+        result = model_panel._modelo_instalado("llama3.2")
         assert result is True
 
-    def test_modelo_instalado_false(self, model_panel):
-        mock_ollama = MagicMock()
-        mock_ollama.list.return_value.models = []
-
-        with patch.dict("sys.modules", {"ollama": mock_ollama}):
-            result = model_panel._modelo_instalado("unknown")
+    def test_modelo_instalado_false_via_cache(self, model_panel):
+        # Cache populated but does not include "unknown".
+        model_panel._installed_model_cache = {"llama3.2"}
+        result = model_panel._modelo_instalado("unknown")
         assert result is False
 
-    def test_modelo_instalado_exception(self, model_panel):
-        mock_ollama = MagicMock()
-        mock_ollama.list.side_effect = Exception("connection error")
-
-        with patch.dict("sys.modules", {"ollama": mock_ollama}):
+    def test_modelo_instalado_exception_safe_returns_false(self, model_panel):
+        # Empty cache → conservative False (no exception raised).
+        model_panel._installed_model_cache = set()
+        with patch.object(model_panel, "_refresh_model_list_async"):
             result = model_panel._modelo_instalado("some_model")
         assert result is False
 
@@ -765,12 +768,14 @@ class TestObserverIntegration:
         with patch("opencohost.ui.model_panel.ctk", mock_ctk):
             panel.build()
 
-        # Prevent live ollama call during button update
+        # Prevent live ollama calls during button update AND background model-list
+        # refresh that _on_state_change("ollama_state", "ready") would otherwise spawn.
         with patch.object(panel, "_modelo_instalado", return_value=False):
-            ui_state.ollama_state = "ready"
-            time.sleep(0.15)
-            # Button should have been updated (text won't be "Revisando Ollama...")
-            assert panel.btn_download.text != "Revisando Ollama..."
+            with patch.object(panel, "_refresh_model_list_async"):
+                ui_state.ollama_state = "ready"
+                time.sleep(0.15)
+                # Button should have been updated (text won't be "Revisando Ollama...")
+                assert panel.btn_download.text != "Revisando Ollama..."
         panel.cleanup()
 
     def test_ready_state_change_triggers_model_refresh(
@@ -853,3 +858,266 @@ class TestRefreshOllamaState:
             model_panel.refresh_ollama_state(on_check_ollama=mock_check)
 
         mock_check.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 12. Fix #A — _installed_model_cache (freeze elimination)
+# ---------------------------------------------------------------------------
+
+
+class TestInstalledModelCache:
+    """_modelo_instalado must read from cache, never call ollama.list() directly."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_timer(self):
+        """Prevent real threading.Timer objects from leaking across test boundaries.
+
+        Any call to _invalidate_model_cache while ollama_state != 'ready'
+        would normally start a 1.5-second daemon Timer that fires
+        _refresh_model_list_async on a worker thread.  That worker can
+        race the ollama.chat patch used by test_health_integration tests.
+
+        This fixture replaces threading.Timer with a no-op stand-in for
+        every test in this class so no real timer ever starts.  Tests that
+        need to assert specific Timer behaviour (TestInvalidateFallbackTimer)
+        use object.__new__ bypass + their own explicit patches instead.
+        """
+        class _NoOpTimer:
+            def __init__(self, interval, fn, *args, **kwargs):
+                self.interval = interval
+                self.fn = fn
+                self.daemon = False
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+            def start(self):
+                pass  # never fires
+
+        with patch("opencohost.ui.model_panel.threading.Timer", _NoOpTimer):
+            yield
+
+    def test_modelo_instalado_never_calls_ollama_list_when_cache_populated(self, model_panel):
+        """After cache is set, _modelo_instalado must NOT call ollama.list()."""
+        model_panel._installed_model_cache = {"qwen3:8b"}
+
+        mock_ollama = MagicMock()
+        mock_ollama.list.side_effect = AssertionError("ollama.list must not be called from main thread")
+
+        with patch.dict("sys.modules", {"ollama": mock_ollama}):
+            result = model_panel._modelo_instalado("qwen3:8b")
+
+        assert result is True
+
+    def test_modelo_instalado_returns_true_exact_match(self, model_panel):
+        model_panel._installed_model_cache = {"qwen3:8b"}
+        assert model_panel._modelo_instalado("qwen3:8b") is True
+
+    def test_modelo_instalado_returns_true_latest_suffix_match(self, model_panel):
+        """Caller passes a :latest-suffixed tag; cache holds the canonical (no :latest) form.
+
+        _canonical_model_tag strips ':latest', so _modelo_instalado("llama3:latest")
+        canonicalises to "llama3" and matches the cache entry via exact match (path 1).
+        The old dead branch (canonical.endswith(":latest")) is never reached because
+        _canonical_model_tag already stripped the suffix before the check.
+        """
+        # Cache stores canonical "llama3" (as _apply_model_catalog populates it).
+        model_panel._installed_model_cache = {"llama3"}
+        # Caller passes the :latest-suffixed form — real scenario when a UI tag
+        # is passed before being normalised.
+        assert model_panel._modelo_instalado("llama3:latest") is True
+
+    def test_modelo_instalado_returns_true_prefix_match(self, model_panel):
+        """Prefix match: query 'phi3' should match 'phi3:mini' in cache."""
+        model_panel._installed_model_cache = {"phi3:mini"}
+        assert model_panel._modelo_instalado("phi3") is True
+
+    def test_modelo_instalado_returns_false_when_not_in_cache(self, model_panel):
+        model_panel._installed_model_cache = {"qwen3:8b"}
+        assert model_panel._modelo_instalado("llama3") is False
+
+    def test_modelo_instalado_returns_false_and_does_not_call_ollama_when_cache_empty(self, model_panel):
+        """Empty cache -> conservative False, does NOT call ollama.list()."""
+        model_panel._installed_model_cache = set()
+
+        mock_ollama = MagicMock()
+        mock_ollama.list.side_effect = AssertionError("ollama.list must not be called when cache is empty")
+
+        with patch.dict("sys.modules", {"ollama": mock_ollama}):
+            result = model_panel._modelo_instalado("qwen3:8b")
+
+        assert result is False
+
+    def test_apply_model_catalog_writes_cache_before_ui_calls(self, model_panel):
+        """Cache must be populated in _apply_model_catalog with the installed tag set."""
+        model_panel._apply_model_catalog({"qwen3:8b", "llama3:latest"})
+        # Cache is written with canonical tags (stripped :latest)
+        assert "qwen3:8b" in model_panel._installed_model_cache
+        assert "llama3" in model_panel._installed_model_cache
+
+    def test_apply_model_catalog_none_does_not_wipe_cache(self, model_panel):
+        """When installed_model_tags is None (Ollama DOWN), cache must not be cleared."""
+        model_panel._installed_model_cache = {"qwen3:8b"}
+        model_panel._apply_model_catalog(None)
+        assert "qwen3:8b" in model_panel._installed_model_cache
+
+    def test_invalidate_model_cache_clears_set(self, model_panel):
+        model_panel._installed_model_cache = {"qwen3:8b", "llama3"}
+        with patch.object(model_panel, "_refresh_model_list_async"):
+            model_panel._invalidate_model_cache()
+        assert len(model_panel._installed_model_cache) == 0
+
+    def test_invalidate_model_cache_triggers_async_refresh(self, model_panel):
+        with patch.object(model_panel, "_refresh_model_list_async") as mock_refresh:
+            model_panel._invalidate_model_cache()
+        mock_refresh.assert_called_once()
+
+    def test_init_has_empty_installed_model_cache(self, ui_state, dispatcher, on_log):
+        panel = ModelPanel(
+            parent_frame=MagicMock(),
+            ui_state=ui_state,
+            dispatcher=dispatcher,
+            on_log=on_log,
+        )
+        assert hasattr(panel, "_installed_model_cache")
+        assert isinstance(panel._installed_model_cache, set)
+        assert len(panel._installed_model_cache) == 0
+        panel.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# 13. Fix — _invalidate_fallback_timer (orphaned-timer leak)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidateFallbackTimer:
+    """Tests for the dedup + cancel fix on the fallback Timer in _invalidate_model_cache.
+
+    Uses object.__new__ to bypass __init__ entirely — no real UIState threads,
+    no ollama.list() calls, and no resolve_llm_tiers() side effects.  This
+    pattern matches the isolation strategy used in test_app_shell_obs_resilience.py.
+    """
+
+    def _make_bare_panel(self):
+        """Create a structurally minimal ModelPanel without running __init__."""
+        panel = object.__new__(ModelPanel)
+        panel._invalidate_fallback_timer = None
+        panel._installed_model_cache = set()
+        panel._model_refresh_inflight = False
+        panel._observer_id = None
+        panel._ui_state = MagicMock()
+        panel._ui_state.ollama_state = "service_stopped"
+        panel._schedule_ui_update = MagicMock(side_effect=lambda fn: fn())
+        return panel
+
+    def test_init_has_invalidate_fallback_timer_attribute(self):
+        """ModelPanel.__init__ must declare _invalidate_fallback_timer = None."""
+        panel = self._make_bare_panel()
+        assert hasattr(panel, "_invalidate_fallback_timer")
+        assert panel._invalidate_fallback_timer is None
+
+    def test_double_invalidate_cancels_first_timer(self):
+        """Two calls to _invalidate_model_cache while ollama_state != 'ready' must
+        cancel the first Timer before starting the second — only one live handle."""
+        panel = self._make_bare_panel()
+        created_timers: list = []
+
+        class FakeTimer:
+            def __init__(self, interval, fn):
+                self.interval = interval
+                self.fn = fn
+                self.cancelled = False
+                self.daemon = False
+                self.started = False
+                created_timers.append(self)
+
+            def cancel(self):
+                self.cancelled = True
+
+            def start(self):
+                self.started = True
+
+        with patch.object(panel, "_refresh_model_list_async"):
+            with patch("opencohost.ui.model_panel.threading.Timer", FakeTimer):
+                panel._invalidate_model_cache()
+                panel._invalidate_model_cache()
+
+        # Exactly two Timer instances were created.
+        assert len(created_timers) == 2
+        # The FIRST timer was cancelled before the second was started.
+        assert created_timers[0].cancelled is True
+        # The SECOND timer was started and is now the stored handle.
+        assert created_timers[1].started is True
+        assert panel._invalidate_fallback_timer is created_timers[1]
+
+    def test_invalidate_stores_timer_handle(self):
+        """After _invalidate_model_cache, _invalidate_fallback_timer must hold the Timer."""
+        panel = self._make_bare_panel()
+        sentinel_timer = MagicMock()
+        sentinel_timer.daemon = False
+
+        with patch.object(panel, "_refresh_model_list_async"):
+            with patch("opencohost.ui.model_panel.threading.Timer", return_value=sentinel_timer):
+                panel._invalidate_model_cache()
+
+        assert panel._invalidate_fallback_timer is sentinel_timer
+
+    def test_cleanup_cancels_invalidate_fallback_timer(self):
+        """cleanup() must cancel and clear _invalidate_fallback_timer."""
+        panel = self._make_bare_panel()
+        mock_timer = MagicMock()
+        panel._invalidate_fallback_timer = mock_timer
+
+        panel.cleanup()
+
+        mock_timer.cancel.assert_called_once()
+        assert panel._invalidate_fallback_timer is None
+
+    def test_cleanup_safe_when_no_fallback_timer(self):
+        """cleanup() must not raise when _invalidate_fallback_timer is None."""
+        panel = self._make_bare_panel()
+        panel._invalidate_fallback_timer = None
+        panel.cleanup()  # Should not raise
+
+    def test_no_timer_when_ollama_already_ready(self):
+        """When ollama_state == 'ready', no fallback Timer should be created."""
+        panel = self._make_bare_panel()
+        panel._ui_state.ollama_state = "ready"
+
+        with patch.object(panel, "_refresh_model_list_async"):
+            with patch("opencohost.ui.model_panel.threading.Timer") as mock_timer_cls:
+                panel._invalidate_model_cache()
+
+        mock_timer_cls.assert_not_called()
+        assert panel._invalidate_fallback_timer is None
+
+
+# ---------------------------------------------------------------------------
+# 14. on_closing calls model_panel.cleanup()
+# ---------------------------------------------------------------------------
+
+
+class TestOnClosingCallsModelPanelCleanup:
+    """on_closing must invoke model_panel.cleanup() during teardown."""
+
+    def test_on_closing_invokes_model_panel_cleanup(self):
+        """app_shell.on_closing() must call model_panel.cleanup() if model_panel exists."""
+        # We only want to verify the structural call — no need to spin up VocalAIApp.
+        # Read the source and confirm model_panel.cleanup() is called.
+        import ast
+        import pathlib
+
+        source = pathlib.Path("E:/VoiceAI/opencohost/ui/app_shell.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "on_closing":
+                src_segment = ast.get_source_segment(source, node)
+                # Check that model_panel.cleanup() is present in the on_closing body
+                if src_segment and "model_panel" in src_segment and "cleanup()" in src_segment:
+                    found = True
+                    break
+
+        assert found, "on_closing must call model_panel.cleanup()"

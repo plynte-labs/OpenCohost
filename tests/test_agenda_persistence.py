@@ -467,8 +467,14 @@ class TestAppShellPersistenceWiring:
         """Crash regression (2026-06-12 17:02): apply_session_settings was
         called inside _build_ui, which runs BEFORE kira_agenda exists —
         the app died at launch (tkinter masks the missing attribute as a
-        '_tkinter.tkapp has no attribute' error). The push must live in
-        __init__, AFTER load_into populates the controller."""
+        '_tkinter.tkapp has no attribute' error). The push must NEVER live
+        in _build_ui.
+
+        Async-load update (fix #C, 2026-06-14): agenda restore now runs off
+        the Tk thread; the settings push moved out of __init__ into the
+        _on_agenda_loaded callback, which the daemon worker schedules via
+        _safe_after only AFTER load_into completes. The 'after restore'
+        ordering is therefore preserved structurally."""
         import ast
 
         tree = ast.parse(self._source())
@@ -485,37 +491,54 @@ class TestAppShellPersistenceWiring:
         )
         fns = {n.name: n for n in app_cls.body if isinstance(n, ast.FunctionDef)}
 
+        # The settings push must never run in _build_ui (kira_agenda not built yet).
         assert "apply_session_settings" not in attribute_calls(fns["_build_ui"]), (
             "_build_ui runs before kira_agenda exists; pushing settings there crashes launch"
         )
+        # It now lives in the post-restore async callback, not synchronously in __init__.
+        assert "apply_session_settings" in attribute_calls(fns["_on_agenda_loaded"]), (
+            "settings push must happen in _on_agenda_loaded, after the agenda restore"
+        )
+        # __init__ wires the restore (load_into, inside the daemon worker) and schedules
+        # the callback via _safe_after — guaranteeing settings push runs AFTER load_into.
         init_calls = attribute_calls(fns["__init__"])
-        assert "apply_session_settings" in init_calls, "settings push missing from __init__"
-        assert init_calls.index("load_into") < init_calls.index("apply_session_settings"), (
-            "settings must be pushed AFTER the restore populates the controller"
+        assert "load_into" in init_calls, "agenda restore (load_into) must be wired from __init__"
+        assert "_safe_after" in init_calls, (
+            "the post-restore callback (_on_agenda_loaded) must be scheduled from __init__"
         )
 
     def test_init_refreshes_agenda_ui_after_restore(self) -> None:
         """Runtime-gate regression (2026-06-12): topics restored correctly
         into the controller but the panel never rendered them — nothing
         triggered a status update after load_into, so the operator saw an
-        empty queue and concluded the restore failed."""
+        empty queue and concluded the restore failed.
+
+        Async-load update (fix #C, 2026-06-14): the refresh moved into the
+        _on_agenda_loaded callback (which runs after the off-thread restore).
+        Both the settings push and the refresh now live in that one method, so
+        we assert the refresh still comes AFTER the settings push within it."""
         import ast
 
         tree = ast.parse(self._source())
         app_cls = next(
             n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "VocalAIApp"
         )
-        init_fn = next(
-            n for n in app_cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+        loaded_fn = next(
+            n
+            for n in app_cls.body
+            if isinstance(n, ast.FunctionDef) and n.name == "_on_agenda_loaded"
         )
-        init_calls = [
+        loaded_calls = [
             node.func.attr
-            for node in ast.walk(init_fn)
+            for node in ast.walk(loaded_fn)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         ]
-        assert "_kira_agenda_update_status" in init_calls, (
-            "__init__ must refresh the agenda UI after restoring topics"
+        assert "_kira_agenda_update_status" in loaded_calls, (
+            "_on_agenda_loaded must refresh the agenda UI after restoring topics"
         )
-        assert init_calls.index("apply_session_settings") < init_calls.index(
+        assert "apply_session_settings" in loaded_calls, (
+            "_on_agenda_loaded must push the restored session settings"
+        )
+        assert loaded_calls.index("apply_session_settings") < loaded_calls.index(
             "_kira_agenda_update_status"
-        ), "the refresh must come after both restore and settings push"
+        ), "the refresh must come after the settings push"

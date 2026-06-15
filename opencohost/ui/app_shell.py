@@ -205,19 +205,21 @@ class VocalAIApp(ctk.CTk):
             self.kira_agenda.set_profile(self.cohost_profiles.get(self._current_cohost_profile, {}))
         self._kira_agenda_tick_id: str | None = None
         self._kira_agenda_prefetched_action: AgendaAction | None = None
+        self._prefetch_retry_id: str | None = None  # fix #B: non-blocking prefetch poll guard
         self._idle_ticks: int = 0
         self._kira_agenda_pending_compact_chat: str = ""
         self._agenda_persistence = AgendaPersistence(EDITORIAL_CARDS_DB, log_fn=self._on_stream_admin_log)
-        self._agenda_persistence.load_into(self.kira_agenda)
-        # Reflect restored session settings in the panel (built earlier in _build_ui)
-        # so dispatch paths do not clobber them with widget defaults.
-        self.cohost_agenda_panel.apply_session_settings(self.kira_agenda.max_turns_per_topic, self.kira_agenda.rhythm, self.kira_agenda.response_length, self.kira_agenda.safety_mode)
-        self._topic_inbox_bridge = TopicInboxBridge(TopicInboxStore(EDITORIAL_CARDS_DB), log_fn=self._on_stream_admin_log, persist_fn=lambda: self._agenda_persistence.save_if_changed(self.kira_agenda))
-        self._topic_inbox_bridge.start_polling(lambda fn, delay: self._safe_after(fn, delay), self._kira_agenda_update_status)
-        # Render the restored queue (needs the bridge above): without this
-        # refresh the panel keeps its empty built state and the restore is
-        # invisible to the operator.
-        self._kira_agenda_update_status()
+        # fix #C: load agenda off main thread to avoid sqlite blocking startup.
+        # _topic_inbox_bridge is None until _on_agenda_loaded fires.
+        self._topic_inbox_bridge = None
+        import threading as _threading
+        def _load_agenda_worker():
+            try:
+                self._agenda_persistence.load_into(self.kira_agenda)
+            except Exception:
+                logger.exception("Agenda load failed; starting with empty agenda")
+            self._safe_after(self._on_agenda_loaded, delay_ms=0)
+        _threading.Thread(target=_load_agenda_worker, daemon=True).start()
         self.after(100, self._start_motor)
         # Wire motor_ia to voice control panel
         if hasattr(self, "voice_panel"):
@@ -231,6 +233,40 @@ class VocalAIApp(ctk.CTk):
         self.after(500, self._aplicar_perfil_actual)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
         logger.info("Aplicación OpenCohost iniciada.")
+
+    def _on_agenda_loaded(self) -> None:
+        """Called on the main thread after the daemon thread finishes load_into.
+
+        Runs all operations that depend on the loaded agenda state:
+        session settings, TopicInboxBridge construction, polling start, and
+        initial status render.  Guards against teardown with _closing check.
+        """
+        if self.__dict__.get("_closing", False):
+            return
+        self.cohost_agenda_panel.apply_session_settings(
+            self.kira_agenda.max_turns_per_topic,
+            self.kira_agenda.rhythm,
+            self.kira_agenda.response_length,
+            self.kira_agenda.safety_mode,
+        )
+        self._topic_inbox_bridge = TopicInboxBridge(
+            TopicInboxStore(EDITORIAL_CARDS_DB),
+            log_fn=self._on_stream_admin_log,
+            persist_fn=lambda: self._agenda_persistence.save_if_changed(self.kira_agenda),
+        )
+        # TODO(pipeline_memory_followups): TopicInboxBridge.start_polling has no stop
+        # mechanism — polling continues until the process exits.  This is a pre-existing
+        # teardown concern; route to the pipeline_memory_followups track before adding
+        # a graceful shutdown path.
+        self._topic_inbox_bridge.start_polling(
+            lambda fn, delay: self._safe_after(fn, delay),
+            self._kira_agenda_update_status,
+        )
+        # Render the restored queue (needs the bridge above): without this
+        # refresh the panel keeps its empty built state and the restore is
+        # invisible to the operator.
+        self._kira_agenda_update_status()
+
     def _start_motor(self) -> None:
         """Start the IA motor thread after mainloop is running.
         Deferring this avoids 'main thread is not in main loop' errors
@@ -383,7 +419,7 @@ class VocalAIApp(ctk.CTk):
         # Status bar
         status_bar_frame = ctk.CTkFrame(self, fg_color="#111820", corner_radius=14)
         status_bar_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        self.status_bar = StatusBar(status_bar_frame, self._ui_state)
+        self.status_bar = StatusBar(status_bar_frame, self._ui_state, schedule_ui_update=self._safe_after)
         self.status_bar.create_status_pills()
         self.lbl_status = self.status_bar.lbl_status
         # Additional pills not managed by StatusBar
@@ -1178,6 +1214,13 @@ class VocalAIApp(ctk.CTk):
             except Exception:
                 pass
             self._kira_agenda_tick_id = None
+        # Cancel any pending prefetch retry (fix #B).
+        if getattr(self, "_prefetch_retry_id", None) is not None:
+            try:
+                self.after_cancel(self._prefetch_retry_id)
+            except Exception:
+                pass
+            self._prefetch_retry_id = None
         if hasattr(self.motor_ia, "drop_pending_sources"):
             self.motor_ia.drop_pending_sources(("kira-agenda",))
         self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
@@ -1202,11 +1245,15 @@ class VocalAIApp(ctk.CTk):
 
     def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
         """Approve a suggestion (DRAFTED topic or inbox proposal) and queue it."""
+        if self._topic_inbox_bridge is None:
+            return
         self._topic_inbox_bridge.approve(topic_id, self.kira_agenda)
         self._kira_agenda_update_status()
 
     def _kira_agenda_reject_suggestion(self, topic_id: str) -> None:
         """Reject a suggestion: skip DRAFTED topics, discard inbox proposals."""
+        if self._topic_inbox_bridge is None:
+            return
         self._topic_inbox_bridge.reject(topic_id, self.kira_agenda)
         self._kira_agenda_update_status()
 
@@ -1370,6 +1417,9 @@ class VocalAIApp(ctk.CTk):
             self._kira_agenda_prefetched_action = action
 
     def _kira_agenda_play_prefetched_if_ready(self) -> bool:
+        # Guard: teardown in progress — do not reschedule.
+        if self.__dict__.get("_closing", False):
+            return False
         action = getattr(self, "_kira_agenda_prefetched_action", None)
         if not action or not hasattr(self.motor_ia, "wait_prefetched_agenda"):
             return False
@@ -1379,7 +1429,20 @@ class VocalAIApp(ctk.CTk):
         if self._kira_agenda_has_non_agenda_audio_work():
             self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
             return self._kira_agenda_clear_prefetch()
-        if not self.motor_ia.wait_prefetched_agenda(timeout=0.35):
+        # fix #B: non-blocking check (timeout=0); retry via after() if not ready yet.
+        if not self.motor_ia.wait_prefetched_agenda(timeout=0):
+            # Cancel any existing retry before scheduling a new one (double-schedule guard).
+            if self._prefetch_retry_id is not None:
+                try:
+                    self.after_cancel(self._prefetch_retry_id)
+                except Exception:
+                    pass
+            # This method is always called from the Tk event loop (main thread).
+            # Use self.after() directly to capture the cancellable ID.
+            try:
+                self._prefetch_retry_id = self.after(50, self._kira_agenda_play_prefetched_if_ready)
+            except RuntimeError:
+                self._prefetch_retry_id = None
             return False
         if not self.kira_agenda.start_prefetched_action(action):
             self._on_stream_admin_log("[Kira Agenda] Prefetch descartado: el tema ya se completó.")
@@ -1392,6 +1455,13 @@ class VocalAIApp(ctk.CTk):
 
     def _kira_agenda_clear_prefetch(self) -> bool:
         self._kira_agenda_prefetched_action = None
+        # Cancel any pending prefetch retry to avoid a leaked timer (fix #4).
+        if getattr(self, "_prefetch_retry_id", None) is not None:
+            try:
+                self.after_cancel(self._prefetch_retry_id)
+            except Exception:
+                pass
+            self._prefetch_retry_id = None
         if hasattr(self.motor_ia, "clear_prefetched_agenda"):
             self.motor_ia.clear_prefetched_agenda()
         return False
@@ -1439,8 +1509,10 @@ class VocalAIApp(ctk.CTk):
                 error_reasons=recovery.last_reasons,
             ))
             # Forward DRAFTED + inbox proposals to the suggestions panel
-            suggestions_list = self._topic_inbox_bridge.build_suggestions(self.kira_agenda)
-            self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
+            # Guard: bridge is None until _on_agenda_loaded fires (fix #C).
+            if self._topic_inbox_bridge is not None:
+                suggestions_list = self._topic_inbox_bridge.build_suggestions(self.kira_agenda)
+                self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
         # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
         # Only update on state transitions to avoid overwriting pipeline-driven TTS state
         was_paused = getattr(self, "_agenda_was_paused", False)
@@ -2711,6 +2783,9 @@ class VocalAIApp(ctk.CTk):
 
     def _on_motor_download_done(self) -> None:
         model = self.motor_ia.current_model
+        # Invalidate stale install-status cache so the next _modelo_instalado call
+        # reflects the newly downloaded model (fix #A).
+        self._safe_after(lambda: self.model_panel._invalidate_model_cache())
         self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
         self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
         self._safe_after(lambda: self.progress_download.pack_forget())
@@ -3018,6 +3093,13 @@ class VocalAIApp(ctk.CTk):
     def on_closing(self) -> None:
         self._closing = True
         logger.info("Cerrando aplicación...")
+        # Cancel prefetch retry timer (fix #B) to avoid callbacks after teardown.
+        if getattr(self, "_prefetch_retry_id", None) is not None:
+            try:
+                self.after_cancel(self._prefetch_retry_id)
+            except Exception:
+                pass
+            self._prefetch_retry_id = None
 
         # Fix: audit/ui-security-perf-2026-05-17 — unsubscribe UIState observer to
         # release GC reference. Matches pattern used by all panel cleanup methods.
@@ -3028,6 +3110,8 @@ class VocalAIApp(ctk.CTk):
             self.voice_panel.cleanup()
         if self.status_bar:
             self.status_bar.cleanup()
+        if hasattr(self, "model_panel") and self.model_panel is not None:
+            self.model_panel.cleanup()
         if hasattr(self, "_advanced_panel"):
             self._advanced_panel.cleanup()
         if hasattr(self, "cohost_agenda_panel"):
