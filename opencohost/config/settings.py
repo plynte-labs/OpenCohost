@@ -215,6 +215,20 @@ REFERENCE_WAV_PATH = os.path.join(str(USER_DATA_DIR), "referencia_grabada.wav")
 # Experimental feature flags
 # ──────────────────────────────────────────────
 
+# RF4 LEGACY — hidden for OpenCohost launch (2026-06-14).
+# The metadata, moderation, and Kira-chat panels in stream_admin_ui.py are
+# retired RF4 panels: moderation is now delegated to Nightbot, metadata is
+# managed externally, and the Kira-chat poke/simulate panel has no active
+# operator use case in the launch product.
+# These panels are HIDDEN (flag=False), NOT deleted, to preserve the code
+# for future reference and to allow re-enabling during development.
+# Set True to re-enable all three panels (development only).
+# See: docs/HANDOFF_RF4.md, conductor/tracks.md (stream_admin_legacy_removal_20260614).
+# Do NOT delete this code. The eventual removal is deferred to the NO-PRIORITY
+# track stream_admin_legacy_removal_20260614 after a full dependency audit.
+STREAM_ADMIN_ENABLED: bool = False
+
+
 def _resolve_experimental_heavy_tts() -> bool:
     """Return whether the experimental Qwen3-TTS heavy-TTS UI option is visible.
 

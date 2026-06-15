@@ -19,6 +19,38 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — UI Declutter shipped (2026-06-14)
+
+**Track: ui_declutter_20260614 / feat/ui-polish-freeze-declutter-20260614 — NOT COMMITTED**
+
+### Active flags
+
+**STREAM_ADMIN_ENABLED = False (2026-06-14):** RF4 metadata/moderation/Kira-chat panels
+are HIDDEN for the OpenCohost launch UI. Moderation is delegated to Nightbot. The panels
+were HIDDEN (not deleted) to reduce operator confusion and declutter the launch-ready UI.
+RF3 Chat Live (`_build_chat_live_tab`) is KEPT active and unaffected.
+Code is CONSERVED — do not delete without the dep-check + owner approval in
+`stream_admin_legacy_removal_20260614` (NO-PRIORITY track).
+See `docs/HANDOFF_RF4.md` for the RF4 legacy freeze note and rationale.
+
+### What shipped in this track
+
+- **Part A (flag gate):** `STREAM_ADMIN_ENABLED = False` in `settings.py` hides
+  `_build_metadata_tab`, `_build_moderation_tab`, `_build_chat_tab` in
+  `stream_admin_ui.py`. `_build_chat_live_tab` (RF3) is NOT gated.
+- **Part B (Sistema rollup):** New `lbl_sistema_pill` in `StatusBar` aggregates
+  model + mic + TTS + health into one always-visible indicator (5 severity levels:
+  CRIT/WARN/INFO/QUIET/OK in red/amber/blue/grey/dim). Engine badge visibility
+  gated: dim on steady-state, amber on qwen_starting (owner decision: Edge speaks
+  during warmup, operator must see the transient change).
+- **Part C (cleanup pointer):** `stream_admin_legacy_removal_20260614` track stub
+  created (NO-PRIORITY, NOT STARTED) for eventual RF4 code deletion after dep audit
+  and owner authorization.
+- **Tests:** `tests/test_ui_declutter_flag_gate.py` (18 tests) and
+  `tests/test_sistema_rollup.py` (32 tests) — all green.
+
+---
+
 ## LATEST SNAPSHOT — Qwen TTS lifecycle build in progress (2026-06-14)
 
 Active build: `qwen_tts_lifecycle_hardening_20260613` — making heavy TTS self-manage and

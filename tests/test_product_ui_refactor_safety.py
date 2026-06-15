@@ -153,7 +153,12 @@ def test_stream_and_logs_callbacks_remain_wired() -> None:
     assert "self.smart_agg_ui.toggle_connection()" in source
     assert "StreamAdminUI(" in source
     assert "self._wire_stream_admin_callbacks()" in source
-    assert "command=self._toggle_logs_panel" in source
+    # _toggle_logs_panel must exist as a real method (not just referenced in a comment).
+    assert "def _toggle_logs_panel" in source
+    # The gear popover must wire the logs control to _toggle_logs_panel in real code.
+    # "command=self._toggle_logs_panel" satisfied by a comment was a gamed test —
+    # instead verify the popover callback calls self._toggle_logs_panel().
+    assert "self._toggle_logs_panel()" in source
     assert "AdvancedModePanel(" in source
 
 

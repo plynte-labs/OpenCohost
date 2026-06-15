@@ -205,6 +205,30 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: OpenCohost UI Declutter — Status Bar Rollup and RF4 Panel Hide**
+  *Link: [./tracks/opencohost_ui_declutter_20260614/](./tracks/opencohost_ui_declutter_20260614/)*
+  *Status 2026-06-14: Track 1 (main-thread freeze elimination) DONE at ada82d5.
+  Track 2 (this track) implemented under Strict TDD on branch
+  feat/ui-polish-freeze-declutter-20260614. NOT COMMITTED.
+  Part A shipped: STREAM_ADMIN_ENABLED=False. RF4 legacy panels (metadata,
+  moderation, Kira-chat) HIDDEN, not deleted. Moderation delegated to Nightbot.
+  RF3 Chat Live kept. Code conserved per HANDOFF_RF4.md.
+  Part B: Sistema rollup pill added (5 severity levels); engine badge visibility
+  gated (dim on steady-state, amber on qwen_starting per owner decision).
+  Part C: Cleanup deferred to stream_admin_legacy_removal_20260614 (NO-PRIORITY).*
+
+---
+
+- [ ] **Track: Stream Admin Legacy Removal — Eventual RF4 Code Deletion (NO-PRIORITY)**
+  *Link: [./tracks/stream_admin_legacy_removal_20260614/](./tracks/stream_admin_legacy_removal_20260614/)*
+  *Status 2026-06-14: NOT STARTED, NO-PRIORITY. RF4 metadata/moderation/Kira-chat
+  panels are currently HIDDEN via STREAM_ADMIN_ENABLED=False (see ui_declutter_20260614).
+  This track covers eventual deletion of the RF4 code after: (1) full dep audit,
+  (2) youtube_chat_compliance_audit_20260614 resolved, (3) owner authorizes deletion.
+  RF3 Chat Live is NOT in scope. See proposal.md and HANDOFF_RF4.md.*
+
+---
+
 - [ ] **Track: Qwen TTS Lifecycle Hardening — Auto-Manage, Visible Progress, Switch-Driven Stop**
   *Link: [./tracks/qwen_tts_lifecycle_hardening_20260613/](./tracks/qwen_tts_lifecycle_hardening_20260613/)*
   *Status 2026-06-13: INVESTIGATION captured + runtime contract owner-approved (A–G).

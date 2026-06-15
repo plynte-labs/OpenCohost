@@ -96,11 +96,22 @@ def status_bar(mock_ctk, mock_parent, ui_state):
             bar._parent = mock_parent
             bar._ui_state = ui_state
             bar._observer_id = None
+            bar._schedule_ui_update = lambda fn: fn()
+            # Initialize _sistema_state so _recompute_rollup() works during create_status_pills()
+            bar._sistema_state = {
+                "model": "loading",
+                "mic": "disconnected",
+                "tts": "idle",
+                "health": "unknown",
+            }
             bar.lbl_status = None
+            bar.lbl_sistema_pill = None
             bar.lbl_model_status_pill = None
             bar.lbl_mic_status_pill = None
             bar.lbl_tts_status_pill = None
             bar.lbl_chat_status_pill = None
+            bar.lbl_health_status_pill = None
+            bar.lbl_engine_status_pill = None
             # Manually call create_status_pills with mocked ctk
             with patch("opencohost.ui.status_bar.ctk", mock_ctk):
                 bar.create_status_pills()
@@ -662,14 +673,29 @@ class TestEngineStatusBadge:
         assert status_bar.lbl_engine_status_pill.text == expected
 
     # T1.2 — color per status (SV-A.2)
+    # Note: qwen_active, piper_local, qwen_starting now use visibility-gated colors
+    # (dim for normal, amber for warmup) per the 2026-06-14 ui_declutter_20260614 design.
+    # Alert statuses (edge_fallback, not_configured, unknown) still use _ENGINE_STATUS_COLORS.
     @pytest.mark.parametrize("status", [
-        "qwen_active", "edge_fallback", "qwen_starting",
-        "not_configured", "piper_local", "unknown",
+        "edge_fallback", "not_configured", "unknown",
     ])
-    def test_engine_pill_color_is_defined(self, status_bar, status):
+    def test_engine_pill_color_is_defined_for_alert_statuses(self, status_bar, status):
         from opencohost.ui.status_bar import _ENGINE_STATUS_COLORS
         status_bar.update_engine_status(status, "")
         assert status_bar.lbl_engine_status_pill.fg_color == _ENGINE_STATUS_COLORS[status]
+
+    @pytest.mark.parametrize("status", [
+        "qwen_active", "piper_local",
+    ])
+    def test_engine_pill_dim_on_steady_state(self, status_bar, status):
+        """qwen_active and piper_local → dim badge (visibility gating)."""
+        status_bar.update_engine_status(status, "")
+        assert status_bar.lbl_engine_status_pill.fg_color == "#1b2633"
+
+    def test_engine_pill_amber_on_qwen_starting(self, status_bar):
+        """qwen_starting → amber badge (owner decision: Edge speaks during warmup)."""
+        status_bar.update_engine_status("qwen_starting", "")
+        assert status_bar.lbl_engine_status_pill.fg_color == "#cc8800"
 
     # T1.2 — the badge shows the EFFECTIVE engine: a fallback never renders as Qwen (SV-A.3)
     def test_engine_pill_edge_fallback_is_not_qwen(self, status_bar):

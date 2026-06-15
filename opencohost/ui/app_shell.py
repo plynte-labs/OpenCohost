@@ -46,6 +46,7 @@ from opencohost.config.settings import (
     WINDOW_GEOMETRY_FILE, ACCIONES_LOG_FILE,
     EDITORIAL_CARDS_DB, REFERENCE_WAV_PATH,
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
+    STREAM_ADMIN_ENABLED,
     load_tts_local_only,
 )
 from opencohost.config.logger import get_logger
@@ -130,9 +131,11 @@ class VocalAIApp(ctk.CTk):
         self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
         self._modo_compacto: bool = False
+        self._compacto_active: bool = True   # compact is the startup default (ui_declutter_20260614)
+        self._logs_visible_active: bool = False  # logs hidden by default; toggled via gear popover
         self._ptt_accept_logged: bool = False
         self._stream_admin_manual_disconnect: bool = False
-        self._logs_panel_visible: bool = True
+        self._logs_panel_visible: bool = False  # compact-is-default: logs start hidden
         self._closing: bool = False
         self._motor_started: bool = False
         self._motor_heartbeat_failure_reported: bool = False
@@ -422,31 +425,27 @@ class VocalAIApp(ctk.CTk):
         self.status_bar = StatusBar(status_bar_frame, self._ui_state, schedule_ui_update=self._safe_after)
         self.status_bar.create_status_pills()
         self.lbl_status = self.status_bar.lbl_status
-        # Additional pills not managed by StatusBar
-        self.lbl_oauth_status_pill = ctk.CTkLabel(status_bar_frame, text="OAuth: desconectado", fg_color="#1b2633", corner_radius=12)
-        self.lbl_oauth_status_pill.pack(side="left", padx=4, pady=8)
-        self.lbl_memory_status_pill = ctk.CTkLabel(status_bar_frame, text="Memoria: disponible", fg_color="#1b2633", corner_radius=12)
-        self.lbl_memory_status_pill.pack(side="left", padx=4, pady=8)
-        self.lbl_moderation_status_pill = ctk.CTkLabel(status_bar_frame, text="Moderación: sin pendientes", fg_color="#1b2633", corner_radius=12)
-        self.lbl_moderation_status_pill.pack(side="left", padx=4, pady=8)
-        self.switch_advanced = ctk.CTkSwitch(status_bar_frame, text="Mostrar logs", command=self._toggle_logs_panel, onvalue=True, offvalue=False)
-        self.switch_advanced.pack(side="right", padx=(8, 12), pady=8)
-        self.switch_advanced.select()
-        self.switch_compacto = ctk.CTkSwitch(status_bar_frame, text="Compacto", command=self._toggle_modo_compacto, onvalue=True, offvalue=False)
-        self.switch_compacto.pack(side="right", padx=8, pady=8)
-        # Autoría / Marca interactiva
-        import webbrowser
-        self.lbl_author = ctk.CTkLabel(
+        # RF4 pills (lbl_oauth_status_pill, lbl_memory_status_pill,
+        # lbl_moderation_status_pill) and the Mostrar-logs / Compacto switches
+        # have been moved to the gear popover (⚙) — see _open_gear_popover().
+        # The lbl_author brand link also lives in the popover.
+        # stream_admin_ui.py accesses the RF4 pills via self._widget() which
+        # returns None when not registered → the existing if-guards are safe no-ops.
+        # _limpiar_historial uses hasattr(self, "lbl_memory_status_pill") → also safe.
+
+        # Gear button — opens the settings popover
+        self.btn_gear = ctk.CTkButton(
             status_bar_frame,
-            text="OpenCohost",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#3a86ff",
-            cursor="hand2"
+            text="⚙",
+            width=32,
+            height=28,
+            fg_color="#1a2535",
+            hover_color="#253347",
+            font=ctk.CTkFont(size=14),
+            command=self._open_gear_popover,
         )
-        self.lbl_author.pack(side="right", padx=(20, 8), pady=8)
-        self.lbl_author.bind("<Button-1>", lambda e: webbrowser.open_new_tab("https://github.com/plynte-labs/opencohost"))
-        self.lbl_author.bind("<Enter>", lambda e: self.lbl_author.configure(text_color="#5390ff", font=ctk.CTkFont(size=12, weight="bold", underline=True)))
-        self.lbl_author.bind("<Leave>", lambda e: self.lbl_author.configure(text_color="#3a86ff", font=ctk.CTkFont(size=12, weight="bold", underline=False)))
+        self.btn_gear.pack(side="right", padx=(4, 12), pady=8)
+        self._gear_popover: Any = None
 
         # Product shell: Kira stays visible on the left; configuration and
         # stream operations live on the right.  Phase 2 only moves containers,
@@ -979,7 +978,10 @@ class VocalAIApp(ctk.CTk):
         self._product_workspace_panel = side_panel
 
         self._show_main_view("Kira")
-        self._toggle_logs_panel()
+        # Apply startup compact mode default (ui_declutter_20260614).
+        # _compacto_active is already True; calling _toggle_modo_compacto()
+        # hides the side config panel and sets logs hidden.
+        self._toggle_modo_compacto()
 
     # ──────────────────────────────────────────────
     # Music bed wiring
@@ -2269,19 +2271,18 @@ class VocalAIApp(ctk.CTk):
         self.after(0, lambda: self.barra_rms.grid() if estado == "listening" else self.barra_rms.grid_remove())
 
     def _toggle_modo_compacto(self) -> None:
-        self._modo_compacto = self.switch_compacto.get()
+        # _compacto_active is set by the gear-popover toggle (replaces switch_compacto.get()).
+        self._modo_compacto = self._compacto_active
         if self._modo_compacto:
             if hasattr(self, "_side_config_panel"):
                 self._side_config_panel.grid_remove()
             self._show_main_view("Kira")
             if hasattr(self, "_advanced_panel"):
                 self._set_logs_panel_visible(False)
-            self.switch_compacto.configure(text="Completo")
         else:
             if hasattr(self, "_side_config_panel"):
                 self._side_config_panel.grid()
             self._toggle_logs_panel()
-            self.switch_compacto.configure(text="Compacto")
 
     def _set_logs_panel_visible(self, visible: bool) -> None:
         if not hasattr(self, "_advanced_panel"):
@@ -2292,11 +2293,34 @@ class VocalAIApp(ctk.CTk):
     def _toggle_logs_panel(self) -> None:
         if not hasattr(self, "_advanced_panel"):
             return
-        if hasattr(self, "switch_compacto") and self.switch_compacto.get():
+        # In compact mode the logs panel is always hidden regardless of the logs toggle.
+        if getattr(self, "_compacto_active", False):
             self._set_logs_panel_visible(False)
             return
-        visible = bool(hasattr(self, "switch_advanced") and self.switch_advanced.get())
+        # Use the internal bool managed by the gear popover (replaces switch_advanced.get()).
+        visible = bool(getattr(self, "_logs_visible_active", False))
         self._set_logs_panel_visible(visible)
+
+    def _open_gear_popover(self) -> None:
+        """Open (or focus) the gear-settings popover.
+
+        Delegates construction to opencohost.ui.gear_popover.open_gear_popover.
+        The gear popover now lives in its own module (ui_declutter_20260614 FIX C).
+        """
+        from opencohost.ui.gear_popover import open_gear_popover
+        result = open_gear_popover(
+            parent=self,
+            popover_ref_getter=lambda: self._gear_popover,
+            popover_ref_setter=lambda p: setattr(self, "_gear_popover", p),
+            compacto_active=getattr(self, "_compacto_active", True),
+            logs_visible=getattr(self, "_logs_visible_active", False),
+            on_compacto_toggle=self._toggle_modo_compacto,
+            on_logs_toggle=self._toggle_logs_panel,
+            on_compacto_state_write=lambda v: setattr(self, "_compacto_active", v),
+            on_logs_state_write=lambda v: setattr(self, "_logs_visible_active", v),
+        )
+        if result is not None:
+            self._gear_popover = result
 
     def _toggle_help_section(self, key: str, frame: Any, button: Any) -> None:
         expanded = not self._help_expanded.get(key, False)
