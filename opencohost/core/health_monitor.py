@@ -51,6 +51,7 @@ LIFECYCLE_WAITING = "waiting"
 LIFECYCLE_DEGRADED = "degraded"
 LIFECYCLE_READY = "ready"
 LIFECYCLE_FAILED = "failed"
+LIFECYCLE_STOPPED = "stopped"  # cleanly stopped (distinct from FAILED) — contract B2/F4
 
 
 # ──────────────────────────────────────────────
@@ -341,6 +342,13 @@ class QwenProcessManager:
 
             proc = self._process
             self._process = None
+            # Owned shutdown: reset lifecycle + idle clock so the engine/health pill
+            # and idle_seconds do not misreport a stale READY after stop (contract B2/F4).
+            # Preserve a FAILED verdict: a failed start() calls stop() to clean up, and that
+            # failure must not be masked as a clean STOPPED.
+            if self._lifecycle_state != LIFECYCLE_FAILED:
+                self._lifecycle_state = LIFECYCLE_STOPPED
+            self._last_health_time = 0.0
 
         if proc.poll() is not None:
             self._close_subprocess_logs()

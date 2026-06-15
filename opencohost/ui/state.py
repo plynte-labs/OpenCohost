@@ -32,6 +32,9 @@ VALID_OLLAMA_STATES = frozenset(
     {"checking", "ready", "app_missing", "package_missing", "service_stopped"}
 )
 VALID_HEALTH_STATUSES = frozenset({"unknown", "green", "yellow", "red"})
+# Engine (voice) badge statuses — single source of truth lives in core.qwen_markers (SV-A),
+# so ui and core can never diverge on the valid set.
+from opencohost.core.qwen_markers import ENGINE_STATUSES as VALID_ENGINE_STATUSES
 
 # ---------------------------------------------------------------------------
 # Observer callback type
@@ -94,6 +97,8 @@ class UIState:
             "ptt_enabled": False,
             "advanced_mode": False,
             "health_status": "unknown",
+            "engine_status": "unknown",  # effective TTS engine badge (SV-A)
+            "engine_reason": "",         # free-form fallback reason (unvalidated)
         }
 
         # Observer registry: subscription_id -> callback
@@ -476,6 +481,22 @@ class UIState:
         with self._lock:
             self._state["health_status"] = value
             self._notify_observers("health_status", value)
+            self._condition.notify_all()
+
+    @property
+    def engine_status(self) -> str:
+        with self._lock:
+            return self._state["engine_status"]
+
+    @engine_status.setter
+    def engine_status(self, value: str) -> None:
+        if value not in VALID_ENGINE_STATUSES:
+            raise ValueError(
+                f"Invalid engine_status '{value}'. Must be one of {sorted(VALID_ENGINE_STATUSES)}"
+            )
+        with self._lock:
+            self._state["engine_status"] = value
+            self._notify_observers("engine_status", value)
             self._condition.notify_all()
 
     # ------------------------------------------------------------------

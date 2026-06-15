@@ -240,6 +240,9 @@ EXPERIMENTAL_HEAVY_TTS_ENABLED: bool = _resolve_experimental_heavy_tts()
 # ──────────────────────────────────────────────
 QWEN_IDLE_TTL = 300          # seconds of idle before auto-shutdown
 QWEN_STARTUP_TIMEOUT = 60    # max seconds to wait for /health after start
+QWEN_KEEP_WARM_SECONDS = 30  # keep an owned Qwen server warm this long after switch to Ligero, then stop (contract B)
+QWEN_BLIP_BACKOFF = 2.0      # provisional (owner-pending): delay before one transient-health-blip retry (contract F)
+QWEN_VRAM_FOOTPRINT_MB = 2048  # provisional (owner-pending): expected Qwen-0.6B VRAM footprint for the crash-gate delta (contract G4)
 VRAM_POLL_INTERVAL = 10      # seconds between VRAM polls
 VRAM_LOW_THRESHOLD_MB = 2048 # MB free VRAM considered "low"
 VRAM_CRITICAL_THRESHOLD_MB = 1024  # MB free VRAM considered "critical"

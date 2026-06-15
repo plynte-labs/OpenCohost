@@ -19,6 +19,70 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — Qwen TTS lifecycle build in progress (2026-06-14)
+
+Active build: `qwen_tts_lifecycle_hardening_20260613` — making heavy TTS self-manage and
+**self-verify** (the fix for the owner's "I can't tell if it actually works" uncertainty).
+Strict TDD, **NOTHING COMMITTED** (working tree only).
+
+- Artifacts: `conductor/tracks/qwen_tts_lifecycle_hardening_20260613/` — `spec.md`, `tasks.md`,
+  `investigation.md` (Appendix A = how QwenProcessManager works), and **`progress.md`** with the
+  exact resume point + green test baseline. Engram topic `architecture/qwen-tts-lifecycle`.
+- DONE (green, fresh-reviewed): Phase 0 foundations (T0.1–T0.4) + Phase 1 **T1.1+T1.2** (the
+  visible "Voz: …" engine badge — validated `UIState.engine_status` field + status-bar pill that
+  shows the EFFECTIVE engine).
+- **RESUME NEXT SESSION AT: Phase 1 T1.3 + T1.4** — persist the effective engine + emit
+  `[ACCEPT] tts_engine …` markers (`llm_engine.py` after L1584, legacy lines byte-identical) and
+  wire `engine:*` events to the badge (`llm_engine` + `app_shell._handle_motor_event`). Full
+  steps in `progress.md`.
+- Earlier this session (also uncommitted): the APP_ID heavy-TTS silent-fallback bug fixed
+  (`server_qwen.py:102` `voiceai-` → `opencohost-qwen-tts`); tracks board reconciled (2 closed,
+  1 reclassified); YouTube chat compliance RESCOPED (read-only own-key, no OAuth) + RF4/stream_admin
+  marked LEGACY; `.gitignore` leak (`config/tts_speed.json`) plugged.
+
+---
+
+## LATEST SNAPSHOT — Benchmark triage + audio PR (2026-06-13 PM)
+
+First live production benchmark (24k-viewer stream) was run and triaged by a
+28-agent fan-out. Snapshot for cross-session verification:
+
+- **PR #45 `fix/audio-teardown-stop` — CI GREEN, MERGEABLE, NOT yet merged.**
+  Fixes the O8 audio-teardown cluster (music kept playing minutes after a
+  co-host segment; emergency stop did not interrupt speech). 4 bugs + a
+  DEFERRED soft-stop. Strict TDD (25 tests), passed Judgment Day 3 rounds
+  (both judges APPROVED). Owner decision: soft_stop = deferred (music stops
+  after Kira's closing speech, minutes-late OK); emergency_stop = immediate.
+  - **PENDING (owner): runtime ear-validation** — confirm music stops deferred
+    on soft-stop and immediate on emergency-stop. Then merge (or merge then
+    validate — owner's call).
+  - CI note: the only CI failure was the app_shell.py line-count guard
+    (test_integration.py); resolved by raising 3100→3160 with documented debt.
+    app_shell decomposition stays owned by ui_rendering_optimization_20260609.
+
+- **Benchmark triage report:** `conductor/benchmark_20260613_triage.md` (23
+  findings). Two operator perceptions were REFUTED with evidence: the "5-min
+  downtime" was ~2m3s (~78% inevitable model load; fix = keep rollback model
+  warm); the "20-min stream hijack" was operator absence, not a hang.
+  The real "hijack feel" driver is a CONFIRMED bug: runaway generation
+  (gemma4:e4b pops num_predict → 97s monologues) → routed to
+  kira_history_summarization_20260611.
+
+- **New track proposal (UNCOMMITTED, awaiting approval):**
+  `conductor/tracks/viewer_queue_backpressure_20260613/proposal.md` — bounded
+  viewer-query queue + sectioned-accumulation config. Blocked behind two
+  prerequisites in kira_history_summarization_20260611 (runaway-generation cap
+  + operator priority=0 lane). NOT a crash fix.
+
+- **Uncommitted on master:** proposal.md + tracks.md entry + this snapshot.
+  Worktree with the PR branch: `.claude/worktrees/agent-a7c551c89720a2e7f`.
+  Engram: #1891 (verified triage), #1892 (backpressure idea), #1899 (audio fix).
+
+- **Still owed (other sessions):** pipeline memory L1 DEBUG re-run for technical
+  proof of `<memoria_de_fondo>` injection (log showed digest:0 = INFO-level
+  artifact, not a failure); UI-jank fixes under ui_rendering_optimization.
+
+
 ## Product direction update ? 2026-06-05
 
 - The next product/release direction is **OpenCohost**.

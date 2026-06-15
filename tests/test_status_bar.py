@@ -628,3 +628,63 @@ class TestEdgeCases:
             status_bar.update_pipeline_state(state)
             assert status_bar.lbl_status.text == expected_text
             assert status_bar.lbl_status.text_color == expected_color
+
+
+# ---------------------------------------------------------------------------
+# 8. Engine badge (SV-A) — visible effective-engine pill
+# ---------------------------------------------------------------------------
+
+
+class TestEngineStatusBadge:
+    """SV-A: the validated engine_status field + the visible 'Voz: ...' pill."""
+
+    # T1.1 — UIState field validation (SV-A.1)
+    def test_engine_status_field_valid_values(self, ui_state):
+        from opencohost.ui.state import VALID_ENGINE_STATUSES
+        assert VALID_ENGINE_STATUSES  # non-empty
+        for value in VALID_ENGINE_STATUSES:
+            ui_state.engine_status = value
+            assert ui_state.engine_status == value
+        with pytest.raises(ValueError):
+            ui_state.engine_status = "definitely_not_a_status"
+
+    # T1.2 — pill text per status, reflecting the EFFECTIVE engine (SV-A.2)
+    @pytest.mark.parametrize("status, reason, expected", [
+        ("qwen_active", "", "Voz: Qwen clonada"),
+        ("qwen_starting", "", "Voz: Qwen iniciando"),
+        ("not_configured", "", "Voz: clonación no configurada"),
+        ("piper_local", "", "Voz: Piper local"),
+        ("edge_fallback", "vram_low", "Voz: Edge respaldo: vram_low"),
+        ("edge_fallback", "", "Voz: Edge respaldo"),
+    ])
+    def test_engine_pill_maps_status_to_text(self, status_bar, status, reason, expected):
+        status_bar.update_engine_status(status, reason)
+        assert status_bar.lbl_engine_status_pill.text == expected
+
+    # T1.2 — color per status (SV-A.2)
+    @pytest.mark.parametrize("status", [
+        "qwen_active", "edge_fallback", "qwen_starting",
+        "not_configured", "piper_local", "unknown",
+    ])
+    def test_engine_pill_color_is_defined(self, status_bar, status):
+        from opencohost.ui.status_bar import _ENGINE_STATUS_COLORS
+        status_bar.update_engine_status(status, "")
+        assert status_bar.lbl_engine_status_pill.fg_color == _ENGINE_STATUS_COLORS[status]
+
+    # T1.2 — the badge shows the EFFECTIVE engine: a fallback never renders as Qwen (SV-A.3)
+    def test_engine_pill_edge_fallback_is_not_qwen(self, status_bar):
+        status_bar.update_engine_status("edge_fallback", "qwen_starting")
+        text = status_bar.lbl_engine_status_pill.text
+        assert "Edge" in text and "Qwen clonada" not in text
+
+    # T1.2 — None widget is a safe no-op
+    def test_update_engine_status_with_none_widget(self, status_bar):
+        status_bar.lbl_engine_status_pill = None
+        status_bar.update_engine_status("qwen_active", "")  # must not raise
+
+    # T1.2 — observer routing: an engine_status change drives the pill with the current reason
+    def test_engine_status_routing_updates_pill(self, status_bar):
+        status_bar._schedule_ui_update = lambda fn: fn()
+        status_bar._ui_state.set("engine_reason", "vram_low")
+        status_bar._on_state_change("engine_status", "edge_fallback")
+        assert status_bar.lbl_engine_status_pill.text == "Voz: Edge respaldo: vram_low"

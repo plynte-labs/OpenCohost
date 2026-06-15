@@ -55,6 +55,15 @@ _HEALTH_STATUS_COLORS: dict[str, str] = {
     "red": "#cc3333",
 }
 
+_ENGINE_STATUS_COLORS: dict[str, str] = {
+    "qwen_active": "#1f5a3a",     # green — heavy/cloned voice is what spoke
+    "edge_fallback": "#cc8800",   # amber — fell back to Edge
+    "qwen_starting": "#33558a",   # blue — Qwen warming up
+    "not_configured": "#555555",  # grey — voice cloning not set up
+    "piper_local": "#1f5a3a",     # green — local light engine
+    "unknown": "#666666",
+}
+
 # ---------------------------------------------------------------------------
 # Pipeline state → display text + main label color
 # ---------------------------------------------------------------------------
@@ -100,6 +109,7 @@ class StatusBar:
         self.lbl_tts_status_pill: ctk.CTkLabel | None = None
         self.lbl_chat_status_pill: ctk.CTkLabel | None = None
         self.lbl_health_status_pill: ctk.CTkLabel | None = None
+        self.lbl_engine_status_pill: ctk.CTkLabel | None = None
 
     # ------------------------------------------------------------------
     # Pill creation
@@ -151,6 +161,12 @@ class StatusBar:
             fg_color="#1b2633", corner_radius=12,
         )
         self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
+
+        self.lbl_engine_status_pill = ctk.CTkLabel(
+            self._parent, text="Voz: --",
+            fg_color="#1b2633", corner_radius=12,
+        )
+        self.lbl_engine_status_pill.pack(side="left", padx=4, pady=8)
 
         # Subscribe to UIState observer for automatic pill updates
         if self._observer_id is not None:
@@ -220,6 +236,33 @@ class StatusBar:
         color = _HEALTH_STATUS_COLORS.get(status, "#666666")
         label = status if status != "unknown" else "--"
         self.lbl_health_status_pill.configure(text=f"Health: {label}", fg_color=color)
+
+    def update_engine_status(self, status: str, reason: str = "") -> None:
+        """Update the engine (voice) badge pill with the EFFECTIVE engine.
+
+        Args:
+            status: One of the qwen_markers.ENGINE_STATUSES values.
+            reason: Free-form fallback reason, shown for ``edge_fallback``.
+        """
+        if self.lbl_engine_status_pill is None:
+            return
+        color = _ENGINE_STATUS_COLORS.get(status, "#666666")
+        text = self._engine_status_text(status, reason)
+        self.lbl_engine_status_pill.configure(text=text, fg_color=color)
+
+    def _engine_status_text(self, status: str, reason: str = "") -> str:
+        """Display text for the engine badge — always the EFFECTIVE engine."""
+        if status == "qwen_active":
+            return "Voz: Qwen clonada"
+        if status == "qwen_starting":
+            return "Voz: Qwen iniciando"
+        if status == "not_configured":
+            return "Voz: clonación no configurada"
+        if status == "piper_local":
+            return "Voz: Piper local"
+        if status == "edge_fallback":
+            return f"Voz: Edge respaldo: {reason}" if reason else "Voz: Edge respaldo"
+        return "Voz: --"
 
     def update_pipeline_state(self, state: str) -> None:
         """Update the main status label based on pipeline state.
@@ -309,6 +352,9 @@ class StatusBar:
             "tts_status": self.update_tts_status,
             "chat_status": self.update_chat_status,
             "health_status": self.update_health_status,
+            "engine_status": lambda v: self.update_engine_status(
+                v, self._ui_state.get("engine_reason", "")
+            ),
         }
         handler = handlers.get(key)
         if handler and isinstance(value, str):
