@@ -1,4 +1,4 @@
-# VoiceAI — Kira, tu co-host virtual para Stream
+# OpenCohost — Kira, tu co-host virtual para Stream
 
 ## Vision
 Aplicación de escritorio que crea un co-host de IA (**Kira**) con procesamiento local-first: LLM y TTS pesado corren en GPU local sin suscripciones ni censura corporativa. Funciones opcionales (Edge-TTS, YouTube Chat, Stream Admin) usan Internet.

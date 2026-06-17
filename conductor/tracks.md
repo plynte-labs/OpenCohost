@@ -244,3 +244,46 @@ This file tracks all major tracks for the project. Each track has its own detail
   VRAM-gated via existing VRAMGuard, progress in the in-app console, Edge during startup.
   ~80% already built in QwenProcessManager. PACKAGING of the heavy env is PARKED (out of
   current scope). Next: spec + TDD implementation of the lifecycle wiring. See investigation.md.*
+
+---
+
+- [ ] **Track: Branding Log Leak Remediation — Runtime Output Still Says "VoiceAI"**
+  *Link: [./tracks/branding_log_leak_remediation_20260616/](./tracks/branding_log_leak_remediation_20260616/)*
+  *Status 2026-06-16: PROPOSAL ONLY — not started. Launch-readiness branding sweep
+  found the running app still emits the retired "VoiceAI" name in runtime output.
+  Highest-impact (L1): the shared logger is named "VoiceAI" and the format includes
+  %(name)s, so EVERY console+file log line reads [VoiceAI]. Also L2 log file written
+  as voiceai_*.log; L3/L4 literal log messages (llm_engine.py:870, temp_file_cleanup.py:69,72);
+  L5 public env var VOICEAI_DEBUG. Cross-cutting security constraint: the logger name
+  must be renamed in all three getLogger("VoiceAI") sites together (logger.py:43,
+  avatar_panel.py:36, obs_client.py:25) or avatar_panel/obs_client lose the
+  SensitiveDataFilter (token/liveChatId redaction). C1–C4 cosmetic (docstrings/ids,
+  not printed). S1 routed+frozen: admin_manager.py:325 metadata tag "voiceai" behind
+  STREAM_ADMIN_ENABLED=False — external leak if RF4 re-enabled, owned by
+  stream_admin_legacy_removal_20260614. See proposal.md.*
+
+---
+
+- [~] **Track: Product Rebrand VoiceAI → OpenCohost (docs)**
+  *Link: [./tracks/product_rebrand_voiceai_to_opencohost_20260617/](./tracks/product_rebrand_voiceai_to_opencohost_20260617/)*
+  *Status 2026-06-17: Workstream A (repo docs reconciliation) DONE — rebranded forward-facing
+  prose in AGENTS.md, CLAUDE.md, conductor/product.md, AGENT_HANDOFF.md (title + current-state),
+  docs/RF3_*, and WhatIs.md (local/ignored; filesystem paths preserved). Deliberately PRESERVED:
+  ADR-004, docs/architecture.md (documents the deferred internal rename), docs/audit/*, track
+  specs, engram key `voiceai`. Workstream B (code/runtime rename — logger, identifiers) is the
+  internal rename DEFERRED by architecture.md; absorbs branding_log_leak_remediation_20260616.
+  Verified by git: appdata `%APPDATA%/VoiceAI`→`OpenCohost` shipped in v0.1.0/v0.1.1 (commit
+  e76c9b1 is ancestor) → NO orphaned users, the migration shim is unnecessary. No .py touched.*
+
+- [ ] **Track: Public Site Rebrand — voiceaikira.vercel.app → OpenCohost (PRIORITY)**
+  *Link: [./tracks/public_site_rebrand_opencohost_20260617/](./tracks/public_site_rebrand_opencohost_20260617/)*
+  *Status 2026-06-17: PROPOSAL ONLY. Highest external leverage — the legacy brand the US audience
+  actually sees (URL + /docs + /es). Includes domain migration to opencohost.com (ADR-0010) with
+  301/SEO/analytics continuity. Separate Vercel project/repo. See proposal.md.*
+
+- [ ] **Track: English Compatibility / i18n — US-ready OpenCohost (PRIORITY)**
+  *Link: [./tracks/english_compatibility_i18n_20260617/](./tracks/english_compatibility_i18n_20260617/)*
+  *Status 2026-06-17: PROPOSAL ONLY. Motivated by ADR-0001 + US/English web traffic. Externalize
+  CustomTkinter UI strings (en default, es retained), locale-aware Kira persona/prompts,
+  English-first docs. Constraints: no PyInstaller bloat (dict/gettext), CTk thread-safety via
+  UIState/_safe_after. Pattern ref: LiveAudio bilingual (engram liveaudio). See proposal.md.*

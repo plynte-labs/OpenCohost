@@ -1,4 +1,4 @@
-# VoiceAI Agent Handoff
+# OpenCohost Agent Handoff
 
 This is the first file an AI agent should read when starting work in this repo.
 
@@ -382,7 +382,7 @@ validation CI run on or after that date is advisable but optional.
 
 ## Current project truth
 
-- VoiceAI has functional prototypes for local AI voice, TTS, SmartAggregator, stream
+- OpenCohost has functional prototypes for local AI voice, TTS, SmartAggregator, stream
   workflows, and health monitoring.
 - The project has grown enough that blind expansion is risky.
 - Active local implementation checkpoint: `dynamic_model_management_20260608`
