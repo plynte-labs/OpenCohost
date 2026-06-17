@@ -320,18 +320,18 @@ class VocalAIApp(ctk.CTk):
         try:
             alive = motor.is_alive()
         except Exception:
-            logger.exception("No se pudo verificar el heartbeat de MotorVocalIA")
+            logger.exception("No se pudo verificar el heartbeat del motor de Kira")
             return
         if alive:
             return
         self._motor_heartbeat_failure_reported = True
-        logger.critical("MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline")
+        logger.critical("Kira's engine thread died unexpectedly; UI remains open but Kira is offline")
         try:
             self._ui_state.health_status = "red"
         except Exception:
             logger.exception("No se pudo marcar health_status tras fallo de MotorVocalIA")
         try:
-            self._print_log("[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app.")
+            self._print_log("[CRITICO] El motor de Kira se detuvo inesperadamente. Kira esta offline; reinicia la app.")
         except Exception:
             logger.exception("No se pudo informar en UI el fallo de MotorVocalIA")
     def _on_ui_state_change(self, key: str, value: Any) -> None:

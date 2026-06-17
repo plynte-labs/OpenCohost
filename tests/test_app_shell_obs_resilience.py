@@ -170,11 +170,11 @@ def test_motor_heartbeat_reports_dead_started_motor_once():
             app._check_motor_heartbeat()
 
         mock_critical.assert_called_once_with(
-            "MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline"
+            "Kira's engine thread died unexpectedly; UI remains open but Kira is offline"
         )
         assert app._ui_state.health_status == "red"
         app._print_log.assert_called_once_with(
-            "[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app."
+            "[CRITICO] El motor de Kira se detuvo inesperadamente. Kira esta offline; reinicia la app."
         )
     finally:
         _restore_app_shell_module(old_module)
