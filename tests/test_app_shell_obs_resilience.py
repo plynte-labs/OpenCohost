@@ -858,7 +858,7 @@ def test_on_closing_cancels_obs_retry_loop_before_destroy():
         )
         app.destroy = MagicMock()
 
-        with patch.object(app_shell, "cleanup_voiceai_temp_artifacts"):
+        with patch.object(app_shell, "cleanup_opencohost_temp_artifacts"):
             app.on_closing()
 
         assert cancel_event.is_set() is True
@@ -912,7 +912,7 @@ def test_app_closing_releases_owned_model_and_runs_safe_janitor():
         )
         app.destroy = MagicMock()
 
-        with patch.object(app_shell, "cleanup_voiceai_temp_artifacts") as janitor:
+        with patch.object(app_shell, "cleanup_opencohost_temp_artifacts") as janitor:
             app.on_closing()
 
         app.motor_ia.release_owned_ollama_model.assert_called_once_with(timeout=2.0)

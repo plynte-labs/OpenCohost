@@ -1,5 +1,5 @@
 """
-PTT (Push-to-Talk) Manager for VoiceAI.
+PTT (Push-to-Talk) Manager for OpenCohost.
 
 Encapsulates hotkey configuration, pynput listener lifecycle, and
 PTT state management. Thread-safe for concurrent UI and audio access.

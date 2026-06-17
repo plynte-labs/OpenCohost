@@ -1,6 +1,6 @@
 import logging
 
-from opencohost.core.temp_file_cleanup import cleanup_voiceai_temp_artifacts, register_temp_file_cleanup
+from opencohost.core.temp_file_cleanup import cleanup_opencohost_temp_artifacts, register_temp_file_cleanup
 
 
 class FakeResponse:
@@ -45,7 +45,7 @@ def test_temp_file_cleanup_swallows_and_logs_remove_failure(tmp_path, caplog):
     assert any("Could not remove generated temp audio file" in record.message for record in caplog.records)
 
 
-def test_janitor_removes_only_voiceai_temp_artifacts(tmp_path):
+def test_janitor_removes_only_opencohost_temp_artifacts(tmp_path):
     owned = tmp_path / "tts_chunk_0_abcd.wav"
     server_owned = tmp_path / "out_pesado_abcd1234.wav"
     user_file = tmp_path / "user_reference.wav"
@@ -53,7 +53,7 @@ def test_janitor_removes_only_voiceai_temp_artifacts(tmp_path):
     for path in (owned, server_owned, user_file, asset_file):
         path.write_bytes(b"data")
 
-    stats = cleanup_voiceai_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
+    stats = cleanup_opencohost_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
 
     assert stats["removed"] == 2
     assert not owned.exists()
@@ -66,8 +66,8 @@ def test_janitor_is_idempotent(tmp_path):
     owned = tmp_path / "tts_chunk_0_abcd.mp3"
     owned.write_bytes(b"data")
 
-    first = cleanup_voiceai_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
-    second = cleanup_voiceai_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
+    first = cleanup_opencohost_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
+    second = cleanup_opencohost_temp_artifacts(tmp_path, logging.getLogger("test"), min_age_seconds=0.0)
 
     assert first["removed"] == 1
     assert second["removed"] == 0

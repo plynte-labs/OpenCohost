@@ -1,4 +1,4 @@
-"""Avatar runtime state bridge for VoiceAI.
+"""Avatar runtime state bridge for OpenCohost.
 
 Provides a simple, Tkinter-independent enum and pub/sub bridge so that
 core modules (voice, chat, TTS) can signal avatar state changes without

@@ -4,6 +4,11 @@ import time
 import logging
 from opencohost.config.settings import LOG_DIR
 
+
+def _debug_enabled() -> bool:
+    """DEBUG logging is enabled when OPENCOHOST_DEBUG=1."""
+    return os.getenv("OPENCOHOST_DEBUG") == "1"
+
 # ──────────────────────────────────────────────
 # Logging estructurado
 # ──────────────────────────────────────────────
@@ -32,7 +37,7 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 file_handler = logging.FileHandler(
-    os.path.join(LOG_DIR, f"voiceai_{time.strftime('%Y%m%d_%H%M%S')}.log"),
+    os.path.join(LOG_DIR, f"opencohost_{time.strftime('%Y%m%d_%H%M%S')}.log"),
     encoding="utf-8"
 )
 file_handler.setFormatter(log_formatter)
@@ -40,8 +45,8 @@ file_handler.setFormatter(log_formatter)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 
-logger = logging.getLogger("VoiceAI")
-logger.setLevel(logging.DEBUG if os.getenv("VOICEAI_DEBUG") == "1" else logging.INFO)
+logger = logging.getLogger("OpenCohost")
+logger.setLevel(logging.DEBUG if _debug_enabled() else logging.INFO)
 logger.addFilter(SensitiveDataFilter())
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)

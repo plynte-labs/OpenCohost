@@ -1,4 +1,4 @@
-"""Voice Control Panel module for VoiceAI.
+"""Voice Control Panel module for OpenCohost.
 
 Encapsulates all voice input functionality:
 - WebSocket management (LiveAudio connection with auto-reconnect)

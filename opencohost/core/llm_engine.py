@@ -864,10 +864,10 @@ class MotorVocalIA(threading.Thread):
         return True
 
     def release_owned_ollama_model(self, timeout: float = 2.0) -> bool:
-        """Best-effort unload for the model warmed by this VoiceAI session."""
+        """Best-effort unload for the model warmed by this OpenCohost session."""
         model = self._loaded_model or self._warmed_model
         if not model or not self._owns_ollama_model or not hasattr(self, "ollama"):
-            logger.info("Ollama model release skipped; no VoiceAI-owned model recorded")
+            logger.info("Ollama model release skipped; no OpenCohost-owned model recorded")
             return False
 
         result = {"released": False}

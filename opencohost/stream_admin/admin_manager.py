@@ -322,7 +322,7 @@ class AdminManager:
             "description": preset.get("description", self.metadata.description or "Stream con Kira como co-host virtual."),
             "category_id": str(category.get("id", self.metadata.category_id or "22")),
             "category_name": category.get("name", self.metadata.category_name or "People & Blogs"),
-            "tags": preset.get("tags", self.metadata.tags or ["kira", "voiceai", "live"]),
+            "tags": preset.get("tags", self.metadata.tags or ["kira", "opencohost", "live"]),
         }
 
     def _build_suggestion_prompt(self, context, presets, categories) -> str:

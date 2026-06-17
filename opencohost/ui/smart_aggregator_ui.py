@@ -1,7 +1,7 @@
 """SmartAggregatorUI — encapsulates Smart Aggregator UI behavior.
 
 Manages the YouTube Live chat connection lifecycle, message display,
-vibe/activity logging, and aggregated-context prompting for the VoiceAI
+vibe/activity logging, and aggregated-context prompting for the OpenCohost
 main window.  Subscribes to UIState observer for automatic updates when
 ``smart_agg_connected`` or ``smart_agg_connecting`` changes.
 

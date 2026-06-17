@@ -21,7 +21,7 @@ HF_HUB_DIR = STORAGE_PATHS.hf_hub_cache
 QWEN_REPO_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 QWEN_CACHE_DIR = HF_HUB_DIR / "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base"
 
-# Hugging Face debe buscar primero en el cache configurable de VoiceAI. Si la
+# Hugging Face debe buscar primero en el cache configurable de OpenCohost. Si la
 # snapshot local existe, activamos offline para evitar llamadas de red.
 
 os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))

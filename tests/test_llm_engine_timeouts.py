@@ -301,7 +301,7 @@ def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
     motor.ollama = MagicMock()
     motor.ollama.chat.side_effect = TimeoutError("chat stalled")
 
-    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
         dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
 
     assert dialogo == ""
@@ -325,7 +325,7 @@ def test_ollama_chat_connection_error_is_logged_and_returns_empty(caplog):
     motor.ollama = MagicMock()
     motor.ollama.chat.side_effect = ConnectionError("ollama refused")
 
-    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
         dialogo = motor._generar_dialogo("hola", source="chat", commit_history=True)
 
     assert dialogo == ""
@@ -463,7 +463,7 @@ def test_accumulation_expiry_logs_count_without_raw_payload(caplog):
         (now, raw_fresh_payload, raw_source),
     ]
 
-    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
         accumulated = motor._flush_accumulation()
 
     log_text = "\n".join(
@@ -484,7 +484,7 @@ def test_accumulation_item_overflow_logs_count_without_raw_payload(caplog):
     raw_second_payload = "RAW_ITEM_OVERFLOW_SECRET_2"
     raw_source = "secret-source"
 
-    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
         motor.enqueue_accumulation(raw_first_payload, source=raw_source)
         motor.enqueue_accumulation(raw_second_payload, source=raw_source)
 
@@ -503,7 +503,7 @@ def test_accumulation_char_overflow_logs_count_without_raw_payload(caplog):
     raw_payload = "RAW_CHAR_OVERFLOW_SECRET"
     raw_source = "secret-source"
 
-    with caplog.at_level(logging.WARNING, logger="VoiceAI"):
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
         motor.enqueue_accumulation(raw_payload, source=raw_source)
 
     log_text = "\n".join(

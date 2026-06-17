@@ -1,4 +1,4 @@
-"""Utilities for removing VoiceAI-generated temp files safely."""
+"""Utilities for removing OpenCohost-generated temp files safely."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from logging import Logger
 from pathlib import Path
 
 
-VOICEAI_TEMP_PATTERNS = (
+OPENCOHOST_TEMP_PATTERNS = (
     "tts_chunk_*.mp3",
     "tts_chunk_*.wav",
     "out_ligero_*.wav",
@@ -38,7 +38,7 @@ def register_temp_file_cleanup(
     return response
 
 
-def cleanup_voiceai_temp_artifacts(
+def cleanup_opencohost_temp_artifacts(
     temp_root: str | os.PathLike[str],
     logger: Logger,
     *,
@@ -46,7 +46,7 @@ def cleanup_voiceai_temp_artifacts(
     now: float | None = None,
     remove: Callable[[str], None] = os.remove,
 ) -> dict[str, int]:
-    """Remove only known VoiceAI-generated temp artifacts."""
+    """Remove only known OpenCohost-generated temp artifacts."""
     import time
 
     root = Path(temp_root)
@@ -55,7 +55,7 @@ def cleanup_voiceai_temp_artifacts(
         return stats
 
     cutoff = (time.time() if now is None else now) - min_age_seconds
-    for pattern in VOICEAI_TEMP_PATTERNS:
+    for pattern in OPENCOHOST_TEMP_PATTERNS:
         for path in root.glob(pattern):
             try:
                 if not path.is_file():
@@ -66,8 +66,8 @@ def cleanup_voiceai_temp_artifacts(
                     continue
                 remove(str(path))
                 stats["removed"] += 1
-                logger.debug("Removed VoiceAI temp artifact: %s", path)
+                logger.debug("Removed OpenCohost temp artifact: %s", path)
             except OSError as exc:
                 stats["failed"] += 1
-                logger.warning("Could not remove VoiceAI temp artifact %s: %s", path, exc)
+                logger.warning("Could not remove OpenCohost temp artifact %s: %s", path, exc)
     return stats

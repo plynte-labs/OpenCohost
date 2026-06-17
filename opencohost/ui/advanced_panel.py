@@ -1,4 +1,4 @@
-"""Advanced Mode Panel module for VoiceAI.
+"""Advanced Mode Panel module for OpenCohost.
 
 Encapsulates the advanced mode panel that contains:
 - Log display (general log, Kira actions, YouTube chat, stream admin log)

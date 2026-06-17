@@ -15,11 +15,11 @@ from typing import Iterable, TextIO
 
 
 DEFAULT_CRASH_LOG = os.environ.get(
-    "VOICEAI_CRASH_LOG",
+    "OPENCOHOST_CRASH_LOG",
     os.path.join("logs", "crash.log"),
 )
 DEFAULT_FATAL_LOG = os.environ.get(
-    "VOICEAI_FATAL_LOG",
+    "OPENCOHOST_FATAL_LOG",
     os.path.join("logs", "fatal.log"),
 )
 _FATAL_LOG_HANDLE: TextIO | None = None

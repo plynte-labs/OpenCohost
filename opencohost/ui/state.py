@@ -1,7 +1,7 @@
 """Thread-safe UI state container with observer pattern.
 
 Provides a framework-agnostic, thread-safe container for all UI-visible
-state in VoiceAI.  Replaces the scattered `self.ws_connected`,
+state in OpenCohost.  Replaces the scattered `self.ws_connected`,
 `self._pipeline_state`, `self._ollama_state`, etc. attributes that were
 previously read/written from multiple threads without synchronization.
 
