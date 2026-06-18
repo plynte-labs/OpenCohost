@@ -57,15 +57,31 @@ class MemoryDigest:
         """Reset the digest (profile change, clear_history)."""
         self._lines = []
 
+    # Defaults are the original Spanish literals (es-preserving). The engine
+    # passes the active locale's values; a bundle with a broken format string
+    # falls back to these so a community mod can never crash the prompt build.
+    _DEFAULT_LINE_FORMAT = "[hace {n} {unit}]"
+    _DEFAULT_UNIT_SINGULAR = "turno"
+    _DEFAULT_UNIT_PLURAL = "turnos"
+
     def build_block(
-        self, sanitize_fn: Optional[Callable[[str], str]] = None
+        self,
+        sanitize_fn: Optional[Callable[[str], str]] = None,
+        *,
+        line_format: Optional[str] = None,
+        unit_singular: Optional[str] = None,
+        unit_plural: Optional[str] = None,
     ) -> str:
         """Return the digest as a single string block, optionally re-sanitized.
 
-        Renders "[hace N turno(s)]" labels at build time so the counter always
-        reflects distance-from-now: the most-recently stored line = "[hace 1
-        turno]", next older = "[hace 2 turnos]", etc. N is bounded by the
-        number of surviving lines.
+        Renders distance-from-now labels at build time so the counter always
+        reflects recency: the most-recently stored line = distance 1, next older
+        = distance 2, etc. N is bounded by the number of surviving lines.
+
+        The label is locale-driven via ``line_format`` (with ``{n}``/``{unit}``
+        placeholders) and ``unit_singular``/``unit_plural``; all default to the
+        original Spanish form ``[hace N turno(s)]`` (es-preserving). A malformed
+        ``line_format`` falls back to the Spanish default rather than raising.
 
         Args:
             sanitize_fn: A callable applied to each line before joining (double
@@ -78,14 +94,26 @@ class MemoryDigest:
         if not self._lines:
             return ""
 
+        fmt = line_format or self._DEFAULT_LINE_FORMAT
+        singular = unit_singular or self._DEFAULT_UNIT_SINGULAR
+        plural = unit_plural or self._DEFAULT_UNIT_PLURAL
+
         n_lines = len(self._lines)
         labeled: List[str] = []
         # _lines[0] is oldest, _lines[-1] is newest.
         # oldest → n_lines, newest → 1
         for i, body in enumerate(self._lines):
             distance = n_lines - i          # n_lines down to 1
-            label = "turno" if distance == 1 else "turnos"
-            line_with_prefix = f"[hace {distance} {label}] {body}"
+            unit = singular if distance == 1 else plural
+            try:
+                prefix = fmt.format(n=distance, unit=unit)
+            except (KeyError, IndexError, ValueError):
+                prefix = self._DEFAULT_LINE_FORMAT.format(
+                    n=distance,
+                    unit=(self._DEFAULT_UNIT_SINGULAR if distance == 1
+                          else self._DEFAULT_UNIT_PLURAL),
+                )
+            line_with_prefix = f"{prefix} {body}"
             if sanitize_fn is not None:
                 line_with_prefix = sanitize_fn(line_with_prefix)
             labeled.append(line_with_prefix)

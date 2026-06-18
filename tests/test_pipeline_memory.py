@@ -16,6 +16,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _pin_es_locale():
+    """Pin the active locale to es for every test in this module.
+
+    These tests characterize the Spanish digest/wrapper scaffolding
+    ("[hace N turnos]", <memoria_de_fondo nota=...>). Engine prompts now read
+    scaffolding from the active locale bundle, so without pinning they would
+    depend on the machine's persisted locale.json. Pin es = the documented
+    pre-i18n behavior, deterministically.
+    """
+    from opencohost.i18n import active
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    active.set_active_bundle(resolve_active_bundle(locale="es"))
+    yield
+    active.reset_active_bundle()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
