@@ -15,6 +15,8 @@ import torch
 import soundfile as sf
 import edge_tts
 
+from opencohost.i18n import active as i18n_active
+
 BASE_DIR = Path(__file__).resolve().parent
 HF_CACHE_DIR = STORAGE_PATHS.hf_home
 HF_HUB_DIR = STORAGE_PATHS.hf_hub_cache
@@ -172,7 +174,7 @@ def generar_audio():
                 }), 400
 
             logger.info(f"[{request_id}] Motor LIGERO: '{texto[:60]}...'")
-            voz_edge = "es-MX-DaliaNeural"
+            voz_edge = i18n_active.edge_voice()
             async def generar_edge():
                 communicate = edge_tts.Communicate(texto, voz_edge)
                 await communicate.save(archivo_salida)

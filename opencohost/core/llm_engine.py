@@ -26,6 +26,7 @@ from opencohost.config.settings import (
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
 )
+from opencohost.i18n import active as i18n_active
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
@@ -1640,7 +1641,7 @@ class MotorVocalIA(threading.Thread):
                 try:
                     if effective_motor == "ligero":
                         async def generar_edge():
-                            communicate = edge_tts.Communicate(oracion, "es-MX-DaliaNeural")
+                            communicate = edge_tts.Communicate(oracion, i18n_active.edge_voice())
                             await communicate.save(archivo_chunk)
 
                         asyncio.run(asyncio.wait_for(generar_edge(), timeout=TTS_LIGHT_TIMEOUT))
