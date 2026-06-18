@@ -247,9 +247,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Branding Log Leak Remediation — Runtime Output Still Says "VoiceAI"**
+- [x] **Track: Branding Log Leak Remediation — Runtime Output Still Says "VoiceAI"** — SUPERSEDED
   *Link: [./tracks/branding_log_leak_remediation_20260616/](./tracks/branding_log_leak_remediation_20260616/)*
-  *Status 2026-06-16: PROPOSAL ONLY — not started. Launch-readiness branding sweep
+  *Status 2026-06-17: SUPERSEDED/DONE — all runtime items (L1–L5, C1–C4, and S1) shipped by the
+  VoiceAI→OpenCohost runtime rebrand (commit ad7ca94, merged on audit/comprehensive-review).
+  Verified: `git grep voiceai` in opencohost/ = 0; logger "OpenCohost"; opencohost_*.log;
+  OPENCOHOST_DEBUG; S1 tag now ["kira","opencohost","live"]. Original proposal (historical):
+  launch-readiness branding sweep
   found the running app still emits the retired "VoiceAI" name in runtime output.
   Highest-impact (L1): the shared logger is named "VoiceAI" and the format includes
   %(name)s, so EVERY console+file log line reads [VoiceAI]. Also L2 log file written
@@ -264,16 +268,16 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Product Rebrand VoiceAI → OpenCohost (docs)**
+- [x] **Track: Product Rebrand VoiceAI → OpenCohost**
   *Link: [./tracks/product_rebrand_voiceai_to_opencohost_20260617/](./tracks/product_rebrand_voiceai_to_opencohost_20260617/)*
-  *Status 2026-06-17: Workstream A (repo docs reconciliation) DONE — rebranded forward-facing
-  prose in AGENTS.md, CLAUDE.md, conductor/product.md, AGENT_HANDOFF.md (title + current-state),
-  docs/RF3_*, and WhatIs.md (local/ignored; filesystem paths preserved). Deliberately PRESERVED:
-  ADR-004, docs/architecture.md (documents the deferred internal rename), docs/audit/*, track
-  specs, engram key `voiceai`. Workstream B (code/runtime rename — logger, identifiers) is the
-  internal rename DEFERRED by architecture.md; absorbs branding_log_leak_remediation_20260616.
-  Verified by git: appdata `%APPDATA%/VoiceAI`→`OpenCohost` shipped in v0.1.0/v0.1.1 (commit
-  e76c9b1 is ancestor) → NO orphaned users, the migration shim is unnecessary. No .py touched.*
+  *Status 2026-06-17: DONE. Workstream A (docs reconciliation) + Workstream B (runtime rename) both
+  complete and merged on audit/comprehensive-review (commits 28df4c3 docs, ad7ca94 runtime,
+  6f30231 operator log strings). Runtime: logger "OpenCohost", opencohost_*.log, OPENCOHOST_DEBUG/
+  _CRASH_LOG/_FATAL_LOG, identifiers, log strings, S1 tag — verified `git grep voiceai` in opencohost/
+  = 0. Absorbs/supersedes branding_log_leak_remediation_20260616. Git-verified: appdata rename shipped
+  in v0.1.0/v0.1.1 (commit e76c9b1 ancestor) → no orphaned users, migration shim unnecessary.
+  PRESERVED: ADR-004, docs/audit/*, engram key `voiceai`. Only the separate `VocalAI` class
+  identifiers (MotorVocalIA, VocalAIApp) remain deferred — see docs/architecture.md.*
 
 - [ ] **Track: Public Site Rebrand — voiceaikira.vercel.app → OpenCohost (PRIORITY)**
   *Link: [./tracks/public_site_rebrand_opencohost_20260617/](./tracks/public_site_rebrand_opencohost_20260617/)*
