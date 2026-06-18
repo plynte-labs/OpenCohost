@@ -1,0 +1,19 @@
+# Spanish locale bundle (es) — the project's base/default locale.
+#
+# Official, in-tree, project-authored. This is OpenCohost's original language;
+# resources are being migrated into this bundle phase by phase (T1: TTS voice,
+# T3: persona/scaffolding, T5: guardrails). Until a slot is migrated its value
+# still lives in the engines. See the track proposal.
+meta:
+  code: es
+  display: Español
+  tier: official
+  status: complete        # the shipped default; completeness tightens as slots migrate
+  schema_version: 1
+  fallback: []            # base locale — nothing to fall back to
+
+tts:
+  # Migrated in T1. Was hard-coded at llm_engine.py / server_qwen.py.
+  edge_voice: es-MX-DaliaNeural
+  qwen_language: Spanish
+  qwen_needs_ref_wav: true   # user-provided reference WAV; no bundled audio
