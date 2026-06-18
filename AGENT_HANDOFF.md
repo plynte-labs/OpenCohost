@@ -385,6 +385,11 @@ validation CI run on or after that date is advisable but optional.
 - OpenCohost has functional prototypes for local AI voice, TTS, SmartAggregator, stream
   workflows, and health monitoring.
 - The project has grown enough that blind expansion is risky.
+- Branding: VoiceAI→OpenCohost rebrand complete in docs + runtime (logger name,
+  log-file prefix `opencohost_*.log`, env vars `OPENCOHOST_DEBUG`/`_CRASH_LOG`/
+  `_FATAL_LOG`, identifiers, operator log strings); merged on
+  `audit/comprehensive-review`. Deferred by design: the `VocalAI` class
+  identifiers (`MotorVocalIA`, `VocalAIApp`) — see docs/architecture.md.
 - Active local implementation checkpoint: `dynamic_model_management_20260608`
   is in progress under a **thin client over Ollama** boundary.
   - completed locally: Phase 1 (runtime validity + persistence) and
@@ -397,6 +402,9 @@ validation CI run on or after that date is advisable but optional.
     pending-switch escape path, and rollback to last known good model
   - validated: focused recovery/model-management suite `159 passed` + real
     watchdog/rollback event against `gemma:26b` (logs/voiceai_20260611_084746.log)
+  - RE-VALIDATED 2026-06-17 (release gate #1 confirmed): inference watchdog timeout
+    (45s) + automatic rollback against real stalling model `qwopus`; app kept
+    processing the queue without restart (logs/opencohost_20260617_175453.log)
 - `health-monitor-auto-fallback` has been reconciled:
   - keep: HealthMonitor core, health pill, Vibe gate, heavy-TTS fallback gate
   - adjust only if needed: thresholds, docs wording, manual-vs-auto fallback policy

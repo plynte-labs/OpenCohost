@@ -287,3 +287,47 @@ This file tracks all major tracks for the project. Each track has its own detail
   CustomTkinter UI strings (en default, es retained), locale-aware Kira persona/prompts,
   English-first docs. Constraints: no PyInstaller bloat (dict/gettext), CTk thread-safety via
   UIState/_safe_after. Pattern ref: LiveAudio bilingual (engram liveaudio). See proposal.md.*
+
+---
+
+### Accumulated from 2026-06-17 runtime session (owner observations + untested features)
+
+- [ ] **Track: First-Run & Ollama-Off Model Onboarding UX**
+  *Link: [./tracks/first_run_model_onboarding_20260617/](./tracks/first_run_model_onboarding_20260617/)*
+  *Status 2026-06-17: PROPOSAL. Ollama-off blocks model choice (only "open Ollama" works); on start it
+  auto-loads an unwanted model; fresh install FORCES downloading llama3 (can't choose/skip). Mitigation:
+  decouple selection from Ollama-running state + persist intent; honor user intent on start; fresh-install
+  chooser instead of forced llama3; never force a download when models exist. See proposal.md.*
+
+- [ ] **Track: App Startup Clarity (loading vs frozen)**
+  *Link: [./tracks/app_startup_clarity_20260617/](./tracks/app_startup_clarity_20260617/)*
+  *Status 2026-06-17: PROPOSAL. At startup only Kira shows; new users can't tell if it's loading or frozen
+  during the slow cold start. Mitigation: surface the phases the backend already logs (Iniciando→Conectando
+  Ollama→Preparando modelo→Listo) + warm-up progress, via UIState/_safe_after. See proposal.md.*
+
+- [ ] **Track: Status Bars Stale / Cryptic Errors (investigate)**
+  *Link: [./tracks/status_bar_stale_state_20260617/](./tracks/status_bar_stale_state_20260617/)*
+  *Status 2026-06-17: PROPOSAL (investigation-first). Some status bars never update — keep showing
+  `system:error` and cryptic strings that alarm without being actionable. Investigate UIState observer
+  wiring (which keys never refresh / never clear on recovery) + inventory error strings, then fix wording
+  + refresh. See proposal.md.*
+
+- [ ] **Track: Kira Memory Hardening — MemoryDigest E5 + E3**
+  *Link: [./tracks/kira_memory_hardening_20260617/](./tracks/kira_memory_hardening_20260617/)*
+  *Status 2026-06-17: PROPOSAL. Memory verified WIRED & working (deque sliding window + MemoryDigest L1 in
+  direct-path prompts). Remaining: E5 (history commits before TTS speaks → unspoken replies pollute digest;
+  gate on was_spoken) and E3 (digest sanitizer narrower than commit-time; add Spanish markers/NFKC/whole-digest
+  scan). Supersedes repo_hygiene R3/R4 memory slice. Strict TDD. See proposal.md.*
+
+- [ ] **Track: RF3 Chat Ingestion — runtime validation (UNTESTED)**
+  *Status 2026-06-17: not validated at runtime (owner had no live stream in the 2026-06-17 session; zero
+  connection attempts in the log — expected, not a bug). To test without owning a stream: "Chat Live (RF3)"
+  tab → paste `twitch.tv/<any live channel>` (anonymous, no OAuth) or any public YouTube live URL → Conectar
+  Chat Live; success logs `[StreamAdmin] Chat Live conectado [...]`. Note: failure paths are silent in the
+  log (invalid URL = UI toast; connect_to False = nothing). OAuth tokens present at data/stream_admin/.*
+
+- [ ] **Track: Editorial Cards — runtime end-to-end validation (UNTESTED)**
+  *Status 2026-06-17: cards verified WIRED (EditorialCardStore + EditorialAgendaBridge in app_shell:149,192;
+  ~15 refs in cohost_agenda_panel.py UI; CLI editorial_cli.py; raw-chat rejected at model boundary). Almost
+  certainly functional but NOT exercised this session. Validate end-to-end: author → arm → fires in agenda →
+  Kira uses it. Pairs with the cohost-engine deep-dive (deferred).*
