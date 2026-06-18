@@ -285,12 +285,16 @@ This file tracks all major tracks for the project. Each track has its own detail
   actually sees (URL + /docs + /es). Includes domain migration to opencohost.com (ADR-0010) with
   301/SEO/analytics continuity. Separate Vercel project/repo. See proposal.md.*
 
-- [ ] **Track: English Compatibility / i18n — US-ready OpenCohost (PRIORITY)**
+- [~] **Track: English Compatibility / i18n — US-ready OpenCohost (PRIORITY)**
   *Link: [./tracks/english_compatibility_i18n_20260617/](./tracks/english_compatibility_i18n_20260617/)*
-  *Status 2026-06-17: PROPOSAL ONLY. Motivated by ADR-0001 + US/English web traffic. Externalize
-  CustomTkinter UI strings (en default, es retained), locale-aware Kira persona/prompts,
-  English-first docs. Constraints: no PyInstaller bloat (dict/gettext), CTk thread-safety via
-  UIState/_safe_after. Pattern ref: LiveAudio bilingual (engram liveaudio). See proposal.md.*
+  *Status 2026-06-18: IN PROGRESS on branch `feat/i18n-core`. Reusable swap architecture (add a
+  language = add a data bundle, not engine code). Phases T0–T5 (see proposal.md). DONE & committed:
+  T0 i18n-core (contract+registry+state/CLI), T0d resilient startup resolver (degrade-to-es,
+  anti-shadowing, BCP 47), T1 Edge voice read from active bundle (behavior-preserving). Commits
+  0f180e1, fa006fd. ~57 i18n tests + engine regression green. Scope: es+en OFFICIAL only (zh future,
+  community-tier unless a native author joins). NEXT: T2 = en bundle + Kira speaks English (first
+  owner runtime test). Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety. Pattern ref:
+  LiveAudio bilingual (engram liveaudio).*
 
 ---
 
