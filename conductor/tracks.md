@@ -288,13 +288,32 @@ This file tracks all major tracks for the project. Each track has its own detail
 - [~] **Track: English Compatibility / i18n — US-ready OpenCohost (PRIORITY)**
   *Link: [./tracks/english_compatibility_i18n_20260617/](./tracks/english_compatibility_i18n_20260617/)*
   *Status 2026-06-18: IN PROGRESS on branch `feat/i18n-core`. Reusable swap architecture (add a
-  language = add a data bundle, not engine code). Phases T0–T5 (see proposal.md). DONE & committed:
-  T0 i18n-core (contract+registry+state/CLI), T0d resilient startup resolver (degrade-to-es,
-  anti-shadowing, BCP 47), T1 Edge voice read from active bundle (behavior-preserving). Commits
-  0f180e1, fa006fd. ~57 i18n tests + engine regression green. Scope: es+en OFFICIAL only (zh future,
-  community-tier unless a native author joins). NEXT: T2 = en bundle + Kira speaks English (first
-  owner runtime test). Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety. Pattern ref:
-  LiveAudio bilingual (engram liveaudio).*
+  language = add a data bundle, not engine code). Phases T0–T5 (see proposal.md). DONE: T0 i18n-core
+  (contract+registry+state/CLI), T0d resilient startup resolver (degrade-to-es, anti-shadowing,
+  BCP 47), T1 Edge voice from active bundle, T2 en bundle (Kira speaks English — owner-validated,
+  persists across restart), T3 locale-driven LLM persona (es byte-identical), T3c hardcoded prompt
+  scaffolding → bundle slots ([Mensaje del usuario], <memoria_de_fondo>, [hace N turnos] all
+  locale-aware). 231 i18n+engine tests green. Owner runtime-validated en with llama3: ~90% English
+  (residual es is from the profile prompt itself, owner-owned). Scope: es+en OFFICIAL only (zh future,
+  community-tier unless a native author joins). NEXT: T4 coherence gate (warn-only, profile wins —
+  decided), T5 guardrails (SHIP-BLOCKER). Optional: GUARDRAIL_FALLBACK_LINES (4 spoken es lines).
+  ⚠️ NOT YET VALIDATED in en: RF3 smart-aggregator, RF4 stream-admin, and guardrails behavior — must
+  test before declaring i18n done. Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety.*
+
+- [ ] **Track: Profile-Language Auto-Detect → Locale Switch (comfort)**
+  *Link: [./tracks/profile_locale_autodetect_20260618/](./tracks/profile_locale_autodetect_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY, spun out of i18n during T3 runtime test. Comfort layer on top of
+  the T4 warn-only coherence gate: detect a profile's language and offer/perform the matching locale
+  switch (profile still wins; mismatch stays allowed-but-announced). Recommends an explicit `locale`
+  field on profiles over heuristics; suggest-not-auto default; next-boot restart model. See proposal.md.*
+
+- [ ] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
+  *Link: [./tracks/music_mode_ducking_20260618/](./tracks/music_mode_ducking_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY, from i18n runtime observation. (A) make Kira's speak-time music
+  volume configurable (today hard-coded ducked_volume=0.08). (B) BUG: music not leveled on the FIRST
+  interaction after a track change — root cause hypothesis: audio_bed.py:228 starts new tracks at
+  base_volume with no persisted duck state, so a track change mid-speech ignores ducking until the next
+  duck() call. Comfort/quality, not launch-blocking. See proposal.md.*
 
 ---
 
