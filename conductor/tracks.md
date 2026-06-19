@@ -293,10 +293,12 @@ This file tracks all major tracks for the project. Each track has its own detail
   BCP 47), T1 Edge voice from active bundle, T2 en bundle (Kira speaks English — owner-validated,
   persists across restart), T3 locale-driven LLM persona (es byte-identical), T3c hardcoded prompt
   scaffolding → bundle slots ([Mensaje del usuario], <memoria_de_fondo>, [hace N turnos] all
-  locale-aware). 231 i18n+engine tests green. Owner runtime-validated en with llama3: ~90% English
+  locale-aware), T4 coherence gate (warn-only, profile always wins — new opencohost/i18n/coherence.py,
+  wired into set_profile; deterministic Option A today + Option B `locale`-field seam for the autodetect
+  track; 22 gate tests, 108 i18n+engine green). Owner runtime-validated en with llama3: ~90% English
   (residual es is from the profile prompt itself, owner-owned). Scope: es+en OFFICIAL only (zh future,
-  community-tier unless a native author joins). NEXT: T4 coherence gate (warn-only, profile wins —
-  decided), T5 guardrails (SHIP-BLOCKER). Optional: GUARDRAIL_FALLBACK_LINES (4 spoken es lines).
+  community-tier unless a native author joins). NEXT: T5 guardrails (SHIP-BLOCKER). Optional:
+  GUARDRAIL_FALLBACK_LINES (4 spoken es lines).
   ⚠️ NOT YET VALIDATED in en: RF3 smart-aggregator, RF4 stream-admin, and guardrails behavior — must
   test before declaring i18n done. Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety.*
 
@@ -314,6 +316,29 @@ This file tracks all major tracks for the project. Each track has its own detail
   interaction after a track change — root cause hypothesis: audio_bed.py:228 starts new tracks at
   base_volume with no persisted duck state, so a track change mid-speech ignores ducking until the next
   duck() call. Comfort/quality, not launch-blocking. See proposal.md.*
+
+- [ ] **Track: Co-host Liveness & Recovery Hardening (watchdog + systemic-empty degrade + idempotency)**
+  *Link: [./tracks/cohost_liveness_recovery_20260619/](./tracks/cohost_liveness_recovery_20260619/)*
+  *Status 2026-06-19: PROPOSAL-ONLY, spun out of the GAP-005 empty-response fix via a 3-lens adversarial panel
+  (engram #2241). GAP-005 point fix DONE+tested (empty/blocked agenda gen → register_failure(GUARDRAIL_EMPTY) via
+  existing validator hook; 5 tests; uncommitted). Remaining (own track, own TDD): (1) liveness WATCHDOG for stalls
+  GAP-005 doesn't see — mode 6 TTS-hang in SPEAKING, prefetch crash, future paths; clock lives in app_shell tick,
+  injectable for tests. (2) SYSTEMIC-EMPTY degrade-then-ALERT: today register_failure abandons topic at 2 + resets
+  on close, so a dead model burns the topic queue and NEVER reaches PAUSED_NEEDS_OPERATOR (silent death) — add a
+  session-level empty streak → degrade → operator pause. (3) record_failure IDEMPOTENCY (prereq: watchdog + engine
+  signal could double-increment, skip degrade, jump to PAUSED). Sibling of heavy_model_inference_recovery. See proposal.md.*
+
+- [ ] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
+  *Link: [./tracks/i18n_engine_locale_residue_20260618/](./tracks/i18n_engine_locale_residue_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
+  (1) ARCHITECTURAL — the locale bundle persona is dead code: every profile carries a `prompt` so the engine never
+  reaches i18n_active.system_prompt() (llm_engine.py:332); locale does NOT govern persona today. (2) Five hardcoded
+  Spanish injection vectors leak into en sessions; the worst (GUARDRAIL_FALLBACK_LINES llm_engine.py:74) is committed
+  to historial → primes the model to Spanish (root of the llama3 Spanglish). Scope narrowed to LANGUAGE + GUARDRAILS.
+  D1: fallback lines subscribe to i18n + a user-set default-language (en/es) safety net. D2 (stop filler contaminating
+  Kira's memory) MOVED to kira_memory_hardening E6 (owner Option 5) — this track keeps only the LANGUAGE of the lines.
+  D3 (language governor) routed to its own proposal. MUST run investigation I1 (what's in the guardrails domain) + I2 (do the fallback lines ever fire?)
+  before any code — owner has never heard a guardrail line spoken. Operationalizes/refines i18n T5. See proposal.md.*
 
 ---
 
@@ -339,12 +364,15 @@ This file tracks all major tracks for the project. Each track has its own detail
   wiring (which keys never refresh / never clear on recovery) + inventory error strings, then fix wording
   + refresh. See proposal.md.*
 
-- [ ] **Track: Kira Memory Hardening — MemoryDigest E5 + E3**
+- [ ] **Track: Kira Memory Hygiene — Consolidated Admission + Sanitization (E5 + E6 + E3)**
   *Link: [./tracks/kira_memory_hardening_20260617/](./tracks/kira_memory_hardening_20260617/)*
-  *Status 2026-06-17: PROPOSAL. Memory verified WIRED & working (deque sliding window + MemoryDigest L1 in
-  direct-path prompts). Remaining: E5 (history commits before TTS speaks → unspoken replies pollute digest;
-  gate on was_spoken) and E3 (digest sanitizer narrower than commit-time; add Spanish markers/NFKC/whole-digest
-  scan). Supersedes repo_hygiene R3/R4 memory slice. Strict TDD. See proposal.md.*
+  *Status 2026-06-18: PROPOSAL, RESCOPED (owner Option 5) into one memory-hygiene pass on a single boundary —
+  "what enters Kira's memory and is it trustworthy." Axis A ADMISSION via one should_remember(turn) predicate:
+  E5 (unspoken/TTS-failed replies; gate on was_spoken) + E6 (synthetic filler — guardrail/agenda fallback lines
+  are spoken but committed to historial and prime the next turn; tag at source, exclude — ABSORBS D2-B from
+  i18n_engine_locale_residue). Axis B CONTENT TRUST: E3 (digest sanitizer hardening — Spanish markers/NFKC/
+  whole-digest scan). E6 ≠ E5 (was_spoken doesn't catch spoken filler) — that's why one predicate, not two gates.
+  Memory verified WIRED & working. Supersedes repo_hygiene R3/R4 memory slice. Strict TDD. See proposal.md.*
 
 - [ ] **Track: RF3 Chat Ingestion — runtime validation (UNTESTED)**
   *Status 2026-06-17: not validated at runtime (owner had no live stream in the 2026-06-17 session; zero
