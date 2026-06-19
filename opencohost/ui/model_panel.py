@@ -379,7 +379,19 @@ class ModelPanel:
         return self.get_tag_for_display(self.get_selected_display())
 
     def set_active_model(self, tag: str) -> None:
-        """Set the currently active model to update button state."""
+        """Set the currently active model and sync the combobox display.
+
+        Callers on the success path of a runtime model switch must use this
+        method so the combobox stays in sync with the actual active model.
+        Previously this method only updated _active_model_tag and button/tier
+        labels without calling combo_modelos.set(), causing the combobox to
+        show the old model after a successful switch.  The failure path already
+        used restore_to_active_model which did sync the combo; this brings the
+        success path to parity.
+        """
+        display = self.get_display_for_tag(tag)
+        if self.combo_modelos is not None:
+            self.combo_modelos.set(display)
         self._active_model_tag = tag
         self._update_button_for_ollama_state()
         self._update_tier_buttons()

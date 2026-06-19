@@ -1123,3 +1123,52 @@ class TestOnClosingCallsModelPanelCleanup:
                     break
 
         assert found, "on_closing must call model_panel.cleanup()"
+
+
+# ---------------------------------------------------------------------------
+# 15. Bug fix — set_active_model must sync combo_modelos (success-path desync)
+# ---------------------------------------------------------------------------
+
+
+class TestSetActiveModelComboSync:
+    """set_active_model (called on the SUCCESS path of a runtime model switch)
+    must update combo_modelos to reflect the new active model.
+
+    Root cause: set_active_model only updated _active_model_tag and button/tier
+    labels, but never called combo_modelos.set().  The FAILURE path already used
+    restore_to_active_model which does call combo_modelos.set().  Only the success
+    path was broken.
+
+    Fix applied to model_panel.py set_active_model: now calls
+    combo_modelos.set(get_display_for_tag(tag)) before updating _active_model_tag,
+    bringing the success path to parity with restore_to_active_model.
+    The app_shell.py _on_motor_model_changed success path was also updated to
+    use restore_to_active_model for belt-and-suspenders correctness.
+
+    This test pins the panel-level contract: after set_active_model is called with
+    a new tag, combo_modelos.get() must equal get_display_for_tag(new_tag).
+    """
+
+    def test_set_active_model_syncs_combo_to_new_model(self, model_panel):
+        """After a successful runtime model switch, the combobox must reflect
+        the new active model — not the stale pre-switch selection."""
+        from opencohost.config.settings import MODELS_CATALOG
+
+        # Start: panel is initialised with DEFAULT_MODEL.
+        # Pick a different model to simulate a successful runtime switch.
+        new_tag = "qwen3:4b"
+        expected_display = MODELS_CATALOG[new_tag]["display"]
+
+        # Pre-condition: combo currently shows the default (old) model.
+        assert model_panel.combo_modelos.get() != expected_display, (
+            "Pre-condition failed: combo already shows the new model before set_active_model"
+        )
+
+        # This is the call that _on_motor_model_changed makes on the success path.
+        model_panel.set_active_model(new_tag)
+
+        # After a successful switch the combobox MUST reflect the new model.
+        assert model_panel.combo_modelos.get() == expected_display, (
+            f"combo_modelos still shows '{model_panel.combo_modelos.get()}' "
+            f"after set_active_model('{new_tag}') — combobox was not synced"
+        )

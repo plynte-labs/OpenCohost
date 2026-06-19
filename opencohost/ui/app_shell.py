@@ -2820,7 +2820,12 @@ class VocalAIApp(ctk.CTk):
         model = self.motor_ia.current_model
         self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
-        self._safe_after(lambda: self.model_panel.set_active_model(model))
+        # Use restore_to_active_model (not set_active_model) so the combobox is
+        # synced to the newly active model — mirroring the failure path at
+        # _on_motor_switch_failed, which already used restore_to_active_model.
+        # set_active_model only updated _active_model_tag and buttons; it never
+        # called combo_modelos.set(), leaving the combobox stale after a success.
+        self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
         self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._actualizar_pipeline("idle")
 
