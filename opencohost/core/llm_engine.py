@@ -27,6 +27,7 @@ from opencohost.config.settings import (
     load_tts_speed, save_tts_speed,
 )
 from opencohost.i18n import active as i18n_active
+from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
@@ -327,6 +328,7 @@ class MotorVocalIA(threading.Thread):
             logger.info("Piper speech rate set to length_scale=%.2f", scale)
 
         elif tipo == "set_profile":
+            prompt_override_active = "prompt" in payload
             self.system_prompt = payload.get("prompt", i18n_active.system_prompt())
             self.use_system_role = payload.get("use_system", False)
             profile_name = payload.get("_profile_name", "desconocido")
@@ -334,6 +336,14 @@ class MotorVocalIA(threading.Thread):
             self.historial.clear()
             self._memory_digest.clear()
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
+            # T4 coherence gate (warn-only; the profile always wins). Flags when a
+            # custom persona's language is not governed by the active locale.
+            i18n_coherence.log_coherence(
+                i18n_active.get_active_bundle(),
+                profile_name=profile_name,
+                profile_prompt_active=prompt_override_active,
+                profile_locale=payload.get("locale"),
+            )
 
         elif tipo == "download_model":
             if not self.is_ready:
