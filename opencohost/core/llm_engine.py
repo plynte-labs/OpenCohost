@@ -1451,6 +1451,14 @@ class MotorVocalIA(threading.Thread):
         if dialogo:
 
             self._hablar(dialogo, source=source)
+        elif source.startswith("kira-agenda"):
+            # Empty or guardrail-blocked agenda generation: _generar_dialogo
+            # returned "", so _hablar never runs and no speaking_start event
+            # fires. Signal the failure through the SAME validator hook the
+            # success path uses (_accept_agenda_output at line ~1156) so the
+            # controller leaves GENERATING and its recovery ladder engages,
+            # instead of stalling the autonomous loop silently.
+            self._accept_agenda_output("")
 
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:
