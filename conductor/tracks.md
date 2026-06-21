@@ -328,6 +328,18 @@ This file tracks all major tracks for the project. Each track has its own detail
   session-level empty streak → degrade → operator pause. (3) record_failure IDEMPOTENCY (prereq: watchdog + engine
   signal could double-increment, skip degrade, jump to PAUSED). Sibling of heavy_model_inference_recovery. See proposal.md.*
 
+- [ ] **Track: Latency Tracing Debug Mode (round-trip span instrumentation)**
+  *Link: [./tracks/latency_tracing_debug_mode_20260619/](./tracks/latency_tracing_debug_mode_20260619/)*
+  *Status 2026-06-19: PROPOSAL → DESIGN. Owner request, branch feat/latency-tracing. Observability ONLY (measures+logs
+  timings, zero behavior change), gated behind DEBUG_LATENCY flag OFF by default. Per-turn span trace of the full speech
+  round-trip to find the biggest latency bottleneck. KEY FINDING: the LLM→TTS half is ALREADY timed in llm_engine.py
+  (llm.think start_llm:1049/elapsed:1113; tts.ttfa elapsed_first:1794; tts.duration total_elapsed:1838) — net new work is
+  the INPUT half (ptt.hold app_shell.py:3098/3109; stt.latency voice_control.py:463) + CORRELATION into one summary line.
+  TRAP: speaking_start (1511) is pre-synthesis, NOT audio-out — real first audio is pygame...play() at 1798. CATCH: PTT
+  grace period (up to 5.0s, voice_control.py:121) must be its own span, excluded from turn.e2e, or it reads as phantom STT
+  lag. Cross-thread correlation via Option B (per-stage tracer singleton, no queue-payload change; valid since PTT turns are
+  serialized). Safety: time only, never content; LiveVoice/PTT seams stay separate. Strict TDD (injectable clock). See proposal.md.*
+
 - [ ] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
   *Link: [./tracks/i18n_engine_locale_residue_20260618/](./tracks/i18n_engine_locale_residue_20260618/)*
   *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
@@ -386,3 +398,44 @@ This file tracks all major tracks for the project. Each track has its own detail
   ~15 refs in cohost_agenda_panel.py UI; CLI editorial_cli.py; raw-chat rejected at model boundary). Almost
   certainly functional but NOT exercised this session. Validate end-to-end: author → arm → fires in agenda →
   Kira uses it. Pairs with the cohost-engine deep-dive (deferred).*
+  *Status 2026-06-21: VALIDATED end-to-end this session — author → arm → fires in agenda → Kira uses it.
+  Confirmed via a synthetic "Mythos ban" card (real <editorial_context> injected into the prompt), the focused
+  suite (306 passed), and a real gemma4:e2b run where the card demonstrably changed Kira's answer (0/18 false
+  matches; 83% card-use). The cohost-engine deep-dive is ALSO done — see the 2026-06-21 stress-test tracks below
+  + docs/adr/ADR-011.*
+
+---
+
+### Accumulated from 2026-06-21 cohost stress-test session
+
+Session context: realistic cohost stress test (20 editorial cards, 10 agenda topics, randomized chat + 10 viewer
+requests, gemma4:e2b, real `KiraAgendaController`). Verdict: NOT stream-ready on this config (latency + repetition
+FAILs); persona/voseo + agenda control (10/10 topics, no derailment) + card precision (0/18 false matches) all PASSED.
+Also done this session: the Akira-profile **voseo fix** (`default_profiles.json` + `perfiles.json`) — Kira drifted to
+Mexican because the profile said "español latam" + tuteo; rewrote to Rioplatense voseo + anti-mexicanismo rule;
+validated and durable under load (46/46 voseo). NOTE (not a track): response-length latency is a configurable user
+PREFERENCE (owner runs `monologue`), not a defect.
+
+- [ ] **Track: Cohost Repetition Handling — Detect→Trim→Regenerate + In-Character Recovery**
+  *Status 2026-06-21: PROPOSAL — investigation complete, see **docs/adr/ADR-011**. Stress test showed ~24%
+  repetition/mode-collapse on gemma4:e2b (GTA topic emitted the same answer 4×; Overwatch open = prior permaban
+  open verbatim). PLATFORM BUG: the guardrail DETECTS the repeat (9/46 trips: ERR_GUARDRAIL_SIMILAR/LOOPING) but the
+  runtime EMITS the stale text anyway — no in-line recovery. A controlled A/B (cards on/off, same seed) + adversarial
+  judge ruled the editorial card a CONTRIBUTOR (prompt enlargement), NOT the cause; root cause is model-level context
+  recycling intrinsic to the 2B model. Decided ladder: detect → trim trailing dup → evaluate remainder → bounded
+  regenerate; recovery speech must stay IN-CHARACTER (machine-meta like "problemas de duplicación" violates Akira's
+  own rules). Biggest lever = model choice (do NOT ship gemma4:e2b for cohost). Open owner decisions: acknowledge-vs-
+  cover, retry count. Future scope: kira_agenda_controller.py guardrail gate + llm_engine.py output transformer.*
+
+- [ ] **Track: Editorial Matcher Recall — Stemming/Lemmatization + Single-Use Lock Review**
+  *Status 2026-06-21: PROPOSAL — from the stress test. Match PRECISION is perfect (0/18 false matches) but RECALL has
+  holes: no stemming/lemmatization, so a plural viewer query ("gaming chairs") scores 0.40 and misses the armed
+  "gaming chair" card (`opencohost/core/editorial_matching.py`, ≥0.8 gate). Separately, the single-use + one-active-
+  card lock left valid repeat questions ungrounded (trades recall for one-shot freshness). Scope: inflection-tolerant
+  matching; reconsider the single-use lock for viewer requests.*
+
+- [ ] **Track: Input Sanitizer — Gaming-Word False Positives (CODE_PATTERNS treats "drop" as code)**
+  *Status 2026-06-21: PROPOSAL — minor, from the stress test. The production sanitizer's CODE_PATTERNS flags the SQL
+  keyword "drop" as code-like markup, which rejected the topic title "RTX 5070 price drop" (had to reword to "price
+  cut"). "drop" is extremely common in gaming ("price drop", "frame drop", "drop rate") → false positives on
+  legitimate topic/chat text. Scope: narrow CODE_PATTERNS so common gaming words are not misread as code.*
