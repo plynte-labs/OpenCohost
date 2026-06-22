@@ -563,10 +563,14 @@ def test_output_sanitizer_rejects_recent_line_and_near_repeat():
     first = "Y eso es porque la IA no es un monstruo, es un espejo torcido de lo que entrenamos y premiamos."
 
     assert controller.accept_output(first) is True
-    assert controller.accept_output(f"Otra entrada. {first}") is False
+    # Ladder behaviour: trailing dup sentence is trimmed; "Otra entrada." is salvaged
+    # and accepted rather than rejected.  The dup is NOT committed to history.
+    assert controller.accept_output(f"Otra entrada. {first}") is True
 
     controller = KiraAgendaController()
     assert controller.accept_output("Y eso abre un ángulo interesante sobre la cultura digital, la confianza pública y las decisiones técnicas que nadie revisa con calma.") is True
+    # Whole-sentence near-dup (94% similar single sentence): trim returns ("", False),
+    # falls through to guardrail checks → rejected as before.
     assert controller.accept_output("Y en eso aparece un ángulo interesante sobre la cultura digital, la confianza pública y esas decisiones técnicas que casi nadie revisa con calma.") is False
 
 
