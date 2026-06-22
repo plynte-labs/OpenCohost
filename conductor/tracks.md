@@ -430,12 +430,32 @@ PREFERENCE (owner runs `monologue`), not a defect.
 - [ ] **Track: Editorial Matcher Recall — Stemming/Lemmatization + Single-Use Lock Review**
   *Status 2026-06-21: PROPOSAL — from the stress test. Match PRECISION is perfect (0/18 false matches) but RECALL has
   holes: no stemming/lemmatization, so a plural viewer query ("gaming chairs") scores 0.40 and misses the armed
-  "gaming chair" card (`opencohost/core/editorial_matching.py`, ≥0.8 gate). Separately, the single-use + one-active-
-  card lock left valid repeat questions ungrounded (trades recall for one-shot freshness). Scope: inflection-tolerant
-  matching; reconsider the single-use lock for viewer requests.*
+  "gaming chair" card (`opencohost/core/editorial_matching.py`, ≥0.8 gate). Single-use, stemming, and the cross-path edge — DECIDED 2026-06-21:
+  (a) STEMMING/lemmatization = add it as a SCORE BOOST only. It raises the match score for inflected forms (plural
+  "chairs" → "chair"); it never forces an exact match, so exact triggers still rule. False-positive tuning (cap the
+  boost so it cannot push an unrelated card over the 0.8 gate) is deferred to design.
+  (b) SINGLE-USE LOCK = KEEP as-is (owner-confirmed intentional). The CHAT/direct path is already NON-consuming
+  (`resolve_direct_context` leaves the card ARMED), so recurring chat re-fires the card; cards are never deleted
+  (USED + re-armable). The agenda's one-shot-per-topic is deliberate freshness (anti-repetition).
+  (c) CROSS-PATH exhaustion (agenda consumes a card → invisible to chat via `list_armed`) is NOT a matcher fix —
+  spun out to the parked Sessions / Recurrent-Themes idea below. The matcher is functional + effective today
+  except for (a).*
 
 - [ ] **Track: Input Sanitizer — Gaming-Word False Positives (CODE_PATTERNS treats "drop" as code)**
   *Status 2026-06-21: PROPOSAL — minor, from the stress test. The production sanitizer's CODE_PATTERNS flags the SQL
   keyword "drop" as code-like markup, which rejected the topic title "RTX 5070 price drop" (had to reword to "price
   cut"). "drop" is extremely common in gaming ("price drop", "frame drop", "drop rate") → false positives on
-  legitimate topic/chat text. Scope: narrow CODE_PATTERNS so common gaming words are not misread as code.*
+  legitimate topic/chat text. BROADER than "drop": the bare-keyword pattern (`kira_agenda_controller.py:305` =
+  `function|class|import|from|select|insert|update|delete|drop|script|console.log`) also flags `from` (a top-10
+  English word — would reject any title containing it), plus `update`, `select`, `class`. The structural patterns
+  (triple-backtick fences, HTML tags, `[{};]{3,}`, `=>`) do the real anti-injection work. DECIDED 2026-06-21 (owner):
+  KEEP the SQL-injection / code-protection intent but switch to CONTEXT-AWARE detection — flag a keyword only when it
+  appears with adjacent code syntax (e.g. `DROP TABLE`, `from x import`), never as a bare word. Keep protection real
+  for TopicSuggester (viewer-sourced chat) input.*
+
+- [ ] **Track (PARKED, low-certainty): Sessions / Recurrent-Themes Layer**
+  *Status 2026-06-21: IDEA ONLY, spun out of the matcher-recall ideation — NOT a matcher fix. The cross-path
+  recurrence gap (an agenda-consumed card becomes invisible to a later chat question on the same topic, since
+  `list_armed()` excludes ACTIVE/USED) points to a separate concern: session-level memory of which themes/cards
+  have been covered, and how recurrence is handled across the agenda + chat paths. Owner: "possibly a separate
+  system like `sessions` or `recurrent_themes` — not sure yet." Parked until the concept firms up.*
