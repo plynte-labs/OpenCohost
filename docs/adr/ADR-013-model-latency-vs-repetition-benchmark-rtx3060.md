@@ -36,7 +36,7 @@ Per-generation latency and repetition for cohost mode (WITH editorial cards, rea
 | Model | ~Params | Latency / gen | Repetition (mode-collapse) | Live-usable? |
 |---|---|---|---|---|
 | **gemma4:e2b** | ~2B eff. | **~5–7 s** | HIGH — verbatim loops (GTA ×4), cross-topic echo; ~11 near-dup pairs in the full stress | Fast, but repeats |
-| **gemma4:e4b** | ~8B | ~12 s | Better (taste test: 0/3 guardrail trips); not yet full-stressed | TBD (mini-bench) |
+| **gemma4:e4b** | ~8B | ~19 s (mini-bench median) | None (0 near-dups); cleanest voseo | Borderline — ~2× slow for live |
 | **gemma4:12b** | ~11.9B | **~40–110 s** (avg ~64 s) | **None** — 7→0 near-dup pairs, both collapse signatures gone | No — ~10× too slow |
 | **gemma:26b** | ~25B | **~65–216 s** | n/a (blocked) | No — too slow + **empty-output bug** |
 
@@ -52,9 +52,27 @@ Per-generation latency and repetition for cohost mode (WITH editorial cards, rea
 
 ---
 
-## Mini-benchmark (small models) — *pending*
+## Mini-benchmark (small models) — results (2026-06-21, RTX 3060 12GB)
 
-A background mini-benchmark (`minibench-small-models` workflow) measures latency (median / p90), empty-rate, and repetition for the 5 focus models on this rig, with a consistent short cohost probe (seed=42, cards ON, ~3 topics + 2 requests, identical subset across models). **Results table + sweet-spot recommendation to be appended here on completion.**
+Short cohost probe per model (seed=42, cards ON, identical subset: agenda topics GTA6 delay / Valorant underdog / brutal soulslike + 2 chat requests, ~10 gens each), reasoning-cap auto-removed for `thinking` models.
+
+| Model | Size | Latency median | p90 | Empty% | Near-dup pairs | Live-usable verdict |
+|---|---|---|---|---|---|---|
+| **gemma4:e2b** | 5.1B (~2B eff.) | **8.48 s** | 27.58 s | 0% | **0** | ✅ **SWEET SPOT** — coherent + live-usable (2 guardrail trips) |
+| gemma4:e4b | 8.0B | 18.81 s | 32.26 s | 0% | 0 | ⚠️ Quality-first — cleanest voseo, but ~2× slow for live banter |
+| llama3:latest | 8.0B | 4.05 s | 7.52 s | 0% | 6 | ❌ Fast but REPETITIVE — verbatim openings, 9 guardrail trips |
+| qwen3:1.7b | 2.0B | 3.60 s | 6.29 s | 0% | 6 | ❌ Fastest but word-salad (stray English in asterisks), 10 guardrail trips |
+| qwen3:4b | 4.0B | 41.54 s | 58.86 s | 0% | 0 | ❌ Clean but latency-disqualified (VRAM cliff → CPU/pagefile offload) |
+
+**Sweet spot: `gemma4:e2b`** — the smallest model that stays coherent (0 near-dups, 0 empties) at live-usable latency (8.5 s median) on this 3060. The only model that clears BOTH gates.
+
+Key reads:
+- **The frontier is non-monotonic by param count** — it is gated by VRAM fit (12 GB) AND by enough capacity to avoid mode-collapse. e2b sits exactly at the knee.
+- **Two failure modes bracket it**: below (qwen3:1.7b 3.6 s, llama3 4.05 s) = fast but repetition-collapse (6 near-dups, 9–10 guardrail trips each); above (e4b 18.8 s, qwen3:4b 41.5 s) = clean but slow. The smallest *coherent* model wins, not the smallest.
+- **VRAM cliff is visible**: qwen3:4b's 41.5 s median is the signature of partial CPU/pagefile offload past 12 GB — capacity you can't fit on-GPU buys nothing for live.
+- **Empty-output was SOLVED, not avoided**: 0% empty across ALL 5 including the 4 reasoning (`thinking`) models, because the reasoning-cap fix was applied; `llama3` (`thinking=False`) was correctly left alone. Validates the [ADR-014](./ADR-014-model-qualification-and-minibenchmark.md) detection approach.
+- **Caveat — e2b is best-case-on-this-subset**: e2b showed 0 near-dups here but **~11 in the FULL stress run** (ADR-011). Repetition is prompt-diversity-sensitive and the mini-bench used a fixed 3-topic subset that was kind to it. So **e2b still needs the ADR-011 repetition handling under fuller agendas** — it is the sweet spot, not a repetition-free model.
+- **p90 tail**: e2b median is 8.5 s but p90 spikes to 27.6 s on occasional long reasoning passes — fine for supervised banter, worth watching if the live target tightens.
 
 ---
 

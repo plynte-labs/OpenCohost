@@ -66,6 +66,12 @@ A "test this model" button / where the mini-benchmark surfaces in the interface 
 
 ---
 
+## Validation (2026-06-21 mini-benchmark)
+
+D1 was empirically confirmed by the small-model mini-benchmark (ADR-013): with the capabilities-`thinking` → cap-removal applied, **empty-rate was 0% across all 4 reasoning models** (gemma4:e2b, gemma4:e4b, qwen3:1.7b, qwen3:4b); `llama3` (`thinking=False`) was correctly left unpatched. Without the fix those reasoning models return empty — exactly the silent-empty failure D1 prevents. The detection signal (`'thinking'` in `capabilities`) held for every reasoning model tested.
+
+---
+
 ## Related ADRs
 - [ADR-011](./ADR-011-cohost-repetition-regenerate-on-duplicate.md) — D4 (model is the lever); this ADR makes that lever practical.
 - [ADR-013](./ADR-013-model-latency-vs-repetition-benchmark-rtx3060.md) — the hardware benchmark this qualification turns into a per-user, per-model check.
