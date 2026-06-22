@@ -57,6 +57,27 @@ The only nonzero empty-regen was gemma4:e2b (2), whose full-stress run kept **re
 
 ---
 
+## Content-quality scoring (blind 3-judge panel, 2026-06-22)
+
+Mechanical metrics (latency, repetition, empty-regen) don't capture whether a model SOUNDS like Kira. A blind 3-judge panel scored each model's actual responses to 5 identical prompts (3 topic-opens + 2 chat requests), anonymized M1–M5, on persona/voseo, coherence, engagement, and topic/card use (1–10). The winner was UNANIMOUS.
+
+| Rank | Model | persona/voseo | coherence | engagement | card-use | **OVERALL** |
+|---|---|:---:|:---:|:---:|:---:|:---:|
+| 1 | **gemma4:e2b** | 8.5 | 8.9 | 8.1 | 8.7 | **8.43** |
+| 2 | gemma4:e4b | 8.8 | 8.8 | 8.5 | 6.9 | 8.23 |
+| 3 | llama3:latest | 4.3 | 6.3 | 5.3 | 5.7 | 5.00 |
+| 4 | qwen3:1.7b | 2.9 | 2.7 | 2.2 | 2.1 | 2.40 |
+| 5 | qwen3:4b | 1.7 | 1.9 | 1.2 | 1.3 | 1.57 |
+
+- **Content CONFIRMS gemma4:e2b** — the same model the mechanical view chose. Both axes converge → the default is best on content AND latency/repetition simultaneously.
+- **gemma4:e4b has the best raw VOICE** (sharpest voseo, highest engagement) but lost #1 to a single fully off-topic answer (the soulslike prompt drifted to leaks/permaban), tanking its card-use (6.9). Punchier but less reliable.
+- **llama3 — the latency star — BREAKS persona**: it slips into Iberian Spanish (tuteo/vosotros: "eres", "¿os parece?", "cogerlo"), reading like a generic assistant, not a Rioplatense voseo Kira (5.00). **This corrects the latency-only view: the fastest, repetition-clean model is NOT the best Kira.** Persona is a hard gate that only content evaluation exposes.
+- qwen3:4b: worst — fallback stalls + a raw English chain-of-thought preamble that leaks the system prompt and admits being an AI (it ignored `think=False` at the instance level). qwen3:1.7b: word-salad / empty outputs.
+
+**Combined recommendation (content + latency + repetition): keep `gemma4:e2b` as the live Kira default** — unanimous content winner (8.43), full-stress validated at 8.5 s, repetition 11→0 with the ladder. `gemma4:e4b` is a punchier-persona fallback IF the off-topic-drift is fixed and the latency is acceptable. `llama3` is a fast-path emergency only (persona sacrificed).
+
+---
+
 ## Consequences
 
 - The ladder is validated as **model-independent and effective**: it eliminates spoken duplicates on every model that produces them, with no empty-regen residual when reasoning is disabled.
