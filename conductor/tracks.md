@@ -468,4 +468,22 @@ PREFERENCE (owner runs `monologue`), not a defect.
   (+ a guardrail trip). A user who selects gemma4:12b/26b as their cohost model today gets silent empty output. This
   BLOCKS ADR-011 D4 ("use a bigger model to fix the repetition") for the larger gemma family. Fix: detect reasoning
   models robustly (e.g. presence of a `thinking` field, or a broader gemma marker) instead of the narrow name
-  whitelist; also revisit the 180s inference watchdog vs big-model latency (gemma:26b ~65–216s/gen). Engram #2349/#2350.*
+  whitelist; also revisit the 180s inference watchdog vs big-model latency (gemma:26b ~65–216s/gen). Engram #2349/#2350. Fix approach decided in **docs/adr/ADR-014**: AUGMENT the name heuristic with Ollama
+  `capabilities` ('thinking') as info (do NOT depend on it; keep what we have) + a runtime self-heal (empty content +
+  response `thinking` field → retry uncapped + cache). Owner dropped gemma:26b/gemma4:12b from further testing (too
+  slow on a 3060 — see ADR-013).*
+
+- [ ] **Track: Model Qualification + Mini-Benchmark (engine)**
+  *Status 2026-06-21: PROPOSAL — see **docs/adr/ADR-014**. Make ANY model selectable safely (owner: yes, anyone can
+  pick any model). (1) Reasoning-cap detection: KEEP the existing name heuristic AND augment with Ollama `capabilities`
+  ('thinking', verified on gemma4 e2b/e4b/12b + qwen3:4b) as info, defensively wrapped (no hard dependency) + runtime
+  self-heal (empty content + response `thinking` → retry uncapped, cache). O(1) per model, whitelist-free. (2) Per-model
+  latency MINI-BENCHMARK: a short cohost probe (few gens, fixed seed/topics) measuring median/p90 latency on the USER's
+  hardware + empty-rate + repetition signal → live-usable verdict, cached per model+machine; must run HEADLESSLY (no UI
+  dependency). Hardware frontier reference: docs/adr/ADR-013 (RTX 3060). Open input: the owner's latency ceiling (what
+  counts as "too slow") for the verdict threshold.*
+
+- [ ] **Track: Model Mini-Benchmark — UI Surfacing (DEFERRED — no UI today)**
+  *Status 2026-06-21: DEFERRED, owner "hoy no quiero entrar en la UI". Where/how the mini-benchmark surfaces in the
+  interface (a "test this model" button, the latency verdict when picking a model). Depends on the engine mini-benchmark
+  (ADR-014) being runnable headlessly first. No UI work authorized now.*
