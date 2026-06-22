@@ -459,3 +459,13 @@ PREFERENCE (owner runs `monologue`), not a defect.
   `list_armed()` excludes ACTIVE/USED) points to a separate concern: session-level memory of which themes/cards
   have been covered, and how recurrence is handled across the agenda + chat paths. Owner: "possibly a separate
   system like `sessions` or `recurrent_themes` — not sure yet." Parked until the concept firms up.*
+
+- [ ] **Track: Reasoning-Model Token Budget — Larger Gemma Models Return Empty Output (BUG)**
+  *Status 2026-06-21: PROPOSAL/BUG — surfaced by the ADR-011 D4 model-scaling test. `_uses_reasoning_token_budget`
+  (`opencohost/core/llm_engine.py:1295`) removes the `num_predict` cap ONLY for model names matching
+  `qwen3|e2b|e4b|think`. Larger gemma reasoning models (`gemma4:12b`, `gemma:26b`) DO emit an internal `thinking`
+  block but are NOT whitelisted → they keep the cap, spend it on thinking, and return EMPTY content every generation
+  (+ a guardrail trip). A user who selects gemma4:12b/26b as their cohost model today gets silent empty output. This
+  BLOCKS ADR-011 D4 ("use a bigger model to fix the repetition") for the larger gemma family. Fix: detect reasoning
+  models robustly (e.g. presence of a `thinking` field, or a broader gemma marker) instead of the narrow name
+  whitelist; also revisit the 180s inference watchdog vs big-model latency (gemma:26b ~65–216s/gen). Engram #2349/#2350.*

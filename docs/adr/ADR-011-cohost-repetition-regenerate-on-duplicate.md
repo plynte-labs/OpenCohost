@@ -108,5 +108,17 @@ This is exactly the failure mode adversarial review exists to catch: a real, cor
 
 - **Positive**: a **model-independent** fix (D3 + D1) stops stale duplicates from ever reaching the audience, cheaply (trim-first), while staying in persona (D2). The biggest quality lever (model choice, D4) is made explicit. Latency stays the owner's configurable choice (D5), not a forced cap.
 - **Reversible / low-blast-radius**: the recovery ladder lives in the existing guardrail gate and the output-transformer seam; no change to the agenda contract, which already held end-to-end (10/10 topics, no derailment).
-- **Deferred**: editorial matcher recall (no stemming → plural queries miss cards; single-use + one-active-card lock) and the input-sanitizer false positive on gaming words (`drop`) are **out of scope** here — own tracks.
+- **Deferred**: editorial matcher recall (no stemming → plural queries miss cards; single-use + one-active-card lock) and the input-sanitizer false positive on gaming words (`drop`) are **out of scope** here — own tracks, now decided in **[ADR-012](./ADR-012-editorial-matcher-sanitizer-and-card-lifecycle.md)**.
 - **Validation gate**: re-run the cohost stress test (a) on the production-target model and (b) after wiring the regenerate-on-duplicate path, targeting a duplicate-cluster rate near zero and **no** stale duplicate ever surfaced. Do not declare cohost mode stream-ready on gemma4:e2b.
+
+---
+
+## Related ADRs
+
+- **[ADR-012](./ADR-012-editorial-matcher-sanitizer-and-card-lifecycle.md)** — the sibling matcher-recall / single-use-lifecycle / input-sanitizer / parked-sessions decisions that this ADR deferred.
+
+## Update log
+
+- **2026-06-21**: Cross-linked ADR-012 (sibling findings decided). The D4 "validation gate" — re-running the stress test on a larger model — is now IN PROGRESS (see the stress-rerun-bigger-model workflow); results recorded below.
+- **2026-06-21 (result)**: **D4 VALIDATED** — the repetition is largely a small-model artifact. Re-ran the stress test (same seed=42, cards ON, documented 5-topic subset) on **gemma4:12b** (11.9B, ~6× the e2b effective params, same family): near-duplicate pairs **7 → 0**, verbatim clusters **2 → 0**, guardrail trips **17.9% → 4.8%**, avg length flat (840 → 804). Both signature collapses vanished — the GTA ×4 verbatim loop (6 GTA pairs → 0) and the Overwatch-open ≡ permaban-open cross-topic echo (similarity 0.999 → 0.023). Verdict: *bigger-model-fixes-it* (medium confidence; n=1, same seed, subset). Residual on 12b: a recurring opener tic and some rephrased within-topic recycling (no verbatim loops), plus 2/5 chat requests returning generic deflection instead of engaging the attached card.
+- **2026-06-21 (BLOCKER found)**: D4's "use a bigger model" is **gated by a production bug**. `_uses_reasoning_token_budget` (llm_engine.py:1295) removes the `num_predict` cap only for model names matching `qwen3|e2b|e4b|think`. Larger gemma reasoning models (**gemma4:12b**, **gemma:26b**) emit a thinking block but are NOT whitelisted → the cap is spent on thinking → they return **empty content** every generation. A user selecting them as the cohost model gets silent empty output. Registered as its own track.
