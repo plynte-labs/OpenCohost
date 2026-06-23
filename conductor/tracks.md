@@ -471,7 +471,7 @@ PREFERENCE (owner runs `monologue`), not a defect.
   ui/cohost_agenda_panel, core/topic_inbox; AGENT_HANDOFF: "keep in sync manually"), a latent safety bug. Bonus: gate is
   bypassable via BMP homoglyphs → NFKC normalize. Effort M.*
 
-- [ ] **Track: Raw-Chat Prompt Exposure — agenda path leaks unsummarized chat into the LLM prompt (SECURITY, P1→P0)**
+- [x] **Track: Raw-Chat Prompt Exposure — agenda path leaks unsummarized chat into the LLM prompt (SECURITY, P1→P0)** — SINK DONE; source curation spun out below
   *Status 2026-06-22: BUG, found by the #4 threat-model deep-dive + adversarial verify (engram #2387). Violates the
   CLAUDE.md safety rule "Never expose raw chat in LLM prompts, logs, or persistence." VERIFIED in code: when the agenda
   path runs and intent_summary has no structured prompt, app_shell.py:2212-2214 falls back to
@@ -484,6 +484,25 @@ PREFERENCE (owner runs `monologue`), not a defect.
   + post-generation output guardrails. FIX: route the agenda path through ChatContextPacketBuilder too, and/or wrap any
   injected chat in read-only data delimiters in _build_prompt (like the memory block). HIGHEST priority of the cohost
   backlog — security-rule violation, not UX. Effort S–M.*
+  *Status 2026-06-22 (DONE — sink): the prompt-injection exposure is NEUTRALIZED. _build_prompt now wraps viewer chat in
+  read-only data delimiters and collapses '=' runs so the markers cannot be forged (blind dual review found a CRITICAL
+  str.replace reconstruction bypass; fixed via re.sub r'={2,}'->'='; focused re-verify = 8 attacks, all blocked). Commits
+  4d7ea34 + aa88a56, 8 tests (tests/test_cohost_chat_prompt_delimiting.py), engram #2389. The SOURCE curation is spun out
+  to the non-priority track below — owner: "me gusta tal cual está, no es prioridad."*
+
+- [ ] **Track (non-priority, defense-in-depth): Agenda Chat Source — route fallback through ChatContextPacket**
+  *Status 2026-06-22: DEFERRED, owner "no es prioridad" — the committed delimiting already makes injection inert; this is
+  curation, NOT security. Today the agenda fallback (app_shell.py:2212-2214) builds compact_chat as a raw "\n".join of the
+  last-6 verbatim chat messages. ChatContextPacketBuilder.to_prompt_context() (chat_input_contract.py:349) is a
+  CURATED/BOUNDED alternative: ≤3 topic clusters + 1 highlight + ≤5 supporting comments, author-labeled and truncated
+  (120/150/200), gated by should_call_llm — safer, though it still contains truncated viewer text (so the sink delimiting
+  stays as complementary defense). CATCH: the packet path is flag-gated OFF (USE_INPUT_CONTRACT_PROMPT=False, experimental)
+  — enabling it for the live agenda flow is a behavior change needing RUNTIME validation (Kira still reacts; should_call_llm
+  does not over-silence). Options: (A) route the agenda fallback through the packet (curated; couples to maturing that
+  feature); (B) minimal in-place hardening of the raw join (cap N msgs / M chars + per-message scrub + signal-gate). TDD:
+  extract a pure helper resolve_agenda_compact_chat(intent_summary, context, packet_builder) — never the raw join —
+  unit-test it, then app_shell calls it. Fold in the sink-review LOW residuals: GAP-1 section-header impersonation inside
+  the data region (semantic), GAP-2 Unicode '=' lookalikes (NFKC before the collapse). Effort M.*
 
 - [ ] **Track (PARKED, low-certainty): Sessions / Recurrent-Themes Layer**
   *Status 2026-06-21: IDEA ONLY, spun out of the matcher-recall ideation — NOT a matcher fix. The cross-path
