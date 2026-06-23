@@ -361,8 +361,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   lag. Cross-thread correlation via Option B (per-stage tracer singleton, no queue-payload change; valid since PTT turns are
   serialized). Safety: time only, never content; LiveVoice/PTT seams stay separate. Strict TDD (injectable clock). See proposal.md.*
 
-- [ ] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
+- [~] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
   *Link: [./tracks/i18n_engine_locale_residue_20260618/](./tracks/i18n_engine_locale_residue_20260618/)*
+  *Status 2026-06-23: EXPLORE + DESIGN DONE (see explore.md + design.md; staged, NOT implemented). 3-lens adversarial
+  review found 16 issues, all revised in. Notable catch: a BREAKING REGRESSION — test_llm_engine_timeouts.py references
+  GUARDRAIL_FALLBACK_LINES which the design removes (must be folded into the regression suite). Next: implement on approval.*
   *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
   (1) ARCHITECTURAL — the locale bundle persona is dead code: every profile carries a `prompt` so the engine never
   reaches i18n_active.system_prompt() (llm_engine.py:332); locale does NOT govern persona today. (2) Five hardcoded
@@ -390,8 +393,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   during the slow cold start. Mitigation: surface the phases the backend already logs (Iniciando→Conectando
   Ollama→Preparando modelo→Listo) + warm-up progress, via UIState/_safe_after. See proposal.md.*
 
-- [ ] **Track: Status Bars Stale / Cryptic Errors (investigate)**
+- [~] **Track: Status Bars Stale / Cryptic Errors (investigate)**
   *Link: [./tracks/status_bar_stale_state_20260617/](./tracks/status_bar_stale_state_20260617/)*
+  *Status 2026-06-23: EXPLORE + DESIGN DONE (see explore.md + design.md; staged, NOT implemented). Root cause:
+  _on_motor_switch_failed sets model_status="error" and the idle event never clears it -> stale "Sistema: error" rollup;
+  fix <10 lines / 3 UI files. 3-lens review found 14 issues, all revised in. Next: implement on approval.*
   *Status 2026-06-17: PROPOSAL (investigation-first). Some status bars never update — keep showing
   `system:error` and cryptic strings that alarm without being actionable. Investigate UIState observer
   wiring (which keys never refresh / never clear on recovery) + inventory error strings, then fix wording
@@ -586,7 +592,7 @@ PREFERENCE (owner runs `monologue`), not a defect.
 
 ---
 
-- [ ] **Track: Context-Window Overflow Guardrail — Long-Session (2h+) Live Resilience (sibling of Reasoning-Token-Budget)**
+- [~] **Track: Context-Window Overflow Guardrail — Long-Session (2h+) Live Resilience (sibling of Reasoning-Token-Budget)**
   *Link: [./tracks/context_overflow_guardrail_20260623/](./tracks/context_overflow_guardrail_20260623/) — see `explore.md`*
   *Status 2026-06-23: EXPLORE DONE (staged, not implemented; owner approved explore). DISTINCT failure mode from
   Reasoning-Token-Budget: that was `num_predict` (OUTPUT budget eaten by thinking); THIS is `num_ctx` (INPUT window
@@ -599,6 +605,10 @@ PREFERENCE (owner runs `monologue`), not a defect.
   prompt_eval_count>=0.95*ctx → E prompt_eval_count observability → D async digest upgrade → F raise num_ctx (last resort,
   VRAM-permitting). Layers 1-3 eliminate the silent-overflow class. CRITICAL open question for design: does Ollama truncate
   silently or return empty on overflow? (confirm in a real run). Next phase: design. Effort M.*
+  *Status 2026-06-23: DESIGN DONE (see design.md; staged, NOT implemented). Locked the layered strategy
+  (B ctx-discovery → A char-budget gate → C trim-and-retry on prompt_eval_count) with API contracts + TDD plan. 3-lens
+  adversarial review found 19 issues, all revised in. The CRITICAL open question (Ollama truncates silently vs returns
+  empty) stays FLAGGED for a real runtime run before implementation. Next: implement on approval.*
 
 - [ ] **Track: Model Qualification + Mini-Benchmark (engine)**
   *Status 2026-06-21: PROPOSAL — see **docs/adr/ADR-014**. Make ANY model selectable safely (owner: yes, anyone can
