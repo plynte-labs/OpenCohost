@@ -88,6 +88,7 @@ class MotorVocalIA(threading.Thread):
         self.log_queue = log_queue
         self.ui_callback = ui_callback
         self.command_queue = queue.Queue()
+        self._reasoning_model_cache: dict[str, bool] = {}
 
         self.voz_referencia = None
         self.is_ready = False
@@ -1042,7 +1043,7 @@ class MotorVocalIA(threading.Thread):
                 opciones_llm.pop('num_ctx', None)
                 opciones_llm['temperature'] = 0.7
 
-            if self._uses_reasoning_token_budget(request_model):
+            if self._resolve_reasoning_classification(request_model):
                 opciones_llm.pop('num_predict', None)
                 self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
 
@@ -1102,6 +1103,19 @@ class MotorVocalIA(threading.Thread):
 
                 if thinking:
                     logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
+
+                # Layer 2 self-heal: empty visible content + internal thinking means a
+                # reasoning model spent its budget thinking and hit the num_predict cap.
+                # Drop the cap, remember the classification, and retry uncapped.
+                if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
+                    opciones_llm.pop('num_predict', None)
+                    self._reasoning_model_cache[request_model] = True
+                    self._log(
+                        f"Auto-corrección: {request_model} devolvió contenido vacío con "
+                        f"pensamiento interno; removiendo límite de tokens y reintentando.",
+                        level="warning",
+                    )
+                    continue
 
                 if raw_content.strip():
                     break
@@ -1285,6 +1299,38 @@ class MotorVocalIA(threading.Thread):
         """
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
+
+    def _check_capabilities_reasoning(self, model: str) -> bool:
+        """Layer 1: ask Ollama whether ``model`` advertises a 'thinking' capability.
+
+        Augments (does not replace) the name heuristic so reasoning models whose
+        name lacks a known marker (e.g. gemma4:12b) are still detected. Wrapped
+        defensively: any error, missing field, or older Ollama without the
+        capabilities field degrades to False — never a crash, never a hard
+        dependency on ollama.show.
+        """
+        try:
+            import ollama
+            info = ollama.show(model)
+            caps = info.get("capabilities") if isinstance(info, dict) else getattr(info, "capabilities", None)
+            return bool(caps) and "thinking" in caps
+        except Exception:
+            return False
+
+    def _resolve_reasoning_classification(self, model: str) -> bool:
+        """Resolve whether ``model`` should drop the num_predict cap.
+
+        Cache first (Layer 3); on miss combine the name heuristic with the Ollama
+        capabilities check (Layer 1). The name heuristic short-circuits the ``or``
+        so a known reasoning model never pays the ollama.show RPC. The resolved
+        value is cached per model name.
+        """
+        cached = self._reasoning_model_cache.get(model)
+        if cached is not None:
+            return cached
+        result = self._uses_reasoning_token_budget(model) or self._check_capabilities_reasoning(model)
+        self._reasoning_model_cache[model] = result
+        return result
 
     @staticmethod
     def _is_ollama_transport_error(exc: Exception) -> bool:
