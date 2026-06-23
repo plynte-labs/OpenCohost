@@ -68,6 +68,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [~] **Track: OpenCohost Launch Readiness ? Brand, Repo Safety, and Release Validation**
   *Link: [./tracks/opencohost_launch_readiness_20260605/](./tracks/opencohost_launch_readiness_20260605/)*
+  *Status 2026-06-23: EXECUTION OWNERSHIP SPLIT. The public GitHub migration (fresh-history
+  export + MIT) is owned by `opencohost_repo_export_20260610` (see `docs/adr/ADR-016`); this
+  track is scope/context for it, NOT the migration executor (per repo_export `plan.md` Phase 0).
+  What this track STILL OWNS as code release-blockers before the Lite launch: Decision 6
+  (chat-entity allowlist in `acciones.jsonl`, FAIL-CLOSED — a distinct persistence sink from the
+  raw-chat prompt fix already shipped) and the manual runtime validation gates. Decision 5
+  (pyproject metadata: requires-python>=3.10 + edge-tts hard dep) is DONE. Decisions 1-3 (fresh
+  migration, Lite scope, working-tree commit) are absorbed by the repo_export track + ADR-016.*
 
 ---
 
@@ -147,6 +155,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: OpenCohost Repo Export - Land the Migration and Move to plynte-labs**
   *Link: [./tracks/opencohost_repo_export_20260610/](./tracks/opencohost_repo_export_20260610/)*
+  *Status 2026-06-23: RECONFIRMED as the owner of the GitHub migration. Absorbs the
+  public-readiness audit findings instead of creating a duplicate track. Key blockers:
+  tracked ignored `.opencode/` files, README install path points to missing
+  `requirements.txt`, public collaboration/security/privacy docs are missing, and raw
+  internal agent/handoff/process docs need curation before fresh-history export. License
+  decision: keep MIT as a community/portfolio strategy; MIT does not prevent copying,
+  so the public advantage must be trust, demos, contribution velocity, and a curated
+  project identity. See `public_readiness_audit_20260623.md` + `plan.md`.*
 
 ---
 
