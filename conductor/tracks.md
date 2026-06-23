@@ -526,6 +526,25 @@ PREFERENCE (owner runs `monologue`), not a defect.
   unit-test it, then app_shell calls it. Fold in the sink-review LOW residuals: GAP-1 section-header impersonation inside
   the data region (semantic), GAP-2 Unicode '=' lookalikes (NFKC before the collapse). Effort M.*
 
+- [~] **Track: Chat-Entity Persistence Hygiene (Decision 6) — chat-derived text reaches acciones.jsonl**
+  *Status 2026-06-23: INTERIM MITIGATION SHIPPED; full redact/allowlist STAGED (owner: low priority).
+  CONCERN: the InputContract shadow path persisted chat-derived data to the local action log —
+  `Aggregator._log_input_contract_shadow` (aggregator.py:366) logged `old_compact[:120]` (chat intent text,
+  may include usernames) + the full ChatContextPacket JSON via on_live_safety_log → _on_stream_admin_log →
+  _log_accion → _guardar_accion (advanced_panel.py:398) → `acciones.jsonl`. In tension with "never persist
+  raw chat". MITIGATING CONTEXT: acciones.jsonl lives in logs/ (gitignored) — local-only, NEVER ships to the
+  public repo; and it routes through Stream Admin (RF4), which is cut from Lite.
+  DONE NOW: flipped INPUT_CONTRACT_SHADOW_MODE=False (chat_input_contract.py:18) — kills the active path;
+  pinned by tests/test_input_contract_shadow_privacy.py (default-off + leak characterization, RED→GREEN, 438
+  related tests green). The second spot (app_shell.py:2267 old_compact[:80]) was already dormant behind
+  USE_INPUT_CONTRACT_PROMPT=False.
+  STAGED — two options, do NOT build now: (A) near-term redact — if shadow/input-contract is ever re-enabled,
+  drop/redact old_compact + packet from the persisted log line, keeping only categorical metadata
+  (event/goal/clusters); FAIL-CLOSED by construction. (B) future plus — entity allowlist classifier (safe
+  vocabulary of game titles/topics; drop anything resembling a username/free text); richer diagnostics but a
+  new failure surface + vocabulary to maintain (the 2026-06-10 decision flagged this risk). GATE: resolve (A)
+  before flipping INPUT_CONTRACT_SHADOW_MODE or USE_INPUT_CONTRACT_PROMPT back to True. Effort S (A) / M (B).*
+
 - [ ] **Track (PARKED, low-certainty): Sessions / Recurrent-Themes Layer**
   *Status 2026-06-21: IDEA ONLY, spun out of the matcher-recall ideation — NOT a matcher fix. The cross-path
   recurrence gap (an agenda-consumed card becomes invisible to a later chat question on the same topic, since
