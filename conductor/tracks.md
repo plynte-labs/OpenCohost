@@ -325,8 +325,13 @@ This file tracks all major tracks for the project. Each track has its own detail
   switch (profile still wins; mismatch stays allowed-but-announced). Recommends an explicit `locale`
   field on profiles over heuristics; suggest-not-auto default; next-boot restart model. See proposal.md.*
 
-- [ ] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
+- [x] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
   *Link: [./tracks/music_mode_ducking_20260618/](./tracks/music_mode_ducking_20260618/)*
+  *Status 2026-06-23: DONE (commit f242dd4). Strict-TDD inline. Bug B fixed: `_is_ducked` flag on AudioBedEngine (set
+  in duck(), cleared in unduck()) conditions audio_bed.py:228 so a channel allocated on track-change inherits the duck
+  state instead of starting at base_volume. Feature A: AudioBedPolicy.__post_init__ clamping (0<=ducked<=base<=1) +
+  load/save_music_volumes in settings.py (tts_speed JSON pattern). 11 tests + 25/25 audio-teardown regression green.
+  REMAINING (owner): app_shell one-line wiring to load persisted volumes + runtime check (change track mid-utterance).*
   *Status 2026-06-18: PROPOSAL-ONLY, from i18n runtime observation. (A) make Kira's speak-time music
   volume configurable (today hard-coded ducked_volume=0.08). (B) BUG: music not leveled on the FIRST
   interaction after a track change — root cause hypothesis: audio_bed.py:228 starts new tracks at
@@ -552,7 +557,7 @@ PREFERENCE (owner runs `monologue`), not a defect.
   have been covered, and how recurrence is handled across the agenda + chat paths. Owner: "possibly a separate
   system like `sessions` or `recurrent_themes` — not sure yet." Parked until the concept firms up.*
 
-- [ ] **Track: Reasoning-Model Token Budget — Larger Gemma Models Return Empty Output (BUG)**
+- [x] **Track: Reasoning-Model Token Budget — Larger Gemma Models Return Empty Output (BUG)**
   *Status 2026-06-21: PROPOSAL/BUG — surfaced by the ADR-011 D4 model-scaling test. `_uses_reasoning_token_budget`
   (`opencohost/core/llm_engine.py:1295`) removes the `num_predict` cap ONLY for model names matching
   `qwen3|e2b|e4b|think`. Larger gemma reasoning models (`gemma4:12b`, `gemma:26b`) DO emit an internal `thinking`
@@ -573,6 +578,27 @@ PREFERENCE (owner runs `monologue`), not a defect.
   name heuristic), and the runtime self-heal (empty + response-thinking → uncapped retry + per-model cache) is the real net
   that doesn't depend on metadata. Owner: PROCEED via protocol. To land: (a) augment with ollama.show capabilities + cache;
   (b) empty+thinking → uncapped-retry branch; (c) thread think=False into live options; (d) a COMMITTED test (not temp/).*
+  *Status 2026-06-23: DONE (commit 18995c4). Strict-TDD inline. Layer 1 `_check_capabilities_reasoning` (ollama.show →
+  'thinking' in capabilities, defensively wrapped — augments, never depends), Layer 3 per-model cache +
+  `_resolve_reasoning_classification` (name heuristic short-circuits the RPC), Layer 2 self-heal in the retry loop (empty
+  content + thinking → pop num_predict, cache True, retry uncapped). Call site llm_engine.py:1045 now uses the resolver.
+  12 tests + 15/15 llm_tiers/heavy-model regression green. REMAINING (owner): validate against a real gemma4:12b (RUN C).*
+
+---
+
+- [ ] **Track: Context-Window Overflow Guardrail — Long-Session (2h+) Live Resilience (sibling of Reasoning-Token-Budget)**
+  *Link: [./tracks/context_overflow_guardrail_20260623/](./tracks/context_overflow_guardrail_20260623/) — see `explore.md`*
+  *Status 2026-06-23: EXPLORE DONE (staged, not implemented; owner approved explore). DISTINCT failure mode from
+  Reasoning-Token-Budget: that was `num_predict` (OUTPUT budget eaten by thinking); THIS is `num_ctx` (INPUT window
+  overflow) — as a 2h+ stream accumulates context the assembled prompt exceeds num_ctx and Ollama silently truncates the
+  input → empty/degraded output mid-stream. KEY FINDING: `prompt_eval_count` is in EVERY Ollama response but never read
+  (a free, exact overflow signal). Current partial mitigation only: HISTORY_MAX_TURNS=10 deque (turn-counted, not
+  token-counted), MemoryDigest(max_chars=600), hardcoded num_ctx=4096 (popped for gemma), 2-attempt blind retry — none is
+  an enforced guardrail. RANKED options (owner priority: compact/trim first, raise num_ctx LAST): B per-model ctx discovery
+  via ollama.show → A proactive char-budget gate (evict oldest history before the call) → C reactive trim-and-retry on
+  prompt_eval_count>=0.95*ctx → E prompt_eval_count observability → D async digest upgrade → F raise num_ctx (last resort,
+  VRAM-permitting). Layers 1-3 eliminate the silent-overflow class. CRITICAL open question for design: does Ollama truncate
+  silently or return empty on overflow? (confirm in a real run). Next phase: design. Effort M.*
 
 - [ ] **Track: Model Qualification + Mini-Benchmark (engine)**
   *Status 2026-06-21: PROPOSAL — see **docs/adr/ADR-014**. Make ANY model selectable safely (owner: yes, anyone can
