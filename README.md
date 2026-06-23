@@ -1,15 +1,15 @@
 # OpenCohost — Local-First AI Streaming Co-Host
 
-OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor) that runs entirely on your hardware using Ollama and local TTS models. No cloud subscriptions. No latency spikes mid-stream.
+OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor). Kira uses a **local LLM brain via Ollama** and **free cloud voice (Microsoft Edge-TTS) in v1**. Your viewer chat, prompts, and conversation memory never leave your machine — only Kira's outgoing spoken text is sent to Edge-TTS for synthesis. High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
 > Spanish version: [README.es.md](README.es.md)
 
 ## What Kira Does
 
 - Listens to your stream via a local WebSocket transcription feed
-- Responds via voice using local LLM inference (Ollama) and local TTS
+- Responds via voice using local LLM inference (Ollama) and Edge-TTS (Microsoft cloud voice, free)
 - Maintains a sliding conversation window across a stream session
-- Switches between a lightweight TTS engine (Edge-TTS, 0% GPU) and a high-quality local voice engine (Qwen3-TTS zero-shot cloning)
+- Supports optional offline TTS via Piper (`local-tts` extra) — no cloud calls when active
 - Monitors its own health: if TTS becomes unavailable, Kira degrades gracefully rather than crashing
 
 ## Features
@@ -18,9 +18,8 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 |---|---|
 | Manual chat input with voice response | Stable |
 | Push-to-talk with global hotkey | Stable |
-| Lightweight TTS (Edge-TTS) | Stable |
-| Local TTS (Qwen3-TTS zero-shot cloning) | Stable |
-| Piper offline TTS fallback | Stable |
+| Default TTS (Edge-TTS, free Microsoft cloud voice) | Stable |
+| Optional offline TTS (Piper, `local-tts` extra) | Stable |
 | WebSocket live transcription feed | Stable |
 | Streaming TTS pipeline (speaks before LLM finishes) | Stable |
 | Conversational memory (10-turn sliding window) | Stable |
@@ -28,62 +27,56 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 | LLM model catalog with one-click switching | Stable |
 | Ollama lifecycle management from the UI | Stable |
 | Smart Chat Aggregator (YouTube Live) | Stable |
-| Stream Admin panel (YouTube OAuth, Twitch placeholder) | MVP |
 | Health monitor with TTS fallback gate | Stable |
 | Compact mode for second-monitor streaming | Stable |
 
+> **Roadmap (not in v1):** High-fidelity fully-local voice via Qwen3-TTS / F5 voice cloning is planned as an advanced opt-in in a future release. It requires a separate Python environment, ~2 GB of models, and a GPU with sufficient VRAM.
+
 ## Requirements
+
+### Prerequisites
+
+- **Windows** (primary supported platform; clean-machine validation on Linux/macOS in progress)
+- **Python 3.10+** (conda or venv environment activated)
+- **[Ollama](https://ollama.com/) installed and running** — Kira cannot start without it
 
 ### Hardware
 
 | Tier | GPU VRAM | Use case |
 |---|---|---|
-| Minimum | 6 GB | Edge-TTS only; Ollama on a smaller model |
-| Recommended | 12 GB | Concurrent LLM + Qwen3-TTS |
-| Ideal | 24 GB | Dedicated GPU server; Ollama + full TTS without contention |
-
-### Software
-
-- Python 3.13 (activated conda or venv environment)
-- [Ollama](https://ollama.com/) installed and running
-- `customtkinter`, `ollama`, `sounddevice`, `soundfile`, `numpy`, `websockets`, `requests`, `pygame`, `edge-tts`, `pytchat` (main environment)
-- `flask`, `torch`, `torchaudio`, `soundfile`, `qwen-tts`, `edge-tts` (TTS server environment, optional — only if using Qwen3-TTS)
+| Minimum | 6 GB | Edge-TTS (cloud); Ollama on a smaller model |
+| Recommended | 8–12 GB | Comfortable LLM inference with headroom |
+| Ideal | 16+ GB | Larger models without contention |
 
 ## Setup
 
 > These commands assume your Python environment is already activated. Replace `python` with the path to your environment's interpreter if you are not in an activated shell.
 
 ```powershell
-# Install main dependencies
-python -m pip install -r requirements.txt
+# Install the package with default extras (Edge-TTS + platform integrations)
+pip install -e ".[cloud-tts,integrations]"
 
-# (Optional) Install TTS server dependencies in a separate environment
-# python -m pip install flask torch torchaudio soundfile qwen-tts edge-tts
+# uv equivalent
+uv pip install -e ".[cloud-tts,integrations]"
+
+# Optional: add offline Piper TTS support (no cloud calls for voice synthesis)
+pip install -e ".[cloud-tts,integrations,local-tts]"
 ```
+
+**Extras reference:**
+
+| Extra | What it enables |
+|---|---|
+| `cloud-tts` | Edge-TTS — Microsoft free cloud voice (default) |
+| `local-tts` | Piper offline TTS — fully local, no cloud calls |
+| `integrations` | YouTube chat (pytchat), OBS WebSocket, NVIDIA VRAM monitor |
+| `dev` | pytest, pre-commit, detect-secrets |
 
 ### Run
 
 ```powershell
-# Terminal 1 — main app (LLM + UI + audio pipeline)
-python -m opencohost
-
-# Terminal 2 — Qwen3-TTS server (only needed for high-quality local voice cloning)
-# Run this in the environment that has torch + qwen-tts installed
-python opencohost/server_qwen.py
-```
-
-Kira's voice will use Edge-TTS (lightweight, online) if the Qwen3-TTS server is not available.
-
-### Configure TTS Python path
-
-If you are using Qwen3-TTS, set the environment variable `XTTS_PYTHON` to the Python interpreter in your TTS environment:
-
-```powershell
-$env:XTTS_PYTHON = "path/to/your/tts-env/python.exe"
 python -m opencohost
 ```
-
-Or set `tools.xtts_python` in `opencohost/config/storage.yaml`.
 
 ### Configure storage paths
 
@@ -101,14 +94,12 @@ storage:
 ```
 opencohost/
 ├── __main__.py           # Entry point (python -m opencohost)
-├── server_qwen.py        # Multi-engine TTS server (Flask)
 ├── config/
 │   ├── logger.py         # Structured logging (console + rotating files)
 │   ├── settings.py       # Constants, model catalog, system prompt
 │   ├── storage.py        # Portable path resolution for cache/temp
 │   ├── storage.yaml      # Storage path overrides
-│   ├── default_profiles.json  # Seeded personality profiles
-│   └── stream_admin.yaml      # Stream Admin configuration
+│   └── default_profiles.json  # Seeded personality profiles
 ├── core/
 │   ├── llm_engine.py     # LLM orchestration, memory, TTS pipeline
 │   ├── health_monitor.py # Service health, TTS fallback gate
@@ -116,8 +107,7 @@ opencohost/
 ├── ui/
 │   ├── app_shell.py      # Main UI shell (thread-safe UIState observer)
 │   └── model_panel.py    # Model management panel
-├── smart_aggregator/     # YouTube Live Chat aggregator (RF3)
-└── stream_admin/         # Stream Admin panel: OAuth, metadata, moderation (RF4)
+└── smart_aggregator/     # YouTube Live Chat aggregator
 ```
 
 ## Personality Profiles
@@ -146,10 +136,6 @@ The app validates Ollama at startup and disables actions that depend on the LLM 
 - **Install Python dependency** — alerts when the `ollama` Python package is missing from the active environment
 
 The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing, model switching, and downloads until the service responds again.
-
-## Stream Admin (RF4)
-
-The Stream Admin panel supports YouTube OAuth/API for reading and writing chat, metadata, moderation, and analytics. A Twitch provider placeholder is included. OAuth credentials are stored in `data/stream_admin/oauth_client.json` (gitignored). Environment variables `YOUTUBE_OAUTH_CLIENT_ID` and `YOUTUBE_OAUTH_CLIENT_SECRET` are also supported.
 
 ## Testing
 
