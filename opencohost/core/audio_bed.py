@@ -21,6 +21,12 @@ class AudioBedPolicy:
     idle_loop_limit: int = 2        # max loops with no Kira interaction before stopping
     idle_check_interval: float = 30.0  # seconds between idle checks
 
+    def __post_init__(self) -> None:
+        # Clamp so a bad config can never produce an invalid mix:
+        # 0.0 <= ducked_volume <= base_volume <= 1.0
+        self.base_volume = max(0.0, min(float(self.base_volume), 1.0))
+        self.ducked_volume = max(0.0, min(float(self.ducked_volume), self.base_volume))
+
 
 class AudioBedEngine:
     """Small runtime controller for long-lived production music beds.
@@ -43,6 +49,7 @@ class AudioBedEngine:
         self._pygame = None
         self._channel = None
         self._sound = None
+        self._is_ducked: bool = False
         self._lock = threading.RLock()
         # Idle loop tracking
         self._last_interaction: float = time.time()
@@ -82,12 +89,14 @@ class AudioBedEngine:
     def duck(self) -> None:
         with self._lock:
             self._mark_interaction()
+            self._is_ducked = True
             channel = self._channel
             if channel:
                 channel.set_volume(self.policy.ducked_volume)
 
     def unduck(self) -> None:
         with self._lock:
+            self._is_ducked = False
             channel = self._channel
             if channel:
                 channel.set_volume(self.policy.base_volume)
@@ -225,7 +234,11 @@ class AudioBedEngine:
                 self._channel = self._pygame.mixer.find_channel(force=True)
                 if self._channel is None:
                     self._channel = self._pygame.mixer.Channel(7)
-                self._channel.set_volume(self.policy.base_volume)
+                initial_vol = (
+                    self.policy.ducked_volume if self._is_ducked
+                    else self.policy.base_volume
+                )
+                self._channel.set_volume(initial_vol)
                 self._channel.play(sound, loops=-1, fade_ms=self.policy.fade_ms)
                 if old_channel and old_channel is not self._channel:
                     old_channel.fadeout(self.policy.fade_ms)
