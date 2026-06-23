@@ -470,6 +470,12 @@ PREFERENCE (owner runs `monologue`), not a defect.
   half. Also EXTRACT a single opencohost/core/text_safety.py — the rule is 3 hand-synced copies (kira_agenda_controller,
   ui/cohost_agenda_panel, core/topic_inbox; AGENT_HANDOFF: "keep in sync manually"), a latent safety bug. Bonus: gate is
   bypassable via BMP homoglyphs → NFKC normalize. Effort M.*
+  *DECISION 2026-06-22 (owner): do NOT delete Tier B now — no quick destructive change. The whole #4 rework is deferred to
+  a FUTURE SDD PROPOSAL with proper spec-driven treatment. The proposal weighs TWO options, both kept on the table: (1)
+  SIMPLEST — drop the theater Tier B keyword half, keep only Tier A structural (likely winner, removes all gaming false
+  positives, zero tuning/false-negative surface); (2) the corroboration 2-tier above (keywords + ≥2 syntax signals) IF we
+  want input-layer code-hygiene rather than deferring it to the TTS sanitizer. The text_safety.py unification rides with
+  the proposal. Tier B stays intact until the proposal decides — higher-priority tracks come first.*
 
 - [x] **Track: Raw-Chat Prompt Exposure — agenda path leaks unsummarized chat into the LLM prompt (SECURITY, P1→P0)** — SINK DONE; source curation spun out below
   *Status 2026-06-22: BUG, found by the #4 threat-model deep-dive + adversarial verify (engram #2387). Violates the
