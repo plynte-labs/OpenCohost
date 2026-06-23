@@ -2210,6 +2210,13 @@ class VocalAIApp(ctk.CTk):
             intent_summary = data.get("intent_summary") or {}
             compact_chat = intent_summary.get("prompt") or ""
             if not compact_chat:
+                # SECURITY: this fallback joins UNSUMMARIZED viewer chat. It is
+                # contained downstream by _build_prompt's read-only data delimiters
+                # (KiraAgendaController._wrap_untrusted_chat), which make prompt
+                # injection structurally inert. The full fix — routing this path
+                # through the structured ChatContextPacket so RAW chat never reaches
+                # the prompt — is the "Raw-Chat Prompt Exposure" track in
+                # conductor/tracks.md. Do not remove the downstream delimiters.
                 context = data.get("context", [])[-6:]
                 compact_chat = "\n".join(m.get("text", "") for m in context if m.get("text"))
             if getattr(self.motor_ia, "is_processing", False) or getattr(self.motor_ia, "is_speaking", False):
