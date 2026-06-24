@@ -1568,10 +1568,12 @@ class VocalAIApp(ctk.CTk):
         was_paused = getattr(self, "_agenda_was_paused", False)
         is_paused = self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR
         if self.status_bar and was_paused != is_paused:
+            # Route through the UIState setter (single source of truth + validation)
+            # instead of poking StatusBar directly. "paused" is a VALID_TTS_STATUSES value.
             if is_paused:
-                self.after(0, lambda: self.status_bar.update_tts_status("paused"))
+                self.after(0, lambda: setattr(self._ui_state, "tts_status", "paused"))
             else:
-                self.after(0, lambda: self.status_bar.update_tts_status("idle"))
+                self.after(0, lambda: setattr(self._ui_state, "tts_status", "idle"))
         self._agenda_was_paused = is_paused
 
     def _init_stream_admin(self) -> None:
@@ -2861,6 +2863,15 @@ class VocalAIApp(ctk.CTk):
         self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
         self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
+        # Stale-error fix: if the motor rolled back to a working model, the system is
+        # operational again — clear the transient "error" pill after a short delay so
+        # it doesn't stick for the whole session (the failure is logged above).
+        if actual_model:
+            self._safe_after(
+                lambda: setattr(self._ui_state, "model_status", "ready")
+                if self._ui_state.model_status == "error" else None,
+                2000,
+            )
 
     def _on_motor_download_start(self) -> None:
         self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Descargando..."))

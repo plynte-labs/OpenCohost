@@ -55,6 +55,15 @@ _HEALTH_STATUS_COLORS: dict[str, str] = {
     "red": "#cc3333",
 }
 
+# Human-readable labels for the health pill — internal tokens ("red") are not
+# operator language. Unknown tokens fall through to the raw value (permissive).
+_HEALTH_LABELS: dict[str, str] = {
+    "green": "OK",
+    "yellow": "alerta",
+    "red": "falla crítica",
+    "unknown": "--",
+}
+
 _ENGINE_STATUS_COLORS: dict[str, str] = {
     "qwen_active": "#1f5a3a",     # green — heavy/cloned voice is what spoke
     "edge_fallback": "#cc8800",   # amber — fell back to Edge
@@ -283,7 +292,7 @@ class StatusBar:
         if self.lbl_health_status_pill is None:
             return
         color = _HEALTH_STATUS_COLORS.get(status, "#666666")
-        label = status if status != "unknown" else "--"
+        label = _HEALTH_LABELS.get(status, status)
         self.lbl_health_status_pill.configure(text=f"Health: {label}", fg_color=color)
 
     def update_engine_status(self, status: str, reason: str = "") -> None:
@@ -328,7 +337,7 @@ class StatusBar:
             return "Voz: Piper local"
         if status == "edge_fallback":
             return f"Voz: Edge respaldo: {reason}" if reason else "Voz: Edge respaldo"
-        return "Voz: --"
+        return "Voz: iniciando…"
 
     def update_pipeline_state(self, state: str) -> None:
         """Update the main status label based on pipeline state.
@@ -428,7 +437,7 @@ class StatusBar:
             "model_status": {
                 "loading": "Modelo: cargando",
                 "ready": "Modelo: listo",
-                "error": "Modelo: error",
+                "error": "Modelo: error · revisa Ollama",
                 "offline": "Modelo: offline",
             },
             "mic_status": {

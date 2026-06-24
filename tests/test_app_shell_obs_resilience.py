@@ -1097,11 +1097,10 @@ def test_agenda_update_status_tts_pill_fires_when_bridge_is_none():
         # cohost_agenda_panel present — exercises the bridge-None path
         app.cohost_agenda_panel = MagicMock()
 
-        # status_bar with spy on update_tts_status
-        tts_calls: list = []
-        app.status_bar = SimpleNamespace(
-            update_tts_status=lambda s: tts_calls.append(s)
-        )
+        # status_bar present (truthy gate); the pause pill now routes through the
+        # UIState setter, so the spy lives on _ui_state.tts_status, not status_bar.
+        app.status_bar = SimpleNamespace(update_tts_status=lambda s: None)
+        app._ui_state = SimpleNamespace(tts_status="idle")
 
         # Capture after() calls without executing them immediately
         after_calls: list = []
@@ -1126,9 +1125,9 @@ def test_agenda_update_status_tts_pill_fires_when_bridge_is_none():
                 except Exception:
                     pass
 
-        assert "paused" in tts_calls, (
-            "update_tts_status('paused') must be scheduled when bridge is None "
-            "and state transitions to PAUSED_NEEDS_OPERATOR"
+        assert app._ui_state.tts_status == "paused", (
+            "tts_status must be set to 'paused' via the UIState setter when bridge "
+            "is None and state transitions to PAUSED_NEEDS_OPERATOR"
         )
     finally:
         _restore_app_shell_module(old_module)
