@@ -36,6 +36,12 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
 LLM_MAX_TOKENS = 768
+# Chat-reactive anti-repetition sampling brake. Added ONLY to source=="chat"
+# generations (RF3 viewer chat, agenda HANDLE_CHAT, and default-enqueue chat
+# turns). Keeps direct/ptt/accumulated/kira-agenda sampling byte-identical.
+CHAT_REPEAT_PENALTY = 1.2
+CHAT_PRESENCE_PENALTY = 0.5
+CHAT_FREQUENCY_PENALTY = 0.5
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
 DEFAULT_LLM_TIERS = {

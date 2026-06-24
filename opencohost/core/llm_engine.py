@@ -21,6 +21,7 @@ from opencohost.config.settings import (
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
     TTS_LOCAL_MODEL_PATH,
+    CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
@@ -31,6 +32,7 @@ from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
+from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger
 from opencohost.config.validation import output_guard
 
@@ -1047,6 +1049,16 @@ class MotorVocalIA(threading.Thread):
                 opciones_llm.pop('num_predict', None)
                 self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
 
+            # FIX 1 — chat-reactive anti-repetition sampling brake. Gated to
+            # source=="chat" (RF3 viewer chat, agenda HANDLE_CHAT, default-enqueue
+            # chat); NEVER applied to direct/ptt/accumulated/kira-agenda. Only ADDS
+            # keys, so non-chat options stay byte-identical. See the event_taxonomy
+            # track for the source-disambiguation follow-up.
+            if source == "chat":
+                opciones_llm["repeat_penalty"] = CHAT_REPEAT_PENALTY
+                opciones_llm["presence_penalty"] = CHAT_PRESENCE_PENALTY
+                opciones_llm["frequency_penalty"] = CHAT_FREQUENCY_PENALTY
+
             start_llm = time.time()
             max_intentos = 2
             raw_content = ""
@@ -1166,6 +1178,26 @@ class MotorVocalIA(threading.Thread):
                 return ""
 
             self._last_llm_failure = None
+
+            # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
+            # brake let through (verbatim dups + synonym-swap templates) BEFORE it
+            # reaches TTS or gets committed into the history window that feeds the
+            # next prompt. Reuses the proven neutral-fallback seam. Gated to
+            # source=="chat" so agenda/direct/ptt/LiveVoice paths are untouched.
+            if source == "chat":
+                recent_outputs = [
+                    m.get("content", "")
+                    for m in history_snapshot
+                    if isinstance(m, dict) and m.get("role") == "assistant"
+                ][-REPETITION_CONFIG.window:]
+                repetition = detect_repetition(dialogo, recent_outputs)
+                if repetition.is_repetitive:
+                    self._log(
+                        f"Repetición de chat bloqueada ({repetition.reason}); "
+                        f"usando línea neutral sin LLM.",
+                        level="warning",
+                    )
+                    return self._guardrail_fallback_line(source) or ""
 
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
