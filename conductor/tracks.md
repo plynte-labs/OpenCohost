@@ -489,6 +489,20 @@ PREFERENCE (owner runs `monologue`), not a defect.
   threshold. Do NOT discard the filter — tune it. Related: `viewer_queue_backpressure_20260613` (the consume side).
   Effort M.*
 
+- [ ] **Track: Output Diversity / Macro Repetition — Session-Scale Style Collapse (NOT short-window)**
+  *Link: [./tracks/output_diversity_macro_repetition_20260624/](./tracks/output_diversity_macro_repetition_20260624/)*
+  *Status 2026-06-24: PROPOSAL — opened, NOT started. Surfaced by the 2026-06-23 evening RF3 runtime (gemma4:e2b +
+  "Comunidad", ~2h). DISTINCT layer above `Cohost Repetition Handling` (short-window) and `Chat Activation Filter`
+  (quantity). The window=4 `repetition_guard` works for its scope (fired 2× in prod, opening_ngram_repeat, both spoke
+  fallback) but cannot catch MACRO mode-collapse: >50% of ~90 responses opened with 3 stems ("Parece que la X es Y" ~19×,
+  "A veces…" ~10×, "La gente siempre…" ~8×), one detached-philosophical register/theme regardless of chat, and generic
+  content rarely referencing a concrete message. Owner hypothesis: prompt + dependencies (assembly, context richness,
+  sampling, persona, model size), NOT model alone. HARD GATE: do NOT implement — first run RF3 with
+  chat_activation_diagnostics.enabled:true, read get_diagnostics()["activation_telemetry"], then decide fix order:
+  (a) reduce context_sampling decimation, (b) richer context/compaction, (c) should_call, (d) only THEN an output-diversity
+  guard (the telemetry measures activation, not diversity — a separate metric is in-scope to design). See engram #2468,
+  #2446; ADR-017/018/019. Effort M–L.*
+
 - [ ] **Track: Editorial Matcher Recall — Stemming/Lemmatization + Single-Use Lock Review**
   *Status 2026-06-21: PROPOSAL — from the stress test. Match PRECISION is perfect (0/18 false matches) but RECALL has
   holes: no stemming/lemmatization, so a plural viewer query ("gaming chairs") scores 0.40 and misses the armed
