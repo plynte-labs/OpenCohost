@@ -33,7 +33,30 @@ class ActivityTrigger:
             if self._last_trigger_time is None or (now - self._last_trigger_time) >= self.cooldown_seconds:
                 self._last_trigger_time = now
                 self._trigger(current_rate)
-    
+                self._emit_decision("trigger_fired", current_rate)
+            else:
+                # Rate is high enough but we're inside the cooldown window — a
+                # currently-invisible suppression. Surfaced for telemetry only.
+                self._emit_decision("cooldown_suppressed", current_rate)
+        else:
+            self._emit_decision("rate_below_threshold", current_rate)
+
+    def _emit_decision(self, reason: str, rate: float) -> None:
+        """Optional telemetry hook. No-op (identical behavior) unless an
+        ``on_decision`` callback was injected."""
+        cb = self.callbacks.get("on_decision")
+        if cb is None:
+            return
+        try:
+            cb({
+                "reason": reason,
+                "rate": rate,
+                "threshold": self.threshold_per_second,
+                "cooldown_seconds": self.cooldown_seconds,
+            })
+        except Exception:
+            pass
+
     def get_current_rate(self) -> float:
         if not self._timestamps:
             return 0.0
