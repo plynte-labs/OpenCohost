@@ -190,6 +190,15 @@ class MotorVocalIA(threading.Thread):
         self.agenda_controller = None               # Phase 0: metrics access
         self.direct_editorial_context_provider = None  # set externally by app_shell
 
+        # Optional chat-activation telemetry seams (measure-first, off-by-default).
+        # app_shell sets these ONLY when chat diagnostics are enabled; in production
+        # they stay None so the guards below skip and behavior is byte-identical.
+        # They fire from THIS worker thread into the aggregator's collector, which
+        # locks its mutation path while enabled. RECORD-ONLY — neither changes queue
+        # lifetime or speech behavior. Gated strictly on source == "chat".
+        self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
+        self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
+
     @property
     def is_speaking(self):
         with self._lock:
@@ -604,6 +613,7 @@ class MotorVocalIA(threading.Thread):
         if self._processing or self._speaking:
             return
 
+        expired_chat_infos: list = []
         with self._pq_lock:
             # Expire stale non-PTT items before selecting next work
             now = time.time()
@@ -612,10 +622,25 @@ class MotorVocalIA(threading.Thread):
                 prio, ts, payload, source = item
                 if prio > 0 and (now - ts) > self._pq_ttl_seconds:
                     self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
+                    # Measure-first telemetry seam: record (never alter) chat expiries.
+                    # Captured here, emitted below OUTSIDE _pq_lock.
+                    if source == "chat":
+                        expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
                 else:
                     kept.append(item)
             self._priority_queue = kept
 
+        # Emit expiry telemetry OUTSIDE _pq_lock so the queue lock is never held across
+        # the aggregator collector's lock (the two locks stay order-independent). No-op
+        # unless wired (diagnostics enabled); a failing callback never disturbs the queue.
+        if expired_chat_infos and self.on_chat_item_expired is not None:
+            for info in expired_chat_infos:
+                try:
+                    self.on_chat_item_expired(info)
+                except Exception:
+                    pass
+
+        with self._pq_lock:
             if not self._priority_queue:
                 # No priority items — check accumulation buffer
                 accumulated = self._flush_accumulation()
@@ -1529,6 +1554,17 @@ class MotorVocalIA(threading.Thread):
         if dialogo:
 
             self._hablar(dialogo, source=source)
+            # Measure-first telemetry seam: a chat turn actually played to completion —
+            # advance the spoken clock so secs_since_last_spoken stays honest vs a
+            # should_call that may later expire via TTL. Chat-only; no-op when unset.
+            # Intentionally NOT in a finally: if _hablar raises (TTS failure) Kira did
+            # NOT speak, so the spoken gap should keep growing — that growing gap is the
+            # very signal that surfaces silent TTS failures to the operator.
+            if source == "chat" and self.on_chat_turn_spoken is not None:
+                try:
+                    self.on_chat_turn_spoken()
+                except Exception:
+                    pass
         elif source.startswith("kira-agenda"):
             # Empty or guardrail-blocked agenda generation: _generar_dialogo
             # returned "", so _hablar never runs and no speaking_start event

@@ -162,7 +162,52 @@ class Aggregator:
             msg_len=0, msg_category=MsgCategory.NA.value,
             chat_rate=float(data.get("rate", 0.0)),
         )
-    
+
+    @property
+    def diagnostics_enabled(self) -> bool:
+        """True when chat-activation telemetry is collecting. app_shell reads this to
+        decide whether to wire the motor's cross-module seams — so in production
+        (False) the callbacks are never even attached."""
+        return bool(self._telemetry.enabled)
+
+    def on_chat_item_expired(self, info: dict) -> None:
+        """Cross-module seam (called from the MOTOR worker thread): a ``source ==
+        "chat"`` item expired in the motor's priority queue (TTL). RECORD-ONLY — it
+        never changes item lifetime. Fast-exits when disabled.
+
+        ``chat_rate`` is intentionally 0.0: reading the live rate here would touch the
+        activity window from the wrong thread, and the TTL signal is age-vs-ttl, not
+        rate. Age is carried in ``score`` and the TTL limit in ``threshold``."""
+        if not self._telemetry.enabled:
+            return
+        ttl = info.get("ttl_sec")
+        self._telemetry.record(
+            stage=FilterStage.QUEUE_TTL.value,
+            accepted=False,
+            reason=ReasonCode.TTL_EXPIRED.value,
+            score=float(info.get("age_sec", 0.0)),
+            threshold=float(ttl) if ttl is not None else None,
+            msg_len=0,
+            chat_rate=0.0,
+            msg_category=MsgCategory.NA.value,
+        )
+
+    def on_chat_turn_spoken(self) -> None:
+        """Cross-module seam (called from the MOTOR worker thread): Kira finished
+        speaking a chat turn. Advances the spoken clock. Fast-exits when disabled."""
+        if not self._telemetry.enabled:
+            return
+        self._telemetry.mark_spoken()
+
+    def attach_motor_telemetry_seams(self, motor) -> None:
+        """Introduce the motor's cross-module telemetry seams to this collector, but
+        ONLY when diagnostics are enabled — production leaves the motor's callbacks
+        None so its behavior is byte-identical. Called once by the composition root."""
+        if not self.diagnostics_enabled:
+            return
+        motor.on_chat_item_expired = self.on_chat_item_expired
+        motor.on_chat_turn_spoken = self.on_chat_turn_spoken
+
     def _check_busy(self) -> bool:
         if self._busy_callback:
             try:

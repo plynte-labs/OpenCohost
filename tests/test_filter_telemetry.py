@@ -168,3 +168,101 @@ def test_rollup_accept_ratio_and_by_stage():
     roll = tel.rollup()
     assert roll["accept_ratio"] == 0.5
     assert roll["by_stage"]["quality_gate"] == {"accepted": 1, "rejected": 1}
+
+
+# ── Thread safety (cross-module seams call record()/mark_spoken from a 2nd thread) ─
+
+def test_concurrent_record_and_mark_spoken_is_lossless():
+    """The cross-module QUEUE_TTL seam and spoken clock fire from the MOTOR worker
+    thread while the in-aggregator seams record from the chat-source thread. Without
+    a guard, the counter read-modify-writes lose increments. This drives both entry
+    points from many threads at once and asserts every increment survived.
+    """
+    import sys
+    import threading
+
+    tel = FilterTelemetry(enabled=True, ring=200_000)
+    n_threads, per = 8, 3_000
+    barrier = threading.Barrier(n_threads)
+
+    def worker():
+        barrier.wait()  # maximise simultaneity so a missing lock reliably loses counts
+        for _ in range(per):
+            tel.record(
+                stage=FilterStage.QUEUE_TTL.value, accepted=False,
+                reason=ReasonCode.TTL_EXPIRED.value, score=1.0, threshold=30.0,
+                msg_len=0, chat_rate=0.0, msg_category=MsgCategory.NA.value,
+            )
+            tel.mark_spoken()
+
+    # Force the interpreter to switch threads very frequently so a switch lands
+    # mid read-modify-write — without a guard the counters reliably lose updates.
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+
+    roll = tel.rollup()
+    expected = n_threads * per
+    assert roll["total"] == expected
+    assert roll["rejected"] == expected
+    assert roll["counts"]["queue_ttl:ttl_expired"] == expected
+
+
+def test_rollup_snapshot_is_consistent_during_concurrent_writes():
+    """The operator reads rollup() from the UI thread WHILE the motor and chat-source
+    threads write. Without the lock the three counters are read at separate bytecodes,
+    so a switch mid-read yields a torn snapshot where accepted + rejected != total.
+    Drive a reader against live writers and assert the snapshot invariant always holds
+    (and that no 'mutated during iteration' error escapes).
+    """
+    import sys
+    import threading
+
+    tel = FilterTelemetry(enabled=True, ring=100_000)  # large so the ring never fills
+    violations: list = []
+    stop = threading.Event()
+
+    def writer(accept: bool):
+        while not stop.is_set():
+            tel.record(
+                stage=FilterStage.QUALITY_GATE.value, accepted=accept,
+                reason=ReasonCode.ACCEPTED.value if accept else ReasonCode.QUALITY_TOO_LOW.value,
+                score=0.5, threshold=0.5, msg_len=10, chat_rate=1.0,
+            )
+            tel.mark_spoken()
+
+    def reader():
+        try:
+            for _ in range(5_000):
+                roll = tel.rollup()
+                if roll["accepted"] + roll["rejected"] != roll["total"]:
+                    violations.append((roll["accepted"], roll["rejected"], roll["total"]))
+                tel.recent()
+        except Exception as e:  # 'dict/deque changed size during iteration' would land here
+            violations.append(repr(e))
+        finally:
+            stop.set()
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        writers = [threading.Thread(target=writer, args=(i % 2 == 0,)) for i in range(4)]
+        rdr = threading.Thread(target=reader)
+        for t in writers:
+            t.start()
+        rdr.start()
+        rdr.join()
+        stop.set()
+        for t in writers:
+            t.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+
+    assert violations == [], f"rollup() returned a torn/inconsistent snapshot: {violations[:5]}"
