@@ -2676,30 +2676,34 @@ class VocalAIApp(ctk.CTk):
                 self._avatar_bridge.set_state(AvatarState.SLEEPING)
                 self._log_accion("Kira se durmió por inactividad")
 
-    def _on_joyita_to_obs(self, text: str) -> None:
-        """Send the joyita message to an OBS Text source named 'KiraJoyita'.
+    # ------------------------------------------------------------------
+    # OBS lifecycle delegates — bodies live in opencohost/ui/obs_lifecycle.py
+    # (ui_rendering_optimization_20260609 Phase 6 Stage 1 extraction).
+    # Keep these thin delegates so object.__new__ fixtures and on_closing/
+    # _build_ui callers keep resolving the same method names unchanged.
+    # ------------------------------------------------------------------
 
-        Clears it after 120 seconds unless a new joyita arrives sooner.
-        """
-        if not text:
-            return
-        obs = getattr(self, "_obs_client", None)
-        if not obs or not obs.is_connected:
-            return
-        source_name = "KiraJoyita"
-        if obs.set_obs_text(source_name, text):
-            if self._joyita_obs_timer_id is not None:
-                try:
-                    self.after_cancel(self._joyita_obs_timer_id)
-                except Exception:
-                    pass
-            self._joyita_obs_timer_id = self.after(120_000, lambda: self._clear_obs_joyita(source_name))
+    def _on_joyita_to_obs(self, text: str) -> None:
+        """Delegate → obs_lifecycle.on_joyita_to_obs."""
+        from opencohost.ui.obs_lifecycle import on_joyita_to_obs
+        on_joyita_to_obs(
+            text=text,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            get_joyita_timer_id=lambda: getattr(self, "_joyita_obs_timer_id", None),
+            set_joyita_timer_id=lambda v: setattr(self, "_joyita_obs_timer_id", v),
+            after=self.after,
+            after_cancel=self.after_cancel,
+            clear_obs_joyita=self._clear_obs_joyita,
+        )
 
     def _clear_obs_joyita(self, source_name: str) -> None:
-        self._joyita_obs_timer_id = None
-        obs = getattr(self, "_obs_client", None)
-        if obs and obs.is_connected:
-            obs.set_obs_text(source_name, "")
+        """Delegate → obs_lifecycle.clear_obs_joyita."""
+        from opencohost.ui.obs_lifecycle import clear_obs_joyita
+        clear_obs_joyita(
+            source_name=source_name,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_joyita_timer_id=lambda v: setattr(self, "_joyita_obs_timer_id", v),
+        )
 
     def _init_obs_client(self) -> None:
         """Initialize OBS WebSocket client if enabled in config."""
@@ -2710,72 +2714,41 @@ class VocalAIApp(ctk.CTk):
         self._obs_start_from_config()
 
     def _obs_start_from_config(self, retry_delay: float = 5) -> bool:
-        """Create/refresh OBS runtime client and start one cancellable retry loop."""
-        from opencohost.avatar.avatar_config import load_avatar_config
-        avatar_cfg = load_avatar_config()
+        """Delegate → obs_lifecycle.start_from_config.
 
-        if not avatar_cfg.obs.enabled:
-            self._obs_stop_runtime()
-            return False
-
-        existing_thread = getattr(self, "_obs_retry_thread", None)
-        if (
-            getattr(self, "_obs_client", None) is not None
-            and existing_thread is not None
-            and existing_thread.is_alive()
-        ):
-            return True
-
-        existing_client = getattr(self, "_obs_client", None)
-        if existing_client is not None and getattr(existing_client, "is_connected", False):
-            try:
-                self._avatar_panel.set_obs_client(existing_client)
-            except Exception:
-                pass
-            return True
-
-        try:
-            self._obs_client = OBSClient(
-                config=OBSConfig(
-                    enabled=avatar_cfg.obs.enabled,
-                    host=avatar_cfg.obs.host,
-                    port=avatar_cfg.obs.port,
-                    password=avatar_cfg.obs.password,
-                    source_name=avatar_cfg.obs.source_name,
-                    scene_name=avatar_cfg.obs.scene_name,
-                ),
-                assets_folder=avatar_cfg.assets_folder,
-                state_images=avatar_cfg.state_images,
-                on_log=lambda msg: self._print_log(msg),
-            )
-            self._obs_retry_cancel = threading.Event()
-            self._obs_retry_thread = threading.Thread(
-                target=self._connect_obs_loop,
-                args=(self._obs_retry_cancel, self._obs_client, retry_delay),
-                daemon=True,
-            )
-            self._obs_retry_thread.start()
-            return True
-        except Exception as e:
-            self._print_log(f"[OBS] Failed to initialize: {e}")
-            return False
+        obs_client_cls and thread_cls are forwarded from the app_shell module
+        namespace so that existing tests that patch app_shell.OBSClient /
+        app_shell.threading.Thread keep working unchanged.
+        """
+        from opencohost.ui.obs_lifecycle import start_from_config
+        return start_from_config(
+            print_log=self._print_log,
+            schedule_ui_update=self._safe_after,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            avatar_bridge=getattr(self, "_avatar_bridge", None),
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_obs_client=lambda c: setattr(self, "_obs_client", c),
+            get_retry_thread=lambda: getattr(self, "_obs_retry_thread", None),
+            set_retry_thread=lambda t: setattr(self, "_obs_retry_thread", t),
+            get_retry_cancel=lambda: getattr(self, "_obs_retry_cancel", None),
+            set_retry_cancel=lambda e: setattr(self, "_obs_retry_cancel", e),
+            winfo_exists=lambda: self.winfo_exists(),
+            retry_delay=retry_delay,
+            obs_client_cls=OBSClient,
+            obs_config_cls=OBSConfig,
+            thread_cls=threading.Thread,
+        )
 
     def _obs_stop_runtime(self) -> None:
-        """Cancel OBS retry loop and disconnect the live runtime client."""
-        cancel_event = getattr(self, "_obs_retry_cancel", None)
-        if cancel_event is not None:
-            cancel_event.set()
-        obs_client = getattr(self, "_obs_client", None)
-        if obs_client is not None:
-            try:
-                obs_client.disconnect()
-            except Exception:
-                logger.exception("Fallo al desconectar OBS")
-        self._obs_client = None
-        try:
-            self._avatar_panel.set_obs_client(None)
-        except Exception:
-            pass
+        """Delegate → obs_lifecycle.stop_runtime."""
+        from opencohost.ui.obs_lifecycle import stop_runtime
+        stop_runtime(
+            print_log=self._print_log,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_obs_client=lambda c: setattr(self, "_obs_client", c),
+            get_retry_cancel=lambda: getattr(self, "_obs_retry_cancel", None),
+        )
 
     def _connect_obs_loop(
         self,
@@ -2783,48 +2756,19 @@ class VocalAIApp(ctk.CTk):
         obs_client: OBSClient | None = None,
         retry_delay: float = 5,
     ) -> None:
-        """Retry OBS connection without letting unexpected socket errors kill the thread."""
-        logged_once = False
-        managed_loop = cancel_event is not None
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            try:
-                active_client = obs_client if obs_client is not None else self._obs_client
-                if active_client is None or active_client is not getattr(self, "_obs_client", None):
-                    break
-                if active_client.connect(log_failures=not logged_once):
-                    if cancel_event is not None and cancel_event.is_set():
-                        break
-                    if active_client is not getattr(self, "_obs_client", None):
-                        break
-                    active_client.subscribe_bridge(self._avatar_bridge)
-                    active_client.on_state_change(self._avatar_bridge.get_state())
-                    try:
-                        if self.winfo_exists():
-                            self._safe_after(lambda: self._avatar_panel.set_obs_client(active_client))
-                    except Exception:
-                        pass
-                    return
-                if not logged_once:
-                    self._print_log(
-                        "[OBS] No se pudo conectar. OpenCohost reintentara cada 5s. "
-                        "Abrí OBS y la conexión se restablecerá automáticamente."
-                    )
-                    logged_once = True
-            except Exception:
-                logger.exception("Fallo inesperado en loop de OBS")
-                if not logged_once:
-                    self._print_log(
-                        "[OBS] Error inesperado conectando. OpenCohost seguira reintentando cada 5s."
-                    )
-                    logged_once = True
-            if managed_loop:
-                if cancel_event is not None and cancel_event.wait(retry_delay):
-                    break
-            else:
-                time.sleep(retry_delay)
-        # Client was destroyed (app closing)
+        """Delegate → obs_lifecycle.connect_obs_loop."""
+        from opencohost.ui.obs_lifecycle import connect_obs_loop
+        connect_obs_loop(
+            cancel_event=cancel_event,
+            obs_client=obs_client,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            print_log=self._print_log,
+            schedule_ui_update=self._safe_after,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            avatar_bridge=getattr(self, "_avatar_bridge", None),
+            winfo_exists=lambda: self.winfo_exists(),
+            retry_delay=retry_delay,
+        )
 
     def _on_motor_model_changed(self) -> None:
         model = self.motor_ia.current_model
