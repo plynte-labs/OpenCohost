@@ -3,6 +3,10 @@ logs/
 Grabaciones/
 __pycache__/
 legacy/
+# Exception: the OpenCohost RF4 preservation module is intentionally tracked
+# (Phase 6 Stage 2a — revivable parked surface). Re-include the dir + contents.
+!opencohost/ui/legacy/
+!opencohost/ui/legacy/**
 modelos_f5/
 temp/
 test/
