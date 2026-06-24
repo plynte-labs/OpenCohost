@@ -225,11 +225,13 @@ class TestAppShellStructure:
         # design's 35-line estimate due to keyword-arg wiring for injected callables
         # and factory overrides (obs_client_cls, obs_config_cls, thread_cls) needed
         # to keep existing patches in test_app_shell_obs_resilience.py green.
-        # Cap < 3175 design target deferred to Stage 2/3 (stream-admin delete or
-        # motor-event extraction). NEVER raise this cap.
-        # Margin set to ~16 lines (3224 actual) so a one-line follow-up does not
-        # flap a structural guard (blind-judge review, 2026-06-24).
-        assert len(lines) < 3240, f"app_shell.py has {len(lines)} lines, expected < 3240"
+        # Lowered 3230 -> 2820 (2026-06-24): ui_rendering_optimization_20260609 Phase 6
+        # Stage 2a — moved RF4-dead stream-admin shell methods (~435 LOC) to
+        # opencohost/ui/legacy/stream_admin_shell_legacy.py; gutted
+        # _wire_stream_admin_callbacks to 4 RF3 wires; removed AdminManager import,
+        # _stream_admin_manual_disconnect field, _init_stream_admin() call, and
+        # on_closing RF4 teardown block. Actual: 2789 lines. NEVER raise this cap.
+        assert len(lines) < 2820, f"app_shell.py has {len(lines)} lines, expected < 2820"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell
