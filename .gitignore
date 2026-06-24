@@ -20,6 +20,7 @@ config/last_model.json
 config/llm_tiers.json
 config/tts_local_only.json
 config/tts_speed.json
+config/avatar.yaml
 # Stale pre-restructure leftovers; runtime never writes here anymore
 opencohost/config/ptt_settings.json
 opencohost/config/window_geometry.json
