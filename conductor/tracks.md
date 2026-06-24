@@ -453,6 +453,41 @@ PREFERENCE (owner runs `monologue`), not a defect.
   regenerate; recovery speech must stay IN-CHARACTER (machine-meta like "problemas de duplicación" violates Akira's
   own rules). Biggest lever = model choice (do NOT ship gemma4:e2b for cohost). Open owner decisions: acknowledge-vs-
   cover, retry count. Future scope: kira_agenda_controller.py guardrail gate + llm_engine.py output transformer.*
+  *Status 2026-06-23: CHAT-PATH SLICE IMPLEMENTED (strict-TDD, NOT committed) — see
+  `conductor/chat_repetition_guard_20260623.md` + `rf3_run_analysis_20260623.md` + engram #2445. A real RF3 run
+  proved llama3 ALSO collapses (cross-model, refutes "just pick a better model"), and that NO similarity guardrail
+  even runs on `source=="chat"` (the agenda detector is gated to `kira-agenda`). Shipped: FIX1 sampling brake
+  (repeat/presence/frequency penalties, gated to chat-reactive) + FIX2 reactive structural guard
+  (`opencohost/core/repetition_guard.py`, threshold-free skeleton-equality detector that catches synonym-swap
+  templates the agenda 0.78 token-overlap misses) → reuses `_guardrail_fallback_line`, returns before commit.
+  619 tests green, isolation pinned. D3 = fallback-first (regenerate deferred).*
+  *Status 2026-06-23: PARTIAL runtime validation (see `chat_repetition_guard_20260623.md`). The main loop did NOT
+  recur (guard fired 2× on llama3 in ~56 min, gemma4:e4b 0×; all 6 guardrail trips spoke a fallback, never silent).
+  NOT a full RF3 sign-off — the run had model switches, profile change, direct pokes, and the chat filter forced to
+  0.1. Honest framing: "repetition loop fixed for chat-reactive path; runtime smoke passed; full RF3 readiness still
+  pending." Clean 45–60min single-model RF3 run (no direct pokes) still owed. Scope is "chat-reactive" not "RF3-only".*
+
+- [ ] **Track: Event Taxonomy / Source Disambiguation (structural debt)**
+  *Link: [./tracks/event_taxonomy_source_disambiguation_20260623/](./tracks/event_taxonomy_source_disambiguation_20260623/)*
+  *Status 2026-06-23: PROPOSAL — opened, NOT started (owner: after repetition-fix runtime validation). Surfaced by
+  the chat-reactive repetition fix + external review. `source=="chat"` is overloaded — emitted by RF3 viewer-chat
+  (`smart_aggregator_ui.py:435,457`), agenda HANDLE_CHAT (`kira_agenda_controller.py:1165`), AND the default param of
+  `enqueue`/`replace_pending`/`enqueue_accumulation` (`llm_engine.py:364,383,506`). The footgun: any future caller that
+  forgets `source` silently inherits chat behavior. Goal: replace flat `source` with explicit `origin/intent/mode/audience`
+  metadata + kill the silent `source="chat"` default. Frozen by
+  `tests/test_chat_repetition_guard.py::test_default_enqueue_is_chat_documented`. Effort M–L.
+  MINOR NOTE (not urgent): the `source=="direct"` path is NOT covered by the chat-reactive repetition guard and can
+  still mini-template ("El rey de la X está en acción" 2× in the 2026-06-23 runtime). Fold a `direct_repetition_guard`
+  into this track (or a sibling) only after the chat fix is fully validated — do NOT widen the guard scope now.*
+
+- [ ] **Track: Chat Activation Filter (`should_call_llm`) — Personalization for High-Traffic Chats**
+  *Status 2026-06-23: PROPOSAL — opened, NOT started. THE next real priority after the repetition fix (external review
+  verdict). In the 2026-06-23 runtime with a ~2k-viewer chat, the `should_call_llm` gate let through so few messages
+  that the owner had to force the threshold to `0.1` to make Kira activate ~every 30s. The long idle gaps in that run
+  were "input starvation" from this filter, NOT guardrail silence — Kira isn't stuck, she's under-fed. Goal: make the
+  activation filter personalizable / traffic-adaptive (sensitivity, cadence target, burst handling) instead of a fixed
+  threshold. Do NOT discard the filter — tune it. Related: `viewer_queue_backpressure_20260613` (the consume side).
+  Effort M.*
 
 - [ ] **Track: Editorial Matcher Recall — Stemming/Lemmatization + Single-Use Lock Review**
   *Status 2026-06-21: PROPOSAL — from the stress test. Match PRECISION is perfect (0/18 false matches) but RECALL has
