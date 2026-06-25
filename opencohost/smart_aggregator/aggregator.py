@@ -12,8 +12,8 @@ from .activity_trigger import ActivityTrigger
 from .intent_aggregator import IntentAggregator
 from .filter_policy import get_preset, list_presets
 from .diagnostics import FilterDiagnostics
+from .filter_telemetry import FilterTelemetry, FilterStage, ReasonCode, MsgCategory
 from .chat_input_contract import (
-    INPUT_CONTRACT_SHADOW_MODE,
     ChatContextPacketBuilder,
     ChatEventDetector,
 )
@@ -50,7 +50,10 @@ class Aggregator:
         )
         self.activity = ActivityTrigger(
             self.config.get("activity", {}),
-            callbacks={"on_trigger": self._on_activity_trigger}
+            callbacks={
+                "on_trigger": self._on_activity_trigger,
+                "on_decision": self._on_activity_decision,
+            }
         )
         self.intent_aggregator = IntentAggregator(self.config.get("intent", {}))
         self._source = None
@@ -71,6 +74,11 @@ class Aggregator:
         self._session_id: Optional[int] = None
         self._busy_callback: Optional[Callable[[], bool]] = None
         self._diagnostics = FilterDiagnostics()
+        _diag_cfg = self.config.get("chat_activation_diagnostics", {}) or {}
+        self._telemetry = FilterTelemetry(
+            enabled=bool(_diag_cfg.get("enabled", False)),
+            ring=int(_diag_cfg.get("ring_size", 512)),
+        )
         self._filter_policy_name: str = "balanced"
         self._load_spam_config()
         self._load_live_safety_config()
@@ -118,11 +126,88 @@ class Aggregator:
         return self._filter_policy_name
 
     def get_diagnostics(self) -> dict:
-        return self._diagnostics.get_diagnostics()
+        diag = self._diagnostics.get_diagnostics()
+        if self._telemetry.enabled:
+            diag = {**diag, "activation_telemetry": self._telemetry.rollup()}
+        return diag
 
     def reset_diagnostics(self) -> None:
         self._diagnostics.reset_diagnostics()
-    
+
+    def _emit_decision(self, *, stage: str, accepted: bool, reason: str,
+                       score=None, threshold=None, text: str = "", rate=None,
+                       msg_category=None, batch_count=None) -> None:
+        """Record a filter decision as METADATA ONLY. Fast-exits when disabled, so
+        behavior is identical and the hot path pays only a bool check. ``text`` is
+        used solely for its length — it is never stored."""
+        if not self._telemetry.enabled:
+            return
+        if rate is None:
+            rate = max(self.activity.get_current_rate(), self._raw_seen_rate())
+        self._telemetry.record(
+            stage=stage, accepted=accepted, reason=reason, score=score, threshold=threshold,
+            msg_len=len(text) if text else 0, chat_rate=float(rate),
+            msg_category=msg_category, batch_count=batch_count,
+        )
+
+    def _on_activity_decision(self, data: dict) -> None:
+        """Activity-trigger decision callback (fired/cooldown-suppressed/rate-below)."""
+        if not self._telemetry.enabled:
+            return
+        reason = data.get("reason", ReasonCode.UNKNOWN.value)
+        self._telemetry.record(
+            stage=FilterStage.ACTIVITY_TRIGGER.value,
+            accepted=(reason == ReasonCode.TRIGGER_FIRED.value),
+            reason=reason, score=data.get("rate"), threshold=data.get("threshold"),
+            msg_len=0, msg_category=MsgCategory.NA.value,
+            chat_rate=float(data.get("rate", 0.0)),
+        )
+
+    @property
+    def diagnostics_enabled(self) -> bool:
+        """True when chat-activation telemetry is collecting. app_shell reads this to
+        decide whether to wire the motor's cross-module seams — so in production
+        (False) the callbacks are never even attached."""
+        return bool(self._telemetry.enabled)
+
+    def on_chat_item_expired(self, info: dict) -> None:
+        """Cross-module seam (called from the MOTOR worker thread): a ``source ==
+        "chat"`` item expired in the motor's priority queue (TTL). RECORD-ONLY — it
+        never changes item lifetime. Fast-exits when disabled.
+
+        ``chat_rate`` is intentionally 0.0: reading the live rate here would touch the
+        activity window from the wrong thread, and the TTL signal is age-vs-ttl, not
+        rate. Age is carried in ``score`` and the TTL limit in ``threshold``."""
+        if not self._telemetry.enabled:
+            return
+        ttl = info.get("ttl_sec")
+        self._telemetry.record(
+            stage=FilterStage.QUEUE_TTL.value,
+            accepted=False,
+            reason=ReasonCode.TTL_EXPIRED.value,
+            score=float(info.get("age_sec", 0.0)),
+            threshold=float(ttl) if ttl is not None else None,
+            msg_len=0,
+            chat_rate=0.0,
+            msg_category=MsgCategory.NA.value,
+        )
+
+    def on_chat_turn_spoken(self) -> None:
+        """Cross-module seam (called from the MOTOR worker thread): Kira finished
+        speaking a chat turn. Advances the spoken clock. Fast-exits when disabled."""
+        if not self._telemetry.enabled:
+            return
+        self._telemetry.mark_spoken()
+
+    def attach_motor_telemetry_seams(self, motor) -> None:
+        """Introduce the motor's cross-module telemetry seams to this collector, but
+        ONLY when diagnostics are enabled — production leaves the motor's callbacks
+        None so its behavior is byte-identical. Called once by the composition root."""
+        if not self.diagnostics_enabled:
+            return
+        motor.on_chat_item_expired = self.on_chat_item_expired
+        motor.on_chat_turn_spoken = self.on_chat_turn_spoken
+
     def _check_busy(self) -> bool:
         if self._busy_callback:
             try:
@@ -195,16 +280,29 @@ class Aggregator:
             if quality < min_quality:
                 accepted = False
                 self._diagnostics.record_rejected("quality_too_low")
+                self._emit_decision(stage=FilterStage.QUALITY_GATE.value, accepted=False,
+                                    reason=ReasonCode.QUALITY_TOO_LOW.value, score=quality,
+                                    threshold=min_quality, text=filtered.get("text", ""))
             else:
+                whitelisted = "quality" not in filtered  # whitelist bypass returns no quality key
                 filtered = self._apply_spam_filter(filtered)
                 accepted = filtered is not None
                 if accepted:
                     self._diagnostics.record_accepted()
+                    self._emit_decision(
+                        stage=FilterStage.QUALITY_GATE.value, accepted=True,
+                        reason=ReasonCode.WHITELISTED.value if whitelisted else ReasonCode.ACCEPTED.value,
+                        score=filtered.get("quality"), threshold=min_quality,
+                        text=filtered.get("text", ""))
                 else:
                     self._diagnostics.record_rejected("spam")
+                    self._emit_decision(stage=FilterStage.QUALITY_GATE.value, accepted=False,
+                                        reason=ReasonCode.SPAM.value, text=message.get("text", ""))
         else:
             reason = self.msg_filter.last_rejection_reason or "unknown"
             self._diagnostics.record_rejected(reason)
+            self._emit_decision(stage=FilterStage.MESSAGE_FILTER.value, accepted=False,
+                                reason=reason, text=message.get("text", ""))
         
         if accepted and self.on_filtered_message:
             try:
@@ -216,7 +314,13 @@ class Aggregator:
         vibe_temp = 50.0
         if accepted:
             current_rate = max(self.activity.get_current_rate(), self._raw_seen_rate())
-            if self._should_sample_for_context(current_rate):
+            sampled = self._should_sample_for_context(current_rate)
+            self._emit_decision(
+                stage=FilterStage.CONTEXT_SAMPLING.value, accepted=sampled,
+                reason=ReasonCode.SAMPLED_IN.value if sampled else ReasonCode.SAMPLED_OUT.value,
+                score=current_rate, threshold=float(self._live_safety_sample_every),
+                text=filtered.get("text", ""), rate=current_rate)
+            if sampled:
                 self.intent_aggregator.add_message(filtered)
 
             if self._should_consider_vibe(current_rate):
@@ -261,13 +365,22 @@ class Aggregator:
                         "intent_summary": intent_summary,
                     })
 
-                # ── Shadow mode: Input Contract logging ─────────────────
-                if INPUT_CONTRACT_SHADOW_MODE:
+                # ── should_call telemetry (metadata-only; replaces the removed
+                #    privacy-unsafe shadow log). Reads ONLY packet metadata —
+                #    never to_dict()/to_prompt_context() (those carry author+text).
+                if self._telemetry.enabled:
                     try:
-                        builder = ChatContextPacketBuilder()
-                        packet = builder.build(context)
-                        old = intent_summary.get("prompt", "")
-                        self._log_input_contract_shadow(old, packet)
+                        packet = ChatContextPacketBuilder().build(context)
+                        self._telemetry.record(
+                            stage=FilterStage.SHOULD_CALL.value,
+                            accepted=packet.should_call_llm,
+                            reason=(ReasonCode.SHOULD_CALL_TRUE.value if packet.should_call_llm
+                                    else ReasonCode.SHOULD_CALL_FALSE.value),
+                            score=packet.confidence, threshold=None, msg_len=0,
+                            msg_category=MsgCategory.NA.value,
+                            chat_rate=float(data.get("rate", 0.0)),
+                            batch_count=packet.total_messages,
+                        )
                     except Exception:
                         pass
 
@@ -362,23 +475,6 @@ class Aggregator:
                 self.on_live_safety_log(message)
             except Exception:
                 pass
-
-    def _log_input_contract_shadow(self, old_compact: str, packet: "ChatContextPacket") -> None:
-        """Shadow log: compare old compact_chat vs new ChatContextPacket."""
-        import json
-        try:
-            packet_dict = packet.to_dict()
-            # Compact the packet for readable single-line logging
-            packet_json = json.dumps(packet_dict, ensure_ascii=False, default=str)
-            msg = (
-                f"[InputContract Shadow] "
-                f"old_compact={old_compact[:120]!r} | "
-                f"packet={packet_json}"
-            )
-            if self.on_live_safety_log:
-                self.on_live_safety_log(msg)
-        except Exception:
-            pass
 
     def _load_spam_config(self):
         spam_cfg = self.config.get("spam", {})

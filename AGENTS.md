@@ -32,6 +32,19 @@
 - Existing OpenCohost-specific skill remains available and should not be overwritten:
 - `vocalai-ui-ux-architect`
 
+## OpenCohost Engineering Skills
+
+Project-specific skills distilled from the chat-activation telemetry work (ADR-017..019).
+Read the matching `SKILL.md` before the corresponding task:
+
+- `measure-first-telemetry-seam` — add metadata-only, opt-in telemetry seams across module
+  boundaries without changing production behavior. Trigger: telemetry, diagnostics,
+  cross-module seam, measure-first.
+- `precommit-dual-review` — run two blind adversarial judges against the working diff,
+  verified against HEAD, before any commit. Trigger: judgment day, dual review, validar con jueces.
+- `strict-tdd-concurrency-tests` — write reproducibly-RED concurrency tests before adding
+  locks. Trigger: race condition, thread-safety test, torn read, setswitchinterval.
+
 ## Worktree Safety
 
 - The worktree may contain user changes. Do not revert or overwrite existing changes unless explicitly requested.

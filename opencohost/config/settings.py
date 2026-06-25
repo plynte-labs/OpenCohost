@@ -36,6 +36,12 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
 LLM_MAX_TOKENS = 768
+# Chat-reactive anti-repetition sampling brake. Added ONLY to source=="chat"
+# generations (RF3 viewer chat, agenda HANDLE_CHAT, and default-enqueue chat
+# turns). Keeps direct/ptt/accumulated/kira-agenda sampling byte-identical.
+CHAT_REPEAT_PENALTY = 1.2
+CHAT_PRESENCE_PENALTY = 0.5
+CHAT_FREQUENCY_PENALTY = 0.5
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
 DEFAULT_LLM_TIERS = {
@@ -454,6 +460,59 @@ def save_tts_speed(value: float, config_file: Optional[str] = None) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({
                 "tts_speed": float(value),
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+# ── Music bed volumes (base / ducked) ───────────────────────────────────────
+MUSIC_VOLUME_FILE = os.path.join(str(USER_DATA_DIR), "config", "music_volume.json")
+MUSIC_BASE_VOLUME = 0.28
+MUSIC_DUCKED_VOLUME = 0.08
+
+
+def load_music_volumes(config_file: Optional[str] = None) -> tuple[float, float]:
+    """Load persisted (base_volume, ducked_volume) for the music bed.
+
+    Returns (MUSIC_BASE_VOLUME, MUSIC_DUCKED_VOLUME) when the file is absent,
+    unreadable, or corrupted.
+
+    Args:
+        config_file: Override path for testing. Uses MUSIC_VOLUME_FILE when None.
+    """
+    path = config_file if config_file is not None else MUSIC_VOLUME_FILE
+    try:
+        if not os.path.exists(path):
+            return MUSIC_BASE_VOLUME, MUSIC_DUCKED_VOLUME
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        base = float(data.get("base_volume", MUSIC_BASE_VOLUME))
+        ducked = float(data.get("ducked_volume", MUSIC_DUCKED_VOLUME))
+        return base, ducked
+    except Exception:
+        return MUSIC_BASE_VOLUME, MUSIC_DUCKED_VOLUME
+
+
+def save_music_volumes(
+    base_volume: float, ducked_volume: float, config_file: Optional[str] = None
+) -> None:
+    """Persist music bed volumes using an atomic temp-file + os.replace write.
+
+    Args:
+        base_volume: full music volume (0.0-1.0).
+        ducked_volume: volume while Kira speaks (0.0-1.0).
+        config_file: Override path for testing. Uses MUSIC_VOLUME_FILE when None.
+    """
+    path = config_file if config_file is not None else MUSIC_VOLUME_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "base_volume": float(base_volume),
+                "ducked_volume": float(ducked_volume),
                 "saved_at": datetime.now().isoformat(),
             }, f)
         os.replace(tmp, path)

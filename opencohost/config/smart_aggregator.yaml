@@ -49,6 +49,13 @@ activity:
       parameter: "excitement_multiplier"
       value: 1.5
 
+# Measure-first instrumentation of the chat-activation filter. Metadata-only
+# (no chat text/usernames ever logged). OFF by default — enable to diagnose why
+# Kira is under-fed at high traffic, then read get_diagnostics()["activation_telemetry"].
+chat_activation_diagnostics:
+  enabled: false
+  ring_size: 512
+
 spam:
   enabled: true
   user_window_seconds: 30

@@ -325,8 +325,13 @@ This file tracks all major tracks for the project. Each track has its own detail
   switch (profile still wins; mismatch stays allowed-but-announced). Recommends an explicit `locale`
   field on profiles over heuristics; suggest-not-auto default; next-boot restart model. See proposal.md.*
 
-- [ ] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
+- [x] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
   *Link: [./tracks/music_mode_ducking_20260618/](./tracks/music_mode_ducking_20260618/)*
+  *Status 2026-06-23: DONE (commit f242dd4). Strict-TDD inline. Bug B fixed: `_is_ducked` flag on AudioBedEngine (set
+  in duck(), cleared in unduck()) conditions audio_bed.py:228 so a channel allocated on track-change inherits the duck
+  state instead of starting at base_volume. Feature A: AudioBedPolicy.__post_init__ clamping (0<=ducked<=base<=1) +
+  load/save_music_volumes in settings.py (tts_speed JSON pattern). 11 tests + 25/25 audio-teardown regression green.
+  REMAINING (owner): app_shell one-line wiring to load persisted volumes + runtime check (change track mid-utterance).*
   *Status 2026-06-18: PROPOSAL-ONLY, from i18n runtime observation. (A) make Kira's speak-time music
   volume configurable (today hard-coded ducked_volume=0.08). (B) BUG: music not leveled on the FIRST
   interaction after a track change — root cause hypothesis: audio_bed.py:228 starts new tracks at
@@ -356,8 +361,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   lag. Cross-thread correlation via Option B (per-stage tracer singleton, no queue-payload change; valid since PTT turns are
   serialized). Safety: time only, never content; LiveVoice/PTT seams stay separate. Strict TDD (injectable clock). See proposal.md.*
 
-- [ ] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
+- [~] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
   *Link: [./tracks/i18n_engine_locale_residue_20260618/](./tracks/i18n_engine_locale_residue_20260618/)*
+  *Status 2026-06-23: EXPLORE + DESIGN DONE (see explore.md + design.md; staged, NOT implemented). 3-lens adversarial
+  review found 16 issues, all revised in. Notable catch: a BREAKING REGRESSION — test_llm_engine_timeouts.py references
+  GUARDRAIL_FALLBACK_LINES which the design removes (must be folded into the regression suite). Next: implement on approval.*
   *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
   (1) ARCHITECTURAL — the locale bundle persona is dead code: every profile carries a `prompt` so the engine never
   reaches i18n_active.system_prompt() (llm_engine.py:332); locale does NOT govern persona today. (2) Five hardcoded
@@ -385,8 +393,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   during the slow cold start. Mitigation: surface the phases the backend already logs (Iniciando→Conectando
   Ollama→Preparando modelo→Listo) + warm-up progress, via UIState/_safe_after. See proposal.md.*
 
-- [ ] **Track: Status Bars Stale / Cryptic Errors (investigate)**
+- [~] **Track: Status Bars Stale / Cryptic Errors (investigate)**
   *Link: [./tracks/status_bar_stale_state_20260617/](./tracks/status_bar_stale_state_20260617/)*
+  *Status 2026-06-23: EXPLORE + DESIGN DONE (see explore.md + design.md; staged, NOT implemented). Root cause:
+  _on_motor_switch_failed sets model_status="error" and the idle event never clears it -> stale "Sistema: error" rollup;
+  fix <10 lines / 3 UI files. 3-lens review found 14 issues, all revised in. Next: implement on approval.*
   *Status 2026-06-17: PROPOSAL (investigation-first). Some status bars never update — keep showing
   `system:error` and cryptic strings that alarm without being actionable. Investigate UIState observer
   wiring (which keys never refresh / never clear on recovery) + inventory error strings, then fix wording
@@ -442,6 +453,55 @@ PREFERENCE (owner runs `monologue`), not a defect.
   regenerate; recovery speech must stay IN-CHARACTER (machine-meta like "problemas de duplicación" violates Akira's
   own rules). Biggest lever = model choice (do NOT ship gemma4:e2b for cohost). Open owner decisions: acknowledge-vs-
   cover, retry count. Future scope: kira_agenda_controller.py guardrail gate + llm_engine.py output transformer.*
+  *Status 2026-06-23: CHAT-PATH SLICE IMPLEMENTED (strict-TDD, NOT committed) — see
+  `conductor/chat_repetition_guard_20260623.md` + `rf3_run_analysis_20260623.md` + engram #2445. A real RF3 run
+  proved llama3 ALSO collapses (cross-model, refutes "just pick a better model"), and that NO similarity guardrail
+  even runs on `source=="chat"` (the agenda detector is gated to `kira-agenda`). Shipped: FIX1 sampling brake
+  (repeat/presence/frequency penalties, gated to chat-reactive) + FIX2 reactive structural guard
+  (`opencohost/core/repetition_guard.py`, threshold-free skeleton-equality detector that catches synonym-swap
+  templates the agenda 0.78 token-overlap misses) → reuses `_guardrail_fallback_line`, returns before commit.
+  619 tests green, isolation pinned. D3 = fallback-first (regenerate deferred).*
+  *Status 2026-06-23: PARTIAL runtime validation (see `chat_repetition_guard_20260623.md`). The main loop did NOT
+  recur (guard fired 2× on llama3 in ~56 min, gemma4:e4b 0×; all 6 guardrail trips spoke a fallback, never silent).
+  NOT a full RF3 sign-off — the run had model switches, profile change, direct pokes, and the chat filter forced to
+  0.1. Honest framing: "repetition loop fixed for chat-reactive path; runtime smoke passed; full RF3 readiness still
+  pending." Clean 45–60min single-model RF3 run (no direct pokes) still owed. Scope is "chat-reactive" not "RF3-only".*
+
+- [ ] **Track: Event Taxonomy / Source Disambiguation (structural debt)**
+  *Link: [./tracks/event_taxonomy_source_disambiguation_20260623/](./tracks/event_taxonomy_source_disambiguation_20260623/)*
+  *Status 2026-06-23: PROPOSAL — opened, NOT started (owner: after repetition-fix runtime validation). Surfaced by
+  the chat-reactive repetition fix + external review. `source=="chat"` is overloaded — emitted by RF3 viewer-chat
+  (`smart_aggregator_ui.py:435,457`), agenda HANDLE_CHAT (`kira_agenda_controller.py:1165`), AND the default param of
+  `enqueue`/`replace_pending`/`enqueue_accumulation` (`llm_engine.py:364,383,506`). The footgun: any future caller that
+  forgets `source` silently inherits chat behavior. Goal: replace flat `source` with explicit `origin/intent/mode/audience`
+  metadata + kill the silent `source="chat"` default. Frozen by
+  `tests/test_chat_repetition_guard.py::test_default_enqueue_is_chat_documented`. Effort M–L.
+  MINOR NOTE (not urgent): the `source=="direct"` path is NOT covered by the chat-reactive repetition guard and can
+  still mini-template ("El rey de la X está en acción" 2× in the 2026-06-23 runtime). Fold a `direct_repetition_guard`
+  into this track (or a sibling) only after the chat fix is fully validated — do NOT widen the guard scope now.*
+
+- [ ] **Track: Chat Activation Filter (`should_call_llm`) — Personalization for High-Traffic Chats**
+  *Status 2026-06-23: PROPOSAL — opened, NOT started. THE next real priority after the repetition fix (external review
+  verdict). In the 2026-06-23 runtime with a ~2k-viewer chat, the `should_call_llm` gate let through so few messages
+  that the owner had to force the threshold to `0.1` to make Kira activate ~every 30s. The long idle gaps in that run
+  were "input starvation" from this filter, NOT guardrail silence — Kira isn't stuck, she's under-fed. Goal: make the
+  activation filter personalizable / traffic-adaptive (sensitivity, cadence target, burst handling) instead of a fixed
+  threshold. Do NOT discard the filter — tune it. Related: `viewer_queue_backpressure_20260613` (the consume side).
+  Effort M.*
+
+- [ ] **Track: Output Diversity / Macro Repetition — Session-Scale Style Collapse (NOT short-window)**
+  *Link: [./tracks/output_diversity_macro_repetition_20260624/](./tracks/output_diversity_macro_repetition_20260624/)*
+  *Status 2026-06-24: PROPOSAL — opened, NOT started. Surfaced by the 2026-06-23 evening RF3 runtime (gemma4:e2b +
+  "Comunidad", ~2h). DISTINCT layer above `Cohost Repetition Handling` (short-window) and `Chat Activation Filter`
+  (quantity). The window=4 `repetition_guard` works for its scope (fired 2× in prod, opening_ngram_repeat, both spoke
+  fallback) but cannot catch MACRO mode-collapse: >50% of ~90 responses opened with 3 stems ("Parece que la X es Y" ~19×,
+  "A veces…" ~10×, "La gente siempre…" ~8×), one detached-philosophical register/theme regardless of chat, and generic
+  content rarely referencing a concrete message. Owner hypothesis: prompt + dependencies (assembly, context richness,
+  sampling, persona, model size), NOT model alone. HARD GATE: do NOT implement — first run RF3 with
+  chat_activation_diagnostics.enabled:true, read get_diagnostics()["activation_telemetry"], then decide fix order:
+  (a) reduce context_sampling decimation, (b) richer context/compaction, (c) should_call, (d) only THEN an output-diversity
+  guard (the telemetry measures activation, not diversity — a separate metric is in-scope to design). See engram #2468,
+  #2446; ADR-017/018/019. Effort M–L.*
 
 - [ ] **Track: Editorial Matcher Recall — Stemming/Lemmatization + Single-Use Lock Review**
   *Status 2026-06-21: PROPOSAL — from the stress test. Match PRECISION is perfect (0/18 false matches) but RECALL has
@@ -552,7 +612,7 @@ PREFERENCE (owner runs `monologue`), not a defect.
   have been covered, and how recurrence is handled across the agenda + chat paths. Owner: "possibly a separate
   system like `sessions` or `recurrent_themes` — not sure yet." Parked until the concept firms up.*
 
-- [ ] **Track: Reasoning-Model Token Budget — Larger Gemma Models Return Empty Output (BUG)**
+- [x] **Track: Reasoning-Model Token Budget — Larger Gemma Models Return Empty Output (BUG)**
   *Status 2026-06-21: PROPOSAL/BUG — surfaced by the ADR-011 D4 model-scaling test. `_uses_reasoning_token_budget`
   (`opencohost/core/llm_engine.py:1295`) removes the `num_predict` cap ONLY for model names matching
   `qwen3|e2b|e4b|think`. Larger gemma reasoning models (`gemma4:12b`, `gemma:26b`) DO emit an internal `thinking`
@@ -573,6 +633,31 @@ PREFERENCE (owner runs `monologue`), not a defect.
   name heuristic), and the runtime self-heal (empty + response-thinking → uncapped retry + per-model cache) is the real net
   that doesn't depend on metadata. Owner: PROCEED via protocol. To land: (a) augment with ollama.show capabilities + cache;
   (b) empty+thinking → uncapped-retry branch; (c) thread think=False into live options; (d) a COMMITTED test (not temp/).*
+  *Status 2026-06-23: DONE (commit 18995c4). Strict-TDD inline. Layer 1 `_check_capabilities_reasoning` (ollama.show →
+  'thinking' in capabilities, defensively wrapped — augments, never depends), Layer 3 per-model cache +
+  `_resolve_reasoning_classification` (name heuristic short-circuits the RPC), Layer 2 self-heal in the retry loop (empty
+  content + thinking → pop num_predict, cache True, retry uncapped). Call site llm_engine.py:1045 now uses the resolver.
+  12 tests + 15/15 llm_tiers/heavy-model regression green. REMAINING (owner): validate against a real gemma4:12b (RUN C).*
+
+---
+
+- [~] **Track: Context-Window Overflow Guardrail — Long-Session (2h+) Live Resilience (sibling of Reasoning-Token-Budget)**
+  *Link: [./tracks/context_overflow_guardrail_20260623/](./tracks/context_overflow_guardrail_20260623/) — see `explore.md`*
+  *Status 2026-06-23: EXPLORE DONE (staged, not implemented; owner approved explore). DISTINCT failure mode from
+  Reasoning-Token-Budget: that was `num_predict` (OUTPUT budget eaten by thinking); THIS is `num_ctx` (INPUT window
+  overflow) — as a 2h+ stream accumulates context the assembled prompt exceeds num_ctx and Ollama silently truncates the
+  input → empty/degraded output mid-stream. KEY FINDING: `prompt_eval_count` is in EVERY Ollama response but never read
+  (a free, exact overflow signal). Current partial mitigation only: HISTORY_MAX_TURNS=10 deque (turn-counted, not
+  token-counted), MemoryDigest(max_chars=600), hardcoded num_ctx=4096 (popped for gemma), 2-attempt blind retry — none is
+  an enforced guardrail. RANKED options (owner priority: compact/trim first, raise num_ctx LAST): B per-model ctx discovery
+  via ollama.show → A proactive char-budget gate (evict oldest history before the call) → C reactive trim-and-retry on
+  prompt_eval_count>=0.95*ctx → E prompt_eval_count observability → D async digest upgrade → F raise num_ctx (last resort,
+  VRAM-permitting). Layers 1-3 eliminate the silent-overflow class. CRITICAL open question for design: does Ollama truncate
+  silently or return empty on overflow? (confirm in a real run). Next phase: design. Effort M.*
+  *Status 2026-06-23: DESIGN DONE (see design.md; staged, NOT implemented). Locked the layered strategy
+  (B ctx-discovery → A char-budget gate → C trim-and-retry on prompt_eval_count) with API contracts + TDD plan. 3-lens
+  adversarial review found 19 issues, all revised in. The CRITICAL open question (Ollama truncates silently vs returns
+  empty) stays FLAGGED for a real runtime run before implementation. Next: implement on approval.*
 
 - [ ] **Track: Model Qualification + Mini-Benchmark (engine)**
   *Status 2026-06-21: PROPOSAL — see **docs/adr/ADR-014**. Make ANY model selectable safely (owner: yes, anyone can

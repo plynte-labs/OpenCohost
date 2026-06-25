@@ -19,6 +19,61 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-06-23 (cohost backlog: 2 fixes shipped + 7 designs staged + Opus audit)
+
+Branch `feat/akira-voseo-fix-and-cohost-adr` (NOT merged to master). Tree clean — all work committed.
+
+### Shipped this session (committed, strict-TDD)
+- **Raw-chat prompt-injection fix** (`aa88a56`) — `kira_agenda_controller._build_prompt` wraps viewer
+  chat in read-only data delimiters + collapses `=` runs so the markers can't be forged. 8 tests +
+  blind-judge validated (all-resist).
+- **Decision 6 interim** (`3577a60`) — flipped `INPUT_CONTRACT_SHADOW_MODE=False`
+  (`chat_input_contract.py:18`): the shadow path was persisting chat-derived `old_compact`+packet to
+  `acciones.jsonl` (local gitignored log; not a git leak, a runtime privacy-rule violation). Full
+  redact/allowlist work STAGED as a track.
+- **Music-Mode Ducking** (`f242dd4`) — `_is_ducked` flag fixes the track-change duck regression
+  (`audio_bed.py:228`) + `AudioBedPolicy.__post_init__` clamping + `load/save_music_volumes`. 11 tests.
+  REMAINING (owner): app_shell 1-line wiring to load persisted volumes + runtime ear-check.
+- **Reasoning-Token-Budget / think=False** (`18995c4`) — capabilities-augment
+  (`_check_capabilities_reasoning` via `ollama.show`, defensive — augments, never depends) + per-model
+  cache + self-heal (empty content + thinking → uncapped retry). 12 tests. REMAINING (owner): validate
+  vs a real `gemma4:12b` (RUN C).
+
+### Public-launch readiness (ADR-016, committed) — repo NOT made public (OWNER-RUN)
+- ADR-016 (`4af9caf`) MIT + fresh-history export. README Lite-aligned (`83e60eb`): honest TTS framing,
+  dropped RF4/heavy-TTS, fixed install path. 9 trust/onboarding docs (`24863f3`):
+  CONTRIBUTING/SECURITY/CODE_OF_CONDUCT/SUPPORT/PRIVACY/TRUST_MODEL/QUICKSTART + 2 issue templates.
+  Repo-hygiene (`eec1606`): `.agents/` → `.gitignore` + git-safety-check `.engram//Documents/` blocks.
+- Export EXCLUSION MANIFEST decided + recorded in
+  `conductor/tracks/opencohost_repo_export_20260610/plan.md` (Phase 1): keep only conductor/
+  product.md+tech-stack.md+code_styleguides; EXCLUDE `avatar.yaml` (orphan), `CLAUDE.md`/`AGENTS.md`/
+  `AGENT_HANDOFF.md`, `.agents/`, `.opencode/*`; strip pyproject `heavy-tts` extra at export.
+  CODE_OF_CONDUCT contact = `gitrafuh@gmail.com`.
+- **The export itself (create `plynte-labs/opencohost`, fresh-init, flip public) is OWNER-RUN — NOT started.**
+
+### Design pipeline — 7 tracks have explore/design artifacts (gitignored `conductor/tracks/<slug>/`), Opus-audited
+Full audit: `conductor/tracks/design_audit_20260623.md` + engram #2438. All 7 landed MINOR-GAPS
+(right architecture, precision defects). Cross-cutting theme: file:line / API / fixture DRIFT vs live source.
+- **Implement-ready NOW (2):** Profile-Language Auto-Detect; Engine Locale Residue.
+- **Need a fix-pass first (5)** — one concrete blocker each:
+  - Repo Hygiene (H3): T3 asserts a constant it removes → RED forever; missed 3rd dup `CODE_PATTERNS` at `kira_agenda_controller.py:302`.
+  - App Startup Clarity: wrong API name (`_on_ui_state_change` → real `_on_state_change`); 3-way `lbl_status` write race in warming.
+  - Status Bars Stale: Fix A snippet crashes (`_safe_after` arg order inverted); delayed-vs-immediate reset contradiction.
+  - Context-Overflow Guardrail (NEW, 2h+ live resilience): response-access contract contradicts code+tests (getattr vs `respuesta.get('message')`, tests mock plain dicts → Layers 3/4 never fire); T1-T6 ready; T7 gated on a live Ollama-overflow runtime question. KEY FINDING: `prompt_eval_count` is in every response but unused.
+  - Latency Tracing: 2 HIGH seam mislocations (DISPATCH misses motor-busy path; `finish()` wrong location); stale line numbers — reference impl on `feat/latency-tracing` likely already resolves these.
+
+### NEXT SESSION ENTRY POINT
+1. Recover via `mem_context` (engram #2438 audit, #2431 designs, #2425 impls, #2415 ADR-016 arc). Read `conductor/tracks/design_audit_20260623.md`.
+2. **Fix-pass the 5 not-ready designs** (correct the coordinate/contract drift per the Opus audit — doc edits to the gitignored `design.md` files).
+3. Then **implement strict-TDD** (like Music/Reasoning): the 2 ready + the fixed ones, one batch at a time, on owner approval.
+4. Owner runtime validations still owed: RUN B (latency tracer live) + RUN C (heavy-model) from prior sessions; Music duck mid-utterance + app_shell volume wiring; Reasoning vs `gemma4:12b`; Context-Overflow "does Ollama truncate silently or return empty?".
+
+### Infra notes (this session)
+- **Fable 5 is UNAVAILABLE** — substituted sonnet per the no-access rule (the audit used Opus, the session model).
+- Workflow sub-agent spawning hit transient API 500s twice; **INLINE implementation (main loop) was the reliable recovery.** After a partial-edit 500, revert to tag `backup/pre-explore-design-20260623` + remove untracked partial test files so the strict-TDD RED phase is genuine.
+
+---
+
 ## LATEST SNAPSHOT — UI polish + audio-teardown MERGED to master (2026-06-15)
 
 **`feat/ui-polish-freeze-declutter-20260614` MERGED to `master` via PR #46 (commit

@@ -21,6 +21,7 @@ from opencohost.config.settings import (
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
     TTS_LOCAL_MODEL_PATH,
+    CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
@@ -31,6 +32,7 @@ from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
+from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger
 from opencohost.config.validation import output_guard
 
@@ -88,6 +90,7 @@ class MotorVocalIA(threading.Thread):
         self.log_queue = log_queue
         self.ui_callback = ui_callback
         self.command_queue = queue.Queue()
+        self._reasoning_model_cache: dict[str, bool] = {}
 
         self.voz_referencia = None
         self.is_ready = False
@@ -186,6 +189,15 @@ class MotorVocalIA(threading.Thread):
         self.agenda_output_transformer = None
         self.agenda_controller = None               # Phase 0: metrics access
         self.direct_editorial_context_provider = None  # set externally by app_shell
+
+        # Optional chat-activation telemetry seams (measure-first, off-by-default).
+        # app_shell sets these ONLY when chat diagnostics are enabled; in production
+        # they stay None so the guards below skip and behavior is byte-identical.
+        # They fire from THIS worker thread into the aggregator's collector, which
+        # locks its mutation path while enabled. RECORD-ONLY — neither changes queue
+        # lifetime or speech behavior. Gated strictly on source == "chat".
+        self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
+        self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
 
     @property
     def is_speaking(self):
@@ -601,6 +613,7 @@ class MotorVocalIA(threading.Thread):
         if self._processing or self._speaking:
             return
 
+        expired_chat_infos: list = []
         with self._pq_lock:
             # Expire stale non-PTT items before selecting next work
             now = time.time()
@@ -609,10 +622,25 @@ class MotorVocalIA(threading.Thread):
                 prio, ts, payload, source = item
                 if prio > 0 and (now - ts) > self._pq_ttl_seconds:
                     self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
+                    # Measure-first telemetry seam: record (never alter) chat expiries.
+                    # Captured here, emitted below OUTSIDE _pq_lock.
+                    if source == "chat":
+                        expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
                 else:
                     kept.append(item)
             self._priority_queue = kept
 
+        # Emit expiry telemetry OUTSIDE _pq_lock so the queue lock is never held across
+        # the aggregator collector's lock (the two locks stay order-independent). No-op
+        # unless wired (diagnostics enabled); a failing callback never disturbs the queue.
+        if expired_chat_infos and self.on_chat_item_expired is not None:
+            for info in expired_chat_infos:
+                try:
+                    self.on_chat_item_expired(info)
+                except Exception:
+                    pass
+
+        with self._pq_lock:
             if not self._priority_queue:
                 # No priority items — check accumulation buffer
                 accumulated = self._flush_accumulation()
@@ -1042,9 +1070,19 @@ class MotorVocalIA(threading.Thread):
                 opciones_llm.pop('num_ctx', None)
                 opciones_llm['temperature'] = 0.7
 
-            if self._uses_reasoning_token_budget(request_model):
+            if self._resolve_reasoning_classification(request_model):
                 opciones_llm.pop('num_predict', None)
                 self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
+
+            # FIX 1 — chat-reactive anti-repetition sampling brake. Gated to
+            # source=="chat" (RF3 viewer chat, agenda HANDLE_CHAT, default-enqueue
+            # chat); NEVER applied to direct/ptt/accumulated/kira-agenda. Only ADDS
+            # keys, so non-chat options stay byte-identical. See the event_taxonomy
+            # track for the source-disambiguation follow-up.
+            if source == "chat":
+                opciones_llm["repeat_penalty"] = CHAT_REPEAT_PENALTY
+                opciones_llm["presence_penalty"] = CHAT_PRESENCE_PENALTY
+                opciones_llm["frequency_penalty"] = CHAT_FREQUENCY_PENALTY
 
             start_llm = time.time()
             max_intentos = 2
@@ -1103,6 +1141,19 @@ class MotorVocalIA(threading.Thread):
                 if thinking:
                     logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
 
+                # Layer 2 self-heal: empty visible content + internal thinking means a
+                # reasoning model spent its budget thinking and hit the num_predict cap.
+                # Drop the cap, remember the classification, and retry uncapped.
+                if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
+                    opciones_llm.pop('num_predict', None)
+                    self._reasoning_model_cache[request_model] = True
+                    self._log(
+                        f"Auto-corrección: {request_model} devolvió contenido vacío con "
+                        f"pensamiento interno; removiendo límite de tokens y reintentando.",
+                        level="warning",
+                    )
+                    continue
+
                 if raw_content.strip():
                     break
                 
@@ -1152,6 +1203,26 @@ class MotorVocalIA(threading.Thread):
                 return ""
 
             self._last_llm_failure = None
+
+            # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
+            # brake let through (verbatim dups + synonym-swap templates) BEFORE it
+            # reaches TTS or gets committed into the history window that feeds the
+            # next prompt. Reuses the proven neutral-fallback seam. Gated to
+            # source=="chat" so agenda/direct/ptt/LiveVoice paths are untouched.
+            if source == "chat":
+                recent_outputs = [
+                    m.get("content", "")
+                    for m in history_snapshot
+                    if isinstance(m, dict) and m.get("role") == "assistant"
+                ][-REPETITION_CONFIG.window:]
+                repetition = detect_repetition(dialogo, recent_outputs)
+                if repetition.is_repetitive:
+                    self._log(
+                        f"Repetición de chat bloqueada ({repetition.reason}); "
+                        f"usando línea neutral sin LLM.",
+                        level="warning",
+                    )
+                    return self._guardrail_fallback_line(source) or ""
 
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
@@ -1285,6 +1356,38 @@ class MotorVocalIA(threading.Thread):
         """
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
+
+    def _check_capabilities_reasoning(self, model: str) -> bool:
+        """Layer 1: ask Ollama whether ``model`` advertises a 'thinking' capability.
+
+        Augments (does not replace) the name heuristic so reasoning models whose
+        name lacks a known marker (e.g. gemma4:12b) are still detected. Wrapped
+        defensively: any error, missing field, or older Ollama without the
+        capabilities field degrades to False — never a crash, never a hard
+        dependency on ollama.show.
+        """
+        try:
+            import ollama
+            info = ollama.show(model)
+            caps = info.get("capabilities") if isinstance(info, dict) else getattr(info, "capabilities", None)
+            return bool(caps) and "thinking" in caps
+        except Exception:
+            return False
+
+    def _resolve_reasoning_classification(self, model: str) -> bool:
+        """Resolve whether ``model`` should drop the num_predict cap.
+
+        Cache first (Layer 3); on miss combine the name heuristic with the Ollama
+        capabilities check (Layer 1). The name heuristic short-circuits the ``or``
+        so a known reasoning model never pays the ollama.show RPC. The resolved
+        value is cached per model name.
+        """
+        cached = self._reasoning_model_cache.get(model)
+        if cached is not None:
+            return cached
+        result = self._uses_reasoning_token_budget(model) or self._check_capabilities_reasoning(model)
+        self._reasoning_model_cache[model] = result
+        return result
 
     @staticmethod
     def _is_ollama_transport_error(exc: Exception) -> bool:
@@ -1451,6 +1554,17 @@ class MotorVocalIA(threading.Thread):
         if dialogo:
 
             self._hablar(dialogo, source=source)
+            # Measure-first telemetry seam: a chat turn actually played to completion —
+            # advance the spoken clock so secs_since_last_spoken stays honest vs a
+            # should_call that may later expire via TTL. Chat-only; no-op when unset.
+            # Intentionally NOT in a finally: if _hablar raises (TTS failure) Kira did
+            # NOT speak, so the spoken gap should keep growing — that growing gap is the
+            # very signal that surfaces silent TTS failures to the operator.
+            if source == "chat" and self.on_chat_turn_spoken is not None:
+                try:
+                    self.on_chat_turn_spoken()
+                except Exception:
+                    pass
         elif source.startswith("kira-agenda"):
             # Empty or guardrail-blocked agenda generation: _generar_dialogo
             # returned "", so _hablar never runs and no speaking_start event

@@ -2180,6 +2180,7 @@ class VocalAIApp(ctk.CTk):
         self.smart_agg.on_source_error = self.smart_agg_ui.on_source_error
         self.smart_agg.on_source_connect = self.smart_agg_ui.on_source_connect
         self.smart_agg.on_source_disconnect = self.smart_agg_ui.on_source_disconnect
+        self.smart_agg.attach_motor_telemetry_seams(self.motor_ia)  # measure-first; no-op unless enabled
 
         self.stream_admin_ui.set_smart_agg(self.smart_agg)
         self.stream_admin_ui.set_motor_ia(self.motor_ia)
