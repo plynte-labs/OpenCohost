@@ -39,4 +39,13 @@ method. FR1's contract is guarded by REAL-engine tests so no active hole, but ti
 `MagicMock(spec=MotorVocalIA)` to make renames raise AttributeError. (Not changed now: a shared
 fixture; spec-ing it may break unrelated default-stub tests — needs its own verification pass.)
 
+### Runtime finding (2026-06-25) — reasoning model hangs the interactive tier → SDD PROPOSAL
+The heavy-model runtime validation PASSED (qwen3:1.7b hung 180s on "Hola" → watchdog → rollback to
+llama3 → recovered; FR1 gate cleared). Root cause: qwen3:1.7b is a reasoning model in the `fast` tier;
+the engine uncaps `num_predict` for reasoning models (`llm_engine.py:1110-1111`) and never disables
+thinking → unbounded thinking on trivial prompts. Captured as a PROPOSAL (owner decision, not done):
+`conductor/tracks/realtime_reasoning_model_handling_20260625/proposal.md` — decisions D1 (swap
+fast/default to a non-reasoning model), D2 (disable thinking on interactive path), D3 (tier-specific
+watchdog; 180s is too long for fast/light).
+
 ### B1 (restated) — aggregator locking still open (see top section).
