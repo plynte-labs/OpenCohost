@@ -198,6 +198,7 @@ class VocalAIApp(ctk.CTk):
         self._kira_agenda_prefetched_action: AgendaAction | None = None
         self._prefetch_retry_id: str | None = None  # fix #B: non-blocking prefetch poll guard
         self._idle_ticks: int = 0
+        self._suggestion_gen: int = 0  # FR2: supersession counter for idle recompute
         self._kira_agenda_pending_compact_chat: str = ""
         self._agenda_persistence = AgendaPersistence(EDITORIAL_CARDS_DB, log_fn=self._on_stream_admin_log)
         # fix #C: load agenda off main thread to avoid sqlite blocking startup.
@@ -1014,6 +1015,42 @@ class VocalAIApp(ctk.CTk):
 
         _threading.Thread(target=_worker, daemon=True).start()
 
+    def _dispatch_suggestion_recompute(self, gen: int, existing_topics: list, last_outputs: list, session_id: str) -> None:
+        """FR2: run heavy idle-tick reads on a worker; marshal result back via _safe_after."""
+        smart_agg = self.smart_agg
+        def _worker() -> None:
+            try:
+                intent_summary = smart_agg.intent_aggregator.summarize()
+                vibe_data = smart_agg.thermometer.compute_vibe()
+                vibe_temp = vibe_data.get("temperature", 50) if isinstance(vibe_data, dict) else 50
+                snapshots = smart_agg.history.get_recent_context_snapshots(session_id, max_items=3)
+                suggestions = generate_suggestions(
+                    intent_summary=intent_summary,
+                    snapshots=snapshots,
+                    vibe_temperature=vibe_temp,
+                    existing_topics=existing_topics,
+                    last_outputs=last_outputs,
+                )
+            except Exception:
+                logger.exception("idle-suggestion recompute failed")
+                return
+            self._safe_after(lambda: self._apply_idle_suggestions(gen, suggestions))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_idle_suggestions(self, gen: int, suggestions: list) -> None:
+        """FR2: apply idle suggestions on UI thread (supersession guards: generation + agenda state)."""
+        # Post-teardown guard: a late worker can marshal here after on_closing
+        # set _closing; do not touch Tk/agenda during/after teardown.
+        if self.__dict__.get("_closing", False):
+            return
+        if gen != self._suggestion_gen:
+            return
+        if not hasattr(self, "kira_agenda") or self.kira_agenda.state != AgendaState.IDLE:
+            return
+        if suggestions:
+            self.kira_agenda.suggest_topics(suggestions)
+            self._kira_agenda_update_status()
+
     def _music_play_mood(self, mood: str) -> None:
         # FR3: dispatch the play (which includes disk decode) off the UI thread.
         # _music_update_panel() is called immediately on the main thread —
@@ -1374,24 +1411,14 @@ class VocalAIApp(ctk.CTk):
             if self._idle_ticks >= 3 and self.kira_agenda.can_suggest():
                 # Rich-context gate: skip if aggregator has no data
                 if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
-                    try:
-                        intent_summary = self.smart_agg.intent_aggregator.summarize()
-                        vibe_data = self.smart_agg.vibe_thermometer.compute_vibe()
-                        vibe_temp = vibe_data.get("temperature", 50) if isinstance(vibe_data, dict) else 50
-                        snapshots = self.smart_agg.history.get_recent_context_snapshots(
-                            self.smart_agg._session_id, max_items=3,
-                        )
-                        suggestions = generate_suggestions(
-                            intent_summary=intent_summary,
-                            snapshots=snapshots,
-                            vibe_temperature=vibe_temp,
-                            existing_topics=self.kira_agenda.topics,
-                            last_outputs=self.kira_agenda.last_outputs,
-                        )
-                        if suggestions:
-                            self.kira_agenda.suggest_topics(suggestions)
-                    except Exception:
-                        pass  # Swallow to avoid breaking the tick loop
+                    # FR2: snapshot mutable agenda state on main thread, then dispatch
+                    # heavy reads (summarize/compute_vibe/snapshots) off the UI thread.
+                    existing_topics = list(self.kira_agenda.topics)
+                    last_outputs = list(self.kira_agenda.last_outputs)
+                    self._suggestion_gen += 1
+                    self._dispatch_suggestion_recompute(
+                        self._suggestion_gen, existing_topics, last_outputs, self.smart_agg._session_id,
+                    )
                 self._idle_ticks = 0
         else:
             self._idle_ticks = 0
