@@ -996,9 +996,33 @@ class VocalAIApp(ctk.CTk):
         elif imported:
             self._print_log(f"[Música] {imported} track(s) importados para {mood}.")
 
+    def _dispatch_audio_play(self, fn) -> None:
+        """Dispatch an audio play callable to a worker thread.
+
+        Keeps the pygame mixer.Sound disk decode off the Tk main thread for
+        user-triggered and agenda-triggered mood changes (FR3).
+        The callable is expected to be a zero-argument lambda wrapping
+        audio_bed.request_mood(...).
+        """
+        import threading as _threading
+
+        def _worker():
+            try:
+                fn()
+            except Exception as e:
+                logger.warning("Audio play worker error: %s", e)
+
+        _threading.Thread(target=_worker, daemon=True).start()
+
     def _music_play_mood(self, mood: str) -> None:
-        if self.audio_bed.request_mood(mood, force=True, boundary=True):
-            self._music_update_panel()
+        # FR3: dispatch the play (which includes disk decode) off the UI thread.
+        # _music_update_panel() is called immediately on the main thread —
+        # it reads library state (not play state) so it is safe to call
+        # unconditionally before the worker completes.
+        self._dispatch_audio_play(
+            lambda: self.audio_bed.request_mood(mood, force=True, boundary=True)
+        )
+        self._music_update_panel()
 
     def _music_stop(self) -> None:
         self.audio_bed.stop()
@@ -1163,9 +1187,14 @@ class VocalAIApp(ctk.CTk):
         self._kira_agenda_force_strict_chat_filter()
         self.kira_agenda.enable()
         self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
-        # Start music bed when co-host mode activates — it's an intentional segment
-        if hasattr(self, "audio_bed") and self.audio_bed.current_track is None and self.audio_bed.enabled:
-            self.audio_bed.request_mood("normal", force=True, boundary=True)
+        # Start music bed when co-host mode activates — it's an intentional segment.
+        # FR3: the idle check is now atomic inside request_mood (only_if_idle=True)
+        # so the check-then-act race between concurrent enables is eliminated.
+        # request_mood already returns False when not enabled, so no pre-check needed.
+        if hasattr(self, "audio_bed"):
+            self._dispatch_audio_play(
+                lambda: self.audio_bed.request_mood("normal", force=True, boundary=True, only_if_idle=True)
+            )
         self._kira_agenda_update_status()
         self._kira_agenda_tick()
 
