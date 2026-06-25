@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from opencohost.ui import theme
 from opencohost.ui.state import UIState, VALID_TTS_STATUSES
 from opencohost.ui.status_bar import StatusBar
 
@@ -175,7 +176,8 @@ class TestPillCreationDefaults:
         assert status_bar.lbl_status.text == "Modelo cargando"
 
     def test_main_label_default_color(self, status_bar):
-        assert status_bar.lbl_status.text_color == "#ffaa00"
+        # design-system: was #ffaa00 -> WARNING (#cc8800)
+        assert status_bar.lbl_status.text_color == theme.WARNING
 
     def test_mic_pill_default_text(self, status_bar):
         assert status_bar.lbl_mic_status_pill.text == "Mic: revisando"
@@ -299,10 +301,11 @@ class TestTtsStatus:
     @pytest.mark.parametrize(
         "status,expected_text,expected_color",
         [
-            ("idle", "TTS: inactivo", "#1b2633"),
-            ("generating", "TTS: renderizando", "#1f3f6f"),
-            ("speaking", "TTS: hablando", "#1f526f"),
-            ("error", "TTS: error", "#cc3333"),
+            ("idle", "TTS: inactivo", theme.SURFACE_INSET),
+            ("generating", "TTS: renderizando", theme.INFO),
+            # design-system: speaking bg was #1f526f -> INFO (#1f3f6f)
+            ("speaking", "TTS: hablando", theme.INFO),
+            ("error", "TTS: error", theme.DANGER),
         ],
     )
     def test_tts_status_color_and_text(self, status_bar, status, expected_text, expected_color):
@@ -325,7 +328,8 @@ class TestTtsStatus:
     def test_update_tts_status_speaking(self, status_bar):
         status_bar.update_tts_status("speaking")
         assert status_bar.lbl_tts_status_pill.text == "TTS: hablando"
-        assert status_bar.lbl_tts_status_pill.fg_color == "#1f526f"
+        # design-system: was #1f526f -> INFO (#1f3f6f)
+        assert status_bar.lbl_tts_status_pill.fg_color == theme.INFO
 
     def test_update_tts_status_error(self, status_bar):
         status_bar.update_tts_status("error")
@@ -393,14 +397,15 @@ class TestPipelineState:
     @pytest.mark.parametrize(
         "state,expected_text,expected_color",
         [
-            ("idle", "Modelo listo", "#44cc66"),
-            ("listening", "Micrófono escuchando", "#44ff44"),
-            ("processing", "Modelo procesando", "#ffaa00"),
-            ("speaking", "TTS renderizando voz", "#4488ff"),
-            ("playing", "TTS hablando", "#44ccff"),
-            ("downloading", "Modelo cargando", "#ff8800"),
-            ("init", "Modelo cargando", "#888888"),
-            ("error", "Modelo error", "#ff5555"),
+            # design-system consolidation shifts annotated per row
+            ("idle", "Modelo listo", theme.SUCCESS),            # was #44cc66 -> SUCCESS
+            ("listening", "Micrófono escuchando", theme.SUCCESS),  # was #44ff44 -> SUCCESS
+            ("processing", "Modelo procesando", theme.WARNING),    # was #ffaa00 -> WARNING
+            ("speaking", "TTS renderizando voz", theme.INFO_BRIGHT),  # #4488ff exact
+            ("playing", "TTS hablando", theme.INFO_BRIGHT),        # was #44ccff -> INFO_BRIGHT
+            ("downloading", "Modelo cargando", theme.WARNING),     # was #ff8800 -> WARNING
+            ("init", "Modelo cargando", theme.NEUTRAL_HOVER),      # was #888888 -> NEUTRAL_HOVER
+            ("error", "Modelo error", theme.DANGER),               # was #ff5555 -> DANGER
         ],
     )
     def test_pipeline_state_display(self, status_bar, state, expected_text, expected_color):
@@ -411,7 +416,8 @@ class TestPipelineState:
     def test_pipeline_state_unknown(self, status_bar):
         status_bar.update_pipeline_state("unknown_state")
         assert status_bar.lbl_status.text == ""
-        assert status_bar.lbl_status.text_color == "#aaaaaa"
+        # design-system: unknown fallback was #aaaaaa -> TEXT_MUTED (#a9bdd3)
+        assert status_bar.lbl_status.text_color == theme.TEXT_MUTED
 
     def test_pipeline_idle_sets_mic_and_tts_idle(self, status_bar):
         status_bar.update_pipeline_state("idle")
@@ -431,7 +437,8 @@ class TestPipelineState:
     def test_pipeline_playing_sets_tts_speaking(self, status_bar):
         status_bar.update_pipeline_state("playing")
         assert status_bar.lbl_tts_status_pill.text == "TTS: hablando"
-        assert status_bar.lbl_tts_status_pill.fg_color == "#1f526f"
+        # design-system: was #1f526f -> INFO (#1f3f6f)
+        assert status_bar.lbl_tts_status_pill.fg_color == theme.INFO
 
     def test_pipeline_error_sets_tts_idle(self, status_bar):
         status_bar.update_pipeline_state("error")
@@ -495,7 +502,8 @@ class TestObserverIntegration:
         ui_state.tts_status = "speaking"
         time.sleep(0.15)
         assert bar.lbl_tts_status_pill.text == "TTS: hablando"
-        assert bar.lbl_tts_status_pill.fg_color == "#1f526f"
+        # design-system: was #1f526f -> INFO (#1f3f6f)
+        assert bar.lbl_tts_status_pill.fg_color == theme.INFO
         bar.cleanup()
 
     def test_chat_status_change_triggers_pill_update(self, mock_ctk, mock_parent, ui_state):
@@ -602,10 +610,10 @@ class TestEdgeCases:
 
     def test_all_tts_transitions(self, status_bar):
         transitions = [
-            ("idle", "TTS: inactivo", "#1b2633"),
-            ("generating", "TTS: renderizando", "#1f3f6f"),
-            ("speaking", "TTS: hablando", "#1f526f"),
-            ("error", "TTS: error", "#cc3333"),
+            ("idle", "TTS: inactivo", theme.SURFACE_INSET),
+            ("generating", "TTS: renderizando", theme.INFO),
+            ("speaking", "TTS: hablando", theme.INFO),  # design-system: was #1f526f -> INFO
+            ("error", "TTS: error", theme.DANGER),
         ]
         for status, expected_text, expected_color in transitions:
             status_bar.update_tts_status(status)
@@ -626,14 +634,14 @@ class TestEdgeCases:
 
     def test_all_pipeline_transitions(self, status_bar):
         transitions = [
-            ("idle", "Modelo listo", "#44cc66"),
-            ("listening", "Micrófono escuchando", "#44ff44"),
-            ("processing", "Modelo procesando", "#ffaa00"),
-            ("speaking", "TTS renderizando voz", "#4488ff"),
-            ("playing", "TTS hablando", "#44ccff"),
-            ("downloading", "Modelo cargando", "#ff8800"),
-            ("init", "Modelo cargando", "#888888"),
-            ("error", "Modelo error", "#ff5555"),
+            ("idle", "Modelo listo", theme.SUCCESS),
+            ("listening", "Micrófono escuchando", theme.SUCCESS),
+            ("processing", "Modelo procesando", theme.WARNING),
+            ("speaking", "TTS renderizando voz", theme.INFO_BRIGHT),
+            ("playing", "TTS hablando", theme.INFO_BRIGHT),
+            ("downloading", "Modelo cargando", theme.WARNING),
+            ("init", "Modelo cargando", theme.NEUTRAL_HOVER),
+            ("error", "Modelo error", theme.DANGER),
         ]
         for state, expected_text, expected_color in transitions:
             status_bar.update_pipeline_state(state)

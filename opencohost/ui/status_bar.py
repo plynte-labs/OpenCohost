@@ -12,47 +12,51 @@ from typing import Any
 
 import customtkinter as ctk
 
+from opencohost.ui import theme
 from opencohost.ui.state import UIState
 
 
 # ---------------------------------------------------------------------------
 # Color palettes — dark background tints for pill fg_color
+# All values reference design tokens (theme.*); raw hex lives only in theme.py.
+# Consolidation shifts (close-but-not-exact source hex folded into the nearest
+# semantic token) are annotated inline as: was #oldhex -> TOKEN.
 # ---------------------------------------------------------------------------
 
 _MODEL_STATUS_COLORS: dict[str, str] = {
-    "loading": "#cc8800",
-    "ready": "#22cc66",
-    "error": "#cc3333",
-    "offline": "#666666",
+    "loading": theme.WARNING,        # exact #cc8800
+    "ready": theme.SUCCESS,          # exact #22cc66
+    "error": theme.DANGER,           # exact #cc3333
+    "offline": theme.NEUTRAL_HOVER,  # exact #666666
 }
 
 _MIC_STATUS_COLORS: dict[str, str] = {
-    "disconnected": "#4a2630",
-    "idle": "#1b2633",
-    "listening": "#1f5a3a",
-    "recording": "#cc8800",
+    "disconnected": theme.MIC_OFFLINE_BG,  # exact #4a2630 (dedicated token)
+    "idle": theme.SURFACE_INSET,           # exact #1b2633
+    "listening": theme.SUCCESS_DIM,        # exact #1f5a3a
+    "recording": theme.WARNING,            # exact #cc8800
 }
 
 _TTS_STATUS_COLORS: dict[str, str] = {
-    "idle": "#1b2633",
-    "generating": "#1f3f6f",
-    "speaking": "#1f526f",
-    "paused": "#ffaa00",
-    "error": "#cc3333",
+    "idle": theme.SURFACE_INSET,  # exact #1b2633
+    "generating": theme.INFO,     # exact #1f3f6f
+    "speaking": theme.INFO,       # consolidation: was #1f526f -> INFO (#1f3f6f)
+    "paused": theme.WARNING,      # consolidation: was #ffaa00 -> WARNING (#cc8800)
+    "error": theme.DANGER,        # exact #cc3333
 }
 
 _CHAT_STATUS_COLORS: dict[str, str] = {
-    "disconnected": "#1b2633",
-    "connecting": "#cc8800",
-    "connected": "#1f5a3a",
-    "error": "#cc3333",
+    "disconnected": theme.SURFACE_INSET,  # exact #1b2633
+    "connecting": theme.WARNING,          # exact #cc8800
+    "connected": theme.SUCCESS_DIM,       # exact #1f5a3a
+    "error": theme.DANGER,                # exact #cc3333
 }
 
 _HEALTH_STATUS_COLORS: dict[str, str] = {
-    "unknown": "#666666",
-    "green": "#22cc66",
-    "yellow": "#cc8800",
-    "red": "#cc3333",
+    "unknown": theme.NEUTRAL_HOVER,  # exact #666666
+    "green": theme.SUCCESS,          # exact #22cc66
+    "yellow": theme.WARNING,         # exact #cc8800
+    "red": theme.DANGER,             # exact #cc3333
 }
 
 # Human-readable labels for the health pill — internal tokens ("red") are not
@@ -65,22 +69,24 @@ _HEALTH_LABELS: dict[str, str] = {
 }
 
 _ENGINE_STATUS_COLORS: dict[str, str] = {
-    "qwen_active": "#1f5a3a",     # green — heavy/cloned voice is what spoke
-    "edge_fallback": "#cc8800",   # amber — fell back to Edge
-    "qwen_starting": "#33558a",   # blue — Qwen warming up
-    "not_configured": "#555555",  # grey — voice cloning not set up
-    "piper_local": "#1f5a3a",     # green — local light engine
-    "unknown": "#666666",
+    "qwen_active": theme.SUCCESS_DIM,     # green — heavy/cloned voice is what spoke (exact #1f5a3a)
+    "edge_fallback": theme.WARNING,       # amber — fell back to Edge (exact #cc8800)
+    "qwen_starting": theme.INFO,          # blue — Qwen warming up. DEAD value: update_engine_status
+                                          # forces WARNING for qwen_starting, so this entry is never
+                                          # rendered. Tokenized faithfully (consolidation: was #33558a -> INFO).
+    "not_configured": theme.NEUTRAL,      # grey — voice cloning not set up (exact #555555)
+    "piper_local": theme.SUCCESS_DIM,     # green — local light engine (exact #1f5a3a)
+    "unknown": theme.NEUTRAL_HOVER,       # exact #666666
 }
 
 # Module-level constant — hoisted from _recompute_rollup so it is allocated once,
 # not on every state-change call (FIX E: ui_declutter_20260614 adversarial review).
 _ROLLUP_CONFIG: dict[str, tuple[str, str]] = {
-    "OK":    ("Sistema: OK",     "#1b2633"),
-    "QUIET": ("Sistema: ...",    "#444444"),
-    "INFO":  ("Sistema: activo", "#1f3f6f"),
-    "WARN":  ("Sistema: alerta", "#cc8800"),
-    "CRIT":  ("Sistema: error",  "#cc3333"),
+    "OK":    ("Sistema: OK",     theme.SURFACE_INSET),  # exact #1b2633
+    "QUIET": ("Sistema: ...",    theme.NEUTRAL_DIM),    # exact #444444
+    "INFO":  ("Sistema: activo", theme.INFO),           # exact #1f3f6f
+    "WARN":  ("Sistema: alerta", theme.WARNING),        # exact #cc8800
+    "CRIT":  ("Sistema: error",  theme.DANGER),         # exact #cc3333
 }
 
 # ---------------------------------------------------------------------------
@@ -88,14 +94,14 @@ _ROLLUP_CONFIG: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 
 _PIPELINE_DISPLAY: dict[str, tuple[str, str]] = {
-    "idle": ("Modelo listo", "#44cc66"),
-    "listening": ("Micrófono escuchando", "#44ff44"),
-    "processing": ("Modelo procesando", "#ffaa00"),
-    "speaking": ("TTS renderizando voz", "#4488ff"),
-    "playing": ("TTS hablando", "#44ccff"),
-    "downloading": ("Modelo cargando", "#ff8800"),
-    "init": ("Modelo cargando", "#888888"),
-    "error": ("Modelo error", "#ff5555"),
+    "idle": ("Modelo listo", theme.SUCCESS),                  # consolidation: was #44cc66 -> SUCCESS (#22cc66)
+    "listening": ("Micrófono escuchando", theme.SUCCESS),     # consolidation: was #44ff44 -> SUCCESS (#22cc66)
+    "processing": ("Modelo procesando", theme.WARNING),       # consolidation: was #ffaa00 -> WARNING (#cc8800)
+    "speaking": ("TTS renderizando voz", theme.INFO_BRIGHT),  # exact #4488ff
+    "playing": ("TTS hablando", theme.INFO_BRIGHT),           # consolidation: was #44ccff -> INFO_BRIGHT (#4488ff)
+    "downloading": ("Modelo cargando", theme.WARNING),        # consolidation: was #ff8800 -> WARNING (#cc8800)
+    "init": ("Modelo cargando", theme.NEUTRAL_HOVER),         # consolidation: was #888888 -> NEUTRAL_HOVER (#666666)
+    "error": ("Modelo error", theme.DANGER),                  # consolidation: was #ff5555 -> DANGER (#cc3333)
 }
 
 
@@ -155,7 +161,7 @@ class StatusBar:
             self._parent,
             text="Modelo cargando",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#ffaa00",
+            text_color=theme.WARNING,  # consolidation: was #ffaa00 -> WARNING (#cc8800)
         )
         self.lbl_status.pack(side="left", padx=(12, 8), pady=10)
 
@@ -167,7 +173,7 @@ class StatusBar:
         self.lbl_sistema_pill = ctk.CTkLabel(
             self._parent,
             text="Sistema: alerta",
-            fg_color="#cc8800",
+            fg_color=theme.WARNING,  # exact #cc8800
             corner_radius=12,
             font=ctk.CTkFont(size=11, weight="normal"),
         )
@@ -178,7 +184,7 @@ class StatusBar:
         self.lbl_model_status_pill = ctk.CTkLabel(
             self._parent,
             text="Modelo: cargando",
-            fg_color="#cc8800",
+            fg_color=theme.WARNING,  # exact #cc8800
             corner_radius=12,
             font=ctk.CTkFont(size=11, weight="normal"),
         )
@@ -186,31 +192,31 @@ class StatusBar:
 
         self.lbl_mic_status_pill = ctk.CTkLabel(
             self._parent, text="Mic: revisando",
-            fg_color="#1b2633", corner_radius=12,
+            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
         )
         self.lbl_mic_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_tts_status_pill = ctk.CTkLabel(
             self._parent, text="TTS: inactivo",
-            fg_color="#1b2633", corner_radius=12,
+            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
         )
         self.lbl_tts_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_chat_status_pill = ctk.CTkLabel(
             self._parent, text="Chat: desconectado",
-            fg_color="#1b2633", corner_radius=12,
+            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
         )
         self.lbl_chat_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_health_status_pill = ctk.CTkLabel(
             self._parent, text="Health: --",
-            fg_color="#1b2633", corner_radius=12,
+            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
         )
         self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_engine_status_pill = ctk.CTkLabel(
             self._parent, text="Voz: --",
-            fg_color="#1b2633", corner_radius=12,
+            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
         )
         self.lbl_engine_status_pill.pack(side="left", padx=4, pady=8)
 
@@ -291,7 +297,7 @@ class StatusBar:
         self._recompute_rollup()
         if self.lbl_health_status_pill is None:
             return
-        color = _HEALTH_STATUS_COLORS.get(status, "#666666")
+        color = _HEALTH_STATUS_COLORS.get(status, theme.NEUTRAL_HOVER)  # exact #666666
         label = _HEALTH_LABELS.get(status, status)
         self.lbl_health_status_pill.configure(text=f"Health: {label}", fg_color=color)
 
@@ -299,10 +305,10 @@ class StatusBar:
         """Update the engine (voice) badge pill with the EFFECTIVE engine.
 
         Visibility gating (owner decision 2026-06-14):
-        - qwen_active, piper_local: badge uses dim color (#1b2633) — normal steady-state,
-          no need to draw operator attention.
-        - qwen_starting: badge uses INFO-visible amber (#cc8800) — Edge speaks during Qwen
-          warmup and the operator should understand the transient voice change.
+        - qwen_active, piper_local: badge uses dim color (theme.SURFACE_INSET) — normal
+          steady-state, no need to draw operator attention.
+        - qwen_starting: badge uses INFO-visible amber (theme.WARNING) — Edge speaks during
+          Qwen warmup and the operator should understand the transient voice change.
         - edge_fallback, not_configured, unknown: badge uses the standard alert color —
           operator must notice the fallback.
 
@@ -315,14 +321,14 @@ class StatusBar:
         text = self._engine_status_text(status, reason)
         # Visibility rule: dim on normal steady-state; visible on fallback or startup warmup.
         if status in ("qwen_active", "piper_local"):
-            color = "#1b2633"  # dim — normal operation, no operator action needed
+            color = theme.SURFACE_INSET  # dim — normal operation, no operator action needed (exact #1b2633)
         elif status == "qwen_starting":
             # Owner decision: qwen_starting → INFO-visible (amber) because Edge
             # is speaking during warmup and the operator should know.
-            color = "#cc8800"
+            color = theme.WARNING  # exact #cc8800
         else:
             # edge_fallback, not_configured, unknown — use the standard alert color
-            color = _ENGINE_STATUS_COLORS.get(status, "#666666")
+            color = _ENGINE_STATUS_COLORS.get(status, theme.NEUTRAL_HOVER)  # exact #666666
         self.lbl_engine_status_pill.configure(text=text, fg_color=color)
 
     def _engine_status_text(self, status: str, reason: str = "") -> str:
@@ -350,7 +356,8 @@ class StatusBar:
                 ``speaking``, ``playing``, ``downloading``, ``init``,
                 ``error``.
         """
-        text, color = _PIPELINE_DISPLAY.get(state, ("", "#aaaaaa"))
+        # consolidation: unknown-state fallback label was #aaaaaa -> TEXT_MUTED (#a9bdd3)
+        text, color = _PIPELINE_DISPLAY.get(state, ("", theme.TEXT_MUTED))
         if self.lbl_status is not None:
             self.lbl_status.configure(text=text, text_color=color)
 
@@ -387,12 +394,12 @@ class StatusBar:
           QUIET — health=unknown (and no higher severity)
           OK    — all nominal
 
-        Display:
-          OK    → "Sistema: OK"     / dim dark #1b2633
-          QUIET → "Sistema: ..."    / grey #444444
-          INFO  → "Sistema: activo" / blue #1f3f6f
-          WARN  → "Sistema: alerta" / amber #cc8800
-          CRIT  → "Sistema: error"  / red #cc3333
+        Display (colors come from _ROLLUP_CONFIG, all theme tokens):
+          OK    → "Sistema: OK"     / dim dark  theme.SURFACE_INSET
+          QUIET → "Sistema: ..."    / grey      theme.NEUTRAL_DIM
+          INFO  → "Sistema: activo" / blue      theme.INFO
+          WARN  → "Sistema: alerta" / amber     theme.WARNING
+          CRIT  → "Sistema: error"  / red       theme.DANGER
         """
         if self.lbl_sistema_pill is None:
             return
@@ -429,7 +436,7 @@ class StatusBar:
             "chat_status": _CHAT_STATUS_COLORS,
         }
         palette = palettes.get(status_type, {})
-        return palette.get(status, "#1b2633")
+        return palette.get(status, theme.SURFACE_INSET)  # default pill bg, exact #1b2633
 
     def _get_status_text(self, status_type: str, status: str) -> str:
         """Return the display text for a status type/value pair."""

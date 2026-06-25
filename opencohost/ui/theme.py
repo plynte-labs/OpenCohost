@@ -76,6 +76,13 @@ SELECT_HOVER: str = "#286391"    # Hover on a tier segment (was #286391)
 # Kept separate from DANGER so pill-background use does not clash with bright DANGER label.
 DANGER_DIM: str = "#8f2f2f"      # Dark pill bg for destructive-action buttons
 
+# Mic-offline pill background — a dim warning-red distinct from DANGER_DIM.
+# Semantically separate: DANGER_DIM is a destructive-ACTION button bg; this is a
+# passive "mic disconnected" status pill. Consolidating the two would conflate a
+# user action with a hardware-state indicator, so it gets its own token (was
+# #4a2630 in status_bar mic palette).
+MIC_OFFLINE_BG: str = "#4a2630"  # Mic disconnected status pill bg (dim warning-red)
+
 # Warm neutral — de-emphasis action (e.g. Fade out button; not destructive, not primary)
 SURFACE_WARM: str = "#7d5a2a"    # Dark amber-brown — secondary non-destructive action
 
