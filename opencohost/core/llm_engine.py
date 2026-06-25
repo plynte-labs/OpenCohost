@@ -22,11 +22,14 @@ from opencohost.config.settings import (
     OLLAMA_CHAT_TIMEOUT,
     TTS_LOCAL_MODEL_PATH,
     CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
+    CTX_FALLBACK_DEFAULT, CHAR_BUDGET_SAFETY_FACTOR,
+    CTX_PRESSURE_HIGH_THRESHOLD, CTX_OVERFLOW_SIGNAL_RATIO,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
 )
+from opencohost.core import context_budget
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
@@ -91,6 +94,7 @@ class MotorVocalIA(threading.Thread):
         self.ui_callback = ui_callback
         self.command_queue = queue.Queue()
         self._reasoning_model_cache: dict[str, bool] = {}
+        self._model_ctx_limit: dict[str, int] = {}
 
         self.voz_referencia = None
         self.is_ready = False
@@ -1059,11 +1063,30 @@ class MotorVocalIA(threading.Thread):
                 prompt_completo = f"{self.system_prompt}\n\n[{i18n_active.user_message_label()}]: {enriched}"
                 messages.append({'role': 'user', 'content': prompt_completo})
 
+            # Layer 1+2: discover the model's real context window (cached, free
+            # after first call — also covers the name-heuristic short-circuit gap)
+            # and proactively trim oldest history pairs so the assembled prompt
+            # fits within the character budget derived from that window.
+            self._discover_model_ctx(request_model)
+            _model_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+            messages, _ctx_evicted = context_budget.apply_char_budget(
+                messages,
+                ctx_limit=_model_ctx,
+                max_output_tokens=LLM_MAX_TOKENS,
+                safety_factor=CHAR_BUDGET_SAFETY_FACTOR,
+            )
+            if _ctx_evicted > 0:
+                self._log(
+                    f"ctx_budget_gate: evicted {_ctx_evicted} pair(s) from messages "
+                    f"(model={request_model}, ctx_limit={_model_ctx})",
+                    level="warning",
+                )
+
             opciones_llm = {
                 'temperature': LLM_TEMPERATURE,
                 'top_p': LLM_TOP_P,
                 'num_predict': LLM_MAX_TOKENS,
-                'num_ctx': 4096,
+                'num_ctx': _model_ctx,
             }
 
             if "gemma" in request_model.lower():
@@ -1141,6 +1164,26 @@ class MotorVocalIA(threading.Thread):
                 if thinking:
                     logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
 
+                # Layer 3 reactive trim: an empty response whose prompt_eval_count
+                # plateaued at/near the context ceiling is Ollama's silent input-
+                # overflow signal. Drop the oldest in-flight pairs and retry ONCE
+                # (intento==0 guard). Inserted BEFORE the reasoning-model branch so
+                # trimming context wins over removing the output-token cap. Delegates
+                # the int-threshold comparison to context_budget.is_overflow_signal.
+                _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
+                _ctx_limit_now = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+                if intento == 0 and context_budget.is_overflow_signal(
+                    raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
+                ):
+                    _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
+                    self._log(
+                        f"ctx_overflow_reactive: prompt_eval_count={_pec} >= "
+                        f"{_ctx_limit_now}*{CTX_OVERFLOW_SIGNAL_RATIO:.2f}; dropped "
+                        f"{_dropped} pair(s) from in-flight messages, retrying.",
+                        level="warning",
+                    )
+                    continue
+
                 # Layer 2 self-heal: empty visible content + internal thinking means a
                 # reasoning model spent its budget thinking and hit the num_predict cap.
                 # Drop the cap, remember the classification, and retry uncapped.
@@ -1162,6 +1205,23 @@ class MotorVocalIA(threading.Thread):
 
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
+
+            # Layer 4 observability: log prompt-window utilization on every populated
+            # response and raise a UI pressure signal when it crosses the high mark.
+            _pec_final = (getattr(respuesta, "prompt_eval_count", 0) or 0) if respuesta is not None else 0
+            _ctx_for_obs = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+            if _pec_final > 0:
+                _util = context_budget.utilization(_pec_final, _ctx_for_obs)
+                logger.info(
+                    "ctx_utilization: model=%s prompt_eval_count=%d num_ctx=%d ratio=%.3f source=%s",
+                    request_model, _pec_final, _ctx_for_obs, _util, source,
+                )
+                if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
+                    logger.warning(
+                        "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
+                        _util * 100, request_model, source,
+                    )
+                    self.ui_callback("ctx_pressure_high")
 
             # MODEL_TRACE: audit which model was used for this generation
             generation_model = request_model
@@ -1357,18 +1417,63 @@ class MotorVocalIA(threading.Thread):
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
 
+    def _discover_model_ctx(self, model: str) -> int:
+        """Layer 1: return ``model``'s native context length from ``ollama.show``.
+
+        Sole owner of the ``ollama.show`` RPC for both context discovery and the
+        reasoning-capability check. Calls ``ollama.show`` once per model lifetime,
+        caches the parsed context length in ``self._model_ctx_limit`` and the raw
+        response in ``self._ctx_show_cache`` so ``_check_capabilities_reasoning``
+        can read ``capabilities`` from the same response. Any failure degrades to
+        ``CTX_FALLBACK_DEFAULT`` — never a crash.
+        """
+        cache = getattr(self, "_model_ctx_limit", None)
+        if cache is None:
+            cache = {}
+            self._model_ctx_limit = cache
+        cached = cache.get(model)
+        if cached is not None:
+            return cached
+        try:
+            resp = self._fetch_show(model)
+            ctx = context_budget.parse_model_ctx(resp, fallback=CTX_FALLBACK_DEFAULT)
+        except Exception:
+            ctx = CTX_FALLBACK_DEFAULT
+        cache[model] = ctx
+        return ctx
+
+    def _fetch_show(self, model: str):
+        """Fetch and memoise the raw ``ollama.show`` response for ``model``.
+
+        Shared by ``_discover_model_ctx`` (context length) and
+        ``_check_capabilities_reasoning`` (capabilities) so a single RPC serves
+        both. The raw response is cached in ``self._ctx_show_cache``.
+        """
+        cache = getattr(self, "_ctx_show_cache", None)
+        if cache is None:
+            cache = {}
+            self._ctx_show_cache = cache
+        if model in cache:
+            return cache[model]
+        import ollama
+        resp = ollama.show(model)
+        cache[model] = resp
+        return resp
+
     def _check_capabilities_reasoning(self, model: str) -> bool:
         """Layer 1: ask Ollama whether ``model`` advertises a 'thinking' capability.
 
         Augments (does not replace) the name heuristic so reasoning models whose
-        name lacks a known marker (e.g. gemma4:12b) are still detected. Wrapped
-        defensively: any error, missing field, or older Ollama without the
-        capabilities field degrades to False — never a crash, never a hard
-        dependency on ollama.show.
+        name lacks a known marker (e.g. gemma4:12b) are still detected. Shares the
+        single ``ollama.show`` RPC owned by ``_discover_model_ctx`` (via
+        ``_fetch_show``) and populates ``self._model_ctx_limit[model]`` as a side
+        effect. Wrapped defensively: any error, missing field, or older Ollama
+        without the capabilities field degrades to False — never a crash.
         """
         try:
-            import ollama
-            info = ollama.show(model)
+            # Populate the ctx-limit cache from the same RPC (RPC-ownership §Layer 1).
+            self._discover_model_ctx(model)
+            info = self._fetch_show(model)
             caps = info.get("capabilities") if isinstance(info, dict) else getattr(info, "capabilities", None)
             return bool(caps) and "thinking" in caps
         except Exception:

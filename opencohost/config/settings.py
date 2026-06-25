@@ -36,6 +36,13 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
 LLM_MAX_TOKENS = 768
+# Context-window overflow guardrail (context_overflow_guardrail_20260623).
+# Consumed by the budget-gate wiring in llm_engine.py; the pure logic lives in
+# opencohost/core/context_budget.py and receives these as plain arguments.
+CTX_FALLBACK_DEFAULT: int = 4096            # used when ollama.show exposes no ctx length
+CHAR_BUDGET_SAFETY_FACTOR: float = 3.5      # chars per token; conservative estimate
+CTX_PRESSURE_HIGH_THRESHOLD: float = 0.80   # utilization ratio for UI warning
+CTX_OVERFLOW_SIGNAL_RATIO: float = 0.95     # prompt_eval_count / num_ctx threshold for reactive trim
 # Chat-reactive anti-repetition sampling brake. Added ONLY to source=="chat"
 # generations (RF3 viewer chat, agenda HANDLE_CHAT, and default-enqueue chat
 # turns). Keeps direct/ptt/accumulated/kira-agenda sampling byte-identical.
