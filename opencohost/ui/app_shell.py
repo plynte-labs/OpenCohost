@@ -2149,6 +2149,7 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_download_start(self) -> None: self._dispatch_motor_handler("on_motor_download_start")
     def _on_motor_download_done(self) -> None: self._dispatch_motor_handler("on_motor_download_done")
     def _on_motor_download_error(self) -> None: self._dispatch_motor_handler("on_motor_download_error")
+    def _on_ctx_pressure_high(self) -> None: self._dispatch_motor_handler("on_ctx_pressure_high")
 
     # ------------------------------------------------------------------
     # OBS lifecycle delegates — bodies live in opencohost/ui/obs_lifecycle.py

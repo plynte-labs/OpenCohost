@@ -581,6 +581,16 @@ def on_motor_download_error(
         avatar_bridge.set_state(AvatarState.ERROR)
 
 
+def on_ctx_pressure_high(**_: Any) -> None:
+    """Handle a context-pressure-high signal from the LLM engine.
+
+    Logs the event at WARNING level. A visual indicator is a future enhancement
+    (out of scope for the context_overflow_guardrail track); this establishes the
+    event plumbing without committing to a specific UI widget.
+    """
+    logger.warning("UI: ctx_pressure_high signal received from LLM engine.")
+
+
 # ---------------------------------------------------------------------------
 # Single source of truth: status string → handler function name
 # ---------------------------------------------------------------------------
@@ -607,6 +617,7 @@ STATUS_TO_HANDLER: dict[str, str] = {
     "download_start":           "on_motor_download_start",
     "download_done":            "on_motor_download_done",
     "download_error":           "on_motor_download_error",
+    "ctx_pressure_high":        "on_ctx_pressure_high",
 }
 
 
