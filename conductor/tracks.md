@@ -135,6 +135,24 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [~] **Track: UI Rendering Optimization - VSync, Antialiasing, and Layout Stability**
   *Link: [./tracks/ui_rendering_optimization_20260609/](./tracks/ui_rendering_optimization_20260609/)*
+  *Status 2026-06-24: Phase 6 decomposition (OBS + stream-admin→legacy + motor-events)
+  DONE; app_shell.py 3281→2615 (< 3200 target). Phase 4 (DPI/AA/VSync, ADR-006) NOT started.*
+
+---
+
+- [ ] **Track: UI-Thread Hardening (Agenda / Audio) - Encapsulate Interrupt, Off-Thread Recompute & Decode**
+  *Link: [./tracks/ui_thread_hardening_agenda_audio_20260624/](./tracks/ui_thread_hardening_agenda_audio_20260624/)*
+  *Status 2026-06-24: PLANNED. Behavior/threading fixes from a 3-opus audit — FR1 motor_ia.interrupt_speaking()
+  (ADR-AUD-005 HIGH, gated with the heavy-model runtime gate), FR2 idle-tick recompute off-thread,
+  FR3 pygame Sound decode off-thread, FR4 audio_bed.shutdown() in on_closing. No decomposition.*
+
+---
+
+- [ ] **Track: app_shell Phase 7 - Agenda/Audio Cluster Decomposition**
+  *Link: [./tracks/app_shell_agenda_audio_decomposition_20260624/](./tracks/app_shell_agenda_audio_decomposition_20260624/)*
+  *Status 2026-06-24: PLANNED. Behavior-preserving extraction of the agenda/audio cluster to a
+  controller module (function-module + thin delegate). Sequenced AFTER ui_thread_hardening and
+  BEFORE qwen_tts_lifecycle_hardening.*
 
 ---
 
