@@ -64,6 +64,13 @@ INFO_BRIGHT: str = "#4488ff"     # Bright blue — pipeline label text
 # Neutral / disabled
 NEUTRAL: str = "#555555"         # Inactive mood buttons, tertiary controls
 NEUTRAL_DIM: str = "#444444"     # Subtle quiet background (QUIET rollup)
+NEUTRAL_HOVER: str = "#666666"   # Hover for NEUTRAL buttons (was #666666 in model/profile panels)
+
+# Selectable / segmented control (manual LLM-tier buttons in model_panel)
+# A small "tab group" palette: the active segment, idle segments, and hover.
+SELECT_ACTIVE: str = "#1f4f7a"   # Active tier segment (was #1f4f7a)
+SELECT_IDLE: str = "#2b3440"     # Idle tier segment (was #2b3440)
+SELECT_HOVER: str = "#286391"    # Hover on a tier segment (was #286391)
 
 # Danger dim — destructive action pill bg (was #8f2f2f — Limpiar faltantes, Eliminar)
 # Kept separate from DANGER so pill-background use does not clash with bright DANGER label.

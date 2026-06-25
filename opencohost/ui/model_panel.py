@@ -21,6 +21,7 @@ from opencohost.core.ollama_startup import OllamaStartupManager
 from opencohost.core.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui import styles, theme
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +244,8 @@ class ModelPanel:
 
         Must be called once after the parent frame exists.
         """
-        self.lbl_model_header = ctk.CTkLabel(
-            self._parent,
-            text="Modelo",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        )
-        self.lbl_model_header.pack(fill="x", padx=10, pady=(10, 4))
+        self.lbl_model_header = styles.heading(ctk, self._parent, "Modelo", step="LABEL")
+        self.lbl_model_header.pack(fill="x", padx=theme.SPACE_MD + 2, pady=(theme.SPACE_MD + 2, theme.SPACE_SM))
 
         self.combo_modelos = ctk.CTkOptionMenu(
             self._parent,
@@ -258,63 +254,56 @@ class ModelPanel:
             width=300,
         )
         self.combo_modelos.set(self.default_display)
-        self.combo_modelos.pack(fill="x", padx=10, pady=4)
+        self.combo_modelos.pack(fill="x", padx=theme.SPACE_MD + 2, pady=theme.SPACE_SM)
 
         # Guard: disable combo at startup when Ollama is not ready
         if self._ui_state.ollama_state != "ready":
             self.combo_modelos.configure(state="disabled")
 
-        self.btn_download = ctk.CTkButton(
+        self.btn_download = styles.neutral_button(
+            ctk,
             self._parent,
-            text="Revisando Ollama...",
-            command=self._on_download_model,
+            "Revisando Ollama...",
+            self._on_download_model,
             width=110,
-            fg_color="#555555",
-            hover_color="#666666",
         )
-        self.btn_download.pack(fill="x", padx=10, pady=4)
+        self.btn_download.pack(fill="x", padx=theme.SPACE_MD + 2, pady=theme.SPACE_SM)
 
-        self.lbl_modelo_info = ctk.CTkLabel(
+        self.lbl_modelo_info = styles.muted_label(
+            ctk,
             self._parent,
-            text="",
-            font=ctk.CTkFont(size=11),
-            text_color="#aaaaaa",
-            anchor="w",
+            "",
             justify="left",
             wraplength=300,
         )
-        self.lbl_modelo_info.pack(fill="x", padx=10, pady=4)
+        self.lbl_modelo_info.pack(fill="x", padx=theme.SPACE_MD + 2, pady=theme.SPACE_SM)
 
-        self.lbl_tier_header = ctk.CTkLabel(
-            self._parent,
-            text="Tier LLM manual",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            anchor="w",
+        self.lbl_tier_header = styles.heading(
+            ctk, self._parent, "Tier LLM manual", step="BODY"
         )
-        self.lbl_tier_header.pack(fill="x", padx=10, pady=(8, 2))
+        self.lbl_tier_header.pack(fill="x", padx=theme.SPACE_MD + 2, pady=(theme.SPACE_MD, theme.SPACE_XS))
 
         for tier in LLM_TIERS:
-            button = ctk.CTkButton(
+            button = styles.select_button(
+                ctk,
                 self._parent,
-                text=self._format_tier_button_text(tier),
-                command=lambda selected=tier: self._on_llm_tier_selected(selected),
+                self._format_tier_button_text(tier),
+                lambda selected=tier: self._on_llm_tier_selected(selected),
+                active=tier == self._active_llm_tier,
                 width=110,
-                fg_color="#1f4f7a" if tier == self._active_llm_tier else "#2b3440",
-                hover_color="#286391",
             )
-            button.pack(fill="x", padx=10, pady=2)
+            button.pack(fill="x", padx=theme.SPACE_MD + 2, pady=theme.SPACE_XS)
             self._tier_buttons[tier] = button
 
-        self.lbl_tier_info = ctk.CTkLabel(
+        self.lbl_tier_info = styles.muted_label(
+            ctk,
             self._parent,
-            text="El tier cambia solo el modelo de futuros pedidos; perfil y memoria se conservan.",
-            font=ctk.CTkFont(size=10),
-            text_color="#8fa3b8",
-            anchor="w",
+            "El tier cambia solo el modelo de futuros pedidos; perfil y memoria se conservan.",
+            step="CAPTION",
             justify="left",
             wraplength=300,
         )
-        self.lbl_tier_info.pack(fill="x", padx=10, pady=(2, 6))
+        self.lbl_tier_info.pack(fill="x", padx=theme.SPACE_MD + 2, pady=(theme.SPACE_XS, theme.SPACE_MD - 2))
 
         self.progress_download = ctk.CTkProgressBar(self._parent, width=150)
         self.progress_download.pack(fill="x", padx=10, pady=(4, 10))
@@ -668,7 +657,7 @@ class ModelPanel:
             button.configure(
                 text=self._format_tier_button_text(tier),
                 state="disabled" if is_active else state,
-                fg_color="#1f4f7a" if is_active else "#2b3440",
+                fg_color=theme.SELECT_ACTIVE if is_active else theme.SELECT_IDLE,
             )
 
     # ------------------------------------------------------------------
