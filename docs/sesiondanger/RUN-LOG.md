@@ -30,10 +30,20 @@ captured in `FOLLOWUPS.md` and engram — never block.
 ## Rollback points (batch commits)
 - batch 0 — session docs setup (`RUN-LOG`, `FOLLOWUPS`).
 - batch 1 — **FR1** `interrupt_speaking()` Demeter fix (`5f83724`). Dual opus judges SAFE. Suite 2783.
+- (ADR-SD-003 commit — UI design/stack investigation.)
+- batch 2 — **Bug A** music-preview single-flight (`120883b`). Judges: code correct; tests rewritten non-vacuous. Suite 2788.
+- batch 3 — **Bug B+C** startup panel visibility (`da8b637`). Judges: code correct; Bug C runtime test added. Suite 2792.
 
-## Progress
-- [x] FR1 — committed `5f83724` (batch 1)
-- [ ] Bug A (music threads) — DIAGNOSED (engram #2535, FR3-regression); fix pending
-- [ ] Bug B (terminal slider) — DIAGNOSED (advanced_panel build grids frame; fix = grid_remove in build)
-- [ ] Bug C (product panel) — DIAGNOSED (compact-default hides aliased product workspace); reverses ui_declutter (ADR-SD-002)
-- [ ] Investigation D (UI/stack ADR)
+## Progress — ALL SCOPED WORK DONE
+- [x] FR1 — `5f83724` (batch 1). Demeter HIGH fix.
+- [x] Bug A (music threads) — `120883b` (batch 2). Single-flight; FR3-regression fixed. ADR-SD-001.
+- [x] Bug B (terminal slider) — `da8b637` (batch 3). grid_remove in build().
+- [x] Bug C (product panel) — `da8b637` (batch 3). Compact-default flipped; ADR-SD-002 (reverses ui_declutter — owner confirm).
+- [x] Investigation D — ADR-SD-003 (recommend: stay on CustomTkinter + design system; never Rust TUI; Tauri/Qt post-launch only).
+
+## Final state
+- Branch `session/danger-overnight-20260625`, NOT merged to master. Owner reviews.
+- Full suite green at every batch (final 2792 passed, 2 skipped).
+- `opencohost/ui/stream_admin_ui.py` — owner's uncommitted NOTE_DEVELOPER note, intentionally left untouched.
+- Open follow-ups in `FOLLOWUPS.md`: B1 (aggregator locking), residual `_last_switch_failure` Demeter reach, `_make_shell_stub` spec hygiene, stale `_compacto_active` getattr fallback default.
+- Owner decisions pending: ADR-SD-002 (compact-default reversal) and ADR-SD-003 (UI/stack direction).
