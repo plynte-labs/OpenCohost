@@ -2059,193 +2059,96 @@ class VocalAIApp(ctk.CTk):
         self._handle_motor_event(status)
 
     def _handle_motor_event(self, status: str) -> None:
-        handlers = {
-            "ready": self._on_motor_ready,
-            "model_warming": self._on_motor_model_warming,
-            "ollama_unavailable": self._on_motor_ollama_unavailable,
-            "processing": self._on_motor_processing,
-            "idle": self._on_motor_idle,
-            "llm_timeout_recovered": self._on_motor_llm_timeout_recovered,
-            "speaking_start": self._on_motor_speaking_start,
-            "speaking_end": self._on_motor_speaking_end,
-            "model_changed": self._on_motor_model_changed,
-            "model_switch_pending": self._on_motor_switch_pending,
-            "model_switch_applied": self._on_motor_model_changed,
-            "model_switch_failed": self._on_motor_switch_failed,
-            "llm_tier_switch_applied": self._on_motor_model_changed,
-            "llm_tier_switch_failed": self._on_motor_switch_failed,
-            "download_start": self._on_motor_download_start,
-            "download_done": self._on_motor_download_done,
-            "download_error": self._on_motor_download_error,
-        }
-        handler = handlers.get(status)
-        if handler:
-            handler()
+        from opencohost.ui.motor_event_handlers import STATUS_TO_HANDLER
+        name = STATUS_TO_HANDLER.get(status)
+        if name:
+            getattr(self, "_" + name)()
 
-    def _on_motor_ready(self) -> None:
-        self._ui_state.model_status = "ready"
-        self._safe_after(lambda: self.btn_grabar.configure(state="normal"))
-        self._safe_after(lambda: self.btn_voz.configure(state="normal"))
-        self._safe_after(lambda: self.btn_ws.configure(state="normal"))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
-        if hasattr(self.motor_ia, "current_model"):
-            self._safe_after(lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
-            # Sync combobox to actual startup model (may differ from DEFAULT_MODEL)
-            model = self.motor_ia.current_model
-            self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
-            self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-            self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        # Start PTT flush watcher thread
-        if hasattr(self, "voice_panel"):
-            self.voice_panel._start_ptt_flush_watcher()
+    @staticmethod
+    def _get_attr(obj: object, name: str, default=None):
+        """object.__getattribute__ lookup — raises AttributeError without CTk recursion."""
+        try:
+            return object.__getattribute__(obj, name)
+        except AttributeError:
+            return default
 
-    def _on_motor_model_warming(self) -> None:
-        self._ui_state.model_status = "loading"
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
-        self._actualizar_pipeline("init")
-
-    def _on_motor_ollama_unavailable(self) -> None:
-        self._safe_after(lambda: self.btn_grabar.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_voz.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_ws.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
-        self._actualizar_pipeline("error")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.ERROR)
-
-    def _on_motor_processing(self) -> None:
-        self._actualizar_pipeline("processing")
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_download.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_mapear.configure(state="disabled"))
-
-    def _on_motor_idle(self) -> None:
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
-        self._safe_after(lambda: self.btn_mapear.configure(state="normal"))
-        self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
-        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
-            self._kira_agenda_schedule_tick(500)
-
-    def _on_motor_llm_timeout_recovered(self) -> None:
-        failure = getattr(self.motor_ia, "_last_llm_failure", None) or {}
-        failed_model = failure.get("model", "?")
-        recovered_model = getattr(self.motor_ia, "current_model", failed_model)
-        self._print_log(
-            f"[Sistema] ⚠️ Recuperación por timeout de inferencia en {failed_model}. Modelo activo: {recovered_model}"
+    def _motor_handler_deps(self) -> dict:  # deps for motor_event_handlers.get_handler_map()
+        # Use _get_attr (object.__getattribute__) — avoids triggering CTk __getattr__
+        # on partially-initialised object.__new__ stubs used in unit tests.
+        g = self._get_attr
+        _d = vars(self)
+        return dict(
+            ui_state=_d.get("_ui_state"),
+            motor_ia=_d.get("motor_ia"),
+            model_panel=_d.get("model_panel"),
+            voice_panel=_d.get("voice_panel"),
+            ptt=_d.get("ptt"),
+            audio_bed=_d.get("audio_bed"),
+            avatar_bridge=_d.get("_avatar_bridge"),
+            kira_agenda=_d.get("kira_agenda"),
+            btn_grabar=_d.get("btn_grabar"),
+            btn_voz=_d.get("btn_voz"),
+            btn_ws=_d.get("btn_ws"),
+            btn_primary_voice=_d.get("btn_primary_voice"),
+            btn_enviar=_d.get("btn_enviar"),
+            btn_download=_d.get("btn_download"),
+            btn_mapear=_d.get("btn_mapear"),
+            combo_modelos=_d.get("combo_modelos"),
+            switch_ptt=_d.get("switch_ptt"),
+            progress_download=_d.get("progress_download"),
+            schedule_ui_update=g(self, "_safe_after"),
+            actualizar_pipeline=g(self, "_actualizar_pipeline"),
+            log_accion=g(self, "_log_accion"),
+            print_log=g(self, "_print_log"),
+            check_pending_audio_bed_stop=g(self, "_check_pending_audio_bed_stop"),
+            kira_agenda_schedule_tick=g(self, "_kira_agenda_schedule_tick"),
+            kira_agenda_update_status=g(self, "_kira_agenda_update_status"),
+            kira_agenda_prefetch_while_speaking=g(self, "_kira_agenda_prefetch_while_speaking"),
+            kira_agenda_clear_prefetch=g(self, "_kira_agenda_clear_prefetch"),
+            kira_agenda_consume_pending_chat_if_due=g(self, "_kira_agenda_consume_pending_chat_if_due"),
+            kira_agenda_play_prefetched_if_ready=g(self, "_kira_agenda_play_prefetched_if_ready"),
+            on_ptt_press=g(self, "_on_ptt_press"),
+            on_ptt_release=g(self, "_on_ptt_release"),
+            on_ptt_click=g(self, "_on_ptt_click"),
+            # Timer state — getter/setter pairs (obs_lifecycle pattern)
+            get_speaking_is_alt=lambda: _d.get("_speaking_is_alt"),
+            set_speaking_is_alt=lambda v: setattr(self, "_speaking_is_alt", v),
+            get_speaking_alt_timer_id=lambda: _d.get("_speaking_alt_timer_id"),
+            set_speaking_alt_timer_id=lambda v: setattr(self, "_speaking_alt_timer_id", v),
+            get_inactivity_timer_id=lambda: _d.get("_inactivity_timer_id"),
+            set_inactivity_timer_id=lambda v: setattr(self, "_inactivity_timer_id", v),
+            inactivity_timeout_ms=_d.get("_inactivity_timeout_ms"),
+            after=g(self, "after"),
+            after_cancel=g(self, "after_cancel"),
+            set_title=g(self, "title"),
+            winfo_exists=g(self, "winfo_exists"),
         )
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(recovered_model))
-        self._safe_after(lambda: self.model_panel.update_model_info(recovered_model))
 
-    def _on_motor_speaking_start(self) -> None:
-        if hasattr(self, "audio_bed"):
-            self.audio_bed.duck()
-        # Use controller state, not motor source, to decide if this speech
-        # was initiated by the agenda state machine.  The controller may
-        # emit chat/PTT/stop actions whose motor source does not start
-        # with "kira-agenda"; the state check is the authoritative signal.
-        controller_generated = (
-            hasattr(self, "kira_agenda")
-            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING, AgendaState.TOPIC_CLOSING}
-        )
-        if controller_generated:
-            self.kira_agenda.mark_generation_accepted()
-            self._kira_agenda_update_status()
-            self._kira_agenda_prefetch_while_speaking()
-        elif hasattr(self, "kira_agenda"):
-            self._kira_agenda_clear_prefetch()
-        self._actualizar_pipeline("speaking")
-        self._log_accion("Kira comenzó a sintetizar respuesta")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.SPEAKING)
-            self._start_speaking_alt_timer()
+    # Motor-event handler delegates — bodies in motor_event_handlers.py (Phase 6 Stage 3).
+    def _dispatch_motor_handler(self, fn: str) -> None:  # call motor_event_handlers.<fn> with injected deps
+        import opencohost.ui.motor_event_handlers as _m
+        getattr(_m, fn)(**self._motor_handler_deps())
 
-    def _on_motor_speaking_end(self) -> None:
-        prefetched_started = False
-        # Use controller state, not motor source (see _on_motor_speaking_start).
-        agenda_speech = (
-            hasattr(self, "kira_agenda")
-            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
-        )
-        if agenda_speech:
-            self.kira_agenda.mark_speech_complete()
-            self._kira_agenda_update_status()
-            if self._kira_agenda_consume_pending_chat_if_due():
-                prefetched_started = True
-            else:
-                prefetched_started = self._kira_agenda_play_prefetched_if_ready()
-            if not prefetched_started and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
-                self._kira_agenda_schedule_tick(1200)
-        elif hasattr(self, "kira_agenda"):
-            self._kira_agenda_clear_prefetch()
-        self._stop_speaking_alt_timer()
-        if hasattr(self, "audio_bed"):
-            self.audio_bed.unduck()
-            if agenda_speech or self.audio_bed.current_track is not None:
-                self.audio_bed.on_boundary()
-        # Fix 3: fire the deferred graceful audio-bed stop if soft_stop was
-        # called while Kira was speaking.  This runs AFTER mark_speech_complete()
-        # so the agenda state is already settled (OFF when closing speech ended).
-        self._check_pending_audio_bed_stop()
-        estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
-        self._actualizar_pipeline(estado)
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(
-                AvatarState.LISTENING if estado == "listening" else AvatarState.IDLE
-            )
-        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
-        self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
-
-    def _start_speaking_alt_timer(self) -> None:
-        """Start a timer that alternates between SPEAKING and SPEAKING_ALT."""
-        self._speaking_is_alt = False
-        self._tick_speaking_alt()
-
-    def _stop_speaking_alt_timer(self) -> None:
-        """Stop the speaking alternation timer."""
-        if self._speaking_alt_timer_id is not None:
-            self.after_cancel(self._speaking_alt_timer_id)
-            self._speaking_alt_timer_id = None
-
-    def _tick_speaking_alt(self) -> None:
-        """Toggle between SPEAKING and SPEAKING_ALT and reschedule."""
-        self._speaking_is_alt = not self._speaking_is_alt
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(
-                AvatarState.SPEAKING_ALT if self._speaking_is_alt else AvatarState.SPEAKING
-            )
-        # Alternate every 700ms — fast enough to look natural, slow enough to see both images
-        self._speaking_alt_timer_id = self.after(700, self._tick_speaking_alt)
-
-    def _reset_inactivity_timer(self) -> None:
-        """Reset the inactivity timer. If Kira is idle for too long, she goes to sleep."""
-        self._stop_inactivity_timer()
-        self._inactivity_timer_id = self.after(self._inactivity_timeout_ms, self._on_inactivity_timeout)
-
-    def _stop_inactivity_timer(self) -> None:
-        """Stop the inactivity timer."""
-        if self._inactivity_timer_id is not None:
-            self.after_cancel(self._inactivity_timer_id)
-            self._inactivity_timer_id = None
-
-    def _on_inactivity_timeout(self) -> None:
-        """Kira has been idle for too long — go to sleep."""
-        self._inactivity_timer_id = None
-        if hasattr(self, "_avatar_bridge"):
-            current = self._avatar_bridge.get_state()
-            if current in (AvatarState.IDLE,):
-                self._avatar_bridge.set_state(AvatarState.SLEEPING)
-                self._log_accion("Kira se durmió por inactividad")
+    def _on_motor_ready(self) -> None: self._dispatch_motor_handler("on_motor_ready")
+    def _on_motor_model_warming(self) -> None: self._dispatch_motor_handler("on_motor_model_warming")
+    def _on_motor_ollama_unavailable(self) -> None: self._dispatch_motor_handler("on_motor_ollama_unavailable")
+    def _on_motor_processing(self) -> None: self._dispatch_motor_handler("on_motor_processing")
+    def _on_motor_idle(self) -> None: self._dispatch_motor_handler("on_motor_idle")
+    def _on_motor_llm_timeout_recovered(self) -> None: self._dispatch_motor_handler("on_motor_llm_timeout_recovered")
+    def _on_motor_speaking_start(self) -> None: self._dispatch_motor_handler("on_motor_speaking_start")
+    def _on_motor_speaking_end(self) -> None: self._dispatch_motor_handler("on_motor_speaking_end")
+    def _start_speaking_alt_timer(self) -> None: self._dispatch_motor_handler("start_speaking_alt_timer")
+    def _stop_speaking_alt_timer(self) -> None: self._dispatch_motor_handler("stop_speaking_alt_timer")
+    def _tick_speaking_alt(self) -> None: self._dispatch_motor_handler("tick_speaking_alt")
+    def _reset_inactivity_timer(self) -> None: self._dispatch_motor_handler("reset_inactivity_timer")
+    def _stop_inactivity_timer(self) -> None: self._dispatch_motor_handler("stop_inactivity_timer")
+    def _on_inactivity_timeout(self) -> None: self._dispatch_motor_handler("on_inactivity_timeout")
+    def _on_motor_model_changed(self) -> None: self._dispatch_motor_handler("on_motor_model_changed")
+    def _on_motor_switch_pending(self) -> None: self._dispatch_motor_handler("on_motor_switch_pending")
+    def _on_motor_switch_failed(self) -> None: self._dispatch_motor_handler("on_motor_switch_failed")
+    def _on_motor_download_start(self) -> None: self._dispatch_motor_handler("on_motor_download_start")
+    def _on_motor_download_done(self) -> None: self._dispatch_motor_handler("on_motor_download_done")
+    def _on_motor_download_error(self) -> None: self._dispatch_motor_handler("on_motor_download_error")
 
     # ------------------------------------------------------------------
     # OBS lifecycle delegates — bodies live in opencohost/ui/obs_lifecycle.py
@@ -2340,84 +2243,6 @@ class VocalAIApp(ctk.CTk):
             winfo_exists=lambda: self.winfo_exists(),
             retry_delay=retry_delay,
         )
-
-    def _on_motor_model_changed(self) -> None:
-        model = self.motor_ia.current_model
-        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        self._safe_after(lambda: self.model_panel.update_model_info(model))
-        # Use restore_to_active_model (not set_active_model) so the combobox is
-        # synced to the newly active model — mirroring the failure path at
-        # _on_motor_switch_failed, which already used restore_to_active_model.
-        # set_active_model only updated _active_model_tag and buttons; it never
-        # called combo_modelos.set(), leaving the combobox stale after a success.
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
-        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-        self._actualizar_pipeline("idle")
-
-    def _on_motor_switch_pending(self) -> None:
-        desired = getattr(self.motor_ia, "_desired_model", None)
-        if desired:
-            display = self.model_panel.get_display_for_tag(desired)
-            if not getattr(self.motor_ia, "is_ready", False):
-                self._print_log(f"[Sistema] Cambio a {display} pendiente: Ollama no está listo.")
-            else:
-                self._print_log(f"[Sistema] Cambio a {display} pendiente: se aplicará al terminar la respuesta actual.")
-        # Do NOT restore combobox — user's selection stays visible as intended target
-
-    def _on_motor_switch_failed(self) -> None:
-        self._ui_state.model_status = "error"
-        failure = getattr(self.motor_ia, "_last_switch_failure", None)
-        actual_model = self.motor_ia.current_model
-        if failure:
-            requested = failure.get("requested", "?")
-            reason = failure.get("reason", "unknown")
-            self._print_log(f"[Sistema] ❌ Cambio a {requested} fallido: {reason}. Modelo activo: {actual_model}")
-            # Clear after read to prevent stale display
-            self.motor_ia._last_switch_failure = None
-        # Restore combobox to actual motor model
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
-        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-        self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
-        # Stale-error fix: if the motor rolled back to a working model, the system is
-        # operational again — clear the transient "error" pill after a short delay so
-        # it doesn't stick for the whole session (the failure is logged above).
-        if actual_model:
-            self._safe_after(
-                lambda: setattr(self._ui_state, "model_status", "ready")
-                if self._ui_state.model_status == "error" else None,
-                2000,
-            )
-
-    def _on_motor_download_start(self) -> None:
-        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
-        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
-        self._safe_after(lambda: self.progress_download.pack(fill="x", padx=10, pady=(4, 10)))
-        self._safe_after(lambda: self.progress_download.set(0))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
-        self._actualizar_pipeline("downloading")
-
-    def _on_motor_download_done(self) -> None:
-        model = self.motor_ia.current_model
-        # Invalidate stale install-status cache so the next _modelo_instalado call
-        # reflects the newly downloaded model (fix #A).
-        self._safe_after(lambda: self.model_panel._invalidate_model_cache())
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.progress_download.pack_forget())
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        self._safe_after(lambda: self.model_panel.update_model_info(model))
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
-
-    def _on_motor_download_error(self) -> None:
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.progress_download.pack_forget())
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._actualizar_pipeline("error")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.ERROR)
 
     # ──────────────────────────────────────────────
     # Audio, TTS, Chat, PTT helpers

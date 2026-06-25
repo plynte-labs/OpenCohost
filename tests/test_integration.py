@@ -231,7 +231,11 @@ class TestAppShellStructure:
         # _wire_stream_admin_callbacks to 4 RF3 wires; removed AdminManager import,
         # _stream_admin_manual_disconnect field, _init_stream_admin() call, and
         # on_closing RF4 teardown block. Actual: 2789 lines. NEVER raise this cap.
-        assert len(lines) < 2820, f"app_shell.py has {len(lines)} lines, expected < 2820"
+        # Lowered 2820 -> 2660 (2026-06-24): ui_rendering_optimization_20260609 Phase 6
+        # Stage 3 — extracted motor-event dispatch cluster (21 methods, ~251 body LOC)
+        # to opencohost/ui/motor_event_handlers.py; thin delegates + _motor_handler_deps()
+        # left on VocalAIApp. Actual: 2614 lines. NEVER raise this cap.
+        assert len(lines) < 2660, f"app_shell.py has {len(lines)} lines, expected < 2660"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell
