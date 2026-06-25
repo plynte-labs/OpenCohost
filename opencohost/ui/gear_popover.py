@@ -2,7 +2,7 @@
 
 A non-modal CTkToplevel window that contains:
   - Mostrar-logs toggle (default OFF)
-  - Compacto toggle (default ON)
+  - Compacto toggle (default OFF)
   - OpenCohost brand/About link
 
 Usage (from app_shell.py)::

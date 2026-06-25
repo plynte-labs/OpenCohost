@@ -1150,3 +1150,42 @@ class TestDispatcherIntegration:
 
             # Should not raise — dispatcher handles errors
             panel.log_action("Error callback")
+
+
+# ===================================================================
+# Bug B regression: build() must not leave frame visible (state-view parity)
+# ===================================================================
+
+class TestBuildStartupVisibilityState:
+    """Bug B: after build(), the logs frame must be hidden so that
+    _logs_panel_visible=False (the init default) and the actual widget
+    visibility AGREE.
+
+    RED before fix: _frame._grid_visible is True immediately after build()
+    because build() calls self._frame.grid(...) but never calls grid_remove().
+    GREEN after fix: build() calls grid_remove() right after grid(), so the
+    rendered state matches the _logs_panel_visible=False init default.
+
+    This test is intentionally NON-VACUOUS: the assertion checks the widget
+    render state, not just the Python bool. A panel with grid() called but
+    no grid_remove() WILL fail here even if _logs_panel_visible happens to
+    be False.
+    """
+
+    def test_build_leaves_frame_hidden_matching_init_default(
+        self, mock_ctk, ui_state, dispatcher, log_queue
+    ):
+        """After build(), frame must NOT be gridded: state and view must agree."""
+        with patch.dict("sys.modules", {"customtkinter": mock_ctk}):
+            panel = _make_panel(mock_ctk, ui_state, dispatcher, log_queue)
+            panel.build()
+
+            # Both must be False — any mismatch means Bug B is present
+            assert panel._logs_panel_visible is False, (
+                "_logs_panel_visible must be False after build() (init default)"
+            )
+            assert panel._frame._grid_visible is False, (
+                "_frame must NOT be gridded after build(): "
+                "grid() was called but grid_remove() was not, "
+                "so the logs frame renders OPEN while state says collapsed (Bug B)"
+            )

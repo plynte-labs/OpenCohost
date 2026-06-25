@@ -157,6 +157,12 @@ class AdvancedModePanel:
             height=260,
         )
         self._frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        # Bug B fix: immediately hide after grid() so rendered state matches
+        # _logs_panel_visible=False (the init default). set_logs_visible() has
+        # a no-op guard (if self._logs_panel_visible == visible: return) which
+        # would prevent it from calling grid_remove() here, so we call it
+        # directly. The guard stays intact for all subsequent toggle calls.
+        self._frame.grid_remove()
         self._frame.grid_propagate(False)
         self._frame.grid_columnconfigure(0, weight=1)
         self._frame.grid_rowconfigure(1, weight=1)

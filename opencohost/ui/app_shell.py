@@ -120,7 +120,7 @@ class VocalAIApp(ctk.CTk):
         self._run_startup_janitor()
         self.dispositivo_seleccionado: int | None = None
         self._modo_compacto: bool = False
-        self._compacto_active: bool = True   # compact is the startup default (ui_declutter_20260614)
+        self._compacto_active: bool = False  # Bug C fix: product workspace visible at startup (ADR-SD-002 2026-06-25)
         self._logs_visible_active: bool = False  # logs hidden by default; toggled via gear popover
         self._ptt_accept_logged: bool = False
         self._logs_panel_visible: bool = False  # compact-is-default: logs start hidden
@@ -966,9 +966,12 @@ class VocalAIApp(ctk.CTk):
         self._product_workspace_panel = side_panel
 
         self._show_main_view("Kira")
-        # Apply startup compact mode default (ui_declutter_20260614).
-        # _compacto_active is already True; calling _toggle_modo_compacto()
-        # hides the side config panel and sets logs hidden.
+        # Bug C fix (ADR-SD-002 2026-06-25): _compacto_active is now False so
+        # _toggle_modo_compacto() routes through the else-branch: shows the
+        # product workspace (side_config_panel.grid()) and hides logs (via
+        # _toggle_logs_panel → _logs_visible_active=False). Kira hero view is
+        # already set by the _show_main_view("Kira") call above, decoupled from
+        # compact mode. Reverses ui_declutter_20260614 compact-is-default.
         self._toggle_modo_compacto()
 
     # ──────────────────────────────────────────────
