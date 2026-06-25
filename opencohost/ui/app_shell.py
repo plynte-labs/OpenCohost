@@ -1052,13 +1052,33 @@ class VocalAIApp(ctk.CTk):
             self._kira_agenda_update_status()
 
     def _music_play_mood(self, mood: str) -> None:
-        # FR3: dispatch the play (which includes disk decode) off the UI thread.
-        # _music_update_panel() is called immediately on the main thread —
-        # it reads library state (not play state) so it is safe to call
-        # unconditionally before the worker completes.
-        self._dispatch_audio_play(
-            lambda: self.audio_bed.request_mood(mood, force=True, boundary=True)
-        )
+        # Bug A fix: single-flight for preview buttons — at most ONE worker, last-click
+        # wins (coalesce), hard-stop before play so no two channels overlap.
+        if not hasattr(self, "_preview_lock"):
+            self._preview_lock = threading.Lock()
+            self._preview_in_flight, self._preview_latest_mood = False, ""
+        with self._preview_lock:
+            self._preview_latest_mood = mood
+            if self._preview_in_flight:
+                self._music_update_panel()
+                return
+            self._preview_in_flight = True
+        def _preview_worker() -> None:
+            try:
+                while True:
+                    with self._preview_lock:
+                        current_mood = self._preview_latest_mood
+                    self.audio_bed.stop(emergency=True)
+                    self.audio_bed.request_mood(current_mood, force=True, boundary=True)
+                    with self._preview_lock:
+                        if self._preview_latest_mood == current_mood:
+                            self._preview_in_flight = False
+                            return
+            except Exception as exc:
+                logger.warning("Preview worker error: %s", exc)
+                with self._preview_lock:
+                    self._preview_in_flight = False
+        threading.Thread(target=_preview_worker, daemon=True).start()
         self._music_update_panel()
 
     def _music_stop(self) -> None:
