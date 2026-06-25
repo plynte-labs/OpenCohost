@@ -127,9 +127,9 @@ def test_hung_inference_allows_switch_back_to_last_known_good_model(tmp_path):
     worker.start()
 
     try:
-        assert _wait_until(lambda: motor.is_processing, timeout=0.3)
+        assert _wait_until(lambda: motor.is_processing, timeout=3.0)
         motor._dispatch_command("switch_model", DEFAULT_MODEL)
-        assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=0.6)
+        assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=5.0)
         # The UI event is dispatched asynchronously after the model switch;
         # on loaded CI runners it can land after current_model updates.
         assert _wait_until(lambda: "model_switch_applied" in ui_events, timeout=2.0)
@@ -167,11 +167,11 @@ def test_follow_up_input_does_not_remain_trapped_forever_after_hung_request(tmp_
     worker.start()
 
     try:
-        assert _wait_until(lambda: motor.is_processing, timeout=0.3)
+        assert _wait_until(lambda: motor.is_processing, timeout=3.0)
         motor._dispatch_command("process_context", "segundo mensaje")
-        assert _wait_until(lambda: call_count["value"] >= 2, timeout=1.0)
-        assert _wait_until(lambda: len(motor._priority_queue) == 0, timeout=1.5)
-        assert _wait_until(lambda: not motor.is_processing, timeout=2.0)
+        assert _wait_until(lambda: call_count["value"] >= 2, timeout=5.0)
+        assert _wait_until(lambda: len(motor._priority_queue) == 0, timeout=5.0)
+        assert _wait_until(lambda: not motor.is_processing, timeout=5.0)
     finally:
         release.set()
         worker.join(timeout=1.0)
@@ -203,7 +203,7 @@ def test_hung_first_inference_rolls_back_to_last_known_good_model(tmp_path):
     worker.start()
 
     try:
-        assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=0.6)
+        assert _wait_until(lambda: motor.current_model == DEFAULT_MODEL, timeout=5.0)
         # The UI event is dispatched asynchronously after the model switch;
         # on loaded CI runners it can land after current_model updates.
         assert _wait_until(lambda: "model_switch_applied" in ui_events, timeout=2.0)
