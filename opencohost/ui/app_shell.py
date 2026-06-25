@@ -61,7 +61,7 @@ from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
 from opencohost.core.editorial_cards import EditorialCard, EditorialCardStore
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.health_monitor import HealthMonitor
-from opencohost.core.temp_file_cleanup import cleanup_voiceai_temp_artifacts
+from opencohost.core.temp_file_cleanup import cleanup_opencohost_temp_artifacts
 from opencohost.core.music_library import MusicLibrary
 from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy
 from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
@@ -288,9 +288,9 @@ class VocalAIApp(ctk.CTk):
         # Begin UI health status polling and passive motor heartbeat checks.
         self._poll_health_status()
     def _run_startup_janitor(self) -> None:
-        """Recover only known VoiceAI temp leftovers from a previous run."""
+        """Recover only known OpenCohost temp leftovers from a previous run."""
         try:
-            stats = cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=60.0)
+            stats = cleanup_opencohost_temp_artifacts(TEMP_DIR, logger, min_age_seconds=60.0)
         except Exception as exc:
             logger.warning("Startup temp janitor failed: %s", exc)
             return
@@ -320,18 +320,18 @@ class VocalAIApp(ctk.CTk):
         try:
             alive = motor.is_alive()
         except Exception:
-            logger.exception("No se pudo verificar el heartbeat de MotorVocalIA")
+            logger.exception("No se pudo verificar el heartbeat del motor de Kira")
             return
         if alive:
             return
         self._motor_heartbeat_failure_reported = True
-        logger.critical("MotorVocalIA thread died unexpectedly; UI remains open but Kira is offline")
+        logger.critical("Kira's engine thread died unexpectedly; UI remains open but Kira is offline")
         try:
             self._ui_state.health_status = "red"
         except Exception:
             logger.exception("No se pudo marcar health_status tras fallo de MotorVocalIA")
         try:
-            self._print_log("[CRITICO] MotorVocalIA se detuvo inesperadamente. Kira esta offline; reinicia la app.")
+            self._print_log("[CRITICO] El motor de Kira se detuvo inesperadamente. Kira esta offline; reinicia la app.")
         except Exception:
             logger.exception("No se pudo informar en UI el fallo de MotorVocalIA")
     def _on_ui_state_change(self, key: str, value: Any) -> None:
@@ -2820,7 +2820,12 @@ class VocalAIApp(ctk.CTk):
         model = self.motor_ia.current_model
         self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
         self._safe_after(lambda: self.model_panel.update_model_info(model))
-        self._safe_after(lambda: self.model_panel.set_active_model(model))
+        # Use restore_to_active_model (not set_active_model) so the combobox is
+        # synced to the newly active model — mirroring the failure path at
+        # _on_motor_switch_failed, which already used restore_to_active_model.
+        # set_active_model only updated _active_model_tag and buttons; it never
+        # called combo_modelos.set(), leaving the combobox stale after a success.
+        self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
         self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
         self._actualizar_pipeline("idle")
 
@@ -3249,7 +3254,7 @@ class VocalAIApp(ctk.CTk):
         self.motor_ia.command_queue.put(None)
 
         try:
-            cleanup_voiceai_temp_artifacts(TEMP_DIR, logger, min_age_seconds=0.0)
+            cleanup_opencohost_temp_artifacts(TEMP_DIR, logger, min_age_seconds=0.0)
         except Exception as e:
             logger.warning(f"No se pudo limpiar temporales de la app al salir: {e}")
 

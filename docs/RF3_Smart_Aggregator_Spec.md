@@ -17,7 +17,7 @@ Si necesitas una dependencia nueva, **consulta primero**.
 
 El proyecto tiene **dos aplicaciones**:
 
-1. **`VoiceAI`** — UI (`ui/app.py`), motor IA, TTS, LLM
+1. **`OpenCohost`** — UI (`ui/app.py`), motor IA, TTS, LLM
 2. **`LiveAudio`** — App separada que maneja:
    - Audio del micrófono
    - Transcripción Whisper

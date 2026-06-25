@@ -1,4 +1,4 @@
-"""OBS WebSocket client for VoiceAI avatar integration.
+"""OBS WebSocket client for OpenCohost avatar integration.
 
 Connects to OBS Studio via obs-websocket and updates image sources
 based on avatar state changes.
@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
+from opencohost.config.logger import get_logger
 
-logger = logging.getLogger("VoiceAI")
+logger = get_logger()
 
 _SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 

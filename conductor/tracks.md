@@ -244,3 +244,145 @@ This file tracks all major tracks for the project. Each track has its own detail
   VRAM-gated via existing VRAMGuard, progress in the in-app console, Edge during startup.
   ~80% already built in QwenProcessManager. PACKAGING of the heavy env is PARKED (out of
   current scope). Next: spec + TDD implementation of the lifecycle wiring. See investigation.md.*
+
+---
+
+- [x] **Track: Branding Log Leak Remediation — Runtime Output Still Says "VoiceAI"** — SUPERSEDED
+  *Link: [./tracks/branding_log_leak_remediation_20260616/](./tracks/branding_log_leak_remediation_20260616/)*
+  *Status 2026-06-17: SUPERSEDED/DONE — all runtime items (L1–L5, C1–C4, and S1) shipped by the
+  VoiceAI→OpenCohost runtime rebrand (commit ad7ca94, merged on audit/comprehensive-review).
+  Verified: `git grep voiceai` in opencohost/ = 0; logger "OpenCohost"; opencohost_*.log;
+  OPENCOHOST_DEBUG; S1 tag now ["kira","opencohost","live"]. Original proposal (historical):
+  launch-readiness branding sweep
+  found the running app still emits the retired "VoiceAI" name in runtime output.
+  Highest-impact (L1): the shared logger is named "VoiceAI" and the format includes
+  %(name)s, so EVERY console+file log line reads [VoiceAI]. Also L2 log file written
+  as voiceai_*.log; L3/L4 literal log messages (llm_engine.py:870, temp_file_cleanup.py:69,72);
+  L5 public env var VOICEAI_DEBUG. Cross-cutting security constraint: the logger name
+  must be renamed in all three getLogger("VoiceAI") sites together (logger.py:43,
+  avatar_panel.py:36, obs_client.py:25) or avatar_panel/obs_client lose the
+  SensitiveDataFilter (token/liveChatId redaction). C1–C4 cosmetic (docstrings/ids,
+  not printed). S1 routed+frozen: admin_manager.py:325 metadata tag "voiceai" behind
+  STREAM_ADMIN_ENABLED=False — external leak if RF4 re-enabled, owned by
+  stream_admin_legacy_removal_20260614. See proposal.md.*
+
+---
+
+- [x] **Track: Product Rebrand VoiceAI → OpenCohost**
+  *Link: [./tracks/product_rebrand_voiceai_to_opencohost_20260617/](./tracks/product_rebrand_voiceai_to_opencohost_20260617/)*
+  *Status 2026-06-17: DONE. Workstream A (docs reconciliation) + Workstream B (runtime rename) both
+  complete and merged on audit/comprehensive-review (commits 28df4c3 docs, ad7ca94 runtime,
+  6f30231 operator log strings). Runtime: logger "OpenCohost", opencohost_*.log, OPENCOHOST_DEBUG/
+  _CRASH_LOG/_FATAL_LOG, identifiers, log strings, S1 tag — verified `git grep voiceai` in opencohost/
+  = 0. Absorbs/supersedes branding_log_leak_remediation_20260616. Git-verified: appdata rename shipped
+  in v0.1.0/v0.1.1 (commit e76c9b1 ancestor) → no orphaned users, migration shim unnecessary.
+  PRESERVED: ADR-004, docs/audit/*, engram key `voiceai`. Only the separate `VocalAI` class
+  identifiers (MotorVocalIA, VocalAIApp) remain deferred — see docs/architecture.md.*
+
+- [ ] **Track: Public Site Rebrand — voiceaikira.vercel.app → OpenCohost (PRIORITY)**
+  *Link: [./tracks/public_site_rebrand_opencohost_20260617/](./tracks/public_site_rebrand_opencohost_20260617/)*
+  *Status 2026-06-17: PROPOSAL ONLY. Highest external leverage — the legacy brand the US audience
+  actually sees (URL + /docs + /es). Includes domain migration to opencohost.com (ADR-0010) with
+  301/SEO/analytics continuity. Separate Vercel project/repo. See proposal.md.*
+
+- [~] **Track: English Compatibility / i18n — US-ready OpenCohost (PRIORITY)**
+  *Link: [./tracks/english_compatibility_i18n_20260617/](./tracks/english_compatibility_i18n_20260617/)*
+  *Status 2026-06-18: IN PROGRESS on branch `feat/i18n-core`. Reusable swap architecture (add a
+  language = add a data bundle, not engine code). Phases T0–T5 (see proposal.md). DONE: T0 i18n-core
+  (contract+registry+state/CLI), T0d resilient startup resolver (degrade-to-es, anti-shadowing,
+  BCP 47), T1 Edge voice from active bundle, T2 en bundle (Kira speaks English — owner-validated,
+  persists across restart), T3 locale-driven LLM persona (es byte-identical), T3c hardcoded prompt
+  scaffolding → bundle slots ([Mensaje del usuario], <memoria_de_fondo>, [hace N turnos] all
+  locale-aware), T4 coherence gate (warn-only, profile always wins — new opencohost/i18n/coherence.py,
+  wired into set_profile; deterministic Option A today + Option B `locale`-field seam for the autodetect
+  track; 22 gate tests, 108 i18n+engine green). Owner runtime-validated en with llama3: ~90% English
+  (residual es is from the profile prompt itself, owner-owned). Scope: es+en OFFICIAL only (zh future,
+  community-tier unless a native author joins). NEXT: T5 guardrails (SHIP-BLOCKER). Optional:
+  GUARDRAIL_FALLBACK_LINES (4 spoken es lines).
+  ⚠️ NOT YET VALIDATED in en: RF3 smart-aggregator, RF4 stream-admin, and guardrails behavior — must
+  test before declaring i18n done. Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety.*
+
+- [ ] **Track: Profile-Language Auto-Detect → Locale Switch (comfort)**
+  *Link: [./tracks/profile_locale_autodetect_20260618/](./tracks/profile_locale_autodetect_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY, spun out of i18n during T3 runtime test. Comfort layer on top of
+  the T4 warn-only coherence gate: detect a profile's language and offer/perform the matching locale
+  switch (profile still wins; mismatch stays allowed-but-announced). Recommends an explicit `locale`
+  field on profiles over heuristics; suggest-not-auto default; next-boot restart model. See proposal.md.*
+
+- [ ] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
+  *Link: [./tracks/music_mode_ducking_20260618/](./tracks/music_mode_ducking_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY, from i18n runtime observation. (A) make Kira's speak-time music
+  volume configurable (today hard-coded ducked_volume=0.08). (B) BUG: music not leveled on the FIRST
+  interaction after a track change — root cause hypothesis: audio_bed.py:228 starts new tracks at
+  base_volume with no persisted duck state, so a track change mid-speech ignores ducking until the next
+  duck() call. Comfort/quality, not launch-blocking. See proposal.md.*
+
+- [ ] **Track: Co-host Liveness & Recovery Hardening (watchdog + systemic-empty degrade + idempotency)**
+  *Link: [./tracks/cohost_liveness_recovery_20260619/](./tracks/cohost_liveness_recovery_20260619/)*
+  *Status 2026-06-19: PROPOSAL-ONLY, spun out of the GAP-005 empty-response fix via a 3-lens adversarial panel
+  (engram #2241). GAP-005 point fix DONE+tested (empty/blocked agenda gen → register_failure(GUARDRAIL_EMPTY) via
+  existing validator hook; 5 tests; uncommitted). Remaining (own track, own TDD): (1) liveness WATCHDOG for stalls
+  GAP-005 doesn't see — mode 6 TTS-hang in SPEAKING, prefetch crash, future paths; clock lives in app_shell tick,
+  injectable for tests. (2) SYSTEMIC-EMPTY degrade-then-ALERT: today register_failure abandons topic at 2 + resets
+  on close, so a dead model burns the topic queue and NEVER reaches PAUSED_NEEDS_OPERATOR (silent death) — add a
+  session-level empty streak → degrade → operator pause. (3) record_failure IDEMPOTENCY (prereq: watchdog + engine
+  signal could double-increment, skip degrade, jump to PAUSED). Sibling of heavy_model_inference_recovery. See proposal.md.*
+
+- [ ] **Track: Engine Locale Residue — Hardcoded Spanish in Prompt Assembly & Guardrail Fallback Lines (PRIORITY)**
+  *Link: [./tracks/i18n_engine_locale_residue_20260618/](./tracks/i18n_engine_locale_residue_20260618/)*
+  *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
+  (1) ARCHITECTURAL — the locale bundle persona is dead code: every profile carries a `prompt` so the engine never
+  reaches i18n_active.system_prompt() (llm_engine.py:332); locale does NOT govern persona today. (2) Five hardcoded
+  Spanish injection vectors leak into en sessions; the worst (GUARDRAIL_FALLBACK_LINES llm_engine.py:74) is committed
+  to historial → primes the model to Spanish (root of the llama3 Spanglish). Scope narrowed to LANGUAGE + GUARDRAILS.
+  D1: fallback lines subscribe to i18n + a user-set default-language (en/es) safety net. D2 (stop filler contaminating
+  Kira's memory) MOVED to kira_memory_hardening E6 (owner Option 5) — this track keeps only the LANGUAGE of the lines.
+  D3 (language governor) routed to its own proposal. MUST run investigation I1 (what's in the guardrails domain) + I2 (do the fallback lines ever fire?)
+  before any code — owner has never heard a guardrail line spoken. Operationalizes/refines i18n T5. See proposal.md.*
+
+---
+
+### Accumulated from 2026-06-17 runtime session (owner observations + untested features)
+
+- [ ] **Track: First-Run & Ollama-Off Model Onboarding UX**
+  *Link: [./tracks/first_run_model_onboarding_20260617/](./tracks/first_run_model_onboarding_20260617/)*
+  *Status 2026-06-17: PROPOSAL. Ollama-off blocks model choice (only "open Ollama" works); on start it
+  auto-loads an unwanted model; fresh install FORCES downloading llama3 (can't choose/skip). Mitigation:
+  decouple selection from Ollama-running state + persist intent; honor user intent on start; fresh-install
+  chooser instead of forced llama3; never force a download when models exist. See proposal.md.*
+
+- [ ] **Track: App Startup Clarity (loading vs frozen)**
+  *Link: [./tracks/app_startup_clarity_20260617/](./tracks/app_startup_clarity_20260617/)*
+  *Status 2026-06-17: PROPOSAL. At startup only Kira shows; new users can't tell if it's loading or frozen
+  during the slow cold start. Mitigation: surface the phases the backend already logs (Iniciando→Conectando
+  Ollama→Preparando modelo→Listo) + warm-up progress, via UIState/_safe_after. See proposal.md.*
+
+- [ ] **Track: Status Bars Stale / Cryptic Errors (investigate)**
+  *Link: [./tracks/status_bar_stale_state_20260617/](./tracks/status_bar_stale_state_20260617/)*
+  *Status 2026-06-17: PROPOSAL (investigation-first). Some status bars never update — keep showing
+  `system:error` and cryptic strings that alarm without being actionable. Investigate UIState observer
+  wiring (which keys never refresh / never clear on recovery) + inventory error strings, then fix wording
+  + refresh. See proposal.md.*
+
+- [ ] **Track: Kira Memory Hygiene — Consolidated Admission + Sanitization (E5 + E6 + E3)**
+  *Link: [./tracks/kira_memory_hardening_20260617/](./tracks/kira_memory_hardening_20260617/)*
+  *Status 2026-06-18: PROPOSAL, RESCOPED (owner Option 5) into one memory-hygiene pass on a single boundary —
+  "what enters Kira's memory and is it trustworthy." Axis A ADMISSION via one should_remember(turn) predicate:
+  E5 (unspoken/TTS-failed replies; gate on was_spoken) + E6 (synthetic filler — guardrail/agenda fallback lines
+  are spoken but committed to historial and prime the next turn; tag at source, exclude — ABSORBS D2-B from
+  i18n_engine_locale_residue). Axis B CONTENT TRUST: E3 (digest sanitizer hardening — Spanish markers/NFKC/
+  whole-digest scan). E6 ≠ E5 (was_spoken doesn't catch spoken filler) — that's why one predicate, not two gates.
+  Memory verified WIRED & working. Supersedes repo_hygiene R3/R4 memory slice. Strict TDD. See proposal.md.*
+
+- [ ] **Track: RF3 Chat Ingestion — runtime validation (UNTESTED)**
+  *Status 2026-06-17: not validated at runtime (owner had no live stream in the 2026-06-17 session; zero
+  connection attempts in the log — expected, not a bug). To test without owning a stream: "Chat Live (RF3)"
+  tab → paste `twitch.tv/<any live channel>` (anonymous, no OAuth) or any public YouTube live URL → Conectar
+  Chat Live; success logs `[StreamAdmin] Chat Live conectado [...]`. Note: failure paths are silent in the
+  log (invalid URL = UI toast; connect_to False = nothing). OAuth tokens present at data/stream_admin/.*
+
+- [ ] **Track: Editorial Cards — runtime end-to-end validation (UNTESTED)**
+  *Status 2026-06-17: cards verified WIRED (EditorialCardStore + EditorialAgendaBridge in app_shell:149,192;
+  ~15 refs in cohost_agenda_panel.py UI; CLI editorial_cli.py; raw-chat rejected at model boundary). Almost
+  certainly functional but NOT exercised this session. Validate end-to-end: author → arm → fires in agenda →
+  Kira uses it. Pairs with the cohost-engine deep-dive (deferred).*

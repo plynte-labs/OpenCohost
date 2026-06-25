@@ -1,4 +1,4 @@
-# VoiceAI Agent Guide
+# OpenCohost Agent Guide
 
 ## Agent Startup Hook
 
@@ -14,7 +14,7 @@
 
 ## Known Project Context
 
-- VoiceAI has prior work to make TTS usable without internet after the first model download.
+- OpenCohost has prior work to make TTS usable without internet after the first model download.
 - Cached Qwen3-TTS models are stored under `modelos_f5/hub` inside the project directory (path is machine-local and gitignored).
 - When the model is already cached, startup should prefer local resolution and force HF/Transformers offline mode to avoid unnecessary network access.
 - Heavy TTS requests may need longer timeouts to avoid chunk failures.
@@ -29,7 +29,7 @@
 
 ## Existing Project Skill
 
-- Existing VoiceAI-specific skill remains available and should not be overwritten:
+- Existing OpenCohost-specific skill remains available and should not be overwritten:
 - `vocalai-ui-ux-architect`
 
 ## Worktree Safety

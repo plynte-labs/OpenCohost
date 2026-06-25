@@ -658,3 +658,116 @@ class TestOrchestrationSequence:
         ptt_items = [i for i in motor._priority_queue if i[3] == "ptt"]
         # PTT was already consumed, so queue may have remaining items
         assert ctrl.active_topic is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GAP-005 — Empty agenda response must not stall the cohost loop
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestGAP005EmptyResponseRecovery:
+    """An empty (or guardrail-blocked) agenda generation returns "" from
+    _generar_dialogo, so _hablar never runs and no speaking_start event fires.
+    Without wiring, the controller stays in GENERATING forever and the
+    autonomous loop dies silently. The fix routes the empty result through the
+    existing validator hook → register_failure(GUARDRAIL_EMPTY) → recovery.
+    """
+
+    def test_empty_agenda_response_exits_generating_state(self):
+        """The confirmed bug: empty response must leave GENERATING and recover."""
+        motor = _build_motor()
+        ctrl, _ = _build_agenda_with_topic()
+        motor.agenda_output_validator = ctrl.accept_output
+
+        action = ctrl.next_action()
+        assert action.kind == "enqueue"
+        assert ctrl.state == AgendaState.GENERATING
+
+        with patch.object(motor, "_generar_dialogo", return_value=""), \
+                patch.object(motor, "_hablar") as hablar:
+            motor._ejecutar_inferencia(action.prompt, source=action.source)
+
+        hablar.assert_not_called()
+        assert ctrl.state != AgendaState.GENERATING
+        assert ctrl.state == AgendaState.REGENERATING_SAFE
+
+    def test_empty_direct_response_does_not_touch_agenda_controller(self):
+        """Direct path is not driven by the controller: it must stay untouched."""
+        motor = _build_motor()
+        ctrl, _ = _build_agenda_with_topic()
+        motor.agenda_output_validator = ctrl.accept_output
+
+        ctrl.next_action()
+        assert ctrl.state == AgendaState.GENERATING
+        failures_before = ctrl.recovery.failure_count
+
+        with patch.object(motor, "_generar_dialogo", return_value=""), \
+                patch.object(motor, "_hablar"):
+            motor._ejecutar_inferencia("pregunta directa del operador", source="direct")
+
+        assert ctrl.recovery.failure_count == failures_before
+        assert ctrl.state == AgendaState.GENERATING
+
+    def test_nonempty_agenda_response_still_speaks(self):
+        """Regression: a valid agenda response must still be spoken."""
+        motor = _build_motor()
+        ctrl, _ = _build_agenda_with_topic()
+        motor.agenda_output_validator = ctrl.accept_output
+
+        action = ctrl.next_action()
+        with patch.object(motor, "_generar_dialogo", return_value="una idea concreta y viva"), \
+                patch.object(motor, "_hablar") as hablar:
+            motor._ejecutar_inferencia(action.prompt, source=action.source)
+
+        hablar.assert_called_once()
+
+    def test_two_consecutive_empties_abandon_topic(self):
+        """Second consecutive empty abandons the topic and moves on (degrade ladder)."""
+        motor = _build_motor()
+        ctrl, _ = _build_agenda_with_topic(turns=3)
+        motor.agenda_output_validator = ctrl.accept_output
+
+        a1 = ctrl.next_action()
+        with patch.object(motor, "_generar_dialogo", return_value=""), \
+                patch.object(motor, "_hablar"):
+            motor._ejecutar_inferencia(a1.prompt, source=a1.source)
+        assert ctrl.state == AgendaState.REGENERATING_SAFE
+
+        a2 = ctrl.next_action()
+        assert a2.kind == "enqueue"
+        with patch.object(motor, "_generar_dialogo", return_value=""), \
+                patch.object(motor, "_hablar"):
+            motor._ejecutar_inferencia(a2.prompt, source=a2.source)
+
+        assert ctrl.recovery.failure_count >= 2
+        assert ctrl.state == AgendaState.WAITING_SIGNAL
+        assert ctrl.active_topic.turns_spoken == ctrl.max_turns_per_topic
+
+    def test_persistent_empty_responses_are_bounded_not_infinite(self):
+        """A systemically-empty model must NOT loop forever — the controller
+        must stop issuing agenda work within a bounded number of cycles."""
+        motor = _build_motor()
+        ctrl, _ = _build_agenda_with_topic(turns=3)
+        motor.agenda_output_validator = ctrl.accept_output
+
+        enqueues = 0
+        action = AgendaAction.none()
+        for _ in range(30):
+            action = ctrl.next_action()
+            if action.kind != "enqueue":
+                break
+            enqueues += 1
+            with patch.object(motor, "_generar_dialogo", return_value=""), \
+                    patch.object(motor, "_hablar"):
+                motor._ejecutar_inferencia(action.prompt, source=action.source)
+        else:
+            pytest.fail("Controller kept issuing+failing agenda actions forever")
+
+        assert action.kind == "none"
+        assert ctrl.state in {
+            AgendaState.IDLE,
+            AgendaState.OFF,
+            AgendaState.PAUSED_NEEDS_OPERATOR,
+            AgendaState.HARD_PAUSED,
+        }
+        assert enqueues <= 6  # real path is ~3 (open → continue → close)

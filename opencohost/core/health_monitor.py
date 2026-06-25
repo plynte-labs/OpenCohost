@@ -1,4 +1,4 @@
-"""Health Monitor — system health daemon for VoiceAI.
+"""Health Monitor — system health daemon for OpenCohost.
 
 Provides real-time monitoring of:
 - GPU VRAM availability (via pynvml, graceful degradation)

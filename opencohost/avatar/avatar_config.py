@@ -1,4 +1,4 @@
-"""Avatar configuration loader/saver for VoiceAI.
+"""Avatar configuration loader/saver for OpenCohost.
 
 Loads ``config/avatar.yaml``, validates state-image mappings, and manages
 a local assets folder where user-selected images are copied to.

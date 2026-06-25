@@ -1,5 +1,5 @@
 """
-Callback protocols for VoiceAI inter-module communication.
+Callback protocols for OpenCohost inter-module communication.
 
 Defines type-safe Protocol classes for all module-to-UI callbacks and a
 CallbackDispatcher that replaces silent ``try/except: pass`` with proper

@@ -478,7 +478,7 @@ class TestModelTrace:
         """MODEL_TRACE appears in logger for standalone/direct source."""
         motor, log_q, _ = self._setup_motor_for_generation(tmp_path)
 
-        with caplog.at_level(logging.INFO, logger="VoiceAI"):
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
             result = motor._generar_dialogo("hola", source="direct", commit_history=False)
 
         assert result == "Respuesta de test"
@@ -493,7 +493,7 @@ class TestModelTrace:
         motor.agenda_output_preview_validator = None
         motor.agenda_output_transformer = None
 
-        with caplog.at_level(logging.INFO, logger="VoiceAI"):
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
             result = motor._generar_dialogo("tema de agenda", source="kira-agenda", commit_history=False)
 
         assert result  # non-empty after sanitization
@@ -507,7 +507,7 @@ class TestModelTrace:
         motor.agenda_output_preview_validator = None
         motor.agenda_output_transformer = None
 
-        with caplog.at_level(logging.INFO, logger="VoiceAI"):
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
             result = motor._generar_dialogo(
                 "prefetch test", source="kira-agenda", commit_history=False, log_prefix="Agenda prefetch",
             )

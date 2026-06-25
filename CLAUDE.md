@@ -1,10 +1,10 @@
-# VoiceAI — CLAUDE.md
+# OpenCohost — CLAUDE.md
 
 Agent instructions for this repository. Read this before planning any work.
 
 ## What is this project
 
-**VoiceAI / OpenCohost** is a local-first AI streaming co-host platform.
+**OpenCohost** is a local-first AI streaming co-host platform.
 The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor)
 that runs entirely on the user's hardware using Ollama + Qwen3-TTS/F5-TTS.
 

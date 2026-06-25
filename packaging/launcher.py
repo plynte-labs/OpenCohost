@@ -15,7 +15,7 @@ the following intentional divergences:
   - Ollama preflight: checks CLI on PATH + HTTP ping to localhost:11434 before
     launching the app; shows a clear actionable message when absent.
   - Default install includes cloud-tts + local-tts extras.
-  - VOICEAI_DEBUG=1 is forwarded to the app when --debug is used.
+  - OPENCOHOST_DEBUG=1 is forwarded to the app when --debug is used.
 
 HARD CONSTRAINT: this module may only use the Python standard library plus
 tkinter. It must NEVER import opencohost or any third-party package — it runs
@@ -26,7 +26,7 @@ CLI surface:
     --self-test          print detection + resolved paths, exit 0
     --reinstall          wipe app/ + .venv and bootstrap fresh
     --headless           plain stdout progress, no tkinter window
-    --debug              set VOICEAI_DEBUG=1 for the launched app process
+    --debug              set OPENCOHOST_DEBUG=1 for the launched app process
     --src-dir PATH       dev mode: install from a local checkout instead
                          of a GitHub release zip
     --no-launch          (hidden) stop after writing installed.json
@@ -871,7 +871,7 @@ def launch_app(install_root, portable, environ=None, platform=None, debug=False,
     env = dict(environ)
     env["OPENCOHOST_HOME"] = resolve_app_home(install_root, environ)
     if debug:
-        env["VOICEAI_DEBUG"] = "1"
+        env["OPENCOHOST_DEBUG"] = "1"
     if getattr(sys, "frozen", False):
         env["OPENCOHOST_LAUNCHER"] = os.path.abspath(sys.executable)
     if portable:
@@ -1581,7 +1581,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--debug", action="store_true",
-        help="set VOICEAI_DEBUG=1 for the launched app (visible logs)",
+        help="set OPENCOHOST_DEBUG=1 for the launched app (visible logs)",
     )
     parser.add_argument(
         "--src-dir", default=None, metavar="PATH",

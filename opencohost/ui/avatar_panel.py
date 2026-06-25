@@ -32,8 +32,9 @@ from opencohost.avatar.avatar_config import (
     assign_image_to_state,
 )
 from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
+from opencohost.config.logger import get_logger
 
-logger = logging.getLogger("VoiceAI")
+logger = get_logger()
 
 # ---------------------------------------------------------------------------
 # Layout constants

@@ -15,13 +15,15 @@ import torch
 import soundfile as sf
 import edge_tts
 
+from opencohost.i18n import active as i18n_active
+
 BASE_DIR = Path(__file__).resolve().parent
 HF_CACHE_DIR = STORAGE_PATHS.hf_home
 HF_HUB_DIR = STORAGE_PATHS.hf_hub_cache
 QWEN_REPO_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 QWEN_CACHE_DIR = HF_HUB_DIR / "models--Qwen--Qwen3-TTS-12Hz-0.6B-Base"
 
-# Hugging Face debe buscar primero en el cache configurable de VoiceAI. Si la
+# Hugging Face debe buscar primero en el cache configurable de OpenCohost. Si la
 # snapshot local existe, activamos offline para evitar llamadas de red.
 
 os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
@@ -172,7 +174,7 @@ def generar_audio():
                 }), 400
 
             logger.info(f"[{request_id}] Motor LIGERO: '{texto[:60]}...'")
-            voz_edge = "es-MX-DaliaNeural"
+            voz_edge = i18n_active.edge_voice()
             async def generar_edge():
                 communicate = edge_tts.Communicate(texto, voz_edge)
                 await communicate.save(archivo_salida)

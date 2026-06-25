@@ -1,4 +1,4 @@
-"""VoiceAI configuration package.
+"""OpenCohost configuration package.
 
 Creator Configuration Contract (MVP Core):
   - schema: Enums + frozen dataclasses

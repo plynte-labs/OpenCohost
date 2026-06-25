@@ -10,11 +10,13 @@ the future module-specific docs.
 |---|---|
 | OpenCohost | Current public product direction. |
 | Kira | Preserved cohost/persona identity. |
-| VoiceAI / VocalAI | Existing internal/project naming still present in modules, paths, package metadata, and some legacy docs. |
+| VocalAI | Legacy class-identifier naming still present in code (`MotorVocalIA`, `VocalAIApp`). The "VoiceAI" runtime rename is done; "VocalAI" class identifiers remain deferred. |
 
-Current behavior: public-facing app startup now logs OpenCohost, while many
-internal identifiers still use VoiceAI/VocalAI names. Internal renaming is
-deferred because broad renames would increase regression risk.
+Current behavior: the runtime is rebranded to OpenCohost — the shared logger is
+named "OpenCohost", logs are written as `opencohost_*.log`, and the debug env var
+is `OPENCOHOST_DEBUG`. The remaining legacy identifiers are the "VocalAI" class
+names (`MotorVocalIA`, `VocalAIApp`); renaming those is deferred because broad
+class renames would increase regression risk.
 
 ## Entry Point
 
@@ -203,4 +205,5 @@ sections. Current known deferred areas include:
 - packaging/installer work,
 - broad Product UI work,
 - Qwen lifecycle hardening unless runtime validation proves it is needed,
-- full internal rename from VoiceAI/VocalAI to OpenCohost.
+- full internal rename of the remaining VocalAI class identifiers
+  (`MotorVocalIA`, `VocalAIApp`) to OpenCohost.
