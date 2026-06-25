@@ -1950,6 +1950,15 @@ class MotorVocalIA(threading.Thread):
             logger.exception("Error en consumidor de audio")
         finally:
             total_elapsed = time.time() - start_tts
+            # Join the producer FIRST so it can no longer enqueue a chunk, THEN
+            # drain.  Draining before the join races: when the producer is still
+            # synthesizing at interrupt time, it writes+enqueues that chunk AFTER
+            # get_nowait() already emptied the queue, leaking the temp file
+            # permanently (reproducible under loaded-CI interleaving).  After the
+            # consumer's dequeue freed a queue slot, the producer always makes
+            # progress and breaks on its next _speaking check, so this join
+            # returns well within its timeout.
+            hilo_productor.join(timeout=2.0)
             # Fix 1: drain any remaining items left in cola_audios by the producer
             # after an early break (pre-dequeue guard, post-dequeue guard, or
             # interrupted-chunk break).  Without this, 1-3 temp .wav files leak
@@ -1975,8 +1984,6 @@ class MotorVocalIA(threading.Thread):
             self._speaking = False
             self._current_speech_source = None
         self.ui_callback("speaking_end")
-
-        hilo_productor.join(timeout=2.0)
 
     def _log(self, msg, level="info"):
         prefix = "[IA]"

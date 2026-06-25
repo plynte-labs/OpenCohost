@@ -455,6 +455,73 @@ class TestFix1TempFileDrainOnInterrupt:
             "drain loop after early break must delete all remaining queued chunks"
         )
 
+    def test_no_leak_when_producer_lags_behind_drain(self, tmp_path):
+        """Deterministic reproduction of the CI-only leak: a slow producer.
+
+        When the producer is still synthesizing a chunk at the moment the
+        consumer interrupts and drains, the drain finds the queue empty; the
+        producer then writes+enqueues that chunk AFTER the drain.  If the
+        producer is joined only AFTER the drain (the bug), that chunk's temp
+        file leaks permanently.  Making synthesize() slow for chunks after the
+        first forces this interleaving on any machine.
+        """
+        import os
+
+        motor, _ui = _make_motor()
+        motor.voz_referencia = None
+        motor.motor_tts = "ligero"
+        motor.tts_local_only = False
+        motor._edge_tts_offline = True
+
+        written_paths: list[str] = []
+        call_index = {"value": 0}
+
+        def fake_synthesize(text, out_path):
+            idx = call_index["value"]
+            call_index["value"] += 1
+            # First chunk is instant so the consumer can dequeue + interrupt;
+            # later chunks lag so the producer is still working when the
+            # consumer's drain loop runs.
+            if idx >= 1:
+                time.sleep(0.3)
+            with open(out_path, "wb") as f:
+                f.write(b"\x00" * 64)
+            written_paths.append(out_path)
+            return True
+
+        motor._piper = MagicMock()
+        motor._piper.is_available.return_value = True
+        motor._piper.synthesize.side_effect = fake_synthesize
+
+        def load_and_interrupt(path):
+            with motor._lock:
+                motor._speaking = False
+
+        motor.pygame.mixer.music.load.side_effect = load_and_interrupt
+        motor.pygame.mixer.music.get_busy.return_value = False
+
+        done = threading.Event()
+
+        def run():
+            motor._hablar(
+                "Sentence one drain test. "
+                "Sentence two drain test. "
+                "Sentence three drain test."
+            )
+            done.set()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        assert done.wait(timeout=8.0), "Consumer did not exit within timeout"
+
+        assert len(written_paths) > 0, "synthesize() was never called — test setup broken"
+        surviving = [p for p in written_paths if os.path.exists(p)]
+        assert surviving == [], (
+            f"Temp files leaked after interrupt: {surviving}\n"
+            "the producer must be joined BEFORE the drain so a late-written "
+            "chunk cannot survive the queue drain"
+        )
+
     def test_single_prequeued_file_deleted_on_post_dequeue_interrupt(self, tmp_path):
         """The post-dequeue _speaking guard must delete the just-dequeued file.
 
