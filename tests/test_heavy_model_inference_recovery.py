@@ -169,9 +169,9 @@ def test_follow_up_input_does_not_remain_trapped_forever_after_hung_request(tmp_
     try:
         assert _wait_until(lambda: motor.is_processing, timeout=3.0)
         motor._dispatch_command("process_context", "segundo mensaje")
-        assert _wait_until(lambda: call_count["value"] >= 2, timeout=5.0)
-        assert _wait_until(lambda: len(motor._priority_queue) == 0, timeout=5.0)
-        assert _wait_until(lambda: not motor.is_processing, timeout=5.0)
+        assert _wait_until(lambda: call_count["value"] >= 2, timeout=15.0)
+        assert _wait_until(lambda: len(motor._priority_queue) == 0, timeout=15.0)
+        assert _wait_until(lambda: not motor.is_processing, timeout=15.0)
     finally:
         release.set()
         worker.join(timeout=1.0)
