@@ -223,6 +223,20 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             return self._current_processing_source
 
+    def interrupt_speaking(self) -> None:
+        """Public interrupt: stop the in-flight speech consumer immediately.
+
+        Sets the speaking flag False under the engine lock so the _hablar
+        consumer loop exits without draining the pre-filled audio queue. This
+        is the supported way for the UI to interrupt speech — callers must NOT
+        reach into _lock/_speaking directly (ADR-AUD-005 Demeter fix, FR1).
+
+        NOTE: _lock is a plain threading.Lock (not reentrant). Call this method
+        only from outside any code path that already holds self._lock.
+        """
+        with self._lock:
+            self._speaking = False
+
     def run(self):
         self._log("Inicializando cliente ligero...")
         try:

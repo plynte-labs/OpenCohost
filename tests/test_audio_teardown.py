@@ -908,3 +908,56 @@ class TestFix4EmergencyStopClearsPendingFlag:
             "After emergency_stop clears the flag, a stale speaking_end "
             "must NOT trigger a second graceful audio_bed.stop()"
         )
+
+
+# ===========================================================================
+# FR1 (ADR-AUD-005) — interrupt_speaking() public method on MotorVocalIA
+# ===========================================================================
+
+
+class TestFR1InterruptSpeaking:
+    """FR1: MotorVocalIA must expose interrupt_speaking() as the canonical
+    public interrupt; app_shell must not reach into _lock/_speaking directly.
+    """
+
+    def test_interrupt_speaking_clears_flag_under_lock(self):
+        """interrupt_speaking() must atomically set _speaking=False.
+
+        RED: AttributeError before the method exists.
+        GREEN: flag cleared after calling the method.
+        """
+        motor, _ui = _make_motor()
+        motor._speaking = True
+
+        motor.interrupt_speaking()
+
+        assert motor._speaking is False, (
+            "interrupt_speaking() must set motor._speaking to False so the "
+            "in-flight _hablar consumer loop exits immediately"
+        )
+
+    def test_emergency_stop_uses_public_interrupt_not_private_reach_in(self):
+        """app_shell._kira_agenda_emergency_stop must use interrupt_speaking(),
+        not reach into motor_ia._lock / motor_ia._speaking directly.
+
+        RED: the private reach-in is still present in source — assertion fails.
+        GREEN: source uses the public method only.
+        """
+        import pathlib
+
+        source = pathlib.Path(
+            "E:/VoiceAI/opencohost/ui/app_shell.py"
+        ).read_text(encoding="utf-8")
+
+        assert "self.motor_ia.interrupt_speaking()" in source, (
+            "app_shell._kira_agenda_emergency_stop must call "
+            "motor_ia.interrupt_speaking() (ADR-AUD-005 FR1)"
+        )
+        assert "self.motor_ia._lock" not in source, (
+            "app_shell must NOT reach into motor_ia._lock directly "
+            "(ADR-AUD-005 Demeter violation)"
+        )
+        assert "self.motor_ia._speaking" not in source, (
+            "app_shell must NOT reach into motor_ia._speaking directly "
+            "(ADR-AUD-005 Demeter violation)"
+        )

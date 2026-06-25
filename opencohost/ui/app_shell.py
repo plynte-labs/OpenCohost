@@ -1296,8 +1296,7 @@ class VocalAIApp(ctk.CTk):
         # pre-filled audio queue.  Do this before drop_pending_sources so the
         # engine sees the interrupt signal first.
         if hasattr(self, "motor_ia"):
-            with self.motor_ia._lock:
-                self.motor_ia._speaking = False
+            self.motor_ia.interrupt_speaking()
             if hasattr(self.motor_ia, "drop_pending_sources"):
                 self.motor_ia.drop_pending_sources(("kira-agenda",))
         # Bug 1 fix: hard-stop the music bed immediately on emergency teardown.
