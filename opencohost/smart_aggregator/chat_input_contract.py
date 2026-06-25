@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 # ── Feature flags ────────────────────────────────────────────────────────────
-INPUT_CONTRACT_SHADOW_MODE = True
+INPUT_CONTRACT_SHADOW_MODE = False  # privacy (Decision 6): shadow log persists chat-derived old_compact + packet to acciones.jsonl; keep OFF until redact/allowlist lands
 USE_INPUT_CONTRACT_PROMPT = False  # Phase B: set True to use ChatContextPacket as LLM prompt source
 
 

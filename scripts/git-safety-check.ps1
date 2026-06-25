@@ -29,7 +29,9 @@ $blockedPathPatterns = @(
     '(^|/)\.pytest_cache/',
     '\.(db|sqlite|sqlite3|jsonl|log|wav|mp3|mp4|pth|pt|safetensors|bin)$',
     'oauth_(client|tokens)\.json$',
-    '(^|/)tokens?/'
+    '(^|/)tokens?/',
+    '^\.engram/',
+    '^Documents/'
 )
 
 $blocked = @()
