@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional
 
 VALID_MODEL_STATUSES = frozenset({"loading", "ready", "error", "offline"})
 VALID_MIC_STATUSES = frozenset({"disconnected", "idle", "listening", "recording"})
-VALID_TTS_STATUSES = frozenset({"idle", "generating", "speaking", "error"})
+VALID_TTS_STATUSES = frozenset({"idle", "generating", "speaking", "paused", "error"})
 VALID_CHAT_STATUSES = frozenset({"disconnected", "connecting", "connected", "error"})
 VALID_PIPELINE_STATES = frozenset(
     {"idle", "listening", "processing", "speaking", "playing", "downloading", "init", "error"}

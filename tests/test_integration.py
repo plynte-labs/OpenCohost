@@ -213,8 +213,29 @@ class TestAppShellStructure:
         # with master also absorbed PR#45's audio-teardown wiring (Bug 1 audio-bed
         # hard-stop + Bug 4 motor _speaking=False) into _kira_agenda_emergency_stop,
         # so the real merged figure is ~3256, not 3204 or 3148.
-        # Target < 3200 remains owned by ui_rendering_optimization_20260609.
-        assert len(lines) < 3270, f"app_shell.py has {len(lines)} lines, expected < 3270"
+        # Raised 3270 -> 3285 (2026-06-24): status_bar_stale_state_20260617 Fix A
+        # added the rolled-back-switch model_status reset in _on_motor_switch_failed
+        # (clears the stale "error" pill); Fix B re-routed the agenda PAUSED pill
+        # through the UIState setter. Decomposition still owned by
+        # ui_rendering_optimization_20260609; target < 3200.
+        # Lowered 3285 -> 3230 (2026-06-24): ui_rendering_optimization_20260609 Phase 6
+        # Stage 1 — extracted OBS lifecycle (7 methods, ~150 body LOC) to
+        # opencohost/ui/obs_lifecycle.py; thin delegates left on VocalAIApp.
+        # Net delta: −56 lines (3280 → 3224). Delegates more verbose than the
+        # design's 35-line estimate due to keyword-arg wiring for injected callables
+        # and factory overrides (obs_client_cls, obs_config_cls, thread_cls) needed
+        # to keep existing patches in test_app_shell_obs_resilience.py green.
+        # Lowered 3230 -> 2820 (2026-06-24): ui_rendering_optimization_20260609 Phase 6
+        # Stage 2a — moved RF4-dead stream-admin shell methods (~435 LOC) to
+        # opencohost/ui/legacy/stream_admin_shell_legacy.py; gutted
+        # _wire_stream_admin_callbacks to 4 RF3 wires; removed AdminManager import,
+        # _stream_admin_manual_disconnect field, _init_stream_admin() call, and
+        # on_closing RF4 teardown block. Actual: 2789 lines. NEVER raise this cap.
+        # Lowered 2820 -> 2660 (2026-06-24): ui_rendering_optimization_20260609 Phase 6
+        # Stage 3 — extracted motor-event dispatch cluster (21 methods, ~251 body LOC)
+        # to opencohost/ui/motor_event_handlers.py; thin delegates + _motor_handler_deps()
+        # left on VocalAIApp. Actual: 2614 lines. NEVER raise this cap.
+        assert len(lines) < 2660, f"app_shell.py has {len(lines)} lines, expected < 2660"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell

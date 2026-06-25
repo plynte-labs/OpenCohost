@@ -14,6 +14,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SHELL = ROOT / "opencohost" / "ui" / "app_shell.py"
+# Phase 6 decomposition relocated the motor-event/speaking handlers out of
+# app_shell.py into this module; source-level checks for that behavior read both.
+MOTOR_HANDLERS = ROOT / "opencohost" / "ui" / "motor_event_handlers.py"
 AVATAR_PANEL = ROOT / "opencohost" / "ui" / "avatar_panel.py"
 INVENTORY = ROOT / "conductor" / "tracks" / "product_ui_kira_avatar_refactor_20260513" / "inventory.md"
 
@@ -172,10 +175,11 @@ def test_kira_agenda_mode_wiring_stays_out_of_llm_engine() -> None:
     assert "save_cohost_profiles" in source
     assert "on_remove_topic" in source
     assert "on_move_topic" in source
-    assert "set_agenda_add_topic_callback" in source
-    assert "set_agenda_enable_callback" in source
-    assert "set_agenda_soft_stop_callback" in source
-    assert "set_agenda_emergency_stop_callback" in source
+    # The StreamAdminUI agenda mini-tab wires (set_agenda_*_callback) were cut in
+    # Phase 6 Stage 2a (owner decision — redundant with CoHostAgendaPanel; the dead
+    # RF4 shell wiring was relocated to the parked legacy module). CoHostAgendaPanel
+    # above stays the primary agenda contract, so the "agenda lives in the UI layer,
+    # not the core LLM engine" intent this test guards is preserved.
     assert "self.smart_agg.on_aggregated_context = self._on_smart_aggregated_context" in source
     assert "drop_pending_sources((\"kira-agenda\",))" in source
     assert "_kira_agenda_has_higher_priority_pending" in source
@@ -196,8 +200,11 @@ def test_music_mood_tab_is_wired_next_to_avatar_obs() -> None:
     assert "on_delete_track=lambda track_id: self._music_delete_track(track_id)" in source
     assert "def _music_delete_track" in source
     assert "messagebox.askyesno" in source
-    assert "self.audio_bed.duck()" in source
-    assert "self.audio_bed.unduck()" in source
+    # duck/unduck moved into the speaking handlers in motor_event_handlers.py
+    # (Phase 6); self.audio_bed -> injected audio_bed there.
+    motor_handlers = read_text(MOTOR_HANDLERS)
+    assert "audio_bed.duck()" in motor_handlers
+    assert "audio_bed.unduck()" in motor_handlers
 
 
 def test_music_panel_exposes_list_and_confirmed_delete_source_wiring() -> None:
@@ -215,15 +222,18 @@ def test_music_panel_exposes_list_and_confirmed_delete_source_wiring() -> None:
 def test_agenda_lifecycle_is_source_gated_and_prefetch_invalidates_on_interrupt() -> None:
     """Agenda state must only advance for agenda-origin speech, never PTT/chat/direct."""
     source = read_text(APP_SHELL)
+    # The speaking handlers + their agenda-gating logic moved to
+    # motor_event_handlers.py in Phase 6; self.X -> injected names there.
+    ui = source + read_text(MOTOR_HANDLERS)
 
-    assert "def _is_kira_agenda_speech_source" in source
-    assert "current_speech_source" in source
-    assert "startswith(\"kira-agenda\")" in source
-    assert "mark_generation_accepted()" in source
+    assert "def _is_kira_agenda_speech_source" in ui
+    assert "current_speech_source" in ui
+    assert "startswith(\"kira-agenda\")" in ui
+    assert "mark_generation_accepted()" in ui
     # Post-fix: checks use controller state (SPEAKING/GENERATING), not motor source
-    assert "AgendaState.SPEAKING, AgendaState.GENERATING" in source
-    assert "agenda_speech = " in source
-    assert "self._kira_agenda_clear_prefetch()" in source
+    assert "AgendaState.SPEAKING, AgendaState.GENERATING" in ui
+    assert "agenda_speech = " in ui
+    assert "kira_agenda_clear_prefetch()" in ui
 
 
 def test_destructive_music_and_agenda_cleanup_require_confirmation() -> None:
@@ -245,9 +255,10 @@ def test_audio_bed_state_mutation_is_locked() -> None:
 def test_chat_speech_does_not_start_music_bed_boundary() -> None:
     """Music bed boundaries must not auto-start music for regular chat speech."""
     source = read_text(APP_SHELL)
+    ui = source + read_text(MOTOR_HANDLERS)  # speaking-end boundary moved here (Phase 6)
 
-    assert "if agenda_speech or self.audio_bed.current_track is not None:" in source
-    assert "self.audio_bed.on_boundary()" in source
+    assert "if agenda_speech or audio_bed.current_track is not None:" in ui
+    assert "audio_bed.on_boundary()" in ui
 
 
 def test_avatar_panel_is_gridded_into_its_parent() -> None:

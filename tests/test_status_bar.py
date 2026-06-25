@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from opencohost.ui.state import UIState
+from opencohost.ui.state import UIState, VALID_TTS_STATUSES
 from opencohost.ui.status_bar import StatusBar
 
 
@@ -215,7 +215,7 @@ class TestModelStatus:
         [
             ("loading", "Modelo: cargando", "#cc8800"),
             ("ready", "Modelo: listo", "#22cc66"),
-            ("error", "Modelo: error", "#cc3333"),
+            ("error", "Modelo: error · revisa Ollama", "#cc3333"),
             ("offline", "Modelo: offline", "#666666"),
         ],
     )
@@ -714,3 +714,73 @@ class TestEngineStatusBadge:
         status_bar._ui_state.set("engine_reason", "vram_low")
         status_bar._on_state_change("engine_status", "edge_fallback")
         assert status_bar.lbl_engine_status_pill.text == "Voz: Edge respaldo: vram_low"
+
+
+# ---------------------------------------------------------------------------
+# status_bar_stale_state_20260617 — Fix B: "paused" is a valid TTS status
+# ---------------------------------------------------------------------------
+
+
+class TestPausedTtsStatus:
+    def test_paused_in_valid_tts_statuses(self):
+        assert "paused" in VALID_TTS_STATUSES
+
+    def test_paused_accepted_by_tts_status_setter(self, ui_state):
+        # Must not raise ValueError — the agenda PAUSED path routes through this setter.
+        ui_state.tts_status = "paused"
+        assert ui_state.tts_status == "paused"
+
+    def test_tts_pill_shows_paused_via_observer(self, status_bar):
+        status_bar._schedule_ui_update = lambda fn: fn()
+        status_bar._on_state_change("tts_status", "paused")
+        assert status_bar.lbl_tts_status_pill.text == "TTS: pausado · Kira espera operador"
+
+    def test_paused_does_not_trigger_crit_rollup(self, status_bar):
+        # paused is INFO severity, not CRIT — must not read as "Sistema: error".
+        status_bar._sistema_state["model"] = "ready"
+        status_bar._sistema_state["health"] = "green"
+        status_bar._sistema_state["mic"] = "idle"
+        status_bar.update_tts_status("paused")
+        assert status_bar.lbl_sistema_pill.text == "Sistema: activo"
+
+
+# ---------------------------------------------------------------------------
+# status_bar_stale_state_20260617 — Fix C: human-readable / actionable strings
+# ---------------------------------------------------------------------------
+
+
+class TestClarityStrings:
+    def test_model_error_text_has_action_hint(self, status_bar):
+        assert (
+            status_bar._get_status_text("model_status", "error")
+            == "Modelo: error · revisa Ollama"
+        )
+
+    def test_health_red_shows_human_label(self, status_bar):
+        status_bar.update_health_status("red")
+        assert status_bar.lbl_health_status_pill.text == "Health: falla crítica"
+
+    def test_health_yellow_shows_alerta(self, status_bar):
+        status_bar.update_health_status("yellow")
+        assert status_bar.lbl_health_status_pill.text == "Health: alerta"
+
+    def test_health_green_shows_ok(self, status_bar):
+        status_bar.update_health_status("green")
+        assert status_bar.lbl_health_status_pill.text == "Health: OK"
+
+    def test_health_unknown_shows_dash(self, status_bar):
+        status_bar.update_health_status("unknown")
+        assert status_bar.lbl_health_status_pill.text == "Health: --"
+
+    def test_health_unknown_token_shows_raw_string(self, status_bar):
+        # Permissive fallback: unrecognized tokens surface verbatim, not silently dropped.
+        status_bar.update_health_status("future_token")
+        assert status_bar.lbl_health_status_pill.text == "Health: future_token"
+
+    def test_engine_unknown_shows_iniciando(self, status_bar):
+        assert status_bar._engine_status_text("unknown") == "Voz: iniciando…"
+
+    def test_engine_known_statuses_unchanged(self, status_bar):
+        assert status_bar._engine_status_text("qwen_active") == "Voz: Qwen clonada"
+        assert status_bar._engine_status_text("piper_local") == "Voz: Piper local"
+        assert status_bar._engine_status_text("edge_fallback") == "Voz: Edge respaldo"

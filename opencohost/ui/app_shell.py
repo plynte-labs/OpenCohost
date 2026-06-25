@@ -65,18 +65,7 @@ from opencohost.core.temp_file_cleanup import cleanup_opencohost_temp_artifacts
 from opencohost.core.music_library import MusicLibrary
 from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy
 from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
-from opencohost.stream_admin import AdminManager
 logger = get_logger()
-def _stream_admin_should_process_chat_message(stream_admin_ui: Any, msg_id: Any) -> bool:
-    if not msg_id:
-        return True
-    with stream_admin_ui._chat_lock:
-        if msg_id in stream_admin_ui._seen_chat_ids:
-            return False
-        stream_admin_ui._seen_chat_ids.add(msg_id)
-        if len(stream_admin_ui._seen_chat_ids) > 2000:
-            stream_admin_ui._seen_chat_ids = set(list(stream_admin_ui._seen_chat_ids)[-1000:])
-    return True
 def _cargar_geometria() -> dict | None:
     try:
         if os.path.exists(WINDOW_GEOMETRY_FILE):
@@ -134,7 +123,6 @@ class VocalAIApp(ctk.CTk):
         self._compacto_active: bool = True   # compact is the startup default (ui_declutter_20260614)
         self._logs_visible_active: bool = False  # logs hidden by default; toggled via gear popover
         self._ptt_accept_logged: bool = False
-        self._stream_admin_manual_disconnect: bool = False
         self._logs_panel_visible: bool = False  # compact-is-default: logs start hidden
         self._closing: bool = False
         self._motor_started: bool = False
@@ -227,9 +215,8 @@ class VocalAIApp(ctk.CTk):
         # Wire motor_ia to voice control panel
         if hasattr(self, "voice_panel"):
             self.voice_panel.set_motor_ia(self.motor_ia)
-        # Initialize smart aggregator and stream admin
+        # Initialize smart aggregator
         self._init_smart_aggregator()
-        self._init_stream_admin()
         # Start log and cross-thread UI task processing
         self.after(50, self._process_ui_tasks)
         self.after(100, self._process_logs)
@@ -1060,29 +1047,10 @@ class VocalAIApp(ctk.CTk):
 
     def _wire_stream_admin_callbacks(self) -> None:
         sa = self.stream_admin_ui
-        sa.set_connect_callback(lambda rw: self._stream_admin_connect(rw))
-        sa.set_disconnect_callback(lambda: self._stream_admin_disconnect())
-        sa.set_save_oauth_callback(lambda: self._stream_admin_save_oauth_client())
-        sa.set_refresh_metadata_callback(lambda: self._stream_admin_refresh_metadata())
-        sa.set_suggest_metadata_callback(lambda: self._stream_admin_suggest_metadata())
-        sa.set_apply_metadata_callback(lambda: self._stream_admin_apply_metadata())
-        sa.set_reject_pending_callback(lambda: self._stream_admin_reject_pending())
-        sa.set_apply_runtime_settings_callback(lambda: self._stream_admin_apply_runtime_settings())
-        sa.set_propose_high_risk_callback(lambda action: self._stream_admin_propose_high_risk(action))
-        sa.set_connect_current_chat_callback(lambda: self._stream_admin_connect_current_chat())
-        sa.set_send_chat_callback(lambda: self._stream_admin_send_chat())
-        sa.set_toggle_small_stream_callback(lambda: self._stream_admin_toggle_small_stream())
-        sa.set_simulate_chat_callback(lambda: self._stream_admin_simulate_chat())
-        sa.set_force_kira_callback(lambda: self._stream_admin_force_kira_comment())
         sa.set_connect_chat_live_callback(lambda: self._on_stream_admin_connect_chat_live())
         sa.set_connect_chat_twitch_callback(lambda: self._on_stream_admin_button_twitch())
         sa.set_threshold_preset_callback(lambda v: self._on_stream_admin_threshold_preset(v))
         sa.set_cooldown_preset_callback(lambda v: self._on_stream_admin_cooldown_preset(v))
-        sa.set_refresh_user_list_callback(lambda: self._stream_admin_refresh_user_list())
-        sa.set_agenda_add_topic_callback(lambda title, angle, constraints: self._kira_agenda_add_topic(title, angle, constraints))
-        sa.set_agenda_enable_callback(lambda: self._kira_agenda_enable())
-        sa.set_agenda_soft_stop_callback(lambda: self._kira_agenda_soft_stop())
-        sa.set_agenda_emergency_stop_callback(lambda: self._kira_agenda_emergency_stop())
 
     def _kira_agenda_add_topic(self, title: str, angle: str, constraints: list[str], priority: str = "normal", response_length: str = "normal", max_turns: int | None = None) -> None:
         title = (title or "").strip()
@@ -1568,123 +1536,13 @@ class VocalAIApp(ctk.CTk):
         was_paused = getattr(self, "_agenda_was_paused", False)
         is_paused = self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR
         if self.status_bar and was_paused != is_paused:
+            # Route through the UIState setter (single source of truth + validation)
+            # instead of poking StatusBar directly. "paused" is a VALID_TTS_STATUSES value.
             if is_paused:
-                self.after(0, lambda: self.status_bar.update_tts_status("paused"))
+                self.after(0, lambda: setattr(self._ui_state, "tts_status", "paused"))
             else:
-                self.after(0, lambda: self.status_bar.update_tts_status("idle"))
+                self.after(0, lambda: setattr(self._ui_state, "tts_status", "idle"))
         self._agenda_was_paused = is_paused
-
-    def _init_stream_admin(self) -> None:
-        try:
-            config_path = os.path.join(PACKAGE_CONFIG_DIR, "stream_admin.yaml")
-            self.stream_admin = AdminManager(config_path=config_path, llm_interface=self.smart_agg_ui.llm_interface)
-            self.stream_admin.on_log = self._on_stream_admin_log
-            self.stream_admin.on_state = self._on_stream_admin_state
-            self.stream_admin.on_metadata = self._on_stream_admin_metadata
-            self.stream_admin.on_pending_action = self._on_stream_admin_pending
-            self.stream_admin.on_analytics = self._on_stream_admin_analytics
-            self.stream_admin_ui.set_stream_admin(self.stream_admin)
-            self._stream_admin_apply_runtime_settings(log=False)
-            self._populate_stream_oauth_client_fields()
-            self._on_stream_admin_state(self.stream_admin.status())
-            self._on_stream_admin_log("[StreamAdmin] RF4 listo. YouTube read-only disponible; Twitch en placeholder.")
-        except Exception as e:
-            self.stream_admin = None
-            logger.exception("No se pudo inicializar Stream Admin")
-            self.log_queue.put(f"[StreamAdmin] No disponible: {e}")
-
-    def _populate_stream_oauth_client_fields(self) -> None:
-        if not self.stream_admin:
-            return
-        cfg = self.stream_admin.get_oauth_client_config()
-        client_id = cfg.get("client_id", "")
-        entry_id = self.stream_admin_ui._widget("entry_stream_client_id")
-        entry_secret = self.stream_admin_ui._widget("entry_stream_client_secret")
-        if entry_id and client_id and not client_id.startswith("${"):
-            entry_id.delete(0, "end")
-            entry_id.insert(0, client_id)
-        if entry_secret and cfg.get("has_client_secret"):
-            entry_secret.configure(placeholder_text="Secret guardado localmente; escribe uno nuevo para reemplazar")
-
-    # ──────────────────────────────────────────────
-    # Stream Admin methods (delegated from UI)
-    # ──────────────────────────────────────────────
-
-    def _run_stream_admin_task(self, action_name: str, func) -> None:
-        if not self.stream_admin:
-            self._notify_operator("Stream Admin", "RF4 no inicializado. Revisa config/stream_admin.yaml.")
-            return
-
-        def worker():
-            try:
-                result = func()
-                if result is not None:
-                    logger.debug(f"StreamAdmin {action_name}: {result}")
-            except Exception as e:
-                logger.exception(f"StreamAdmin fallo en {action_name}")
-                hint = ""
-                if "Falta scope de escritura" in str(e):
-                    hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
-                try:
-                    self._safe_after(lambda err=e: self._notify_operator("Stream Admin", str(err), level="error"))
-                except Exception:
-                    self._notify_operator("Stream Admin", str(e), level="error")
-                self._on_stream_admin_log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _stream_admin_connect(self, request_write: bool) -> None:
-        self._run_stream_admin_task("OAuth YouTube", lambda: self.stream_admin.authenticate("youtube", request_write_scopes=request_write))
-
-    def _stream_admin_save_oauth_client(self) -> None:
-        entry_id = self.stream_admin_ui._widget("entry_stream_client_id")
-        entry_secret = self.stream_admin_ui._widget("entry_stream_client_secret")
-        client_id = entry_id.get().strip() if entry_id else ""
-        client_secret = entry_secret.get().strip() if entry_secret else ""
-        self._run_stream_admin_task("Guardar OAuth client", lambda: self.stream_admin.save_oauth_client_config(client_id, client_secret))
-        if entry_secret:
-            entry_secret.delete(0, "end")
-
-    def _stream_admin_disconnect(self) -> None:
-        self._run_stream_admin_task("Desconectar proveedor", self.stream_admin.disconnect)
-
-    def _stream_admin_revoke_write(self) -> None:
-        if not self.stream_admin:
-            return
-        self.stream_admin.revoke_write_mode()
-        self._on_stream_admin_log("[StreamAdmin] Escritura revocada manualmente. Solo lectura activo.")
-
-    def _stream_admin_refresh_metadata(self) -> None:
-        self._run_stream_admin_task("Leer metadata", self.stream_admin.refresh_metadata)
-
-    def _stream_admin_suggest_metadata(self) -> None:
-        context = ""
-        if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
-            try:
-                intent_summary = self.smart_agg.intent_aggregator.summarize()
-                prompt = intent_summary.get("prompt", "")
-                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
-                    context = prompt
-                if not context:
-                    snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=3)
-                    context = "\n\n".join(s.get("summary", "") for s in snapshots)
-            except Exception:
-                context = ""
-        self._run_stream_admin_task("Sugerir metadata", lambda: self.stream_admin.suggest_metadata(context))
-
-    def _stream_admin_apply_metadata(self) -> None:
-        if not self._stream_admin_can_write():
-            self._notify_operator("Stream Admin", "Modo solo lectura activo. Usa 'Reconectar Escritura' antes de aplicar cambios.")
-            return
-        payload = self.stream_admin_ui.metadata_payload_from_ui()
-        if self.stream_admin and self.stream_admin.pending_action:
-            action = lambda: self.stream_admin.apply_pending_action(payload, force=True)
-        else:
-            action = lambda: self.stream_admin.apply_metadata(payload)
-        self._run_stream_admin_task("Aplicar metadata", action)
-
-    def _stream_admin_reject_pending(self) -> None:
-        self._run_stream_admin_task("Rechazar acción", self.stream_admin.reject_pending_action)
 
     def _on_stream_admin_connect_chat_live(self) -> None:
         entry_url = self.stream_admin_ui._widget("entry_stream_chat_url")
@@ -1800,162 +1658,6 @@ class VocalAIApp(ctk.CTk):
         else:
             self.smart_agg.set_filter_policy(previous_preset)
 
-    def _stream_admin_connect_current_chat(self) -> None:
-        metadata = self.stream_admin_ui.last_metadata or {}
-        video_id = metadata.get("video_id")
-        live_chat_id = metadata.get("live_chat_id")
-        if not video_id and self.stream_admin:
-            video_id = getattr(getattr(self.stream_admin, "metadata", None), "video_id", "")
-            live_chat_id = getattr(getattr(self.stream_admin, "metadata", None), "live_chat_id", "")
-        if not video_id:
-            self._notify_operator("Stream Admin", "Primero usa 'Leer' para detectar el live activo.")
-            return
-
-        if self.stream_admin_ui.chat_connected:
-            self._stream_admin_disconnect_api_chat()
-            return
-
-        if live_chat_id and self.stream_admin:
-            self._stream_admin_connect_api_chat(video_id, live_chat_id)
-            return
-
-        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
-            current = SmartAggregatorUI.extract_youtube_video_id(self.entry_youtube_video.get())
-            if current == video_id:
-                self._on_stream_admin_log(f"[StreamAdmin] Chat ya conectado al live {video_id}.")
-                return
-            self._notify_operator("Stream Admin", "Ya hay un chat conectado. Desconéctalo antes de cambiar de live.")
-            return
-
-        entry_video = self.stream_admin_ui._widget("entry_stream_chat_message")
-        self.entry_youtube_video.delete(0, "end")
-        self.entry_youtube_video.insert(0, video_id)
-        self._on_stream_admin_log(f"[StreamAdmin] Conectando RF3 al chat del live {video_id}.")
-        self.smart_agg_ui.toggle_connection()
-
-    def _stream_admin_connect_api_chat(self, video_id: str, live_chat_id: str) -> None:
-        if not self.smart_agg:
-            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
-            return
-        if self._ui_state.smart_agg_connected or self._ui_state.smart_agg_connecting:
-            self._notify_operator("Stream Admin", "Ya hay un chat RF3 conectado. Desconéctalo antes de usar chat autenticado.")
-            return
-
-        self.stream_admin_ui.chat_connected = True
-        self.stream_admin_ui._chat_stop = threading.Event()
-        self.stream_admin_ui._seen_chat_ids = set()
-        self.smart_agg.start_session("youtube", video_id)
-        self.entry_youtube_video.delete(0, "end")
-        self.entry_youtube_video.insert(0, video_id)
-
-        btn = self.stream_admin_ui._widget("btn_stream_connect_chat")
-        if btn:
-            btn.configure(text="Desconectar Chat", fg_color="darkred")
-        if hasattr(self, "btn_youtube_chat"):
-            self.btn_youtube_chat.configure(text="Desconectar Chat", fg_color="darkred")
-        if self.status_bar:
-            self.status_bar.update_chat_status("connected")
-        if hasattr(self, "lbl_kira_chat_state"):
-            self.lbl_kira_chat_state.configure(text="Chat: conectado", fg_color="#1f5a3a")
-        self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado conectado al live {video_id}.")
-
-        def worker():
-            page_token = None
-            failures = 0
-            max_failures = 6
-            while self.stream_admin_ui.chat_connected and self.stream_admin_ui._chat_stop and not self.stream_admin_ui._chat_stop.is_set():
-                try:
-                    result = self.stream_admin.provider.list_live_chat_messages(live_chat_id, page_token=page_token)
-                    failures = 0
-                    page_token = result.get("next_page_token") or page_token
-                    for message in result.get("messages", []):
-                        msg_id = message.get("id")
-                        if not _stream_admin_should_process_chat_message(self.stream_admin_ui, msg_id):
-                            continue
-                        self.smart_agg.process_message(message)
-                    delay = max(1.0, float(result.get("polling_interval_millis", 5000)) / 1000.0)
-                except Exception as e:
-                    failures += 1
-                    logger.warning(f"Chat autenticado YouTube fallo: {e}")
-                    self._on_stream_admin_log(f"[StreamAdmin] Chat autenticado aviso: {e}")
-                    if failures >= max_failures or "Token" in str(e) or "Permisos" in str(e):
-                        self._on_stream_admin_log("[StreamAdmin] Chat autenticado detenido por fallos consecutivos. Reconecta cuando el proveedor esté estable.")
-                        self._safe_after(self._stream_admin_disconnect_api_chat)
-                        break
-                    delay = min(60.0, 5.0 * (2 ** (failures - 1)))
-                if self.stream_admin_ui._chat_stop:
-                    self.stream_admin_ui._chat_stop.wait(delay)
-
-        self.stream_admin_ui._chat_thread = threading.Thread(target=worker, daemon=True)
-        self.stream_admin_ui._chat_thread.start()
-
-    def _stream_admin_disconnect_api_chat(self) -> None:
-        self.stream_admin_ui.chat_connected = False
-        if self.stream_admin_ui._chat_stop:
-            self.stream_admin_ui._chat_stop.set()
-        self.stream_admin_ui._chat_stop = None
-        try:
-            if self.smart_agg:
-                self.smart_agg.end_session()
-        except Exception:
-            pass
-        btn = self.stream_admin_ui._widget("btn_stream_connect_chat")
-        if btn:
-            btn.configure(text="Conectar Chat", fg_color="#2f5f8f")
-        if hasattr(self, "btn_youtube_chat"):
-            self.btn_youtube_chat.configure(text="Conectar Chat", fg_color="#2f5f8f")
-        if self.status_bar:
-            self.status_bar.update_chat_status("disconnected")
-        if hasattr(self, "lbl_kira_chat_state"):
-            self.lbl_kira_chat_state.configure(text="Chat: desconectado", fg_color="#1b2633")
-        self._on_stream_admin_log("[StreamAdmin] Chat autenticado desconectado.")
-
-    def _stream_admin_send_chat(self) -> None:
-        if not self._stream_admin_can_write():
-            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de enviar mensajes al chat.")
-            return
-        entry = self.stream_admin_ui._widget("entry_stream_chat_message")
-        message = entry.get().strip() if entry else ""
-        if not message:
-            self._notify_operator("Stream Admin", "Escribe un mensaje para el chat.")
-            return
-        import re
-        message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", message)[:500]
-        self._run_stream_admin_task("Enviar mensaje al chat", lambda: self.stream_admin.send_chat_message(message))
-
-    def _stream_admin_force_kira_comment(self) -> None:
-        if self.smart_agg_ui.is_busy():
-            self._on_stream_admin_log("[StreamAdmin] Forzar Kira omitido: Kira está ocupada.")
-            return
-        context = []
-        if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
-            try:
-                intent_summary = self.smart_agg.intent_aggregator.summarize()
-                prompt = intent_summary.get("prompt", "")
-                if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
-                    context = [{"user": "Contexto compacto", "text": prompt}]
-                if not context:
-                    snapshots = self.smart_agg.history.get_recent_context_snapshots(self.smart_agg._session_id, max_items=1)
-                    context = [
-                        {"user": "Contexto compacto", "text": s.get("summary", "")}
-                        for s in snapshots
-                        if s.get("summary")
-                    ]
-            except Exception as e:
-                logger.warning(f"No se pudo obtener contexto RF3 para Forzar Kira: {e}")
-        if not context:
-            entry = self.stream_admin_ui._widget("entry_stream_chat_message")
-            manual = entry.get().strip() if entry else ""
-            if manual:
-                context = [{"user": "Streamer", "text": manual}]
-            elif self.stream_admin_ui.last_metadata:
-                context = [{"user": "Stream Admin", "text": f"Live actual: {self.stream_admin_ui.last_metadata.get('title', '')}. Categoria {self.stream_admin_ui.last_metadata.get('category_id', '')}."}]
-        if not context:
-            self._notify_operator("Stream Admin", "No hay mensajes recientes. Escribe una idea en 'Kira Chat' o espera chat.")
-            return
-        self.smart_agg_ui.on_aggregated_context({"trigger": {"manual": True, "source": "stream_admin"}, "context": context})
-        self._on_stream_admin_log("[StreamAdmin] Forzar Kira ejecutado con contexto reciente.")
-
     def _on_stream_admin_threshold_preset(self, value: str) -> None:
         import math
         try:
@@ -1982,20 +1684,6 @@ class VocalAIApp(ctk.CTk):
             self.smart_agg.set_activity_limits(cooldown_seconds=cd, reset=True)
             self._on_stream_admin_log(f"[StreamAdmin] Cooldown de actividad: {int(cd)}s.")
 
-    def _stream_admin_toggle_small_stream(self) -> None:
-        if not self.smart_agg:
-            return
-        switch = self.stream_admin_ui._widget("switch_stream_small")
-        if switch and switch.get():
-            self.smart_agg.set_activity_limits(threshold_per_second=0.2, cooldown_seconds=20.0, reset=True)
-            self.smart_agg.set_spam_limits(max_messages_per_user=30)
-            self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico ON: Kira reaccionará con menos mensajes.")
-        else:
-            defaults = self.stream_admin_ui._smart_agg_default_activity or {"threshold": 1.0, "cooldown": 45.0}
-            self.smart_agg.set_activity_limits(threshold_per_second=defaults.get("threshold", 1.0), cooldown_seconds=defaults.get("cooldown", 45.0), reset=True)
-            self.smart_agg_ui.apply_spam_limit(log=False)
-            self._on_stream_admin_log("[StreamAdmin] Modo Stream Chico OFF: umbrales RF3 restaurados.")
-
     def _on_threshold_preset(self, value: str) -> None:
         if hasattr(self, "entry_youtube_threshold"):
             self.entry_youtube_threshold.delete(0, "end")
@@ -2003,109 +1691,9 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self, "smart_agg_ui"):
             self.smart_agg_ui.apply_threshold(log=True)
 
-    def _stream_admin_simulate_chat(self) -> None:
-        if not self.smart_agg:
-            self._notify_operator("Stream Admin", "Smart Aggregator no inicializado.")
-            return
-        if self.smart_agg_ui.is_busy():
-            self._on_stream_admin_log("[StreamAdmin] Simular Chat omitido: Kira está ocupada.")
-            return
-        if getattr(self.smart_agg, "_session_id", None) is None:
-            channel = self.stream_admin_ui.last_metadata.get("video_id") if self.stream_admin_ui.last_metadata else "simulated"
-            self.smart_agg.start_session("youtube", channel or "simulated")
-
-        now = time.time()
-        sample_sets = [
-            [("TesterUno", "Kira comenta algo del Minecraft con mods ahora mismo"), ("TesterDos", "El chat quiere saber si estos cultivos van a crecer rapido"), ("TesterTres", "Esto se esta poniendo caotico con tantos mobs alrededor"), ("TesterCuatro", "La base necesita nombre antes de que explote todo"), ("TesterCinco", "Kira deberia burlarse un poquito del survival"), ("TesterSeis", "Momento perfecto para que Kira diga algo divertido")],
-            [("CreeperFan", "Ese mod se ve peligrosamente roto para un episodio uno"), ("CultivosOP", "Si los cultivos no crecen rapido esto es estafa agricola"), ("NetherPronto", "Fran va a morir antes de hacer una casa decente"), ("ChatCaos", "Kira tiene que elegir si la base se llama rancho del desastre"), ("ModWatcher", "Hay demasiadas cosas raras en pantalla y apenas empezamos"), ("Ironia", "Survival con mods significa sufrir pero con pasos extra")],
-            [("Aldeano", "Necesitamos una meta clara antes de que el chat se distraiga"), ("DiamanteFake", "Eso no parece seguro pero si parece divertido"), ("HornoLento", "Kira deberia exigir armadura antes de otra idea brillante"), ("BiomeFan", "Explora ese bioma raro o no hay respeto"), ("PicoRoto", "Este survival ya huele a inventario perdido"), ("ChatPlan", "Objetivo del stream: no morir por una gallina mutante")],
-        ]
-        samples = sample_sets[self.stream_admin_ui.sim_round % len(sample_sets)]
-        self.stream_admin_ui.sim_round += 1
-        for idx, (user, text) in enumerate(samples):
-            self.smart_agg.process_message({"id": f"sim-{int(now)}-{idx}", "user": user, "text": text, "timestamp": now + (idx * 0.05), "source": "stream_admin_simulator"})
-        self._on_stream_admin_log("[StreamAdmin] Chat simulado enviado a RF3.")
-
-    def _stream_admin_propose_high_risk(self, action: str) -> None:
-        entry_user = self.stream_admin_ui._widget("entry_stream_mod_user")
-        entry_reason = self.stream_admin_ui._widget("entry_stream_mod_reason")
-        user = entry_user.get().strip() if entry_user else ""
-        reason = entry_reason.get().strip() if entry_reason else "moderacion manual RF4"
-        if not user:
-            self._notify_operator("Stream Admin", "Ingresa el channelId del usuario a moderar.")
-            return
-        self._run_stream_admin_task(f"Proponer {action}", lambda: self.stream_admin.propose_high_risk_moderation(action, user, reason, 300))
-
     def _stream_admin_track_chat_user(self, message: dict) -> None:
         self.stream_admin_ui.track_chat_user(message)
         self._safe_after(self.stream_admin_ui.refresh_user_list)
-
-    def _stream_admin_refresh_user_list(self) -> None:
-        frame_users = self.stream_admin_ui._widget("frame_stream_users")
-        if not frame_users:
-            return
-        for child in frame_users.winfo_children():
-            child.destroy()
-        users = sorted(self.stream_admin_ui.chat_users.values(), key=lambda item: item.get("last_seen", 0), reverse=True)[:10]
-        if not users:
-            ctk.CTkLabel(frame_users, text="Sin usuarios recientes con channelId. Conecta chat autenticado y espera mensajes.", text_color="#aaaaaa").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-            return
-        headers = ["Usuario", "Mensajes", "Razón", "Acción"]
-        for col, title in enumerate(headers):
-            ctk.CTkLabel(frame_users, text=title, font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=col, padx=4, pady=2, sticky="w")
-        for row, item in enumerate(users, start=1):
-            user = item.get("user", "YouTube")
-            channel_id = item.get("channel_id", "")
-            badges = []
-            if item.get("is_owner"):
-                badges.append("owner")
-            if item.get("is_moderator"):
-                badges.append("mod")
-            if item.get("is_member"):
-                badges.append("member")
-            label = user if not badges else f"{user} ({', '.join(badges)})"
-            ctk.CTkLabel(frame_users, text=label, anchor="w").grid(row=row, column=0, padx=4, pady=3, sticky="w")
-            ctk.CTkLabel(frame_users, text=str(item.get("count", 0)), width=55).grid(row=row, column=1, padx=4, pady=3, sticky="w")
-            reason_entry = ctk.CTkEntry(frame_users, placeholder_text="razón", width=260)
-            reason_entry.insert(0, self.stream_admin_ui.default_mod_reason(item))
-            reason_entry.grid(row=row, column=2, padx=4, pady=3, sticky="ew")
-            action_frame = ctk.CTkFrame(frame_users, fg_color="transparent")
-            action_frame.grid(row=row, column=3, padx=4, pady=3, sticky="w")
-            button_state = "disabled" if item.get("is_owner") or not self._stream_admin_can_write() else "normal"
-            ctk.CTkButton(action_frame, text="Timeout", width=75, fg_color="#555555", hover_color="#666666", state=button_state, command=lambda cid=channel_id, u=user, e=reason_entry: self._stream_admin_moderate_user_from_list("timeout", cid, u, e)).pack(side="left", padx=(0, 4))
-            ctk.CTkButton(action_frame, text="Banear", width=70, fg_color="#7d2a2a", state=button_state, command=lambda cid=channel_id, u=user, e=reason_entry: self._stream_admin_moderate_user_from_list("ban", cid, u, e)).pack(side="left")
-
-    def _stream_admin_moderate_user_from_list(self, action: str, channel_id: str, user: str, reason_entry) -> None:
-        if not self.stream_admin:
-            return
-        if not self._stream_admin_can_write():
-            self._notify_operator("Stream Admin", "Modo solo lectura activo. Reconecta escritura antes de moderar usuarios.")
-            return
-        if not channel_id:
-            self._notify_operator("Stream Admin", "Este usuario no tiene channelId disponible para moderar.")
-            return
-        reason = reason_entry.get().strip() or f"{action} manual desde Stream Admin"
-        verb = "banear" if action == "ban" else "aplicar timeout a"
-        if not messagebox.askyesno("Confirmar moderación", f"¿Seguro que quieres {verb} {user}?\n\nRazón: {reason}"):
-            return
-        self._run_stream_admin_task(f"Moderación {action}", lambda: self.stream_admin.apply_high_risk_moderation(action, channel_id, reason, 300))
-
-    def _stream_admin_apply_runtime_settings(self, log: bool = True) -> None:
-        self.stream_admin_ui.apply_runtime_settings(log=log)
-        if self.stream_admin:
-            self._sync_stream_admin_controls(self.stream_admin.status())
-
-    def _stream_admin_can_write(self) -> bool:
-        if not self.stream_admin:
-            return False
-        try:
-            status = self.stream_admin.status()
-        except Exception:
-            return False
-        return bool(status.get("write_enabled") and status.get("write_scope_active"))
-
-    def _sync_stream_admin_controls(self, state: dict) -> None:
-        self.stream_admin_ui._sync_controls(state)
 
     def _on_stream_admin_log(self, msg: str) -> None:
         self._safe_after(lambda m=msg: self._append_stream_admin_log(m))
@@ -2117,23 +1705,8 @@ class VocalAIApp(ctk.CTk):
             return
         self._advanced_panel.append_to_textbox(self.text_stream_admin_log, msg, max_lines=1000)
 
-    def _on_stream_admin_state(self, state: dict) -> None:
-        self.stream_admin_ui.on_state(state)
-
-    def _on_stream_admin_metadata(self, metadata: dict) -> None:
-        self.stream_admin_ui.on_metadata(metadata)
-
-    def _on_stream_admin_pending(self, pending: dict) -> None:
-        self.stream_admin_ui.on_pending(pending)
-
-    def _on_stream_admin_analytics(self, snapshot: dict) -> None:
-        self.stream_admin_ui.on_analytics(snapshot)
-
     def _stream_admin_ingest_rf3_event(self, event_type: str, payload: dict) -> None:
         self.stream_admin_ui.ingest_rf3_event(event_type, payload)
-
-    def _stream_admin_inject_silent_context(self, context: Any) -> None:
-        self.stream_admin_ui._inject_silent_context(context)
 
     # ──────────────────────────────────────────────
     # Smart Aggregator initialization
@@ -2486,218 +2059,125 @@ class VocalAIApp(ctk.CTk):
         self._handle_motor_event(status)
 
     def _handle_motor_event(self, status: str) -> None:
-        handlers = {
-            "ready": self._on_motor_ready,
-            "model_warming": self._on_motor_model_warming,
-            "ollama_unavailable": self._on_motor_ollama_unavailable,
-            "processing": self._on_motor_processing,
-            "idle": self._on_motor_idle,
-            "llm_timeout_recovered": self._on_motor_llm_timeout_recovered,
-            "speaking_start": self._on_motor_speaking_start,
-            "speaking_end": self._on_motor_speaking_end,
-            "model_changed": self._on_motor_model_changed,
-            "model_switch_pending": self._on_motor_switch_pending,
-            "model_switch_applied": self._on_motor_model_changed,
-            "model_switch_failed": self._on_motor_switch_failed,
-            "llm_tier_switch_applied": self._on_motor_model_changed,
-            "llm_tier_switch_failed": self._on_motor_switch_failed,
-            "download_start": self._on_motor_download_start,
-            "download_done": self._on_motor_download_done,
-            "download_error": self._on_motor_download_error,
-        }
-        handler = handlers.get(status)
-        if handler:
-            handler()
+        from opencohost.ui.motor_event_handlers import STATUS_TO_HANDLER
+        name = STATUS_TO_HANDLER.get(status)
+        if name:
+            getattr(self, "_" + name)()
 
-    def _on_motor_ready(self) -> None:
-        self._ui_state.model_status = "ready"
-        self._safe_after(lambda: self.btn_grabar.configure(state="normal"))
-        self._safe_after(lambda: self.btn_voz.configure(state="normal"))
-        self._safe_after(lambda: self.btn_ws.configure(state="normal"))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
-        if hasattr(self.motor_ia, "current_model"):
-            self._safe_after(lambda: self.model_panel.set_active_model(self.motor_ia.current_model))
-            # Sync combobox to actual startup model (may differ from DEFAULT_MODEL)
-            model = self.motor_ia.current_model
-            self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
-            self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-            self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        # Start PTT flush watcher thread
-        if hasattr(self, "voice_panel"):
-            self.voice_panel._start_ptt_flush_watcher()
+    @staticmethod
+    def _get_attr(obj: object, name: str, default=None):
+        """object.__getattribute__ lookup — raises AttributeError without CTk recursion."""
+        try:
+            return object.__getattribute__(obj, name)
+        except AttributeError:
+            return default
 
-    def _on_motor_model_warming(self) -> None:
-        self._ui_state.model_status = "loading"
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Preparando modelo..."))
-        self._actualizar_pipeline("init")
-
-    def _on_motor_ollama_unavailable(self) -> None:
-        self._safe_after(lambda: self.btn_grabar.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_voz.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_ws.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.model_panel.refresh_ollama_state(on_check_ollama=lambda: self.motor_ia.command_queue.put(("check_ollama", None))))
-        self._actualizar_pipeline("error")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.ERROR)
-
-    def _on_motor_processing(self) -> None:
-        self._actualizar_pipeline("processing")
-        self._safe_after(lambda: self.btn_enviar.configure(state="disabled"))
-        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_download.configure(state="disabled"))
-        self._safe_after(lambda: self.btn_mapear.configure(state="disabled"))
-
-    def _on_motor_idle(self) -> None:
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.btn_enviar.configure(state="normal"))
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
-        self._safe_after(lambda: self.btn_mapear.configure(state="normal"))
-        self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
-        if hasattr(self, "kira_agenda") and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
-            self._kira_agenda_schedule_tick(500)
-
-    def _on_motor_llm_timeout_recovered(self) -> None:
-        failure = getattr(self.motor_ia, "_last_llm_failure", None) or {}
-        failed_model = failure.get("model", "?")
-        recovered_model = getattr(self.motor_ia, "current_model", failed_model)
-        self._print_log(
-            f"[Sistema] ⚠️ Recuperación por timeout de inferencia en {failed_model}. Modelo activo: {recovered_model}"
+    def _motor_handler_deps(self) -> dict:  # deps for motor_event_handlers.get_handler_map()
+        # Use _get_attr (object.__getattribute__) — avoids triggering CTk __getattr__
+        # on partially-initialised object.__new__ stubs used in unit tests.
+        g = self._get_attr
+        _d = vars(self)
+        return dict(
+            ui_state=_d.get("_ui_state"),
+            motor_ia=_d.get("motor_ia"),
+            model_panel=_d.get("model_panel"),
+            voice_panel=_d.get("voice_panel"),
+            ptt=_d.get("ptt"),
+            audio_bed=_d.get("audio_bed"),
+            avatar_bridge=_d.get("_avatar_bridge"),
+            kira_agenda=_d.get("kira_agenda"),
+            btn_grabar=_d.get("btn_grabar"),
+            btn_voz=_d.get("btn_voz"),
+            btn_ws=_d.get("btn_ws"),
+            btn_primary_voice=_d.get("btn_primary_voice"),
+            btn_enviar=_d.get("btn_enviar"),
+            btn_download=_d.get("btn_download"),
+            btn_mapear=_d.get("btn_mapear"),
+            combo_modelos=_d.get("combo_modelos"),
+            switch_ptt=_d.get("switch_ptt"),
+            progress_download=_d.get("progress_download"),
+            schedule_ui_update=g(self, "_safe_after"),
+            actualizar_pipeline=g(self, "_actualizar_pipeline"),
+            log_accion=g(self, "_log_accion"),
+            print_log=g(self, "_print_log"),
+            check_pending_audio_bed_stop=g(self, "_check_pending_audio_bed_stop"),
+            kira_agenda_schedule_tick=g(self, "_kira_agenda_schedule_tick"),
+            kira_agenda_update_status=g(self, "_kira_agenda_update_status"),
+            kira_agenda_prefetch_while_speaking=g(self, "_kira_agenda_prefetch_while_speaking"),
+            kira_agenda_clear_prefetch=g(self, "_kira_agenda_clear_prefetch"),
+            kira_agenda_consume_pending_chat_if_due=g(self, "_kira_agenda_consume_pending_chat_if_due"),
+            kira_agenda_play_prefetched_if_ready=g(self, "_kira_agenda_play_prefetched_if_ready"),
+            on_ptt_press=g(self, "_on_ptt_press"),
+            on_ptt_release=g(self, "_on_ptt_release"),
+            on_ptt_click=g(self, "_on_ptt_click"),
+            # Timer state — getter/setter pairs (obs_lifecycle pattern)
+            get_speaking_is_alt=lambda: _d.get("_speaking_is_alt"),
+            set_speaking_is_alt=lambda v: setattr(self, "_speaking_is_alt", v),
+            get_speaking_alt_timer_id=lambda: _d.get("_speaking_alt_timer_id"),
+            set_speaking_alt_timer_id=lambda v: setattr(self, "_speaking_alt_timer_id", v),
+            get_inactivity_timer_id=lambda: _d.get("_inactivity_timer_id"),
+            set_inactivity_timer_id=lambda v: setattr(self, "_inactivity_timer_id", v),
+            inactivity_timeout_ms=_d.get("_inactivity_timeout_ms"),
+            after=g(self, "after"),
+            after_cancel=g(self, "after_cancel"),
+            set_title=g(self, "title"),
+            winfo_exists=g(self, "winfo_exists"),
         )
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(recovered_model))
-        self._safe_after(lambda: self.model_panel.update_model_info(recovered_model))
 
-    def _on_motor_speaking_start(self) -> None:
-        if hasattr(self, "audio_bed"):
-            self.audio_bed.duck()
-        # Use controller state, not motor source, to decide if this speech
-        # was initiated by the agenda state machine.  The controller may
-        # emit chat/PTT/stop actions whose motor source does not start
-        # with "kira-agenda"; the state check is the authoritative signal.
-        controller_generated = (
-            hasattr(self, "kira_agenda")
-            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING, AgendaState.TOPIC_CLOSING}
-        )
-        if controller_generated:
-            self.kira_agenda.mark_generation_accepted()
-            self._kira_agenda_update_status()
-            self._kira_agenda_prefetch_while_speaking()
-        elif hasattr(self, "kira_agenda"):
-            self._kira_agenda_clear_prefetch()
-        self._actualizar_pipeline("speaking")
-        self._log_accion("Kira comenzó a sintetizar respuesta")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.SPEAKING)
-            self._start_speaking_alt_timer()
+    # Motor-event handler delegates — bodies in motor_event_handlers.py (Phase 6 Stage 3).
+    def _dispatch_motor_handler(self, fn: str) -> None:  # call motor_event_handlers.<fn> with injected deps
+        import opencohost.ui.motor_event_handlers as _m
+        getattr(_m, fn)(**self._motor_handler_deps())
 
-    def _on_motor_speaking_end(self) -> None:
-        prefetched_started = False
-        # Use controller state, not motor source (see _on_motor_speaking_start).
-        agenda_speech = (
-            hasattr(self, "kira_agenda")
-            and self.kira_agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}
-        )
-        if agenda_speech:
-            self.kira_agenda.mark_speech_complete()
-            self._kira_agenda_update_status()
-            if self._kira_agenda_consume_pending_chat_if_due():
-                prefetched_started = True
-            else:
-                prefetched_started = self._kira_agenda_play_prefetched_if_ready()
-            if not prefetched_started and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR}:
-                self._kira_agenda_schedule_tick(1200)
-        elif hasattr(self, "kira_agenda"):
-            self._kira_agenda_clear_prefetch()
-        self._stop_speaking_alt_timer()
-        if hasattr(self, "audio_bed"):
-            self.audio_bed.unduck()
-            if agenda_speech or self.audio_bed.current_track is not None:
-                self.audio_bed.on_boundary()
-        # Fix 3: fire the deferred graceful audio-bed stop if soft_stop was
-        # called while Kira was speaking.  This runs AFTER mark_speech_complete()
-        # so the agenda state is already settled (OFF when closing speech ended).
-        self._check_pending_audio_bed_stop()
-        estado = "listening" if self.voice_panel.is_ws_connected() else "idle"
-        self._actualizar_pipeline(estado)
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(
-                AvatarState.LISTENING if estado == "listening" else AvatarState.IDLE
-            )
-        self._safe_after(lambda: self.switch_ptt.configure(state="normal"))
-        self.ptt.ensure_listener(on_press=self._on_ptt_press, on_release=self._on_ptt_release, on_click=self._on_ptt_click)
+    def _on_motor_ready(self) -> None: self._dispatch_motor_handler("on_motor_ready")
+    def _on_motor_model_warming(self) -> None: self._dispatch_motor_handler("on_motor_model_warming")
+    def _on_motor_ollama_unavailable(self) -> None: self._dispatch_motor_handler("on_motor_ollama_unavailable")
+    def _on_motor_processing(self) -> None: self._dispatch_motor_handler("on_motor_processing")
+    def _on_motor_idle(self) -> None: self._dispatch_motor_handler("on_motor_idle")
+    def _on_motor_llm_timeout_recovered(self) -> None: self._dispatch_motor_handler("on_motor_llm_timeout_recovered")
+    def _on_motor_speaking_start(self) -> None: self._dispatch_motor_handler("on_motor_speaking_start")
+    def _on_motor_speaking_end(self) -> None: self._dispatch_motor_handler("on_motor_speaking_end")
+    def _start_speaking_alt_timer(self) -> None: self._dispatch_motor_handler("start_speaking_alt_timer")
+    def _stop_speaking_alt_timer(self) -> None: self._dispatch_motor_handler("stop_speaking_alt_timer")
+    def _tick_speaking_alt(self) -> None: self._dispatch_motor_handler("tick_speaking_alt")
+    def _reset_inactivity_timer(self) -> None: self._dispatch_motor_handler("reset_inactivity_timer")
+    def _stop_inactivity_timer(self) -> None: self._dispatch_motor_handler("stop_inactivity_timer")
+    def _on_inactivity_timeout(self) -> None: self._dispatch_motor_handler("on_inactivity_timeout")
+    def _on_motor_model_changed(self) -> None: self._dispatch_motor_handler("on_motor_model_changed")
+    def _on_motor_switch_pending(self) -> None: self._dispatch_motor_handler("on_motor_switch_pending")
+    def _on_motor_switch_failed(self) -> None: self._dispatch_motor_handler("on_motor_switch_failed")
+    def _on_motor_download_start(self) -> None: self._dispatch_motor_handler("on_motor_download_start")
+    def _on_motor_download_done(self) -> None: self._dispatch_motor_handler("on_motor_download_done")
+    def _on_motor_download_error(self) -> None: self._dispatch_motor_handler("on_motor_download_error")
 
-    def _start_speaking_alt_timer(self) -> None:
-        """Start a timer that alternates between SPEAKING and SPEAKING_ALT."""
-        self._speaking_is_alt = False
-        self._tick_speaking_alt()
-
-    def _stop_speaking_alt_timer(self) -> None:
-        """Stop the speaking alternation timer."""
-        if self._speaking_alt_timer_id is not None:
-            self.after_cancel(self._speaking_alt_timer_id)
-            self._speaking_alt_timer_id = None
-
-    def _tick_speaking_alt(self) -> None:
-        """Toggle between SPEAKING and SPEAKING_ALT and reschedule."""
-        self._speaking_is_alt = not self._speaking_is_alt
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(
-                AvatarState.SPEAKING_ALT if self._speaking_is_alt else AvatarState.SPEAKING
-            )
-        # Alternate every 700ms — fast enough to look natural, slow enough to see both images
-        self._speaking_alt_timer_id = self.after(700, self._tick_speaking_alt)
-
-    def _reset_inactivity_timer(self) -> None:
-        """Reset the inactivity timer. If Kira is idle for too long, she goes to sleep."""
-        self._stop_inactivity_timer()
-        self._inactivity_timer_id = self.after(self._inactivity_timeout_ms, self._on_inactivity_timeout)
-
-    def _stop_inactivity_timer(self) -> None:
-        """Stop the inactivity timer."""
-        if self._inactivity_timer_id is not None:
-            self.after_cancel(self._inactivity_timer_id)
-            self._inactivity_timer_id = None
-
-    def _on_inactivity_timeout(self) -> None:
-        """Kira has been idle for too long — go to sleep."""
-        self._inactivity_timer_id = None
-        if hasattr(self, "_avatar_bridge"):
-            current = self._avatar_bridge.get_state()
-            if current in (AvatarState.IDLE,):
-                self._avatar_bridge.set_state(AvatarState.SLEEPING)
-                self._log_accion("Kira se durmió por inactividad")
+    # ------------------------------------------------------------------
+    # OBS lifecycle delegates — bodies live in opencohost/ui/obs_lifecycle.py
+    # (ui_rendering_optimization_20260609 Phase 6 Stage 1 extraction).
+    # Keep these thin delegates so object.__new__ fixtures and on_closing/
+    # _build_ui callers keep resolving the same method names unchanged.
+    # ------------------------------------------------------------------
 
     def _on_joyita_to_obs(self, text: str) -> None:
-        """Send the joyita message to an OBS Text source named 'KiraJoyita'.
-
-        Clears it after 120 seconds unless a new joyita arrives sooner.
-        """
-        if not text:
-            return
-        obs = getattr(self, "_obs_client", None)
-        if not obs or not obs.is_connected:
-            return
-        source_name = "KiraJoyita"
-        if obs.set_obs_text(source_name, text):
-            if self._joyita_obs_timer_id is not None:
-                try:
-                    self.after_cancel(self._joyita_obs_timer_id)
-                except Exception:
-                    pass
-            self._joyita_obs_timer_id = self.after(120_000, lambda: self._clear_obs_joyita(source_name))
+        """Delegate → obs_lifecycle.on_joyita_to_obs."""
+        from opencohost.ui.obs_lifecycle import on_joyita_to_obs
+        on_joyita_to_obs(
+            text=text,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            get_joyita_timer_id=lambda: getattr(self, "_joyita_obs_timer_id", None),
+            set_joyita_timer_id=lambda v: setattr(self, "_joyita_obs_timer_id", v),
+            after=self.after,
+            after_cancel=self.after_cancel,
+            clear_obs_joyita=self._clear_obs_joyita,
+        )
 
     def _clear_obs_joyita(self, source_name: str) -> None:
-        self._joyita_obs_timer_id = None
-        obs = getattr(self, "_obs_client", None)
-        if obs and obs.is_connected:
-            obs.set_obs_text(source_name, "")
+        """Delegate → obs_lifecycle.clear_obs_joyita."""
+        from opencohost.ui.obs_lifecycle import clear_obs_joyita
+        clear_obs_joyita(
+            source_name=source_name,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_joyita_timer_id=lambda v: setattr(self, "_joyita_obs_timer_id", v),
+        )
 
     def _init_obs_client(self) -> None:
         """Initialize OBS WebSocket client if enabled in config."""
@@ -2708,72 +2188,41 @@ class VocalAIApp(ctk.CTk):
         self._obs_start_from_config()
 
     def _obs_start_from_config(self, retry_delay: float = 5) -> bool:
-        """Create/refresh OBS runtime client and start one cancellable retry loop."""
-        from opencohost.avatar.avatar_config import load_avatar_config
-        avatar_cfg = load_avatar_config()
+        """Delegate → obs_lifecycle.start_from_config.
 
-        if not avatar_cfg.obs.enabled:
-            self._obs_stop_runtime()
-            return False
-
-        existing_thread = getattr(self, "_obs_retry_thread", None)
-        if (
-            getattr(self, "_obs_client", None) is not None
-            and existing_thread is not None
-            and existing_thread.is_alive()
-        ):
-            return True
-
-        existing_client = getattr(self, "_obs_client", None)
-        if existing_client is not None and getattr(existing_client, "is_connected", False):
-            try:
-                self._avatar_panel.set_obs_client(existing_client)
-            except Exception:
-                pass
-            return True
-
-        try:
-            self._obs_client = OBSClient(
-                config=OBSConfig(
-                    enabled=avatar_cfg.obs.enabled,
-                    host=avatar_cfg.obs.host,
-                    port=avatar_cfg.obs.port,
-                    password=avatar_cfg.obs.password,
-                    source_name=avatar_cfg.obs.source_name,
-                    scene_name=avatar_cfg.obs.scene_name,
-                ),
-                assets_folder=avatar_cfg.assets_folder,
-                state_images=avatar_cfg.state_images,
-                on_log=lambda msg: self._print_log(msg),
-            )
-            self._obs_retry_cancel = threading.Event()
-            self._obs_retry_thread = threading.Thread(
-                target=self._connect_obs_loop,
-                args=(self._obs_retry_cancel, self._obs_client, retry_delay),
-                daemon=True,
-            )
-            self._obs_retry_thread.start()
-            return True
-        except Exception as e:
-            self._print_log(f"[OBS] Failed to initialize: {e}")
-            return False
+        obs_client_cls and thread_cls are forwarded from the app_shell module
+        namespace so that existing tests that patch app_shell.OBSClient /
+        app_shell.threading.Thread keep working unchanged.
+        """
+        from opencohost.ui.obs_lifecycle import start_from_config
+        return start_from_config(
+            print_log=self._print_log,
+            schedule_ui_update=self._safe_after,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            avatar_bridge=getattr(self, "_avatar_bridge", None),
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_obs_client=lambda c: setattr(self, "_obs_client", c),
+            get_retry_thread=lambda: getattr(self, "_obs_retry_thread", None),
+            set_retry_thread=lambda t: setattr(self, "_obs_retry_thread", t),
+            get_retry_cancel=lambda: getattr(self, "_obs_retry_cancel", None),
+            set_retry_cancel=lambda e: setattr(self, "_obs_retry_cancel", e),
+            winfo_exists=lambda: self.winfo_exists(),
+            retry_delay=retry_delay,
+            obs_client_cls=OBSClient,
+            obs_config_cls=OBSConfig,
+            thread_cls=threading.Thread,
+        )
 
     def _obs_stop_runtime(self) -> None:
-        """Cancel OBS retry loop and disconnect the live runtime client."""
-        cancel_event = getattr(self, "_obs_retry_cancel", None)
-        if cancel_event is not None:
-            cancel_event.set()
-        obs_client = getattr(self, "_obs_client", None)
-        if obs_client is not None:
-            try:
-                obs_client.disconnect()
-            except Exception:
-                logger.exception("Fallo al desconectar OBS")
-        self._obs_client = None
-        try:
-            self._avatar_panel.set_obs_client(None)
-        except Exception:
-            pass
+        """Delegate → obs_lifecycle.stop_runtime."""
+        from opencohost.ui.obs_lifecycle import stop_runtime
+        stop_runtime(
+            print_log=self._print_log,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            set_obs_client=lambda c: setattr(self, "_obs_client", c),
+            get_retry_cancel=lambda: getattr(self, "_obs_retry_cancel", None),
+        )
 
     def _connect_obs_loop(
         self,
@@ -2781,117 +2230,19 @@ class VocalAIApp(ctk.CTk):
         obs_client: OBSClient | None = None,
         retry_delay: float = 5,
     ) -> None:
-        """Retry OBS connection without letting unexpected socket errors kill the thread."""
-        logged_once = False
-        managed_loop = cancel_event is not None
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            try:
-                active_client = obs_client if obs_client is not None else self._obs_client
-                if active_client is None or active_client is not getattr(self, "_obs_client", None):
-                    break
-                if active_client.connect(log_failures=not logged_once):
-                    if cancel_event is not None and cancel_event.is_set():
-                        break
-                    if active_client is not getattr(self, "_obs_client", None):
-                        break
-                    active_client.subscribe_bridge(self._avatar_bridge)
-                    active_client.on_state_change(self._avatar_bridge.get_state())
-                    try:
-                        if self.winfo_exists():
-                            self._safe_after(lambda: self._avatar_panel.set_obs_client(active_client))
-                    except Exception:
-                        pass
-                    return
-                if not logged_once:
-                    self._print_log(
-                        "[OBS] No se pudo conectar. OpenCohost reintentara cada 5s. "
-                        "Abrí OBS y la conexión se restablecerá automáticamente."
-                    )
-                    logged_once = True
-            except Exception:
-                logger.exception("Fallo inesperado en loop de OBS")
-                if not logged_once:
-                    self._print_log(
-                        "[OBS] Error inesperado conectando. OpenCohost seguira reintentando cada 5s."
-                    )
-                    logged_once = True
-            if managed_loop:
-                if cancel_event is not None and cancel_event.wait(retry_delay):
-                    break
-            else:
-                time.sleep(retry_delay)
-        # Client was destroyed (app closing)
-
-    def _on_motor_model_changed(self) -> None:
-        model = self.motor_ia.current_model
-        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        self._safe_after(lambda: self.model_panel.update_model_info(model))
-        # Use restore_to_active_model (not set_active_model) so the combobox is
-        # synced to the newly active model — mirroring the failure path at
-        # _on_motor_switch_failed, which already used restore_to_active_model.
-        # set_active_model only updated _active_model_tag and buttons; it never
-        # called combo_modelos.set(), leaving the combobox stale after a success.
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(model))
-        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-        self._actualizar_pipeline("idle")
-
-    def _on_motor_switch_pending(self) -> None:
-        desired = getattr(self.motor_ia, "_desired_model", None)
-        if desired:
-            display = self.model_panel.get_display_for_tag(desired)
-            if not getattr(self.motor_ia, "is_ready", False):
-                self._print_log(f"[Sistema] Cambio a {display} pendiente: Ollama no está listo.")
-            else:
-                self._print_log(f"[Sistema] Cambio a {display} pendiente: se aplicará al terminar la respuesta actual.")
-        # Do NOT restore combobox — user's selection stays visible as intended target
-
-    def _on_motor_switch_failed(self) -> None:
-        self._ui_state.model_status = "error"
-        failure = getattr(self.motor_ia, "_last_switch_failure", None)
-        actual_model = self.motor_ia.current_model
-        if failure:
-            requested = failure.get("requested", "?")
-            reason = failure.get("reason", "unknown")
-            self._print_log(f"[Sistema] ❌ Cambio a {requested} fallido: {reason}. Modelo activo: {actual_model}")
-            # Clear after read to prevent stale display
-            self.motor_ia._last_switch_failure = None
-        # Restore combobox to actual motor model
-        self._safe_after(lambda: self.model_panel.restore_to_active_model(actual_model))
-        self._safe_after(lambda: self.model_panel.set_llm_tier_state(self.motor_ia.llm_tiers.config.as_dict(), self.motor_ia.active_llm_tier))
-        self._safe_after(lambda: self.model_panel.update_model_info(actual_model))
-
-    def _on_motor_download_start(self) -> None:
-        self._safe_after(lambda: self.btn_download.configure(state="disabled", text="Descargando..."))
-        self._safe_after(lambda: self.combo_modelos.configure(state="disabled"))
-        self._safe_after(lambda: self.progress_download.pack(fill="x", padx=10, pady=(4, 10)))
-        self._safe_after(lambda: self.progress_download.set(0))
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="disabled"))
-        self._actualizar_pipeline("downloading")
-
-    def _on_motor_download_done(self) -> None:
-        model = self.motor_ia.current_model
-        # Invalidate stale install-status cache so the next _modelo_instalado call
-        # reflects the newly downloaded model (fix #A).
-        self._safe_after(lambda: self.model_panel._invalidate_model_cache())
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.progress_download.pack_forget())
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._safe_after(lambda: self.title(f"OpenCohost — Qwen3-TTS + {model}"))
-        self._safe_after(lambda: self.model_panel.update_model_info(model))
-        self._actualizar_pipeline("idle")
-        self._safe_after(lambda: self.model_panel.update_model_info(self.model_panel.get_selected_tag()))
-
-    def _on_motor_download_error(self) -> None:
-        self._safe_after(lambda: self.model_panel.update_button_for_ollama_state())
-        self._safe_after(lambda: self.combo_modelos.configure(state="normal"))
-        self._safe_after(lambda: self.progress_download.pack_forget())
-        self._safe_after(lambda: self.btn_primary_voice.configure(state="normal"))
-        self._actualizar_pipeline("error")
-        if hasattr(self, "_avatar_bridge"):
-            self._avatar_bridge.set_state(AvatarState.ERROR)
+        """Delegate → obs_lifecycle.connect_obs_loop."""
+        from opencohost.ui.obs_lifecycle import connect_obs_loop
+        connect_obs_loop(
+            cancel_event=cancel_event,
+            obs_client=obs_client,
+            get_obs_client=lambda: getattr(self, "_obs_client", None),
+            print_log=self._print_log,
+            schedule_ui_update=self._safe_after,
+            avatar_panel=getattr(self, "_avatar_panel", None),
+            avatar_bridge=getattr(self, "_avatar_bridge", None),
+            winfo_exists=lambda: self.winfo_exists(),
+            retry_delay=retry_delay,
+        )
 
     # ──────────────────────────────────────────────
     # Audio, TTS, Chat, PTT helpers
@@ -3236,12 +2587,6 @@ class VocalAIApp(ctk.CTk):
                 self.smart_agg.disconnect()
         except Exception as e:
             logger.warning(f"No se pudo desconectar Smart Aggregator: {e}")
-
-        try:
-            if self.stream_admin_ui.chat_connected:
-                self._stream_admin_disconnect_api_chat()
-        except Exception as e:
-            logger.warning(f"No se pudo desconectar chat autenticado RF4: {e}")
 
         try:
             x = self.winfo_x()
