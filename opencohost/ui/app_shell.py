@@ -2578,6 +2578,15 @@ class VocalAIApp(ctk.CTk):
             except Exception as e:
                 logger.warning(f"HealthMonitor cleanup error: {e}")
 
+        # FR4 (ui_thread_hardening_agenda_audio_20260624): graceful audio-bed teardown.
+        # shutdown() hard-stops the channel and cancels the daemon _idle_check_timer,
+        # which otherwise lingers until process exit.
+        if getattr(self, "audio_bed", None) is not None:
+            try:
+                self.audio_bed.shutdown()
+            except Exception as e:
+                logger.warning(f"AudioBed shutdown error: {e}")
+
         # Set avatar to sleeping on close
         if hasattr(self, "_avatar_bridge"):
             self._avatar_bridge.set_state(AvatarState.SLEEPING)
