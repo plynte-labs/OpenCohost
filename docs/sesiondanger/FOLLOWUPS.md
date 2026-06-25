@@ -11,4 +11,32 @@ Each entry: what, why deferred, where, suggested action.
   scope this session unless it blocks a task.
 
 ## New items found during this session
-- (appended as discovered)
+
+### Design decision — Bug C reverses the ui_declutter_20260614 compact default
+The product workspace, `_side_config_panel`, and `_product_workspace_panel` are the SAME widget
+(`app_shell.py:965-966`). Compact mode (`_compacto_active=True`, the startup default chosen by track
+`ui_declutter_20260614`) hides it via `grid_remove()` at startup (`_toggle_modo_compacto`, ~:1962,
+invoked at ~:972). The owner explicitly wants the product/config panel VISIBLE at launch so users
+can discover settings. Implementing Bug C therefore MODIFIES the declutter track's deliberate
+"compact-is-default" decision. Done per explicit owner request; documented in ADR-SD-002 for owner
+confirmation. Target startup state: product workspace SHOWN, logs HIDDEN.
+
+### Regression — FR3 worsened the music-preview multi-playback (Bug A)
+FR3 (`eb8849c`, merged this session) moved `_music_play_mood` onto a per-click daemon thread via
+`_dispatch_audio_play`, removing the main-thread serialization. Combined with the pre-existing
+`force=True` + avoid-current random selection + 6s `old_channel.fadeout`, rapid preview clicks now
+stack overlapping channels AND workers. Fixed as part of Bug A (single-flight). engram #2535.
+
+### Residual Demeter reach (FR1 judge INFO) — out of FR1 scope
+`opencohost/ui/motor_event_handlers.py:503` still does `motor_ia._last_switch_failure = None`
+(UI reaching engine private state). FR1 only fixed the `_speaking`/`_lock` reach in
+`_kira_agenda_emergency_stop`. Consider a future FR to encapsulate this too.
+
+### Test hygiene (FR1 judge LOW) — `_make_shell_stub` motor=None branch
+`tests/test_audio_teardown.py:104-107` builds a bare `MagicMock` motor that auto-vivifies any method
+(e.g. `interrupt_speaking`), so a test through that branch could green-pass a broken/renamed engine
+method. FR1's contract is guarded by REAL-engine tests so no active hole, but tighten with
+`MagicMock(spec=MotorVocalIA)` to make renames raise AttributeError. (Not changed now: a shared
+fixture; spec-ing it may break unrelated default-stub tests — needs its own verification pass.)
+
+### B1 (restated) — aggregator locking still open (see top section).

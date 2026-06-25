@@ -28,11 +28,12 @@ captured in `FOLLOWUPS.md` and engram — never block.
 - Document WHY in `docs/sesiondanger/ADR-SD-*.md`.
 
 ## Rollback points (batch commits)
-- batch 0 — session docs setup.
+- batch 0 — session docs setup (`RUN-LOG`, `FOLLOWUPS`).
+- batch 1 — **FR1** `interrupt_speaking()` Demeter fix (`5f83724`). Dual opus judges SAFE. Suite 2783.
 
 ## Progress
-- [ ] FR1
-- [ ] Bug A (music threads)
-- [ ] Bug B (terminal slider)
-- [ ] Bug C (product panel)
+- [x] FR1 — committed `5f83724` (batch 1)
+- [ ] Bug A (music threads) — DIAGNOSED (engram #2535, FR3-regression); fix pending
+- [ ] Bug B (terminal slider) — DIAGNOSED (advanced_panel build grids frame; fix = grid_remove in build)
+- [ ] Bug C (product panel) — DIAGNOSED (compact-default hides aliased product workspace); reverses ui_declutter (ADR-SD-002)
 - [ ] Investigation D (UI/stack ADR)
