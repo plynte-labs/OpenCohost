@@ -195,54 +195,18 @@ class StreamAdminUI:
         metadata_section.grid_columnconfigure(0, weight=1)
         self._build_metadata_tab(metadata_section)
 
-        # Build sections first so toggle lambdas can reference them
+        # Chat Live (RF3) is the only Acciones section exposed for launch, so it
+        # renders directly (no collapsible). Kira Chat (RF4) and Moderación stay
+        # behind STREAM_ADMIN_ENABLED; their _build_chat_tab / _build_moderation_tab
+        # methods are intentionally retained (flag-gated, covered by tests) but are
+        # no longer wired into this view — flipping the flag will not restore them
+        # here without re-adding the render calls above.
         chat_live_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        chat_live_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        chat_live_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         chat_live_section.grid_columnconfigure(0, weight=1)
         self._build_chat_live_tab(chat_live_section)
 
-        chat_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        chat_section.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
-        chat_section.grid_columnconfigure(0, weight=1)
-        self._build_chat_tab(chat_section)
-
-        moderation_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        moderation_section.grid(row=3, column=0, sticky="ew", padx=0, pady=0)
-        moderation_section.grid_columnconfigure(0, weight=1)
-        self._build_moderation_tab(moderation_section)
-
-        # Collapsible section toggles — placed above sections at row 0
-        self._sections_expanded = {"chat_live": True, "chat": True, "moderation": True}
-
-        toggle_row = ctk.CTkFrame(actions_sections, fg_color="transparent")
-        toggle_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
-        toggle_row.grid_columnconfigure(0, weight=1)
-        toggle_row.grid_columnconfigure(1, weight=1)
-        toggle_row.grid_columnconfigure(2, weight=1)
-
-        btn_live = ctk.CTkButton(toggle_row, text="▼ Chat Live (RF3)", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("chat_live", chat_live_section, btn_live))
-        btn_live.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
-
-        btn_chat = ctk.CTkButton(toggle_row, text="▼ Kira Chat", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("chat", chat_section, btn_chat))
-        btn_chat.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
-
-        btn_mod = ctk.CTkButton(toggle_row, text="▼ Moderación", anchor="w", fg_color="#151d26", text_color="#d8e2ef", hover_color="#1d2a38", command=lambda: self._toggle_section("moderation", moderation_section, btn_mod))
-        btn_mod.grid(row=0, column=2, padx=2, pady=2, sticky="ew")
-
         return parent
-
-    def _toggle_section(self, key: str, frame: Any, button: Any) -> None:
-        """Toggle visibility of an Acciones card section."""
-        expanded = not self._sections_expanded.get(key, True)
-        self._sections_expanded[key] = expanded
-        if expanded:
-            frame.grid()
-            current = button.cget("text")
-            button.configure(text=current.replace("▶", "▼"))
-        else:
-            frame.grid_remove()
-            current = button.cget("text")
-            button.configure(text=current.replace("▼", "▶"))
 
     def _toggle_oauth_section(self, content: Any, button: Any) -> None:
         self._oauth_expanded = not self._oauth_expanded
@@ -541,7 +505,7 @@ class StreamAdminUI:
         frame_live.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         frame_live.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame_live, text="Chat Live (RF3)", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        ctk.CTkLabel(frame_live, text="Chat Live", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
 
         entry_url = ctk.CTkEntry(frame_live, placeholder_text="URL del directo (YouTube o Twitch)")
         entry_url.grid(row=1, column=0, padx=10, pady=4, sticky="ew")

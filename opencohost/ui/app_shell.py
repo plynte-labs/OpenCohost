@@ -840,8 +840,8 @@ class VocalAIApp(ctk.CTk):
 
         # Help sections — one per product tab, collapsible
         help_sections = [
-            ("Configuración", "Modelo/Perfil: elegí el modelo LLM (Ollama) y el perfil de personalidad de Kira.\n\nAudio/TTS: seleccioná dispositivo de entrada, alterná entre TTS Ligero (Edge-TTS cloud, rápido) y Pesado (Qwen3-TTS local, mayor calidad).\n\nPTT (Push-to-Talk): mantené presionada la tecla asignada para hablar; soltá para que Kira responda."),
-            ("Stream", "Emisión: conectá tu cuenta de YouTube (OAuth), gestioná metadata del stream (título, categoría, tags, descripción).\n\nAcciones: monitoreá el chat en vivo (Chat Live RF3), enviá mensajes como Kira, moderá usuarios (timeout/ban)."),
+            ("Configuración", "Modelo/Perfil: elegí el modelo LLM (Ollama) y el perfil de personalidad de Kira.\n\nAudio/TTS: seleccioná el dispositivo de entrada y la voz de Kira (Argentina o Neutral) con el selector «Voz de Kira». Activá «Solo TTS local (Piper)» para mantener toda la síntesis de voz en tu máquina; por defecto está desactivado y la voz ligera usa Edge-TTS (nube).\n\nPTT (Push-to-Talk): mantené presionada la tecla asignada para hablar; soltá para que Kira responda."),
+            ("Stream", "Emisión: conectá tu cuenta de YouTube (OAuth), gestioná metadata del stream (título, categoría, tags, descripción).\n\nAcciones: monitoreá el chat en vivo (Chat Live) para que Kira reaccione a tu audiencia."),
             ("Co-host", "Creá una agenda de temas aprobados para que Kira los desarrolle en vivo. Importá temas en lote desde texto estructurado. Controlá la sesión: Activar, Stop suave, Emergencia."),
             ("Música", "Importá loops de audio .mp3/.wav etiquetados por mood (Normal, Calmo, Épico, etc.). Probá cada mood con un clic. El sistema hace fade, ducking y fallback automático."),
             ("Avatar / OBS", "Cambiá la imagen de Kira para cada estado (idle, hablando, escuchando, etc.). Conectá con OBS Studio vía WebSocket para reflejar los cambios en vivo."),

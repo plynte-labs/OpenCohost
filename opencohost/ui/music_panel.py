@@ -87,22 +87,21 @@ class MusicPanel:
             anchor="w",
         ).grid(row=0, column=0, columnspan=4, sticky="ew", padx=theme.SPACE_XL - 2, pady=(theme.SPACE_LG, theme.SPACE_SM))
         mood_grid = ctk.CTkFrame(controls, fg_color="transparent")
-        mood_grid.grid(row=1, column=0, columnspan=4, sticky="w", padx=theme.SPACE_XL - 2, pady=(0, theme.SPACE_SM))
+        mood_grid.grid(row=1, column=0, columnspan=4, sticky="ew", padx=theme.SPACE_XL - 2 - theme.SPACE_XS, pady=(0, theme.SPACE_SM))
         for col in range(4):
-            mood_grid.grid_columnconfigure(col, weight=0)
+            mood_grid.grid_columnconfigure(col, weight=1, uniform="mood")
         for idx, mood in enumerate(KNOWN_MOODS):
             r, c = divmod(idx, 4)
             ctk.CTkButton(
                 mood_grid,
                 text=mood.capitalize(),
-                width=110,
                 height=30,
                 corner_radius=theme.RADIUS_SM,
                 font=theme.font("LABEL"),
                 command=lambda m=mood: self._on_play_mood(m),
                 fg_color=theme.NEUTRAL,
                 hover_color=theme.NEUTRAL_HOVER,
-            ).grid(row=r, column=c, sticky="w", padx=theme.SPACE_XS, pady=theme.SPACE_XS)
+            ).grid(row=r, column=c, sticky="ew", padx=theme.SPACE_XS, pady=theme.SPACE_XS)
         ctk.CTkButton(
             controls,
             text="Fade out",
