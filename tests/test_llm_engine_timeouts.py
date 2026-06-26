@@ -29,7 +29,7 @@ def test_prepare_model_warms_selected_ollama_model():
     motor.ollama.generate.assert_called_once()
     call = motor.ollama.generate.call_args.kwargs
     assert call["model"] == "llama3"
-    assert call["keep_alive"] == -1
+    assert call["keep_alive"] == llm_engine.LLM_KEEP_ALIVE
     assert call["options"]["num_predict"] == 1
     assert motor._warmed_model == "llama3"
     assert motor._owns_ollama_model is True

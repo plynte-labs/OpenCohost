@@ -60,6 +60,11 @@ class OllamaStartupManager:
 
         env = dict(self._base_env if self._base_env is not None else os.environ)
         env["OLLAMA_MODELS"] = ollama_models_dir
+        # RAM ceilings (ram_llm_hardening_20260626 Phase 0 / A3): one runner, one
+        # loaded model — each runner/model carries its own KV cache. setdefault so
+        # an operator who already exported these keeps their chosen value.
+        env.setdefault("OLLAMA_NUM_PARALLEL", "1")
+        env.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
         creationflags = self._creationflags
         if creationflags is None:
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

@@ -17,7 +17,7 @@ from typing import Optional
 
 from opencohost.config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
-    LLM_TOP_P, LLM_MAX_TOKENS, TEMP_DIR, TTS_SERVER_URL,
+    LLM_TOP_P, LLM_MAX_TOKENS, LLM_KEEP_ALIVE, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
     TTS_LOCAL_MODEL_PATH,
@@ -917,7 +917,7 @@ class MotorVocalIA(threading.Thread):
                     self.ollama.generate,
                     model=model,
                     prompt="Responde solo: ok",
-                    keep_alive=-1,
+                    keep_alive=LLM_KEEP_ALIVE,
                     options={"num_predict": 1, "temperature": 0},
                 )
                 future.result(timeout=120)
@@ -1150,7 +1150,7 @@ class MotorVocalIA(threading.Thread):
                         timeout=chat_timeout,
                         model=request_model,
                         messages=messages,
-                        keep_alive=-1,
+                        keep_alive=LLM_KEEP_ALIVE,
                         options=opciones_llm
                     )
                 except Exception as e:

@@ -136,7 +136,43 @@ def test_start_env_includes_ollama_models_path() -> None:
 
     assert result.status == "ready"
     assert captured["args"] == ["ollama", "serve"]
-    assert captured["env"] == {"EXISTING": "1", "OLLAMA_MODELS": "/fake/custom-ollama-models"}
+    assert captured["env"] == {
+        "EXISTING": "1",
+        "OLLAMA_MODELS": "/fake/custom-ollama-models",
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+    }
+
+
+def test_operator_env_overrides_are_preserved() -> None:
+    """A3 RAM ceilings use setdefault, so an operator who already exported
+    OLLAMA_NUM_PARALLEL / OLLAMA_MAX_LOADED_MODELS keeps their value while the
+    other ceiling default is still applied (ram_llm_hardening_20260626 Phase 0)."""
+    proc = FakeProcess(poll_values=(None,))
+    captured: dict[str, object] = {}
+    probes = {"count": 0}
+
+    def is_ready() -> bool:
+        probes["count"] += 1
+        return probes["count"] == 2
+
+    def popen(args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return proc
+
+    manager = OllamaStartupManager(
+        popen=popen,
+        is_ready=is_ready,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+        base_env={"OLLAMA_NUM_PARALLEL": "4"},
+    )
+
+    result = manager.start_and_wait("ollama", "/fake/models")
+
+    assert result.status == "ready"
+    assert captured["env"]["OLLAMA_NUM_PARALLEL"] == "4"  # operator override preserved
+    assert captured["env"]["OLLAMA_MAX_LOADED_MODELS"] == "1"  # default still applied
 
 
 def test_timeout_waiting_ready_reports_process_and_model_path_context(tmp_path) -> None:

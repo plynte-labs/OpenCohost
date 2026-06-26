@@ -39,7 +39,7 @@ from typing import Any, Callable, Optional
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
-from opencohost.config.settings import BASE_DIR
+from opencohost.config.settings import BASE_DIR, LLM_KEEP_ALIVE
 from opencohost.config.logger import get_logger
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 from opencohost.ui.state import UIState
@@ -155,7 +155,7 @@ class SmartAggregatorUI:
         response = ollama_client.chat(
             model=self._motor_ia.current_model,
             messages=[{"role": "user", "content": prompt}],
-            keep_alive=-1,
+            keep_alive=LLM_KEEP_ALIVE,
             options={"temperature": 0.2, "num_predict": 180},
         )
         msg_obj = response.get("message", {})

@@ -36,6 +36,11 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LLM_TEMPERATURE = 0.8
 LLM_TOP_P = 0.9
 LLM_MAX_TOKENS = 768
+# Ollama keep_alive: how long an idle model stays resident in RAM after a
+# request. Finite (not -1) so models release RAM on idle instead of being pinned
+# for the whole session. Applied at the warm-up, chat, and Vibe call sites.
+# (ram_llm_hardening_20260626 Phase 0 / A1.)
+LLM_KEEP_ALIVE = "7m"
 # Context-window overflow guardrail (context_overflow_guardrail_20260623).
 # Consumed by the budget-gate wiring in llm_engine.py; the pure logic lives in
 # opencohost/core/context_budget.py and receives these as plain arguments.

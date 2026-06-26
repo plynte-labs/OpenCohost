@@ -347,6 +347,23 @@ class TestRegressionGuards:
         captured = self._run_dialogo(monkeypatch, model="gemma4:e4b", ctx_seed=8192)
         assert "num_ctx" not in captured[0]
 
+    def test_chat_uses_finite_keep_alive(self, monkeypatch):
+        """The chat generation call must pass the finite LLM_KEEP_ALIVE, not the
+        legacy -1 that pins the model in RAM for the whole session
+        (ram_llm_hardening_20260626 Phase 0 / A1)."""
+        import opencohost.core.llm_engine as le
+        monkeypatch.setattr(le, "output_guard", lambda dialogo, source="chat": (True, ""))
+        m = _make_motor("qwen3:4b")
+        captured = {}
+
+        def fake_chat(*, timeout, **kwargs):
+            captured.update(kwargs)
+            return _Resp(content="ok", prompt_eval_count=10)
+
+        m._ollama_chat_with_watchdog = fake_chat
+        m._generar_dialogo("hola", source="chat", commit_history=False)
+        assert captured["keep_alive"] == le.LLM_KEEP_ALIVE
+
     def test_existing_retry_reasoning_branch_still_works(self, monkeypatch):
         """Empty + thinking + num_predict present → pop num_predict + retry (Layer 2 self-heal).
         This must still fire when there is NO overflow signal (pec below threshold)."""

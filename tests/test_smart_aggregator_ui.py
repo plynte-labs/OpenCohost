@@ -26,6 +26,7 @@ import pytest
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
 from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
+from opencohost.config.settings import LLM_KEEP_ALIVE
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +329,7 @@ class TestLLMInterface:
         call_kwargs = mock_motor_ia.ollama.chat.call_args
         assert call_kwargs.kwargs["model"] == "qwen2.5:7b"
         assert call_kwargs.kwargs["messages"] == [{"role": "user", "content": "analyze this"}]
-        assert call_kwargs.kwargs["keep_alive"] == -1
+        assert call_kwargs.kwargs["keep_alive"] == LLM_KEEP_ALIVE
         assert result == "hello world"
 
     def test_returns_content_from_dict_message(self, smart_agg_ui, mock_motor_ia):
