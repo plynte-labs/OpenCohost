@@ -28,6 +28,7 @@ from opencohost.config.settings import (
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
+    PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
 )
 from opencohost.core import context_budget
 from opencohost.i18n import active as i18n_active
@@ -144,7 +145,9 @@ class MotorVocalIA(threading.Thread):
             self._edge_tts_offline: bool = True
         else:
             self._edge_tts_offline: bool = False
-        self._piper = PiperEngine(TTS_LOCAL_MODEL_PATH, length_scale=load_tts_speed())
+        self._piper = PiperEngine(
+            piper_voice_path(load_piper_voice()), length_scale=load_tts_speed()
+        )
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
         self.health_monitor = None
@@ -356,6 +359,20 @@ class MotorVocalIA(threading.Thread):
             self._piper.set_length_scale(scale)
             save_tts_speed(scale)
             logger.info("Piper speech rate set to length_scale=%.2f", scale)
+
+        elif tipo == "set_piper_voice":
+            voice_key = str(payload)
+            path = piper_voice_path(voice_key)
+            if self._piper.reload(path):
+                save_piper_voice(voice_key)
+                label = PIPER_VOICES.get(voice_key, {}).get("label", voice_key)
+                self._log(f"Voz de Kira cambiada a: {label}")
+                logger.info("Piper voice switched to %s (%s)", voice_key, path)
+            else:
+                self._log(
+                    f"No se pudo cambiar la voz de Kira a '{voice_key}'",
+                    level="warning",
+                )
 
         elif tipo == "set_profile":
             prompt_override_active = "prompt" in payload

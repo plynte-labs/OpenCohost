@@ -666,3 +666,75 @@ class TestServerQwenLocalOnlyGuardStructural:
             "server_qwen.py must have a comment explaining the duplicated read "
             "(cross-env / separate Python environment)"
         )
+
+
+# ===========================================================================
+# 9. Piper voice selection — Argentina ↔ Neutral offline voice toggle
+# ===========================================================================
+
+class TestPiperVoiceSettings:
+    def test_default_voice_is_argentina(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "argentina"
+        assert cfg.DEFAULT_PIPER_VOICE == "argentina"
+
+    def test_save_and_reload_neutral(self, tmp_path):
+        from opencohost.config import settings as cfg
+
+        path = str(tmp_path / "piper_voice.json")
+        cfg.save_piper_voice("neutral", config_file=path)
+        assert cfg.load_piper_voice(config_file=path) == "neutral"
+
+    def test_invalid_saved_key_falls_back_to_default(self, tmp_path):
+        from opencohost.config import settings as cfg
+
+        path = str(tmp_path / "piper_voice.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"piper_voice": "klingon"}))
+        assert cfg.load_piper_voice(config_file=path) == "argentina"
+
+    def test_invalid_save_key_is_normalized(self, tmp_path):
+        from opencohost.config import settings as cfg
+
+        path = str(tmp_path / "piper_voice.json")
+        cfg.save_piper_voice("klingon", config_file=path)
+        assert cfg.load_piper_voice(config_file=path) == "argentina"
+
+    def test_voice_path_resolves_per_key(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.piper_voice_path("argentina").endswith("es_AR-daniela-high.onnx")
+        assert cfg.piper_voice_path("neutral").endswith("es_MX-claude-high.onnx")
+        # Unknown key resolves to the default (argentina), never an empty path.
+        assert cfg.piper_voice_path("klingon").endswith("es_AR-daniela-high.onnx")
+
+    def test_voice_path_under_piper_cache_dir(self):
+        from opencohost.config import settings as cfg
+
+        p = cfg.piper_voice_path("neutral").replace("\\", "/")
+        assert "/piper/" in p
+
+
+class TestPiperVoiceCommand:
+    def test_set_piper_voice_reloads_and_persists(self):
+        from unittest.mock import patch, MagicMock
+
+        motor, *_ = _make_motor()
+        motor._piper = MagicMock()
+        motor._piper.reload.return_value = True
+        with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+            motor._dispatch_command("set_piper_voice", "neutral")
+        motor._piper.reload.assert_called_once()
+        assert motor._piper.reload.call_args[0][0].endswith("es_MX-claude-high.onnx")
+        mock_save.assert_called_once_with("neutral")
+
+    def test_set_piper_voice_skips_persist_on_reload_failure(self):
+        from unittest.mock import patch, MagicMock
+
+        motor, *_ = _make_motor()
+        motor._piper = MagicMock()
+        motor._piper.reload.return_value = False
+        with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+            motor._dispatch_command("set_piper_voice", "neutral")
+        mock_save.assert_not_called()

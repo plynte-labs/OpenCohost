@@ -102,6 +102,30 @@ class PiperEngine:
             if _SynthesisConfig is not None and self._length_scale != 1.0:
                 self._syn_config = _SynthesisConfig(length_scale=self._length_scale)
 
+    def reload(self, model_path: str) -> bool:
+        """Swap to a different Piper voice model at runtime.
+
+        Powers the in-app Argentina↔Neutral voice toggle. Takes the synthesis
+        lock so an in-flight synthesize() completes on the old voice before the
+        swap. On failure the previous voice stays loaded (the engine is never
+        left voiceless) and False is returned; never raises.
+        """
+        with self._lock:
+            if not _PIPER_AVAILABLE or not model_path:
+                return False
+            previous = self._voice
+            try:
+                self._voice = _piper_voice.PiperVoice.load(model_path)
+                self._model_path = model_path
+                logger.info("Piper TTS recargado: %s", model_path)
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "Piper: error al recargar el modelo '%s': %s", model_path, exc
+                )
+                self._voice = previous  # keep the working voice
+                return False
+
     def synthesize(self, text: str, output_path: str) -> bool:
         """
         Synthesize *text* and write the result as a WAV file to *output_path*.

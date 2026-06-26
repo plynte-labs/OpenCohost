@@ -48,6 +48,7 @@ from opencohost.config.settings import (
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     STREAM_ADMIN_ENABLED,
     load_tts_local_only,
+    PIPER_VOICES, load_piper_voice, piper_voice_path, DEFAULT_PIPER_VOICE,
 )
 from opencohost.config.logger import get_logger
 from opencohost.core.agenda_persistence import AgendaPersistence
@@ -105,15 +106,15 @@ class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"OpenCohost — Qwen3-TTS + {DEFAULT_MODEL}")
+        self.title("Kira — OpenCohost")
         geo = _cargar_geometria()
         if geo:
             try:
                 self.geometry(f"{geo['width']}x{geo['height']}+{geo['x']}+{geo['y']}")
             except Exception:
-                self.geometry("1100x700")
+                self.geometry("1280x800")
         else:
-            self.geometry("1100x700")
+            self.geometry("1280x800")
         self.minsize(800, 500)
         self.log_queue = queue.Queue()
         self._ui_task_queue = queue.Queue()
@@ -127,6 +128,7 @@ class VocalAIApp(ctk.CTk):
         self._closing: bool = False
         self._motor_started: bool = False
         self._motor_heartbeat_failure_reported: bool = False
+        self._kira_first_ready: bool = False  # one-shot "Kira lista" cue in the response box
         self._kira_avatar_preview_after_id: Any = None
         self.perfiles = cargar_perfiles()
         self.cohost_profiles = load_cohost_profiles()
@@ -352,7 +354,7 @@ class VocalAIApp(ctk.CTk):
                 try:
                     from PIL import Image
                     img = Image.open(image_path)
-                    img.thumbnail((220, 220), Image.Resampling.LANCZOS)
+                    img.thumbnail((320, 320), Image.Resampling.LANCZOS)
                     # Keep BOTH references alive to prevent Tkinter image GC.
                     # CTkImage wraps the PIL Image but doesn't always hold a
                     # strong reference to it — if the PIL Image is collected,
@@ -443,11 +445,14 @@ class VocalAIApp(ctk.CTk):
         app_shell.grid_columnconfigure(0, weight=0, minsize=460)
         app_shell.grid_columnconfigure(1, weight=1)
         app_shell.grid_rowconfigure(0, weight=1)
-        # Persistent Kira panel
-        main_panel = ctk.CTkFrame(app_shell, fg_color="#10161d", corner_radius=18)
+        # Persistent Kira panel — pinned to a fixed width via grid_propagate(False)
+        # so inner content (long Kira replies, the per-state strings written into
+        # text_kira_response) can't inflate the card and shift the column.
+        main_panel = ctk.CTkFrame(app_shell, fg_color="#10161d", corner_radius=18, width=560)
         main_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
         main_panel.grid_columnconfigure(0, weight=1)
         main_panel.grid_rowconfigure(0, weight=1)
+        main_panel.grid_propagate(False)
         main_content = ctk.CTkFrame(main_panel, fg_color="transparent")
         main_content.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         main_content.grid_columnconfigure(0, weight=1)
@@ -457,9 +462,9 @@ class VocalAIApp(ctk.CTk):
         self._main_view_buttons: dict[str, Any] = {}
         self._main_view_frames = {"Kira": tab_main_kira}
         tab_main_kira.grid_columnconfigure(0, weight=1)
-        tab_main_kira.grid_rowconfigure(1, weight=1)
+        tab_main_kira.grid_rowconfigure(1, weight=3)  # avatar is the visual hero
         tab_main_kira.grid_rowconfigure(2, weight=0)
-        tab_main_kira.grid_rowconfigure(3, weight=1)
+        tab_main_kira.grid_rowconfigure(3, weight=0)  # response hugs its content, no wasted gap
         # Kira header
         kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
         kira_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
@@ -477,7 +482,7 @@ class VocalAIApp(ctk.CTk):
             avatar_preview_frame, text="",
             text_color="#6b7b8d",
             font=ctk.CTkFont(size=12),
-            height=140,
+            height=260,
             corner_radius=8,
         )
         self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
@@ -504,7 +509,7 @@ class VocalAIApp(ctk.CTk):
         self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=14), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled", height=130, wrap="word")
         self.text_kira_response.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         self.text_kira_response.configure(state="normal")
-        self.text_kira_response.insert("end", "La respuesta de Kira aparecerá aquí. Los logs completos se muestran abajo solo si activas Mostrar logs.\n")
+        self.text_kira_response.insert("end", "Iniciando Kira… esperá unos segundos mientras se prepara.\n")
         self.text_kira_response.configure(state="disabled")
         # Voice panel (compact — primary button is at Kira level)
         voice_panel_frame = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
@@ -548,7 +553,6 @@ class VocalAIApp(ctk.CTk):
         side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
         side_panel.grid_columnconfigure(0, weight=1)
         side_panel.grid_rowconfigure(3, weight=1)
-        ctk.CTkLabel(side_panel, text="Paneles de producto", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
         # Product tabs — custom buttons (full-width, clear active state)
         product_tab_bar = ctk.CTkFrame(side_panel, fg_color="transparent")
         product_tab_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 6))
@@ -744,30 +748,57 @@ class VocalAIApp(ctk.CTk):
             state="disabled",
         )
         self.btn_ws.pack(fill="x", padx=10, pady=(0, 10))
-        # TTS / Memory
+        # Voz de Kira card  (raw hex kept for parity with this un-migrated file;
+        # #151d26 == theme.SURFACE, #101923 == theme.SURFACE_NESTED, #8fa3b8 == theme.TEXT_DIM — future token sweep)
         frame_tts_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_tts_memory.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_tts_memory, text="TTS / Memoria", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(frame_tts_memory, text="Voz de Kira", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 6))
+        # Two fully-offline Piper voices (Argentina ↔ Neutral). Selecting one forces
+        # local Piper synthesis so the change is audible immediately and never
+        # depends on the Edge-TTS cloud (demo-safe). The recessed sub-frame groups
+        # the voice picker with its privacy escape hatch (one decision, one place).
+        frame_voice = ctk.CTkFrame(frame_tts_memory, fg_color="#101923", corner_radius=10)
+        frame_voice.pack(fill="x", padx=10, pady=(4, 8))
+        self._kira_voice_labels = {info["label"]: key for key, info in PIPER_VOICES.items()}
+        self.seg_kira_voice = ctk.CTkSegmentedButton(
+            frame_voice,
+            values=list(self._kira_voice_labels.keys()),
+            command=self._on_kira_voice_change,
+        )
+        self.seg_kira_voice.pack(fill="x", padx=10, pady=(10, 2))
+        _saved_voice = load_piper_voice()
+        _saved_label = next(
+            (lbl for lbl, key in self._kira_voice_labels.items() if key == _saved_voice),
+            next(iter(self._kira_voice_labels), ""),
+        )
+        if _saved_label:
+            self.seg_kira_voice.set(_saved_label)
+        ctk.CTkLabel(frame_voice, text="Ambas voces son 100% offline (Piper).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 6))
+        # Privacy switch: when ON, Edge-TTS is never invoked — all light synthesis uses Piper.
+        self.switch_local_only = ctk.CTkSwitch(frame_voice, text="Solo TTS local (Piper)", onvalue=True, offvalue=False, command=self._al_cambiar_tts_local_only)
+        self.switch_local_only.pack(fill="x", padx=10, pady=(4, 0))
+        if load_tts_local_only():
+            self.switch_local_only.select()
+        ctk.CTkLabel(frame_voice, text="OFF envía el texto a Edge-TTS (nube) para una voz más natural.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
+        # Heavy-TTS switch stays CREATED + selected so the attribute always exists,
+        # but it is only shown (packed) when the experimental heavy path is enabled.
         self.switch_modo_ligero = ctk.CTkSwitch(frame_tts_memory, text="🎛️ TTS: Ligero", onvalue="ligero", offvalue="pesado", command=self._al_cambiar_motor_tts)
-        self.switch_modo_ligero.pack(fill="x", padx=10, pady=4)
         self.switch_modo_ligero.select()
         if EXPERIMENTAL_HEAVY_TTS_ENABLED:
-            ctk.CTkLabel(frame_tts_memory, text="Ligero: rápido, usa Edge-TTS (cloud). Pesado: Qwen3-TTS local, requiere descarga previa del modelo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
+            self.switch_modo_ligero.pack(fill="x", padx=10, pady=4)
+            ctk.CTkLabel(frame_tts_memory, text="Ligero: rápido, usa Edge-TTS (cloud). Pesado: Qwen3-TTS local, requiere descarga previa del modelo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 6))
         else:
             # Heavy-TTS is experimental; hidden in packaged builds.
             # Engine-side gates and auto-fallback remain active regardless.
             self.switch_modo_ligero.configure(state="disabled")
-            ctk.CTkLabel(frame_tts_memory, text="TTS: Edge-TTS (cloud) / Piper (local fallback).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 2))
-        # Privacy switch: when ON, Edge-TTS is never invoked — all light synthesis uses Piper.
-        self.switch_local_only = ctk.CTkSwitch(frame_tts_memory, text="Solo TTS local (Piper)", onvalue=True, offvalue=False, command=self._al_cambiar_tts_local_only)
-        self.switch_local_only.pack(fill="x", padx=10, pady=(4, 0))
-        if load_tts_local_only():
-            self.switch_local_only.select()
-        ctk.CTkLabel(frame_tts_memory, text="ON: nada de texto sale de tu PC, voz algo menos natural. OFF: voz ligera más natural vía Edge-TTS (envía el texto a servidores de Microsoft).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
         self.tts_speed_selector = build_tts_speed_selector(frame_tts_memory, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
-        self.btn_clear = ctk.CTkButton(frame_tts_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
+        # Memoria card — separate concern from voice; clearing wipes conversation context only.
+        frame_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
+        frame_memory.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
+        ctk.CTkLabel(frame_memory, text="Memoria", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 6))
+        self.btn_clear = ctk.CTkButton(frame_memory, text="🗑️ Limpiar Memoria", command=self._limpiar_historial, width=130, fg_color="#555555", hover_color="#777777")
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
-        ctk.CTkLabel(frame_tts_memory, text="Limpia el historial de conversación. Kira olvidará el contexto previo.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkLabel(frame_memory, text="Kira olvidará el contexto previo de la conversación.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
         # PTT controls live with model/profile because they configure how Kira is operated.
         frame_ptt = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_ptt.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
@@ -1952,6 +1983,10 @@ class VocalAIApp(ctk.CTk):
         if hasattr(self, "voice_panel"):
             self.voice_panel.update_tts_label(estado)
 
+        # Kira transparency: surface what she's doing in the response box so she
+        # doesn't read as a black box. Overwritten by the real reply on arrival.
+        self._update_kira_response_status(estado)
+
         # Safe automatic avatar transition from pipeline state.
         # NOTE: "speaking" is handled by _on_motor_speaking_start + alternation timer,
         # so we skip it here to avoid fighting with the timer.
@@ -1976,6 +2011,40 @@ class VocalAIApp(ctk.CTk):
 
         self.after(0, update_status_details)
         self.after(0, lambda: self.barra_rms.grid() if estado == "listening" else self.barra_rms.grid_remove())
+
+    def _update_kira_response_status(self, estado: str) -> None:
+        """Show a human-readable activity cue in the Kira response box.
+
+        Writes ONLY for the transient "processing" state and a one-shot "ready"
+        cue on the first idle. It never writes on "listening", later "idle", or
+        "speaking", so it can never erase Kira's actual reply (rendered by
+        update_kira_response()). The listening state is already surfaced by the
+        avatar (listening.png) and the voice strip, so nothing is lost here.
+        """
+        box = getattr(self, "text_kira_response", None)
+        if box is None:
+            return
+        msg: str | None = None
+        if estado == "processing":
+            msg = "Kira está pensando…"
+        elif estado == "idle" and not self._kira_first_ready:
+            self._kira_first_ready = True
+            msg = "¡Kira lista! Tocá «Hablar» o escribile abajo para empezar."
+        if msg is None:
+            return
+
+        def apply() -> None:
+            try:
+                if not box.winfo_exists():
+                    return
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("end", msg + "\n")
+                box.configure(state="disabled")
+            except Exception:
+                logger.debug("No se pudo actualizar el estado en la caja de respuesta", exc_info=True)
+
+        self.after(0, apply)
 
     def _toggle_modo_compacto(self) -> None:
         # _compacto_active is set by the gear-popover toggle (replaces switch_compacto.get()).
@@ -2341,6 +2410,40 @@ class VocalAIApp(ctk.CTk):
         """Dispatch set_tts_local_only to the engine (persists; immediate effect)."""
         enabled = bool(self.switch_local_only.get())
         self.motor_ia.command_queue.put(("set_tts_local_only", enabled))
+
+    def _on_kira_voice_change(self, label: str) -> None:
+        """Switch Kira's voice (Argentina ↔ Neutral), both offline Piper voices.
+
+        Selecting a voice forces local Piper synthesis so the change is audible
+        immediately and never routes to the Edge-TTS cloud. The engine persists
+        the choice; the privacy switch is kept visually in sync. No-op if the
+        motor is not up yet (e.g. a programmatic .set() during UI build).
+        """
+        motor = getattr(self, "motor_ia", None)
+        if motor is None:
+            return
+        voice_key = self._kira_voice_labels.get(label, DEFAULT_PIPER_VOICE)
+        # Guard: never switch to a voice whose Piper .onnx model is missing.
+        # Dispatching set_piper_voice would fail on the motor thread (reload
+        # raises), leaving the engine on the old voice while the UI already shows
+        # the new label + flipped local-only — a broken, persisted desync.
+        if not os.path.isfile(piper_voice_path(voice_key)):
+            prev_key = load_piper_voice()
+            prev_label = next(
+                (lbl for lbl, key in self._kira_voice_labels.items() if key == prev_key),
+                label,
+            )
+            # .set() updates the button WITHOUT re-firing this command.
+            self.seg_kira_voice.set(prev_label)
+            self._print_log(
+                f"[Voz] La voz «{label}» no está disponible (falta el modelo). "
+                "Mantengo la voz actual."
+            )
+            return
+        motor.command_queue.put(("set_piper_voice", voice_key))
+        motor.command_queue.put(("set_tts_local_only", True))
+        if hasattr(self, "switch_local_only"):
+            self.switch_local_only.select()  # keep the privacy switch in sync
 
     def _obtener_dispositivos_entrada(self) -> list:
         dispositivos_validos = []

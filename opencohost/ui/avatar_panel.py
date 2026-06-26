@@ -231,9 +231,11 @@ class AvatarPanel:
             row_idx += 1
         self._build_parent = None
 
-        # "Todos los estados" toggle button
+        # "Todos los estados" toggle button — nested INSIDE the collapsible
+        # main_content frame so it hides/shows with the avatar controls and the
+        # 8 state rows (rows 2-9) it toggles. Placed at row 10, below those rows.
         self._toggle_all_states_btn = ctk.CTkButton(
-            self._content_frame,
+            main_content,
             text="▶ Estados adicionales",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#151d26",
@@ -242,7 +244,7 @@ class AvatarPanel:
             command=self._toggle_all_states,
             anchor="w",
         )
-        self._toggle_all_states_btn.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 4))
+        self._toggle_all_states_btn.grid(row=10, column=0, sticky="ew", padx=10, pady=(4, 4))
 
         # OBS WebSocket section — collapsible
         self._obs_expanded = False
@@ -256,9 +258,9 @@ class AvatarPanel:
             command=self._toggle_obs_section,
             anchor="w",
         )
-        self._toggle_obs_btn.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 0))
+        self._toggle_obs_btn.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 0))
 
-        self._build_obs_section(4)
+        self._build_obs_section(3)
         # Hide OBS section by default
         if hasattr(self, '_obs_frame') and self._obs_frame:
             self._obs_frame.grid_remove()

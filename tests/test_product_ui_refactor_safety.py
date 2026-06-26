@@ -100,7 +100,8 @@ def test_phase2_product_shell_uses_persistent_kira_and_workspace() -> None:
 
     assert "Product shell: Kira stays visible on the left" in source
     assert "Product workspace: current configuration plus full Stream Admin" in source
-    assert "Paneles de producto" in source
+    # The "Paneles de producto" heading was removed in the demo-polish pass
+    # (dev jargon + wasted vertical space); the tab bar communicates the section.
     assert '("config", "Configuración")' in source
     assert '("stream", "Stream")' in source
     assert '("cohost", "Co-host")' in source
@@ -285,8 +286,10 @@ def test_kira_avatar_preview_is_the_visual_hero() -> None:
     source = read_text(APP_SHELL)
 
     assert "minsize=460" in source
-    assert "img.thumbnail((220, 220)" in source
-    assert "height=140" in source
+    # Demo-polish pass: avatar enlarged to be the clear visual hero.
+    assert "img.thumbnail((320, 320)" in source
+    assert "height=260" in source
+    assert "grid_rowconfigure(1, weight=3)" in source  # avatar row dominates
 
 
 def test_kira_response_panel_is_compact_and_scrollable() -> None:

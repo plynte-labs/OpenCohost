@@ -8,6 +8,27 @@ from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
+from opencohost.ui import theme
+
+# ---------------------------------------------------------------------------
+# Color migration (ui-design-system-20260625 Phase 4)
+# All raw hex replaced by theme.* tokens; raw hex lives only in theme.py.
+# Mappings (this panel had 54 hex literals across 14 distinct values):
+#   EXACT (token value == old hex, zero visual change):
+#     #0f151c -> BG, #162232 -> SURFACE_ALT, #151d26 -> SURFACE,
+#     #d8e2ef -> TEXT, #a9bdd3 -> TEXT_MUTED, #555555 -> NEUTRAL,
+#     #8f2f2f -> DANGER_DIM, #7d5a2a -> SURFACE_WARM, #2f5f8f -> PRIMARY,
+#     #8fa3b8 -> TEXT_DIM (new), #101923 -> SURFACE_NESTED (new),
+#     #1d2a38 -> HOVER_SUBTLE (new), #2f7d50 -> SUCCESS_ACTION (new).
+#   The four "(new)" values are byte-equal to their source hex (new tokens added
+#   for distinct semantic roles, NOT consolidation shifts), so the COLOR token
+#   migration itself is byte-equal: zero consolidation shifts.
+# NOTE: this is not a pure color swap. The "Nuevo tema aprobado" card was
+#   deliberately restyled in the same pass (4→2 column grid, full-width primary
+#   CTA, added hover colors, RADIUS_MD), so that card is intentionally NOT
+#   pixel-identical to its pre-migration layout.
+# ---------------------------------------------------------------------------
+
 
 class CoHostAgendaPanel:
     """Operator-facing controls for the Co-host Agenda product tab."""
@@ -89,38 +110,38 @@ class CoHostAgendaPanel:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
 
-        root = ctk.CTkScrollableFrame(parent, fg_color="#0f151c", corner_radius=18)
+        root = ctk.CTkScrollableFrame(parent, fg_color=theme.BG, corner_radius=18)
         root.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=1)
 
-        hero = ctk.CTkFrame(root, fg_color="#162232", corner_radius=18)
+        hero = ctk.CTkFrame(root, fg_color=theme.SURFACE_ALT, corner_radius=18)
         hero.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 8))
         hero.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(hero, text="Kira Co-host", font=ctk.CTkFont(size=24, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 2))
         ctk.CTkLabel(
             hero,
             text="Agenda aprobada, turnos seguros y control humano. El espectador no ve la estructura: Kira debe sonar natural.",
-            text_color="#a9bdd3",
+            text_color=theme.TEXT_MUTED,
             anchor="w",
             justify="left",
             wraplength=760,
         ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
 
-        card_profile = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        card_profile = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
         card_profile.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
         card_profile.grid_columnconfigure(0, weight=1)
 
         btn_toggle_profile = ctk.CTkButton(
             card_profile, text="▶ Perfil Co-host",
             anchor="w",
-            fg_color="transparent", text_color="#d8e2ef",
-            hover_color="#1d2a38",
+            fg_color="transparent", text_color=theme.TEXT,
+            hover_color=theme.HOVER_SUBTLE,
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         btn_toggle_profile.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
 
-        profile_content = ctk.CTkFrame(card_profile, fg_color="#101923", corner_radius=14)
+        profile_content = ctk.CTkFrame(card_profile, fg_color=theme.SURFACE_NESTED, corner_radius=14)
         profile_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         profile_content.grid_remove()
         profile_content.grid_columnconfigure(0, weight=1)
@@ -137,21 +158,21 @@ class CoHostAgendaPanel:
         entry_profile_name = ctk.CTkEntry(profile_content, placeholder_text="Nombre del perfil Co-host")
         entry_profile_name.grid(row=0, column=1, sticky="ew", padx=(6, 14), pady=4)
         self._widgets["entry_profile_name"] = entry_profile_name
-        style_text = ctk.CTkTextbox(profile_content, height=88, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
+        style_text = ctk.CTkTextbox(profile_content, height=88, fg_color=theme.BG, text_color=theme.TEXT, wrap="word")
         style_text.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
         style_text.insert("end", "Soná como co-host natural de stream: cercana, con humor seco, sin anunciar estructura ni despedirte entre ideas.")
         self._widgets["text_profile_style"] = style_text
-        ctk.CTkButton(profile_content, text="Guardar perfil Co-host", command=self._dispatch_save_profile, fg_color="#555555").grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
+        ctk.CTkButton(profile_content, text="Guardar perfil Co-host", command=self._dispatch_save_profile, fg_color=theme.NEUTRAL).grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
 
-        session = ctk.CTkFrame(profile_content, fg_color="#101923", corner_radius=12)
+        session = ctk.CTkFrame(profile_content, fg_color=theme.SURFACE_NESTED, corner_radius=12)
         session.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
         for col in range(4):
             session.grid_columnconfigure(col, weight=1)
         ctk.CTkLabel(session, text="Configuración de sesión", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=4, sticky="ew", padx=12, pady=(10, 2))
-        ctk.CTkLabel(session, text="Turnos globales", text_color="#a9bdd3", anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 2))
-        ctk.CTkLabel(session, text="Ritmo global", text_color="#a9bdd3", anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 2))
-        ctk.CTkLabel(session, text="Longitud global", text_color="#a9bdd3", anchor="w").grid(row=1, column=2, sticky="ew", padx=12, pady=(2, 2))
-        ctk.CTkLabel(session, text="Modo vivo", text_color="#a9bdd3", anchor="w").grid(row=1, column=3, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(session, text="Turnos globales", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(session, text="Ritmo global", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(session, text="Longitud global", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=2, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(session, text="Modo vivo", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=3, sticky="ew", padx=12, pady=(2, 2))
         turns = ctk.CTkOptionMenu(session, values=self.TURN_LIMITS)
         turns.set(self.DEFAULT_TURN_LIMIT)
         turns.grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 10))
@@ -172,22 +193,22 @@ class CoHostAgendaPanel:
         safety_mode.grid(row=2, column=3, sticky="ew", padx=12, pady=(2, 10))
         self._widgets["combo_safety_mode"] = safety_mode
 
-        current = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        current = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
         current.grid(row=2, column=0, sticky="nsew", padx=(12, 6), pady=8)
         current.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(current, text="Ahora", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
-        lbl_current = ctk.CTkLabel(current, text="Sin tema activo", text_color="#d8e2ef", anchor="w", justify="left", wraplength=360)
+        lbl_current = ctk.CTkLabel(current, text="Sin tema activo", text_color=theme.TEXT, anchor="w", justify="left", wraplength=360)
         lbl_current.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
         self._widgets["lbl_current_topic"] = lbl_current
-        lbl_state = ctk.CTkLabel(current, text="Estado: OFF · fallos: 0", text_color="#8fa3b8", anchor="w", justify="left", wraplength=360)
+        lbl_state = ctk.CTkLabel(current, text="Estado: OFF · fallos: 0", text_color=theme.TEXT_DIM, anchor="w", justify="left", wraplength=360)
         lbl_state.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 12))
         self._widgets["lbl_state"] = lbl_state
 
-        queue = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        queue = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
         queue.grid(row=2, column=1, sticky="nsew", padx=(6, 12), pady=8)
         queue.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(queue, text="Cola de temas", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
-        queue_text = ctk.CTkTextbox(queue, height=120, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
+        queue_text = ctk.CTkTextbox(queue, height=120, fg_color=theme.BG, text_color=theme.TEXT, wrap="word")
         queue_text.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
         queue_text.insert("end", "No hay temas en cola todavía.\n")
         queue_text.configure(state="disabled")
@@ -200,12 +221,12 @@ class CoHostAgendaPanel:
         queue_index = ctk.CTkEntry(queue_controls, placeholder_text="Nº", width=48)
         queue_index.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self._widgets["entry_queue_index"] = queue_index
-        ctk.CTkButton(queue_controls, text="Subir", command=lambda: self._dispatch_move_topic(-1), fg_color="#555555").grid(row=0, column=1, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(queue_controls, text="Bajar", command=lambda: self._dispatch_move_topic(1), fg_color="#555555").grid(row=0, column=2, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(queue_controls, text="Eliminar", command=self._dispatch_remove_topic, fg_color="#8f2f2f").grid(row=0, column=3, padx=4, pady=4, sticky="ew")
+        ctk.CTkButton(queue_controls, text="Subir", command=lambda: self._dispatch_move_topic(-1), fg_color=theme.NEUTRAL).grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        ctk.CTkButton(queue_controls, text="Bajar", command=lambda: self._dispatch_move_topic(1), fg_color=theme.NEUTRAL).grid(row=0, column=2, padx=4, pady=4, sticky="ew")
+        ctk.CTkButton(queue_controls, text="Eliminar", command=self._dispatch_remove_topic, fg_color=theme.DANGER_DIM).grid(row=0, column=3, padx=4, pady=4, sticky="ew")
 
         # Sugerencias de Kira — auto-generated topic suggestions
-        suggestions_frame = ctk.CTkFrame(queue, fg_color="#101923", corner_radius=12)
+        suggestions_frame = ctk.CTkFrame(queue, fg_color=theme.SURFACE_NESTED, corner_radius=12)
         suggestions_frame.grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 12))
         suggestions_frame.grid_columnconfigure(0, weight=1)
         self._widgets["suggestions_frame"] = suggestions_frame
@@ -224,87 +245,93 @@ class CoHostAgendaPanel:
         # Initially hidden until suggestions arrive
         suggestions_frame.grid_remove()
 
-        session_controls = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        session_controls = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
         session_controls.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
         for col in range(3):
             session_controls.grid_columnconfigure(col, weight=1)
         ctk.CTkLabel(session_controls, text="Control de sesión", font=ctk.CTkFont(size=16, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=3, sticky="ew", padx=14, pady=(12, 4))
-        btn_enable = ctk.CTkButton(session_controls, text="Activar", command=self._dispatch_enable, fg_color="#2f7d50", state="disabled")
+        btn_enable = ctk.CTkButton(session_controls, text="Activar", command=self._dispatch_enable, fg_color=theme.SUCCESS_ACTION, state="disabled")
         btn_enable.grid(row=1, column=0, padx=(14, 4), pady=(4, 14), sticky="ew")
         self._widgets["btn_agenda_enable"] = btn_enable
-        btn_soft = ctk.CTkButton(session_controls, text="Stop suave", command=self._on_soft_stop, fg_color="#7d5a2a", state="disabled")
+        btn_soft = ctk.CTkButton(session_controls, text="Stop suave", command=self._on_soft_stop, fg_color=theme.SURFACE_WARM, state="disabled")
         btn_soft.grid(row=1, column=1, padx=4, pady=(4, 14), sticky="ew")
         self._widgets["btn_agenda_soft_stop"] = btn_soft
-        btn_emergency = ctk.CTkButton(session_controls, text="Emergencia", command=self._on_emergency_stop, fg_color="#8f2f2f", state="disabled")
+        btn_emergency = ctk.CTkButton(session_controls, text="Emergencia", command=self._on_emergency_stop, fg_color=theme.DANGER_DIM, state="disabled")
         btn_emergency.grid(row=1, column=2, padx=(4, 14), pady=(4, 14), sticky="ew")
         self._widgets["btn_agenda_emergency"] = btn_emergency
-        lbl_activation_hint = ctk.CTkLabel(session_controls, text="", text_color="#8fa3b8", anchor="w", wraplength=760)
+        lbl_activation_hint = ctk.CTkLabel(session_controls, text="", text_color=theme.TEXT_DIM, anchor="w", wraplength=760)
         lbl_activation_hint.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 12))
         self._widgets["lbl_activation_hint"] = lbl_activation_hint
 
         # Collapsible: Nuevo tema aprobado
-        card_nuevo = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
-        card_nuevo.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
+        card_nuevo = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
+        card_nuevo.grid(row=4, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_LG, pady=theme.SPACE_MD)
         card_nuevo.grid_columnconfigure(0, weight=1)
 
         self._topic_form_expanded = False
         btn_toggle_nuevo = ctk.CTkButton(
             card_nuevo, text="▶ Nuevo tema aprobado",
             anchor="w",
-            fg_color="transparent", text_color="#d8e2ef",
-            hover_color="#1d2a38",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color="transparent", text_color=theme.TEXT,
+            hover_color=theme.HOVER_SUBTLE,
+            font=ctk.CTkFont(size=theme.HEADING, weight="bold"),
         )
-        btn_toggle_nuevo.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+        btn_toggle_nuevo.grid(row=0, column=0, sticky="ew", padx=theme.SPACE_XL, pady=(theme.SPACE_LG, theme.SPACE_SM))
 
-        # Content frame for nuevo tema
-        content_nuevo = ctk.CTkFrame(card_nuevo, fg_color="#101923", corner_radius=14)
-        content_nuevo.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        # Content frame for nuevo tema — clean 2-column rhythm
+        content_nuevo = ctk.CTkFrame(card_nuevo, fg_color=theme.SURFACE_NESTED, corner_radius=theme.RADIUS_MD)
+        content_nuevo.grid(row=1, column=0, sticky="ew", padx=theme.SPACE_XL, pady=(0, theme.SPACE_XL))
         content_nuevo.grid_remove()
-        content_nuevo.grid_columnconfigure(0, weight=2)
-        content_nuevo.grid_columnconfigure(1, weight=1)
-        content_nuevo.grid_columnconfigure(2, weight=1)
-        content_nuevo.grid_columnconfigure(3, weight=1)
+        content_nuevo.grid_columnconfigure(0, weight=1)
+        content_nuevo.grid_columnconfigure(1, weight=0, minsize=120)
 
         # Wire toggle
         btn_toggle_nuevo.configure(
             command=lambda: self._toggle_topic_form(content_nuevo, btn_toggle_nuevo)
         )
 
-        entry_title = ctk.CTkEntry(content_nuevo, placeholder_text="Tema claro, máximo 90 caracteres")
-        entry_title.grid(row=0, column=0, sticky="ew", padx=(14, 6), pady=4)
-        self._widgets["entry_title"] = entry_title
+        # Row 0: field labels — Tema | Prioridad en cola
+        ctk.CTkLabel(content_nuevo, text="Tema", text_color=theme.TEXT_MUTED, anchor="w").grid(row=0, column=0, sticky="ew", padx=(theme.SPACE_XL, theme.SPACE_SM), pady=(theme.SPACE_MD, theme.SPACE_XS))
+        ctk.CTkLabel(content_nuevo, text="Prioridad en cola", text_color=theme.TEXT_MUTED, anchor="w").grid(row=0, column=1, sticky="ew", padx=(theme.SPACE_SM, theme.SPACE_XL), pady=(theme.SPACE_MD, theme.SPACE_XS))
 
-        ctk.CTkLabel(content_nuevo, text="Prioridad en cola", text_color="#a9bdd3", anchor="w").grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 0))
+        # Row 1: title entry | priority menu
+        entry_title = ctk.CTkEntry(content_nuevo, placeholder_text="Tema claro, máximo 90 caracteres")
+        entry_title.grid(row=1, column=0, sticky="ew", padx=(theme.SPACE_XL, theme.SPACE_SM), pady=(0, theme.SPACE_SM))
+        self._widgets["entry_title"] = entry_title
 
         priority = ctk.CTkOptionMenu(content_nuevo, values=self.PRIORITIES)
         priority.set("Normal")
-        priority.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
+        priority.grid(row=1, column=1, sticky="ew", padx=(theme.SPACE_SM, theme.SPACE_XL), pady=(0, theme.SPACE_SM))
         self._widgets["combo_priority"] = priority
 
+        # Row 2-3: angle label + entry (full width)
+        ctk.CTkLabel(content_nuevo, text="Ángulo", text_color=theme.TEXT_MUTED, anchor="w").grid(row=2, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_XL, pady=(theme.SPACE_SM, theme.SPACE_XS))
         entry_angle = ctk.CTkEntry(content_nuevo, placeholder_text="Ángulo: cómo querés que Kira lo trate")
-        entry_angle.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
+        entry_angle.grid(row=3, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_XL, pady=(0, theme.SPACE_SM))
         self._widgets["entry_angle"] = entry_angle
 
+        # Row 4: tag entry + add button
         tag_row = ctk.CTkFrame(content_nuevo, fg_color="transparent")
-        tag_row.grid(row=3, column=0, columnspan=4, sticky="ew", padx=14, pady=4)
+        tag_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_XL, pady=theme.SPACE_SM)
         tag_row.grid_columnconfigure(0, weight=1)
         entry_constraint = ctk.CTkEntry(tag_row, placeholder_text="Pegar hashtags/tags: #sinDespedidas, humor seco; no spoilers")
-        entry_constraint.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=0)
+        entry_constraint.grid(row=0, column=0, sticky="ew", padx=(0, theme.SPACE_SM), pady=0)
         self._widgets["entry_constraint_tag"] = entry_constraint
-        ctk.CTkButton(tag_row, text="Agregar tag", command=self._dispatch_add_constraint_tag, width=110, fg_color="#555555").grid(row=0, column=1, sticky="ew")
-        tags = ctk.CTkLabel(content_nuevo, text="Tags: —", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
-        tags.grid(row=4, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 4))
+        ctk.CTkButton(tag_row, text="Agregar tag", command=self._dispatch_add_constraint_tag, width=110, fg_color=theme.NEUTRAL, hover_color=theme.NEUTRAL_HOVER).grid(row=0, column=1, sticky="ew")
+
+        # Row 5: tags caption
+        tags = ctk.CTkLabel(content_nuevo, text="Tags: —", text_color=theme.TEXT_DIM, anchor="w", justify="left", wraplength=760)
+        tags.grid(row=5, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_XL, pady=(0, theme.SPACE_SM))
         self._widgets["lbl_constraint_tags"] = tags
 
+        # Row 6: full-width primary CTA
         actions = ctk.CTkFrame(content_nuevo, fg_color="transparent")
-        actions.grid(row=5, column=0, columnspan=4, sticky="ew", padx=14, pady=(6, 14))
-        for col in range(4):
-            actions.grid_columnconfigure(col, weight=1)
-        ctk.CTkButton(actions, text="Agregar a cola", command=self._dispatch_add_topic, fg_color="#2f5f8f").grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+        actions.grid(row=6, column=0, columnspan=2, sticky="ew", padx=0, pady=0)
+        actions.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(actions, text="Agregar a cola", command=self._dispatch_add_topic, fg_color=theme.PRIMARY, hover_color=theme.PRIMARY_HOVER, height=36, font=ctk.CTkFont(size=theme.BODY, weight="bold")).grid(row=0, column=0, columnspan=2, sticky="ew", padx=theme.SPACE_XL, pady=(theme.SPACE_MD, theme.SPACE_XL))
 
         # Collapsible: Importar temas en lote
-        card_bulk = ctk.CTkFrame(root, fg_color="#151d26", corner_radius=16)
+        card_bulk = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=16)
         card_bulk.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
         card_bulk.grid_columnconfigure(0, weight=1)
 
@@ -312,14 +339,14 @@ class CoHostAgendaPanel:
         btn_toggle_bulk = ctk.CTkButton(
             card_bulk, text="▶ Importar temas en lote",
             anchor="w",
-            fg_color="transparent", text_color="#d8e2ef",
-            hover_color="#1d2a38",
+            fg_color="transparent", text_color=theme.TEXT,
+            hover_color=theme.HOVER_SUBTLE,
             font=ctk.CTkFont(size=16, weight="bold"),
         )
         btn_toggle_bulk.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
 
         # Content frame for bulk import
-        content_bulk = ctk.CTkFrame(card_bulk, fg_color="#101923", corner_radius=14)
+        content_bulk = ctk.CTkFrame(card_bulk, fg_color=theme.SURFACE_NESTED, corner_radius=14)
         content_bulk.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         content_bulk.grid_remove()
         content_bulk.grid_columnconfigure(0, weight=1)
@@ -328,19 +355,19 @@ class CoHostAgendaPanel:
             command=lambda: self._toggle_bulk_section(content_bulk, btn_toggle_bulk)
         )
 
-        bulk_text = ctk.CTkTextbox(content_bulk, height=120, fg_color="#0f151c", text_color="#d8e2ef", wrap="word")
+        bulk_text = ctk.CTkTextbox(content_bulk, height=120, fg_color=theme.BG, text_color=theme.TEXT, wrap="word")
         bulk_text.grid(row=0, column=0, sticky="ew", padx=12, pady=4)
         bulk_text.insert("end", "1. Sociedad Latam\nTema: La nostalgia noventera en internet\nÁngulo: Por qué volvemos a símbolos viejos cuando el presente pesa.\nPrioridad: alta\nRitmo: normal\nTags: #Latam #Nostalgia #Internet\n\n2. Gaming\nTema: Mods como cultura popular\nÁngulo: Comunidades chicas que terminan definiendo gustos enormes.\nLongitud: expandida\nPrioridad: baja\nTags: #Gaming #Mods")
         self._widgets["text_bulk_topics"] = bulk_text
-        ctk.CTkButton(content_bulk, text="Importar temas", command=self._dispatch_bulk_import, fg_color="#2f5f8f").grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 4))
-        bulk_status = ctk.CTkLabel(content_bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los turnos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color="#8fa3b8", anchor="w", justify="left", wraplength=760)
+        ctk.CTkButton(content_bulk, text="Importar temas", command=self._dispatch_bulk_import, fg_color=theme.PRIMARY).grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 4))
+        bulk_status = ctk.CTkLabel(content_bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los turnos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color=theme.TEXT_DIM, anchor="w", justify="left", wraplength=760)
         bulk_status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
         self._widgets["lbl_bulk_status"] = bulk_status
 
         guardrails = ctk.CTkLabel(
             root,
             text="Guardrails: se rechazan textos larguísimos, código, HTML, emojis/símbolos raros y demasiadas restricciones. Modos: Live_safe ≈25-40s/cap 1100; Monologue permite monólogos largos interruptibles/cap 3000; Test permite 60-90s/cap 6000. Longitud global: Corta ≈450 chars; Normal ≈1500 chars mini monólogo; Expandida = monólogo largo de prueba con cap 6000. Turnos globales 1-20.",
-            text_color="#8fa3b8",
+            text_color=theme.TEXT_DIM,
             anchor="w",
             justify="left",
             wraplength=760,
@@ -685,9 +712,9 @@ class CoHostAgendaPanel:
     # ------------------------------------------------------------------
 
     _CONFIDENCE_COLORS: dict[str, str] = {
-        "HIGH": "#2f7d50",
-        "MEDIUM": "#7d5a2a",
-        "LOW": "#555555",
+        "HIGH": theme.SUCCESS_ACTION,  # exact #2f7d50 (affirmative-action green)
+        "MEDIUM": theme.SURFACE_WARM,  # exact #7d5a2a
+        "LOW": theme.NEUTRAL,          # exact #555555
     }
     _CONFIDENCE_LABELS: dict[str, str] = {
         "HIGH": "ALTA",
@@ -801,14 +828,14 @@ class CoHostAgendaPanel:
         source = suggestion.get("source", "")
         topic_id = suggestion.get("topic_id", "")
 
-        frame = ctk.CTkFrame(parent, fg_color="#0f151c", corner_radius=10)
+        frame = ctk.CTkFrame(parent, fg_color=theme.BG, corner_radius=10)
         frame.grid(row=row, column=0, sticky="ew", padx=4, pady=2)
         frame.grid_columnconfigure(0, weight=1)
 
         # Row 0: confidence badge + source label
         badge_row = ctk.CTkFrame(frame, fg_color="transparent")
         badge_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
-        badge_color = self._CONFIDENCE_COLORS.get(confidence, "#555555")
+        badge_color = self._CONFIDENCE_COLORS.get(confidence, theme.NEUTRAL)  # exact #555555
         badge_text = self._CONFIDENCE_LABELS.get(confidence, "BAJA")
         badge = ctk.CTkLabel(
             badge_row,
@@ -822,7 +849,7 @@ class CoHostAgendaPanel:
             source_label = ctk.CTkLabel(
                 badge_row,
                 text=source,
-                text_color="#8fa3b8",
+                text_color=theme.TEXT_DIM,
                 font=ctk.CTkFont(size=11),
                 anchor="e",
             )
@@ -832,7 +859,7 @@ class CoHostAgendaPanel:
         title_label = ctk.CTkLabel(
             frame,
             text=title[:90],
-            text_color="#d8e2ef",
+            text_color=theme.TEXT,
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
             justify="left",
@@ -844,7 +871,7 @@ class CoHostAgendaPanel:
         angle_label = ctk.CTkLabel(
             frame,
             text=angle_preview or "Sin ángulo",
-            text_color="#8fa3b8",
+            text_color=theme.TEXT_DIM,
             font=ctk.CTkFont(size=11),
             anchor="w",
             justify="left",
@@ -862,7 +889,7 @@ class CoHostAgendaPanel:
             button_row,
             text="Aprobar",
             command=lambda t=tid: self._on_approve_suggestion(t),
-            fg_color="#2f7d50",
+            fg_color=theme.SUCCESS_ACTION,
             height=28,
             font=ctk.CTkFont(size=12),
         ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
@@ -870,7 +897,7 @@ class CoHostAgendaPanel:
             button_row,
             text="Rechazar",
             command=lambda t=tid: self._on_reject_suggestion(t),
-            fg_color="#8f2f2f",
+            fg_color=theme.DANGER_DIM,
             height=28,
             font=ctk.CTkFont(size=12),
         ).grid(row=0, column=1, padx=(4, 0), sticky="ew")

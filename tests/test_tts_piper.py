@@ -134,6 +134,53 @@ class TestSynthesizeFailure:
 
 
 # ---------------------------------------------------------------------------
+# reload() — runtime voice swap (powers the in-app Argentina↔Neutral toggle)
+# ---------------------------------------------------------------------------
+
+class TestReload:
+    def test_reload_swaps_voice_on_success(self):
+        """reload() loads the new model, updates the path, and returns True."""
+        v1, v2 = MagicMock(name="v1"), MagicMock(name="v2")
+        mock_voice_cls = MagicMock()
+        mock_voice_cls.load.side_effect = [v1, v2]
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
+            mock_piper_voice.PiperVoice = mock_voice_cls
+            engine = _make_engine("/voice/a.onnx")
+            engine.load()
+            assert engine._voice is v1
+            assert engine.reload("/voice/b.onnx") is True
+            assert engine._voice is v2
+            assert engine._model_path == "/voice/b.onnx"
+            assert engine.is_available() is True
+
+    def test_reload_keeps_old_voice_on_failure(self):
+        """A failed reload keeps the previously-loaded voice — never voiceless."""
+        v1 = MagicMock(name="v1")
+        mock_voice_cls = MagicMock()
+        mock_voice_cls.load.side_effect = [v1, RuntimeError("bad onnx")]
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.tts_piper._piper_voice") as mock_piper_voice:
+            mock_piper_voice.PiperVoice = mock_voice_cls
+            engine = _make_engine("/voice/a.onnx")
+            engine.load()
+            assert engine.reload("/voice/bad.onnx") is False
+            assert engine._voice is v1
+            assert engine._model_path == "/voice/a.onnx"
+            assert engine.is_available() is True
+
+    def test_reload_returns_false_when_piper_unavailable(self):
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", False):
+            engine = _make_engine("/voice/a.onnx")
+            assert engine.reload("/voice/b.onnx") is False
+
+    def test_reload_returns_false_on_empty_path(self):
+        with patch("opencohost.core.tts_piper._PIPER_AVAILABLE", True):
+            engine = _make_engine("/voice/a.onnx")
+            assert engine.reload("") is False
+
+
+# ---------------------------------------------------------------------------
 # Task 3.4 — is_available()
 # ---------------------------------------------------------------------------
 

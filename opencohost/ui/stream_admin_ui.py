@@ -7,7 +7,7 @@ can update the UI without knowing about app.py internals.
 
 Thread safety is provided via the injected ``UIState``.  Callbacks are
 invoked through ``CallbackDispatcher`` for safe error handling.
-
+NOTE_DEVELOPER: Only RF3 is in usage the rest is not longer in usage
 Usage::
 
     sa_ui = StreamAdminUI(

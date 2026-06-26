@@ -63,7 +63,7 @@ def on_motor_ready(
         model = motor_ia.current_model
         schedule_ui_update(lambda: model_panel.restore_to_active_model(model))
         schedule_ui_update(lambda: model_panel.set_llm_tier_state(motor_ia.llm_tiers.config.as_dict(), motor_ia.active_llm_tier))
-        schedule_ui_update(lambda: set_title(f"OpenCohost — Qwen3-TTS + {model}"))
+        schedule_ui_update(lambda: set_title("Kira — OpenCohost"))
     # Start PTT flush watcher thread
     if voice_panel is not None and hasattr(voice_panel, "_start_ptt_flush_watcher"):
         voice_panel._start_ptt_flush_watcher()
@@ -443,7 +443,7 @@ def on_motor_model_changed(
 ) -> None:
     """Motor switched to a new model — update title, model panel, and pipeline."""
     model = motor_ia.current_model
-    schedule_ui_update(lambda: set_title(f"OpenCohost — Qwen3-TTS + {model}"))
+    schedule_ui_update(lambda: set_title("Kira — OpenCohost"))
     schedule_ui_update(lambda: model_panel.update_model_info(model))
     # Use restore_to_active_model (not set_active_model) so the combobox is
     # synced to the newly active model — mirroring the failure path at
@@ -554,7 +554,7 @@ def on_motor_download_done(
     schedule_ui_update(lambda: combo_modelos.configure(state="normal"))
     schedule_ui_update(lambda: progress_download.pack_forget())
     schedule_ui_update(lambda: btn_primary_voice.configure(state="normal"))
-    schedule_ui_update(lambda: set_title(f"OpenCohost — Qwen3-TTS + {model}"))
+    schedule_ui_update(lambda: set_title("Kira — OpenCohost"))
     schedule_ui_update(lambda: model_panel.update_model_info(model))
     actualizar_pipeline("idle")
     schedule_ui_update(lambda: model_panel.update_model_info(model_panel.get_selected_tag()))

@@ -808,7 +808,11 @@ class VoiceControlPanel:
         if self.lbl_kira_tts_state is None:
             return
 
-        if estado == "speaking":
+        if estado == "processing":
+            self.lbl_kira_tts_state.configure(
+                text="Kira: pensando…", fg_color="#1f3f6f"
+            )
+        elif estado == "speaking":
             self.lbl_kira_tts_state.configure(
                 text="TTS: generando", fg_color="#1f3f6f"
             )

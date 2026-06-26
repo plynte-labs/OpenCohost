@@ -174,6 +174,14 @@ TTS_LIGHT_TIMEOUT = 45
 TTS_LOCAL_MODEL_PATH: str = os.path.join(
     str(STORAGE_PATHS.cache_root), "piper", "es_AR-daniela-high.onnx"
 )
+# Offline Piper voice registry for the in-app "Voz de Kira" toggle. Both voices
+# ship as local .onnx files under the piper cache dir, so switching never touches
+# the Edge-TTS cloud — the toggle stays bulletproof for live / offline demos.
+PIPER_VOICES: dict[str, dict] = {
+    "argentina": {"label": "🇦🇷 Argentina", "file": "es_AR-daniela-high.onnx"},
+    "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx"},
+}
+DEFAULT_PIPER_VOICE = "argentina"
 # Piper speaking-rate control: 1.0 keeps the voice model default; values
 # above 1.0 slow speech down proportionally (1.15 ≈ 15% slower).
 # Ignored when the installed piper-tts does not expose SynthesisConfig.
@@ -209,6 +217,7 @@ WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geomet
 LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
 LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
 TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
+PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
 
@@ -340,6 +349,32 @@ def is_runtime_model_available(
     return canonical in normalized
 
 
+def _select_installed_fallback_model(normalized_installed: set[str]) -> Optional[str]:
+    """Pick the best actually-installed model for startup.
+
+    Prefers curated catalog models (smallest first for a fast, low-VRAM start);
+    otherwise any installed tag (sorted for determinism). Returns None when
+    nothing is installed.
+    """
+    if not normalized_installed:
+        return None
+
+    def _catalog_size(tag: str) -> float:
+        # A non-positive (or missing) size_gb is an "unknown size" placeholder
+        # (e.g. gemma4-uncensored: 0.0), not a real tiny model. Treat it as
+        # infinite so the sentinel sorts LAST and never masquerades as the
+        # smallest install.
+        size = MODELS_CATALOG[tag].get("size_gb", float("inf"))
+        return size if size > 0 else float("inf")
+
+    catalog_installed = [t for t in normalized_installed if t in MODELS_CATALOG]
+    if catalog_installed:
+        # Secondary key on the tag keeps tied sizes deterministic across
+        # processes; set iteration / hash order would otherwise vary run to run.
+        return min(catalog_installed, key=lambda t: (_catalog_size(t), t))
+    return sorted(normalized_installed)[0]
+
+
 def resolve_startup_model(
     installed_model_tags: Optional[Iterable[str]] = None,
 ) -> tuple[str, str]:
@@ -350,19 +385,47 @@ def resolve_startup_model(
         'saved_runtime' - saved non-curated model still available at runtime
         'default' - no saved model found, using DEFAULT_MODEL
         'invalid_saved_fallback' - saved model is not runtime-valid
+        'installed_fallback' - DEFAULT_MODEL is not installed; using a real,
+                               discovered installed model instead (prevents the
+                               'ready but Kira never answers' silent-ready state)
     """
+    normalized = (
+        _normalize_installed_model_tags(installed_model_tags)
+        if installed_model_tags is not None
+        else _discover_installed_model_tags()
+    )
+
+    def _default_or_installed(source: str) -> tuple[str, str]:
+        # Never hand back a model that is demonstrably NOT installed: that path
+        # makes Kira reach "ready" but never answer. When we can see the installed
+        # set and DEFAULT_MODEL is absent from it, switch to a real installed one.
+        if normalized and _canonical_model_tag(DEFAULT_MODEL) not in normalized:
+            picked = _select_installed_fallback_model(normalized)
+            if picked is not None:
+                return picked, "installed_fallback"
+        return DEFAULT_MODEL, source
+
     try:
         if os.path.exists(LAST_MODEL_FILE):
             with open(LAST_MODEL_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             saved = _canonical_model_tag(data.get("model", ""))
-            if saved and is_runtime_model_available(saved, installed_model_tags):
+            if saved and is_runtime_model_available(saved, normalized):
+                # is_runtime_model_available() returns True for ANY catalog member
+                # by membership alone, even one that was uninstalled (e.g.
+                # `ollama rm`). When we can actually see the installed set
+                # (non-empty) and the saved tag is not in it, route through the
+                # installed-fallback path so Kira never silent-readies on a model
+                # that will never load. An empty set (no discovery) is left alone:
+                # we cannot verify, so we must not break offline-discovery cases.
+                if normalized and saved not in normalized:
+                    return _default_or_installed("invalid_saved_fallback")
                 source = "saved" if saved in MODELS_CATALOG else "saved_runtime"
                 return saved, source
-            return DEFAULT_MODEL, "invalid_saved_fallback"
+            return _default_or_installed("invalid_saved_fallback")
     except Exception:
         pass
-    return DEFAULT_MODEL, "default"
+    return _default_or_installed("default")
 
 
 def save_last_model(tag: str, source: str = "user_switch") -> None:
@@ -421,6 +484,54 @@ def save_tts_local_only(value: bool, config_file: Optional[str] = None) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({
                 "tts_local_only": bool(value),
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def piper_voice_path(voice_key: str) -> str:
+    """Resolve a Piper voice key to its local .onnx path.
+
+    Unknown keys resolve to the default voice so callers never get an empty path.
+    """
+    voice = PIPER_VOICES.get(voice_key) or PIPER_VOICES[DEFAULT_PIPER_VOICE]
+    return os.path.join(str(STORAGE_PATHS.cache_root), "piper", voice["file"])
+
+
+def load_piper_voice(config_file: Optional[str] = None) -> str:
+    """Load the selected Piper voice key from disk.
+
+    Returns DEFAULT_PIPER_VOICE when the file is absent, unreadable, corrupted,
+    or holds an unknown key. The default preserves the original Argentina voice.
+    """
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    try:
+        if not os.path.exists(path):
+            return DEFAULT_PIPER_VOICE
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        key = str(data.get("piper_voice", DEFAULT_PIPER_VOICE))
+        return key if key in PIPER_VOICES else DEFAULT_PIPER_VOICE
+    except Exception:
+        return DEFAULT_PIPER_VOICE
+
+
+def save_piper_voice(voice_key: str, config_file: Optional[str] = None) -> None:
+    """Persist the selected Piper voice key using an atomic write.
+
+    Unknown keys are normalized to the default before writing so a corrupted
+    call can never persist a voice that does not exist.
+    """
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    key = voice_key if voice_key in PIPER_VOICES else DEFAULT_PIPER_VOICE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "piper_voice": key,
                 "saved_at": datetime.now().isoformat(),
             }, f)
         os.replace(tmp, path)

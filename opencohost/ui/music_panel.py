@@ -86,32 +86,35 @@ class MusicPanel:
             font=ctk.CTkFont(size=theme.HEADING, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, columnspan=4, sticky="ew", padx=theme.SPACE_XL - 2, pady=(theme.SPACE_LG, theme.SPACE_SM))
-        for idx, mood in enumerate(KNOWN_MOODS[:4]):
+        mood_grid = ctk.CTkFrame(controls, fg_color="transparent")
+        mood_grid.grid(row=1, column=0, columnspan=4, sticky="w", padx=theme.SPACE_XL - 2, pady=(0, theme.SPACE_SM))
+        for col in range(4):
+            mood_grid.grid_columnconfigure(col, weight=0)
+        for idx, mood in enumerate(KNOWN_MOODS):
+            r, c = divmod(idx, 4)
             ctk.CTkButton(
-                controls,
+                mood_grid,
                 text=mood.capitalize(),
+                width=110,
+                height=30,
+                corner_radius=theme.RADIUS_SM,
+                font=theme.font("LABEL"),
                 command=lambda m=mood: self._on_play_mood(m),
                 fg_color=theme.NEUTRAL,
-            ).grid(row=1, column=idx, sticky="ew", padx=theme.SPACE_SM, pady=theme.SPACE_SM)
-        for idx, mood in enumerate(KNOWN_MOODS[4:]):
-            ctk.CTkButton(
-                controls,
-                text=mood.capitalize(),
-                command=lambda m=mood: self._on_play_mood(m),
-                fg_color=theme.NEUTRAL,
-            ).grid(row=2, column=idx, sticky="ew", padx=theme.SPACE_SM, pady=theme.SPACE_SM)
+                hover_color=theme.NEUTRAL_HOVER,
+            ).grid(row=r, column=c, sticky="w", padx=theme.SPACE_XS, pady=theme.SPACE_XS)
         ctk.CTkButton(
             controls,
             text="Fade out",
             command=self._on_stop,
             fg_color=theme.SURFACE_WARM,
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=(theme.SPACE_XL - 2, theme.SPACE_SM), pady=(theme.SPACE_MD, theme.SPACE_LG))
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=(theme.SPACE_XL - 2, theme.SPACE_SM), pady=(theme.SPACE_MD, theme.SPACE_LG))
         ctk.CTkButton(
             controls,
             text="Limpiar faltantes",
             command=self._on_cleanup_missing,
             fg_color=theme.DANGER_DIM,
-        ).grid(row=3, column=2, columnspan=2, sticky="ew", padx=(theme.SPACE_SM, theme.SPACE_XL - 2), pady=(theme.SPACE_MD, theme.SPACE_LG))
+        ).grid(row=2, column=2, columnspan=2, sticky="ew", padx=(theme.SPACE_SM, theme.SPACE_XL - 2), pady=(theme.SPACE_MD, theme.SPACE_LG))
 
         stats = ctk.CTkFrame(root, fg_color=theme.SURFACE, corner_radius=theme.RADIUS_MD + 4)
         stats.grid(row=3, column=0, sticky="ew", padx=theme.SPACE_LG, pady=theme.SPACE_MD)

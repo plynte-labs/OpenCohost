@@ -368,8 +368,15 @@ class TestBranding(unittest.TestCase):
         self.assertIn("opencohost", _launcher.GITHUB_REPO.lower())
         self.assertIn("plynte-labs", _launcher.GITHUB_REPO.lower())
 
-    def test_app_window_title_contains_opencohost(self):
-        self.assertIn("OpenCohost", _launcher.APP_WINDOW_TITLE)
+    def test_app_window_title_is_app_title_prefix(self):
+        # The launcher detects the app window by title PREFIX (startswith).
+        # app_shell.py sets the title to "Kira — OpenCohost", so the detection
+        # constant must be the LEADING token of that title — "Kira". The old
+        # "OpenCohost" value regressed detection because the title no longer
+        # starts with it.
+        app_title = "Kira — OpenCohost"
+        self.assertEqual(_launcher.APP_WINDOW_TITLE, "Kira")
+        self.assertTrue(app_title.startswith(_launcher.APP_WINDOW_TITLE))
 
     def test_ollama_download_url_in_constants(self):
         self.assertIn("ollama.com", _launcher.OLLAMA_DOWNLOAD_URL)

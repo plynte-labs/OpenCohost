@@ -35,6 +35,14 @@ BG: str = "#0f151c"          # Root canvas / scroll-frame background
 SURFACE: str = "#151d26"     # Cards, panels (was #151d26 / #101923 / #111820)
 SURFACE_ALT: str = "#162232" # Hero / elevated card (was #162232 / #10161d)
 SURFACE_INSET: str = "#1b2633"  # Pill idle background (was #1b2633)
+# Nested-content surface — a frame placed INSIDE a SURFACE card (profile body,
+# session block, suggestion frame, bulk/topic content). It is darker than
+# SURFACE so the nesting reads as recessed. The Phase-1 docstring earmarked
+# #101923 for a fold into SURFACE, but in live code it is used as this distinct
+# recessed level (12 sites across agenda/avatar/app_shell); collapsing it into
+# SURFACE would flatten the hierarchy (a visible change), so it gets its own
+# semantic token (was #101923 in agenda/avatar/app_shell nested frames).
+SURFACE_NESTED: str = "#101923"  # Recessed content surface inside a SURFACE card
 
 # Borders
 BORDER: str = "#2a3a50"      # Subtle dividers
@@ -42,10 +50,20 @@ BORDER: str = "#2a3a50"      # Subtle dividers
 # Text
 TEXT: str = "#d8e2ef"        # Primary text (bright on dark BG)
 TEXT_MUTED: str = "#a9bdd3"  # Secondary / caption text
+# Tertiary / state text — dimmer than TEXT_MUTED. Used for status lines, hints,
+# tag captions and suggestion sub-labels. Recurs ~33x across agenda/avatar/
+# app_shell/stream_admin; distinct dim blue-grey, so kept separate from the
+# brighter TEXT_MUTED (was #8fa3b8).
+TEXT_DIM: str = "#8fa3b8"    # Tertiary / state caption text (dim blue-grey)
 
 # Primary action — CTA blue
 PRIMARY: str = "#2f5f8f"     # Import/primary buttons (unchanged)
 PRIMARY_HOVER: str = "#3a72a8"  # Slightly brighter on hover
+# Subtle hover for transparent/flat toggle buttons (collapsible section headers).
+# A dim surface tint applied on hover over an otherwise borderless control;
+# recurs across agenda/avatar/app_shell/stream_admin collapsible toggles (was
+# #1d2a38).
+HOVER_SUBTLE: str = "#1d2a38"   # Hover tint for flat/transparent toggle buttons
 
 # Status / semantic tokens
 # DANGER consolidates: #cc3333 (status_bar), #8f2f2f (music_panel, delete buttons),
@@ -55,6 +73,12 @@ DANGER_HOVER: str = "#e04444"    # Hover variant
 
 SUCCESS: str = "#22cc66"         # Ready / success label (was #22cc66 / #44cc66)
 SUCCESS_DIM: str = "#1f5a3a"     # Success pill background (dark, readable on BG)
+# Green ACTION button background — the affirmative call-to-action fill (Activar,
+# Aprobar, HIGH-confidence badge). A mid green, brighter than SUCCESS_DIM (a
+# passive pill bg) and darker than SUCCESS (a bright label color). Used in
+# agenda + stream_admin enable/approve buttons; consolidating into either would
+# distort an interactive button into a passive indicator (was #2f7d50).
+SUCCESS_ACTION: str = "#2f7d50"  # Affirmative-action button bg (enable / approve)
 
 WARNING: str = "#cc8800"         # Amber — alert / loading / fallback (was #cc8800 / #ffaa00)
 

@@ -78,9 +78,10 @@ COLOR_FG = "#e8f0ee"
 COLOR_MUTED = "#8fa6a0"
 COLOR_ACCENT = "#3c9e66"
 
-# Must match the Tk title set in opencohost/ui/app_shell.py (self.title(...)).
-# Window detection by title is how the launcher knows the app is visible.
-APP_WINDOW_TITLE = "OpenCohost"
+# Must match the Tk title prefix set in opencohost/ui/app_shell.py
+# (self.title("Kira — OpenCohost")). Window detection matches by title prefix,
+# so this must be the leading word of that title.
+APP_WINDOW_TITLE = "Kira"
 APP_WINDOW_TIMEOUT = 120.0  # seconds to wait for the app window to appear
 
 APP_START_FAILED_MESSAGE = (
@@ -891,9 +892,9 @@ def launch_app(install_root, portable, environ=None, platform=None, debug=False,
 def _find_app_window():
     """Truthy when the app's top-level window exists (Windows only).
 
-    The app sets a dynamic title ("OpenCohost — Qwen3-TTS + <model>"), so an
-    exact FindWindowW match would never fire; enumerate windows and match by
-    title prefix instead.
+    The app's window title starts with a fixed "Kira" prefix (currently
+    "Kira — OpenCohost"), so enumerate windows and match by title prefix
+    instead of an exact FindWindowW match.
     """
     if sys.platform != "win32":
         return None
