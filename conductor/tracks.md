@@ -4,6 +4,23 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Kira Demo Polish — Offline Voice Toggle, UI Refinements, Startup Robustness**
+  *Link: engram-only (no folder; hackathon-style direct implementation)*
+  *Status 2026-06-26: DONE (commit 300e20a on feat/ui-design-system-20260625, NOT merged to master).
+  Offline Piper voice toggle (Argentina↔Neutral es_MX, PiperEngine.reload hot-swap + missing-file guard);
+  Kira "pensando…/lista" transparency cues; smart startup model fallback (kills silent-ready — never
+  selects an uninstalled model, size-aware + deterministic tie-break); left Kira-column width pin (no
+  reflow on state change); window title cleaned (Kira — OpenCohost) + launcher window-match; Audio/TTS
+  split into Voz/Memoria cards; co-host "Nuevo tema aprobado" restyle; Avatar/OBS "Estados adicionales"
+  nested into its collapsible; Música compact chip grid. Dual-blind-Opus Judgment Day APPROVED (Round 2;
+  7 confirmed issues fixed via 2 jd-fix-agents). Affected suite 483 passed. Engram:
+  sdd/kira-demo-polish-20260626/archive-report. Owner LOVED the neutral es_MX voice.
+  Deferred (next session): motor→UI revert callback on reload failure (TOCTOU/corrupt .onnx), headless
+  tests for _on_kira_voice_change + _update_kira_response_status, es_MX voice provisioning for other
+  machines, avatar PNGs left local (not committed).*
+
+---
+
 - [x] **Track: UI God Class Refactor — Split app.py into Modular Components**
   *Link: [./tracks/ui_refactor_20260508/](./tracks/ui_refactor_20260508/)*
 
