@@ -52,11 +52,16 @@ def test_frozen_with_env_var_override_is_true(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4c — dev mode (not frozen) → flag defaults True
+# Task 4c — dev mode (not frozen) → flag defaults False (env-opt-in only)
 # ---------------------------------------------------------------------------
 
-def test_dev_mode_defaults_true(monkeypatch):
-    """Non-frozen (dev) environment without env var → flag is True."""
+def test_dev_mode_defaults_false(monkeypatch):
+    """Non-frozen (dev) environment without env var → flag is False.
+
+    qwen_tts_extirpation_20260627 WU 1.1: heavy TTS is opt-in via
+    OPENCOHOST_EXPERIMENTAL_TTS=1 in every environment, so dev now matches the
+    packaged default instead of defaulting the experimental UI on.
+    """
     import opencohost.config.settings as settings_mod
 
     # Ensure sys.frozen is absent
@@ -65,8 +70,22 @@ def test_dev_mode_defaults_true(monkeypatch):
     monkeypatch.delenv("OPENCOHOST_EXPERIMENTAL_TTS", raising=False)
 
     result = settings_mod._resolve_experimental_heavy_tts()
+    assert result is False, (
+        "In dev mode without the opt-in env var, EXPERIMENTAL_HEAVY_TTS_ENABLED must be False."
+    )
+
+
+def test_dev_mode_env_opt_in_is_true(monkeypatch):
+    """Non-frozen (dev) + OPENCOHOST_EXPERIMENTAL_TTS=1 → flag is True (the only dev opt-in)."""
+    import opencohost.config.settings as settings_mod
+
+    if hasattr(sys, "frozen"):
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setenv("OPENCOHOST_EXPERIMENTAL_TTS", "1")
+
+    result = settings_mod._resolve_experimental_heavy_tts()
     assert result is True, (
-        "In dev mode (not frozen), EXPERIMENTAL_HEAVY_TTS_ENABLED should default True."
+        "OPENCOHOST_EXPERIMENTAL_TTS=1 must enable the flag in dev too."
     )
 
 

@@ -259,18 +259,13 @@ STREAM_ADMIN_ENABLED: bool = False
 def _resolve_experimental_heavy_tts() -> bool:
     """Return whether the experimental Qwen3-TTS heavy-TTS UI option is visible.
 
-    Logic:
-      - Frozen (packaged) builds default to False — the engine gates and
-        auto-fallback remain active; only the UI affordance is hidden.
-      - OPENCOHOST_EXPERIMENTAL_TTS=1 overrides to True in any environment.
-      - Dev builds (not frozen) default to True.
+    Logic (qwen_tts_extirpation_20260627 WU 1.1 — env opt-in only):
+      - The flag is True IFF OPENCOHOST_EXPERIMENTAL_TTS=1, in every environment.
+      - Otherwise False — dev now matches the packaged default, so the heavy-TTS
+        UI (and its reference-voice cluster) stays hidden unless explicitly opted
+        in. The engine gates and the Edge->Piper auto-fallback remain active.
     """
-    env_override = os.environ.get("OPENCOHOST_EXPERIMENTAL_TTS", "")
-    if env_override == "1":
-        return True
-    if getattr(sys, "frozen", False):
-        return False
-    return True
+    return os.environ.get("OPENCOHOST_EXPERIMENTAL_TTS", "") == "1"
 
 
 EXPERIMENTAL_HEAVY_TTS_ENABLED: bool = _resolve_experimental_heavy_tts()
