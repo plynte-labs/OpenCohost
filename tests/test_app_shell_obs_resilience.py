@@ -1378,3 +1378,44 @@ def test_toggle_compacto_false_shows_product_panel_and_hides_logs():
         )
     finally:
         _restore_app_shell_module(old_module)
+
+
+# ---------------------------------------------------------------------------
+# WU 1.3 (qwen_tts_extirpation_20260627) — fake RMS bar removed from app_shell
+# ---------------------------------------------------------------------------
+
+
+def test_app_shell_does_not_wire_rms_bar():
+    """The live-but-fake RMS bar wiring must be gone from VocalAIApp.
+
+    RED before removal: the source aliases self.barra_rms (build site) and the
+    listening-state grid()/grid_remove() call, plus the _schedule_rms_frame
+    override that drove _animar_rms on a 150ms loop. GREEN after: none remain,
+    and _actualizar_pipeline("listening") no longer touches a bar.
+    """
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        # Read the module source from disk: inspect.getsource on the class fails
+        # here because the helper's patch.dict evicts the freshly-imported module
+        # from sys.modules (class-source resolution goes through sys.modules).
+        src = Path(app_shell.__file__).read_text(encoding="utf-8")
+        assert "barra_rms" not in src
+        assert "_animar_rms" not in src
+        assert "_schedule_rms_frame" not in src
+
+        # Behavioral: the listening transition must not raise AttributeError on a
+        # bare instance that never built the (now-deleted) bar. after() runs the
+        # scheduled callable inline so any residual barra_rms.grid() lambda fires.
+        app = object.__new__(app_shell.VocalAIApp)
+        app._ui_state = SimpleNamespace(pipeline_state="idle")
+        app.status_bar = None
+        app.dispositivo_seleccionado = None
+        app._update_kira_response_status = MagicMock()
+        app._reset_inactivity_timer = MagicMock()
+        app.after = MagicMock(side_effect=lambda _delay, fn: fn())
+
+        app._actualizar_pipeline("listening")  # must not raise
+
+        assert not hasattr(app, "barra_rms")
+    finally:
+        _restore_app_shell_module(old_module)

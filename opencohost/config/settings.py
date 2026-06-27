@@ -207,7 +207,6 @@ MIN_AUDIO_RMS = 0.005  # Umbral mínimo para detectar audio real vs silencio
 PTT_DEFAULT_HOTKEY = "F10"
 PTT_MIN_DURATION = 0.5   # Duración mínima de grabación en segundos
 PTT_MAX_DURATION = 30.0  # Duración máxima (truncar si se excede)
-PTT_RMS_THRESHOLD = 0.005  # Umbral RMS para detección de silencio
 
 # Teclas disponibles para PTT (ordenadas)
 PTT_HOTKEY_LIST = [

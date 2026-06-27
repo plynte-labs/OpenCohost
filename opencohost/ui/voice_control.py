@@ -2,8 +2,6 @@
 
 Encapsulates all voice input functionality:
 - WebSocket management (LiveAudio connection with auto-reconnect)
-- Audio recording (calibration capture with RMS validation)
-- RMS animation (simulated level indicator during listening)
 - Voice button state machine (pipeline-driven UI updates)
 
 This module is decoupled from app.py internals and uses UIState for
@@ -16,15 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 import re
 import threading
 import time
 from typing import Any, Callable, Optional
 
-import numpy as np
-import sounddevice as sd
-import soundfile as sf
 import websockets
 
 import customtkinter as ctk
@@ -32,8 +26,7 @@ import customtkinter as ctk
 from opencohost.config.settings import (
     WS_URI, WS_TIMEOUT, WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_MAX_DELAY, WS_MAX_RETRIES,
-    RECORDING_DURATION, RECORDING_SAMPLERATE, MIN_AUDIO_RMS,
-    BASE_DIR, TEMP_DIR, REFERENCE_WAV_PATH,
+    BASE_DIR, TEMP_DIR,
 )
 from opencohost.config.logger import get_logger
 from opencohost.ui.state import UIState
@@ -109,10 +102,8 @@ class VoiceControlPanel:
         self._ws_should_reconnect: bool = False
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_lock = threading.Lock()
-        self._is_recording: bool = False
         self._recording_thread: Optional[threading.Thread] = None
         self._recording_stream: Any = None
-        self._rms_animating: bool = False
         self._ptt_accept_logged: bool = False
 
         # PTT transcription buffer with grace period
@@ -134,7 +125,6 @@ class VoiceControlPanel:
 
         # Widget references (created in create_voice_panel)
         self.btn_primary_voice: Optional[ctk.CTkButton] = None
-        self.barra_rms: Optional[ctk.CTkProgressBar] = None
         self.lbl_kira_voice_state: Optional[ctk.CTkLabel] = None
         self.lbl_kira_tts_state: Optional[ctk.CTkLabel] = None
         self.lbl_kira_memory_state: Optional[ctk.CTkLabel] = None
@@ -247,10 +237,6 @@ class VoiceControlPanel:
             f"El streamer acaba de decir (PTT): {texto}"
         ))
 
-    def set_dispositivo(self, device_id: Optional[int]) -> None:
-        """Update the selected audio input device."""
-        self._dispositivo_seleccionado = device_id
-
     # ------------------------------------------------------------------
     # Panel creation
     # ------------------------------------------------------------------
@@ -258,9 +244,9 @@ class VoiceControlPanel:
     def create_voice_panel(self) -> None:
         """Create and layout all voice control widgets within parent_frame.
 
-        Builds the voice panel header, state strip, hint label, primary
-        voice button, and RMS progress bar.  All widgets are stored as
-        instance attributes for later manipulation.
+        Builds the voice panel header, state strip, hint label, and primary
+        voice button.  All widgets are stored as instance attributes for
+        later manipulation.
         """
         # State strip
         kira_state_strip = ctk.CTkFrame(self._parent, fg_color="transparent")
@@ -300,14 +286,9 @@ class VoiceControlPanel:
         )
         self.lbl_voice_hint.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 2))
 
-        # Voice actions / RMS bar
+        # Voice actions
         if self._external_primary_button is not None:
             self.btn_primary_voice = self._external_primary_button
-            # No empty frame — barra_rms lives directly in parent, hidden
-            self.barra_rms = ctk.CTkProgressBar(self._parent, width=150, height=10)
-            self.barra_rms.set(0)
-            self.barra_rms.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
-            self.barra_rms.grid_remove()
         else:
             voice_actions = ctk.CTkFrame(self._parent, fg_color="transparent")
             voice_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
@@ -323,10 +304,6 @@ class VoiceControlPanel:
                 hover_color="#24946c"
             )
             self.btn_primary_voice.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
-            self.barra_rms = ctk.CTkProgressBar(voice_actions, width=150, height=10)
-            self.barra_rms.set(0)
-            self.barra_rms.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
-            self.barra_rms.grid_remove()
 
     # ------------------------------------------------------------------
     # WebSocket management
@@ -576,147 +553,6 @@ class VoiceControlPanel:
                     raise
 
     # ------------------------------------------------------------------
-    # Audio recording
-    # ------------------------------------------------------------------
-
-    def start_recording(self, filepath: Optional[str] = None) -> None:
-        """Start audio recording from the selected input device.
-
-        Args:
-            filepath: Destination WAV file path. Uses default calibration
-                path if None.
-        """
-        if self._dispositivo_seleccionado is None:
-            self._on_log("[Grabación] No hay dispositivo de audio seleccionado.")
-            return
-
-        if filepath is None:
-            filepath = REFERENCE_WAV_PATH
-
-        self._is_recording = True
-        self._recording_thread = threading.Thread(
-            target=self._hilo_grabacion,
-            args=(filepath,),
-            daemon=True
-        )
-        self._recording_thread.start()
-
-    def stop_recording(self) -> Optional[bytes]:
-        """Stop the current recording session.
-
-        Returns:
-            Raw audio bytes if recording was active, None otherwise.
-        """
-        self._is_recording = False
-        if self._recording_stream is not None:
-            try:
-                self._recording_stream.stop()
-            except Exception:
-                pass
-        return None
-
-    def is_recording(self) -> bool:
-        """Return whether a recording session is in progress."""
-        return self._is_recording
-
-    def _hilo_grabacion(self, filepath: str) -> None:
-        """Background thread that captures audio and validates RMS level."""
-        self._on_log(
-            f"\n[Grabación] 🔴 GRABANDO {RECORDING_DURATION}s... Habla ahora."
-        )
-
-        try:
-            frames = int(RECORDING_DURATION * RECORDING_SAMPLERATE)
-            recording = np.zeros((frames, 1), dtype='float32')
-            with sd.InputStream(
-                samplerate=RECORDING_SAMPLERATE,
-                channels=1,
-                dtype='float32',
-                device=self._dispositivo_seleccionado,
-            ) as self._recording_stream:
-                idx = 0
-                blocksize = 1024
-                while self._is_recording and idx < frames:
-                    chunk, overflowed = self._recording_stream.read(blocksize)
-                    if overflowed:
-                        self._logger.warning("Overflow de buffer de grabación.")
-                    remaining = frames - idx
-                    take = min(blocksize, remaining)
-                    recording[idx:idx + take] = chunk[:take]
-                    idx += take
-
-            if not self._is_recording:
-                recording = recording[:idx]
-
-            rms = float(np.sqrt(np.mean(recording ** 2)))
-            if rms < MIN_AUDIO_RMS:
-                self._on_log(
-                    "[Grabación] ⚠️ Audio demasiado bajo o silencio. "
-                    "Intenta de nuevo."
-                )
-                self._logger.warning(
-                    f"Grabación descartada por RMS bajo: {rms:.6f}"
-                )
-                return
-
-            sf.write(filepath, recording, RECORDING_SAMPLERATE)
-            self._on_log(f"[Grabación] ⏹️ Audio capturado (RMS: {rms:.4f})")
-            self._logger.info(f"Grabación guardada: {filepath}, RMS={rms:.4f}")
-
-        except Exception as e:
-            self._on_log(f"[ERROR Grabación]: {e}")
-            self._logger.exception("Error durante grabación")
-        finally:
-            self._is_recording = False
-            self._recording_stream = None
-
-    # ------------------------------------------------------------------
-    # RMS animation
-    # ------------------------------------------------------------------
-
-    def update_rms(self, level: float) -> None:
-        """Set the RMS progress bar to a specific level.
-
-        Args:
-            level: Value between 0.0 and 1.0.
-        """
-        if self.barra_rms is not None:
-            self.barra_rms.set(level)
-
-    def start_rms_animation(self) -> None:
-        """Start the simulated RMS animation loop.
-
-        Updates the progress bar with random values every 150ms to
-        simulate audio level during listening state.
-        """
-        self._rms_animating = True
-        self._animar_rms()
-
-    def stop_rms_animation(self) -> None:
-        """Stop the RMS animation and hide the progress bar."""
-        self._rms_animating = False
-        if self.barra_rms is not None:
-            self.barra_rms.grid_remove()
-
-    def _animar_rms(self) -> None:
-        """Single frame of RMS animation. Schedules next frame if active."""
-        if self._pipeline_state != "listening" or not self._rms_animating:
-            return
-
-        nivel = random.uniform(0.2, 0.9)
-        if self.barra_rms is not None:
-            self.barra_rms.set(nivel)
-
-        # Schedule next frame via tkinter after (must be called from main thread)
-        # This method is called from _on_state_change which runs on main thread
-        if self._rms_animating:
-            self._schedule_rms_frame()
-
-    def _schedule_rms_frame(self) -> None:
-        """Schedule the next RMS animation frame on the main thread."""
-        self._logger.warning("RMS animation: _schedule_rms_frame not overridden. Animation will stop.")
-
-    # ------------------------------------------------------------------
     # State machine
     # ------------------------------------------------------------------
 
@@ -734,11 +570,6 @@ class VoiceControlPanel:
         self._on_pipeline_change(state)
         self._schedule_ui_update(lambda: self._update_button_for_state(state))
         self._schedule_ui_update(lambda: self._update_voice_state_label(state))
-
-        if state == "listening":
-            self.start_rms_animation()
-        else:
-            self.stop_rms_animation()
 
     def get_state(self) -> str:
         """Return the current pipeline state."""
@@ -839,7 +670,6 @@ class VoiceControlPanel:
         if self._ptt_flush_thread and self._ptt_flush_thread.is_alive():
             self._ptt_flush_thread.join(timeout=2)
         self.disconnect_ws()
-        self.stop_rms_animation()
         self._ui_state.unsubscribe(self._state_sub_id)
         if self._ws_thread and self._ws_thread.is_alive():
             self._ws_thread.join(timeout=3)

@@ -535,8 +535,6 @@ class VocalAIApp(ctk.CTk):
         self.lbl_kira_chat_state = self.voice_panel.lbl_kira_chat_state
         self.lbl_voice_hint = self.voice_panel.lbl_voice_hint
         self.btn_primary_voice = self.voice_panel.btn_primary_voice
-        self.barra_rms = self.voice_panel.barra_rms
-        self.voice_panel._schedule_rms_frame = lambda: self.after(150, self.voice_panel._animar_rms)
         # Wire primary button to VoiceControlPanel's toggle
         self._primary_speak_btn.configure(command=self.voice_panel._toggle_websocket)
         # Bottom chat entry
@@ -2019,7 +2017,6 @@ class VocalAIApp(ctk.CTk):
                     self.lbl_kira_voice_state.configure(text="Voz/PTT: listo", fg_color="#1b2633")
 
         self.after(0, update_status_details)
-        self.after(0, lambda: self.barra_rms.grid() if estado == "listening" else self.barra_rms.grid_remove())
 
     def _update_kira_response_status(self, estado: str) -> None:
         """Show a human-readable activity cue in the Kira response box.

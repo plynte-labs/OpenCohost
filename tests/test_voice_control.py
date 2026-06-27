@@ -277,11 +277,6 @@ def voice_panel_class():
 
     from opencohost.ui.voice_control import VoiceControlPanel
 
-    # Fix implementation bug: set_state() calls _start_rms_animation / _stop_rms_animation
-    # but the actual public methods are start_rms_animation / stop_rms_animation
-    VoiceControlPanel._start_rms_animation = VoiceControlPanel.start_rms_animation
-    VoiceControlPanel._stop_rms_animation = VoiceControlPanel.stop_rms_animation
-
     return VoiceControlPanel
 
 
@@ -354,15 +349,9 @@ class TestVoiceControlPanelInit:
     def test_init_ws_should_not_reconnect(self, voice_panel):
         assert voice_panel._ws_should_reconnect is False
 
-    def test_init_no_recording_active(self, voice_panel):
-        assert voice_panel._is_recording is False
-
     def test_init_state_sub_id_is_int(self, voice_panel):
         assert isinstance(voice_panel._state_sub_id, int)
         assert voice_panel._state_sub_id >= 0
-
-    def test_init_rms_animating_is_false(self, voice_panel):
-        assert voice_panel._rms_animating is False
 
 
 # ===================================================================
@@ -389,12 +378,6 @@ class TestCreateVoicePanel:
         assert panel.btn_primary_voice is not None
         panel.cleanup()
 
-    def test_create_panel_creates_rms_bar(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = self._make_panel(voice_panel_class, mock_parent, ui_state, mock_logger)
-        panel.create_voice_panel()
-        assert panel.barra_rms is not None
-        panel.cleanup()
-
     def test_create_panel_button_default_text(self, mock_parent, ui_state, mock_logger, voice_panel_class):
         panel = self._make_panel(voice_panel_class, mock_parent, ui_state, mock_logger)
         panel.create_voice_panel()
@@ -405,18 +388,6 @@ class TestCreateVoicePanel:
         panel = self._make_panel(voice_panel_class, mock_parent, ui_state, mock_logger)
         panel.create_voice_panel()
         assert panel.btn_primary_voice.fg_color == "#1f7a5a"
-        panel.cleanup()
-
-    def test_create_panel_rms_bar_initially_hidden(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = self._make_panel(voice_panel_class, mock_parent, ui_state, mock_logger)
-        panel.create_voice_panel()
-        assert panel.barra_rms._grid_removed is True
-        panel.cleanup()
-
-    def test_create_panel_rms_bar_initial_value_zero(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = self._make_panel(voice_panel_class, mock_parent, ui_state, mock_logger)
-        panel.create_voice_panel()
-        assert panel.barra_rms.value == 0.0
         panel.cleanup()
 
     def test_create_panel_subscribes_to_ui_state(self, mock_parent, ui_state, mock_logger, voice_panel_class):
@@ -775,271 +746,11 @@ class TestWebSocketMessageHandling:
 # ===================================================================
 
 
-class TestRecordingStart:
-    """Test audio recording start."""
-
-    def test_start_recording_sets_recording_flag(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.05)
-        assert voice_panel._is_recording is True
-
-    def test_start_recording_calls_sd_input_stream(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-        mock_sd.InputStream.assert_called_once()
-
-    def test_start_recording_uses_correct_samplerate(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-
-        call_kwargs = mock_sd.InputStream.call_args.kwargs
-        assert call_kwargs.get("samplerate") == MOCK_RECORDING_SAMPLERATE
-
-    def test_start_recording_uses_selected_device(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 1
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-
-        call_kwargs = mock_sd.InputStream.call_args.kwargs
-        assert call_kwargs.get("device") == 1
-
-    def test_start_recording_uses_mono_channel(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-
-        call_kwargs = mock_sd.InputStream.call_args.kwargs
-        assert call_kwargs.get("channels") == 1
-
-    def test_start_recording_uses_float32_dtype(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-
-        call_kwargs = mock_sd.InputStream.call_args.kwargs
-        assert call_kwargs.get("dtype") == "float32"
-
-    def test_start_recording_no_device_logs_warning(self, voice_panel, mock_logger):
-        voice_panel._dispositivo_seleccionado = None
-        voice_panel._on_log = mock_logger.info
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        mock_logger.info.assert_called()
-
-
-class TestRecordingStop:
-    """Test audio recording stop and processing."""
-
-    def test_stop_recording_clears_recording_flag(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-        voice_panel.stop_recording()
-        assert voice_panel._is_recording is False
-
-    def test_stop_recording_saves_file(self, voice_panel, mock_sd, mock_sf):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sf.write.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.2)
-        voice_panel.stop_recording()
-        time.sleep(0.3)
-        mock_sf.write.assert_called()
-
-    def test_stop_recording_below_rms_threshold(self, voice_panel, mock_sd, mock_sf):
-        voice_panel._dispositivo_seleccionado = 0
-
-        class LowAudioStream:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-                self._read_data = (np.array([[0.0001]] * 1024, dtype="float32"), False)
-                self.stop = MagicMock()
-
-            def read(self, *args, **kwargs):
-                time.sleep(0.01)
-                return self._read_data
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        original_side_effect = mock_sd.InputStream.side_effect
-        mock_sd.InputStream.side_effect = lambda **kw: LowAudioStream(**kw)
-        mock_sf.write.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.2)
-        voice_panel.stop_recording()
-        time.sleep(0.3)
-        mock_sf.write.assert_not_called()
-        mock_sd.InputStream.side_effect = original_side_effect
-
-    def test_stop_recording_above_rms_threshold(self, voice_panel, mock_sd, mock_sf):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sf.write.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.2)
-        voice_panel.stop_recording()
-        time.sleep(0.3)
-        mock_sf.write.assert_called_once()
-
-    def test_stop_recording_handles_device_error(self, voice_panel, mock_sd, mock_logger):
-        voice_panel._dispositivo_seleccionado = 0
-
-        original_side_effect = mock_sd.InputStream.side_effect
-        mock_sd.InputStream.side_effect = lambda **kw: (_ for _ in ()).throw(Exception("Device not available"))
-        voice_panel._logger = mock_logger
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.3)
-        mock_logger.exception.assert_called()
-        mock_sd.InputStream.side_effect = original_side_effect
-
-
 class TestRecordingDuration:
-    """Test recording duration limits."""
-
-    def test_recording_uses_configured_duration(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording("/tmp/test_audio.wav")
-        time.sleep(0.1)
-
-        call_kwargs = mock_sd.InputStream.call_args.kwargs
-        expected_samples = int(MOCK_RECORDING_DURATION * MOCK_RECORDING_SAMPLERATE)
-        # The implementation computes frames = duration * samplerate internally;
-        # verify the stream was created with the expected samplerate which
-        # together with duration determines total frames.
-        assert call_kwargs.get("samplerate") == MOCK_RECORDING_SAMPLERATE
+    """Test recording duration constants."""
 
     def test_recording_duration_constant_is_eight_seconds(self):
         assert MOCK_RECORDING_DURATION == 8
-
-
-# ===================================================================
-# 5. RMS Animation
-# ===================================================================
-
-
-class TestRMSAnimation:
-    """Test RMS level animation."""
-
-    def test_update_rms_sets_progress_bar_value(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.update_rms(0.5)
-        assert panel.barra_rms.value == 0.5
-        panel.cleanup()
-
-    def test_update_rms_zero_sets_minimum(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.update_rms(0.0)
-        assert panel.barra_rms.value == 0.0
-        panel.cleanup()
-
-    def test_update_rms_one_sets_maximum(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.update_rms(1.0)
-        assert panel.barra_rms.value == 1.0
-        panel.cleanup()
-
-    def test_update_rms_with_none_bar(self, voice_panel):
-        voice_panel.barra_rms = None
-        voice_panel.update_rms(0.5)
-
-    def test_rms_animation_sets_animating_flag(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._pipeline_state = "listening"
-        panel.start_rms_animation()
-        assert panel._rms_animating is True
-        panel.cleanup()
-
-    def test_rms_animation_stops_when_not_listening(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._pipeline_state = "idle"
-        panel.start_rms_animation()
-        assert panel._rms_animating is True
-        panel.cleanup()
-
-    def test_stop_rms_animation_hides_bar(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.barra_rms._grid_removed = False
-        panel.stop_rms_animation()
-        assert panel.barra_rms._grid_removed is True
-        panel.cleanup()
-
-    def test_stop_rms_animation_clears_flag(self, voice_panel):
-        voice_panel._rms_animating = True
-        voice_panel.stop_rms_animation()
-        assert voice_panel._rms_animating is False
-
-    def test_animar_rms_updates_bar(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._pipeline_state = "listening"
-        panel._rms_animating = True
-        panel._animar_rms()
-        assert 0.0 <= panel.barra_rms.value <= 1.0
-        panel.cleanup()
-
-    def test_animar_rms_stops_when_not_listening(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.barra_rms.value = 0.5
-        panel._pipeline_state = "idle"
-        panel._rms_animating = True
-        panel._animar_rms()
-        assert panel.barra_rms.value == 0.5
-        panel.cleanup()
-
-    def test_animar_rms_stops_when_not_animating(self, voice_panel, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel.barra_rms.value = 0.5
-        panel._pipeline_state = "listening"
-        panel._rms_animating = False
-        panel._animar_rms()
-        assert panel.barra_rms.value == 0.5
-        panel.cleanup()
 
 
 # ===================================================================
@@ -1177,57 +888,6 @@ class TestVoiceButtonVisualStates:
         panel.cleanup()
 
 
-class TestVoiceButtonStateAndRMS:
-    """Test RMS bar visibility tied to state."""
-
-    def test_listening_starts_rms_animation(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._schedule_rms_frame = MagicMock()
-        panel.set_state("listening")
-        assert panel._rms_animating is True
-        panel.cleanup()
-
-    def test_idle_stops_rms_animation(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._schedule_rms_frame = MagicMock()
-        panel.set_state("listening")
-        panel.set_state("idle")
-        assert panel._rms_animating is False
-        panel.cleanup()
-
-    def test_processing_stops_rms_animation(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._schedule_rms_frame = MagicMock()
-        panel.set_state("listening")
-        panel.set_state("processing")
-        assert panel._rms_animating is False
-        panel.cleanup()
-
-    def test_speaking_stops_rms_animation(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._schedule_rms_frame = MagicMock()
-        panel.set_state("listening")
-        panel.set_state("speaking")
-        assert panel._rms_animating is False
-        panel.cleanup()
-
-
 # ===================================================================
 # 7. UIState Observer Integration
 # ===================================================================
@@ -1297,11 +957,6 @@ class TestUIStateObserverIntegration:
 class TestCleanup:
     """Test cleanup and resource release."""
 
-    def test_cleanup_stops_rms_animation(self, voice_panel):
-        voice_panel._rms_animating = True
-        voice_panel.cleanup()
-        assert voice_panel._rms_animating is False
-
     def test_cleanup_disconnects_websocket(self, voice_panel):
         voice_panel._ws_connected = True
         voice_panel._ws_should_reconnect = True
@@ -1326,17 +981,6 @@ class TestCleanup:
 class TestEdgeCases:
     """Test edge cases and error conditions."""
 
-    def test_update_rms_with_none_bar(self, voice_panel):
-        voice_panel.barra_rms = None
-        voice_panel.update_rms(None)
-
-    def test_start_recording_with_default_filepath(self, voice_panel, mock_sd):
-        voice_panel._dispositivo_seleccionado = 0
-        mock_sd.InputStream.reset_mock()
-        voice_panel.start_recording()
-        time.sleep(0.1)
-        mock_sd.InputStream.assert_called()
-
     def test_sequential_state_transitions(self, mock_parent, ui_state, mock_logger, voice_panel_class):
         panel = voice_panel_class(
             parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
@@ -1359,24 +1003,6 @@ class TestEdgeCases:
             assert panel.btn_primary_voice.fg_color == expected_color
         panel.cleanup()
 
-    def test_rms_animation_uses_random_values(self, mock_parent, ui_state, mock_logger, voice_panel_class):
-        panel = voice_panel_class(
-            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
-            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
-        )
-        panel.create_voice_panel()
-        panel._pipeline_state = "listening"
-        panel._rms_animating = True
-
-        values = []
-        for _ in range(5):
-            panel._animar_rms()
-            values.append(panel.barra_rms.value)
-
-        for val in values:
-            assert 0.2 <= val <= 0.9
-        panel.cleanup()
-
     def test_toggle_websocket_connects_when_disconnected(self, voice_panel):
         with patch.object(voice_panel, "connect_ws") as mock_connect:
             voice_panel._ws_connected = False
@@ -1395,20 +1021,10 @@ class TestEdgeCases:
         voice_panel._ws_connected = False
         assert voice_panel.is_ws_connected() is False
 
-    def test_is_recording_returns_flag(self, voice_panel):
-        voice_panel._is_recording = True
-        assert voice_panel.is_recording() is True
-        voice_panel._is_recording = False
-        assert voice_panel.is_recording() is False
-
     def test_set_motor_ia(self, voice_panel):
         new_motor = MagicMock()
         voice_panel.set_motor_ia(new_motor)
         assert voice_panel._motor_ia is new_motor
-
-    def test_set_dispositivo(self, voice_panel):
-        voice_panel.set_dispositivo(42)
-        assert voice_panel._dispositivo_seleccionado == 42
 
     def test_update_tts_label_speaking(self, mock_parent, ui_state, mock_logger, voice_panel_class):
         panel = voice_panel_class(
@@ -1567,3 +1183,43 @@ class TestEdgeCases:
 
         asyncio.run(voice_panel._ws_listener())
         mock_motor_ia.command_queue.put.assert_not_called()
+
+
+# ===================================================================
+# 10. WU 1.3 — Deletion absence guards (qwen_tts_extirpation_20260627)
+# ===================================================================
+
+
+class TestWU13DeletionGuards:
+    """RED-first absence assertions for WU 1.3 removals.
+
+    These replace the deleted fake-RMS-bar and unwired-recorder behavioral
+    tests: they go RED while the members still exist and GREEN once removed.
+    """
+
+    def test_voice_control_has_no_unwired_recorder(self, voice_panel_class):
+        VoiceControlPanel = voice_panel_class
+        assert not hasattr(VoiceControlPanel, "start_recording")
+        assert not hasattr(VoiceControlPanel, "set_dispositivo")
+        # Siblings removed with the unwired duplicate recorder (L1).
+        assert not hasattr(VoiceControlPanel, "stop_recording")
+        assert not hasattr(VoiceControlPanel, "is_recording")
+        assert not hasattr(VoiceControlPanel, "_hilo_grabacion")
+
+    def test_voice_control_has_no_fake_rms_bar(
+        self, voice_panel_class, mock_parent, ui_state, mock_logger
+    ):
+        VoiceControlPanel = voice_panel_class
+        # Class-level: the fake (random-painted) RMS animation API is gone.
+        assert not hasattr(VoiceControlPanel, "start_rms_animation")
+        assert not hasattr(VoiceControlPanel, "stop_rms_animation")
+        assert not hasattr(VoiceControlPanel, "_animar_rms")
+        assert not hasattr(VoiceControlPanel, "update_rms")
+        # Instance-level: building the panel must not create a barra_rms widget.
+        panel = VoiceControlPanel(
+            parent_frame=mock_parent, ui_state=ui_state, logger=mock_logger,
+            on_log=mock_logger.info, on_motor_event=MagicMock(), on_pipeline_change=MagicMock(),
+        )
+        panel.create_voice_panel()
+        assert not hasattr(panel, "barra_rms")
+        panel.cleanup()

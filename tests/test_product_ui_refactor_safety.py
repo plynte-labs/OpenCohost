@@ -301,3 +301,11 @@ def test_kira_response_panel_is_compact_and_scrollable() -> None:
     assert "height=130" in source
     assert "wrap=\"word\"" in source
     assert "font=ctk.CTkFont(size=14)" in source
+
+
+def test_ptt_threshold_constant_removed() -> None:
+    """WU 1.3 (qwen_tts_extirpation_20260627): PTT_RMS_THRESHOLD was a dead,
+    docs-only constant with zero code consumers. It must be gone from settings."""
+    import opencohost.config.settings as settings
+
+    assert not hasattr(settings, "PTT_RMS_THRESHOLD")
