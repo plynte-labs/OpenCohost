@@ -219,7 +219,11 @@ class TestMarshalingViaScheduleUiUpdate:
         _flush(deps)
         widget.configure.assert_called()
 
-    def test_on_motor_ready_btn_grabar_not_mutated_inline(self):
+    def test_on_motor_ready_btn_grabar_not_mutated_inline(self, monkeypatch):
+        # btn_grabar is heavy-TTS-gated (qwen_tts_extirpation WU 1.2); force the
+        # opt-in so the marshaling path is still exercised.
+        import opencohost.ui.motor_event_handlers as meh
+        monkeypatch.setattr(meh, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True, raising=False)
         self._assert_configure_not_called_before_flush("btn_grabar", "ready")
 
     def test_on_motor_ready_btn_enviar_not_mutated_inline(self):
@@ -228,7 +232,9 @@ class TestMarshalingViaScheduleUiUpdate:
     def test_on_motor_model_warming_btn_download_not_mutated_inline(self):
         self._assert_configure_not_called_before_flush("btn_download", "model_warming")
 
-    def test_on_motor_ollama_unavailable_btn_grabar_not_mutated_inline(self):
+    def test_on_motor_ollama_unavailable_btn_grabar_not_mutated_inline(self, monkeypatch):
+        import opencohost.ui.motor_event_handlers as meh
+        monkeypatch.setattr(meh, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True, raising=False)
         self._assert_configure_not_called_before_flush("btn_grabar", "ollama_unavailable")
 
     def test_on_motor_processing_btn_enviar_not_mutated_inline(self):
@@ -261,6 +267,41 @@ class TestMarshalingViaScheduleUiUpdate:
         deps["set_title"].assert_not_called()
         _flush(deps)
         deps["set_title"].assert_called()
+
+
+# ---------------------------------------------------------------------------
+# 6. Reference-voice cluster is heavy-TTS-gated (qwen_tts_extirpation WU 1.2)
+# ---------------------------------------------------------------------------
+
+class TestReferenceClusterFlagGate:
+    """on_motor_ready enables btn_grabar/btn_voz (the heavy-TTS reference cluster)
+    ONLY when heavy TTS is opted in. The light controls (btn_ws / btn_enviar /
+    btn_primary_voice) are always enabled, regardless of the flag."""
+
+    def _ready(self, monkeypatch, flag):
+        import opencohost.ui.motor_event_handlers as meh
+        monkeypatch.setattr(meh, "EXPERIMENTAL_HEAVY_TTS_ENABLED", flag, raising=False)
+        deps = _make_deps()
+        table = meh.get_handler_map(deps)
+        table["ready"]()
+        _flush(deps)
+        return deps
+
+    def test_reference_cluster_enabled_on_ready_when_flag_on(self, monkeypatch):
+        deps = self._ready(monkeypatch, True)
+        deps["btn_grabar"].configure.assert_called_with(state="normal")
+        deps["btn_voz"].configure.assert_called_with(state="normal")
+
+    def test_reference_cluster_not_enabled_on_ready_when_flag_off(self, monkeypatch):
+        deps = self._ready(monkeypatch, False)
+        deps["btn_grabar"].configure.assert_not_called()
+        deps["btn_voz"].configure.assert_not_called()
+
+    def test_light_controls_enabled_on_ready_regardless_of_flag(self, monkeypatch):
+        deps = self._ready(monkeypatch, False)
+        deps["btn_ws"].configure.assert_called_with(state="normal")
+        deps["btn_enviar"].configure.assert_called_with(state="normal")
+        deps["btn_primary_voice"].configure.assert_called_with(state="normal")
 
 
 # ---------------------------------------------------------------------------

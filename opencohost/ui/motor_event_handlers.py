@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from opencohost.avatar.avatar_state import AvatarState
 from opencohost.config.logger import get_logger
+from opencohost.config.settings import EXPERIMENTAL_HEAVY_TTS_ENABLED
 
 logger = get_logger()
 
@@ -50,8 +51,12 @@ def on_motor_ready(
 ) -> None:
     """Motor reached 'ready' state — enable all primary controls."""
     ui_state.model_status = "ready"
-    schedule_ui_update(lambda: btn_grabar.configure(state="normal"))
-    schedule_ui_update(lambda: btn_voz.configure(state="normal"))
+    # btn_grabar/btn_voz are the heavy-TTS reference-voice cluster — only enable
+    # them when heavy TTS is opted in (qwen_tts_extirpation_20260627 WU 1.2).
+    # btn_ws/btn_enviar/btn_primary_voice belong to the light path: always enabled.
+    if EXPERIMENTAL_HEAVY_TTS_ENABLED:
+        schedule_ui_update(lambda: btn_grabar.configure(state="normal"))
+        schedule_ui_update(lambda: btn_voz.configure(state="normal"))
     schedule_ui_update(lambda: btn_ws.configure(state="normal"))
     schedule_ui_update(lambda: btn_primary_voice.configure(state="normal"))
     schedule_ui_update(lambda: btn_enviar.configure(state="normal"))
@@ -100,8 +105,10 @@ def on_motor_ollama_unavailable(
     **_: Any,
 ) -> None:
     """Ollama is not reachable — disable all controls and show error state."""
-    schedule_ui_update(lambda: btn_grabar.configure(state="disabled"))
-    schedule_ui_update(lambda: btn_voz.configure(state="disabled"))
+    # Reference-voice cluster is gated (WU 1.2); only touch it when opted in.
+    if EXPERIMENTAL_HEAVY_TTS_ENABLED:
+        schedule_ui_update(lambda: btn_grabar.configure(state="disabled"))
+        schedule_ui_update(lambda: btn_voz.configure(state="disabled"))
     schedule_ui_update(lambda: btn_ws.configure(state="disabled"))
     schedule_ui_update(lambda: btn_primary_voice.configure(state="disabled"))
     schedule_ui_update(lambda: btn_enviar.configure(state="disabled"))

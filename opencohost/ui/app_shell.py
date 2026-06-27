@@ -711,9 +711,15 @@ class VocalAIApp(ctk.CTk):
         # Audio tab
         frame_audio = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_audio.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        ctk.CTkLabel(frame_audio, text="Dispositivo de audio", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        # Reference-voice cluster (mic device selector + record/load WAV) — heavy-TTS
+        # ONLY. It exists solely to provide a reference voice for Qwen3-TTS
+        # (motor=pesado): the recorded/loaded WAV feeds voz_referencia, read only on
+        # the heavy path. Mic capture for LiveVoice/PTT happens in the external STT
+        # server, not here. Widgets are always CREATED (attributes always exist) but
+        # only shown when the experimental heavy path is opted in; otherwise hidden.
+        # (qwen_tts_extirpation_20260627 WU 1.2.)
+        lbl_dispositivo = ctk.CTkLabel(frame_audio, text="Dispositivo de audio", font=ctk.CTkFont(size=13, weight="bold"), anchor="w")
         self.combo_dispositivos = ctk.CTkOptionMenu(frame_audio, values=self.lista_dispositivos, command=self._al_seleccionar_dispositivo, width=300)
-        self.combo_dispositivos.pack(fill="x", padx=10, pady=4)
         if self.lista_dispositivos:
             self.combo_dispositivos.set(self.lista_dispositivos[0])
             self.dispositivo_seleccionado = int(self.lista_dispositivos[0].split(":")[0])
@@ -724,11 +730,14 @@ class VocalAIApp(ctk.CTk):
             if self.status_bar:
                 self.status_bar.update_mic_status("disconnected")
         audio_buttons = ctk.CTkFrame(frame_audio, fg_color="transparent")
-        audio_buttons.pack(fill="x", padx=10, pady=4)
         self.btn_grabar = ctk.CTkButton(audio_buttons, text="🎤 Grabar", command=self._iniciar_grabacion, state="disabled", width=90, fg_color="#555555", hover_color="#666666")
-        self.btn_grabar.pack(side="left", expand=True, fill="x", padx=(0, 4))
         self.btn_voz = ctk.CTkButton(audio_buttons, text="📂 Cargar WAV", command=self._cargar_voz, state="disabled", fg_color="#555555", width=110)
-        self.btn_voz.pack(side="left", expand=True, fill="x", padx=(4, 0))
+        if EXPERIMENTAL_HEAVY_TTS_ENABLED:
+            lbl_dispositivo.pack(fill="x", padx=10, pady=(10, 4))
+            self.combo_dispositivos.pack(fill="x", padx=10, pady=4)
+            audio_buttons.pack(fill="x", padx=10, pady=4)
+            self.btn_grabar.pack(side="left", expand=True, fill="x", padx=(0, 4))
+            self.btn_voz.pack(side="left", expand=True, fill="x", padx=(4, 0))
         # LiveAudio section
         frame_liveaudio = ctk.CTkFrame(frame_audio, fg_color="#101923", corner_radius=10)
         frame_liveaudio.pack(fill="x", padx=10, pady=(8, 0))
