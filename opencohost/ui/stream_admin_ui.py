@@ -195,16 +195,26 @@ class StreamAdminUI:
         metadata_section.grid_columnconfigure(0, weight=1)
         self._build_metadata_tab(metadata_section)
 
-        # Chat Live (RF3) is the only Acciones section exposed for launch, so it
-        # renders directly (no collapsible). Kira Chat (RF4) and Moderación stay
-        # behind STREAM_ADMIN_ENABLED; their _build_chat_tab / _build_moderation_tab
-        # methods are intentionally retained (flag-gated, covered by tests) but are
-        # no longer wired into this view — flipping the flag will not restore them
-        # here without re-adding the render calls above.
+        # Chat Live (RF3) is the only Acciones section exposed for the launch UI;
+        # it renders directly (no collapsible). Kira Chat (RF4) + Moderación are
+        # flag-gated: rendered only when STREAM_ADMIN_ENABLED, so flipping the flag
+        # restores the full Acciones surface (and the widget-contract tests pass),
+        # while the launch default (flag False) stays decluttered.
         chat_live_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
         chat_live_section.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         chat_live_section.grid_columnconfigure(0, weight=1)
         self._build_chat_live_tab(chat_live_section)
+
+        if STREAM_ADMIN_ENABLED:
+            chat_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
+            chat_section.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+            chat_section.grid_columnconfigure(0, weight=1)
+            self._build_chat_tab(chat_section)
+
+            moderation_section = ctk.CTkFrame(actions_sections, fg_color="transparent")
+            moderation_section.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+            moderation_section.grid_columnconfigure(0, weight=1)
+            self._build_moderation_tab(moderation_section)
 
         return parent
 
