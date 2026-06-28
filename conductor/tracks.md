@@ -4,6 +4,24 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: RAM / LLM Hardening — VRAM-honest core for the RTX 3060 12GB**
+  *Link: [./tracks/ram_llm_hardening_20260626/](./tracks/ram_llm_hardening_20260626/) (plan.md, gitignored)*
+  *Status 2026-06-27: Phase 0 DONE + runtime-validated (commit 6c7c1f3): LLM_KEEP_ALIVE="7m" (was -1 = models pinned in RAM forever) at the 3 call sites (warm-up/chat/Vibe) + OLLAMA_NUM_PARALLEL=1 / OLLAMA_MAX_LOADED_MODELS=1 setdefault at ollama_startup. Owner 2h40m live session confirmed: idle models release, single-model switching, zero crashes/OOM. A4 (per-tier num_ctx caps fast=6144 / balanced=quality=4096) APPROVED, NOT implemented. Phases 2-5 (RAMGuard via psutil, wire the dead can_vibe_call gate, steady-state stall escape ladder, OOM classify+recover, cancellable watchdog) planned, NOT started. Engram: ram-llm-hardening/plan, /phase0-runtime-validation.*
+
+---
+
+- [~] **Track: Qwen Heavy TTS Extirpation — dormant now, separable mod later**
+  *Link: [./tracks/qwen_tts_extirpation_20260627/](./tracks/qwen_tts_extirpation_20260627/) (proposal.md, gitignored)*
+  *Status 2026-06-27: Phase 1 DONE (commits e89903b, 5a1a3b3, 6925070): EXPERIMENTAL_HEAVY_TTS_ENABLED → env opt-in only; reference-voice cluster (mic selector + 🎤 Grabar + 📂 Cargar WAV) gated behind the flag; FAKE random.uniform RMS bar + dead PTT_RMS_THRESHOLD + unwired duplicate recorder DELETED. Rationale: heavy TTS competes with the LLM for the 12GB VRAM → extirpate to a mod, not delete. Phases 2 (modularize behind a HeavyTtsProvider seam) + 3 (extract to a separate project, drop the heavy-tts pyproject extra) DOCUMENTED, NOT scheduled. Surfaced+fixed a regression (commit 47b8006): demo-polish 041d276 removed the RF4 _build_chat/_moderation calls unconditionally → re-added under `if STREAM_ADMIN_ENABLED`. Engram: qwen-tts-extirpation/*.*
+
+---
+
+- [~] **Track: PTT Key-Up Reconcile — fix stuck-listening / dropped key-up**
+  *Link: [./tracks/ptt_keyup_reconcile_20260627/](./tracks/ptt_keyup_reconcile_20260627/) (proposal.md, gitignored)*
+  *Status 2026-06-27: IMPLEMENTED (commits 7d11e61, 8df3ccb, e936492), runtime validation OWED. Root cause: a dropped global key-up (pynput misses it when focus is on another app) left _pressed=True forever → avatar stuck "listening" AND next press rejected by the `not self._pressed` guard. Fix: poll physical key state via GetAsyncKeyState (stdlib ctypes, no dep) from a perpetual app_shell after(250); key physically down → hold indefinitely (NO timeout, biblia-safe); up for N=2 debounce polls → re-inject the release THROUGH the stored outer callback so the buffer FLUSHES (not just the avatar reset). Fail-open on non-Windows / any probe error. Owner decision D2: PTT dictation cap raised 500→2000 chars. RUNTIME GATE (owner): hold PTT, switch focus to drop a key-up, confirm self-heal ~750ms + next press registers. X-mouse-button path intentionally unverified (owner uses keyboard). Also: OBS reconnect log-spam silenced (commit a17b0c4, one-line obsws logger to CRITICAL — not a track). Engram: ptt-keyup-reconcile/proposal, obs-reconnect-quiet-and-ptt-followup.*
+
+---
+
 - [x] **Track: Kira Demo Polish — Offline Voice Toggle, UI Refinements, Startup Robustness**
   *Link: engram-only (no folder; hackathon-style direct implementation)*
   *Status 2026-06-26: DONE (commit 300e20a on feat/ui-design-system-20260625, NOT merged to master).
