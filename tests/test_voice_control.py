@@ -601,6 +601,15 @@ class TestPTTFlushWatcher:
         assert fake_stop.wait_calls == [0.5, 0.5]
 
 
+class TestPTTBufferCap:
+    """D2 owner decision: the PTT buffer cap is raised so the 'biblia' is not
+    truncated to ~500 chars (~30-40s) before the missed-key-up flush delivers it.
+    """
+
+    def test_ptt_buffer_cap_is_raised_to_2000(self, voice_panel):
+        assert voice_panel._ptt_max_chars == 2000
+
+
 class TestWebSocketMessageHandling:
     """Test WebSocket message reception and processing."""
 

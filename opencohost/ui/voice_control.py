@@ -108,7 +108,10 @@ class VoiceControlPanel:
 
         # PTT transcription buffer with grace period
         self._ptt_buffer: str = ""
-        self._ptt_max_chars: int = 500
+        # D2 (ptt_keyup_reconcile_20260627): raised 500 → 2000 so a long held
+        # dictation (the 'biblia') is not truncated to ~30-40s before the
+        # missed-key-up flush delivers it. ~2000 chars ≈ a few minutes of speech.
+        self._ptt_max_chars: int = 2000
         self._ptt_grace_period: float = 5.0
         self._ptt_grace_deadline: float = 0.0
         self._ptt_prev_active: bool = False  # track press→release transition
