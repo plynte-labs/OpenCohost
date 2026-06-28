@@ -19,7 +19,7 @@ import customtkinter as ctk
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from tkinter import filedialog
+from tkinter import filedialog, TclError
 import tkinter.messagebox as messagebox
 from pynput import keyboard, mouse
 from opencohost.ui.state import UIState
@@ -224,6 +224,10 @@ class VocalAIApp(ctk.CTk):
         self.after(50, self._process_ui_tasks)
         self.after(100, self._process_logs)
         self.after(500, self._aplicar_perfil_actual)
+        # Drive the PTT physical key-state reconcile (self.ptt exists since :159).
+        # Single perpetual after(250); removing this line disables the whole
+        # missed-key-up feature (kill switch).
+        self.after(250, self._ptt_reconcile_tick)
         self._print_log(f"[Sistema] PTT hotkey cargada: {self.ptt.hotkey}")
         logger.info("Aplicación OpenCohost iniciada.")
 
@@ -297,6 +301,35 @@ class VocalAIApp(ctk.CTk):
         self._check_motor_heartbeat()
         # Reschedule every 2 seconds for UI responsiveness
         self.after(2000, self._poll_health_status)
+
+    def _ptt_reconcile_tick(self) -> None:
+        """Drive PTTManager's physical key-state reconcile from the Tk main thread.
+
+        Perpetual after(250) loop. When the PTT key is held but its key-up event
+        was dropped, the reconcile re-injects the release here — on the main
+        thread, which is strictly safer than the pynput thread for UI mutation.
+        Costs one branch when idle and one GetAsyncKeyState call only while held.
+
+        [D5] Teardown-guarded: a tick can fire once during Tk teardown and touch
+        self.ptt after destroy (TclError). The _closing guard ends the loop
+        cleanly; the try/except blocks are belt-and-suspenders so a teardown race
+        or transient probe error never crashes the loop or the app.
+        """
+        if getattr(self, "_closing", False):
+            return
+        try:
+            ptt = getattr(self, "ptt", None)
+            if ptt is not None:
+                ptt._reconcile_step()
+        except Exception:
+            # Teardown race (TclError) or transient probe error — never crash.
+            pass
+        if not getattr(self, "_closing", False):
+            try:
+                self.after(250, self._ptt_reconcile_tick)
+            except (RuntimeError, TclError):
+                pass
+
     def _check_motor_heartbeat(self) -> None:
         """Surface an operator-visible warning if MotorVocalIA dies after startup."""
         motor = getattr(self, "motor_ia", None)
