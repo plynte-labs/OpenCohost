@@ -639,3 +639,187 @@ class TestStateProperties:
     def test_listener_default_none(self, ptt_manager):
         """Listener should be None before start."""
         assert ptt_manager.listener is None
+
+
+# ── Phase 2: physical key-state reconciliation (missed key-up self-heal) ──
+#
+# These tests patch the BOOLEAN SEAM `_is_vk_physically_down` (never ctypes), so
+# they run safely under the pynput sys.modules mock. VK-resolution and signedness
+# live in tests/test_ptt_keystate_resolution.py (real pynput, per D4).
+
+
+def _idle_emits(state_cb):
+    """All ``_emit_state('idle')`` calls captured on a mock state callback."""
+    return [c for c in state_cb.call_args_list if c.args == ("idle",)]
+
+
+class _FakeVoicePanel:
+    """Stand-in for VoiceControlPanel: records release calls and grace resets."""
+
+    def __init__(self):
+        self.release_calls = 0
+        self.grace_deadline = 0.0
+
+    def on_ptt_release(self):
+        # Mirrors voice_control.on_ptt_release: each call (re)opens the grace
+        # window by pushing the deadline later — idempotent by construction.
+        self.release_calls += 1
+        self.grace_deadline = self.grace_deadline + 5.0
+
+
+class TestPTTReconcile:
+    """Reconcile step, debounce (N=2), biblia-safety, fail-open, idempotency."""
+
+    def _arm_keyboard(self, mgr, state_cb=None):
+        """Arm a held keyboard PTT routed through the inner release handler."""
+        if state_cb is not None:
+            mgr.set_state_callback(state_cb)
+        mgr._target = ("keyboard", mock_keyboard_key.f8)
+        # In production this is app_shell._on_ptt_release (the OUTER wrapper);
+        # the manager-scoped faithful minimum is the inner handler.
+        mgr._on_release_cb = mgr.on_ptt_release
+        mgr._pressed = True
+
+    def test_missed_keyup_fires_release_once(self, ptt_manager, monkeypatch):
+        from opencohost.ui import ptt_manager as ptt_mod
+        state_cb = MagicMock()
+        self._arm_keyboard(ptt_manager, state_cb)
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: False)
+
+        ptt_manager._reconcile_step()          # count=1, below debounce
+        assert ptt_manager.active is True
+        assert _idle_emits(state_cb) == []
+
+        ptt_manager._reconcile_step()          # count=2 → fire release
+        assert ptt_manager.active is False
+        assert len(_idle_emits(state_cb)) == 1
+
+        state_cb.reset_mock()
+        ptt_manager._reconcile_step()          # _pressed False → no-op
+        assert _idle_emits(state_cb) == []
+        assert ptt_manager.active is False
+
+    def test_debounce_ignores_single_transient(self, ptt_manager, monkeypatch):
+        from opencohost.ui import ptt_manager as ptt_mod
+        state_cb = MagicMock()
+        self._arm_keyboard(ptt_manager, state_cb)
+        seq = iter([False, True])
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: next(seq))
+
+        ptt_manager._reconcile_step()          # False → count=1
+        ptt_manager._reconcile_step()          # True  → counter reset
+        assert ptt_manager.active is True
+        assert _idle_emits(state_cb) == []
+        assert ptt_manager._missed_up_count == 0
+
+    def test_long_hold_never_releases(self, ptt_manager, monkeypatch):
+        """Biblia: a multi-minute hold reads down every poll → never cut."""
+        from opencohost.ui import ptt_manager as ptt_mod
+        state_cb = MagicMock()
+        self._arm_keyboard(ptt_manager, state_cb)
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: True)
+
+        for _ in range(1000):
+            ptt_manager._reconcile_step()
+
+        assert ptt_manager.active is True
+        assert _idle_emits(state_cb) == []
+
+    def test_failopen_none_never_releases(self, ptt_manager, monkeypatch):
+        """Probe None (non-Windows / missing windll) → never releases."""
+        from opencohost.ui import ptt_manager as ptt_mod
+        state_cb = MagicMock()
+        self._arm_keyboard(ptt_manager, state_cb)
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: None)
+
+        for _ in range(10):
+            ptt_manager._reconcile_step()
+
+        assert ptt_manager.active is True
+        state_cb.assert_not_called()
+
+    def test_no_double_fire_when_real_release_first(self, ptt_manager, monkeypatch):
+        """A late real key-up flips _pressed first → reconcile emits nothing."""
+        from opencohost.ui import ptt_manager as ptt_mod
+        state_cb = MagicMock()
+        self._arm_keyboard(ptt_manager, state_cb)
+
+        # Real release on the pynput thread wins the race.
+        ptt_manager.on_ptt_release(mock_keyboard_key.f8)
+        assert ptt_manager.active is False
+        assert len(_idle_emits(state_cb)) == 1
+
+        state_cb.reset_mock()
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: False)
+        ptt_manager._reconcile_step()
+        ptt_manager._reconcile_step()
+        assert _idle_emits(state_cb) == []
+
+    def test_duplicate_wrapper_release_is_idempotent(self, ptt_manager):
+        """D1: avatar dedupes to one emit; wrapper grace-reset is harmless."""
+        state_cb = MagicMock()
+        ptt_manager.set_state_callback(state_cb)
+        ptt_manager._target = ("keyboard", mock_keyboard_key.f8)
+        ptt_manager._pressed = True
+
+        # (a) inner avatar layer: two releases → exactly one "idle" emit.
+        ptt_manager.on_ptt_release(mock_keyboard_key.f8)   # clears + emits
+        ptt_manager.on_ptt_release(mock_keyboard_key.f8)   # _pressed False → skip
+        assert len(_idle_emits(state_cb)) == 1
+        assert ptt_manager.active is False
+
+        # (b) wrapper side-effect: repeated voice-panel release only re-opens the
+        # grace window (never raises) — duplicate side-effects are idempotent.
+        voice = _FakeVoicePanel()
+        d0 = voice.grace_deadline
+        voice.on_ptt_release()
+        d1 = voice.grace_deadline
+        voice.on_ptt_release()
+        d2 = voice.grace_deadline
+        assert voice.release_calls == 2
+        assert d1 > d0 and d2 > d1
+
+    def test_mouse_missed_release_reinjects_click(self, ptt_manager, monkeypatch):
+        from opencohost.ui import ptt_manager as ptt_mod
+        clicks = []
+        ptt_manager._target = ("mouse", mock_mouse_button.x1)
+        ptt_manager._on_click_cb = (
+            lambda x, y, button, pressed: clicks.append((x, y, button, pressed))
+        )
+        ptt_manager._pressed = True
+        monkeypatch.setattr(ptt_mod, "_is_vk_physically_down", lambda vk: False)
+
+        ptt_manager._reconcile_step()          # count=1
+        assert clicks == []
+        ptt_manager._reconcile_step()          # count=2 → reinject click
+        assert len(clicks) == 1
+        x, y, button, pressed = clicks[0]
+        assert (x, y) == (0, 0)
+        assert button is mock_mouse_button.x1
+        assert pressed is False
+
+    def test_start_listener_stashes_callbacks(self, ptt_manager):
+        on_press, on_release, on_click = MagicMock(), MagicMock(), MagicMock()
+        ptt_manager._hotkey = "F8"  # keyboard target
+        assert ptt_manager.start_listener(on_press, on_release, on_click) is True
+        assert ptt_manager._on_release_cb is on_release
+        assert ptt_manager._on_click_cb is on_click
+
+    def test_ensure_listener_stashes_callbacks(self, ptt_manager):
+        on_press, on_release, on_click = MagicMock(), MagicMock(), MagicMock()
+        ptt_manager._hotkey = "F8"
+        ptt_manager.enabled = True
+        ptt_manager._listener = None
+        ptt_manager._mapping = False
+        assert ptt_manager.ensure_listener(on_press, on_release, on_click) is True
+        assert ptt_manager._on_release_cb is on_release
+        assert ptt_manager._on_click_cb is on_click
+
+    def test_stop_listener_clears_stash_and_counter(self, ptt_manager):
+        ptt_manager._on_release_cb = MagicMock()
+        ptt_manager._on_click_cb = MagicMock()
+        ptt_manager._missed_up_count = 1
+        ptt_manager.stop_listener()
+        assert ptt_manager._on_release_cb is None
+        assert ptt_manager._on_click_cb is None
+        assert ptt_manager._missed_up_count == 0

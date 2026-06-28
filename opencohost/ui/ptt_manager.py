@@ -6,7 +6,9 @@ PTT state management. Thread-safe for concurrent UI and audio access.
 """
 
 import os
+import sys
 import json
+import ctypes
 import threading
 from typing import Any, Callable, Optional
 
@@ -31,10 +33,65 @@ _PTT_MOUSE_MAP = {
     "Mouse5": mouse.Button.x1,
 }
 
+# ── Physical Win32 VK codes for the GetAsyncKeyState probe ──
+# Keyboard keys carry their VK directly via `.value.vk` (no parallel table to
+# drift). Mouse Buttons do NOT — `Button.x1.value` is a tuple, not a VK — so the
+# X-buttons need an explicit map KEYED OFF THE PYNPUT Button OBJECT. Keying off
+# the Button (x1 -> 0x05, x2 -> 0x06) sidesteps the inverted display labels in
+# `_PTT_MOUSE_MAP`, which only affect UI text.
+_PTT_MOUSE_VK_MAP = {
+    mouse.Button.x1: 0x05,  # VK_XBUTTON1
+    mouse.Button.x2: 0x06,  # VK_XBUTTON2
+}
+
 # Mapa inverso: pynput key → display name
 _PTT_REVERSE_MAP: dict = {}
 _PTT_REVERSE_MAP.update({v: k for k, v in _PTT_KB_MAP.items()})
 _PTT_REVERSE_MAP.update({v: k for k, v in _PTT_MOUSE_MAP.items()})
+
+
+# ── Physical key-state probe (stdlib ctypes; fail-open everywhere) ──
+
+def _resolve_get_async_key_state():
+    """Resolve user32.GetAsyncKeyState once at import; None if unavailable.
+
+    Fail-open: on non-Windows, a missing `windll`, or any ctypes error this
+    returns None and the reconcile becomes a byte-for-byte no-op.
+    """
+    if sys.platform != "win32" or not hasattr(ctypes, "windll"):
+        return None
+    try:
+        fn = ctypes.windll.user32.GetAsyncKeyState
+        fn.argtypes = [ctypes.c_int]
+        fn.restype = ctypes.c_short
+        return fn
+    except Exception:
+        return None
+
+
+_GET_ASYNC_KEY_STATE = _resolve_get_async_key_state()
+
+
+def _is_vk_physically_down(vk):
+    """Return True/False for the real physical key state, or None if unprobeable.
+
+    [E1 — load-bearing] `restype = c_short` returns a SIGNED value, so a held key
+    reads NEGATIVE (e.g. -32768). The high bit (& 0x8000) is the 'currently down'
+    flag and is correct because Python's arbitrary-precision two's complement makes
+    `-32768 & 0x8000 == 0x8000`. Do NOT 'simplify' this to `fn(vk) > 0`: a held key
+    would then read False and the reconcile would fire a spurious release on every
+    real hold. The low bit (pressed-since-last-call / toggle) is ignored.
+
+    Fail-open: None when the probe is unavailable, the VK is unresolved, or the
+    ctypes call raises — the reconcile then behaves exactly as today.
+    """
+    fn = _GET_ASYNC_KEY_STATE
+    if fn is None or vk is None:
+        return None
+    try:
+        return bool(fn(vk) & 0x8000)
+    except Exception:
+        return None
 
 
 class PTTManager:
@@ -49,6 +106,11 @@ class PTTManager:
     - State properties (enabled, active, mapping): Simple bools read/written
       under the appropriate lock or from the main thread only.
     """
+
+    # Consecutive "physically up" polls required before declaring a missed
+    # key-up. Biblia-safe: a real hold reads down on every poll so the counter
+    # never accumulates; a missed key-up is persistent and trips within ~500ms.
+    _MISSED_UP_DEBOUNCE = 2
 
     def __init__(
         self,
@@ -78,6 +140,14 @@ class PTTManager:
         self._enabled = False
         self._pressed = False  # Is the hotkey currently held down?
         self._hotkey = self._load_config()
+
+        # Physical key-state reconciliation (missed key-up self-heal).
+        # Stash the OUTER release/click callbacks so a synthesized release routes
+        # the full path (app_shell wrapper → on_ptt_release → voice flush), not
+        # just the avatar reset. Cleared in stop_listener.
+        self._on_release_cb: Optional[Callable] = None
+        self._on_click_cb: Optional[Callable] = None
+        self._missed_up_count = 0
 
         # Callbacks (set by UI)
         self._on_status_change: Optional[Callable[[str, str], None]] = None
@@ -188,6 +258,10 @@ class PTTManager:
                 return False
             self._listener.daemon = True
             self._target = (kind, target)
+            # Stash the outer callbacks so the reconcile can re-inject a missed
+            # key-up through the SAME path a real event takes (incl. the flush).
+            self._on_release_cb = on_release
+            self._on_click_cb = on_click
             self._listener.start()
             self._log(f"[PTT] Listener iniciado: kind={kind} target={target}")
             return True
@@ -202,6 +276,11 @@ class PTTManager:
                     self._log(f"[PTT] Error stopping listener: {e}")
                 self._listener = None
             self._pressed = False
+            # Clear reconcile stash + counter so a stale callback can never fire
+            # after the listener is gone.
+            self._on_release_cb = None
+            self._on_click_cb = None
+            self._missed_up_count = 0
             self._log("[PTT] Listener detenido")
 
     def ensure_listener(
@@ -234,6 +313,11 @@ class PTTManager:
                     return False
                 self._listener.daemon = True
                 self._target = (kind, target)
+                # Re-stash here (restart branch) where the params are in scope.
+                # The early-return path keeps the prior stash valid — the bound
+                # wrappers are identity-stable across motor restart.
+                self._on_release_cb = on_release
+                self._on_click_cb = on_click
                 self._listener.start()
                 self._log(f"[PTT] Listener reconciliado: kind={kind} target={target}")
                 return True
@@ -308,6 +392,71 @@ class PTTManager:
         self._hotkey = hotkey
         self._save_config(hotkey)
         self._log(f"[PTT] Hotkey aplicada: {hotkey}")
+
+    # ── Physical key-state reconciliation (missed key-up self-heal) ──
+
+    def _resolve_target_vk(self) -> Optional[int]:
+        """Resolve the Win32 VK for the currently stored pynput target.
+
+        Keyed off `self._target[1]` (the pynput object), NEVER the display label,
+        so the inverted mouse display map never leaks in. Keyboard keys expose the
+        VK via `.value.vk`; mouse X-buttons use the explicit `_PTT_MOUSE_VK_MAP`.
+        Returns None on any failure → fail-open.
+        """
+        target = self._target
+        if not target:
+            return None
+        kind, obj = target
+        if kind == "keyboard":
+            try:
+                return obj.value.vk
+            except Exception:
+                return None
+        if kind == "mouse":
+            return _PTT_MOUSE_VK_MAP.get(obj)
+        return None
+
+    def _reconcile_step(self) -> None:
+        """Reconcile a held PTT key against the REAL physical key state.
+
+        Pure/synchronous; driven by app_shell's perpetual ``after(250)`` loop.
+        While ``_pressed``, polls ``GetAsyncKeyState``. If the key has been
+        physically up for ``_MISSED_UP_DEBOUNCE`` consecutive polls, the key-up
+        event was dropped → re-inject the release THROUGH the stored OUTER
+        callback so the buffer flush fires (not just the avatar reset).
+
+        Load-bearing details:
+        - NO time limit: a real multi-minute hold reads down on essentially every
+          poll, so the counter never accumulates (biblia-safe).
+        - Fail-open: a None probe result (non-Windows / unresolved VK / ctypes
+          error) is a no-op, byte-for-byte identical to today.
+        - Does NOT pre-clear ``_pressed``: the outer wrapper reads ``was_active``
+          BEFORE the inner clear, so ``_pressed`` MUST still be True when the
+          synthesized callback runs or the flush is skipped. Let the inner
+          ``on_ptt_release`` flip it.
+        - Must NOT hold ``_listener_lock`` while invoking the stashed callback —
+          the callback path acquires it; avoid self-deadlock. This runs on the Tk
+          main thread, so the lock is simply not held across the call.
+        """
+        if not self._pressed:
+            self._missed_up_count = 0
+            return
+        down = _is_vk_physically_down(self._resolve_target_vk())
+        if down is None:                       # fail-open → behave as today
+            return
+        if down:
+            self._missed_up_count = 0
+            return
+        self._missed_up_count += 1
+        if self._missed_up_count < self._MISSED_UP_DEBOUNCE:
+            return
+        self._missed_up_count = 0
+        kind, target = self._target or (None, None)
+        if kind == "keyboard" and self._on_release_cb:
+            # → app_shell._on_ptt_release → PTTManager.on_ptt_release → flush
+            self._on_release_cb(target)
+        elif kind == "mouse" and self._on_click_cb:
+            self._on_click_cb(0, 0, target, False)
 
     # ── PTT event handlers (for use with pynput) ──
 
