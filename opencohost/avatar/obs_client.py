@@ -25,6 +25,13 @@ from opencohost.config.logger import get_logger
 
 logger = get_logger()
 
+# Silence obsws-python's own logger: on every failed connection it calls
+# self.logger.exception() (baseclient.py:47), dumping a full ConnectionRefused
+# traceback for each 5s retry while OBS is closed. Our [OBS] messages already
+# report status cleanly, and genuine OBS errors still surface via
+# obs_lifecycle's except/logger.exception. (obs_reconnect_quiet — ponytail.)
+logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
+
 _SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 
 

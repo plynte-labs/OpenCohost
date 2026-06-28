@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,14 @@ import pytest
 
 from opencohost.avatar.obs_client import OBSClient, OBSConfig
 from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
+
+
+def test_obsws_logger_silenced_on_import():
+    """Importing obs_client silences obsws-python's own logger so its per-retry
+    logger.exception() tracebacks (baseclient.py:47) stop spamming the log while
+    OBS is closed. Our [OBS] messages report status cleanly; genuine errors still
+    surface via obs_lifecycle's except/logger.exception. (ponytail one-liner.)"""
+    assert logging.getLogger("obsws_python").level >= logging.CRITICAL
 
 
 class TestOBSConfig:
