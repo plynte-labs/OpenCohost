@@ -710,8 +710,6 @@ class VocalAIApp(ctk.CTk):
         tab_cfg_admin.grid_remove()
         self._cfg_subtab_data["ayuda"]["frame"] = tab_cfg_admin
         tab_cfg_admin.grid_rowconfigure(0, weight=1)
-        tab_cfg_admin.grid_remove()
-        self._cfg_subtab_data["ayuda"]["frame"] = tab_cfg_admin
         # Model panel
         frame_model = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
         frame_model.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
