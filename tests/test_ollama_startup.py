@@ -142,8 +142,6 @@ def test_start_env_includes_ollama_models_path() -> None:
         "OLLAMA_NUM_PARALLEL": "1",
         "OLLAMA_MAX_LOADED_MODELS": "1",
         "OLLAMA_FLASH_ATTENTION": "1",
-        "OLLAMA_KV_CACHE_TYPE": "q8_0",
-        "OLLAMA_GPU_OVERHEAD": str(1024 * 1024 * 1024),
     }
 
 
@@ -178,12 +176,12 @@ def test_operator_env_overrides_are_preserved() -> None:
     assert captured["env"]["OLLAMA_MAX_LOADED_MODELS"] == "1"  # default still applied
 
 
-def test_operator_env_overrides_preserve_perf_knobs() -> None:
-    """The flash-attention / KV-cache-type / GPU-overhead knobs also use
-    setdefault, so an operator who exported their own (e.g. KV f16 to dodge the
-    q8_0 precision hit, or a different VRAM reserve) keeps it; unset ones still
-    get the hardening default (ram_llm_hardening_20260626 / config-hardening,
-    ADR-023)."""
+def test_operator_can_disable_flash_attention_and_no_kv_overhead_knobs() -> None:
+    """Flash attention uses setdefault, so an operator who exported
+    OLLAMA_FLASH_ATTENTION=0 keeps it. KV-cache-type and GPU-overhead are NOT set
+    by the app: the ADR-023 spill premise they guarded did not hold at runtime
+    (gemma4:e4b is ~3.3GB resident, 100% GPU with headroom — not 9.6GB), so FA
+    stays as the one free win. See ADR-023 Runtime Correction."""
     proc = FakeProcess(poll_values=(None,))
     captured: dict[str, object] = {}
     probes = {"count": 0}
@@ -201,15 +199,15 @@ def test_operator_env_overrides_preserve_perf_knobs() -> None:
         is_ready=is_ready,
         sleep=lambda _seconds: None,
         monotonic=lambda: 0.0,
-        base_env={"OLLAMA_KV_CACHE_TYPE": "f16", "OLLAMA_GPU_OVERHEAD": "536870912"},
+        base_env={"OLLAMA_FLASH_ATTENTION": "0"},
     )
 
     result = manager.start_and_wait("ollama", "/fake/models")
 
     assert result.status == "ready"
-    assert captured["env"]["OLLAMA_KV_CACHE_TYPE"] == "f16"  # operator override preserved
-    assert captured["env"]["OLLAMA_GPU_OVERHEAD"] == "536870912"  # operator override preserved
-    assert captured["env"]["OLLAMA_FLASH_ATTENTION"] == "1"  # default still applied
+    assert captured["env"]["OLLAMA_FLASH_ATTENTION"] == "0"  # operator override preserved
+    assert "OLLAMA_KV_CACHE_TYPE" not in captured["env"]  # trimmed — app does not set it
+    assert "OLLAMA_GPU_OVERHEAD" not in captured["env"]  # trimmed — app does not set it
 
 
 def test_timeout_waiting_ready_reports_process_and_model_path_context(tmp_path) -> None:
