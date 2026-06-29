@@ -65,6 +65,20 @@ class OllamaStartupManager:
         # an operator who already exported these keeps their chosen value.
         env.setdefault("OLLAMA_NUM_PARALLEL", "1")
         env.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
+        # Performance knobs (ram_llm_hardening_20260626 / config-hardening, ADR-023):
+        # Ollama already runs the same llama.cpp engine, so these capture the
+        # reachable wins without migrating (ADR-022). Flash attention + q8_0 KV
+        # cache roughly halve KV-cache VRAM, keeping the 9.6GB gemma4:e4b quality
+        # tier off the spill cliff on a 12GB card; GPU_OVERHEAD reserves VRAM for
+        # the display so Ollama does not over-commit and force a mid-stream offload.
+        # setdefault: an operator who exported their own (e.g. KV f16) keeps it.
+        # NOTE: these are SERVER-level — only take effect for the daemon WE launch.
+        # If Ollama already runs, set them as system env vars too (see ADR-023).
+        env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
+        env.setdefault("OLLAMA_KV_CACHE_TYPE", "q8_0")
+        # ponytail: 1 GiB reserve. Tune against `ollama ps` residency — lower if it
+        # forces gemma4:e4b into partial offload, raise if the desktop starves it.
+        env.setdefault("OLLAMA_GPU_OVERHEAD", str(1024 * 1024 * 1024))
         creationflags = self._creationflags
         if creationflags is None:
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

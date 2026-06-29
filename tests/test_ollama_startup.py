@@ -141,6 +141,9 @@ def test_start_env_includes_ollama_models_path() -> None:
         "OLLAMA_MODELS": "/fake/custom-ollama-models",
         "OLLAMA_NUM_PARALLEL": "1",
         "OLLAMA_MAX_LOADED_MODELS": "1",
+        "OLLAMA_FLASH_ATTENTION": "1",
+        "OLLAMA_KV_CACHE_TYPE": "q8_0",
+        "OLLAMA_GPU_OVERHEAD": str(1024 * 1024 * 1024),
     }
 
 
@@ -173,6 +176,40 @@ def test_operator_env_overrides_are_preserved() -> None:
     assert result.status == "ready"
     assert captured["env"]["OLLAMA_NUM_PARALLEL"] == "4"  # operator override preserved
     assert captured["env"]["OLLAMA_MAX_LOADED_MODELS"] == "1"  # default still applied
+
+
+def test_operator_env_overrides_preserve_perf_knobs() -> None:
+    """The flash-attention / KV-cache-type / GPU-overhead knobs also use
+    setdefault, so an operator who exported their own (e.g. KV f16 to dodge the
+    q8_0 precision hit, or a different VRAM reserve) keeps it; unset ones still
+    get the hardening default (ram_llm_hardening_20260626 / config-hardening,
+    ADR-023)."""
+    proc = FakeProcess(poll_values=(None,))
+    captured: dict[str, object] = {}
+    probes = {"count": 0}
+
+    def is_ready() -> bool:
+        probes["count"] += 1
+        return probes["count"] == 2
+
+    def popen(args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return proc
+
+    manager = OllamaStartupManager(
+        popen=popen,
+        is_ready=is_ready,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+        base_env={"OLLAMA_KV_CACHE_TYPE": "f16", "OLLAMA_GPU_OVERHEAD": "536870912"},
+    )
+
+    result = manager.start_and_wait("ollama", "/fake/models")
+
+    assert result.status == "ready"
+    assert captured["env"]["OLLAMA_KV_CACHE_TYPE"] == "f16"  # operator override preserved
+    assert captured["env"]["OLLAMA_GPU_OVERHEAD"] == "536870912"  # operator override preserved
+    assert captured["env"]["OLLAMA_FLASH_ATTENTION"] == "1"  # default still applied
 
 
 def test_timeout_waiting_ready_reports_process_and_model_path_context(tmp_path) -> None:
