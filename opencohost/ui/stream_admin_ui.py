@@ -1063,8 +1063,7 @@ class StreamAdminUI:
         title_entry = self._widget("entry_stream_title")
         category_entry = self._widget("entry_stream_category")
 
-        tags_raw = tags_entry.get().split(",") if tags_entry else ""
-        tags = [t.strip() for t in tags_raw if t.strip()] if isinstance(tags_raw, list) else []
+        tags = [t.strip() for t in tags_entry.get().split(",") if t.strip()] if tags_entry else []
         description = desc_text.get("1.0", "end").strip() if desc_text else ""
         title = title_entry.get().strip() if title_entry else ""
         category = category_entry.get().strip() if category_entry else ""
@@ -1167,8 +1166,8 @@ class StreamAdminUI:
             # Python 3.7+ dict preserves insertion order — evict oldest first.
             if len(self._chat_users) > 1000:
                 excess = len(self._chat_users) - 1000
-                for key in list(self._chat_users.keys())[:excess]:
-                    del self._chat_users[key]
+                for _ in range(excess):
+                    del self._chat_users[next(iter(self._chat_users))]
 
     def default_mod_reason(self, item: dict[str, Any]) -> str:
         """Generate a default moderation reason from a user item.
@@ -1586,16 +1585,13 @@ class StreamAdminUI:
 
         def worker() -> None:
             try:
-                result = func()
-                if result is not None:
-                    pass  # Debug logging available via dispatcher
+                func()
             except Exception as e:
                 hint = ""
                 if "Falta scope de escritura" in str(e):
                     hint = " Usa 'Reconectar Escritura' y vuelve a autorizar YouTube para aplicar cambios."
                 self._log(f"[StreamAdmin] {action_name} falló: {e}{hint}")
 
-        import threading
         threading.Thread(target=worker, daemon=True).start()
 
     def _log(self, msg: str) -> None:
