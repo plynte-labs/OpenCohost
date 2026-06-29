@@ -118,7 +118,6 @@ class MotorVocalIA(threading.Thread):
 
         # Pending model switch (non-blocking retry)
         self._pending_model_switch: Optional[str] = None
-        self._pending_switch_retries: int = 0
         self._pending_switch_next_at: float = 0.0
         self._pending_switch_not_ready_logged: bool = False
         # Last switch failure info (read by UI handler, cleared after read)
@@ -329,7 +328,6 @@ class MotorVocalIA(threading.Thread):
                 self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
                 self._pending_switch_not_ready_logged = False
                 self._pending_model_switch = new_model
-                self._pending_switch_retries = 3
                 self._pending_switch_next_at = time.monotonic()
                 self.ui_callback("model_switch_pending")
                 return
@@ -732,7 +730,6 @@ class MotorVocalIA(threading.Thread):
             self._prepare_model(self.current_model)
             if self._pending_model_switch == self.current_model:
                 self._pending_model_switch = None
-                self._pending_switch_retries = 0
                 self._pending_switch_not_ready_logged = False
         self._log("Motor IA listo.")
         return True
@@ -883,7 +880,6 @@ class MotorVocalIA(threading.Thread):
         """Execute model switch and persist on success."""
         previous_model = self.current_model
         self._pending_model_switch = None
-        self._pending_switch_retries = 0
         self._pending_switch_not_ready_logged = False
         try:
             self._switch_and_prepare_model(new_model)
@@ -1622,7 +1618,6 @@ class MotorVocalIA(threading.Thread):
     def _first_sentence(text: str) -> str:
         """Return the first sentence of text (split on . ! ?)."""
         # Split on sentence-ending punctuation followed by whitespace or end-of-string
-        import re
         match = re.search(r'[.!?](?:\s|$)', text)
         if match:
             return text[: match.start() + 1].strip()
@@ -1644,7 +1639,6 @@ class MotorVocalIA(threading.Thread):
     @staticmethod
     def _sanitize_history_context(context: str) -> str:
         """Strip obvious prompt-injection attempts from chat context."""
-        import re
         lowered = context.lower()
         injection_markers = (
             # English markers

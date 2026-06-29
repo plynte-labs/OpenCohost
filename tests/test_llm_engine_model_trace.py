@@ -177,7 +177,6 @@ class TestModelSwitch:
             motor.ollama.generate = MagicMock()
 
             motor._pending_model_switch = "gemma4:e4b"
-            motor._pending_switch_retries = 3
             motor._pending_switch_next_at = time.monotonic() - 1.0  # already ready
             motor._processing = False
             motor._speaking = False
@@ -202,7 +201,6 @@ class TestRetryExhaustion:
         motor.is_ready = False
 
         motor._pending_model_switch = "gemma4:e4b"
-        motor._pending_switch_retries = 3
         motor._pending_switch_next_at = 0
         motor._processing = False
         motor._speaking = False
@@ -211,13 +209,11 @@ class TestRetryExhaustion:
         # Retry 1
         motor._check_pending_model_switch()
         assert motor._pending_model_switch == "gemma4:e4b"
-        assert motor._pending_switch_retries == 3
 
         # Retry 2
         motor._pending_switch_next_at = 0
         motor._check_pending_model_switch()
         assert motor._pending_model_switch == "gemma4:e4b"
-        assert motor._pending_switch_retries == 3
 
         # Retry 3 — still pending; user intent must survive slow Ollama startup
         motor._pending_switch_next_at = 0
@@ -242,7 +238,6 @@ class TestRetryExhaustion:
             motor.current_model = "qwen3:1.7b"
             motor._desired_model = "gemma4:e4b"
             motor._pending_model_switch = "gemma4:e4b"
-            motor._pending_switch_retries = 3
             motor._pending_switch_next_at = 0
             motor.ollama.list = MagicMock(side_effect=[
                 RuntimeError("down"),
@@ -282,7 +277,6 @@ class TestRetryExhaustion:
             motor.current_model = "qwen3:1.7b"
             motor._desired_model = "gemma4:e4b"
             motor._pending_model_switch = "gemma4:e4b"
-            motor._pending_switch_retries = 3
             motor._pending_switch_next_at = 0
             motor._processing = False
             motor._speaking = False
@@ -357,7 +351,6 @@ class TestRetryExhaustion:
         motor.current_model = "qwen3:1.7b"
         motor._desired_model = "gemma4:e4b"
         motor._pending_model_switch = "gemma4:e4b"
-        motor._pending_switch_retries = 3
         motor._pending_switch_next_at = 0
         motor._processing = False
         motor._speaking = False
@@ -584,7 +577,6 @@ class TestNonBlockingRetry:
         motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
         motor._pending_model_switch = "gemma4:e4b"
-        motor._pending_switch_retries = 2
         motor._pending_switch_next_at = 0
 
         with patch("time.sleep") as mock_sleep:
@@ -596,7 +588,6 @@ class TestNonBlockingRetry:
         motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
         motor._pending_model_switch = "gemma4:e4b"
-        motor._pending_switch_retries = 3
         motor._pending_switch_next_at = 0
 
         before = time.monotonic()
