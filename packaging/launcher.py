@@ -422,7 +422,12 @@ def installed_version_satisfies(installed_version, meta_version):
     meta_parsed = _version_tuple(meta_version)
     if installed_parsed is None or meta_parsed is None:
         return installed_version == meta_version
-    return installed_parsed >= meta_parsed
+    # Pad to equal arity so "1.2" and "1.2.0" compare equal (a bare tuple
+    # compare makes (1, 2) < (1, 2, 0), forcing a spurious re-bootstrap). BFA-launcher-4.
+    width = max(len(installed_parsed), len(meta_parsed))
+    installed_padded = installed_parsed + (0,) * (width - len(installed_parsed))
+    meta_padded = meta_parsed + (0,) * (width - len(meta_parsed))
+    return installed_padded >= meta_padded
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1288,7 @@ def run_bootstrap(meta, install_root, portable, reporter, cancel=None,
     if not ollama_status.available:
         LOG.warning("Ollama preflight failed: %s", ollama_status.message)
         reporter.notify(ollama_status.message)
+        reporter.detail("NOTE: %s" % ollama_status.message)
 
     popen = None
     if not no_launch:

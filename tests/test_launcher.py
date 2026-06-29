@@ -128,6 +128,17 @@ class TestInstalledVersionSatisfies(unittest.TestCase):
     def test_installed_patch_newer(self):
         self.assertTrue(installed_version_satisfies("0.1.1", "0.1.0"))
 
+    def test_shorter_installed_equals_padded_meta(self):
+        # BFA-launcher-4: "1.2" installed vs meta "1.2.0" is the SAME version and
+        # must satisfy. Bug: (1, 2) >= (1, 2, 0) is False -> spurious re-bootstrap.
+        self.assertTrue(installed_version_satisfies("1.2", "1.2.0"))
+
+    def test_longer_installed_satisfies_shorter_meta(self):
+        self.assertTrue(installed_version_satisfies("1.2.0", "1.2"))
+
+    def test_shorter_installed_older_does_not_satisfy(self):
+        self.assertFalse(installed_version_satisfies("1.1.9", "1.2"))
+
 
 # ===========================================================================
 # 2. CLI argument parsing
