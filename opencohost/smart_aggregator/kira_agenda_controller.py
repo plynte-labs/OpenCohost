@@ -508,8 +508,6 @@ class KiraAgendaController:
     @classmethod
     def normalize_rhythm(cls, rhythm: object) -> str:
         normalized = str(rhythm or "normal").strip().lower()
-        if normalized == "dinamico":
-            return "dinamico"
         return normalized if normalized in cls.RHYTHM_RULES else "normal"
 
     @classmethod
