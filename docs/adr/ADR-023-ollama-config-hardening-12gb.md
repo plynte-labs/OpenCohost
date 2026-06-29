@@ -1,97 +1,94 @@
-# ADR-023: Ollama Runtime Config Hardening for 12GB VRAM (Flash Attention · q8_0 KV Cache · GPU Overhead)
+# ADR-023: Ollama Runtime Config Hardening for 12GB VRAM (Flash Attention)
 
-**Date**: 2026-06-29
-**Status**: Accepted — implemented at the app-launched daemon (`ollama_startup.py`, strict-TDD). **Owner action still owed**: set the same vars as system env vars + verify with `ollama ps` (see §Verification).
+**Date**: 2026-06-29 (amended same day after runtime validation)
+**Status**: Accepted — shipped **flash-attention only**. KV-cache quant + GPU-overhead were **dropped** after a runtime probe disproved the spill-risk premise they addressed (see §Runtime Correction).
 **Branch**: `feat/ollama-config-hardening-20260629`
-**Author**: Claude Code orchestrator + 8-agent audit workflow
+**Author**: Claude Code orchestrator + audit + 5-agent runtime-log validation workflow
 **Scope**: Config/tuning of the *existing* Ollama backend. No new module. Phase of `ram_llm_hardening_20260626`, follows [ADR-022](./ADR-022-llm-backend-ollama-vs-llamacpp.md).
 
 ---
 
-## Why
+## Runtime Correction (the headline — read this first)
 
-[ADR-022](./ADR-022-llm-backend-ollama-vs-llamacpp.md) concluded: the inference engine is identical to bare llama.cpp, so the wins that "switching to llama.cpp" promises are **config**, and that config lives inside Ollama. This ADR sets it.
+The first draft of this ADR set **three** knobs (flash attention, `OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_GPU_OVERHEAD=1 GiB`) to keep `gemma4:e4b` — believed to be **9.6 GB** and "the only tier at real spill risk" — off the VRAM cliff.
 
-The target is one tier specifically: **`gemma4:e4b` (9.6 GB)** — the default *quality* tier, the only one at real spill risk on a 12 GB card that also drives the display. Push it off the cliff and ADR-013's "VRAM cliff = 3–10x slower" is exactly what bites.
+A live `ollama ps` probe disproved the premise:
+
+```mermaid
+flowchart LR
+    Est["ESTIMATE (draft)<br/>gemma4:e4b = 9.6 GB<br/>borderline / spill risk"]
+    Real["RUNTIME (ollama ps)<br/>gemma4:e4b = 3.3 GB resident<br/>100% GPU · ~6.8 GB free @ 8192 ctx<br/>FA off · f16 KV"]
+    Est -.disproved by.-> Real
+    style Est fill:#7a1f1f,color:#fff
+    style Real fill:#1f6f43,color:#fff
+```
+
+The 9.6 GB was the **on-disk blob size** (`ollama list`), misread as resident VRAM. `gemma4:e4b` is an **elastic Gemma 3n slice** that resolves to ~3.3 GB in VRAM at Q4_K_M. At baseline — **flash attention OFF, f16 KV cache** — it already sits fully on GPU with ~6.8 GB to spare at `num_ctx=8192`.
+
+**Consequence**: the spill cliff this ADR was protecting against isn't near. KV-quant and GPU-overhead were solving a non-problem, so they were removed. Flash attention stays — it's a free win regardless.
 
 ---
 
-## The knobs
+## What shipped
 
-| Knob | Mechanism (level) | Effect | Default set | Override |
+| Knob | Mechanism (level) | Effect | Default | Override |
 |---|---|---|---|---|
-| **Flash attention** | `OLLAMA_FLASH_ATTENTION` (server env) | Lower TTFT + KV-cache VRAM; **required** for KV quant | `1` | export own value |
-| **KV-cache quant** | `OLLAMA_KV_CACHE_TYPE` (server env) | ~½ KV-cache VRAM, tiny precision loss | `q8_0` | export `f16` to disable |
-| **GPU overhead** | `OLLAMA_GPU_OVERHEAD` (server env, **bytes**) | Reserve VRAM for the display so Ollama doesn't over-commit and force mid-stream offload | `1 GiB` (`1073741824`) | export own byte count |
+| **Flash attention** | `OLLAMA_FLASH_ATTENTION` (server env) | Lower TTFT + KV-cache VRAM, same engine | `1` | export `0` to disable |
 | RAM ceilings (existing, A3) | `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` | One runner, one loaded model | `1`, `1` | export own value |
 
-All applied via `env.setdefault(...)` in `ollama_startup.py` → **an operator who exported their own value keeps it.** This matters: `q8_0` carries a small precision risk on high-GQA models, so the operator must be able to fall back to `f16` without a code change.
+Applied via `env.setdefault(...)` in `ollama_startup.py` → an operator who exported their own value keeps it.
+
+### Dropped (and why)
+- **`OLLAMA_KV_CACHE_TYPE=q8_0`** — halves KV-cache VRAM, but with ~6.8 GB free there's nothing to reclaim; it traded a small precision risk on high-GQA models for headroom that isn't scarce.
+- **`OLLAMA_GPU_OVERHEAD=1 GiB`** — guards against over-commit on a display-sharing card, but with ~6.8 GB free the over-commit risk is negligible.
+
+Both remain trivially re-addable as `setdefault` lines (or operator system env vars) **if** a future model genuinely approaches the ceiling — but YAGNI until the runtime says so.
 
 ---
 
-## The trap: these are SERVER-level vars (read this before trusting them)
+## The trap that still matters: flash attention is a SERVER-level var
 
-`OLLAMA_FLASH_ATTENTION` / `OLLAMA_KV_CACHE_TYPE` / `OLLAMA_GPU_OVERHEAD` are read by the **Ollama daemon at launch**, not per request. Our `setdefault` only reaches the daemon **when the app launches `ollama serve` itself**. The env probe showed the daemon was *not* running and started on-demand — good, our vars apply. **But** if Ollama is already running (installed as a background service, or started by hand) when Kira boots, our `setdefault` env never reaches it, and the vars are **silently ignored that session.**
+`OLLAMA_FLASH_ATTENTION` is read by the **Ollama daemon at launch**, not per request. Our `setdefault` only reaches the daemon **when the app launches `ollama serve` itself**. If Ollama is already running (Windows tray service, or started by hand) when Kira boots, our value never reaches it and FA stays at the daemon's own default.
 
 ```mermaid
 flowchart TD
     Boot[Kira starts] --> Q{Ollama daemon<br/>already running?}
     Q -->|No| Launch["app launches `ollama serve`<br/>with our setdefault env"]
-    Launch --> Good["✅ FA + q8_0 + overhead ACTIVE"]
+    Launch --> Good["✅ FA default applied"]
     Q -->|Yes| Reuse["app reuses the running daemon"]
-    Reuse --> Bad["⚠️ our env never reaches it<br/>vars SILENTLY IGNORED"]
-    Bad -. fix .-> Sys["set them as SYSTEM/USER env vars<br/>→ any `ollama serve` inherits them"]
+    Reuse --> Bad["⚠️ our env never reaches it"]
+    Bad -. fix .-> Sys["set OLLAMA_FLASH_ATTENTION as a<br/>SYSTEM env var → any daemon inherits it"]
     Sys --> Good
     style Good fill:#1f6f43,color:#fff
     style Bad fill:#7a1f1f,color:#fff
 ```
 
-**Belt-and-suspenders (owner action):** set the three vars as **Windows system/user environment variables** too, so whichever `ollama serve` wins the race inherits them. The code default covers the app-launched path; the system env covers the already-running path.
+This is exactly why the 2026-06-29 validation run was a **baseline, not a test of this ADR**: the daemon was already running (updating to 0.30.11 restarts the tray service), so `ollama_startup.py:55` returned `already_running` before any `setdefault` ran. To actually exercise FA, set the system env var **and** confirm a cold daemon start.
 
 ---
 
-## VRAM budget — why `gemma4:e4b` is the one to watch
+## Verification (owner, ~5 min)
 
-Rough budget on a 12 GB card already spending ~688 MiB on desktop/Edge (WDDM):
-
-| Tier | Weights | + KV @ f16 | + KV @ **q8_0** | Fits fully on GPU? |
-|---|---|---|---|---|
-| `qwen3:1.7b` | ~2.0 GB | small | smaller | ✅ easy |
-| `llama3` | ~8.0 GB | ~+1 GB | ~+0.5 GB | ✅ comfortable |
-| **`gemma4:e4b`** | **9.6 GB** | risky near the ceiling | **~+0.5 GB → ~10.1 GB** | ⚠️ **fits with q8_0 + ~1 GB reserve; verify** |
-| `gemma:26b` / `qwopus` | 16 GB | — | — | ❌ never (ADR-022) |
-
-q8_0 KV cache is the lever that keeps `gemma4:e4b` *under* the cliff; `GPU_OVERHEAD` keeps the display from shoving it over mid-stream. The exact fit depends on `num_ctx` — **measure, don't assume.**
+1. Stop the Ollama tray service fully (confirm `llama-server.exe` exits).
+2. Set `OLLAMA_FLASH_ATTENTION=1` as a Windows system/user env var; restart Ollama.
+3. Load `gemma4:e4b`; check the server log says flash attention is **on** — its family **post-dates** the documented auto-FA list (qwen3/gemma3/…), so don't assume it inherits the path; the explicit var is what guarantees it.
+4. `ollama ps` → confirm 100% GPU (already true at baseline; this just confirms FA didn't change the fit).
 
 ---
 
-## Verification (owner, ~5 min — the numbers above are estimates)
+## Risk
 
-1. `ollama 0.30.7 → 0.30.11` (update; 0.30.x is where flash-attention auto-enable lives).
-2. Set the three system env vars; restart Ollama.
-3. Load `gemma4:e4b`, then `ollama ps` → confirm it shows **100% GPU** (not "X% CPU") and read its residency.
-4. Check server logs say flash attention is on for `gemma4:e4b` — its family **post-dates** the documented auto-FA list (qwen3/gemma3/…), so don't assume it inherits the path; the explicit var is what guarantees it.
-5. If `gemma4:e4b` partial-offloads → lower `OLLAMA_GPU_OVERHEAD` or `num_ctx`. If the desktop stutters mid-stream → raise it.
-
----
-
-## Risks (config-level, reversible — not new structural failure modes)
-
-- **`q8_0` precision on high-GQA models**: the risk lands on the Qwen2.x family. The default tiers (`gemma4:e4b` / `llama3` / `qwen3:1.7b`) contain **no Qwen2.5**, so it's low-risk for defaults. Installed-but-not-tiered qwen2.5 models only matter if an operator wires one via `llm_tiers.json` — verify Kira's quality on that tier before committing q8_0 (override to `f16`).
-- **`GPU_OVERHEAD` mis-set**: too high forces the protected tier into offload; too low starves the display. It's a **calibration knob** — the `ponytail:` comment in code names the tuning path; finalize against `ollama ps`.
+Minimal and reversible. Flash attention is broadly safe on Ampere+; an operator who hits a model where it misbehaves exports `OLLAMA_FLASH_ATTENTION=0`. No quality-affecting KV change ships by default anymore.
 
 ---
 
 ## Implementation
 
-- `opencohost/core/ollama_startup.py` — three `env.setdefault(...)` lines beside the A3 ceilings, with the server-level / calibration caveats inline.
-- `tests/test_ollama_startup.py` — extended the exact-env assertion; added `test_operator_env_overrides_preserve_perf_knobs` (setdefault respects operator `f16` / custom reserve while applying unset defaults). Strict-TDD RED→GREEN, 11 passed.
-- No settings.py constant: values live as literals next to the existing ceilings (same pattern); the `setdefault` override is the tuning seam. Adding a constant layer would be YAGNI.
-
-**Net**: an afternoon of config captures the bulk of any realistic tuned-llama.cpp gain on this hardware, with minimal reversible config risk, and leaves the product's backbone (tier swap, RAM hardening, one-click pull, auto GPU sizing) untouched.
+- `opencohost/core/ollama_startup.py` — one `env.setdefault("OLLAMA_FLASH_ATTENTION", "1")` beside the A3 ceilings, with the correction noted inline. (KV-quant + GPU-overhead lines removed.)
+- `tests/test_ollama_startup.py` — exact-env assertion expects only the FA addition; `test_operator_can_disable_flash_attention_and_no_kv_overhead_knobs` locks that the two dropped knobs are **not** set by the app. Strict-TDD RED→GREEN, 11 passed.
 
 ---
 
 ## Related ADRs
-- [ADR-022](./ADR-022-llm-backend-ollama-vs-llamacpp.md) — why we stay on Ollama (the wins are config, not a different engine).
-- [ADR-013](./ADR-013-model-latency-vs-repetition-benchmark-rtx3060.md) — the VRAM cliff these knobs keep `gemma4:e4b` away from.
+- [ADR-022](./ADR-022-llm-backend-ollama-vs-llamacpp.md) — why we stay on Ollama; model inventory corrected to e4b ~3.3 GB resident.
+- [ADR-013](./ADR-013-model-latency-vs-repetition-benchmark-rtx3060.md) — the VRAM cliff; this run confirms e4b is comfortably on the safe side of it.

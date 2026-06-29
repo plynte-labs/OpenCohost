@@ -84,7 +84,7 @@ flowchart TD
 |---|---|---|---|
 | `gemma:26b` | 16 GB | ❌ | Permanent CPU spill — **unusable at speed**, no backend rescues it. Drop from recommended tiers. |
 | `qwopus:latest` | 16 GB | ❌ | Same — unusable at speed on this box. |
-| **`gemma4:e4b`** (default *quality* tier) | 9.6 GB | ⚠️ borderline | The **only default tier at real spill risk** once KV cache is added, on a card also driving the display (~688 MiB WDDM). Exactly what ADR-023's knobs protect. |
+| **`gemma4:e4b`** (default *quality* tier) | 9.6 GB disk / **~3.3 GB resident** | ✅ comfortable | Elastic Gemma 3n slice — resolves to ~3.3 GB in VRAM at Q4_K_M (the 9.6 GB is the on-disk blob). Runtime probe: 100% GPU, ~6.8 GB free at num_ctx=8192. **Not** at spill risk — corrects the earlier disk-size estimate (see [ADR-023](./ADR-023-ollama-config-hardening-12gb.md) Runtime Correction). |
 | `llama3` | 8 GB | ✅ | Fits comfortably. |
 | `qwen3:1.7b` | 2 GB | ✅ | Fits comfortably. |
 
@@ -136,4 +136,4 @@ None is true today.
 
 ## Related ADRs
 - [ADR-013](./ADR-013-model-latency-vs-repetition-benchmark-rtx3060.md) — the model-latency/VRAM-cliff frontier on this same 3060; this ADR explains *why the cliff is backend-independent*.
-- [ADR-023](./ADR-023-ollama-config-hardening-12gb.md) — the config hardening that captures levers #1–#6 (flash attention, q8_0 KV cache, GPU overhead).
+- [ADR-023](./ADR-023-ollama-config-hardening-12gb.md) — the config hardening (flash attention only; KV-quant + GPU-overhead were dropped after a runtime probe showed e4b is not near the spill cliff).
