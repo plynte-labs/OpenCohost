@@ -286,9 +286,12 @@ def test_kira_avatar_preview_is_the_visual_hero() -> None:
     source = read_text(APP_SHELL)
 
     assert "minsize=460" in source
-    # Demo-polish pass: avatar enlarged to be the clear visual hero.
-    assert "img.thumbnail((320, 320)" in source
-    assert "height=260" in source
+    # customtkinter_visual_refinement_20260630: avatar is the hero — image capped to
+    # 200px TALL (Kira PNGs are portrait, so HEIGHT binds; the 440 width is never reached)
+    # in a 300px label, "alejado"/zoomed-out with deliberate breathing room, still taller
+    # than the compact 100px response card (owner reversed prominence in 1d, dezoomed 1e→1f).
+    assert "img.thumbnail((440, 200)" in source
+    assert "height=300" in source
     assert "grid_rowconfigure(1, weight=3)" in source  # avatar row dominates
 
 
@@ -298,9 +301,29 @@ def test_kira_response_panel_is_compact_and_scrollable() -> None:
 
     assert "compact scrollable panel" in source
     assert "CTkTextbox" in source
-    assert "height=130" in source
+    assert "height=100" in source
     assert "wrap=\"word\"" in source
     assert "font=ctk.CTkFont(size=14)" in source
+
+
+def test_left_panel_kira_pills_use_icon_language_everywhere() -> None:
+    """Every app_shell writer of the shared left-panel pills must use the icon
+    format (🎤/🔊/🧠/💬), not the pre-refinement 'Category: state' text.
+
+    Regression guard: Phase 1b icon-ized voice_control.py but left three app_shell
+    call sites (_actualizar_pipeline, _al_cambiar_motor_tts, _al_seleccionar_dispositivo)
+    writing the SAME shared widget objects (lbl_kira_voice_state / lbl_kira_tts_state,
+    aliased from VoiceControlPanel) with old text — a runtime revert the dual-judge
+    gate caught. The top status-bar pills (lbl_*_status_pill in status_bar.py) keep
+    their own 'TTS: ...' text and are out of this guard's scope. Scoped deliberately to
+    the voice/TTS formats, which must NEVER appear in app_shell.py: the popover memory
+    pill (lbl_memory_status_pill) legitimately keeps "Memoria: ..." text, and the chat
+    pill is written from smart_aggregator_ui.py (guarded by that module's own tests) —
+    so neither is asserted here.
+    """
+    source = read_text(APP_SHELL)
+    assert 'text="Voz/PTT:' not in source
+    assert 'text="TTS:' not in source
 
 
 def test_ptt_threshold_constant_removed() -> None:

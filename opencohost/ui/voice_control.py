@@ -253,33 +253,33 @@ class VoiceControlPanel:
         """
         # State strip
         kira_state_strip = ctk.CTkFrame(self._parent, fg_color="transparent")
-        kira_state_strip.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 4))
-        for col in range(4):
-            kira_state_strip.grid_columnconfigure(col, weight=1)
+        kira_state_strip.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 2))
+        for col in range(2):
+            kira_state_strip.grid_columnconfigure(col, weight=1, uniform="pill")
 
         self.lbl_kira_voice_state = ctk.CTkLabel(
-            kira_state_strip, text="Voz/PTT: listo",
-            fg_color="#1b2633", corner_radius=12, anchor="w"
+            kira_state_strip, text="🎤 listo",
+            fg_color="#1b2633", corner_radius=10, anchor="center", font=ctk.CTkFont(size=12)
         )
-        self.lbl_kira_voice_state.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=0)
+        self.lbl_kira_voice_state.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 4))
 
         self.lbl_kira_tts_state = ctk.CTkLabel(
-            kira_state_strip, text="TTS: idle",
-            fg_color="#1b2633", corner_radius=12, anchor="w"
+            kira_state_strip, text="🔊 idle",
+            fg_color="#1b2633", corner_radius=10, anchor="center", font=ctk.CTkFont(size=12)
         )
-        self.lbl_kira_tts_state.grid(row=0, column=1, sticky="ew", padx=4, pady=0)
+        self.lbl_kira_tts_state.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 4))
 
         self.lbl_kira_memory_state = ctk.CTkLabel(
-            kira_state_strip, text="Memoria: disponible",
-            fg_color="#1b2633", corner_radius=12, anchor="w"
+            kira_state_strip, text="🧠 disponible",
+            fg_color="#1b2633", corner_radius=10, anchor="center", font=ctk.CTkFont(size=12)
         )
-        self.lbl_kira_memory_state.grid(row=0, column=2, sticky="ew", padx=4, pady=0)
+        self.lbl_kira_memory_state.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(4, 0))
 
         self.lbl_kira_chat_state = ctk.CTkLabel(
-            kira_state_strip, text="Chat: desconectado",
-            fg_color="#1b2633", corner_radius=12, anchor="w"
+            kira_state_strip, text="💬 desconectado",
+            fg_color="#1b2633", corner_radius=10, anchor="center", font=ctk.CTkFont(size=12)
         )
-        self.lbl_kira_chat_state.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=0)
+        self.lbl_kira_chat_state.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
 
         # Hint label
         self.lbl_voice_hint = ctk.CTkLabel(
@@ -618,15 +618,15 @@ class VoiceControlPanel:
 
         if estado == "listening":
             self.lbl_kira_voice_state.configure(
-                text="Voz/PTT: escuchando", fg_color="#1f5a3a"
+                text="🎤 escuchando", fg_color="#1f5a3a"
             )
         elif self._dispositivo_seleccionado is None:
             self.lbl_kira_voice_state.configure(
-                text="Voz/PTT: sin mic", fg_color="#4a2630"
+                text="🎤 sin mic", fg_color="#4a2630"
             )
         else:
             self.lbl_kira_voice_state.configure(
-                text="Voz/PTT: listo", fg_color="#1b2633"
+                text="🎤 listo", fg_color="#1b2633"
             )
 
     # ------------------------------------------------------------------
@@ -644,19 +644,19 @@ class VoiceControlPanel:
 
         if estado == "processing":
             self.lbl_kira_tts_state.configure(
-                text="Kira: pensando…", fg_color="#1f3f6f"
+                text="💭 pensando…", fg_color="#1f3f6f"
             )
         elif estado == "speaking":
             self.lbl_kira_tts_state.configure(
-                text="TTS: generando", fg_color="#1f3f6f"
+                text="🔊 generando", fg_color="#1f3f6f"
             )
         elif estado == "playing":
             self.lbl_kira_tts_state.configure(
-                text="TTS: hablando", fg_color="#1f526f"
+                text="🔊 hablando", fg_color="#1f526f"
             )
         else:
             self.lbl_kira_tts_state.configure(
-                text="TTS: idle", fg_color="#1b2633"
+                text="🔊 idle", fg_color="#1b2633"
             )
 
     # ------------------------------------------------------------------

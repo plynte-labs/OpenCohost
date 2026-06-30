@@ -650,7 +650,7 @@ class TestOnSourceConnect:
     def test_updates_kira_label(self, smart_agg_ui, mock_widgets):
         smart_agg_ui.on_source_connect({"video_id": "abc123"})
         mock_widgets["lbl_kira"].configure.assert_called_with(
-            text="Chat: conectado", fg_color="#1f5a3a"
+            text="💬 conectado", fg_color="#1f5a3a"
         )
 
     def test_logs_on_first_connect(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):
@@ -703,7 +703,7 @@ class TestOnSourceDisconnect:
     def test_updates_kira_label(self, smart_agg_ui, mock_widgets):
         smart_agg_ui.on_source_disconnect()
         mock_widgets["lbl_kira"].configure.assert_called_with(
-            text="Chat: desconectado", fg_color="#1b2633"
+            text="💬 desconectado", fg_color="#1b2633"
         )
 
     def test_logs_user_disconnect(self, ui_state, dispatcher, mock_aggregator, mock_motor_ia):

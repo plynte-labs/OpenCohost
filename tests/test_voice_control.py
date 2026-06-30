@@ -1042,7 +1042,7 @@ class TestEdgeCases:
         )
         panel.create_voice_panel()
         panel.update_tts_label("speaking")
-        assert panel.lbl_kira_tts_state.text == "TTS: generando"
+        assert panel.lbl_kira_tts_state.text == "🔊 generando"
         assert panel.lbl_kira_tts_state.fg_color == "#1f3f6f"
         panel.cleanup()
 
@@ -1053,7 +1053,7 @@ class TestEdgeCases:
         )
         panel.create_voice_panel()
         panel.update_tts_label("playing")
-        assert panel.lbl_kira_tts_state.text == "TTS: hablando"
+        assert panel.lbl_kira_tts_state.text == "🔊 hablando"
         assert panel.lbl_kira_tts_state.fg_color == "#1f526f"
         panel.cleanup()
 
@@ -1064,7 +1064,7 @@ class TestEdgeCases:
         )
         panel.create_voice_panel()
         panel.update_tts_label("idle")
-        assert panel.lbl_kira_tts_state.text == "TTS: idle"
+        assert panel.lbl_kira_tts_state.text == "🔊 idle"
         assert panel.lbl_kira_tts_state.fg_color == "#1b2633"
         panel.cleanup()
 
@@ -1076,7 +1076,7 @@ class TestEdgeCases:
         panel.create_voice_panel()
         panel._dispositivo_seleccionado = 0
         panel._update_voice_state_label("listening")
-        assert panel.lbl_kira_voice_state.text == "Voz/PTT: escuchando"
+        assert panel.lbl_kira_voice_state.text == "🎤 escuchando"
         panel.cleanup()
 
     def test_update_voice_state_label_no_mic(self, mock_parent, ui_state, mock_logger, voice_panel_class):
@@ -1087,7 +1087,7 @@ class TestEdgeCases:
         panel.create_voice_panel()
         panel._dispositivo_seleccionado = None
         panel._update_voice_state_label("idle")
-        assert panel.lbl_kira_voice_state.text == "Voz/PTT: sin mic"
+        assert panel.lbl_kira_voice_state.text == "🎤 sin mic"
         panel.cleanup()
 
     def test_update_voice_state_label_ready(self, mock_parent, ui_state, mock_logger, voice_panel_class):
@@ -1098,7 +1098,7 @@ class TestEdgeCases:
         panel.create_voice_panel()
         panel._dispositivo_seleccionado = 0
         panel._update_voice_state_label("idle")
-        assert panel.lbl_kira_voice_state.text == "Voz/PTT: listo"
+        assert panel.lbl_kira_voice_state.text == "🎤 listo"
         panel.cleanup()
 
     def test_update_button_with_no_button(self, voice_panel):

@@ -354,7 +354,7 @@ class SmartAggregatorUI:
         source_id = info.get("source_id", info.get("video_id", ""))
         self._schedule_ui_update(lambda: self._set_chat_button("Desconectar Chat", "darkred"))
         self._schedule_ui_update(lambda: self._update_chat_pill("connected"))
-        self._schedule_ui_update(lambda: self._set_kira_chat_state("Chat: conectado", "#1f5a3a"))
+        self._schedule_ui_update(lambda: self._set_kira_chat_state("💬 conectado", "#1f5a3a"))
         if not was_connected:
             self._on_log(f"[SmartAggregator] Chat {platform} conectado: {source_id}")
 
@@ -368,7 +368,7 @@ class SmartAggregatorUI:
 
         self._schedule_ui_update(lambda: self._set_chat_button("Conectar Chat", "#2f5f8f"))
         self._schedule_ui_update(lambda: self._update_chat_pill("disconnected"))
-        self._schedule_ui_update(lambda: self._set_kira_chat_state("Chat: desconectado", "#1b2633"))
+        self._schedule_ui_update(lambda: self._set_kira_chat_state("💬 desconectado", "#1b2633"))
 
         if was_active:
             reason = (

@@ -387,7 +387,11 @@ class VocalAIApp(ctk.CTk):
                 try:
                     from PIL import Image
                     img = Image.open(image_path)
-                    img.thumbnail((320, 320), Image.Resampling.LANCZOS)
+                    # Portrait Kira PNGs: HEIGHT binds Image.thumbnail() (the 440 width
+                    # is never reached). Enlarge via the 2nd value AND the label height to
+                    # avoid crop; this static fit trades fill for no-crop (responsive
+                    # <Configure> zoom deferred to the track's sdd-proposal).
+                    img.thumbnail((440, 200), Image.Resampling.LANCZOS)
                     # Keep BOTH references alive to prevent Tkinter image GC.
                     # CTkImage wraps the PIL Image but doesn't always hold a
                     # strong reference to it — if the PIL Image is collected,
@@ -487,7 +491,7 @@ class VocalAIApp(ctk.CTk):
         main_panel.grid_rowconfigure(0, weight=1)
         main_panel.grid_propagate(False)
         main_content = ctk.CTkFrame(main_panel, fg_color="transparent")
-        main_content.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        main_content.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
         main_content.grid_columnconfigure(0, weight=1)
         main_content.grid_rowconfigure(0, weight=1)
         tab_main_kira = ctk.CTkFrame(main_content, fg_color="transparent")
@@ -500,25 +504,28 @@ class VocalAIApp(ctk.CTk):
         tab_main_kira.grid_rowconfigure(3, weight=0)  # response hugs its content, no wasted gap
         # Kira header
         kira_header = ctk.CTkFrame(tab_main_kira, fg_color="transparent")
-        kira_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        kira_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
         kira_header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(kira_header, text="Kira", font=ctk.CTkFont(size=22, weight="bold"), anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(kira_header, text="Experiencia principal", text_color="#8fa3b8", anchor="e").grid(row=0, column=1, sticky="e")
         # Avatar preview in left Kira panel
         self._kira_avatar_label: ctk.CTkLabel | None = None
         self._kira_avatar_ref: Any = None
-        avatar_preview_frame = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=12)
-        avatar_preview_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        # radius 16 unifies the 4 sibling cards (voice/bottom were already 16); not a
+        # theme token (scale is 8/12/18) — full theme-token sweep deferred to the
+        # customtkinter_visual_refinement track, kept literal like the rest of this file.
+        avatar_preview_frame = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=16)
+        avatar_preview_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
         avatar_preview_frame.grid_columnconfigure(0, weight=1)
         avatar_preview_frame.grid_rowconfigure(0, weight=1)
         self._kira_avatar_label = ctk.CTkLabel(
             avatar_preview_frame, text="",
             text_color="#6b7b8d",
             font=ctk.CTkFont(size=12),
-            height=260,
+            height=300,
             corner_radius=8,
         )
-        self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         # Subscribe avatar bridge to update left-panel preview
         self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)
         # Primary action button — Hablar (prominent, at Kira level)
@@ -527,28 +534,28 @@ class VocalAIApp(ctk.CTk):
             text="Hablar",
             command=None,  # Wired after VoiceControlPanel is created
             state="disabled",
-            height=72,
-            font=ctk.CTkFont(size=21, weight="bold"),
+            height=40,
+            font=ctk.CTkFont(size=16, weight="bold"),
             fg_color="#1f7a5a",
             hover_color="#24946c",
         )
-        self._primary_speak_btn.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        self._primary_speak_btn.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 16))
         # Kira response: compact scrollable panel so the avatar remains the hero.
-        kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=18)
-        kira_response_shell.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 10))
+        kira_response_shell = ctk.CTkFrame(tab_main_kira, fg_color="#0c1117", corner_radius=16)
+        kira_response_shell.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
         kira_response_shell.grid_columnconfigure(0, weight=1)
         kira_response_shell.grid_rowconfigure(1, weight=0)
-        ctk.CTkLabel(kira_response_shell, text="Respuesta de Kira", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef", anchor="w").grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
-        self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=14), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled", height=130, wrap="word")
-        self.text_kira_response.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        ctk.CTkLabel(kira_response_shell, text="Respuesta de Kira", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef", anchor="w").grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
+        self.text_kira_response = ctk.CTkTextbox(kira_response_shell, font=ctk.CTkFont(size=14), fg_color="#090d12", border_width=1, border_color="#1f2b38", state="disabled", height=100, wrap="word")
+        self.text_kira_response.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
         self.text_kira_response.configure(state="normal")
         self.text_kira_response.insert("end", "Iniciando Kira… esperá unos segundos mientras se prepara.\n")
         self.text_kira_response.configure(state="disabled")
         # Voice panel (compact — primary button is at Kira level)
         voice_panel_frame = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        voice_panel_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
+        voice_panel_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
         voice_panel_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=13, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
+        ctk.CTkLabel(voice_panel_frame, text="Entrada de voz / PTT", font=ctk.CTkFont(size=12, weight="bold"), text_color="#d8e2ef").grid(row=0, column=0, sticky="w", padx=12, pady=(6, 2))
         self.voice_panel = VoiceControlPanel(
             parent_frame=voice_panel_frame,
             ui_state=self._ui_state,
@@ -570,15 +577,16 @@ class VocalAIApp(ctk.CTk):
         self.btn_primary_voice = self.voice_panel.btn_primary_voice
         # Wire primary button to VoiceControlPanel's toggle
         self._primary_speak_btn.configure(command=self.voice_panel._toggle_websocket)
-        # Bottom chat entry
-        frame_bottom = ctk.CTkFrame(tab_main_kira, fg_color="#121d27", corner_radius=16)
-        frame_bottom.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 16))
+        # Chat entry — integrated into the voice card (same card as the state pills,
+        # no separate floating card / whitespace gap).
+        frame_bottom = ctk.CTkFrame(voice_panel_frame, fg_color="transparent")
+        frame_bottom.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 10))
         frame_bottom.grid_columnconfigure(0, weight=1)
-        self.entry_chat = ctk.CTkEntry(frame_bottom, placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)...")
-        self.entry_chat.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=10)
+        self.entry_chat = ctk.CTkEntry(frame_bottom, placeholder_text="Escribe un mensaje para Kira (contexto o pregunta)...", height=40, corner_radius=10, fg_color="#0c1117", border_width=1, border_color="#1f2b38")
+        self.entry_chat.grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=0)
         self.entry_chat.bind("<Return>", lambda e: self._enviar_contexto_manual())
-        self.btn_enviar = ctk.CTkButton(frame_bottom, text="Enviar a IA", command=self._enviar_contexto_manual, width=110, state="disabled", fg_color="#555555", hover_color="#666666")
-        self.btn_enviar.grid(row=0, column=1, padx=(0, 10), pady=10)
+        self.btn_enviar = ctk.CTkButton(frame_bottom, text="Enviar a IA", command=self._enviar_contexto_manual, width=120, height=40, corner_radius=10, state="disabled", fg_color="#2f5f8f", hover_color="#3670aa")
+        self.btn_enviar.grid(row=0, column=1, padx=0, pady=0)
         # Product workspace: current configuration plus full Stream Admin.
         side_panel = ctk.CTkFrame(app_shell, fg_color="#0f151c", corner_radius=18)
         side_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
@@ -2051,13 +2059,13 @@ class VocalAIApp(ctk.CTk):
         def update_status_details():
             if estado == "listening":
                 if hasattr(self, "lbl_kira_voice_state"):
-                    self.lbl_kira_voice_state.configure(text="Voz/PTT: escuchando", fg_color="#1f5a3a")
+                    self.lbl_kira_voice_state.configure(text="🎤 escuchando", fg_color="#1f5a3a")
             elif self.dispositivo_seleccionado is None:
                 if hasattr(self, "lbl_kira_voice_state"):
-                    self.lbl_kira_voice_state.configure(text="Voz/PTT: sin mic", fg_color="#4a2630")
+                    self.lbl_kira_voice_state.configure(text="🎤 sin mic", fg_color="#4a2630")
             else:
                 if hasattr(self, "lbl_kira_voice_state"):
-                    self.lbl_kira_voice_state.configure(text="Voz/PTT: listo", fg_color="#1b2633")
+                    self.lbl_kira_voice_state.configure(text="🎤 listo", fg_color="#1b2633")
 
         self.after(0, update_status_details)
 
@@ -2453,7 +2461,7 @@ class VocalAIApp(ctk.CTk):
         if self.status_bar:
             self.status_bar.update_tts_status("idle")
         if hasattr(self, "lbl_kira_tts_state"):
-            self.lbl_kira_tts_state.configure(text="TTS: idle", fg_color="#1b2633")
+            self.lbl_kira_tts_state.configure(text="🔊 idle", fg_color="#1b2633")
 
     def _al_cambiar_tts_local_only(self) -> None:
         """Dispatch set_tts_local_only to the engine (persists; immediate effect)."""
@@ -2511,14 +2519,14 @@ class VocalAIApp(ctk.CTk):
             if self.status_bar:
                 self.status_bar.update_mic_status("idle")
             if hasattr(self, "lbl_kira_voice_state"):
-                self.lbl_kira_voice_state.configure(text="Voz/PTT: listo", fg_color="#1b2633")
+                self.lbl_kira_voice_state.configure(text="🎤 listo", fg_color="#1b2633")
             self._print_log(f"[Sistema] Fuente de audio: ID {self.dispositivo_seleccionado}")
         except (ValueError, IndexError):
             self.dispositivo_seleccionado = None
             if self.status_bar:
                 self.status_bar.update_mic_status("disconnected")
             if hasattr(self, "lbl_kira_voice_state"):
-                self.lbl_kira_voice_state.configure(text="Voz/PTT: sin mic", fg_color="#4a2630")
+                self.lbl_kira_voice_state.configure(text="🎤 sin mic", fg_color="#4a2630")
 
     def _iniciar_grabacion(self) -> None:
         if self.dispositivo_seleccionado is None:
@@ -2604,14 +2612,18 @@ class VocalAIApp(ctk.CTk):
             self.entry_chat.delete(0, "end")
 
     def _limpiar_historial(self) -> None:
+        # NOTE (customtkinter_visual_refinement): the gear-popover memory pill keeps the
+        # "Memoria: …" text format on purpose — it belongs to the popover pill-set (with
+        # OAuth/moderation), not the left panel. Only the left-panel pill (lbl_kira_memory_state)
+        # carries the 🧠 icon in Phase 1. Icon-ize the popover set together in its own phase.
         if hasattr(self, "lbl_memory_status_pill"):
             self.lbl_memory_status_pill.configure(text="Memoria: limpiando", fg_color="#5f461b")
         if hasattr(self, "lbl_kira_memory_state"):
-            self.lbl_kira_memory_state.configure(text="Memoria: limpiando", fg_color="#5f461b")
+            self.lbl_kira_memory_state.configure(text="🧠 limpiando", fg_color="#5f461b")
         self.motor_ia.command_queue.put(("clear_history", None))
         self._print_log("[Sistema] 🗑️ Memoria de conversación limpiada.")
         self.after(800, lambda: self.lbl_memory_status_pill.configure(text="Memoria: disponible", fg_color="#1b2633") if hasattr(self, "lbl_memory_status_pill") else None)
-        self.after(800, lambda: self.lbl_kira_memory_state.configure(text="Memoria: disponible", fg_color="#1b2633") if hasattr(self, "lbl_kira_memory_state") else None)
+        self.after(800, lambda: self.lbl_kira_memory_state.configure(text="🧠 disponible", fg_color="#1b2633") if hasattr(self, "lbl_kira_memory_state") else None)
 
     def _toggle_websocket(self) -> None:
         if hasattr(self, "voice_panel"):
