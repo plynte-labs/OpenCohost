@@ -422,11 +422,9 @@ class TestEdgeCaseStateFlapping:
         # Give observer thread time to process all transitions
         time.sleep(0.2)
 
-        # Panel should be in a consistent final state
-        # (ready → button should not be in a broken state)
-        final_state = ui_state.ollama_state
-        assert final_state == "ready"
-        # No assertion on specific button text — just verify no crash
+        # Real observable: after flapping settles to 'ready', the button is not
+        # stuck on a service_stopped/checking action label (and dispatch didn't crash).
+        assert built_panel.btn_download.text not in ("Iniciar Ollama", "Revisando Ollama...")
 
     def test_rapid_state_changes_settle_to_final_state(self, built_panel, ui_state):
         """After rapid flapping, button must reflect the final stable state."""

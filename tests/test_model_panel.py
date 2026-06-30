@@ -622,6 +622,8 @@ class TestOllamaStateDetection:
                 else:
                     del sys.modules["ollama"]
 
+        assert state == "package_missing"
+
     def test_find_ollama_in_path(self, model_panel):
         with patch("shutil.which", return_value="/usr/bin/ollama"):
             exe = model_panel._find_ollama_executable()
