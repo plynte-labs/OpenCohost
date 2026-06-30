@@ -21,9 +21,8 @@ import json
 import os
 import queue
 import sys
-import threading
-import uuid
 import wave
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -73,114 +72,37 @@ def _make_mock_piper(available: bool = True, synthesize_ok: bool = True):
     return mock_piper
 
 
-def _run_one_light_chunk(motor, oracion: str):
+def _drive_hablar(motor, text, *, edge_save_side_effect=None,
+                  motor_tts="ligero", voz_referencia=None, health_monitor=None):
+    """Run the REAL _hablar/productor with boundary mocks.
+
+    Only edge_tts.Communicate (network) and pygame (audio) are mocked; routing,
+    chunking, the tts_local_only snapshot, effective-motor resolution and the
+    Piper fallback all run for real. No re-copied decision tree.
+
+    Returns (loaded_paths, piper_mock, communicate_mock).
     """
-    Simulate exactly one iteration of the light-engine producer path.
+    motor.pygame = MagicMock()
+    # Bare MagicMock get_busy() is truthy -> the consumer busy-wait would spin
+    # forever. Force it False so playback "finishes" immediately.
+    motor.pygame.mixer.music.get_busy.return_value = False
+    motor.health_monitor = health_monitor
+    motor.voz_referencia = voz_referencia
+    motor.motor_tts = motor_tts
 
-    Returns (queue_items, edge_was_called, piper_synthesize_call_count).
+    def _save(path, *a, **k):
+        if edge_save_side_effect is not None:
+            raise edge_save_side_effect
+        open(path, "wb").close()  # stub .mp3 so the consumer can load + remove it
 
-    We do NOT call _hablar() directly (it spins a full thread loop).
-    Instead we replicate the producer's chunk logic inline — this is the
-    same technique used by test_llm_engine_piper_fallback.py.
-    """
-    from unittest.mock import MagicMock, patch
-    import asyncio
-    from opencohost.config.settings import TEMP_DIR
+    communicate = MagicMock()
+    communicate.return_value.save = AsyncMock(side_effect=_save)
 
-    edge_call_count = 0
-    inner_queue: queue.Queue = queue.Queue(maxsize=5)
+    with patch("opencohost.core.llm_engine.edge_tts.Communicate", communicate):
+        motor._hablar(text, source="direct")
 
-    def fake_asyncio_run(coro, *args, **kwargs):
-        nonlocal edge_call_count
-        edge_call_count += 1
-        try:
-            coro.close()
-        except Exception:
-            pass
-        # Simulate a successful Edge-TTS call (writes nothing — file stays absent)
-        # The test only cares whether asyncio.run was reached.
-
-    import opencohost.core.llm_engine as eng  # noqa: F401  (kept for parity with productor)
-
-    # CI runners do not have edge_tts installed (eng.edge_tts is None there).
-    # Treat the module as present so path selection is environment-independent:
-    # offline tests drive motor._edge_tts_offline explicitly, and the Edge call
-    # itself is always faked via fake_asyncio_run — never really invoked.
-    edge_module_missing = False
-
-    # Snapshot tts_local_only ONCE before the loop, mirroring the `local_only`
-    # snapshot introduced in productor() (opencohost/core/llm_engine.py ~line 1400).
-    # This helper must stay in sync with that snapshot so test assertions remain valid.
-    local_only = motor.tts_local_only
-
-    # Determine effective_motor (replicating productor's decision logic)
-    effective_motor = motor.motor_tts
-
-    # Missing-reference auto-fallback
-    if effective_motor == "pesado" and not motor.voz_referencia:
-        effective_motor = "ligero"
-
-    # Health-gate auto-fallback
-    if effective_motor == "pesado":
-        hm = getattr(motor, "health_monitor", None)
-        if hm is not None:
-            block_reason = None
-            if hasattr(hm, "heavy_tts_block_reason"):
-                block_reason = hm.heavy_tts_block_reason(
-                    auto_fallback_enabled=True, manual_motor=effective_motor
-                )
-            elif not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
-                block_reason = "health_gate"
-            if block_reason:
-                effective_motor = "ligero"
-
-    i = 0
-
-    # ── local-only fast-path (replicated from productor) ──────────────────
-    if effective_motor == "ligero" and local_only:
-        archivo_chunk_wav = os.path.join(
-            TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-        )
-        if motor._piper.is_available():
-            if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                inner_queue.put((archivo_chunk_wav, i, oracion))
-            else:
-                inner_queue.put(None)
-        else:
-            inner_queue.put(None)
-    # ── existing offline fast-path (pass-through) ──────────────────────────
-    elif effective_motor == "ligero" and (motor._edge_tts_offline or edge_module_missing):
-        archivo_chunk_wav = os.path.join(
-            TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-        )
-        if motor._piper.is_available():
-            if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                inner_queue.put((archivo_chunk_wav, i, oracion))
-            else:
-                inner_queue.put(None)
-        else:
-            inner_queue.put(None)
-    elif effective_motor == "ligero":
-        # Would call Edge-TTS
-        with patch("asyncio.run", side_effect=fake_asyncio_run):
-            try:
-                fake_asyncio_run(None)
-                inner_queue.put(("stub.mp3", i, oracion))
-            except Exception:
-                inner_queue.put(None)
-    else:
-        inner_queue.put(None)
-
-    inner_queue.put("FIN")
-
-    items = []
-    while True:
-        item = inner_queue.get(timeout=2)
-        if item == "FIN":
-            break
-        items.append(item)
-
-    return items, edge_call_count, motor._piper
+    loaded = [c.args[0] for c in motor.pygame.mixer.music.load.call_args_list]
+    return loaded, motor._piper, communicate
 
 
 # ===========================================================================
@@ -287,57 +209,49 @@ class TestLightPathWithLocalOnlyEnabled:
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False  # Edge-TTS would normally be available
-        motor.motor_tts = "ligero"
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        items, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Hola Kira")
+        loaded, piper, communicate = _drive_hablar(motor, "Hola Kira")
 
-        assert edge_call_count == 0, "Edge-TTS must NEVER be called when local-only is ON"
-        assert mock_piper.synthesize.call_count == 1
-        assert len(items) == 1
-        path, *_ = items[0]
-        assert path.endswith(".wav")
+        communicate.assert_not_called()  # privacy guard: Edge never touched
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
     def test_piper_used_for_heavy_auto_fallback_missing_reference(self):
-        """Heavy→light auto-fallback (missing_reference) lands on Piper when switch is ON."""
+        """Heavy->light auto-fallback (missing_reference) lands on Piper when switch is ON."""
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False
-        motor.motor_tts = "pesado"
-        motor.voz_referencia = None  # triggers missing_reference fallback
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        items, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Fallback test")
+        # motor_tts=pesado + no reference -> real productor missing_reference fallback.
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Fallback test", motor_tts="pesado", voz_referencia=None
+        )
 
-        assert edge_call_count == 0, "Edge-TTS must not be called even after heavy→light fallback"
-        assert mock_piper.synthesize.call_count == 1
-        assert len(items) == 1
-        path, *_ = items[0]
-        assert path.endswith(".wav")
+        communicate.assert_not_called()
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
     def test_piper_used_for_heavy_auto_fallback_health_gate(self):
-        """Heavy→light auto-fallback (health_gate) lands on Piper when switch is ON."""
-        from unittest.mock import MagicMock
-
+        """Heavy->light auto-fallback (health_gate) lands on Piper when switch is ON."""
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False
-        motor.motor_tts = "pesado"
-        motor.voz_referencia = "/some/ref.wav"
-
-        # Simulate health monitor blocking heavy TTS
-        mock_hm = MagicMock()
-        mock_hm.heavy_tts_block_reason.return_value = "health_gate"
-        motor.health_monitor = mock_hm
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        items, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Health gate test")
+        # Health monitor blocks heavy TTS -> real productor health_gate fallback.
+        mock_hm = MagicMock()
+        mock_hm.heavy_tts_block_reason.return_value = "health_gate"
 
-        assert edge_call_count == 0
-        assert mock_piper.synthesize.call_count == 1
-        assert len(items) == 1
-        path, *_ = items[0]
-        assert path.endswith(".wav")
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Health gate test", motor_tts="pesado",
+            voz_referencia="/some/ref.wav", health_monitor=mock_hm,
+        )
+
+        communicate.assert_not_called()
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
 
 # ===========================================================================
@@ -346,31 +260,30 @@ class TestLightPathWithLocalOnlyEnabled:
 
 class TestLocalOnlyWithPiperUnavailable:
     def test_none_in_queue_and_edge_never_called(self):
-        """local-only=True + Piper unavailable → queue gets None; Edge-TTS never called."""
+        """local-only=True + Piper unavailable -> chunk dropped; Edge-TTS never called."""
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False
-        motor.motor_tts = "ligero"
         motor._piper = _make_mock_piper(available=False)
 
-        items, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Sin Piper")
+        loaded, piper, communicate = _drive_hablar(motor, "Sin Piper")
 
-        assert edge_call_count == 0, "Edge-TTS must NEVER be called even when Piper is unavailable"
-        assert mock_piper.synthesize.call_count == 0
-        assert items == [None]
+        communicate.assert_not_called()  # privacy preserved even with Piper down
+        piper.synthesize.assert_not_called()
+        assert loaded == []
 
     def test_piper_synthesize_failure_no_edge(self):
-        """local-only=True + Piper fails synthesis → None in queue; Edge still never called."""
+        """local-only=True + Piper fails synthesis -> chunk dropped; Edge still never called."""
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False
-        motor.motor_tts = "ligero"
         motor._piper = _make_mock_piper(available=True, synthesize_ok=False)
 
-        items, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Synth fail")
+        loaded, piper, communicate = _drive_hablar(motor, "Synth fail")
 
-        assert edge_call_count == 0
-        assert items == [None]
+        communicate.assert_not_called()
+        assert piper.synthesize.called  # attempted, returned False
+        assert loaded == []
 
 
 # ===========================================================================
@@ -383,13 +296,13 @@ class TestLocalOnlyOffPreservesOriginalBehavior:
         motor, *_ = _make_motor()
         motor.tts_local_only = False
         motor._edge_tts_offline = False
-        motor.motor_tts = "ligero"
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        _, edge_call_count, mock_piper = _run_one_light_chunk(motor, "Normal mode")
+        loaded, piper, communicate = _drive_hablar(motor, "Normal mode")
 
-        assert edge_call_count == 1, "Edge-TTS should be called when switch is OFF"
-        mock_piper.synthesize.assert_not_called()
+        assert communicate.called, "Edge-TTS should be called when switch is OFF"
+        piper.synthesize.assert_not_called()
+        assert loaded and loaded[-1].endswith(".mp3")
 
 
 # ===========================================================================
@@ -458,102 +371,6 @@ class TestTtsLocalOnlyUISwitchWiring:
 # 7. Engine — snapshot semantics: mid-utterance toggle does not re-route chunks
 # ===========================================================================
 
-def _run_multi_chunk(motor, oraciones: list[str], flip_after_chunk: int):
-    """
-    Simulate the productor() light-engine path for multiple chunks.
-
-    Mirrors productor() from opencohost/core/llm_engine.py (~lines 1397-1466):
-      - Snapshots local_only ONCE before the loop.
-      - After processing chunk `flip_after_chunk`, toggles motor.tts_local_only OFF
-        to simulate a mid-utterance toggle.
-      - Returns (queue_items, edge_call_count, piper_call_count).
-
-    Because the snapshot is taken before the loop, the toggle must NOT affect
-    any chunk in the current utterance.
-    """
-    from opencohost.config.settings import TEMP_DIR
-
-    # See _run_one_light_chunk: simulate Edge-TTS as installed so the helper is
-    # environment-independent (CI lacks the edge_tts package).
-    edge_module_missing = False
-
-    edge_call_count = 0
-    inner_queue: queue.Queue = queue.Queue(maxsize=10)
-
-    def fake_asyncio_run(coro, *args, **kwargs):
-        nonlocal edge_call_count
-        edge_call_count += 1
-        try:
-            coro.close()
-        except Exception:
-            pass
-
-    # Snapshot ONCE — mirrors productor() lines ~1400
-    local_only = motor.tts_local_only
-
-    # Determine effective_motor (same logic as productor)
-    effective_motor = motor.motor_tts
-    if effective_motor == "pesado" and not motor.voz_referencia:
-        effective_motor = "ligero"
-    if effective_motor == "pesado":
-        hm = getattr(motor, "health_monitor", None)
-        if hm is not None:
-            block_reason = None
-            if hasattr(hm, "heavy_tts_block_reason"):
-                block_reason = hm.heavy_tts_block_reason(
-                    auto_fallback_enabled=True, manual_motor=effective_motor
-                )
-            elif not hm.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor=effective_motor):
-                block_reason = "health_gate"
-            if block_reason:
-                effective_motor = "ligero"
-
-    for i, oracion in enumerate(oraciones):
-        # Simulate mid-utterance toggle AFTER the specified chunk index
-        if i == flip_after_chunk + 1:
-            motor.tts_local_only = False
-
-        # local-only fast-path — uses snapshot, not motor.tts_local_only
-        if effective_motor == "ligero" and local_only:
-            archivo_chunk_wav = os.path.join(
-                TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-            )
-            if motor._piper.is_available():
-                if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                    inner_queue.put((archivo_chunk_wav, i, oracion))
-                else:
-                    inner_queue.put(None)
-            else:
-                inner_queue.put(None)
-        elif effective_motor == "ligero" and (motor._edge_tts_offline or edge_module_missing):
-            archivo_chunk_wav = os.path.join(
-                TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-            )
-            if motor._piper.is_available():
-                if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                    inner_queue.put((archivo_chunk_wav, i, oracion))
-                else:
-                    inner_queue.put(None)
-            else:
-                inner_queue.put(None)
-        elif effective_motor == "ligero":
-            # Would call Edge-TTS
-            fake_asyncio_run(None)
-            inner_queue.put(("stub.mp3", i, oracion))
-        else:
-            inner_queue.put(None)
-
-    inner_queue.put("FIN")
-    items = []
-    while True:
-        item = inner_queue.get(timeout=2)
-        if item == "FIN":
-            break
-        items.append(item)
-
-    return items, edge_call_count, motor._piper
-
-
 class TestSnapshotSemantics:
     """Verify that a mid-utterance toggle of tts_local_only does not re-route
     any chunk of the current utterance to Edge-TTS (snapshot semantics)."""
@@ -561,35 +378,41 @@ class TestSnapshotSemantics:
     def test_mid_utterance_flip_off_keeps_all_chunks_on_piper(self):
         """
         All chunks of an utterance stay on Piper even if tts_local_only is
-        toggled OFF after chunk 0 — the snapshot taken at utterance start wins.
+        toggled OFF after chunk 0 -- the snapshot taken at utterance start wins.
 
-        Scenario:
-          - Utterance has 3 chunks.
-          - tts_local_only starts ON.
-          - After chunk 0 is processed the flag is flipped OFF (simulating a
-            user toggle mid-utterance).
-          - Expected: all 3 chunks go to Piper; Edge-TTS is never called.
+        Drives the REAL productor() over a 3-sentence text. Piper's synthesize
+        flips motor.tts_local_only OFF DURING chunk 0 (inside the producer
+        thread). Because productor() snapshots local_only once at utterance
+        start, chunks 1-2 must still route to Piper, not Edge-TTS.
         """
         motor, *_ = _make_motor()
         motor.tts_local_only = True
         motor._edge_tts_offline = False
-        motor.motor_tts = "ligero"
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        oraciones = ["Chunk cero.", "Chunk uno.", "Chunk dos."]
-        items, edge_call_count, mock_piper = _run_multi_chunk(
-            motor, oraciones, flip_after_chunk=0
+        def _synth(text, path):
+            motor.tts_local_only = False  # flips mid-utterance, inside chunk 0
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(22050)
+                wf.writeframes(b"\x00" * 44)
+            return True
+
+        motor._piper.synthesize.side_effect = _synth
+
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Chunk cero. Chunk uno. Chunk dos."
         )
 
-        assert edge_call_count == 0, (
-            "Edge-TTS must NOT be called for any chunk in the utterance "
-            "even though tts_local_only was toggled OFF mid-utterance"
-        )
-        assert mock_piper.synthesize.call_count == 3, (
+        # Edge-TTS must NOT be called for any chunk even though tts_local_only
+        # was toggled OFF mid-utterance (the utterance-start snapshot wins).
+        communicate.assert_not_called()
+        assert piper.synthesize.call_count == 3, (
             "All 3 chunks must be routed to Piper (snapshot semantics)"
         )
-        assert len(items) == 3
-        for path, *_ in items:
+        assert len(loaded) == 3
+        for path in loaded:
             assert path.endswith(".wav"), "Each chunk must be a .wav from Piper"
 
         # Confirm the flag is now OFF on the motor (toggle took effect on the object)

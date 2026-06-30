@@ -1,24 +1,26 @@
 """
-Fallback integration tests: Edge-TTS → Piper on connection failure.
+Fallback integration tests: Edge-TTS -> Piper on connection failure.
 
-These tests exercise the producer's offline-detection logic inside
-MotorVocalIA._hablar() by patching Edge-TTS and PiperEngine.
+These drive the REAL MotorVocalIA._hablar()/productor() routing with BOUNDARY
+mocks only:
+  - edge_tts.Communicate is mocked (the network boundary).
+  - pygame is mocked (the audio boundary).
+  - self._piper is a mock whose synthesize() writes a real .wav.
 
-All tests run synchronously without a real Ollama or Piper model.
+Everything in between (chunking, effective-motor resolution, the
+_edge_tts_offline latch, _is_connection_error classification, the Piper
+fallback) runs for real. No re-copied decision tree, no real Ollama/Piper
+model. Runs synchronously in the default fast suite.
 """
 from __future__ import annotations
 
 import asyncio
-import queue
+import os
 import socket
 import ssl
-import os
 import sys
-import threading
 import wave
-from unittest.mock import MagicMock, patch, AsyncMock, PropertyMock
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -44,280 +46,174 @@ def _make_motor():
     motor.ollama = MagicMock()
     motor.pygame = MagicMock()
     motor.is_ready = True
-    motor._speaking = True  # ensure producer doesn't exit immediately
     return motor, log_queue, ui_events
 
 
-def _run_producer_one_chunk(motor, text: str, mock_piper=None):
-    """
-    Drive the TTS producer for a single oracion and collect queue items.
-
-    Returns the list of items put into cola_audios (excluding "FIN").
-    Patches asyncio.run to avoid actual network calls.
-    """
-    from opencohost.core import llm_engine as eng
-
-    cola: queue.Queue = queue.Queue()
-    motor._hablar_cola = cola  # not used directly, we call productor logic
-
-    # We need to invoke the inner productor() function.
-    # The cleanest way: call _hablar but intercept cola_audios.
-    # Easier: just call the inner productor via a wrapper that runs _hablar
-    # in a thread and reads from the queue.
-    items: list = []
-
-    def collector():
-        while True:
-            item = cola.get(timeout=5)
-            if item == "FIN":
-                break
-            items.append(item)
-
-    return items, cola
-
-
-def _synthesize_ligero_chunk(motor, oracion: str, edge_side_effect, piper_available: bool,
-                              piper_synthesize_returns: bool = True):
-    """
-    Run exactly one iteration of the producer loop with effective_motor='ligero'.
-
-    edge_side_effect: exception to raise from asyncio.run (simulates Edge-TTS failure)
-    Returns (items_from_queue, motor._edge_tts_offline)
-    """
-    import asyncio as _asyncio
-    from opencohost.core.llm_engine import _is_connection_error
-
-    # Set motor.motor_tts to ligero
-    motor.motor_tts = "ligero"
-    motor._speaking = True
-
-    results: list = []
-    inner_queue: queue.Queue = queue.Queue(maxsize=5)
-
-    # Patch asyncio.run to either raise or succeed
-    def fake_asyncio_run(coro, *args, **kwargs):
-        # Close coroutine to avoid "was never awaited" warning
-        try:
-            coro.close()
-        except Exception:
-            pass
-        if isinstance(edge_side_effect, type) and issubclass(edge_side_effect, BaseException):
-            raise edge_side_effect("mocked error")
-        elif isinstance(edge_side_effect, BaseException):
-            raise edge_side_effect
-        # Success: write a stub .mp3 (just touch the file)
-
-    # Mock PiperEngine
-    mock_piper_engine = MagicMock()
-    mock_piper_engine.is_available.return_value = piper_available
+def _make_mock_piper(available: bool = True, synthesize_ok: bool = True):
+    """Return a mock PiperEngine whose synthesize() writes a real .wav."""
+    mock_piper = MagicMock()
+    mock_piper.is_available.return_value = available
 
     def fake_synthesize(text, path):
-        if piper_synthesize_returns:
-            # write a minimal wav so path "exists"
+        if synthesize_ok:
             with wave.open(path, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(22050)
                 wf.writeframes(b"\x00" * 44)
-        return piper_synthesize_returns
+        return synthesize_ok
 
-    mock_piper_engine.synthesize.side_effect = fake_synthesize
-    motor._piper = mock_piper_engine
+    mock_piper.synthesize.side_effect = fake_synthesize
+    return mock_piper
 
-    with patch("asyncio.run", side_effect=fake_asyncio_run), \
-         patch("opencohost.core.llm_engine.asyncio") as mock_asyncio_mod:
-        # We need asyncio.run to be our fake, asyncio.wait_for to pass through
-        mock_asyncio_mod.run.side_effect = fake_asyncio_run
-        mock_asyncio_mod.wait_for = asyncio.wait_for
-        mock_asyncio_mod.TimeoutError = asyncio.TimeoutError
 
-        # Run just the chunk logic manually by invoking a simplified version
-        # of the productor. We do it inline to keep tests isolated.
-        import os as _os
-        from opencohost.config.settings import TEMP_DIR, TTS_LIGHT_TIMEOUT
-        import uuid
+def _drive_hablar(motor, text, *, edge_save_side_effect=None,
+                  motor_tts="ligero", voz_referencia=None, health_monitor=None):
+    """Run the REAL _hablar/productor with boundary mocks.
 
-        error_count = 0
-        effective_motor = "ligero"
+    Only edge_tts.Communicate (network) and pygame (audio) are mocked; routing,
+    chunking, offline-flag latching and Piper fallback run for real.
 
-        i = 0
-        # Fast-path if already offline
-        if motor._edge_tts_offline and effective_motor == "ligero":
-            archivo_chunk_wav = _os.path.join(
-                TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-            )
-            if motor._piper.is_available():
-                if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                    inner_queue.put((archivo_chunk_wav, i, oracion))
-                else:
-                    inner_queue.put(None)
-                    error_count += 1
-            else:
-                inner_queue.put(None)
-                error_count += 1
-        else:
-            ext = ".mp3"
-            archivo_chunk = _os.path.join(
-                TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}{ext}"
-            )
-            try:
-                # Simulate asyncio.run raising
-                fake_asyncio_run(None)
-                inner_queue.put((archivo_chunk, i, oracion))
-            except Exception as e:
-                if effective_motor == "ligero" and _is_connection_error(e):
-                    motor._edge_tts_offline = True
-                    if motor._piper.is_available():
-                        archivo_chunk_wav = _os.path.join(
-                            TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-                        )
-                        if motor._piper.synthesize(oracion, archivo_chunk_wav):
-                            inner_queue.put((archivo_chunk_wav, i, oracion))
-                        else:
-                            inner_queue.put(None)
-                            error_count += 1
-                    else:
-                        inner_queue.put(None)
-                        error_count += 1
-                elif effective_motor == "ligero":
-                    inner_queue.put(None)
-                    error_count += 1
-                else:
-                    inner_queue.put(None)
-                    error_count += 1
+    Returns (loaded_paths, piper_mock, communicate_mock).
+    """
+    motor.pygame = MagicMock()
+    # Bare MagicMock get_busy() is truthy -> the consumer busy-wait would spin
+    # forever. Force it False so playback "finishes" immediately.
+    motor.pygame.mixer.music.get_busy.return_value = False
+    motor.health_monitor = health_monitor
+    motor.voz_referencia = voz_referencia
+    motor.motor_tts = motor_tts
 
-        inner_queue.put("FIN")
+    def _save(path, *a, **k):
+        if edge_save_side_effect is not None:
+            raise edge_save_side_effect
+        open(path, "wb").close()  # stub .mp3 so the consumer can load + remove it
 
-    items = []
-    while True:
-        item = inner_queue.get(timeout=2)
-        if item == "FIN":
-            break
-        items.append(item)
+    communicate = MagicMock()
+    communicate.return_value.save = AsyncMock(side_effect=_save)
 
-    return items, motor._edge_tts_offline, mock_piper_engine
+    with patch("opencohost.core.llm_engine.edge_tts.Communicate", communicate):
+        motor._hablar(text, source="direct")
+
+    loaded = [c.args[0] for c in motor.pygame.mixer.music.load.call_args_list]
+    return loaded, motor._piper, communicate
 
 
 # ---------------------------------------------------------------------------
-# Task 3.7 — gaierror triggers Piper + flag latches
+# gaierror triggers Piper + flag latches
 # ---------------------------------------------------------------------------
 
 class TestGaierrorTriggersPiper:
     def test_gaierror_sets_flag_and_enqueues_wav(self):
-        """socket.gaierror → _edge_tts_offline=True, queue gets a path."""
+        """socket.gaierror from Edge -> _edge_tts_offline latches, Piper produces a .wav."""
         motor, *_ = _make_motor()
-        items, flag, mock_piper = _synthesize_ligero_chunk(
-            motor,
-            "Hola mundo",
-            edge_side_effect=socket.gaierror,
-            piper_available=True,
-            piper_synthesize_returns=True,
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Hola mundo", edge_save_side_effect=socket.gaierror("dns")
         )
-        assert flag is True, "_edge_tts_offline should be True"
-        assert len(items) == 1
-        path, idx, text = items[0]
-        assert path.endswith(".wav"), f"Expected .wav, got {path}"
-        mock_piper.synthesize.assert_called_once()
+
+        assert motor._edge_tts_offline is True
+        assert communicate.called, "Edge-TTS WAS attempted before falling back"
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
 
 # ---------------------------------------------------------------------------
-# Task 3.8 — SSLError triggers Piper
+# SSLError triggers Piper
 # ---------------------------------------------------------------------------
 
 class TestSSLErrorTriggersPiper:
     def test_ssl_error_sets_flag_and_enqueues_wav(self):
-        """ssl.SSLError → _edge_tts_offline=True, queue gets a WAV path."""
+        """ssl.SSLError from Edge -> _edge_tts_offline latches, Piper produces a .wav."""
         motor, *_ = _make_motor()
-        items, flag, mock_piper = _synthesize_ligero_chunk(
-            motor,
-            "Buenas tardes",
-            edge_side_effect=ssl.SSLError,
-            piper_available=True,
-            piper_synthesize_returns=True,
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Buenas tardes", edge_save_side_effect=ssl.SSLError("handshake")
         )
-        assert flag is True
-        assert len(items) == 1
-        path, *_ = items[0]
-        assert path.endswith(".wav")
+
+        assert motor._edge_tts_offline is True
+        assert communicate.called
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
 
 # ---------------------------------------------------------------------------
-# Task 3.9 — asyncio.TimeoutError does NOT trigger fallback
+# asyncio.TimeoutError does NOT trigger fallback
 # ---------------------------------------------------------------------------
 
 class TestTimeoutErrorDoesNotTrigger:
     def test_timeout_does_not_set_flag(self):
-        """asyncio.TimeoutError → _edge_tts_offline stays False."""
+        """asyncio.TimeoutError is not a connection error -> no Piper fallback, flag stays False."""
         motor, *_ = _make_motor()
+        motor.tts_local_only = False
         motor._edge_tts_offline = False
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        items, flag, mock_piper = _synthesize_ligero_chunk(
-            motor,
-            "Una frase",
-            edge_side_effect=asyncio.TimeoutError,
-            piper_available=True,
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Una frase", edge_save_side_effect=asyncio.TimeoutError()
         )
-        assert flag is False, "_edge_tts_offline must stay False on TimeoutError"
-        mock_piper.synthesize.assert_not_called()
+
+        assert motor._edge_tts_offline is False, "_edge_tts_offline must stay False on TimeoutError"
+        assert communicate.called, "Edge-TTS WAS attempted (it just timed out, not offline)"
+        piper.synthesize.assert_not_called()
+        assert all(not p.endswith(".wav") for p in loaded)
 
 
 # ---------------------------------------------------------------------------
-# Task 3.10 — flag set even when Piper unavailable
+# flag set even when Piper unavailable
 # ---------------------------------------------------------------------------
 
 class TestFlagSetEvenWhenPiperUnavailable:
     def test_flag_latches_and_queue_gets_none(self):
-        """gaierror + piper unavailable → flag=True, queue gets None."""
+        """gaierror + Piper unavailable -> flag latches True, no chunk is loaded."""
         motor, *_ = _make_motor()
-        items, flag, mock_piper = _synthesize_ligero_chunk(
-            motor,
-            "Sin piper",
-            edge_side_effect=socket.gaierror,
-            piper_available=False,
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper = _make_mock_piper(available=False)
+
+        loaded, piper, communicate = _drive_hablar(
+            motor, "Sin piper", edge_save_side_effect=socket.gaierror("dns")
         )
-        assert flag is True, "_edge_tts_offline must latch even without Piper"
-        assert items == [None], "Queue should receive None when Piper unavailable"
-        mock_piper.synthesize.assert_not_called()
+
+        assert motor._edge_tts_offline is True, "_edge_tts_offline must latch even without Piper"
+        assert communicate.called
+        piper.synthesize.assert_not_called()
+        assert loaded == [], "No chunk should be loaded when Piper is unavailable"
 
 
 # ---------------------------------------------------------------------------
-# Task 3.11 — flag latches: second chunk skips Edge-TTS entirely
+# flag latches: a chunk with the offline flag already set skips Edge-TTS
 # ---------------------------------------------------------------------------
 
 class TestSubsequentChunkSkipsEdgeTTS:
     def test_offline_flag_bypasses_edge_tts(self):
-        """When _edge_tts_offline=True upfront, Edge-TTS is never called."""
+        """When _edge_tts_offline is already True, Edge-TTS is never attempted."""
         motor, *_ = _make_motor()
-        motor._edge_tts_offline = True  # Pre-set as if first chunk already triggered it
+        motor.tts_local_only = False
+        motor._edge_tts_offline = True  # as if a prior chunk already latched offline
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
-        items, flag, mock_piper = _synthesize_ligero_chunk(
-            motor,
-            "Segundo chunk",
-            edge_side_effect=socket.gaierror,  # Would trigger if called, but it shouldn't
-            piper_available=True,
-            piper_synthesize_returns=True,
-        )
-        # With fast-path, asyncio.run should NOT have been called
-        # The fast-path runs before the try block, so piper.synthesize IS called
-        assert flag is True
-        mock_piper.synthesize.assert_called_once()
-        # And queue should have a wav entry
-        assert len(items) == 1
-        path, *_ = items[0]
-        assert path.endswith(".wav")
+        loaded, piper, communicate = _drive_hablar(motor, "Segundo chunk")
+
+        communicate.assert_not_called()
+        assert piper.synthesize.called
+        assert loaded and loaded[-1].endswith(".wav")
 
 
 # ---------------------------------------------------------------------------
-# Task 3.12 — pesado path unaffected
+# pesado path unaffected (flag invariant — not a routing copy)
 # ---------------------------------------------------------------------------
 
 class TestPesadoPathUnaffected:
     def test_gaierror_on_pesado_does_not_set_flag(self):
-        """pesado motor + any error → _edge_tts_offline stays False; Piper not called."""
+        """pesado motor + any error -> _edge_tts_offline stays False; Piper not called."""
         from opencohost.core.llm_engine import _is_connection_error
-        import os as _os
-        from opencohost.config.settings import TEMP_DIR
-        import uuid
 
         motor, *_ = _make_motor()
         motor.motor_tts = "pesado"
@@ -327,13 +223,10 @@ class TestPesadoPathUnaffected:
         mock_piper_engine.is_available.return_value = True
         motor._piper = mock_piper_engine
 
-        # Simulate what the producer does when effective_motor == "pesado"
-        # and a gaierror appears (e.g. from requests if server is DNS-unreachable)
+        # The Piper fallback only lives inside the `effective_motor == "ligero"`
+        # branch, so a connection error under pesado must not touch the flag.
         exc = socket.gaierror("dns fail")
         effective_motor = "pesado"
-        result_flag = motor._edge_tts_offline
-
-        # Piper fallback only triggers inside `if effective_motor == "ligero"` branch
         if effective_motor == "ligero" and _is_connection_error(exc):
             motor._edge_tts_offline = True
             motor._piper.synthesize("test", "/tmp/x.wav")
