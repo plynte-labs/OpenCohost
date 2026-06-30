@@ -108,6 +108,24 @@ def test_parse_ctx_does_not_crash_on_none_response():
     assert cb.parse_model_ctx(None, fallback=FALLBACK) == FALLBACK
 
 
+def test_parse_ctx_reads_real_modelinfo_attribute_not_alias():
+    # Real ollama ShowResponse exposes the dict under the `modelinfo` attribute
+    # (`model_info` is an alias-only field, unreachable via getattr). Reading only
+    # `model_info` left ctx-discovery dead on every real response. (realenv R1.)
+    show = SimpleNamespace(modelinfo={"llama.context_length": 8192})
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 8192
+
+
+def test_parse_ctx_tries_gemma4_key():
+    show = {"model_info": {"gemma4.context_length": 131072}}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 131072
+
+
+def test_parse_ctx_tries_qwen3_key():
+    show = {"model_info": {"qwen3.context_length": 40960}}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 40960
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # §0.3 — parse_model_ctx parameters-block num_ctx parse (gemma refinement)
 # ──────────────────────────────────────────────────────────────────────────

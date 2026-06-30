@@ -27,8 +27,10 @@ import re
 _ARCH_CTX_KEYS = (
     "llama.context_length",
     "gemma.context_length",
+    "gemma4.context_length",
     "phi3.context_length",
     "qwen2.context_length",
+    "qwen3.context_length",
     "mistral.context_length",
 )
 
@@ -62,7 +64,14 @@ def parse_model_ctx(show_response, *, fallback: int) -> int:
     ``show_response`` may be a ``dict`` or an attribute-style object (e.g. an
     Ollama ``ShowResponse`` Pydantic model). Any missing field degrades safely.
     """
-    model_info = _get_field(show_response, "model_info")
+    # Real ollama ShowResponse exposes this field as the attribute `.modelinfo`
+    # (Pydantic; `model_info` is an alias-only key). Raw JSON and test dicts use
+    # the `model_info` key. Try the attribute name first, then the dict/legacy key.
+    # (Reading only "model_info" left ctx-discovery dead on every real response —
+    # always the fallback, never the model's native ctx; realenv R1.)
+    model_info = _get_field(show_response, "modelinfo")
+    if model_info is None:
+        model_info = _get_field(show_response, "model_info")
 
     # 1. Architecture-specific context keys, in priority order.
     for key in _ARCH_CTX_KEYS:
