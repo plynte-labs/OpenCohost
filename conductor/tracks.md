@@ -4,6 +4,24 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: Topic Scout (LLM) — idle suggestions of adjacent topics from the live host conversation**
+  *Link: [./tracks/topic_scout_llm_20260629/](./tracks/topic_scout_llm_20260629/) (proposal.md, judge-hardened, gitignored)*
+  *Status 2026-06-29: IMPLEMENTED but DARK (commit 5db253e; SCOUT_ENABLED defaults False). On idle, `scout_digest()` snapshots the LIVE host thread (`self.historial`, last 6 msgs, under `_history_lock`, sanitized) and asks the loaded model for 2-3 SHORT adjacent follow-up titles (e.g. LLMs → "regulación de LLMs"), routed as DRAFTED into the existing TopicInbox + human-approval gate. Owner decision: input = LIVE thread, NOT the eviction-only MemoryDigest (which pivots on stale context → topic mixing). Concurrency on the single Ollama runner: a DEDICATED short-timeout client (LLM_SCOUT_TIMEOUT=8s) so a stall closes the socket → Ollama cancels → runner freed ~8s; never triggers recovery/model-swap; gated on SCOUT_ENABLED/_loaded_model/no-pending-switch/!is_processing/!is_speaking/has_pending_priority_before/capability-reasoning-skip/min-lines/fresh-input-hash; double try/except so a scout failure can't drop rule suggestions; DRAFTED-only, no persist pre-approval. SDD design→2 judges→TDD impl→2 judges (SOUND)→validate (228 passed). OWNER OWED: flip SCOUT_ENABLED + run the gated realenv T9 (`OPENCOHOST_REALENV_TESTS=1 tests/realenv/test_topic_scout_realenv.py`) to validate adjacency on a real model. Companion: ADR-024 (cards as a primitive RAG). Engram: discovery/why-kira-doesn-t-suggest..., topic-scout impl.*
+
+---
+
+- [ ] **Track: Prompt Efficiency / KV-cache — cut per-turn re-prefill (TTFT)**
+  *Link: [./tracks/prompt_efficiency_kvcache_20260629/](./tracks/prompt_efficiency_kvcache_20260629/) (proposal.md, gitignored)*
+  *Status 2026-06-29: PROPOSAL + EXPLORE + DESIGN (no code; SDD wf_d0ca7a43-8d4). From the owner runtime: prompt_eval_count grew 281→5480/turn (24-29s responses). KEY CORRECTION of the working hypothesis: the prefix-buster is FRONT-EVICTION of the sliding 10-turn history window (every turn drops index 0 → llama.cpp longest-common-prefix collapses → full re-prefill), worsened by the default profile (`use_system_role=False`) folding the system prompt into the LAST message (no front anchor) — NOT the MemoryDigest (which lives in the tail, always re-processed anyway). Cap is in TURNS not TOKENS + Kira's ~768-token replies stored VERBATIM → big window. Actionable = Lever 2 (token-budget window + compact Kira's verbose replies before storing at `_commit_history`); Lever 1 (KV-prefix stability) needs an architectural rewrite. MEASURE-FIRST: log `prompt_eval_duration`/`eval_duration` to learn prefill-vs-decode split before committing. NOT a release gate. Engram: prompt-efficiency-kvcache.*
+
+---
+
+- [ ] **Track: Engram Simulado — persistent retrieval memory (generalize the cards RAG)**
+  *Link: [./tracks/engram_simulado_20260629/](./tracks/engram_simulado_20260629/) (proposal.md, gitignored)*
+  *Status 2026-06-29: PROPOSAL only, DEFERRED (less-expansion). Vision: Kira's "second brain" — generalize the editorial-cards retrieval pattern (ADR-024) to ALSO index conversation memory; retrieval-based (bounded top-k prompt injection, unbounded disk store), token-overlap → optional embeddings, per-person personalization. NOT by growing the context (that hits the TTFT/VRAM wall — see prompt-efficiency track). Honest costs: persisting host conversation to disk is PII (inverts the current RAM-only posture) → consent/encryption/retention; per-turn embedding cost on the single runner; mis-calibrated top-k reintroduces noise. Trigger: explicit owner decision (multi-session continuity as a feature + accept the PII trade-off), after the launch-readiness gates. Engram: engram-simulado proposal.*
+
+---
+
 - [~] **Track: RAM / LLM Hardening — VRAM-honest core for the RTX 3060 12GB**
   *Link: [./tracks/ram_llm_hardening_20260626/](./tracks/ram_llm_hardening_20260626/) (plan.md, gitignored)*
   *Status 2026-06-27: Phase 0 DONE + runtime-validated (commit 6c7c1f3): LLM_KEEP_ALIVE="7m" (was -1 = models pinned in RAM forever) at the 3 call sites (warm-up/chat/Vibe) + OLLAMA_NUM_PARALLEL=1 / OLLAMA_MAX_LOADED_MODELS=1 setdefault at ollama_startup. Owner 2h40m live session confirmed: idle models release, single-model switching, zero crashes/OOM. A4 (per-tier num_ctx caps fast=6144 / balanced=quality=4096) APPROVED, NOT implemented. Phases 2-5 (RAMGuard via psutil, wire the dead can_vibe_call gate, steady-state stall escape ladder, OOM classify+recover, cancellable watchdog) planned, NOT started. Engram: ram-llm-hardening/plan, /phase0-runtime-validation.*
