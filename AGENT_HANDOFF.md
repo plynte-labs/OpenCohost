@@ -19,6 +19,102 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-06-29/30 (big-file audit + Ollama hardening + Topic Scout DARK + ctx-discovery prod fix)
+
+Branch `maintenance/big-file-audit-small-fixes-20260629` — **49 commits ahead of `master`, NOT merged.**
+Tree: all session work committed; only owner-local files dirty (see DO-NOT-TOUCH below).
+
+### (a) Operating mode
+**Less expansion, release readiness.** Product is believed SOLID to release soon. Do NOT start new
+feature tracks. The remaining work is runtime validation of what already shipped (gated-off or
+unexercised), then merge. Release verdict on this branch: **SOLID-WITH-CAVEATS** — mergeable for the
+owner's primary config (gemma4), but one real regression-vector ships (the `fast` tier num_ctx change,
+item #4 below) and must be validated or capped before relying on a non-gemma cohost model.
+
+### (b) #1 NEXT STEP — UNMISSABLE, DO THIS FIRST
+**Topic Scout is implemented but DARK. Flip it on and validate its adjacency on a real model.**
+- Set `SCOUT_ENABLED = True` (`opencohost/config/settings.py:68`).
+- Run the gated real-env test (needs a live Ollama with `gemma4:e2b` pulled):
+  ```powershell
+  $env:OPENCOHOST_REALENV_TESTS = "1"; python -m pytest tests/realenv/test_topic_scout_realenv.py -q
+  ```
+- Goal: confirm the idle-LLM topic suggestions are TOPICALLY ADJACENT (not random) on a real model.
+  The Scout is hard-gated at `llm_engine.py:1579` and the app_shell wiring (`app_shell.py:1112`) is
+  defensively wrapped, so flipping the flag is safe — it cannot affect the hot path if the validation
+  goes sideways. Flip back to `False` if adjacency is poor; do NOT merge Scout ON until T9 passes.
+
+### (c) OWNER-OWED next-attack map
+Each item: WHAT / WHERE / HOW to attack.
+
+1. **Topic Scout T9 realenv (THE #1 above).** WHAT: validate Scout adjacency on `gemma4:e2b`.
+   WHERE: `tests/realenv/test_topic_scout_realenv.py`, flag `settings.py:68`. HOW: see (b).
+2. **Flash-attention real exercise.** WHAT: FA config (ADR-022/023) is a cold-start-only
+   `setdefault` — inert in this test run, never proven live. WHERE: Ollama startup path.
+   HOW: set `OLLAMA_FLASH_ATTENTION=1` as a SYSTEM env var, then COLD-START the Ollama daemon
+   (a warm daemon ignores it), and confirm the model loads with FA active.
+3. **7 SDD proposals A–G** (includes the 2 latent bugs below). WHAT: explore+design landed,
+   none implemented. WHERE: `conductor/tracks/big_file_decomposition_20260629.md`. HOW: pick one,
+   fix-pass coordinate/contract drift if any, then strict-TDD implement on owner approval.
+   - **Latent bug A — `self.after` cross-thread race.** `app_shell.py:1664/1670/1682/1691/1693`
+     use raw `self.after`, bypassing the `_safe_after` thread-guard (`app_shell.py:2231`), on a path
+     fed by the chat-aggregator DAEMON thread. Severity for release: **MEDIUM-LOW** — only reachable
+     with a live RF3 chat connected, intermittent, GIL usually masks it, no observed crash. NOT a
+     blocker. Fix = route those 5 calls through `_safe_after`.
+   - **Latent bug B — shared retry budget → silent empty return.** `llm_engine.py:1212-1234`,
+     `max_intentos=2`: overflow-trim (attempt 0) + reasoning-cap-drop (attempt 1) can exit with
+     `raw_content=""`. Severity: **MEDIUM-LOW** — needs a double self-heal on one turn (rare); the
+     agenda `register_failure` degrade ladder catches the empty (one muted, recoverable turn). NOT a
+     blocker. Fix = give the two self-heals independent retry budget.
+4. **A4 per-tier num_ctx caps — ELEVATED from "nice-to-have" to RELEASE-RELEVANT.** WHAT: the
+   ctx-discovery fix (`d3334dc`) uncapped non-gemma tiers. `_model_ctx` feeds BOTH the char-budget
+   AND `opciones_llm['num_ctx']` (`llm_engine.py:1190`), so a non-gemma model now requests its full
+   native ctx as the Ollama KV allocation. **The shipping `fast` tier is `qwen3:1.7b` (native ctx
+   40960)** → selecting it allocates ~40960-token KV (~10x the prior ~4096) on the 12GB box AND
+   disables char-budget eviction (budget ≫ the 10-turn window ⇒ full re-prefill every turn ⇒ worse
+   TTFT). balanced/default=llama3 (8192, ~2x, low risk); quality=gemma4:e4b is popped → safe; gemma
+   primary path is unaffected (why the branch is releasable). WHERE: `llm_engine.py:1171-1194`.
+   HOW: before relying on the `fast` tier OR recommending any high-ctx non-gemma model (qwen3 / large
+   llama) as cohost, EITHER land A4 OR runtime-validate `qwen3:1.7b` for VRAM/TTFT. A4 must clamp
+   BOTH `num_ctx` AND the overflow-budget ctx together — capping one re-opens overflow. Consider
+   clamping `num_ctx` independently of the discovery value.
+5. **ctx_utilization telemetry doc/code drift.** WHAT: the `ctx_utilization` log line
+   (`llm_engine.py:1323`) and its doc description have drifted. WHERE: ADR-029 + emit site. HOW:
+   reconcile the documented fields against the actual emitted record; `prompt_eval_count` is present
+   in every Ollama response and now used here — confirm the doc matches.
+6. **Prompt-efficiency Lever 2 (compact verbose replies).** WHAT: measure-first instrumentation
+   shipped (`c428574`); the actual compaction lever is pending DATA + owner sign-off. WHERE: ADR-029,
+   instrumentation in `llm_engine.py`. HOW: collect real ctx_utilization samples first, then propose
+   Lever 2. NOTE: couples to #4 — on high-ctx non-gemma models char-budget eviction is disabled, so
+   the full 10-turn window re-prefills every turn; measure these two together.
+7. **Merge the branch.** WHAT: merge `maintenance/big-file-audit-small-fixes-20260629` → `master`.
+   WHERE: this branch. HOW: ONLY after the runtime validations above (at minimum #1 Scout T9 and the
+   #4 fast-tier decision). Do not commit/merge without explicit owner ask.
+
+### (d) Branch state
+- `maintenance/big-file-audit-small-fixes-20260629` — **49 commits ahead of `master`, NOT merged.**
+- The 49-commit span is almost entirely observability + dead-code removal + gated-off features.
+  Topic Scout is genuinely DARK (`SCOUT_ENABLED=False`), the 3 deferred core fixes landed via the
+  snapshot-10 design→2-judge→apply gate, source-tag is stripped before `ollama.chat` (rebuild, not
+  mutate). The only behavioral change that actually ships is the num_ctx side-effect in #4.
+- **DO NOT TOUCH (owner-local, intentionally never committed):** `assets/avatar/kira/*.png`
+  (owner's local avatar edits, modified) and `config/` (untracked runtime config). Leave both dirty.
+
+### (e) Reading index
+- **ADR-030** (`docs/adr/ADR-030-session-decision-journal.md`) — this session's decision journal;
+  read it first for the full narrative behind the OWED map.
+- **ADR-025** real-env ctx-discovery bug (model_info vs modelinfo → ctx was always 4096; the
+  production fix in `d3334dc`). **ADR-026** real-env test harness. **ADR-027** adversarial
+  multi-agent gates (design→2 judges→apply). **ADR-028** Kira memory + topic architecture (Scout).
+  **ADR-029** prompt-efficiency / KV-cache (couples to #4 and #6). **ADR-022/023** Ollama backend
+  choice + 12GB config hardening (flash-attention, item #2). **ADR-024** editorial cards as
+  primitive RAG (deferred).
+
+### Stale-doc note (internal, harmless — reconcile if snapshots are kept as the record)
+`09_final_report.md` points 11/15 still say the 3 core fixes are "DIFERIDOS, pendientes de OK del
+owner" — they were APPLIED in snapshot 10. Audit drift only; no owner-facing impact.
+
+---
+
 ## LATEST SNAPSHOT — 2026-06-23 (cohost backlog: 2 fixes shipped + 7 designs staged + Opus audit)
 
 Branch `feat/akira-voseo-fix-and-cohost-adr` (NOT merged to master). Tree clean — all work committed.
