@@ -210,6 +210,30 @@ class TestOverflowBranch:
         m._generar_dialogo("hola", source="chat", commit_history=False)
         assert m.historial == before
 
+    def test_source_key_stripped_before_chat(self, monkeypatch):
+        # Source tag (history_source_tag_20260629 Task B): the `source` key tagged
+        # on stored historial entries must be projected away before the dicts reach
+        # ollama.chat — Ollama's message schema is {role, content} only. The strip
+        # rebuilds fresh dicts at the copy loop (never pop/mutate, which the
+        # test_does_not_mutate_self_historial guard above enforces).
+        import opencohost.core.llm_engine as le
+        monkeypatch.setattr(le, "output_guard", lambda dialogo, source="chat": (True, ""))
+        m = _make_motor()
+        m._model_ctx_limit["llama3"] = 4096
+        m.historial = [
+            {"role": "user", "content": "hola host", "source": "direct"},
+            {"role": "assistant", "content": "respuesta de kira", "source": "direct"},
+        ]
+        captured = {}
+
+        def fake_chat(*, timeout, **kwargs):
+            captured["messages"] = list(kwargs.get("messages", []))
+            return _Resp(content="ok", prompt_eval_count=10)
+        m._ollama_chat_with_watchdog = fake_chat
+        m._generar_dialogo("hola", source="chat", commit_history=False)
+        assert captured["messages"], "chat must have been called with messages"
+        assert all("source" not in mm for mm in captured["messages"])
+
     def test_wins_over_reasoning_branch_on_dual_signal(self, monkeypatch):
         """Overflow branch fires BEFORE the reasoning (empty+thinking) branch."""
         m = self._run(monkeypatch, [

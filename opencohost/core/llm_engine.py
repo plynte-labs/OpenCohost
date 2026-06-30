@@ -1115,8 +1115,12 @@ class MotorVocalIA(threading.Thread):
                 else:
                     digest_block = ""
 
+            # Rebuild a fresh {role, content} per entry — never append by
+            # reference and never pop/mutate — so the stored `source` tag
+            # (history_source_tag_20260629) is projected away before the dicts
+            # reach ollama.chat, and the live deque entries keep their tag.
             for msg in history_snapshot:
-                messages.append(msg)
+                messages.append({'role': msg['role'], 'content': msg['content']})
 
             # Editorial direct-mode enrichment: inject matching ARMED card context for
             # host-direct queries. NON-CONSUMING — card stays ARMED for the agenda path.
@@ -1478,7 +1482,16 @@ class MotorVocalIA(threading.Thread):
         Inherits the direct-path gate (``_sanitize_history_context``); the scout
         needs topic words only, so usernames and injection phrases are scrubbed.
         """
-        recent = history_snapshot[-LLM_SCOUT_HISTORY_MSGS:]
+        # Host-only (history_source_tag_20260629 Task C/D): filter the FULL
+        # snapshot to genuine HOST turns (direct/ptt) FIRST, then take the last N,
+        # so the scout sees the last N real host turns — not N mixed turns thinned
+        # to however few host turns happen to survive. Untagged/viewer/agenda
+        # entries (source absent or not in the set) are excluded by `.get`.
+        host_only = [
+            msg for msg in history_snapshot
+            if isinstance(msg, dict) and msg.get("source") in {"direct", "ptt"}
+        ]
+        recent = host_only[-LLM_SCOUT_HISTORY_MSGS:]
         lines: list[str] = []
         for msg in recent:
             if not isinstance(msg, dict):
@@ -1848,8 +1861,8 @@ class MotorVocalIA(threading.Thread):
                     )
                     self._memory_digest.append(ledger_line)
 
-            self.historial.append({'role': 'user', 'content': safe_context})
-            self.historial.append({'role': 'assistant', 'content': dialogo})
+            self.historial.append({'role': 'user', 'content': safe_context, 'source': source})
+            self.historial.append({'role': 'assistant', 'content': dialogo, 'source': source})
 
     @staticmethod
     def _first_words(text: str, max_words: int = 8) -> str:

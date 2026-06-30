@@ -123,8 +123,9 @@ def _build_scout_motor(monkeypatch):
     motor._pending_model_switch = None
     motor._awaiting_first_success_after_switch = False
     motor._check_capabilities_reasoning = lambda model: False
-    motor.historial.append({"role": "user", "content": "hablamos de viajes espaciales"})
-    motor.historial.append({"role": "assistant", "content": "si, la exploración de Marte da para rato"})
+    # Tagged host turns so the host-only scout filter (Task C) renders them.
+    motor.historial.append({"role": "user", "content": "hablamos de viajes espaciales", "source": "direct"})
+    motor.historial.append({"role": "assistant", "content": "si, la exploración de Marte da para rato", "source": "direct"})
 
     def chat(**kwargs):
         return {"message": {"content": "colonización de Marte\nturismo orbital"}}

@@ -221,8 +221,8 @@ def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     assert spoken == ["Texto cacheado"]
     motor.agenda_output_recorder.assert_called_once_with("Texto cacheado")
     assert list(motor.historial)[-2:] == [
-        {"role": "user", "content": "[agenda segura: prompt interno omitido]"},
-        {"role": "assistant", "content": "Texto cacheado"},
+        {"role": "user", "content": "[agenda segura: prompt interno omitido]", "source": "kira-agenda"},
+        {"role": "assistant", "content": "Texto cacheado", "source": "kira-agenda"},
     ]
 
 
@@ -349,7 +349,7 @@ def test_agenda_output_transformer_caps_before_history_commit():
 
     assert dialogo == "uno dos"
     motor.agenda_output_transformer.assert_called_once_with("uno dos tres cuatro")
-    assert list(motor.historial)[-1] == {"role": "assistant", "content": "uno dos"}
+    assert list(motor.historial)[-1] == {"role": "assistant", "content": "uno dos", "source": "kira-agenda"}
 
 
 def test_agenda_history_redacts_raw_compact_prompt_when_committed():
@@ -361,6 +361,16 @@ def test_agenda_history_redacts_raw_compact_prompt_when_committed():
     assert "CHAT COMPACTO FILTRADO" not in history_text
     assert "usuario dice algo" not in history_text
     assert "Salida segura" in history_text
+
+
+def test_commit_history_tags_both_entries_with_source():
+    # Source tag (history_source_tag_20260629 Task A): both entries of a
+    # committed turn carry the in-scope `source` so readers can separate
+    # host (direct/ptt) from viewer (chat) without a parallel structure.
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._commit_history("contexto host", "respuesta de kira", source="chat")
+    assert list(motor.historial)[-2]["source"] == "chat"
+    assert list(motor.historial)[-1]["source"] == "chat"
 
 
 def test_agenda_history_redacts_editorial_context_when_committed():

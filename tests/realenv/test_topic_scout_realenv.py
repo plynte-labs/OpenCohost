@@ -39,8 +39,9 @@ def _build_real_scout_motor():
     motor.current_model = MODEL
     motor._pending_model_switch = None
     motor._awaiting_first_success_after_switch = False
-    motor.historial.append({"role": "user", "content": SEED_HOST})
-    motor.historial.append({"role": "assistant", "content": SEED_KIRA})
+    # Tagged host turns so the host-only scout filter (Task C) renders them.
+    motor.historial.append({"role": "user", "content": SEED_HOST, "source": "direct"})
+    motor.historial.append({"role": "assistant", "content": SEED_KIRA, "source": "direct"})
     return motor
 
 
