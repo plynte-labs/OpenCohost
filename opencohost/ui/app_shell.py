@@ -1090,6 +1090,7 @@ class VocalAIApp(ctk.CTk):
     def _dispatch_suggestion_recompute(self, gen: int, existing_topics: list, last_outputs: list, session_id: str) -> None:
         """FR2: run heavy idle-tick reads on a worker; marshal result back via _safe_after."""
         smart_agg = self.smart_agg
+        motor_ia = self.motor_ia
         def _worker() -> None:
             try:
                 intent_summary = smart_agg.intent_aggregator.summarize()
@@ -1106,6 +1107,17 @@ class VocalAIApp(ctk.CTk):
             except Exception:
                 logger.exception("idle-suggestion recompute failed")
                 return
+            # Topic Scout (topic_scout_llm_20260629): optional LLM "third source".
+            # scout_digest() is fully self-contained (returns [] on any failure and
+            # when SCOUT_ENABLED is off); wrapped defensively so it can never take
+            # the rule-based suggestions down with it.
+            try:
+                scout_titles = motor_ia.scout_digest()
+            except Exception:
+                logger.exception("topic scout failed")
+                scout_titles = []
+            if scout_titles:
+                suggestions = list(suggestions) + list(scout_titles)
             self._safe_after(lambda: self._apply_idle_suggestions(gen, suggestions))
         threading.Thread(target=_worker, daemon=True).start()
 

@@ -56,6 +56,27 @@ CHAT_PRESENCE_PENALTY = 0.5
 CHAT_FREQUENCY_PENALTY = 0.5
 HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
 DEFAULT_MODEL = "llama3"
+
+# ──────────────────────────────────────────────
+# Topic Scout (topic_scout_llm_20260629)
+# ──────────────────────────────────────────────
+# Idle-time LLM "third source" of stream-topic suggestions. Reads recent LIVE
+# host turns from llm_engine.historial, runs ONE short capped generation through
+# a DEDICATED short-timeout Ollama client (so the single runner slot is released
+# on timeout), and returns adjacent topic titles as DRAFTED-ready dicts.
+# OFF by default until adjacency is validated against a real model at runtime.
+SCOUT_ENABLED: bool = False
+# Dedicated HTTP timeout for the scout client (seconds). MUST stay strictly below
+# the idle re-arm window (~13.5s = 3 ticks x 4500ms) so a synchronous scout can
+# never overlap the next dispatch on the single runner.
+LLM_SCOUT_TIMEOUT = 8
+LLM_SCOUT_NUM_PREDICT = 64        # hard token cap for scout titles
+LLM_SCOUT_TEMPERATURE = 0.6
+LLM_SCOUT_MIN_DIGEST_LINES = 2    # need at least one recent exchange to scout
+LLM_SCOUT_HISTORY_MSGS = 6        # most-recent historial messages fed to the scout
+# Priority floor above EVERY real queue priority (PTT=0, chat=1, agenda=2) so any
+# pending real item aborts the scout (has_pending_priority_before(SCOUT_QUEUE_FLOOR)).
+SCOUT_QUEUE_FLOOR = 99
 DEFAULT_LLM_TIERS = {
     "quality": "gemma4:e4b",
     "balanced": "llama3",

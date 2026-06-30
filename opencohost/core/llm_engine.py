@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import socket
 import threading
 import queue
@@ -20,6 +21,9 @@ from opencohost.config.settings import (
     LLM_TOP_P, LLM_MAX_TOKENS, LLM_KEEP_ALIVE, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
+    SCOUT_ENABLED, LLM_SCOUT_TIMEOUT, LLM_SCOUT_NUM_PREDICT,
+    LLM_SCOUT_TEMPERATURE, LLM_SCOUT_MIN_DIGEST_LINES,
+    LLM_SCOUT_HISTORY_MSGS, SCOUT_QUEUE_FLOOR,
     TTS_LOCAL_MODEL_PATH,
     CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
     CTX_FALLBACK_DEFAULT, CHAR_BUDGET_SAFETY_FACTOR,
@@ -84,6 +88,66 @@ GUARDRAIL_FALLBACK_LINES = (
     "Mmm, mejor lo dejo ahí. ¿Seguimos con otra cosa?",
 )
 
+# Topic Scout prompt — plain user message (NO system prompt / persona). Seeded
+# with a compact, sanitized rendering of the recent LIVE host turns.
+SCOUT_PROMPT_TEMPLATE = """Sos un asistente que sugiere próximos temas para un stream en vivo.
+A partir de estas notas de la conversación reciente, proponé 2 o 3 temas
+NUEVOS y ADYACENTES para seguir la charla: no repitas lo ya dicho, pensá
+hacia dónde podría derivar de forma natural lo que se vino hablando.
+
+Notas:
+{digest_block}
+
+Reglas de salida:
+- Solo títulos, uno por línea.
+- Máximo 6 palabras por título.
+- Sin numeración, sin viñetas, sin comillas, sin explicaciones.
+- Nada de código ni símbolos.
+
+Ejemplo: si se habló de modelos de lenguaje (LLMs), un tema adyacente válido
+sería "regulación de LLMs" o "alucinaciones de IA"."""
+
+# Max words allowed in a scout title (preamble filter rejects longer lines).
+SCOUT_TITLE_MAX_WORDS = 6
+
+# Prompt-injection marker floor (modest, not exhaustive — keyword lists don't
+# scale). Shared by _sanitize_history_context (neutralizes via truncation) and
+# the scout scrub (removes the phrase outright from the compact render).
+INJECTION_MARKERS = (
+    # English markers
+    "ignore all previous",
+    "you are now",
+    "new system prompt",
+    "pretend you are",
+    "forget everything",
+    "disregard previous",
+    "do not follow",
+    "your new role is",
+    "you must now",
+    "act as if",
+    "from now on you are",
+    # Spanish markers
+    "olvida todo",
+    "olvidá todo",
+    "ignora todo",
+    "ignorá todo",
+    "ignora las instrucciones",
+    "ignorá las instrucciones",
+    "ahora eres",
+    "ahora sos",
+    "nuevo system prompt",
+    "nuevo prompt de sistema",
+    "haz de cuenta",
+    "hacé de cuenta",
+    "tu nuevo rol es",
+    "no sigas",
+    "no obedezcas",
+    "actúa como",
+    "actua como",
+    "de ahora en adelante eres",
+    "de ahora en más sos",
+)
+
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -124,6 +188,11 @@ class MotorVocalIA(threading.Thread):
         self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
         self._ollama_chat_client = None
+        # Topic Scout: dedicated short-timeout client (built in run()); its HTTP
+        # timeout closes the socket so Ollama cancels the generation and frees the
+        # single runner slot. Lazily created in scout_digest if run() did not.
+        self._ollama_scout_client = None
+        self._scout_last_input_hash: Optional[str] = None
         self._last_llm_failure: Optional[dict] = None
         self._last_known_good_model: Optional[str] = _startup_model
         self._awaiting_first_success_after_switch: bool = False
@@ -251,6 +320,7 @@ class MotorVocalIA(threading.Thread):
         self.pygame = pygame
         self.ollama = ollama
         self._ollama_chat_client = self._create_ollama_chat_client(ollama)
+        self._ollama_scout_client = self._create_ollama_scout_client(ollama)
 
         try:
             self.pygame.mixer.init()
@@ -1339,17 +1409,38 @@ class MotorVocalIA(threading.Thread):
             self._log(f"Ollama Client no soporta timeout de chat; usando cliente por defecto: {e}", level="warning")
             return None
 
+    def _create_ollama_scout_client(self, ollama_module):
+        """Dedicated short-timeout client for the Topic Scout.
+
+        Built with ``LLM_SCOUT_TIMEOUT`` (not the 180s chat timeout) so that when
+        the HTTP timeout expires the socket closes and Ollama cancels the
+        generation, releasing the single runner slot in ~LLM_SCOUT_TIMEOUT.
+        """
+        client_factory = getattr(ollama_module, "Client", None)
+        if client_factory is None:
+            return None
+        try:
+            return client_factory(timeout=LLM_SCOUT_TIMEOUT)
+        except TypeError as e:
+            self._log(f"Ollama Client no soporta timeout de scout; usando cliente por defecto: {e}", level="warning")
+            return None
+
     def _ollama_chat(self, **kwargs):
         client = self._ollama_chat_client or self.ollama
         return client.chat(**kwargs)
 
-    def _ollama_chat_with_watchdog(self, *, timeout: float, **kwargs):
+    def _ollama_scout_chat(self, **kwargs):
+        client = self._ollama_scout_client or self.ollama
+        return client.chat(**kwargs)
+
+    def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
         result = {}
         done = threading.Event()
+        call = chat_callable or self._ollama_chat
 
         def worker() -> None:
             try:
-                result["response"] = self._ollama_chat(**kwargs)
+                result["response"] = call(**kwargs)
             except Exception as exc:
                 result["error"] = exc
             finally:
@@ -1371,6 +1462,150 @@ class MotorVocalIA(threading.Thread):
         if self._awaiting_first_success_after_switch and request_model == self.current_model:
             return self._post_switch_watchdog_timeout
         return self._inference_watchdog_timeout
+
+    # ── Topic Scout (topic_scout_llm_20260629) ──────────────────────────────
+    def _scout_render_history(self, history_snapshot: list) -> list[str]:
+        """Compact, sanitized rendering of the most-recent LIVE turns.
+
+        Inherits the direct-path gate (``_sanitize_history_context``); the scout
+        needs topic words only, so usernames and injection phrases are scrubbed.
+        """
+        recent = history_snapshot[-LLM_SCOUT_HISTORY_MSGS:]
+        lines: list[str] = []
+        for msg in recent:
+            if not isinstance(msg, dict):
+                continue
+            content = self._scout_scrub_text(
+                self._sanitize_history_context(str(msg.get("content", "")))
+            )
+            if not content:
+                continue
+            speaker = "Host" if msg.get("role") == "user" else "Kira"
+            lines.append(f"{speaker}: {content}")
+        return lines
+
+    @staticmethod
+    def _scout_scrub_text(text: str) -> str:
+        """Strip @mentions and injection-marker phrases from a render line.
+
+        The scout only needs topic words — never usernames or injected
+        instructions — so it scrubs harder than the verbatim direct path.
+        """
+        text = re.sub(r"@\w+", "", text)
+        lowered = text.lower()
+        for marker in INJECTION_MARKERS:
+            idx = lowered.find(marker)
+            while idx != -1:
+                text = text[:idx] + text[idx + len(marker):]
+                lowered = text.lower()
+                idx = lowered.find(marker)
+        return " ".join(text.split())
+
+    def _scout_extract_text(self, response) -> str:
+        """Pull the assistant content out of a chat response (dict or object)."""
+        if response is None:
+            return ""
+        msg = response["message"] if isinstance(response, dict) else getattr(response, "message", None)
+        if msg is None:
+            return ""
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+        return content or ""
+
+    def _scout_parse_titles(self, text: str, input_block: str) -> list[dict]:
+        """Parse adjacent topic titles: filter preamble/echo, sanitize, dedupe, cap 3."""
+        if not text:
+            return []
+        from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+
+        input_cf = input_block.casefold()
+        results: list[dict] = []
+        seen: set[str] = set()
+        for raw_line in text.splitlines():
+            line = raw_line.strip().strip("-•*\t\"'").strip()
+            if not line:
+                continue
+            # Preamble filter: conversational lead-ins ("Claro, acá van:") and
+            # over-long lines are not titles.
+            if line.endswith(":"):
+                continue
+            if len(line.split()) > SCOUT_TITLE_MAX_WORDS:
+                continue
+            # Echo filter: a title that merely repeats a seed term is not adjacent.
+            if line.casefold() in input_cf:
+                continue
+            # Title gate (emoji/code/length) — drop silently on rejection.
+            try:
+                title = KiraAgendaController.sanitize_topic_text(line, field="title")
+            except ValueError:
+                continue
+            slug = title.casefold()
+            if slug in seen:
+                continue
+            seen.add(slug)
+            results.append({"title": title, "source": "scout", "confidence": "LOW"})
+            if len(results) >= 3:
+                break
+        return results
+
+    def scout_digest(self) -> list[dict]:
+        """Topic Scout: idle-time adjacent-topic suggester.
+
+        Best-effort and FULLY self-contained: every internal failure returns []
+        so it can never break the rule-based ``generate_suggestions`` it runs
+        alongside. Returns DRAFTED-ready dicts; NEVER speaks or persists.
+        """
+        try:
+            if not SCOUT_ENABLED:
+                return []
+            # Gate 3: no model resident, or a switch pending/in-flight -> skip
+            # (never cold-load; use the RESIDENT model, not the desired one).
+            if self._loaded_model is None:
+                return []
+            if self._pending_model_switch or self._awaiting_first_success_after_switch:
+                return []
+            # Gate 1: re-read idle state immediately before the call.
+            if self.is_processing or self.is_speaking:
+                return []
+            # Gate 2: real work queued but not yet started would serialize behind
+            # an in-flight scout on the single runner — abort on ANY pending item.
+            if self.has_pending_priority_before(SCOUT_QUEUE_FLOOR):
+                return []
+            # Value gate (efficiency, not safety): a thinking-capable model burns
+            # the 64-token budget on <think> and returns nothing useful.
+            if self._check_capabilities_reasoning(self._loaded_model):
+                return []
+            with self._history_lock:
+                history_snapshot = list(self.historial)
+            lines = self._scout_render_history(history_snapshot)
+            if len(lines) < LLM_SCOUT_MIN_DIGEST_LINES:
+                return []
+            input_block = "\n".join(lines)
+            # Fresh-input gate: hash the LIVE snapshot; skip an identical input.
+            # Cached on EVERY attempt that reaches here (even when the call returns
+            # []), so a no-op scout does not re-fire until the conversation moves.
+            input_hash = hashlib.sha256(input_block.encode("utf-8")).hexdigest()
+            if input_hash == self._scout_last_input_hash:
+                return []
+            self._scout_last_input_hash = input_hash
+            if self._ollama_scout_client is None:
+                self._ollama_scout_client = self._create_ollama_scout_client(self.ollama)
+            prompt = SCOUT_PROMPT_TEMPLATE.format(digest_block=input_block)
+            response = self._ollama_chat_with_watchdog(
+                timeout=LLM_SCOUT_TIMEOUT + 2,
+                chat_callable=self._ollama_scout_chat,
+                model=self._loaded_model,
+                messages=[{"role": "user", "content": prompt}],
+                options={
+                    "num_predict": LLM_SCOUT_NUM_PREDICT,
+                    "temperature": LLM_SCOUT_TEMPERATURE,
+                },
+                keep_alive=LLM_KEEP_ALIVE,
+            )
+            text = self._scout_extract_text(response)
+            return self._scout_parse_titles(text, input_block)
+        except Exception:
+            # Total internal isolation — a scout failure must never escape.
+            return []
 
     @staticmethod
     def _is_watchdog_timeout_error(exc: Exception) -> bool:
@@ -1640,41 +1875,7 @@ class MotorVocalIA(threading.Thread):
     def _sanitize_history_context(context: str) -> str:
         """Strip obvious prompt-injection attempts from chat context."""
         lowered = context.lower()
-        injection_markers = (
-            # English markers
-            "ignore all previous",
-            "you are now",
-            "new system prompt",
-            "pretend you are",
-            "forget everything",
-            "disregard previous",
-            "do not follow",
-            "your new role is",
-            "you must now",
-            "act as if",
-            "from now on you are",
-            # Spanish markers — modest floor; not exhaustive (keyword lists don't scale)
-            "olvida todo",
-            "olvidá todo",
-            "ignora todo",
-            "ignorá todo",
-            "ignora las instrucciones",
-            "ignorá las instrucciones",
-            "ahora eres",
-            "ahora sos",
-            "nuevo system prompt",
-            "nuevo prompt de sistema",
-            "haz de cuenta",
-            "hacé de cuenta",
-            "tu nuevo rol es",
-            "no sigas",
-            "no obedezcas",
-            "actúa como",
-            "actua como",
-            "de ahora en adelante eres",
-            "de ahora en más sos",
-        )
-        for marker in injection_markers:
+        for marker in INJECTION_MARKERS:
             if marker in lowered:
                 return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:300]
         return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:800]
