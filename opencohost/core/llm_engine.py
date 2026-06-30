@@ -1309,9 +1309,17 @@ class MotorVocalIA(threading.Thread):
             _ctx_for_obs = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
             if _pec_final > 0:
                 _util = context_budget.utilization(_pec_final, _ctx_for_obs)
+                # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
+                # vs decode wall-time split so the prefill fraction of TTFT is observable
+                # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
+                _prefill_ms = (getattr(respuesta, "prompt_eval_duration", 0) or 0) / 1e6
+                _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
+                _ec_final = getattr(respuesta, "eval_count", 0) or 0
                 logger.info(
-                    "ctx_utilization: model=%s prompt_eval_count=%d num_ctx=%d ratio=%.3f source=%s",
-                    request_model, _pec_final, _ctx_for_obs, _util, source,
+                    "ctx_utilization: model=%s prompt_eval_count=%d num_ctx=%d ratio=%.3f "
+                    "prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
+                    request_model, _pec_final, _ctx_for_obs, _util,
+                    _prefill_ms, _decode_ms, _ec_final, source,
                 )
                 if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
                     logger.warning(

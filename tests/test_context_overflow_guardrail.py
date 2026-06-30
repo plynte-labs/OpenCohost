@@ -58,9 +58,13 @@ class _Resp:
     (used at the msg_obj extraction site) AND ``getattr(resp, 'prompt_eval_count')``
     (used by the overflow + utilization branches)."""
 
-    def __init__(self, content="", thinking="", prompt_eval_count=0):
+    def __init__(self, content="", thinking="", prompt_eval_count=0,
+                 prompt_eval_duration=0, eval_duration=0, eval_count=0):
         self._message = {"content": content, "thinking": thinking}
         self.prompt_eval_count = prompt_eval_count
+        self.prompt_eval_duration = prompt_eval_duration
+        self.eval_duration = eval_duration
+        self.eval_count = eval_count
 
     def get(self, key, default=None):
         if key == "message":
@@ -268,6 +272,21 @@ class TestUtilizationObservability:
         with caplog.at_level("INFO"):
             m._generar_dialogo("hola", source="chat", commit_history=False)
         assert any("ctx_utilization" in r.message for r in caplog.records)
+
+    def test_prefill_decode_durations_logged(self, monkeypatch, caplog):
+        # measure-first (prompt_efficiency_kvcache_20260629): the prefill-vs-decode
+        # wall-time split must be observable so the prefill fraction of TTFT is known
+        # before any Lever-1 rewrite. Ollama reports durations in nanoseconds.
+        m = self._run(monkeypatch, _Resp(
+            content="hi", prompt_eval_count=2000,
+            prompt_eval_duration=1_000_000_000, eval_duration=2_000_000_000, eval_count=128,
+        ))
+        with caplog.at_level("INFO"):
+            m._generar_dialogo("hola", source="chat", commit_history=False)
+        rec = next(r.message for r in caplog.records if "ctx_utilization" in r.message)
+        assert "prefill_ms=1000" in rec
+        assert "decode_ms=2000" in rec
+        assert "eval_count=128" in rec
 
     def test_pressure_high_callback_above_threshold(self, monkeypatch):
         seen = []
