@@ -162,7 +162,7 @@ class AvatarPanel:
             hover_color="#1d2a38",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        btn_toggle_main.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        btn_toggle_main.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
 
         main_content = ctk.CTkFrame(card_main, fg_color="#101923", corner_radius=14)
         main_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))

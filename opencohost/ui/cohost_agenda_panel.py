@@ -141,8 +141,8 @@ class CoHostAgendaPanel:
         )
         btn_toggle_profile.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
 
-        profile_content = ctk.CTkFrame(card_profile, fg_color=theme.SURFACE_NESTED, corner_radius=14)
-        profile_content.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        profile_content = ctk.CTkFrame(card_profile, fg_color=theme.SURFACE_NESTED, corner_radius=12)
+        profile_content.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
         profile_content.grid_remove()
         profile_content.grid_columnconfigure(0, weight=1)
         profile_content.grid_columnconfigure(1, weight=1)
@@ -346,7 +346,7 @@ class CoHostAgendaPanel:
         btn_toggle_bulk.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
 
         # Content frame for bulk import
-        content_bulk = ctk.CTkFrame(card_bulk, fg_color=theme.SURFACE_NESTED, corner_radius=14)
+        content_bulk = ctk.CTkFrame(card_bulk, fg_color=theme.SURFACE_NESTED, corner_radius=12)
         content_bulk.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         content_bulk.grid_remove()
         content_bulk.grid_columnconfigure(0, weight=1)

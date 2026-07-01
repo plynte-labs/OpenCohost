@@ -737,9 +737,14 @@ class VocalAIApp(ctk.CTk):
         self._model_display_to_tag = self.model_panel._model_display_to_tag
         self._model_tag_to_display = self.model_panel._model_tag_to_display
         self.after(250, self.model_panel.refresh_ollama_state)
-        # Profile panel
-        frame_profile = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
-        frame_profile.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        # Profile panel — stacked with the PTT card in a right-column wrapper so the two
+        # short cards fill the column height instead of leaving a big empty gap under Perfil.
+        frame_right = ctk.CTkFrame(tab_cfg_model_profile, fg_color="transparent")
+        frame_right.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        frame_right.grid_columnconfigure(0, weight=1)
+        frame_right.grid_rowconfigure(1, weight=1)  # PTT stretches so the right column's bottom aligns with the taller Modelo column
+        frame_profile = ctk.CTkFrame(frame_right, fg_color="#151d26", corner_radius=14)
+        frame_profile.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 16))
         self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after)
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
@@ -837,7 +842,12 @@ class VocalAIApp(ctk.CTk):
             # Heavy-TTS is experimental; hidden in packaged builds.
             # Engine-side gates and auto-fallback remain active regardless.
             self.switch_modo_ligero.configure(state="disabled")
-        self.tts_speed_selector = build_tts_speed_selector(frame_tts_memory, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
+        # Velocidad group — its own recessed sub-frame so it reads as a distinct section
+        # under "Voz de Kira", parallel to the voice-selection group (frame_voice) above,
+        # instead of floating loose in the card.
+        frame_speed = ctk.CTkFrame(frame_tts_memory, fg_color="#101923", corner_radius=10)
+        frame_speed.pack(fill="x", padx=10, pady=(0, 10))
+        self.tts_speed_selector = build_tts_speed_selector(frame_speed, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
         # Memoria card — separate concern from voice; clearing wipes conversation context only.
         frame_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_memory.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
@@ -846,19 +856,21 @@ class VocalAIApp(ctk.CTk):
         self.btn_clear.pack(fill="x", padx=10, pady=(4, 10))
         ctk.CTkLabel(frame_memory, text="Kira olvidará el contexto previo de la conversación.", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 10))
         # PTT controls live with model/profile because they configure how Kira is operated.
-        frame_ptt = ctk.CTkFrame(tab_cfg_model_profile, fg_color="#151d26", corner_radius=14)
-        frame_ptt.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+        frame_ptt = ctk.CTkFrame(frame_right, fg_color="#151d26", corner_radius=14)
+        frame_ptt.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         ctk.CTkLabel(frame_ptt, text="PTT (Push-to-Talk)", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 2))
         ctk.CTkLabel(frame_ptt, text="Activá PTT y mantené presionada la tecla para hablar. Soltá para que Kira procese y responda. Con PTT OFF, Kira escucha continuamente (modo LiveAudio).", font=ctk.CTkFont(size=10), text_color="#8fa3b8", anchor="w", justify="left", wraplength=400).pack(fill="x", padx=10, pady=(0, 4))
-        self.switch_ptt = ctk.CTkSwitch(frame_ptt, text="PTT OFF", command=self._al_toggle_ptt, onvalue=True, offvalue=False)
-        self.switch_ptt.pack(fill="x", padx=10, pady=4)
+        # Compact single row: the toggle + key config together (no separate switch row,
+        # no dead gap in the middle).
         ptt_hotkey_row = ctk.CTkFrame(frame_ptt, fg_color="transparent")
         ptt_hotkey_row.pack(fill="x", padx=10, pady=4)
+        self.switch_ptt = ctk.CTkSwitch(ptt_hotkey_row, text="PTT OFF", command=self._al_toggle_ptt, onvalue=True, offvalue=False)
+        self.switch_ptt.pack(side="left", padx=(0, 16))
         ctk.CTkLabel(ptt_hotkey_row, text="Tecla:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
-        self.lbl_hotkey = ctk.CTkLabel(ptt_hotkey_row, text=self.ptt.hotkey, font=ctk.CTkFont(size=13, weight="bold"), width=80)
-        self.lbl_hotkey.pack(side="left", padx=3)
+        self.lbl_hotkey = ctk.CTkLabel(ptt_hotkey_row, text=self.ptt.hotkey, font=ctk.CTkFont(size=13, weight="bold"))
+        self.lbl_hotkey.pack(side="left", padx=(0, 8))
         self.btn_mapear = ctk.CTkButton(ptt_hotkey_row, text="Mapear", command=self._mapear_hotkey, width=70, fg_color="#555555", hover_color="#666666")
-        self.btn_mapear.pack(side="right", padx=3)
+        self.btn_mapear.pack(side="left", padx=3)
         self.lbl_ptt_status = ctk.CTkLabel(frame_ptt, text="", font=ctk.CTkFont(size=12), text_color="#888888", anchor="w", justify="left")
         self.lbl_ptt_status.pack(fill="x", padx=10, pady=(0, 10))
         # Ayuda tab — contextual help for each product tab
@@ -919,14 +931,20 @@ class VocalAIApp(ctk.CTk):
             content.grid_columnconfigure(0, weight=1)
             content.grid_remove()
 
-            # Use CTkTextbox instead of CTkLabel — guarantees text is always visible
+            # Use CTkTextbox instead of CTkLabel — guarantees text is always visible.
+            # Height is sized to the content (approx wrapped lines) so an expanded section
+            # shows the FULL help text with no nested scroll; the outer scroll frame handles
+            # overflow. ~60 chars/line is a deliberately conservative estimate (slightly over-
+            # sizes rather than clipping); tune if a section renders with a visible scrollbar.
+            _help_paras = description.split("\n\n")
+            _help_lines = sum(max(1, (len(p) + 59) // 60) for p in _help_paras) + (len(_help_paras) - 1)
             textbox = ctk.CTkTextbox(
                 content,
                 font=ctk.CTkFont(size=11),
                 fg_color="#101923",
                 text_color="#a9bdd3",
                 wrap="word",
-                height=100,
+                height=_help_lines * 20 + 20,
                 border_width=0,
             )
             textbox.grid(row=0, column=0, sticky="ew", padx=8, pady=8)

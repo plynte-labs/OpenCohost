@@ -420,7 +420,7 @@ class TestModelInfoUpdate:
             model_panel.update_model_info(tag)
 
         info = MODELS_CATALOG[tag]
-        expected_text = f"{info['desc']} ({info['size_gb']}GB) \u2705"
+        expected_text = f"{info['desc']} ({info['size_gb']}GB) \u00b7 \u2705 Instalado"
         assert model_panel.lbl_modelo_info.text == expected_text
 
     def test_update_model_info_not_installed(self, model_panel):
@@ -431,7 +431,7 @@ class TestModelInfoUpdate:
             model_panel.update_model_info(tag)
 
         info = MODELS_CATALOG[tag]
-        expected_text = f"{info['desc']} ({info['size_gb']}GB) \u274c No instalado"
+        expected_text = f"{info['desc']} ({info['size_gb']}GB) \u00b7 \u274c No instalado"
         assert model_panel.lbl_modelo_info.text == expected_text
 
     def test_update_model_info_unknown_tag(self, model_panel):

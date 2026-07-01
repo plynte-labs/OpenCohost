@@ -243,7 +243,7 @@ class StreamAdminUI:
 
     def _build_connection_tab(self, tab: Any) -> None:
         frame_auth = ctk.CTkFrame(tab, fg_color="#151d26", corner_radius=14)
-        frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        frame_auth.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         frame_auth.grid_columnconfigure(0, weight=1)
 
         # Toggle header
@@ -571,7 +571,7 @@ class StreamAdminUI:
             btn.pack(side="left", padx=1)
 
         spam_row = ctk.CTkFrame(frame_live, fg_color="transparent")
-        spam_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(2, 10))
+        spam_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(2, 4))
         ctk.CTkLabel(spam_row, text="Máximo", font=ctk.CTkFont(size=11), text_color="#8fa3b8").pack(side="left", padx=(0, 4))
         entry_spam = ctk.CTkEntry(spam_row, width=50)
         entry_spam.insert(0, "10")

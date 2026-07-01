@@ -328,8 +328,8 @@ class ModelPanel:
         info = MODELS_CATALOG.get(model_tag, {})
         desc = info.get("desc", "Modelo personalizado")
         size = info.get("size_gb", "?")
-        installed = "\u2705" if self._modelo_instalado(model_tag) else "\u274c No instalado"
-        self.lbl_modelo_info.configure(text=f"{desc} ({size}GB) {installed}")
+        installed = "\u2705 Instalado" if self._modelo_instalado(model_tag) else "\u274c No instalado"
+        self.lbl_modelo_info.configure(text=f"{desc} ({size}GB) \u00b7 {installed}")
 
     def update_button_for_ollama_state(self, model_tag: Optional[str] = None) -> None:
         """Public wrapper to update the button based on Ollama state."""
