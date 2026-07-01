@@ -28,6 +28,7 @@ from opencohost.config.settings import (
     CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
     CTX_FALLBACK_DEFAULT, CHAR_BUDGET_SAFETY_FACTOR,
     CTX_PRESSURE_HIGH_THRESHOLD, CTX_OVERFLOW_SIGNAL_RATIO,
+    LLM_TIER_EFFECTIVE_CTX_CAPS,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
@@ -387,6 +388,8 @@ class MotorVocalIA(threading.Thread):
 
         elif tipo == "switch_model":
             new_model = payload
+            if self._is_model_switch_noop(new_model):
+                return
             self._desired_model = new_model
 
             if not self.is_ready:
@@ -395,6 +398,9 @@ class MotorVocalIA(threading.Thread):
                 return
 
             if self._processing or self._speaking:
+                if self._pending_model_switch == new_model:
+                    self._log(f"Switch a {new_model} ya esta pendiente; ignorando duplicado.", level="debug")
+                    return
                 self._log(f"Switch a {new_model} pendiente: motor ocupado.", level="warning")
                 self._pending_switch_not_ready_logged = False
                 self._pending_model_switch = new_model
@@ -861,6 +867,13 @@ class MotorVocalIA(threading.Thread):
         previous_owns_ollama_model = self._owns_ollama_model
         target_model = self.llm_tiers.config.model_for(target_tier)
 
+        if (
+            target_model is not None
+            and target_tier == previous_tier
+            and self._is_model_switch_noop(target_model)
+        ):
+            return True
+
         if target_model is None:
             self._last_switch_failure = {
                 "requested_tier": target_tier,
@@ -935,6 +948,11 @@ class MotorVocalIA(threading.Thread):
 
         model = self._pending_model_switch
 
+        if self._is_model_switch_noop(model):
+            self._pending_model_switch = None
+            self._pending_switch_not_ready_logged = False
+            return
+
         if not self.is_ready:
             self._pending_switch_next_at = time.monotonic() + 2.0
             if self._check_ollama_service(notify_unavailable=False):
@@ -946,8 +964,27 @@ class MotorVocalIA(threading.Thread):
 
         self._apply_model_switch(model)
 
+    def _is_model_switch_noop(self, new_model: str) -> bool:
+        """Return True when the requested model is already the effective target."""
+        return (
+            bool(new_model)
+            and new_model == self.current_model
+            and new_model == self._desired_model
+            and (
+                not self.is_ready
+                or self._warmed_model == new_model
+                or self._loaded_model == new_model
+            )
+        )
+
     def _apply_model_switch(self, new_model: str, *, persist_source: str = "user_switch") -> bool:
         """Execute model switch and persist on success."""
+        if self._is_model_switch_noop(new_model):
+            if self._pending_model_switch == new_model:
+                self._pending_model_switch = None
+                self._pending_switch_not_ready_logged = False
+            return True
+
         previous_model = self.current_model
         self._pending_model_switch = None
         self._pending_switch_not_ready_logged = False
@@ -1164,22 +1201,23 @@ class MotorVocalIA(threading.Thread):
                 prompt_completo = f"{self.system_prompt}\n\n[{i18n_active.user_message_label()}]: {enriched}"
                 messages.append({'role': 'user', 'content': prompt_completo})
 
-            # Layer 1+2: discover the model's real context window (cached, free
+            # Layer 1+2: discover the model's native context window (cached, free
             # after first call — also covers the name-heuristic short-circuit gap)
-            # and proactively trim oldest history pairs so the assembled prompt
-            # fits within the character budget derived from that window.
+            # but budget against OpenCohost's effective runtime cap so large
+            # native windows do not disable prompt eviction or over-allocate KV.
             self._discover_model_ctx(request_model)
-            _model_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+            _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+            _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
             messages, _ctx_evicted = context_budget.apply_char_budget(
                 messages,
-                ctx_limit=_model_ctx,
+                ctx_limit=_effective_ctx,
                 max_output_tokens=LLM_MAX_TOKENS,
                 safety_factor=CHAR_BUDGET_SAFETY_FACTOR,
             )
             if _ctx_evicted > 0:
                 self._log(
                     f"ctx_budget_gate: evicted {_ctx_evicted} pair(s) from messages "
-                    f"(model={request_model}, ctx_limit={_model_ctx})",
+                    f"(model={request_model}, native_ctx={_native_ctx}, effective_ctx={_effective_ctx})",
                     level="warning",
                 )
 
@@ -1187,7 +1225,7 @@ class MotorVocalIA(threading.Thread):
                 'temperature': LLM_TEMPERATURE,
                 'top_p': LLM_TOP_P,
                 'num_predict': LLM_MAX_TOKENS,
-                'num_ctx': _model_ctx,
+                'num_ctx': _effective_ctx,
             }
 
             if "gemma" in request_model.lower():
@@ -1272,7 +1310,7 @@ class MotorVocalIA(threading.Thread):
                 # trimming context wins over removing the output-token cap. Delegates
                 # the int-threshold comparison to context_budget.is_overflow_signal.
                 _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
-                _ctx_limit_now = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+                _ctx_limit_now = _effective_ctx
                 if intento == 0 and context_budget.is_overflow_signal(
                     raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
                 ):
@@ -1310,9 +1348,8 @@ class MotorVocalIA(threading.Thread):
             # Layer 4 observability: log prompt-window utilization on every populated
             # response and raise a UI pressure signal when it crosses the high mark.
             _pec_final = (getattr(respuesta, "prompt_eval_count", 0) or 0) if respuesta is not None else 0
-            _ctx_for_obs = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
             if _pec_final > 0:
-                _util = context_budget.utilization(_pec_final, _ctx_for_obs)
+                _util = context_budget.utilization(_pec_final, _effective_ctx)
                 # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
                 # vs decode wall-time split so the prefill fraction of TTFT is observable
                 # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
@@ -1320,9 +1357,9 @@ class MotorVocalIA(threading.Thread):
                 _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
                 _ec_final = getattr(respuesta, "eval_count", 0) or 0
                 logger.info(
-                    "ctx_utilization: model=%s prompt_eval_count=%d num_ctx=%d ratio=%.3f "
+                    "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
                     "prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
-                    request_model, _pec_final, _ctx_for_obs, _util,
+                    request_model, _pec_final, _native_ctx, _effective_ctx, _util,
                     _prefill_ms, _decode_ms, _ec_final, source,
                 )
                 if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
@@ -1699,6 +1736,28 @@ class MotorVocalIA(threading.Thread):
         """
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
+
+    def _resolve_effective_ctx_limit(self, model: str, native_ctx: int) -> int:
+        """Return OpenCohost's runtime ctx cap for ``model`` without changing discovery."""
+        tier = None
+        tiers = getattr(self, "llm_tiers", None)
+        if tiers is not None:
+            active_model = tiers.active_model
+            if active_model == model:
+                tier = tiers.active_tier
+            else:
+                for candidate_tier, candidate_model in tiers.config.as_dict().items():
+                    if candidate_model == model:
+                        tier = candidate_tier
+                        break
+        tier_cap = LLM_TIER_EFFECTIVE_CTX_CAPS.get(tier, CTX_FALLBACK_DEFAULT)
+        try:
+            native = int(native_ctx)
+        except (TypeError, ValueError):
+            native = CTX_FALLBACK_DEFAULT
+        if native <= 0:
+            native = CTX_FALLBACK_DEFAULT
+        return min(native, tier_cap)
 
     def _discover_model_ctx(self, model: str) -> int:
         """Layer 1: return ``model``'s native context length from ``ollama.show``.

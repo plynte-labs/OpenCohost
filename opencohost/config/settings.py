@@ -82,6 +82,11 @@ DEFAULT_LLM_TIERS = {
     "balanced": "llama3",
     "fast": "qwen3:1.7b",
 }
+LLM_TIER_EFFECTIVE_CTX_CAPS = {
+    "quality": 4096,
+    "balanced": 8192,
+    "fast": 6144,
+}
 
 # Catálogo curado de modelos recomendados para esta tarea
 MODELS_CATALOG = {

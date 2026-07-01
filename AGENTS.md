@@ -31,6 +31,8 @@
 
 - Existing OpenCohost-specific skill remains available and should not be overwritten:
 - `vocalai-ui-ux-architect`
+- `visual-interface-engineering` — systematic UI polish from the Visual Interface Engineering PDF:
+  spacing, hierarchy, reduction of noise, faithful CustomTkinter refinement without behavior changes.
 
 ## OpenCohost Engineering Skills
 

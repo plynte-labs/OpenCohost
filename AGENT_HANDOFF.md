@@ -109,6 +109,32 @@ Each item: WHAT / WHERE / HOW to attack.
   choice + 12GB config hardening (flash-attention, item #2). **ADR-024** editorial cards as
   primitive RAG (deferred).
 
+### (f) Runtime validation — 2026-06-30 (live gemma4 session, profile Akira, ~2h)
+A real 2h+ session (logs 12:09–14:33) with model switching qwen3:1.7b → gemma4:e2b → gemma4:e4b.
+Updates to the OWED map above:
+- **#5 telemetry drift — CONFIRMED LIVE + ROOT-CAUSED.** The `ctx_utilization` log prints `num_ctx=131072`
+  for gemma, which LOOKS alarming but is MISLABELED. Verified: `llm_engine.py:1193-1194` POPS `num_ctx`
+  for gemma (never sent to Ollama), and the log field at `:1313` is `_ctx_for_obs = self._model_ctx_limit`
+  = the DISCOVERED NATIVE ctx, NOT the effective num_ctx. So **gemma does NOT allocate a 131072 KV cache —
+  primary path confirmed safe live.** Fix = rename the log field (`native_ctx=` / add `effective_num_ctx=`)
+  so it stops implying gemma runs at 131072. `ratio` = prompt-vs-native headroom, not KV utilization.
+- **#6 prompt-efficiency — REAL DATA captured.** TTFT is DECODE-dominated, not prefill: prefill_ms 421–1640
+  (cheap, grows slowly), decode_ms 6587–17490; responses verbose (eval_count 700–1156 → 10–27 TTS fragments,
+  full TTS 54–127s). ⇒ **Lever 2 (compact replies) is the right lever; Lever 1 (prefix-stability) is LOW
+  priority for gemma** (prefill already cheap). measure-first instrumentation (c428574) proven working live.
+- **source tag — VALIDATED LIVE.** `source=direct` / `kira-agenda` / `kira-agenda-stop` all emitted correctly
+  end-to-end (the substrate the host-only Scout consumes is confirmed clean).
+- **heavy_model_inference_recovery — happy-path only.** Clean switching + memory release
+  ("Liberando memoria del modelo: qwen3:1.7b") + warm-prep proven; but the WATCHDOG TIMEOUT + ROLLBACK
+  recovery was NOT exercised this run (no stall). Still relies on the prior qwopus/gemma:26b validation.
+- **#1 Topic Scout — STILL DARK / not exercised** (no scout lines in the log). Unchanged, still owed.
+- **#4 fast-tier qwen3 num_ctx=40960 — STILL UNTESTED.** qwen3:1.7b was the initial model but the session
+  switched to gemma4 BEFORE any qwen3 inference, so no `ctx_utilization` line for qwen3 was captured. The
+  regression is neither confirmed nor cleared by this run.
+- **#2 Flash attention — not provable from this log.**
+Per-track annotations written to: prompt_efficiency_kvcache, ADR-029, heavy_model_inference_recovery,
+dynamic_model_management, history_source_tag, topic_scout_llm.
+
 ### Stale-doc note (internal, harmless — reconcile if snapshots are kept as the record)
 `09_final_report.md` points 11/15 still say the 3 core fixes are "DIFERIDOS, pendientes de OK del
 owner" — they were APPLIED in snapshot 10. Audit drift only; no owner-facing impact.

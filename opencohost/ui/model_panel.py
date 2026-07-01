@@ -99,6 +99,9 @@ class ModelPanel:
         self._active_model_tag: Optional[str] = None
         self._active_llm_tier: str = "balanced"
         self._llm_tiers: dict[str, Optional[str]] = dict(resolve_llm_tiers())
+        self._switch_inflight_kind: Optional[str] = None
+        self._switch_inflight_target: Optional[str] = None
+        self._syncing_model_selection: bool = False
 
     # ------------------------------------------------------------------
     # Model catalog
@@ -355,7 +358,11 @@ class ModelPanel:
     def set_model_selection(self, display_name: str) -> None:
         """Set the model combobox to a specific display name."""
         if self.combo_modelos is not None:
-            self.combo_modelos.set(display_name)
+            self._syncing_model_selection = True
+            try:
+                self.combo_modelos.set(display_name)
+            finally:
+                self._syncing_model_selection = False
 
     def get_selected_display(self) -> str:
         """Return the currently selected model display name."""
@@ -380,8 +387,13 @@ class ModelPanel:
         """
         display = self.get_display_for_tag(tag)
         if self.combo_modelos is not None:
-            self.combo_modelos.set(display)
+            self._syncing_model_selection = True
+            try:
+                self.combo_modelos.set(display)
+            finally:
+                self._syncing_model_selection = False
         self._active_model_tag = tag
+        self._clear_switch_inflight()
         self._update_button_for_ollama_state()
         self._update_tier_buttons()
 
@@ -389,8 +401,13 @@ class ModelPanel:
         """Restore combobox to the actual active model after a failed switch."""
         display = self.get_display_for_tag(model_tag)
         if self.combo_modelos is not None:
-            self.combo_modelos.set(display)
+            self._syncing_model_selection = True
+            try:
+                self.combo_modelos.set(display)
+            finally:
+                self._syncing_model_selection = False
         self._active_model_tag = model_tag
+        self._clear_switch_inflight()
         self._update_button_for_ollama_state(model_tag)
         self._update_tier_buttons()
 
@@ -425,12 +442,20 @@ class ModelPanel:
 
     def _on_model_changed(self, display_name: str) -> None:
         """Handle model combobox selection change."""
+        if self._syncing_model_selection:
+            return
         tag = self.get_tag_for_display(display_name)
         self.update_model_info(tag)
         self._update_button_for_ollama_state(tag)
 
+        if tag == self._active_model_tag:
+            return
+        if self._switch_inflight_target == tag:
+            return
+
         ollama_state = self._ui_state.ollama_state
         if ollama_state == "ready" and self._modelo_instalado(tag):
+            self._begin_switch_inflight("model", tag)
             self._dispatcher.dispatch("on_switch_model", tag)
             self._on_log(f"[Sistema] Cambiando a modelo: {tag}")
         elif ollama_state == "ready":
@@ -460,7 +485,13 @@ class ModelPanel:
             self._on_log(f"[Sistema] Tier LLM {label} usa '{model}', pero no esta instalado.")
             self._update_tier_buttons()
             return
+        if tier == self._active_llm_tier:
+            self._update_tier_buttons()
+            return
+        if self._switch_inflight_target in {tier, model}:
+            return
 
+        self._begin_switch_inflight("tier", tier)
         self._dispatcher.dispatch("on_switch_llm_tier", tier)
         self._on_log(f"[Sistema] Cambiando tier LLM a {label}: {model}")
 
@@ -613,6 +644,19 @@ class ModelPanel:
             display_name = self.combo_modelos.get()
             model_tag = self.get_tag_for_display(display_name)
 
+        if self._switch_inflight_kind == "model":
+            self.btn_download.configure(state="disabled", text="Activando...")
+            if self.combo_modelos is not None:
+                self.combo_modelos.configure(state="disabled")
+            self._update_tier_buttons()
+            return
+        if self._switch_inflight_kind == "tier":
+            self.btn_download.configure(state="disabled", text="Cambiando tier...")
+            if self.combo_modelos is not None:
+                self.combo_modelos.configure(state="disabled")
+            self._update_tier_buttons()
+            return
+
         if self._ollama_starting:
             self.btn_download.configure(state="disabled", text="Iniciando Ollama...")
             if self.combo_modelos is not None:
@@ -653,12 +697,31 @@ class ModelPanel:
         for tier, button in self._tier_buttons.items():
             model = self._llm_tiers.get(tier)
             is_active = tier == self._active_llm_tier
-            state = "normal" if model and self._ui_state.ollama_state == "ready" else "disabled"
+            is_inflight_tier = self._switch_inflight_kind == "tier" and tier == self._switch_inflight_target
+            if self._switch_inflight_kind is not None:
+                state = "disabled"
+            else:
+                state = "normal" if model and self._ui_state.ollama_state == "ready" else "disabled"
+            text = "Cambiando..." if is_inflight_tier else self._format_tier_button_text(tier)
             button.configure(
-                text=self._format_tier_button_text(tier),
+                text=text,
                 state="disabled" if is_active else state,
                 fg_color=theme.SELECT_ACTIVE if is_active else theme.SELECT_IDLE,
             )
+
+    def _begin_switch_inflight(self, kind: str, target: str) -> None:
+        self._switch_inflight_kind = kind
+        self._switch_inflight_target = target
+        if self.combo_modelos is not None:
+            self.combo_modelos.configure(state="disabled")
+        if self.btn_download is not None:
+            text = "Activando..." if kind == "model" else "Cambiando tier..."
+            self.btn_download.configure(state="disabled", text=text)
+        self._update_tier_buttons()
+
+    def _clear_switch_inflight(self) -> None:
+        self._switch_inflight_kind = None
+        self._switch_inflight_target = None
 
     # ------------------------------------------------------------------
     # Ollama start
@@ -730,6 +793,12 @@ class ModelPanel:
             return
 
         if self._modelo_instalado(tag):
+            if tag == self._active_model_tag:
+                self._update_button_for_ollama_state(tag)
+                return
+            if self._switch_inflight_target == tag:
+                return
+            self._begin_switch_inflight("model", tag)
             self.btn_download.configure(state="disabled", text="Activando...")
             self._dispatcher.dispatch("on_switch_model", tag)
             self._on_log(f"[Sistema] Activando '{tag}'...")
@@ -775,7 +844,11 @@ class ModelPanel:
             # Terminal state (ready, idle, error): re-enable combo if Ollama is ready
             if self.lbl_modelo_info is not None:
                 self.update_model_info(self.get_selected_tag())
-            if self.combo_modelos is not None and self._ui_state.ollama_state == "ready":
+            if (
+                self.combo_modelos is not None
+                and self._ui_state.ollama_state == "ready"
+                and self._switch_inflight_kind is None
+            ):
                 self.combo_modelos.configure(state="normal")
 
     # ------------------------------------------------------------------

@@ -1174,3 +1174,34 @@ class TestSetActiveModelComboSync:
             f"combo_modelos still shows '{model_panel.combo_modelos.get()}' "
             f"after set_active_model('{new_tag}') — combobox was not synced"
         )
+
+
+# ---------------------------------------------------------------------------
+# 16. Model-switch inflight latch
+# ---------------------------------------------------------------------------
+
+
+class TestModelSwitchInflightLatch:
+    def test_ready_status_does_not_clear_switch_latch_before_final_model_sync(self, model_panel):
+        model_panel._begin_switch_inflight("model", "gemma4:e4b")
+
+        model_panel._handle_model_status_change("ready")
+
+        assert model_panel._switch_inflight_kind == "model"
+        assert model_panel._switch_inflight_target == "gemma4:e4b"
+        assert model_panel.combo_modelos.state == "disabled"
+        assert model_panel.btn_download.state == "disabled"
+        assert model_panel.btn_download.text == "Activando..."
+
+        model_panel.set_active_model("gemma4:e4b")
+
+        assert model_panel._switch_inflight_kind is None
+        assert model_panel._switch_inflight_target is None
+
+    def test_restore_to_active_model_clears_switch_latch_after_failure_sync(self, model_panel):
+        model_panel._begin_switch_inflight("tier", "quality")
+
+        model_panel.restore_to_active_model("llama3")
+
+        assert model_panel._switch_inflight_kind is None
+        assert model_panel._switch_inflight_target is None

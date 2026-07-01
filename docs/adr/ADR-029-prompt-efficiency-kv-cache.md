@@ -210,3 +210,38 @@ Hoy estamos en el punto **correcto y honesto**: el diagnóstico está bien atrib
 - **Settings**: `config/settings.py` — `LLM_MAX_TOKENS=768` (`:38`), `LLM_KEEP_ALIVE="7m"` (`:43`), `CTX_FALLBACK_DEFAULT=4096` (`:47`), `CHAR_BUDGET_SAFETY_FACTOR=3.5` (`:48`), `HISTORY_MAX_TURNS=10` (`:57`).
 - **Track SDD**: `conductor/tracks/prompt_efficiency_kvcache_20260629/proposal.md` (explore + proposal + design).
 - **Memoria del diagnóstico y la corrección**: Engram `voiceai`, observación **#2644** — *"Prompt re-prefill diagnosis: front-eviction busts KV-cache, not the digest"*.
+
+---
+
+## Runtime validation — 2026-06-30 (live gemma4 session)
+
+**Contexto de sesión:** perfil Akira, modelos gemma4 (fast + slow tier), 2026-06-30 12:09–14:33. Sin cambios de código — observación del sistema vivo post-commit c428574.
+
+### Qué valida
+
+**La instrumentación (commit c428574) funciona en producción.** Cada línea `ctx_utilization` emitida durante la sesión tenía todos los campos completos: `prompt_eval_count`, `num_ctx`, `ratio`, `prefill_ms`, `decode_ms`, `eval_count`, `source`. El prerequisito *measure-first* queda satisfecho.
+
+**El TTFT está dominado por DECODE, no por prefill.** Números reales de la sesión:
+- `prefill_ms`: 421–1640 ms, creciendo lentamente a medida que `prompt_eval_count` subió de 558 a 6357 tokens durante el warm-up.
+- `decode_ms`: 6587–17490 ms (grande, consistente en todos los turnos).
+- Tiempo de pared LLM completo: 7–19 s por turno.
+- Primer fragmento TTS: 0.08–2.3 s (arranque streamed).
+- Pipeline TTS completo: 54–127 s por respuesta.
+
+**Conclusión apoyada por los datos: Lever 2 (compactar respuestas verbosas) es la palanca correcta.** Respuestas más cortas reducen tanto el tiempo de decode como la longitud total del pipeline TTS. **Lever 1 (rework de prefijo) es de BAJA prioridad para gemma** — el prefill ya es barato en relación al decode; eliminar el re-prefill por completo ahorraría a lo sumo ~1 s en un turno de 7–19 s.
+
+**La verbosidad es el driver dominante de latencia.** `eval_count` fue 700–1156 tokens por respuesta → 10–27 fragmentos TTS por turno. El pipeline TTS (54–127 s) es muy superior al LLM (7–19 s), y ambos escalan con la longitud de salida. Compactar las respuestas almacenadas (Componente C del design) y/o acotar la longitud de salida atacan el cuello real.
+
+### Qué no prueba / deja abierto
+
+**La hipótesis de prefix-reuse (Lever 1) no se midió directamente.** `prefill_ms` creció aproximadamente en forma lineal con `prompt_eval_count` (consistente con re-prefill), pero no se corrió un A/B contra una condición de prefijo estable. Los datos confirman que el re-prefill ocurre y que es barato para gemma; no dicen qué pasaría con un prefijo estable.
+
+**Sin datos de modelos no-gemma.** El fast-tier qwen3 nunca realizó una inferencia en esta sesión. La conclusión "decode domina" aplica a gemma4; el comportamiento de qwen3 queda sin validación por datos en vivo.
+
+### CRÍTICO — telemetría engañosa en `ctx_utilization` (owed item)
+
+**`num_ctx=131072` en el log de `ctx_utilization` es misleading para gemma.** Verificado en código: `llm_engine.py:1193-1194` hace `pop` de `num_ctx` en `opciones_llm` para gemma antes de llamar a Ollama — el campo nunca se envía. Gemma corre con el default de su modelfile, NO con 131072. El campo que se imprime como `num_ctx=` en `llm_engine.py:1313` (`_ctx_for_obs = self._model_ctx_limit`) refleja el techo de contexto nativo descubierto, no el `num_ctx` efectivo que recibe Ollama. En consecuencia, `ratio` = tokens de prompt vs techo nativo (indicador de headroom), no utilización del KV cache.
+
+**El path primario de gemma se confirmó SEGURO en vivo** — la preocupación del "agravante gemma" de la propuesta no se materializa a esta escala, porque gemma nunca recibe una solicitud `num_ctx=131072`.
+
+**Recomendación (sin cambio de código en este ADR):** renombrar el campo de log de `num_ctx=` a `native_ctx=` (o añadir un campo paralelo `effective_num_ctx=`) para que la línea deje de implicar que gemma está asignando un KV cache de 131072 tokens. Es un fix de claridad de telemetría; no cambia ningún comportamiento. Se recomienda incluir en el próximo touch a Componente A o como fix de label standalone.

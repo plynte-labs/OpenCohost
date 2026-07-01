@@ -753,3 +753,12 @@ PREFERENCE (owner runs `monologue`), not a defect.
   *Status 2026-06-21: DEFERRED, owner "hoy no quiero entrar en la UI". Where/how the mini-benchmark surfaces in the
   interface (a "test this model" button, the latency verdict when picking a model). Depends on the engine mini-benchmark
   (ADR-014) being runnable headlessly first. No UI work authorized now.*
+
+---
+
+- [ ] **Track: UI Shell Validation — demo-first OpenCohost cockpit**
+  *Link: [./tracks/ui_shell_validation_20260630/](./tracks/ui_shell_validation_20260630/)*
+  *Status 2026-06-30: PROPOSAL + ISOLATED PROTOTYPE. Documents the CustomTkinter perception problem as an
+  information-architecture issue, not only a toolkit issue. Owner rejected the first radical/dashboard preview; revised
+  direction is faithful polish: preserve the current two-column OpenCohost identity, improve hierarchy/spacing/error
+  framing, and only later decide whether to refine, complement, or replace the current UI.*

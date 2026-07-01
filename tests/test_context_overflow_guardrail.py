@@ -382,9 +382,9 @@ class TestRegressionGuards:
         m._generar_dialogo("hola", source="chat", commit_history=False)
         return captured
 
-    def test_num_ctx_in_opciones_uses_discovered_value(self, monkeypatch):
+    def test_num_ctx_in_opciones_uses_effective_ctx_cap(self, monkeypatch):
         captured = self._run_dialogo(monkeypatch, model="qwen3:4b", ctx_seed=32768)
-        assert captured[0]["num_ctx"] == 32768
+        assert captured[0]["num_ctx"] == 4096
 
     def test_gemma_still_pops_num_ctx(self, monkeypatch):
         captured = self._run_dialogo(monkeypatch, model="gemma4:e4b", ctx_seed=8192)

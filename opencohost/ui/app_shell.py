@@ -9,11 +9,11 @@ No UI construction code is inline — all delegated to panels.
 """
 from __future__ import annotations
 import json
-import logging
+#import logging
 import os
 import queue
 import threading
-import time
+#import time
 from typing import Any, Optional
 import customtkinter as ctk
 import numpy as np
@@ -21,7 +21,7 @@ import sounddevice as sd
 import soundfile as sf
 from tkinter import filedialog, TclError
 import tkinter.messagebox as messagebox
-from pynput import keyboard, mouse
+#from pynput import keyboard, mouse
 from opencohost.ui.state import UIState
 from opencohost.ui.crash_reporting import install_crash_handler
 from opencohost.ui.protocols import CallbackDispatcher, SmartAggregatorCallbacks
