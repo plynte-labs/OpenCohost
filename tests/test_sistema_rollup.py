@@ -124,42 +124,42 @@ class TestRollupSeverityLevels:
         """model=error → CRIT → 'Sistema: error' (red)."""
         self._set_dimensions(status_bar,
             model="error", mic="idle", tts="idle", health="green")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · modelo"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc3333"
 
     def test_crit_on_health_red(self, status_bar):
         """health=red → CRIT → 'Sistema: error' (red)."""
         self._set_dimensions(status_bar,
             model="ready", mic="idle", tts="idle", health="red")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · salud"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc3333"
 
     def test_crit_on_tts_error(self, status_bar):
         """tts=error → CRIT → 'Sistema: error' (red)."""
         self._set_dimensions(status_bar,
             model="ready", mic="idle", tts="error", health="green")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · TTS"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc3333"
 
     def test_warn_on_model_loading(self, status_bar):
         """model=loading → WARN → 'Sistema: alerta' (amber)."""
         self._set_dimensions(status_bar,
             model="loading", mic="idle", tts="idle", health="green")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta · modelo"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc8800"
 
     def test_warn_on_health_yellow(self, status_bar):
         """health=yellow → WARN → 'Sistema: alerta' (amber)."""
         self._set_dimensions(status_bar,
             model="ready", mic="idle", tts="idle", health="yellow")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta · salud"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc8800"
 
     def test_warn_on_mic_disconnected(self, status_bar):
         """mic=disconnected → WARN → 'Sistema: alerta' (amber)."""
         self._set_dimensions(status_bar,
             model="ready", mic="disconnected", tts="idle", health="green")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: alerta · mic"
         assert status_bar.lbl_sistema_pill.fg_color == "#cc8800"
 
     def test_info_on_tts_generating(self, status_bar):
@@ -236,6 +236,13 @@ class TestRollupSeverityLevels:
             model="ready", mic="idle", tts="idle", health="green")
         assert status_bar.lbl_sistema_pill.text == "Sistema: OK"
         assert status_bar.lbl_sistema_pill.fg_color == "#1b2633"
+
+    def test_crit_names_all_failing_dimensions(self, status_bar):
+        """Multiple CRIT triggers → Sistema names each degraded dimension in order."""
+        self._set_dimensions(status_bar,
+            model="error", mic="idle", tts="error", health="red")
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · modelo, salud, TTS"
+        assert status_bar.lbl_sistema_pill.fg_color == "#cc3333"
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +323,7 @@ class TestUpdateMethodsWriteSistemaState:
 
         # Error should trigger CRIT
         status_bar.update_model_status("error")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · modelo"
 
     def test_update_health_status_triggers_rollup_recompute(self, status_bar):
         """update_health_status('red') must cause CRIT in the rollup pill."""
@@ -327,7 +334,7 @@ class TestUpdateMethodsWriteSistemaState:
         assert status_bar.lbl_sistema_pill.text == "Sistema: OK"
 
         status_bar.update_health_status("red")
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · salud"
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +354,7 @@ class TestRollupWithNilIndividualPill:
         # Now trigger model error with individual pill gone
         status_bar.update_model_status("error")
         assert status_bar._sistema_state["model"] == "error"
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · modelo"
 
     def test_rollup_fires_when_health_pill_is_none(self, status_bar):
         """update_health_status('red') must update rollup even if lbl_health_status_pill is None."""
@@ -359,7 +366,7 @@ class TestRollupWithNilIndividualPill:
 
         status_bar.update_health_status("red")
         assert status_bar._sistema_state["health"] == "red"
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · salud"
 
     def test_rollup_fires_when_tts_pill_is_none(self, status_bar):
         """update_tts_status('error') must update rollup even if lbl_tts_status_pill is None."""
@@ -371,7 +378,7 @@ class TestRollupWithNilIndividualPill:
 
         status_bar.update_tts_status("error")
         assert status_bar._sistema_state["tts"] == "error"
-        assert status_bar.lbl_sistema_pill.text == "Sistema: error"
+        assert status_bar.lbl_sistema_pill.text == "Sistema: error · TTS"
 
     def test_rollup_does_not_raise_when_sistema_pill_is_none(self, status_bar):
         """_recompute_rollup must not raise if lbl_sistema_pill is None."""

@@ -108,10 +108,13 @@ _PIPELINE_DISPLAY: dict[str, tuple[str, str]] = {
 class StatusBar:
     """Manages status pills display and state-driven visual feedback.
 
-    Creates and owns the main status label plus four pill widgets inside a
-    parent frame.  Subscribes to a :class:`UIState` observer so that any
-    change to ``model_status``, ``mic_status``, ``tts_status``, or
-    ``chat_status`` automatically updates the corresponding pill.
+    Creates and owns the main status label plus the top-bar status pills inside
+    a parent frame.  The Mic/TTS/Chat pills are created and kept in sync (and
+    rolled up into the Sistema pill) but are NOT displayed — those states live in
+    the left "Experiencia principal" panel; Sistema/Modelo/Health/Voz stay visible.
+    Subscribes to a :class:`UIState` observer so that any change to
+    ``model_status``, ``mic_status``, ``tts_status``, or ``chat_status``
+    automatically updates the corresponding pill.
 
     Call :meth:`update_pipeline_state` when the high-level pipeline state
     changes (e.g. from the PTT state machine) — this updates the main label
@@ -152,10 +155,11 @@ class StatusBar:
     # ------------------------------------------------------------------
 
     def create_status_pills(self) -> None:
-        """Create the main status label and four pill widgets.
+        """Create the main status label and the status pills.
 
-        Must be called once after the parent frame exists.  Packs widgets
-        left-to-right with consistent spacing.
+        Must be called once after the parent frame exists.  Packs the VISIBLE
+        pills (Sistema, Modelo, Health, Voz) left-to-right with consistent
+        spacing; Mic/TTS/Chat are created but left unpacked (see inline note).
         """
         self.lbl_status = ctk.CTkLabel(
             self._parent,
@@ -181,6 +185,7 @@ class StatusBar:
         # Synchronise pill display with actual startup _sistema_state values
         self._recompute_rollup()
 
+        # Modelo + Health stay VISIBLE — top-bar-native status not shown elsewhere.
         self.lbl_model_status_pill = ctk.CTkLabel(
             self._parent,
             text="Modelo: cargando",
@@ -190,33 +195,34 @@ class StatusBar:
         )
         self.lbl_model_status_pill.pack(side="left", padx=4, pady=8)
 
+        # Mic / TTS / Chat pills are CREATED (kept in sync by their update_* methods and
+        # rolled up into the Sistema pill) but intentionally NOT packed: these states now
+        # live in the left "Experiencia principal" panel (🎤 / 🔊 / 💬), so repeating them
+        # in the top bar is redundant. Re-add .pack(side="left", padx=4, pady=8) to restore.
         self.lbl_mic_status_pill = ctk.CTkLabel(
             self._parent, text="Mic: revisando",
-            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
+            fg_color=theme.SURFACE_INSET, corner_radius=12, font=ctk.CTkFont(size=11, weight="normal"),  # exact #1b2633
         )
-        self.lbl_mic_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_tts_status_pill = ctk.CTkLabel(
             self._parent, text="TTS: inactivo",
-            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
+            fg_color=theme.SURFACE_INSET, corner_radius=12, font=ctk.CTkFont(size=11, weight="normal"),  # exact #1b2633
         )
-        self.lbl_tts_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_chat_status_pill = ctk.CTkLabel(
             self._parent, text="Chat: desconectado",
-            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
+            fg_color=theme.SURFACE_INSET, corner_radius=12, font=ctk.CTkFont(size=11, weight="normal"),  # exact #1b2633
         )
-        self.lbl_chat_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_health_status_pill = ctk.CTkLabel(
             self._parent, text="Health: --",
-            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
+            fg_color=theme.SURFACE_INSET, corner_radius=12, font=ctk.CTkFont(size=11, weight="normal"),  # exact #1b2633
         )
         self.lbl_health_status_pill.pack(side="left", padx=4, pady=8)
 
         self.lbl_engine_status_pill = ctk.CTkLabel(
             self._parent, text="Voz: --",
-            fg_color=theme.SURFACE_INSET, corner_radius=12,  # exact #1b2633
+            fg_color=theme.SURFACE_INSET, corner_radius=12, font=ctk.CTkFont(size=11, weight="normal"),  # exact #1b2633
         )
         self.lbl_engine_status_pill.pack(side="left", padx=4, pady=8)
 
@@ -400,31 +406,45 @@ class StatusBar:
           INFO  → "Sistema: activo" / blue      theme.INFO
           WARN  → "Sistema: alerta" / amber     theme.WARNING
           CRIT  → "Sistema: error"  / red       theme.DANGER
+        CRIT and WARN append the degraded dimension(s) — e.g. "Sistema: error · salud" —
+        because the per-dimension pills are collapsed (see create_status_pills).
         """
         if self.lbl_sistema_pill is None:
             return
 
         s = self._sistema_state
 
-        if s.get("model") == "error" or s.get("health") == "red" or s.get("tts") == "error":
-            severity = "CRIT"
-        elif (
-            s.get("model") == "loading"
-            or s.get("health") == "yellow"
-            or s.get("mic") == "disconnected"
-        ):
-            severity = "WARN"
+        # Collect which dimension(s) drive the current severity so the collapsed Sistema
+        # pill names WHAT degraded (the per-dimension pills are not displayed). Same
+        # predicates and priority as before — only the text gains a "· dim" suffix.
+        crit = [lbl for lbl, bad in (
+            ("modelo", s.get("model") == "error"),
+            ("salud", s.get("health") == "red"),
+            ("TTS", s.get("tts") == "error"),
+        ) if bad]
+        warn = [lbl for lbl, bad in (
+            ("modelo", s.get("model") == "loading"),
+            ("salud", s.get("health") == "yellow"),
+            ("mic", s.get("mic") == "disconnected"),
+        ) if bad]
+
+        if crit:
+            severity, dims = "CRIT", crit
+        elif warn:
+            severity, dims = "WARN", warn
         elif (
             s.get("tts") in ("generating", "paused", "speaking")
             or s.get("mic") in ("recording", "listening")
         ):
-            severity = "INFO"
+            severity, dims = "INFO", []
         elif s.get("health") == "unknown":
-            severity = "QUIET"
+            severity, dims = "QUIET", []
         else:
-            severity = "OK"
+            severity, dims = "OK", []
 
         text, color = _ROLLUP_CONFIG[severity]
+        if dims:
+            text = f"{text} · {', '.join(dims)}"
         self.lbl_sistema_pill.configure(text=text, fg_color=color)
 
     def _get_status_color(self, status_type: str, status: str) -> str:
