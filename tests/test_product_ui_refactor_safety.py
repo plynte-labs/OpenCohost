@@ -288,11 +288,26 @@ def test_kira_avatar_preview_is_the_visual_hero() -> None:
     assert "minsize=460" in source
     # customtkinter_visual_refinement_20260630: avatar is the hero — image capped to
     # 200px TALL (Kira PNGs are portrait, so HEIGHT binds; the 440 width is never reached)
-    # in a 300px label, "alejado"/zoomed-out with deliberate breathing room, still taller
-    # than the compact 100px response card (owner reversed prominence in 1d, dezoomed 1e→1f).
+    # in a 280px label, "alejado"/zoomed-out with deliberate breathing room, still taller
+    # than the compact 100px response card (owner reversed prominence 1d, dezoomed 1e→1f,
+    # then tuned the label to 280 — "Alejamiento Avatar").
     assert "img.thumbnail((440, 200)" in source
-    assert "height=300" in source
+    assert "height=280" in source
     assert "grid_rowconfigure(1, weight=3)" in source  # avatar row dominates
+
+
+def test_left_avatar_preview_renders_at_startup() -> None:
+    """The left avatar preview must be forced to render ONCE at build time.
+
+    Regression guard: AvatarStateBridge.subscribe() does NOT replay the current
+    state to a new subscriber, and set_state() no-ops on the same state, so the
+    bridge (default IDLE) never triggers an initial paint — the avatar stayed
+    blank until the first real pipeline transition (the shipped startup bug). The
+    fix forces one render right after subscribing, off the bridge's current state.
+    """
+    source = read_text(APP_SHELL)
+    assert "self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)" in source
+    assert "self._on_avatar_state_for_preview(self._avatar_bridge.get_state())" in source
 
 
 def test_kira_response_panel_is_compact_and_scrollable() -> None:

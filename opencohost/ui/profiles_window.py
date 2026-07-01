@@ -1,6 +1,8 @@
 import customtkinter as ctk
 import tkinter.messagebox as mb
 
+from opencohost.ui.window_utils import apply_app_icon
+
 # NOTE: This window is made modal by the caller via grab_set() after creation.
 # It could adopt window_utils.show_toplevel(modal=True) in a future pass once
 # the profiles flow is refactored — but do NOT change it here without a
@@ -8,6 +10,7 @@ import tkinter.messagebox as mb
 class ConfiguradorPerfiles(ctk.CTkToplevel):
     def __init__(self, parent, perfiles, on_save_callback):
         super().__init__(parent)
+        apply_app_icon(self)  # OpenCohost logo instead of CustomTkinter's default feather icon
         self.title("🎭 Configurador de Perfiles")
         self.geometry("800x600")
         self.configure(fg_color="#0b0f14")  # match the app's charcoal background

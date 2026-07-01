@@ -31,7 +31,7 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from opencohost.ui.window_utils import raise_window, show_toplevel
+from opencohost.ui.window_utils import apply_app_icon, raise_window, show_toplevel
 
 
 def open_gear_popover(
@@ -81,6 +81,7 @@ def open_gear_popover(
             pass
 
     popover = ctk.CTkToplevel(parent)
+    apply_app_icon(popover)  # OpenCohost logo instead of CustomTkinter's default feather icon
     popover_ref_setter(popover)
     popover.title("Configuración")
     popover.geometry("260x200")

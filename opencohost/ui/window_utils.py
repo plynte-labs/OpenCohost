@@ -30,6 +30,56 @@ from typing import Any
 # 60 ms is comfortable headroom without being perceptibly laggy.
 _RAISE_DELAY_MS: int = 60
 
+# Must exceed CustomTkinter's own after(200, ...) icon reset: CTkToplevel
+# unconditionally schedules after(200, iconbitmap(<feather .ico>)) on Windows and
+# the root CTk window has the same (conditional) reset — both stomp any icon set
+# earlier, including one inherited via the root's iconphoto(True, ...) default.
+# Scheduling ours past that window wins the race for the root AND every Toplevel.
+_ICON_DELAY_MS: int = 250
+_icon_image = None  # module-level cache + the required GC-keepalive strong ref
+
+
+def _load_icon_image():
+    """Load + cache the app icon as a Tk PhotoImage (resized from the 1000x1000
+    source PNG). Module-scoped cache so it decodes once AND keeps a permanent strong
+    reference — ImageTk.PhotoImage is GC'd the instant nothing references it, which
+    silently blanks the window icon."""
+    global _icon_image
+    if _icon_image is not None:
+        return _icon_image
+    try:
+        import os
+        from opencohost.config.settings import BASE_DIR
+        from PIL import Image, ImageTk
+        img = Image.open(os.path.join(BASE_DIR, "assets", "opencohost_ico.png"))
+        img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        _icon_image = ImageTk.PhotoImage(img)
+    except Exception:
+        return None
+    return _icon_image
+
+
+def apply_app_icon(win: Any) -> None:
+    """Set the OpenCohost logo as *win*'s window icon (defeating CustomTkinter's
+    default feather icon). Call once right after constructing the root CTk window or
+    ANY CTkToplevel. Deferred via after() so it lands after CustomTkinter's own
+    after(200, ...) icon reset (see _ICON_DELAY_MS). Silently no-ops on failure."""
+    image = _load_icon_image()
+    if image is None:
+        return
+
+    def _set() -> None:
+        try:
+            if win.winfo_exists():
+                win.iconphoto(True, image)
+        except Exception:
+            pass
+
+    try:
+        win.after(_ICON_DELAY_MS, _set)
+    except Exception:
+        pass
+
 
 def _make_raise_callback(win: Any, *, grab: bool = False):
     """Return the deferred raise closure for *win*.

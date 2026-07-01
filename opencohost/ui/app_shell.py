@@ -36,6 +36,7 @@ from opencohost.ui.cohost_agenda_panel import CoHostAgendaPanel
 from opencohost.ui.music_panel import MusicPanel
 from opencohost.ui.advanced_panel import AdvancedModePanel
 from opencohost.ui.profiles_window import ConfiguradorPerfiles
+from opencohost.ui.window_utils import apply_app_icon
 from opencohost.ui.avatar_panel import AvatarPanel
 from opencohost.avatar.obs_client import OBSClient, OBSConfig
 from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
@@ -107,6 +108,7 @@ class VocalAIApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Kira — OpenCohost")
+        apply_app_icon(self)  # OpenCohost logo instead of CustomTkinter's default feather icon
         geo = _cargar_geometria()
         if geo:
             try:
@@ -522,12 +524,17 @@ class VocalAIApp(ctk.CTk):
             avatar_preview_frame, text="",
             text_color="#6b7b8d",
             font=ctk.CTkFont(size=12),
-            height=300,
+            height=280, #Alejamiento Avatar
             corner_radius=8,
         )
         self._kira_avatar_label.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         # Subscribe avatar bridge to update left-panel preview
         self._avatar_bridge.subscribe(self._on_avatar_state_for_preview)
+        # subscribe() only registers for FUTURE state changes, and the bridge defaults
+        # to IDLE so a same-state set_state() would no-op — force one initial render of
+        # the current state so the avatar shows at startup (was blank until the first real
+        # pipeline transition). Mirrors AvatarPanel.build()'s one-shot _update_preview().
+        self._on_avatar_state_for_preview(self._avatar_bridge.get_state())
         # Primary action button — Hablar (prominent, at Kira level)
         self._primary_speak_btn = ctk.CTkButton(
             tab_main_kira,
@@ -610,11 +617,41 @@ class VocalAIApp(ctk.CTk):
             ("music", "Música"),
             ("avatar", "Avatar / OBS"),
         ]
+        # Icons are prepended at render only — the (key, label) tuples stay clean
+        # (source-guard tests pin them) and _switch_product_tab keys off `key`, not text.
+        TAB_ICONS = {"config": "⚙", "stream": "📡", "cohost": "🤖", "music": "🎵", "avatar": "🎭"}
+        # Render each tab icon as a small color-emoji IMAGE placed with compound="left" so it
+        # vertically CENTERS with the label. Inline emoji text sits below the letters because
+        # Tk's emoji font-fallback baseline differs from the label font. Safe fallback: if the
+        # emoji font / Pillow color rendering isn't available, revert to an inline-text prefix.
+        self._tab_icon_refs: list = []
+        try:
+            from PIL import ImageFont as _ImageFont
+            _emoji_font = _ImageFont.truetype("C:/Windows/Fonts/seguiemj.ttf", 18)
+        except Exception:
+            _emoji_font = None  # non-Windows / font missing → tabs fall back to a text prefix
+
+        def _tab_icon(emoji: str):
+            if not emoji or _emoji_font is None:
+                return None
+            try:
+                from PIL import Image, ImageDraw
+                _im = Image.new("RGBA", (22, 22), (0, 0, 0, 0))
+                ImageDraw.Draw(_im).text((2, 1), emoji, font=_emoji_font, embedded_color=True)
+                _ci = ctk.CTkImage(light_image=_im, dark_image=_im, size=(18, 18))
+                self._tab_icon_refs.append(_ci)
+                return _ci
+            except Exception:
+                return None
+
         for idx, (key, label) in enumerate(TAB_DEFS):
             is_active = (key == self._active_product_tab)
+            _icon_img = _tab_icon(TAB_ICONS.get(key, ""))
             btn = ctk.CTkButton(
                 product_tab_bar,
-                text=label,
+                text=(label if _icon_img else f"{TAB_ICONS.get(key, '')} {label}".strip()),
+                image=_icon_img,
+                compound="left",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 fg_color="#2f5f8f" if is_active else "#151d26",
                 hover_color="#3670aa" if is_active else "#1d2a38",
