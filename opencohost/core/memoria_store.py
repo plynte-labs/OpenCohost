@@ -2,10 +2,15 @@
 
 Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
   - Own unshared SQLite file (memorias.db), PRAGMA user_version=1.
-  - Single guarded upsert: INSERT .. ON CONFLICT(stable_key) DO UPDATE ..
-    WHERE status='draft' — curated rows are immune by construction (the
-    conflict resolves to a no-op when the WHERE clause is false, so no
-    write happens and no exception is raised).
+  - Single guarded upsert: INSERT .. ON CONFLICT(profile_id, stable_key) DO
+    UPDATE .. WHERE status='draft' — curated rows are immune by construction
+    (the conflict resolves to a no-op when the WHERE clause is false, so no
+    write happens and no exception is raised). The uniqueness is a composite
+    UNIQUE(profile_id, stable_key), not a global UNIQUE(stable_key) — this is
+    defense-in-depth for R7 (cross-profile isolation): even a future
+    stable_key derivation bug that emits a colliding key across two
+    profiles can never make one profile's write silently overwrite another
+    profile's row content.
   - Unified curation rule (F5): editing, pinning, OR marking private all
     promote status to 'curated' in the SAME statement as the action — the
     engine never rewrites an operator-touched row. `inactive` is the ONLY
@@ -168,7 +173,7 @@ class MemoriaStore:
                         id, profile_id, stable_key, revision, title, content, status,
                         pinned, private, inactive, created_at, updated_at
                     ) VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?)
-                    ON CONFLICT(stable_key) DO UPDATE SET
+                    ON CONFLICT(profile_id, stable_key) DO UPDATE SET
                         content = excluded.content,
                         title = excluded.title,
                         revision = memorias.revision + 1,
@@ -195,7 +200,15 @@ class MemoriaStore:
         return written_id
 
     def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None) -> bool:
-        """Operator edit: promotes status to curated in the same statement (F5)."""
+        """Operator edit: promotes status to curated in the same statement (F5).
+
+        Returns False if the write failed (e.g. lock contention) — the row
+        was NOT curated and remains auto-capture-eligible. Callers that
+        require the edit to have taken effect (the management UI, slice
+        6/7) MUST check the return value and surface a False to the
+        operator; silently ignoring it would let the next auto-capture on
+        the same stable_key overwrite content the operator believed frozen.
+        """
         set_clauses = ["status = 'curated'", "updated_at = ?"]
         params: list[object] = [_now_text()]
         if title is not None:
@@ -223,6 +236,13 @@ class MemoriaStore:
         must never overwrite again. Un-pinning/un-marking-private never
         demotes a curated row back to draft (one-way). `inactive` is a pure
         visibility flag and never touches status.
+
+        Returns False if the write failed (e.g. lock contention) — the row
+        was NOT curated and remains auto-capture-eligible. Callers that
+        require the freeze to have taken effect (the management UI, slice
+        6/7) MUST check the return value and surface a False to the
+        operator; silently ignoring it would let the next auto-capture on
+        the same stable_key overwrite content the operator believed frozen.
         """
         set_clauses = ["updated_at = ?"]
         params: list[object] = [_now_text()]
@@ -316,7 +336,7 @@ class MemoriaStore:
                 CREATE TABLE IF NOT EXISTS memorias (
                     id TEXT PRIMARY KEY,
                     profile_id TEXT NOT NULL,
-                    stable_key TEXT NOT NULL UNIQUE,
+                    stable_key TEXT NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
@@ -325,7 +345,8 @@ class MemoriaStore:
                     private INTEGER NOT NULL DEFAULT 0,
                     inactive INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(profile_id, stable_key)
                 )
                 """
             )

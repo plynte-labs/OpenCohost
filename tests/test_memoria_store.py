@@ -420,6 +420,56 @@ def test_read_operations_fail_open_on_locked_db(tmp_path) -> None:
     assert store.get(row_id) is not None
 
 
+def test_lock_contended_update_row_returns_false_not_true_or_raising(tmp_path) -> None:
+    """A-SF1: a lock-lost curation must be observable — update_row returns
+    False (never raises, never silently succeeds) so callers that require
+    the freeze/edit to have taken effect (management UI, slice 6/7) can
+    surface the failure. A False here means the row is NOT curated and
+    remains auto-capture-eligible."""
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    row_id = store.upsert_draft(
+        "profile-1", "profile-1|alpha-beta-gamma", "titulo alpha", "contenido alpha beta gamma"
+    )
+
+    blocker = sqlite3.connect(str(db_path))
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        ok = store.update_row(row_id, title="titulo editado")
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert ok is False
+    row = store.get(row_id)
+    assert row["status"] == "draft"  # curation did NOT take effect
+    assert row["title"] == "titulo alpha"
+
+
+def test_lock_contended_set_flags_returns_false_not_true_or_raising(tmp_path) -> None:
+    """A-SF1: same contract as update_row — a lock-lost pin/private toggle
+    must return False, not True and not raise, so the row is known to remain
+    uncurated/auto-capture-eligible."""
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    row_id = store.upsert_draft(
+        "profile-1", "profile-1|alpha-beta-gamma", "titulo alpha", "contenido alpha beta gamma"
+    )
+
+    blocker = sqlite3.connect(str(db_path))
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        ok = store.set_flags(row_id, pinned=True)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert ok is False
+    row = store.get(row_id)
+    assert row["status"] == "draft"  # curation did NOT take effect
+    assert row["pinned"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Profile isolation + purge (2.17-2.19, R7/R8)
 # ---------------------------------------------------------------------------
@@ -435,6 +485,31 @@ def test_profile_isolation_query_never_returns_other_profile_rows(tmp_path) -> N
     assert len(rows_p1) == 1 and len(rows_p2) == 1
     assert {r["profile_id"] for r in rows_p1} == {"profile-1"}
     assert {r["profile_id"] for r in rows_p2} == {"profile-2"}
+
+
+def test_colliding_stable_key_across_profiles_never_cross_profile_overwrites(tmp_path) -> None:
+    """B-S1: derive_stable_key always prefixes with {profile_id}| today, so
+    this is defense-in-depth for R7 — if a future derivation bug ever emits
+    a colliding un-prefixed key for two different profiles, the store's
+    (profile_id, stable_key) composite uniqueness must produce two distinct
+    rows, never let profile B's write silently overwrite profile A's row
+    content while keeping profile A's profile_id."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    colliding_key = "collision-without-profile-prefix"
+
+    id_a = store.upsert_draft("profile-a", colliding_key, "titulo a", "contenido original de a")
+    id_b = store.upsert_draft("profile-b", colliding_key, "titulo b", "contenido original de b")
+
+    assert id_a is not None
+    assert id_b is not None
+    assert id_a != id_b  # distinct rows for distinct profiles, never merged
+
+    row_a = store.get(id_a)
+    row_b = store.get(id_b)
+    assert row_a["profile_id"] == "profile-a"
+    assert row_a["content"] == "contenido original de a"  # untouched by b's write
+    assert row_b["profile_id"] == "profile-b"
+    assert row_b["content"] == "contenido original de b"
 
 
 def test_purge_profile_deletes_all_rows_scoped_to_active_profile_only(tmp_path) -> None:
