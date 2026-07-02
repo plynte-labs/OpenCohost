@@ -2143,6 +2143,11 @@ class MotorVocalIA(threading.Thread):
         """
         self._memorias_private = bool(value)
 
+    @property
+    def memorias_private(self) -> bool:
+        """Current session-scoped capture-privacy switch state (slice 7 UI read)."""
+        return self._memorias_private
+
     def _build_memoria_draft(
         self,
         user_content: str,

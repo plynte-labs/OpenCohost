@@ -1027,3 +1027,315 @@ class TestCurationWriteFailureSurfaced:
 
         assert store.update_row.called
         assert inspector_memory.MEMORIAS_WRITE_FAILED_TEXT in texts
+
+
+# ---------------------------------------------------------------------------
+# Slice 7 (ui-purge+switch): active-profile purge, capture switch + RC-4
+# copy, F6b honest pinned counter. MEMORIAS_ENABLED stays False in
+# production this slice too — switch/indicator tests explicitly monkeypatch
+# it True (design v2.1 §5/§8, B-SF6: the whole switch UI is absent, not
+# just empty, while the flag is False).
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeActiveProfile:
+    def test_purge_button_scoped_to_active_profile_only_with_confirm_dialog(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        store.upsert_draft("p1", "p1|uno-dos-tres", "Titulo P1", "Contenido P1")
+        store.upsert_draft("p2", "p2|siete-ocho-nueve", "Titulo P2", "Contenido P2")
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.mb.askyesno", return_value=True) as mock_confirm,
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            _wait_and_run_latest(calls, event)
+
+            purge_buttons = _find_button_by_text(win, inspector_memory.MEMORIAS_PURGE_BUTTON_TEXT)
+            assert purge_buttons, "expected a purge button"
+            purge_buttons[0].invoke()
+
+            _wait_and_run_latest(calls, event)  # mutation worker -> schedule_ui_update(_refresh)
+            _wait_and_run_latest(calls, event)  # new load worker -> schedule_ui_update(render)
+
+        assert mock_confirm.called
+        assert store.list_for_profile("p1") == []
+        assert len(store.list_for_profile("p2")) == 1, "purge must never touch a different profile"
+
+    def test_purge_shows_row_count_and_curated_warning_before_confirm(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        store.upsert_draft("p1", "p1|uno-dos-tres", "Titulo A", "Contenido A")
+        store.upsert_draft("p1", "p1|cuatro-cinco-seis", "Titulo B", "Contenido B")
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.mb.askyesno", return_value=False) as mock_confirm,
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            _wait_and_run_latest(calls, event)
+
+            purge_buttons = _find_button_by_text(win, inspector_memory.MEMORIAS_PURGE_BUTTON_TEXT)
+            purge_buttons[0].invoke()
+
+        assert mock_confirm.called
+        message = mock_confirm.call_args[0][1]
+        assert "2" in message
+        assert "fijadas" in message.lower()
+        assert "curadas" in message.lower()
+        # declined -> nothing purged
+        assert len(store.list_for_profile("p1")) == 2
+
+
+class TestCaptureSwitch:
+    def _make_motor_ia(self, paused: bool):
+        return MagicMock(
+            memory_inspector_snapshot=MagicMock(return_value=_empty_snapshot()),
+            memorias_private=paused,
+        )
+
+    def test_capture_switch_toggle_flips_session_scoped_private_flag(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        motor_ia = self._make_motor_ia(paused=False)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.MEMORIAS_ENABLED", True),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(motor_ia=motor_ia, schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+
+            switch_buttons = _find_button_by_text(win, "Pausar guardado")
+            assert switch_buttons, "expected a Pausar guardado switch button"
+            switch_buttons[0].invoke()
+
+        motor_ia.set_memorias_private.assert_called_once_with(True)
+
+    def test_capture_indicator_label_reflects_current_switch_state_on_off(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        motor_ia = self._make_motor_ia(paused=False)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.MEMORIAS_ENABLED", True),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(motor_ia=motor_ia, schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+
+            assert inspector_memory.MEMORIAS_INDICATOR_ON in _collect_label_texts(win)
+
+            switch_buttons = _find_button_by_text(win, "Pausar guardado")
+            switch_buttons[0].invoke()
+
+            texts = _collect_label_texts(win)
+
+        assert inspector_memory.MEMORIAS_INDICATOR_PAUSED in texts
+        assert inspector_memory.MEMORIAS_INDICATOR_ON not in texts
+
+    def test_indicator_hidden_when_memorias_enabled_flag_false(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        calls, schedule, event = _make_schedule()
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(**_open_kwargs(schedule_ui_update=schedule))
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert inspector_memory.MEMORIAS_INDICATOR_ON not in texts
+        assert inspector_memory.MEMORIAS_INDICATOR_PAUSED not in texts
+        assert not _find_button_by_text(win, "Pausar guardado")
+
+    def test_switch_pause_feedback_copy_matches_rc4_wording(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        assert inspector_memory.MEMORIAS_PAUSE_FEEDBACK_TEXT == (
+            "Desde ahora no se guardarán nuevas memorias. Lo anterior puede "
+            "terminar de guardarse si ya estaba marcado para guardar."
+        )
+
+        motor_ia = self._make_motor_ia(paused=False)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.MEMORIAS_ENABLED", True),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(motor_ia=motor_ia, schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+
+            switch_buttons = _find_button_by_text(win, "Pausar guardado")
+            switch_buttons[0].invoke()
+
+            texts = _collect_label_texts(win)
+
+        assert inspector_memory.MEMORIAS_PAUSE_FEEDBACK_TEXT in texts
+
+    def test_window_copy_states_pause_does_not_delete_or_block_already_capturable(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        assert inspector_memory.MEMORIAS_PAUSE_WINDOW_NOTE == (
+            "La pausa no borra ni bloquea memorias ya capturables."
+        )
+
+        motor_ia = self._make_motor_ia(paused=False)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.MEMORIAS_ENABLED", True),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(motor_ia=motor_ia, schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert inspector_memory.MEMORIAS_PAUSE_WINDOW_NOTE in texts
+
+
+def _make_pinned_rows(store, profile_id, count, private_count=0):
+    """Create *count* distinct, pinned rows for profile_id via the real
+    upsert+set_flags path (not _fake_row) — count_all_pinned/
+    list_injection_candidates are real SQL queries, so the counter tests
+    below need real rows, not dicts."""
+    row_ids = []
+    for i in range(count):
+        row_id = store.upsert_draft(
+            profile_id,
+            f"{profile_id}|palabra{i}-token{i}-extra{i}",
+            f"Titulo {i}",
+            f"Contenido {i}",
+        )
+        store.set_flags(row_id, pinned=True)
+        row_ids.append(row_id)
+    for row_id in row_ids[:private_count]:
+        store.set_flags(row_id, private=True)
+    return row_ids
+
+
+class TestPinnedCounter:
+    def test_pinned_counter_shows_fijadas_n_se_inyectan_2_when_n_greater_than_2(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        _make_pinned_rows(store, "p1", count=3)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert "Fijadas: 3 · se inyectan 2" in texts
+
+    def test_pinned_counter_shows_fewer_than_2_when_n_less_than_2(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        _make_pinned_rows(store, "p1", count=1)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert "Fijadas: 1 · se inyectan 1" in texts
+
+
+class TestPinnedCounterF6bSemantics:
+    """F6b (owner decision, obs #2770): N = ALL pinned rows for the profile
+    — including pinned+private and pinned+inactive — never the
+    injection-filtered set (that was slice-5's A-SF1 undercount). M =
+    injectable-pinned only, capped at MEMORIAS_MAX_PINNED_INJECT."""
+
+    def test_n_counts_all_pinned_including_private_rows(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        _make_pinned_rows(store, "p1", count=5, private_count=2)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert "Fijadas: 5 · se inyectan 2" in texts
+
+    def test_m_shrinks_further_as_more_pinned_rows_go_private(self, tmp_path):
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        _make_pinned_rows(store, "p1", count=5, private_count=4)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert "Fijadas: 5 · se inyectan 1" in texts

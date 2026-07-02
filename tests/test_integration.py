@@ -250,7 +250,13 @@ class TestAppShellStructure:
         # launcher (button + ~12-line opener wrapper) and Slice B mounts the
         # "Memoria de Kira" launcher; combined mount delta budgeted ~35, landed 59.
         # Planned agenda/audio decomposition will reclaim these lines later.
-        assert len(lines) < 2990, f"app_shell.py has {len(lines)} lines, expected < 2990"
+        # Raised 2990 -> 3000 (2026-07-02): kira_memory_persistence_20260701 slice 7
+        # (ui-purge+switch) closes deviation-2 from slice 6 — _open_inspector_memory
+        # now wires memoria_store/profile_id_getter (both guarded on
+        # MEMORIAS_ENABLED so a dormant run never touches disk), and
+        # ProfilePanel gains memoria_store_getter for the R8 delete-purge signal.
+        # Net +5 lines. Actual: 2994 lines. Decomposition debt unchanged.
+        assert len(lines) < 3000, f"app_shell.py has {len(lines)} lines, expected < 3000"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell
@@ -264,6 +270,15 @@ class TestAppShellStructure:
         assert "from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI" in source
         assert "from opencohost.ui.stream_admin_ui import StreamAdminUI" in source
         assert "from opencohost.ui.advanced_panel import AdvancedModePanel" in source
+
+    def test_open_inspector_memory_wires_memoria_store_and_profile_id_getter(self):
+        """kira_memory_persistence_20260701 slice 7, deviation-2 (from slice
+        6): the production call site must pass memoria_store/
+        profile_id_getter, guarded on MEMORIAS_ENABLED, so a dormant run
+        never instantiates MemoriaStore (zero disk touch invariant)."""
+        source = open(os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py"), "r", encoding="utf-8").read()
+        assert "memoria_store=(self.motor_ia._get_memoria_store() if MEMORIAS_ENABLED else None)" in source
+        assert "profile_id_getter=lambda: self.motor_ia._current_profile_id" in source
 
     def test_app_shell_has_on_closing(self):
         source = open(os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py"), "r", encoding="utf-8").read()

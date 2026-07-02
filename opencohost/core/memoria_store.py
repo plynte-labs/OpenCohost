@@ -435,6 +435,29 @@ class MemoriaStore:
             self._warn_once(f"memoria store list failed (fail-open): {type(exc).__name__}")
             return []
 
+    def count_all_pinned(self, profile_id: str) -> int:
+        """Total pinned rows for profile_id — UNFILTERED by private/inactive
+        and UNCAPPED by MEMORIAS_PROFILE_CAP (F6b, slice 7).
+
+        This is the honest N half of the management UI's «Fijadas: N · se
+        inyectan M» counter (see pinned_injection_counter for the M half,
+        which is correctly computed from the already-filtered injection
+        candidate set). Unlike list_for_profile/list_injection_candidates,
+        this must count every pinned row even beyond the display cap —
+        pinned rows are never pruned (see _prune_profile) so their true
+        count could in principle exceed MEMORIAS_PROFILE_CAP.
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM memorias WHERE profile_id = ? AND pinned = 1",
+                    (profile_id,),
+                ).fetchone()
+                return row["n"] if row is not None else 0
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store count_all_pinned failed (fail-open): {type(exc).__name__}")
+            return 0
+
     def list_injection_candidates(self, profile_id: str) -> list[sqlite3.Row]:
         """Eligible rows for retrieval injection (R9): private=0 AND
         inactive=0, scoped to profile_id, capped at MEMORIAS_PROFILE_CAP.

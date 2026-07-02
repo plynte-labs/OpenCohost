@@ -537,6 +537,51 @@ def test_purge_profile_leaves_other_profiles_untouched(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# count_all_pinned (slice 7, F6b) — the honest N half of the management UI's
+# "Fijadas: N" counter; must be unfiltered by private/inactive and scoped
+# per-profile, unlike list_injection_candidates.
+# ---------------------------------------------------------------------------
+
+def test_count_all_pinned_includes_private_and_inactive_rows(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    a = store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "t1", "c1 c2 c3")
+    b = store.upsert_draft("profile-1", "profile-1|delta-epsilon-zeta", "t2", "c4 c5 c6")
+    c = store.upsert_draft("profile-1", "profile-1|eta-theta-iota", "t3", "c7 c8 c9")
+    store.set_flags(a, pinned=True)
+    store.set_flags(b, pinned=True, private=True)
+    store.set_flags(c, pinned=True, inactive=True)
+
+    assert store.count_all_pinned("profile-1") == 3
+
+
+def test_count_all_pinned_excludes_unpinned_rows(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    a = store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "t1", "c1 c2 c3")
+    store.upsert_draft("profile-1", "profile-1|delta-epsilon-zeta", "t2", "c4 c5 c6")
+    store.set_flags(a, pinned=True)
+
+    assert store.count_all_pinned("profile-1") == 1
+
+
+def test_count_all_pinned_scoped_per_profile(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    a = store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "t1", "c1 c2 c3")
+    b = store.upsert_draft("profile-2", "profile-2|delta-epsilon-zeta", "t2", "c4 c5 c6")
+    store.set_flags(a, pinned=True)
+    store.set_flags(b, pinned=True)
+
+    assert store.count_all_pinned("profile-1") == 1
+    assert store.count_all_pinned("profile-2") == 1
+
+
+def test_count_all_pinned_zero_when_nothing_pinned(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "t1", "c1 c2 c3")
+
+    assert store.count_all_pinned("profile-1") == 0
+
+
+# ---------------------------------------------------------------------------
 # delete_row idempotent semantics (2.22-2.24, A-N2/B-NOTE-1)
 # ---------------------------------------------------------------------------
 

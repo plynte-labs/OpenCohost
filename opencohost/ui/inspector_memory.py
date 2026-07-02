@@ -31,6 +31,8 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
+from opencohost.config.settings import MEMORIAS_ENABLED
+from opencohost.core.memoria_store import pinned_injection_counter
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 from opencohost.ui.window_utils import apply_app_icon, raise_window, show_toplevel
 
@@ -69,6 +71,26 @@ FREEZE_RULE_TEXT = (
     "Editar, fijar o marcar como privada una memoria la congela: Kira no la reescribirá."
 )
 MEMORIAS_WRITE_FAILED_TEXT = "No se pudo guardar el cambio (memoria bloqueada). Probá de nuevo."
+
+# Slice 7 (ui-purge+switch, R8/R15/F6) — purge, capture switch, RC-4 copy.
+MEMORIAS_PURGE_BUTTON_TEXT = "Borrar las memorias de este perfil"
+MEMORIAS_PURGE_CONFIRM_TEMPLATE = (
+    "¿Eliminar las {count} memoria(s) guardada(s) de este perfil? Se incluyen "
+    "las memorias fijadas y curadas — no hay excepciones. Esta acción no se "
+    "puede deshacer."
+)
+# R15: never "privado" — the switch is disk-only (F2), the RAM digest keeps
+# operating either way, so "privado" would overstate what pausing does.
+MEMORIAS_INDICATOR_ON = "Memorias: ON"
+MEMORIAS_INDICATOR_PAUSED = "Memorias: sin guardar"
+# RC-4 strengthened copy (design v2.1 §5): feedback shown only at the moment
+# of pausing (never on resume); the window note is a permanent clarification
+# rendered whenever the switch section itself renders.
+MEMORIAS_PAUSE_FEEDBACK_TEXT = (
+    "Desde ahora no se guardarán nuevas memorias. Lo anterior puede terminar "
+    "de guardarse si ya estaba marcado para guardar."
+)
+MEMORIAS_PAUSE_WINDOW_NOTE = "La pausa no borra ni bloquea memorias ya capturables."
 
 # Statuses AgendaPersistence.save_if_changed actually writes to disk
 # (opencohost/core/agenda_persistence.py _PERSISTED_STATUSES) — mirrored
@@ -112,6 +134,25 @@ def format_background_memory(digest: dict) -> str:
 def format_memoria_row_metadata(row: Any) -> str:
     """Render a memoria row's "created_at · updated_at · rev N" metadata line."""
     return f"{row['created_at']} · {row['updated_at']} · rev {row['revision']}"
+
+
+def format_capture_indicator(paused: bool) -> str:
+    """Render the R15 capture-state label — «Memorias: ON» / «Memorias: sin
+    guardar» — never "privado" (see MEMORIAS_INDICATOR_* rationale)."""
+    return MEMORIAS_INDICATOR_PAUSED if paused else MEMORIAS_INDICATOR_ON
+
+
+def format_pinned_counter(total_pinned: int, injected: int) -> str:
+    """Render the honest F6b «Fijadas: N · se inyectan M» counter.
+
+    N (total_pinned) MUST be ALL pinned rows for the profile — including
+    pinned+private and pinned+inactive — reflecting the operator's pin
+    action ("you pinned N, you see N"). M (injected) is how many actually
+    inject: min(MEMORIAS_MAX_PINNED_INJECT, injectable-pinned count where
+    private=0 AND inactive=0). See MemoriaStore.count_all_pinned /
+    pinned_injection_counter for how each half is computed.
+    """
+    return f"Fijadas: {total_pinned} · se inyectan {injected}"
 
 
 def format_saved_agenda_topics(topics: list) -> list[str]:
@@ -177,7 +218,7 @@ def open_inspector_memory(
         for child in list(frame.winfo_children()):
             child.destroy()
 
-    def _section(title: str, badge: str) -> Any:
+    def _section(title: str, badge: str) -> tuple[Any, Any]:
         frame = ctk.CTkFrame(body, fg_color="#151d26", corner_radius=10)
         frame.pack(fill="x", pady=(0, 8))
         header_row = ctk.CTkFrame(frame, fg_color="transparent")
@@ -186,11 +227,11 @@ def open_inspector_memory(
         ctk.CTkLabel(header_row, text=badge, text_color="#6b7b8d").pack(side="left", padx=(8, 0))
         content = ctk.CTkFrame(frame, fg_color="transparent")
         content.pack(fill="x", padx=10, pady=(0, 8))
-        return content
+        return header_row, content
 
-    conversation_content = _section("Conversación de la sesión", BADGE_CONVERSACION)
-    background_content = _section("Memoria de fondo", BADGE_MEMORIA_FONDO)
-    agenda_content = _section("Agenda guardada", BADGE_AGENDA_GUARDADA)
+    _, conversation_content = _section("Conversación de la sesión", BADGE_CONVERSACION)
+    _, background_content = _section("Memoria de fondo", BADGE_MEMORIA_FONDO)
+    _, agenda_content = _section("Agenda guardada", BADGE_AGENDA_GUARDADA)
     ctk.CTkLabel(agenda_content, text=AGENDA_PROVENANCE_NOTE, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 4))
     # Dedicated child frame for topic rows, packed below the provenance note.
     # _render_agenda only clears/redraws THIS sub-frame, never agenda_content
@@ -198,9 +239,46 @@ def open_inspector_memory(
     agenda_topics_content = ctk.CTkFrame(agenda_content, fg_color="transparent")
     agenda_topics_content.pack(fill="x")
 
-    memorias_content = _section("Memorias guardadas", BADGE_MEMORIAS)
+    memorias_header_row, memorias_content = _section("Memorias guardadas", BADGE_MEMORIAS)
+    # F6b honest pinned/injection counter, rendered next to the section
+    # header — hidden (empty text) whenever there is nothing pinned.
+    memorias_counter_label = ctk.CTkLabel(memorias_header_row, text="", text_color="#8fa3b8")
+    memorias_counter_label.pack(side="left", padx=(8, 0))
     ctk.CTkLabel(memorias_content, text=MEMORIAS_PTT_NOTE, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 2))
     ctk.CTkLabel(memorias_content, text=FREEZE_RULE_TEXT, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 4))
+
+    # Capture switch (R4/R15) — entirely absent (not just empty text) while
+    # MEMORIAS_ENABLED is False: the whole feature is dormant this slice, so
+    # a functional-but-meaningless toggle would only confuse the operator.
+    if MEMORIAS_ENABLED:
+        switch_row = ctk.CTkFrame(memorias_content, fg_color="transparent")
+        switch_row.pack(fill="x", pady=(0, 2), anchor="w")
+        memorias_indicator_label = ctk.CTkLabel(
+            switch_row, text=format_capture_indicator(motor_ia.memorias_private)
+        )
+        memorias_indicator_label.pack(side="left")
+        memorias_switch_feedback_label = ctk.CTkLabel(memorias_content, text="", text_color="#8fa3b8")
+
+        def _toggle_capture_switch() -> None:
+            paused = not motor_ia.memorias_private
+            motor_ia.set_memorias_private(paused)
+            memorias_indicator_label.configure(text=format_capture_indicator(paused))
+            switch_button.configure(text="Reanudar guardado" if paused else "Pausar guardado")
+            # RC-4: feedback shown only at the moment of pausing, cleared on resume.
+            memorias_switch_feedback_label.configure(text=MEMORIAS_PAUSE_FEEDBACK_TEXT if paused else "")
+
+        switch_button = ctk.CTkButton(
+            switch_row,
+            text="Reanudar guardado" if motor_ia.memorias_private else "Pausar guardado",
+            width=140,
+            command=_toggle_capture_switch,
+        )
+        switch_button.pack(side="left", padx=(8, 0))
+        memorias_switch_feedback_label.pack(anchor="w", pady=(0, 2))
+        ctk.CTkLabel(
+            memorias_content, text=MEMORIAS_PAUSE_WINDOW_NOTE, wraplength=520, justify="left", text_color="#6b7b8d",
+        ).pack(anchor="w", pady=(0, 4))
+
     memorias_error_label = ctk.CTkLabel(memorias_content, text="", text_color="#e06c6c")
     memorias_error_label.pack(anchor="w", pady=(0, 4))
     # Same idempotent-refresh pattern as agenda_topics_content: only THIS
@@ -240,6 +318,34 @@ def open_inspector_memory(
             logger.exception("Fallo leyendo Memorias guardadas")
             return []
 
+    def _load_pinned_counter() -> tuple[int, int] | None:
+        """F6b — (total_pinned, injected). total_pinned is the UNFILTERED
+        count (MemoriaStore.count_all_pinned); injected reuses slice 5's
+        pinned_injection_counter fed by the already-filtered injection
+        candidate set (that half was correct as-is — only total_pinned
+        undercounted before this correction)."""
+        if memoria_store is None or profile_id_getter is None:
+            return None
+        try:
+            profile_id = profile_id_getter()
+        except Exception:
+            return None
+        if not profile_id:
+            return None
+        try:
+            total_pinned = memoria_store.count_all_pinned(profile_id)
+            injectable_rows = memoria_store.list_injection_candidates(profile_id)
+            _, injected = pinned_injection_counter(injectable_rows)
+        except Exception:
+            logger.exception("Fallo leyendo el contador de fijadas")
+            return None
+        if not isinstance(total_pinned, int):
+            # A test/caller store double that doesn't implement
+            # count_all_pinned (pre-slice-7 fixtures) — fail open to "no
+            # counter" rather than crash the render on a non-numeric value.
+            return None
+        return total_pinned, injected
+
     def _show_memorias_error(message: str) -> None:
         if not win.winfo_exists():
             return
@@ -278,6 +384,39 @@ def open_inspector_memory(
         ):
             return
         _run_memoria_mutation(lambda: memoria_store.delete_row(row["id"]))
+
+    def _confirm_purge_active_profile() -> None:
+        """R8 purge trigger: active-profile-only, explicit confirm naming
+        the row count AND that curated/pinned rows are included (no
+        exceptions) — NEVER a global purge-all-profiles action."""
+        if memoria_store is None or profile_id_getter is None:
+            return
+        try:
+            profile_id = profile_id_getter()
+        except Exception:
+            return
+        if not profile_id:
+            return
+        try:
+            row_count = len(memoria_store.list_for_profile(profile_id))
+        except Exception:
+            row_count = 0
+        if not mb.askyesno(
+            "Borrar memorias del perfil",
+            MEMORIAS_PURGE_CONFIRM_TEMPLATE.format(count=row_count),
+            parent=win,
+        ):
+            return
+        _run_memoria_mutation(lambda: memoria_store.purge_profile(profile_id))
+
+    if memoria_store is not None:
+        ctk.CTkButton(
+            memorias_content,
+            text=MEMORIAS_PURGE_BUTTON_TEXT,
+            fg_color="darkred",
+            hover_color="#8B0000",
+            command=_confirm_purge_active_profile,
+        ).pack(anchor="w", pady=(0, 4))
 
     def _open_edit_modal(row: Any) -> None:
         modal = ctk.CTkToplevel(win)
@@ -368,7 +507,15 @@ def open_inspector_memory(
         for row in memorias_rows:
             _render_memoria_row(row)
 
-    def _render_snapshot(snapshot: dict, memorias_rows: list) -> None:
+    def _render_pinned_counter(pinned_counter: tuple[int, int] | None) -> None:
+        if not win.winfo_exists():
+            return
+        if pinned_counter and pinned_counter[0] > 0:
+            memorias_counter_label.configure(text=format_pinned_counter(*pinned_counter))
+        else:
+            memorias_counter_label.configure(text="")
+
+    def _render_snapshot(snapshot: dict, memorias_rows: list, pinned_counter: tuple[int, int] | None) -> None:
         if not win.winfo_exists():
             return
         stamp_label.configure(text="Actualizado " + time.strftime("%H:%M:%S"))
@@ -384,8 +531,9 @@ def open_inspector_memory(
 
         _render_agenda()
         _render_memorias(memorias_rows)
+        _render_pinned_counter(pinned_counter)
 
-    def _render_error(memorias_rows: list) -> None:
+    def _render_error(memorias_rows: list, pinned_counter: tuple[int, int] | None) -> None:
         if not win.winfo_exists():
             return
         stamp_label.configure(text="No disponible")
@@ -395,16 +543,18 @@ def open_inspector_memory(
         ctk.CTkLabel(background_content, text="No disponible", text_color="#e06c6c").pack(anchor="w")
         _render_agenda()
         _render_memorias(memorias_rows)
+        _render_pinned_counter(pinned_counter)
 
     def _load_worker() -> None:
         memorias_rows = _load_memorias_rows()
+        pinned_counter = _load_pinned_counter()
         try:
             snapshot = motor_ia.memory_inspector_snapshot()
         except Exception:
             logger.exception("Fallo leyendo Memoria de Kira")
-            schedule_ui_update(lambda: _render_error(memorias_rows))
+            schedule_ui_update(lambda: _render_error(memorias_rows, pinned_counter))
             return
-        schedule_ui_update(lambda: _render_snapshot(snapshot, memorias_rows))
+        schedule_ui_update(lambda: _render_snapshot(snapshot, memorias_rows, pinned_counter))
 
     def _refresh() -> None:
         threading.Thread(target=_load_worker, daemon=True).start()

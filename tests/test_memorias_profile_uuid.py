@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -378,7 +379,7 @@ class TestEliminarPerfilSignal:
 # ===========================================================================
 
 class TestProfilePanelDeleteSignalPlumbing:
-    def _make_panel(self):
+    def _make_panel(self, memoria_store_getter=None):
         from opencohost.ui.state import UIState
         from opencohost.ui.protocols import CallbackDispatcher
         from opencohost.ui.profile_panel import ProfilePanel
@@ -390,6 +391,7 @@ class TestProfilePanelDeleteSignalPlumbing:
             ui_state=ui_state,
             dispatcher=dispatcher,
             on_log=MagicMock(),
+            memoria_store_getter=memoria_store_getter,
         )
         return panel, ui_state
 
@@ -404,6 +406,83 @@ class TestProfilePanelDeleteSignalPlumbing:
                 panel._on_perfiles_guardados(
                     {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
                     deleted=("Reciclado", "old-id-123"),
+                )
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+    # -----------------------------------------------------------------
+    # Slice 7 (ui-purge+switch, R8, task 7.3/7.12) — the deleted=(name, id)
+    # signal above must wire through to MemoriaStore.purge_profile, scoped
+    # to the deleted profile's id only, confirmed by the operator first.
+    # -----------------------------------------------------------------
+
+    def test_profile_delete_wires_purge_for_deleted_profile_id(self):
+        done = threading.Event()
+        store = MagicMock()
+        store.list_for_profile.return_value = [MagicMock(), MagicMock()]
+        store.purge_profile.side_effect = lambda profile_id: done.set()
+        panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
+        try:
+            with (
+                patch("opencohost.ui.profile_panel.guardar_perfiles"),
+                patch("opencohost.ui.profile_panel.mb.askyesno", return_value=True),
+            ):
+                panel._on_perfiles_guardados(
+                    {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
+                    deleted=("Vieja", "old-id-123"),
+                )
+            assert done.wait(timeout=2), "expected purge_profile to run on a worker thread"
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+        store.list_for_profile.assert_called_once_with("old-id-123")
+        store.purge_profile.assert_called_once_with("old-id-123")
+
+    def test_profile_delete_declined_by_operator_never_purges(self):
+        store = MagicMock()
+        store.list_for_profile.return_value = [MagicMock()]
+        panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
+        try:
+            with (
+                patch("opencohost.ui.profile_panel.guardar_perfiles"),
+                patch("opencohost.ui.profile_panel.mb.askyesno", return_value=False),
+            ):
+                panel._on_perfiles_guardados(
+                    {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
+                    deleted=("Vieja", "old-id-123"),
+                )
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+        store.purge_profile.assert_not_called()
+
+    def test_no_deleted_profile_never_calls_purge(self):
+        """A save-diff (deleted=None) must never trigger a purge — only an
+        explicit delete does (R8, never a save-diff)."""
+        store = MagicMock()
+        panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
+        try:
+            with patch("opencohost.ui.profile_panel.guardar_perfiles"):
+                panel._on_perfiles_guardados({"Kira": {"id": "keep"}}, deleted=None)
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+        store.purge_profile.assert_not_called()
+
+    def test_no_memoria_store_getter_never_raises_or_purges(self):
+        """memoria_store_getter=None (production default while
+        MEMORIAS_ENABLED is False) must be a safe no-op, never crash the
+        profile-delete flow."""
+        panel, ui_state = self._make_panel(memoria_store_getter=None)
+        try:
+            with patch("opencohost.ui.profile_panel.guardar_perfiles"):
+                panel._on_perfiles_guardados(
+                    {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
+                    deleted=("Vieja", "old-id-123"),
                 )
         finally:
             panel.cleanup()

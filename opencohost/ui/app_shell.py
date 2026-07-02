@@ -46,6 +46,7 @@ from opencohost.config.settings import (
     PTT_DEFAULT_HOTKEY, PTT_HOTKEY_LIST, PTT_CONFIG_FILE,
     WINDOW_GEOMETRY_FILE, ACCIONES_LOG_FILE,
     EDITORIAL_CARDS_DB, REFERENCE_WAV_PATH,
+    MEMORIAS_ENABLED,
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     STREAM_ADMIN_ENABLED,
     load_tts_local_only,
@@ -782,7 +783,7 @@ class VocalAIApp(ctk.CTk):
         frame_right.grid_rowconfigure(1, weight=1)  # PTT stretches so the right column's bottom aligns with the taller Modelo column
         frame_profile = ctk.CTkFrame(frame_right, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 16))
-        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after)
+        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after, memoria_store_getter=(self.motor_ia._get_memoria_store if MEMORIAS_ENABLED else None))
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
@@ -2266,6 +2267,10 @@ class VocalAIApp(ctk.CTk):
             motor_ia=self.motor_ia,
             kira_agenda=self.kira_agenda,
             schedule_ui_update=self._safe_after,
+            # deviation-2 (slice 6->7): real store, guarded on the flag so a
+            # False run never touches disk for it (dormant-store invariant).
+            memoria_store=(self.motor_ia._get_memoria_store() if MEMORIAS_ENABLED else None),
+            profile_id_getter=lambda: self.motor_ia._current_profile_id,
         )
         if result is not None:
             self._kira_memory_inspector = result

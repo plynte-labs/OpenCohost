@@ -7,6 +7,8 @@ profile configurator window, and handling saved profile updates.
 
 from __future__ import annotations
 
+import threading
+import tkinter.messagebox as mb
 from typing import Any, Callable, Optional
 
 import customtkinter as ctk
@@ -36,6 +38,7 @@ class ProfilePanel:
         on_log: Callable[[str], None],
         configurador_class: Optional[type] = None,
         schedule_ui_update: Optional[Callable[[Callable[[], None]], None]] = None,
+        memoria_store_getter: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._parent = parent_frame
         self._ui_state = ui_state
@@ -43,6 +46,10 @@ class ProfilePanel:
         self._on_log = on_log
         self._configurador_class = configurador_class
         self._schedule_ui_update = schedule_ui_update or (lambda fn: fn())
+        # R8 purge wiring (slice 7): None while MEMORIAS_ENABLED is False in
+        # production (caller's choice) — keeps this panel from ever touching
+        # disk for a store that has nothing to purge.
+        self._memoria_store_getter = memoria_store_getter
 
         # Profile data
         self._perfiles: dict[str, Any] = {}
@@ -189,6 +196,8 @@ class ProfilePanel:
         self._perfiles = nuevos_perfiles
         guardar_perfiles(self._perfiles)
         self.last_deleted_profile = deleted
+        if deleted is not None and deleted[1]:
+            self._purge_deleted_profile_memorias(deleted[0], deleted[1])
 
         nombres = list(self._perfiles.keys())
         if self.combo_perfiles is not None:
@@ -202,6 +211,35 @@ class ProfilePanel:
         if actual := self.get_selected_profile():
             self._on_profile_changed(actual)
         self._on_log("[Sistema] \U0001f4be Perfiles actualizados y guardados.")
+
+    def _purge_deleted_profile_memorias(self, nombre: str, profile_id: str) -> None:
+        """R8 explicit-delete-only purge trigger: consumes the (name, id)
+        signal from ConfiguradorPerfiles._eliminar_perfil. Confirms with the
+        operator (naming the profile + its memoria row count) before
+        purging; the actual delete runs off the Tk thread, mirroring
+        inspector_memory._run_memoria_mutation's off-Tk write pattern.
+        """
+        if self._memoria_store_getter is None:
+            return
+        try:
+            store = self._memoria_store_getter()
+        except Exception:
+            return
+        if store is None:
+            return
+        try:
+            row_count = len(store.list_for_profile(profile_id))
+        except Exception:
+            row_count = 0
+        if row_count == 0:
+            return
+        if not mb.askyesno(
+            "Eliminar memorias del perfil",
+            f'¿Eliminar también las {row_count} memoria(s) guardada(s) del perfil "{nombre}"? '
+            "Se incluyen las fijadas y curadas. Esta acción no se puede deshacer.",
+        ):
+            return
+        threading.Thread(target=lambda: store.purge_profile(profile_id), daemon=True).start()
 
     # ------------------------------------------------------------------
     # UIState observer

@@ -171,6 +171,19 @@ def test_privacy_switch_is_session_scoped_single_global_toggle():
     assert motor.historial[-1]["private"] is True
 
 
+def test_memorias_private_property_reflects_current_switch_state():
+    """Slice 7 UI read: the public memorias_private property mirrors
+    _memorias_private without needing UI code to touch a private attr."""
+    motor, _, _ = _make_motor()
+    assert motor.memorias_private is False
+
+    motor.set_memorias_private(True)
+    assert motor.memorias_private is True
+
+    motor.set_memorias_private(False)
+    assert motor.memorias_private is False
+
+
 # ---------------------------------------------------------------------------
 # R2 — privacy switch, forward-only (3.5, 3.6)
 # ---------------------------------------------------------------------------
