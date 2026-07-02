@@ -19,12 +19,15 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
-## LATEST SNAPSHOT — 2026-07-02 (kira_memory_persistence — 8/8 SLICES COMPLETE, release gate green, NOT merged)
+## LATEST SNAPSHOT — 2026-07-02 (kira_memory_persistence — 8/8 SLICES COMPLETE + live-validated + MERGED to maintenance)
 
 Persistent per-profile Kira memory ("opencohost_memorias") shipped end-to-end on a local
-feature-branch-chain. **17 commits** from maintenance tip `0643dee` → tip `ce9bdd0` on
-`feat/kira-memory-persistence-s8-flip-disclosure` (linear chain s1→s8; tracker
-`feat/kira-memory-persistence` still at 0643dee). **`MEMORIAS_ENABLED = True`** (settings.py:271).
+feature-branch-chain, then **fast-forwarded into `maintenance/big-file-audit-small-fixes-20260629`
+(now at `ab51f17`)** on owner approval 2026-07-02. **19 commits** (8 slices × feat+judge-fix + the
+runtime init-order fix `c865f59` + handoff). **`MEMORIAS_ENABLED = True`** (settings.py:271).
+Still NOT pushed to origin (maintenance itself has never been pushed — a separate owner decision).
+**Live runtime gate PASSED**: real session captured 2 host-only memorias, persisted across app close
+via the F4 flush (proven by identical close-timestamps), zero viewer chat, zero crashes (engram #2789).
 **FULL SUITE 3154 passed, 11 skipped, 0 failed — RELEASE GATE GREEN with the flag ON**, empirically
 verified no real memorias.db/notice written under USER_DATA_DIR. Every slice = feat + judge-fix,
 each dual-Opus approved; owner made all product decisions (Q1-Q6, F1-F6, F3b, F6b — engram #2770).
@@ -51,11 +54,20 @@ Hard-crash loses live window ≤10 pairs; clear/model-switch/download don't flus
 sub-tracks: memorias_fuzzy_upsert, automated PII redactor, historial_privacy_lanes_ui.
 
 ### OWNER-OWED (open gates)
-1. **MERGE/LAND** — chain is LOCAL (never pushed; maintenance itself is unpushed). To land: fast-forward
-   `maintenance` to `ce9bdd0` (linear, clean), or keep on the branch. Owner decision — NOT done.
-2. **RUNTIME VALIDATION** (flag now ON, code-verified only, NOTHING validated live): converse with Kira →
-   close app → reopen → confirm she remembers via the memorias window; exercise the capture switch,
-   per-profile purge, «Fijadas» counter, and the F1 banner. This is the T2-style live gate.
+1. **MERGE/LAND — DONE 2026-07-02** (ff to maintenance @ ab51f17). Remaining: push to origin is still
+   OPEN (maintenance has never been pushed — a broader unrelated decision), and a regression-test gap:
+   NO smoke test covers VocalAIApp construction with the flag ON (the init-order crash c865f59 was
+   invisible to the suite because no test instantiates the app — see engram #2789).
+2. **RUNTIME VALIDATION — CORE PASSED live 2026-07-02** (persistence + host-only privacy + F4 flush).
+   Optional UI-surface follow-up (owner not yet done): reopen app → confirm the 2 memorias render in the
+   "Memoria de Kira" window; exercise the capture switch, per-profile purge, «Fijadas» counter, F1 banner.
+3. **NEW DIRECTION (owner, 2026-07-02): UI stack migration** off CustomTkinter → React+Tailwind in Tauri v2
+   with the Python core exposed via a local FastAPI sidecar. Owner will build the React/Tauri app; the
+   ask to US is the Python-side FastAPI API layer as a SEPARATE module that does NOT touch opencohost/ui/.
+   sdd-explore running for track `kira_fastapi_api_layer_20260702` (engram sdd/kira-fastapi-api-layer-20260702/explore).
+   Key insight: the core is already decoupled at the UIState-observer + command-dispatcher seam, and
+   editorial_cli.py already drives the core headless — the FastAPI layer attaches to the same seam.
+   Also noted (not fixed): avatar async-flash UI bug (engram #2790) — subsumed by the migration.
 
 ---
 
