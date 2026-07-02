@@ -14,6 +14,7 @@ the flag at all — they call opencohost.core.memoria_store functions directly.
 
 from __future__ import annotations
 
+import logging
 import queue
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -394,3 +395,84 @@ def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch
     # Sanity ceiling: combined stacking (memorias ~700 + digest ~600 +
     # editorial + contexto) does not blow up unbounded.
     assert len(final_content) < 3000
+
+
+# ---------------------------------------------------------------------------
+# Judge-round slice-5 hardening (B-SF1, B-SF2) — test-only additions
+# ---------------------------------------------------------------------------
+
+def test_private_and_inactive_content_never_reaches_injected_block_end_to_end(monkeypatch, tmp_path):
+    """B-SF1 (judge-round slice 5) — locks the TRANSITIVE property.
+
+    Tests 5.1/5.2 assert private/inactive exclusion at the CANDIDATE-LIST
+    level only. build_injection_lines intentionally does NOT re-filter
+    private/inactive (see its docstring) — MemoriaStore.list_injection_candidates'
+    SQL WHERE clause is the ONLY guard. This drives the real engine path
+    (_build_memorias_injection_block on a MotorVocalIA with a real
+    MemoriaStore) and asserts the actual injected TEXT never carries
+    private/inactive content, while eligible content is present. Private and
+    inactive rows are pinned so they'd be unconditionally included by
+    build_injection_lines if the SQL filter ever failed (pinned rows bypass
+    topic matching), making the guard-only-at-SQL-level property observable.
+    """
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="profile-1")
+    db_path = tmp_path / "memorias.db"
+
+    _seed_rows(db_path, [
+        {
+            "id": "row-private", "profile_id": "profile-1",
+            "content": "PRIVATE_CONTENT_SENTINEL_AAA111",
+            "title": "musica synthwave privado",
+            "pinned": True, "private": True,
+            "created_at": _BASE_TS,
+        },
+        {
+            "id": "row-inactive", "profile_id": "profile-1",
+            "content": "INACTIVE_CONTENT_SENTINEL_BBB222",
+            "title": "musica synthwave inactivo",
+            "pinned": True, "inactive": True,
+            "created_at": _BASE_TS + timedelta(minutes=1),
+        },
+        {
+            "id": "row-eligible", "profile_id": "profile-1",
+            "content": "ELIGIBLE_CONTENT_SENTINEL_CCC333",
+            "title": "musica synthwave dato",
+            "pinned": False,
+            "created_at": _BASE_TS + timedelta(minutes=2),
+        },
+    ])
+
+    block = motor._build_memorias_injection_block("profile-1", "hablemos de musica synthwave")
+
+    assert "PRIVATE_CONTENT_SENTINEL_AAA111" not in block
+    assert "INACTIVE_CONTENT_SENTINEL_BBB222" not in block
+    assert "ELIGIBLE_CONTENT_SENTINEL_CCC333" in block
+
+
+def test_retrieval_fail_open_secret_sentinel_absent_from_logs(monkeypatch, tmp_path, caplog):
+    """B-SF2 (judge-round slice 5) — RC-8 sentinel parity.
+
+    Slices 2/4 have obligatory SECRET_SHOULD_NOT_LOG sentinel tests for their
+    fail-open log paths; slice 5's retrieval fail-open log
+    (_build_memorias_injection_block's `except Exception`) had none. Locks
+    that the fail-open log carries only type(exc).__name__ + profile_id,
+    never a leaked exception-message content, mirroring
+    test_switch_flush_secret_sentinel_absent_from_logs_on_failure_path in
+    tests/test_memorias_flush_switch.py.
+    """
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="profile-1")
+
+    sentinel = "SECRET_SHOULD_NOT_LOG"
+
+    def failing_list(self, *args, **kwargs):
+        raise RuntimeError(f"retrieval exploded on {sentinel}")
+
+    monkeypatch.setattr(MemoriaStore, "list_injection_candidates", failing_list)
+
+    caplog.set_level(logging.WARNING)
+    block = motor._build_memorias_injection_block("profile-1", "hablemos de musica synthwave")
+
+    assert block == ""
+    assert sentinel not in caplog.text
