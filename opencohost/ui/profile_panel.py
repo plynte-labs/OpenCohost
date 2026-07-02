@@ -46,6 +46,9 @@ class ProfilePanel:
 
         # Profile data
         self._perfiles: dict[str, Any] = {}
+        # (name, id) of the last profile explicitly deleted via the
+        # configurator window; purge wiring lands in a later slice.
+        self.last_deleted_profile: Optional[tuple[str, Optional[str]]] = None
 
         # Widget references
         self.lbl_profile_header: Optional[ctk.CTkLabel] = None
@@ -170,14 +173,22 @@ class ProfilePanel:
         )
         ventana.grab_set()
 
-    def _on_perfiles_guardados(self, nuevos_perfiles: dict[str, Any]) -> None:
+    def _on_perfiles_guardados(
+        self,
+        nuevos_perfiles: dict[str, Any],
+        deleted: Optional[tuple[str, Optional[str]]] = None,
+    ) -> None:
         """Handle profiles saved from the configurator window.
 
         Args:
             nuevos_perfiles: Updated profile dictionary.
+            deleted: (name, id) of a profile explicitly deleted in this save,
+                if any. Purge wiring lands in a later slice — for now this is
+                just recorded for future consumption.
         """
         self._perfiles = nuevos_perfiles
         guardar_perfiles(self._perfiles)
+        self.last_deleted_profile = deleted
 
         nombres = list(self._perfiles.keys())
         if self.combo_perfiles is not None:

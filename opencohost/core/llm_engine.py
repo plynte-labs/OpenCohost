@@ -184,6 +184,10 @@ class MotorVocalIA(threading.Thread):
         self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
         self._owns_ollama_model: bool = False
         self._current_profile_name: str = "default"
+        # Stable profile UUID (R12) — written under _history_lock in
+        # set_profile. Slice 1 introduces the field + lock-guarded write only;
+        # the full snapshot/swap/clear critical section lands in slice 4.
+        self._current_profile_id: str | None = None
         _tier_config = LLMTierConfig(**resolve_llm_tiers())
         self.llm_tiers = LLMTierState(
             config=_tier_config,
@@ -463,6 +467,8 @@ class MotorVocalIA(threading.Thread):
             self.use_system_role = payload.get("use_system", False)
             profile_name = payload.get("_profile_name", "desconocido")
             self._current_profile_name = profile_name
+            with self._history_lock:
+                self._current_profile_id = payload.get("id")
             self.historial.clear()
             self._memory_digest.clear()
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")

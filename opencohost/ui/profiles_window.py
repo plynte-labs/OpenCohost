@@ -1,3 +1,5 @@
+import uuid
+
 import customtkinter as ctk
 import tkinter.messagebox as mb
 
@@ -104,28 +106,38 @@ class ConfiguradorPerfiles(ctk.CTkToplevel):
             contador += 1
         nuevo_nombre = f"{nuevo_nombre} {contador}"
         
-        self.perfiles[nuevo_nombre] = {"prompt": "Escribe aquí la personalidad...", "use_system": False}
+        self.perfiles[nuevo_nombre] = {
+            "id": str(uuid.uuid4()),
+            "prompt": "Escribe aquí la personalidad...",
+            "use_system": False,
+        }
         self._actualizar_lista()
         self._seleccionar_perfil(nuevo_nombre)
 
     def _guardar_perfil_actual(self):
         if not self.perfil_actual: return
-        
+
         nuevo_nombre = self.entry_nombre.get().strip()
         if not nuevo_nombre: return
-        
+
         prompt = self.textbox_prompt.get("1.0", "end").strip()
         use_system = bool(self.check_system.get())
+
+        # Copy the EXISTING value dict so 'id' (and any unknown key) survives
+        # a save — never rebuild from scratch (that used to drop 'id' silently).
+        datos = dict(self.perfiles[self.perfil_actual])
 
         if nuevo_nombre != self.perfil_actual:
             if nuevo_nombre in self.perfiles:
                 mb.showerror("Error", "Ya existe un perfil con ese nombre", parent=self)
                 return
             del self.perfiles[self.perfil_actual]
-            
-        self.perfiles[nuevo_nombre] = {"prompt": prompt, "use_system": use_system}
+
+        datos["prompt"] = prompt
+        datos["use_system"] = use_system
+        self.perfiles[nuevo_nombre] = datos
         self.perfil_actual = nuevo_nombre
-        
+
         self._actualizar_lista()
         self._seleccionar_perfil(nuevo_nombre)
         self.on_save_callback(self.perfiles)
@@ -135,9 +147,14 @@ class ConfiguradorPerfiles(ctk.CTkToplevel):
         if len(self.perfiles) <= 1:
             mb.showwarning("Aviso", "No puedes eliminar el único perfil existente.", parent=self)
             return
-            
+
         if mb.askyesno("Confirmar", f"¿Eliminar el perfil '{self.perfil_actual}'?", parent=self):
-            del self.perfiles[self.perfil_actual]
-            self.on_save_callback(self.perfiles)
+            nombre_eliminado = self.perfil_actual
+            id_eliminado = self.perfiles[nombre_eliminado].get("id")
+            del self.perfiles[nombre_eliminado]
+            # Explicit-delete signal: (name, id) of the deleted profile, keyed
+            # on id so a future purge (slice 7) never touches a different
+            # profile that later reuses this name. No purge is wired yet.
+            self.on_save_callback(self.perfiles, deleted=(nombre_eliminado, id_eliminado))
             self._actualizar_lista()
             self._seleccionar_perfil(list(self.perfiles.keys())[0])

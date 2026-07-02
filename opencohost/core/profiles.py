@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from pathlib import Path
 
 from opencohost.config.settings import PROFILES_FILE, SYSTEM_PROMPT, PACKAGE_CONFIG_DIR
@@ -9,6 +10,29 @@ logger = get_logger()
 
 # Shipped defaults — tracked in opencohost/config/, never modified at runtime.
 DEFAULT_PROFILES_FILE = str(Path(PACKAGE_CONFIG_DIR) / "default_profiles.json")
+
+
+def _ensure_stable_ids(perfiles: dict) -> bool:
+    """Seed a stable uuid4 ``id`` into any profile missing one, in place.
+
+    Also resolves id collisions deterministically: if two profiles share the
+    same id (e.g. a bad hand-edit or import), the first occurrence (by dict
+    order) keeps it and every later occurrence is re-seeded — ids must be
+    unique per profile, never shared, never silently reused (R12/RC-9).
+
+    Returns True if any profile was modified (caller should persist).
+    """
+    seen_ids: set[str] = set()
+    modified = False
+    for datos in perfiles.values():
+        if not isinstance(datos, dict):
+            continue
+        pid = datos.get("id")
+        if not pid or pid in seen_ids:
+            datos["id"] = str(uuid.uuid4())
+            modified = True
+        seen_ids.add(datos["id"])
+    return modified
 
 
 def _load_default_profiles() -> dict | None:
@@ -41,13 +65,17 @@ def cargar_perfiles() -> dict:
     if os.path.exists(PROFILES_FILE):
         try:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                perfiles = json.load(f)
+            if _ensure_stable_ids(perfiles):
+                guardar_perfiles(perfiles)
+            return perfiles
         except Exception as e:
             logger.error(f"Error cargando perfiles: {e}")
 
     # PROFILES_FILE does not exist — attempt to seed from shipped defaults.
     defaults = _load_default_profiles()
     if defaults:
+        _ensure_stable_ids(defaults)
         try:
             os.makedirs(os.path.dirname(PROFILES_FILE), exist_ok=True)
             with open(PROFILES_FILE, "w", encoding="utf-8") as f:
@@ -60,6 +88,7 @@ def cargar_perfiles() -> dict:
     # Bare fallback — no defaults available.
     return {
         "Kira (Default)": {
+            "id": str(uuid.uuid4()),
             "prompt": SYSTEM_PROMPT,
             "use_system": False,
         }
