@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def _ensure_stable_ids(perfiles: dict) -> bool:
         if not isinstance(datos, dict):
             continue
         pid = datos.get("id")
-        if not pid or pid in seen_ids:
+        if not isinstance(pid, str) or not pid or pid in seen_ids:
             datos["id"] = str(uuid.uuid4())
             modified = True
         seen_ids.add(datos["id"])
@@ -66,6 +67,8 @@ def cargar_perfiles() -> dict:
         try:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
                 perfiles = json.load(f)
+            if not isinstance(perfiles, dict):
+                return perfiles
             if _ensure_stable_ids(perfiles):
                 guardar_perfiles(perfiles)
             return perfiles
@@ -96,8 +99,27 @@ def cargar_perfiles() -> dict:
 
 
 def guardar_perfiles(perfiles: dict) -> None:
+    """Write profiles to PROFILES_FILE atomically.
+
+    Writes to a temp file in the same directory, then ``os.replace()``s it
+    into place — a crash or failure mid-write can never leave PROFILES_FILE
+    empty or partially written (R12/MF-1). Fail-open: never raises. On
+    failure, logs one warning with the path + exception type only — never
+    profile content (CLAUDE.md: never expose raw chat/profile content in
+    logs) — and leaves the pre-existing file on disk untouched.
+    """
+    target_dir = os.path.dirname(PROFILES_FILE) or "."
+    tmp_path = None
     try:
-        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+        os.makedirs(target_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=".perfiles_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(perfiles, f, indent=4, ensure_ascii=False)
+        os.replace(tmp_path, PROFILES_FILE)
     except Exception as e:
-        logger.error(f"Error guardando perfiles: {e}")
+        logger.warning(f"Failed to save profiles to {PROFILES_FILE}: {type(e).__name__}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass

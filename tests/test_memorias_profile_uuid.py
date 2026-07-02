@@ -563,3 +563,125 @@ class TestLaunchCoverage:
         finally:
             panel.cleanup()
             ui_state.shutdown(timeout=2.0)
+
+
+# ===========================================================================
+# Judge-round fixes (dual-Opus judgment, obs id 2781): MF-1 atomic write,
+# SF-3 non-dict preservation, SF-4 non-string id coercion.
+# ===========================================================================
+
+class TestCargarPerfilesNonDictPreserved:
+    def test_top_level_array_returned_as_is_and_file_unchanged(self, tmp_path):
+        """SF-3 — a perfiles.json containing a top-level JSON array (not a
+        dict) must be returned as-is, and the file on disk must be left
+        UNCHANGED. _ensure_stable_ids() assumes a dict (calls .values()) and
+        must never run — and the load path must never fall through to the
+        defaults-overwrite branch — on a non-dict payload."""
+        profiles_file = tmp_path / "perfiles.json"
+        original_content = json.dumps(["not", "a", "dict"])
+        profiles_file.write_text(original_content, encoding="utf-8")
+        defaults_file = tmp_path / "default_profiles.json"
+
+        result = _call_cargar(str(profiles_file), str(defaults_file))
+
+        assert result == ["not", "a", "dict"]
+        assert profiles_file.read_text(encoding="utf-8") == original_content
+
+
+class TestEnsureStableIdsCoercesNonStringIds:
+    def test_non_string_id_gets_fresh_uuid4_on_load(self, tmp_path):
+        """SF-4 — a hand-edited non-string id (e.g. an int) must not survive
+        un-normalized: it would escape the str-based seen_ids dedup and
+        create a latent stable_key collision downstream. Treat it as
+        needs-reseed, same as a missing id."""
+        profiles_file = tmp_path / "perfiles.json"
+        profiles_file.write_text(
+            json.dumps({"Akira": {"id": 123, "prompt": "hola", "use_system": True}}),
+            encoding="utf-8",
+        )
+        defaults_file = tmp_path / "default_profiles.json"
+
+        result = _call_cargar(str(profiles_file), str(defaults_file))
+
+        assert isinstance(result["Akira"]["id"], str)
+        assert _is_uuid4(result["Akira"]["id"])
+
+    def test_int_id_and_string_id_with_same_digits_get_distinct_ids(self):
+        """int 123 and str '123' must not collapse into the same identity
+        once coerced — the int occurrence is reseeded, the string occurrence
+        (already a valid non-empty str) is left as-is, so they stay distinct."""
+        from opencohost.core.profiles import _ensure_stable_ids
+
+        perfiles = {
+            "IntId": {"id": 123, "prompt": "a", "use_system": True},
+            "StrId": {"id": "123", "prompt": "b", "use_system": True},
+        }
+
+        _ensure_stable_ids(perfiles)
+
+        assert perfiles["IntId"]["id"] != perfiles["StrId"]["id"]
+        assert isinstance(perfiles["IntId"]["id"], str)
+        assert isinstance(perfiles["StrId"]["id"], str)
+
+
+class TestGuardarPerfilesAtomicWrite:
+    def test_normal_save_round_trips(self, tmp_path):
+        """A normal save round-trips through the atomic temp-file + replace
+        dance without losing or altering any data."""
+        import opencohost.core.profiles as prof_mod
+
+        profiles_file = tmp_path / "perfiles.json"
+        data = {"Akira": {"id": str(uuid.uuid4()), "prompt": "hola", "use_system": True}}
+
+        with patch.object(prof_mod, "PROFILES_FILE", str(profiles_file)):
+            prof_mod.guardar_perfiles(data)
+
+        on_disk = json.loads(profiles_file.read_text(encoding="utf-8"))
+        assert on_disk == data
+
+    def test_interrupted_write_leaves_original_file_intact(self, tmp_path):
+        """MF-1 — guardar_perfiles opened the target in 'w' mode, truncating
+        it before writing. If the write is interrupted mid-way (here:
+        os.replace fails), the pre-existing perfiles.json on disk must be
+        left untouched — never empty, never partially written, never lost."""
+        import opencohost.core.profiles as prof_mod
+
+        profiles_file = tmp_path / "perfiles.json"
+        original_content = json.dumps({"Akira": {"id": "old-id", "prompt": "old", "use_system": True}})
+        profiles_file.write_text(original_content, encoding="utf-8")
+
+        new_data = {"Akira": {"id": "new-id", "prompt": "new", "use_system": True}}
+
+        with (
+            patch.object(prof_mod, "PROFILES_FILE", str(profiles_file)),
+            patch.object(prof_mod.os, "replace", side_effect=OSError("simulated interrupted write")),
+        ):
+            prof_mod.guardar_perfiles(new_data)  # must not raise (fail-open)
+
+        assert profiles_file.read_text(encoding="utf-8") == original_content, (
+            "original file must be intact after an interrupted write"
+        )
+
+    def test_write_failure_logs_one_warning_without_profile_content(self, tmp_path):
+        """SF-2 — a broken persistence must not be invisible: a warning is
+        logged on write failure, containing only the path + exception type,
+        never the actual profile content (never expose raw chat/profile
+        content in logs, per CLAUDE.md safety rules)."""
+        import opencohost.core.profiles as prof_mod
+
+        profiles_file = tmp_path / "perfiles.json"
+        secret_prompt = "SUPER_SECRET_PROMPT_CONTENT"
+        new_data = {"Akira": {"id": "new-id", "prompt": secret_prompt, "use_system": True}}
+
+        with (
+            patch.object(prof_mod, "PROFILES_FILE", str(profiles_file)),
+            patch.object(prof_mod.os, "replace", side_effect=OSError("disk full")),
+            patch.object(prof_mod, "logger") as mock_logger,
+        ):
+            prof_mod.guardar_perfiles(new_data)
+
+        mock_logger.warning.assert_called_once()
+        logged_message = mock_logger.warning.call_args[0][0]
+        assert secret_prompt not in logged_message
+        assert str(profiles_file) in logged_message
+        assert "OSError" in logged_message
