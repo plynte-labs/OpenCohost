@@ -221,8 +221,8 @@ def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     assert spoken == ["Texto cacheado"]
     motor.agenda_output_recorder.assert_called_once_with("Texto cacheado")
     assert list(motor.historial)[-2:] == [
-        {"role": "user", "content": "[agenda segura: prompt interno omitido]", "source": "kira-agenda"},
-        {"role": "assistant", "content": "Texto cacheado", "source": "kira-agenda"},
+        {"role": "user", "content": "[agenda segura: prompt interno omitido]", "source": "kira-agenda", "private": False},
+        {"role": "assistant", "content": "Texto cacheado", "source": "kira-agenda", "private": False},
     ]
 
 
@@ -349,7 +349,9 @@ def test_agenda_output_transformer_caps_before_history_commit():
 
     assert dialogo == "uno dos"
     motor.agenda_output_transformer.assert_called_once_with("uno dos tres cuatro")
-    assert list(motor.historial)[-1] == {"role": "assistant", "content": "uno dos", "source": "kira-agenda"}
+    assert list(motor.historial)[-1] == {
+        "role": "assistant", "content": "uno dos", "source": "kira-agenda", "private": False,
+    }
 
 
 def test_agenda_history_redacts_raw_compact_prompt_when_committed():

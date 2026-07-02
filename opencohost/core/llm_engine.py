@@ -34,6 +34,7 @@ from opencohost.config.settings import (
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
     PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
+    MEMORIAS_ENABLED, MEMORIAS_DB,
 )
 from opencohost.core import context_budget
 from opencohost.i18n import active as i18n_active
@@ -41,6 +42,7 @@ from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
+from opencohost.core.memoria_store import MemoriaStore, derive_stable_key, build_title
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger
 from opencohost.config.validation import output_guard
@@ -247,6 +249,17 @@ class MotorVocalIA(threading.Thread):
         # A separate lock avoids deadlock risk — self._lock must never be held on
         # any path that calls _commit_history.
         self._history_lock = threading.Lock()
+
+        # Memorias capture (R1-R4, dormant while MEMORIAS_ENABLED=False).
+        # Session-scoped privacy switch: False = capturing (default), True =
+        # paused. Tagged onto BOTH pair entries at append time in
+        # _commit_history (state-at-event) — forward-only, never re-gated on
+        # the CURRENT switch state at eviction time (the T1 lesson).
+        self._memorias_private: bool = False
+        # Lazy — only instantiated the first time the full capture gate chain
+        # passes, so a MEMORIAS_ENABLED=False run never touches disk for this
+        # store (zero instantiation cost on the hot path).
+        self._memoria_store: Optional[MemoriaStore] = None
 
         self._lock = threading.Lock()
 
@@ -2005,6 +2018,11 @@ class MotorVocalIA(threading.Thread):
             # ends up in safe_context.
             safe_context = self._sanitize_history_context(history_text if history_text else contexto)
 
+        # T3 — staged memorias draft (pure strings, no I/O). Built while
+        # _history_lock is held below; upsert_draft is called AFTER the lock
+        # releases (upsert_draft must never run with _history_lock held).
+        pending_memoria_capture: Optional[tuple[str, str, str, str]] = None
+
         # Hold _history_lock around the eviction-capture + both appends so
         # concurrent callers (worker loop and agenda speaker daemon) cannot
         # interleave a read of historial[0]/[1] with an append from another thread.
@@ -2039,8 +2057,87 @@ class MotorVocalIA(threading.Thread):
                     )
                     self._memory_digest.append(ledger_line)
 
-            self.historial.append({'role': 'user', 'content': safe_context, 'source': source})
-            self.historial.append({'role': 'assistant', 'content': dialogo, 'source': source})
+                    # T3 — memorias draft (R1-R4). Reuses the source+agenda
+                    # provenance check already done above (evicted_source in
+                    # _DIGEST_CAPTURE_SOURCES, not evicted_is_agenda); adds
+                    # the memoria-specific gates fail-closed, is_capturable
+                    # (via derive_stable_key) LAST — a signal/token-count
+                    # gate, never a substitute for provenance (Judge-B
+                    # forward, slice 2 N1).
+                    pending_memoria_capture = self._build_memoria_draft(
+                        evicted_user_content, evicted_asst_content, ledger_line,
+                    )
+
+            # Append-time privacy tagging (R2/R4): both pair entries carry the
+            # CURRENT switch state at the moment they enter historial. Capture
+            # later reads this tag from the EVICTED entry itself (state-at-event),
+            # never the switch's state at eviction time — forward-only, no
+            # retro-capture and no retro-hide of an already in-flight window.
+            self.historial.append({
+                'role': 'user', 'content': safe_context, 'source': source,
+                'private': self._memorias_private,
+            })
+            self.historial.append({
+                'role': 'assistant', 'content': dialogo, 'source': source,
+                'private': self._memorias_private,
+            })
+
+        if pending_memoria_capture is not None:
+            self._capture_memoria(*pending_memoria_capture)
+
+    def set_memorias_private(self, value: bool) -> None:
+        """Session-scoped memorias capture-privacy switch (R2/R4).
+
+        True pauses capture; False (default) resumes it. Forward-only: only
+        affects pairs appended to historial AFTER this call — never retro-
+        captures a paused window, never retro-hides an already-capturable
+        one. UI wiring (the actual toggle control) lands in slice 7.
+        """
+        self._memorias_private = bool(value)
+
+    def _build_memoria_draft(
+        self, evicted_user_content: str, evicted_asst_content: str, ledger_line: str,
+    ) -> Optional[tuple[str, str, str, str]]:
+        """Pure, no-I/O: build a memoria draft, or None if any gate fails.
+
+        MUST be called while _history_lock is held — reads the EVICTED
+        entry's own tags (state-at-event). The caller has already confirmed
+        the evicted pair's source/agenda provenance (R1); this adds the
+        remaining gates, fail-closed, is_capturable (via derive_stable_key)
+        LAST. Returns (profile_id, stable_key, title, content) or None.
+        """
+        if not MEMORIAS_ENABLED:
+            return None
+        if self.historial[0].get("private") is not False:
+            return None
+        profile_id = self._current_profile_id
+        if profile_id is None:
+            return None
+        signature_text = f"{evicted_user_content} {evicted_asst_content}"
+        stable_key = derive_stable_key(profile_id, signature_text)
+        if stable_key is None:
+            return None
+        return profile_id, stable_key, build_title(signature_text), ledger_line[:300]
+
+    def _capture_memoria(self, profile_id: str, stable_key: str, title: str, content: str) -> None:
+        """I/O: upsert a memoria draft. MUST be called AFTER _history_lock releases.
+
+        Fail-open (R5): any exception is logged (ids/type only, never title
+        or content — RC-8) and swallowed. A memorias write must never crash
+        the calling thread (engine worker loop / agenda speaker daemon).
+        """
+        try:
+            self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+        except Exception as exc:
+            logger.warning(
+                "memoria capture failed (fail-open): %s profile_id=%s stable_key=%s",
+                type(exc).__name__, profile_id, stable_key,
+            )
+
+    def _get_memoria_store(self) -> MemoriaStore:
+        if self._memoria_store is None:
+            self._memoria_store = MemoriaStore(MEMORIAS_DB)
+        return self._memoria_store
 
     @staticmethod
     def _first_words(text: str, max_words: int = 8) -> str:
