@@ -5,11 +5,14 @@ gate chain (R1 provenance, R2 privacy switch, R3 distillation minimum, R4
 session-scoped switch), thread/lock invariants (R5 wiring), and the RC-10
 accepted agenda-append loss.
 
-MEMORIAS_ENABLED stays False in settings; every test that needs capture
-enabled monkeypatches `llm_engine.MEMORIAS_ENABLED` directly (module-level
-name lookup, matching the SCOUT_ENABLED precedent in test_topic_scout.py) —
-patching opencohost.config.settings would NOT affect the name already bound
-into llm_engine's module namespace at import time.
+MEMORIAS_ENABLED defaults True as of slice 8. Tests that exercise
+capture/flush/injection MUST monkeypatch `llm_engine.MEMORIAS_ENABLED`
+(module-level name lookup, matching the SCOUT_ENABLED precedent in
+test_topic_scout.py) AND redirect `llm_engine.MEMORIAS_DB` to a tmp path
+(see the `_enable_memorias` helper) — NEVER let the real store be
+instantiated against USER_DATA_DIR. Patching opencohost.config.settings
+would NOT affect the name already bound into llm_engine's module namespace
+at import time.
 """
 
 import queue

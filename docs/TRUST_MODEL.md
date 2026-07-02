@@ -160,11 +160,13 @@ explicit clear.
 host-distilled extracts of the streamer's own direct/voice turns (never
 viewer chat), written to a local, per-profile SQLite database under the user
 data directory — a local-only write, no new network destination. Pausing
-capture is disk-only: it stops new writes going forward but never
-retroactively deletes existing rows or blocks the RAM-only conversation/
-digest above. A hard crash can still lose the current live window (at most
-~10 exchanges) that had not yet flushed. Purge is explicit-only, scoped to
-the active profile, from the "Memoria de Kira" window.
+capture is disk-only: it stops new writes going forward (a turn already
+tagged as capturable before you paused may still be written to disk) but
+never retroactively deletes existing rows or blocks the RAM-only
+conversation/digest above. A hard crash can still lose the current live
+window (at most ~10 exchanges) that had not yet flushed. Purge is
+explicit-only, scoped to the active profile, from the "Memoria de Kira"
+window.
 
 ---
 

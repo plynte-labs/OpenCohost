@@ -171,6 +171,8 @@ El paso siguiente — generalizar ese patrón a memoria conversacional — es el
 
 **OWED.** engram-simulado sigue DIFERIDO — y debe seguir así hasta una decisión explícita del dueño que acepte el trade-off de **PII**: persistir conversación de host a disco invierte la postura actual RAM-only y exige consentimiento/cifrado/retención. No es deuda técnica; es una decisión de producto que todavía no se tomó.
 
+**Actualización (2026-07-02).** El dueño tomó esa decisión explícita (engram #2770) para una variante **acotada**: el track `kira_memory_persistence_20260701` ("memorias de Kira"), no el engram-simulado completo descrito arriba. Se levantó el diferimiento solo para ese alcance reducido — extractos cortos, host-distillados, de los turnos directos/voz del propio streamer (nunca chat de viewers) — y se implementó tal como se anticipó en (f): retriever léxico, cero deps nuevas, 4º store SQLite (`memorias.db`), gateado por source tag. Cifrado y retención/auto-expiry se descartaron **conscientemente** como no-objetivos de v1 (store local en texto plano, purga explícita por perfil) — misma postura que ya rige `sessions.db`/`cards.db`. El disclosure completo al usuario vive en `docs/PRIVACY.md` y `docs/TRUST_MODEL.md`; el engram-simulado *general* (memoria conversacional completa como RAG) sigue DIFERIDO sin decisión tomada.
+
 ---
 
 ## (g) Eficiencia de prompt: medir antes de optimizar

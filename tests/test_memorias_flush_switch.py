@@ -6,9 +6,12 @@ clear historial+digest, all under ONE `_history_lock` acquisition, with the
 resulting disk upserts dispatched to a worker thread AFTER the lock releases
 (RC-3 — switch-flush must never block the Tk thread).
 
-MEMORIAS_ENABLED stays False in settings; every test that needs capture
-enabled monkeypatches `llm_engine.MEMORIAS_ENABLED` directly, mirroring
-slice 3's `_enable_memorias` convention (test_memorias_capture_engine.py).
+MEMORIAS_ENABLED defaults True as of slice 8. Tests that exercise
+capture/flush/injection MUST monkeypatch `llm_engine.MEMORIAS_ENABLED`
+True AND redirect `llm_engine.MEMORIAS_DB` to a tmp path (see the
+`_enable_memorias` helper, mirroring slice 3's convention in
+test_memorias_capture_engine.py) — NEVER let the real store be
+instantiated against USER_DATA_DIR.
 """
 
 from __future__ import annotations

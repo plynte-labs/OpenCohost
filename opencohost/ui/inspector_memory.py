@@ -75,9 +75,10 @@ MEMORIAS_PROVENANCE_NOTE = (
 # Slice 8 (F1) — passive disclosure banner, shown every launch until
 # dismissed once (dismiss state persisted via MEMORIAS_NOTICE_FILE).
 MEMORIAS_BANNER_TEXT = (
-    "Kira ahora guarda memorias en disco: extractos de tus propios turnos "
-    "directos, por perfil. Podés revisarlas, editarlas, fijarlas, marcarlas "
-    "privadas o borrarlas en cualquier momento desde esta ventana."
+    "Kira ahora guarda memorias en tu disco local: extractos de tus propios "
+    "turnos directos y de voz (PTT), por perfil. Podés revisarlas, editarlas, "
+    "fijarlas, marcarlas privadas o borrarlas en cualquier momento desde esta "
+    "ventana."
 )
 # Divergence from format_conversation_entry's ptt masking, by design: a ptt
 # entry only ever reaches memorias.db after passing the R1 provenance gate

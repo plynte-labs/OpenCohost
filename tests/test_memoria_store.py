@@ -12,8 +12,10 @@ precedent), per-profile growth cap (prune oldest unpinned drafts beyond
 MEMORIAS_PROFILE_CAP after each successful INSERT), and log hygiene (RC-8:
 failure logs/exception messages never carry row title or content).
 
-Slice 2 scope only: this module is not yet wired into the engine or UI
-(MEMORIAS_ENABLED stays False) — it is exercised only by these unit tests.
+MemoriaStore itself never reads MEMORIAS_ENABLED — that gate lives in
+llm_engine's capture hook (wired in as of slice 8, where the flag defaults
+True). These tests instantiate MemoriaStore directly against a tmp_path db
+and MUST keep doing so — NEVER against the real USER_DATA_DIR/memorias.db.
 """
 
 from __future__ import annotations

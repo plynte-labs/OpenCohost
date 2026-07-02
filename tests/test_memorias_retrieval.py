@@ -5,11 +5,14 @@ owner decision F6 (pinned policy A: max 2 oldest-pinned injected, 220-char
 clip at injection time only, automatic top-k always retains a ~260-char
 floor of the 700-char budget).
 
-MEMORIAS_ENABLED stays False in settings; tests that exercise the engine
-wiring monkeypatch `llm_engine.MEMORIAS_ENABLED` directly (module-level name
-lookup — same precedent as tests/test_memorias_capture_engine.py). Pure
-store-level tests (retrieval scoring, budget assembly, clipping) do not need
-the flag at all — they call opencohost.core.memoria_store functions directly.
+MEMORIAS_ENABLED defaults True as of slice 8. Tests that exercise the
+engine wiring MUST monkeypatch `llm_engine.MEMORIAS_ENABLED` (module-level
+name lookup — same precedent as tests/test_memorias_capture_engine.py) AND
+redirect `llm_engine.MEMORIAS_DB` to a tmp path (see the `_enable_memorias`
+helper) — NEVER let the real store be instantiated against USER_DATA_DIR.
+Pure store-level tests (retrieval scoring, budget assembly, clipping) do
+not need the flag at all — they call opencohost.core.memoria_store
+functions directly.
 """
 
 from __future__ import annotations
