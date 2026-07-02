@@ -159,6 +159,38 @@ def test_viewer_chat_entries_excluded_from_flush(monkeypatch, tmp_path):
     assert _store(tmp_path).list_for_profile("profile-1") == []
 
 
+def test_flush_mixed_window_persists_only_eligible_direct_pair_per_pair_selectivity(monkeypatch, tmp_path):
+    """B-SF1 (judge-round slice 4) — 4.4/4.5 above use HOMOGENEOUS windows
+    (all-excluded), which only proves 'excluded-only window -> 0 rows', not
+    per-pair selectivity inside _collect_flush_drafts. This builds a MIXED
+    live window (accumulated, direct, private) and asserts flush persists
+    EXACTLY the one eligible direct pair, locking per-pair gating against a
+    future 'gate once for the whole window' regression."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    # accumulated-source pair -- excluded (not in _DIGEST_CAPTURE_SOURCES)
+    motor.historial.append({"role": "user", "content": _ELIGIBLE_USER_2, "source": "accumulated", "private": False})
+    motor.historial.append({"role": "assistant", "content": _ELIGIBLE_ASST_2, "source": "accumulated", "private": False})
+    # direct-source pair -- eligible, the only one expected to survive
+    motor.historial.append({"role": "user", "content": _ELIGIBLE_USER, "source": "direct", "private": False})
+    motor.historial.append({"role": "assistant", "content": _ELIGIBLE_ASST, "source": "direct", "private": False})
+    # private-tagged pair -- excluded
+    motor.historial.append(
+        {"role": "user", "content": "musica synthwave calma privado", "source": "direct", "private": True}
+    )
+    motor.historial.append(
+        {"role": "assistant", "content": "Kira dice que es genial. Fin.", "source": "direct", "private": True}
+    )
+
+    motor.flush_memorias()
+
+    rows = _store(tmp_path).list_for_profile("profile-1")
+    assert len(rows) == 1
+    expected_key = derive_stable_key("profile-1", f"{_ELIGIBLE_USER} {_ELIGIBLE_ASST}")
+    assert rows[0]["stable_key"] == expected_key
+
+
 # ---------------------------------------------------------------------------
 # R14/RC-2 — profile-switch atomic critical section (4.6-4.8)
 # ---------------------------------------------------------------------------
@@ -328,6 +360,32 @@ def test_switch_flush_secret_sentinel_absent_from_logs_on_failure_path(monkeypat
     _run_set_profile_and_wait_for_flush(motor, monkeypatch, {
         "prompt": "p", "use_system": False, "_profile_name": "new-profile", "id": "profile-new",
     })
+
+    assert sentinel not in caplog.text
+
+
+def test_close_flush_secret_sentinel_absent_from_logs_on_failure_path(monkeypatch, tmp_path, caplog):
+    """B-N1 (judge-round slice 4) — parity with
+    test_switch_flush_secret_sentinel_absent_from_logs_on_failure_path above,
+    for the CLOSE-flush path (flush_memorias). The upsert-failure log there
+    must carry only type(exc).__name__ + profile_id, never the exception
+    message/content, even when the exception message itself leaks a secret."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    sentinel = "SECRET_SHOULD_NOT_LOG"
+    motor.historial.append(
+        {"role": "user", "content": f"{sentinel} synthwave musica calma", "source": "direct", "private": False}
+    )
+    motor.historial.append({"role": "assistant", "content": _ELIGIBLE_ASST, "source": "direct", "private": False})
+
+    def failing_upsert(self, *args, **kwargs):
+        raise RuntimeError(f"disk exploded on {sentinel}")  # simulate a leaky exception message
+
+    monkeypatch.setattr(MemoriaStore, "upsert_draft", failing_upsert)
+
+    caplog.set_level(logging.WARNING)
+    motor.flush_memorias()
 
     assert sentinel not in caplog.text
 
