@@ -42,7 +42,10 @@ from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
-from opencohost.core.memoria_store import MemoriaStore, derive_stable_key, build_title
+from opencohost.core.memoria_store import (
+    MemoriaStore, derive_stable_key, build_title,
+    build_injection_lines, pinned_injection_counter,
+)
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger
 from opencohost.config.validation import output_guard
@@ -260,6 +263,11 @@ class MotorVocalIA(threading.Thread):
         # passes, so a MEMORIAS_ENABLED=False run never touches disk for this
         # store (zero instantiation cost on the hot path).
         self._memoria_store: Optional[MemoriaStore] = None
+        # Slice 5 (R9): honest pin/injection counter from the most recent
+        # direct-path retrieval — (total_pinned, injected). None until the
+        # first direct-path turn with memorias enabled. Value only; rendered
+        # by the slice-7 management UI.
+        self._memorias_pin_counter: Optional[tuple[int, int]] = None
 
         self._lock = threading.Lock()
 
@@ -1213,8 +1221,15 @@ class MotorVocalIA(threading.Thread):
                         unit_singular=i18n_active.digest_unit_singular(),
                         unit_plural=i18n_active.digest_unit_plural(),
                     )
+                    # Slice 5 (R9): snapshot the profile id under the lock
+                    # (engine state protected by _history_lock) — the actual
+                    # store READ happens AFTER the lock releases, below,
+                    # since memorias retrieval is disk I/O and _history_lock
+                    # must never be held during I/O (same rule as capture).
+                    memorias_profile_id = self._current_profile_id
                 else:
                     digest_block = ""
+                    memorias_profile_id = None
 
             # Rebuild a fresh {role, content} per entry — never append by
             # reference and never pop/mutate — so the stored `source` tag
@@ -1222,6 +1237,14 @@ class MotorVocalIA(threading.Thread):
             # reach ollama.chat, and the live deque entries keep their tag.
             for msg in history_snapshot:
                 messages.append({'role': msg['role'], 'content': msg['content']})
+
+            # Slice 5 (R9): memorias retrieval + injection, direct path only.
+            # Store I/O happens here, AFTER _history_lock released above (the
+            # store's own READ_TIMEOUT_SECONDS bounds the read). Fail-open to
+            # "" on any error — a retrieval failure must never break a turn.
+            memorias_block = ""
+            if source == "direct" and MEMORIAS_ENABLED and memorias_profile_id:
+                memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
 
             # Editorial direct-mode enrichment: inject matching ARMED card context for
             # host-direct queries. NON-CONSUMING — card stays ARMED for the agenda path.
@@ -1258,6 +1281,10 @@ class MotorVocalIA(threading.Thread):
                     )
                     enriched = f"{wrapped_digest}\n\n{enriched}"
                     logger.debug("L1 digest injected into direct prompt (len=%d)", len(digest_block))
+                # Memorias block (R9) is PREPENDED before the digest wrap —
+                # it must appear earlier in the prompt than <memoria_de_fondo>.
+                if memorias_block:
+                    enriched = f"{memorias_block}\n\n{enriched}"
 
             if self.use_system_role:
                 messages.append({'role': 'user', 'content': enriched})
@@ -2176,6 +2203,39 @@ class MotorVocalIA(threading.Thread):
         if self._memoria_store is None:
             self._memoria_store = MemoriaStore(MEMORIAS_DB)
         return self._memoria_store
+
+    def _build_memorias_injection_block(self, profile_id: str, contexto: str) -> str:
+        """Slice 5 (R9) — direct-path-only memorias retrieval + injection.
+
+        MUST be called AFTER _history_lock releases (store I/O, bounded by
+        the store's own READ_TIMEOUT_SECONDS). Fail-open to "" on any error
+        — a retrieval failure must never break a turn (mirrors
+        _capture_memoria). Eligibility (private=0 AND inactive=0, capped) is
+        enforced by MemoriaStore.list_injection_candidates; pinned policy A
+        (max 2 oldest-pinned, 220-char clip, top-k floor) by
+        build_injection_lines. Each line is re-sanitized at build time and
+        wrapped in the i18n memorias_block_open/close delimiters.
+        """
+        try:
+            rows = self._get_memoria_store().list_injection_candidates(profile_id)
+            self._memorias_pin_counter = pinned_injection_counter(rows)
+            if not rows:
+                return ""
+            lines = build_injection_lines(rows, contexto)
+            if not lines:
+                return ""
+            sanitized = [self._sanitize_history_context(line) for line in lines]
+            return (
+                i18n_active.memorias_block_open() + "\n"
+                + "\n".join(sanitized)
+                + "\n" + i18n_active.memorias_block_close()
+            )
+        except Exception as exc:
+            logger.warning(
+                "memoria retrieval failed (fail-open): %s profile_id=%s",
+                type(exc).__name__, profile_id,
+            )
+            return ""
 
     def _collect_flush_drafts(self) -> list[tuple[str, str, str, str]]:
         """F4 (slice 4) — snapshot the LIVE (un-evicted) historial window into

@@ -44,8 +44,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from opencohost.config.settings import MEMORIAS_PROFILE_CAP
-from opencohost.core.editorial_matching import normalize_tokens
+from opencohost.config.settings import (
+    MEMORIAS_MAX_INJECT_CHARS,
+    MEMORIAS_MAX_PINNED_INJECT,
+    MEMORIAS_PINNED_CLIP_CHARS,
+    MEMORIAS_PROFILE_CAP,
+)
+from opencohost.core.editorial_matching import match_score, normalize_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +130,114 @@ def build_title(text: str) -> str:
 
 def _now_text() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Retrieval + injection (slice 5, design v2.1 §7, F6) — pure, no I/O
+# ---------------------------------------------------------------------------
+
+# One shared significant title token scores 1/3 ~= 0.33 >= 0.25. RC-7's
+# title derivation (domain stopwords excluded, see build_title above) is
+# what keeps this threshold from firing on shared domain-noise words.
+_TOPIC_MATCH_THRESHOLD = 0.25
+
+
+class _TopicShim:
+    """Exposes ONLY the title to match_score (design fix) — content is never
+    fed into the scorer, or the 0.25 threshold would effectively never fire
+    (titles are a handful of tokens; content is long and dilutes overlap).
+    editorial_matching.match_score is reused verbatim, unmodified."""
+
+    __slots__ = ("topic", "triggers")
+
+    def __init__(self, topic: str) -> None:
+        self.topic = topic
+        self.triggers: list[str] = []
+
+
+def select_top_k(topic_text: str, rows, k: int = 3) -> list:
+    """Lexical top-k of *rows* against *topic_text* by title-only match_score.
+
+    Returns up to *k* rows scoring >= _TOPIC_MATCH_THRESHOLD, best first.
+    """
+    scored = [
+        (match_score(topic_text, _TopicShim(row["title"])), row)
+        for row in rows
+    ]
+    scored = [pair for pair in scored if pair[0] >= _TOPIC_MATCH_THRESHOLD]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in scored[:k]]
+
+
+def _clip_for_injection(text: str, limit: int) -> str:
+    """Hard-cut *text* to at most *limit* chars total, ellipsis included.
+
+    Never mutates the caller's row — operates on a plain string copy.
+    """
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def pinned_injection_counter(rows, max_pinned: int = MEMORIAS_MAX_PINNED_INJECT) -> tuple[int, int]:
+    """Honest pin/injection counter value (F6) — (total_pinned, injected).
+
+    Unconditional: the pinned clip bounds pinned rows to at most
+    max_pinned * MEMORIAS_PINNED_CLIP_CHARS chars, so the policy count never
+    depends on whether the char budget happens to fit. Value only — rendered
+    by the slice-7 management UI.
+    """
+    total_pinned = sum(1 for row in rows if row["pinned"])
+    return total_pinned, min(total_pinned, max_pinned)
+
+
+def build_injection_lines(
+    rows,
+    topic_text: str,
+    *,
+    max_chars: int = MEMORIAS_MAX_INJECT_CHARS,
+    max_pinned: int = MEMORIAS_MAX_PINNED_INJECT,
+    pinned_clip_chars: int = MEMORIAS_PINNED_CLIP_CHARS,
+    top_k: int = 3,
+) -> list[str]:
+    """Assemble the injected memorias lines under pinned policy A (F6).
+
+    *rows* MUST already be the eligible candidate set (private=0,
+    inactive=0, active profile, capped — see
+    MemoriaStore.list_injection_candidates). Pure, no I/O, never mutates a
+    row's stored content/title.
+
+    Order: up to *max_pinned* OLDEST-pinned rows first (each clipped to
+    ~*pinned_clip_chars*), then automatic top-k matches from the remaining
+    rows fill the rest of the budget. Because pinned inclusion is capped at
+    max_pinned * pinned_clip_chars, automatic top-k always keeps a floor of
+    at least (max_chars - max_pinned * pinned_clip_chars) chars, regardless
+    of how many rows are pinned.
+    """
+    pinned_rows = sorted(
+        (row for row in rows if row["pinned"]),
+        key=lambda row: (row["created_at"], row["id"]),
+    )[:max_pinned]
+    non_pinned_rows = [row for row in rows if not row["pinned"]]
+
+    lines: list[str] = []
+    used = 0
+
+    def _try_add(text: str) -> None:
+        nonlocal used
+        sep = 1 if lines else 0
+        if used + sep + len(text) > max_chars:
+            return
+        lines.append(text)
+        used += sep + len(text)
+
+    for row in pinned_rows:
+        _try_add(_clip_for_injection(row["content"], pinned_clip_chars))
+
+    for row in select_top_k(topic_text, non_pinned_rows, k=top_k):
+        _try_add(row["content"])
+
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +412,26 @@ class MemoriaStore:
                 ).fetchall()
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store list failed (fail-open): {type(exc).__name__}")
+            return []
+
+    def list_injection_candidates(self, profile_id: str) -> list[sqlite3.Row]:
+        """Eligible rows for retrieval injection (R9): private=0 AND
+        inactive=0, scoped to profile_id, capped at MEMORIAS_PROFILE_CAP.
+
+        Pinned rows sort first (ORDER BY pinned DESC), so they are never
+        pushed out by the cap ahead of unpinned rows — pinned rows are
+        always in the candidate set before the cap is applied. Bounded
+        read, fail-open to [] (mirrors list_for_profile).
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                return conn.execute(
+                    "SELECT * FROM memorias WHERE profile_id = ? AND private = 0 AND inactive = 0 "
+                    "ORDER BY pinned DESC, updated_at DESC, id ASC LIMIT ?",
+                    (profile_id, MEMORIAS_PROFILE_CAP),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store injection-candidate list failed (fail-open): {type(exc).__name__}")
             return []
 
     # ------------------------------------------------------------------

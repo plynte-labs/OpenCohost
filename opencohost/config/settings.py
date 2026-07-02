@@ -270,6 +270,12 @@ MEMORIAS_DB = os.path.join(str(USER_DATA_DIR), "data", "memorias", "memorias.db"
 MEMORIAS_ENABLED = False
 MEMORIAS_MAX_INJECT_CHARS = 700
 MEMORIAS_PROFILE_CAP = 200
+# Pinned injection policy A (F6, slice 5): at most 2 oldest-pinned rows
+# injected per turn, each clipped to ~220 chars AT INJECTION TIME ONLY (the
+# stored row is never mutated). Leaves automatic top-k a guaranteed floor of
+# MEMORIAS_MAX_INJECT_CHARS - 2*220 = 260 chars regardless of pin count.
+MEMORIAS_MAX_PINNED_INJECT = 2
+MEMORIAS_PINNED_CLIP_CHARS = 220
 
 
 # ──────────────────────────────────────────────
