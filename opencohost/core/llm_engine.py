@@ -13,7 +13,7 @@ try:
     import edge_tts
 except ImportError:
     edge_tts = None  # optional cloud-TTS dependency; Piper offline path stays available
-from collections import deque
+from collections import deque, Counter
 from typing import Optional
 
 from opencohost.config.settings import (
@@ -1673,6 +1673,65 @@ class MotorVocalIA(threading.Thread):
         except Exception:
             # Total internal isolation — a scout failure must never escape.
             return []
+
+    def memory_inspector_snapshot(self) -> dict:
+        """Read-only, privacy-gated snapshot of session memory for the
+        "Memoria de Kira" UI inspector (cards_memory_readonly_panels_20260701).
+
+        Snapshot-then-release (precedent: scout_digest): copies historial
+        entries + digest stats to plain dicts under _history_lock, releases
+        the lock, then formats. Never mutates historial or the digest.
+
+        Content policy (fail-closed, no cross-module string heuristics):
+          - user-slot entries: 'content' key present ONLY when source == "direct"
+          - assistant-slot entries: 'content' key present when source is in
+            _DIGEST_CAPTURE_SOURCES ({"direct", "ptt"}) — Kira's own on-air
+            words are safe to show even for a ptt-sourced turn.
+          - everything else (chat/accumulated/kira-agenda*/unknown/missing
+            source): NO 'content' key at all.
+
+        Returns:
+            {
+              "entries": [{"turn_index", "role", "source", "content_chars", ["content"]}],
+              "source_breakdown": collections.Counter over entry sources,
+              "digest": {"line_count", "total_chars", "max_chars"} — stats
+                  only, never digest line text (compacted lines are
+                  unattributable and can carry ptt-template junk pre-T1.1).
+            }
+        """
+        with self._history_lock:
+            raw_entries = list(self.historial)
+            digest_lines = list(self._memory_digest.lines)
+            digest_max_chars = self._memory_digest._max_chars
+
+        entries: list[dict] = []
+        for idx, raw_entry in enumerate(raw_entries):
+            role = raw_entry.get("role")
+            source = raw_entry.get("source")
+            content = raw_entry.get("content", "") or ""
+            entry = {
+                "turn_index": idx,
+                "role": role,
+                "source": source,
+                "content_chars": len(content),
+            }
+            show_content = (
+                (role == "user" and source == "direct")
+                or (role == "assistant" and source in _DIGEST_CAPTURE_SOURCES)
+            )
+            if show_content:
+                entry["content"] = content
+            entries.append(entry)
+
+        return {
+            "entries": entries,
+            "source_breakdown": Counter(e["source"] for e in entries),
+            "digest": {
+                "line_count": len(digest_lines),
+                "total_chars": sum(len(line) for line in digest_lines),
+                "max_chars": digest_max_chars,
+            },
+        }
 
     @staticmethod
     def _is_watchdog_timeout_error(exc: Exception) -> bool:

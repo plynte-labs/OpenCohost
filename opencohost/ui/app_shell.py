@@ -787,6 +787,30 @@ class VocalAIApp(ctk.CTk):
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
         self.btn_editar_perfiles = self.profile_panel.btn_editar_perfiles
+        # Read-only product inspectors — Tarjetas editoriales + Memoria de Kira
+        # (cards_memory_readonly_panels_20260701). Shared mini-frame, fail-open counts.
+        from opencohost.ui.inspector_cards import format_launcher_label
+        frame_inspectors_launcher = ctk.CTkFrame(frame_right, fg_color="transparent")
+        frame_inspectors_launcher.grid(row=2, column=0, sticky="ew", padx=0, pady=(8, 0))
+        self._editorial_cards_inspector: Any = None
+        try:
+            _cards_count = len(self.editorial_cards.list_all())
+        except Exception:
+            _cards_count = None
+        self.btn_editorial_cards = ctk.CTkButton(
+            frame_inspectors_launcher,
+            text=format_launcher_label(_cards_count),
+            command=self._open_inspector_cards,
+        )
+        self.btn_editorial_cards.pack(fill="x", pady=(0, 4))
+        from opencohost.ui.inspector_memory import format_memory_launcher_label
+        self._kira_memory_inspector: Any = None
+        self.btn_kira_memory = ctk.CTkButton(
+            frame_inspectors_launcher,
+            text=format_memory_launcher_label(None),  # motor_ia does not exist yet at build time
+            command=self._open_inspector_memory,
+        )
+        self.btn_kira_memory.pack(fill="x")
         # Audio tab
         frame_audio = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_audio.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
@@ -2209,6 +2233,39 @@ class VocalAIApp(ctk.CTk):
         )
         if result is not None:
             self._gear_popover = result
+
+    def _open_inspector_cards(self) -> None:
+        """Open (or focus) the "Tarjetas editoriales" read-only inspector.
+
+        Delegates construction to opencohost.ui.inspector_cards.open_inspector_cards.
+        """
+        from opencohost.ui.inspector_cards import open_inspector_cards
+        result = open_inspector_cards(
+            parent=self,
+            ref_getter=lambda: self._editorial_cards_inspector,
+            ref_setter=lambda w: setattr(self, "_editorial_cards_inspector", w),
+            card_store=self.editorial_cards,
+            schedule_ui_update=self._safe_after,
+        )
+        if result is not None:
+            self._editorial_cards_inspector = result
+
+    def _open_inspector_memory(self) -> None:
+        """Open (or focus) the "Memoria de Kira" read-only inspector.
+
+        Delegates construction to opencohost.ui.inspector_memory.open_inspector_memory.
+        """
+        from opencohost.ui.inspector_memory import open_inspector_memory
+        result = open_inspector_memory(
+            parent=self,
+            ref_getter=lambda: self._kira_memory_inspector,
+            ref_setter=lambda w: setattr(self, "_kira_memory_inspector", w),
+            motor_ia=self.motor_ia,
+            kira_agenda=self.kira_agenda,
+            schedule_ui_update=self._safe_after,
+        )
+        if result is not None:
+            self._kira_memory_inspector = result
 
     def _toggle_help_section(self, key: str, frame: Any, button: Any) -> None:
         expanded = not self._help_expanded.get(key, False)
