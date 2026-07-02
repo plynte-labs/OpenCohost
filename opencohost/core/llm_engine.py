@@ -54,6 +54,15 @@ TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 _TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
 _TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
 
+# D1 — eviction source-gating (privacy_prereq_fixes_20260701). Only these
+# origins may be promoted into the MemoryDigest when their history pair is
+# evicted. "accumulated" must NEVER be added here: _flush_accumulation
+# (see below, ~line 700) bundles verbatim viewer chat text into it, so
+# capturing it would leak raw chat into the digest. "chat" is excluded for
+# the same reason. Missing/unknown source values are fail-closed (not
+# captured) — see the eviction gate in _commit_history.
+_DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
+
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
 
@@ -1913,7 +1922,16 @@ class MotorVocalIA(threading.Thread):
                 # the sentinel), to prevent real agenda replies from leaking into
                 # the digest via the eviction path.
                 evicted_is_agenda = evicted_user_content.startswith("[agenda segura")
-                if not evicted_is_agenda:
+                # D1 — source allowlist gate (fail-closed): only capture when the
+                # evicted pair's own source tag is in _DIGEST_CAPTURE_SOURCES.
+                # Missing or unknown source values are treated as not-capturable.
+                evicted_source = self.historial[0].get("source")
+                if evicted_source not in _DIGEST_CAPTURE_SOURCES:
+                    logger.debug(
+                        "Eviction capture skipped: source=%r not in digest allowlist",
+                        evicted_source,
+                    )
+                elif not evicted_is_agenda:
                     ledger_line = self._build_ledger_line(
                         evicted_user_content,
                         evicted_asst_content,

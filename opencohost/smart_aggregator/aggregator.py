@@ -351,12 +351,30 @@ class Aggregator:
                 intent_summary = self.intent_aggregator.summarize()
                 prompt = intent_summary.get("prompt", "")
                 if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
+                    # D2 — defense in depth: minimize metadata here too, independent
+                    # of SessionHistory's own sanitizer. Drops trigger.actions
+                    # (operator config, not PII, but not needed downstream) and
+                    # top_intents[].examples/entities (verbatim viewer text).
+                    minimized_trigger = {
+                        k: v for k, v in data.items()
+                        if k in {"rate", "threshold", "window_seconds"}
+                    }
+                    minimized_top_intents = [
+                        {
+                            k: v for k, v in item.items()
+                            if k in {"intent", "label", "count", "duplicates"}
+                        }
+                        for item in intent_summary.get("top_intents", [])
+                    ]
                     self.history.add_context_snapshot(
                         self._session_id,
                         prompt,
                         message_count=int(intent_summary.get("total_messages", 0)),
+                        # vibe=data.get("temperature") is a pre-existing dead field:
+                        # ActivityTrigger's payload never sets "temperature", so this
+                        # is always None. Left as-is (out of scope for this fix).
                         vibe=data.get("temperature"),
-                        metadata={"trigger": data, "top_intents": intent_summary.get("top_intents", [])},
+                        metadata={"trigger": minimized_trigger, "top_intents": minimized_top_intents},
                     )
                 if self.on_aggregated_context:
                     self.on_aggregated_context({

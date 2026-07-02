@@ -156,9 +156,9 @@ class TestEvictionCapture:
         from opencohost.config.settings import HISTORY_MAX_TURNS
         n = count if count is not None else HISTORY_MAX_TURNS
         for i in range(n):
-            motor.historial.append({"role": "user", "content": f"user msg {i}"})
+            motor.historial.append({"role": "user", "content": f"user msg {i}", "source": "direct"})
             motor.historial.append(
-                {"role": "assistant", "content": f"assistant reply {i}. This is a sentence."}
+                {"role": "assistant", "content": f"assistant reply {i}. This is a sentence.", "source": "direct"}
             )
 
     def test_no_eviction_when_history_not_full(self):
@@ -266,8 +266,8 @@ class TestEvictionCapture:
         motor, _, _ = _make_motor()
         self._fill_history_to_max(motor)
         # Override slot 0 with known content — it will be evicted next
-        motor.historial[0] = {"role": "user", "content": "the stored sanitized text"}
-        motor.historial[1] = {"role": "assistant", "content": "Kira said something cool. End."}
+        motor.historial[0] = {"role": "user", "content": "the stored sanitized text", "source": "direct"}
+        motor.historial[1] = {"role": "assistant", "content": "Kira said something cool. End.", "source": "direct"}
         motor._commit_history("irrelevant new input", "new reply.", source="direct")
         line = motor._memory_digest.lines[0]
         assert "the stored sanitized text" in line
@@ -275,17 +275,24 @@ class TestEvictionCapture:
     def test_evicted_agenda_pair_does_not_leak_to_digest(self):
         """When an agenda pair (user=sentinel, assistant=real reply) sits at the
         eviction slot and a DIRECT turn pushes it out, the real agenda reply must
-        NOT appear in the digest."""
+        NOT appear in the digest.
+
+        source is tagged "direct" here on purpose: this proves the "[agenda
+        segura" content-prefix belt check (not just the source allowlist) is
+        what blocks capture — the pair would otherwise pass the source gate.
+        """
         motor, _, _ = _make_motor()
         self._fill_history_to_max(motor)
         # Place an agenda pair at slots 0/1 — agenda user slot is the sentinel
         motor.historial[0] = {
             "role": "user",
             "content": "[agenda segura: prompt interno omitido]",
+            "source": "direct",
         }
         motor.historial[1] = {
             "role": "assistant",
             "content": "TOP SECRET AGENDA REPLY that must never leak.",
+            "source": "direct",
         }
         # Commit a direct turn — this triggers eviction of slots 0/1
         motor._commit_history("innocent question", "innocent reply.", source="direct")
@@ -293,6 +300,70 @@ class TestEvictionCapture:
         assert "TOP SECRET AGENDA REPLY" not in block, (
             f"Agenda reply leaked into digest: {block!r}"
         )
+
+    # -----------------------------------------------------------------------
+    # D1 — eviction source-gating (new: source allowlist at the eviction gate)
+    # -----------------------------------------------------------------------
+
+    def test_evicted_source_chat_not_captured(self):
+        """Evicted pairs originating from viewer chat must never enter the digest."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {"role": "user", "content": "chat viewer message", "source": "chat"}
+        motor.historial[1] = {"role": "assistant", "content": "Kira replied to chat. Done.", "source": "chat"}
+        motor._commit_history("new direct question", "new direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 0
+
+    def test_evicted_source_accumulated_not_captured(self):
+        """Evicted "accumulated" pairs bundle verbatim viewer chat via
+        _flush_accumulation — the worse leak vector — and must never be captured."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {
+            "role": "user",
+            "content": "accumulated viewer chat bundle",
+            "source": "accumulated",
+        }
+        motor.historial[1] = {
+            "role": "assistant",
+            "content": "Kira replied to accumulation. Done.",
+            "source": "accumulated",
+        }
+        motor._commit_history("new direct question", "new direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 0
+
+    def test_evicted_source_ptt_is_captured(self):
+        """PTT (host push-to-talk) evicted pairs are host-origin and stay captured."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {"role": "user", "content": "ptt spoken message", "source": "ptt"}
+        motor.historial[1] = {"role": "assistant", "content": "Kira replied to ptt. Done.", "source": "ptt"}
+        motor._commit_history("new direct question", "new direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 1
+        assert "ptt spoken message" in motor._memory_digest.lines[0]
+
+    def test_evicted_missing_source_not_captured(self):
+        """Fail-closed: an evicted entry with no `source` key must not be captured."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {"role": "user", "content": "no source tag message"}
+        motor.historial[1] = {"role": "assistant", "content": "Kira replied without source tag."}
+        motor._commit_history("new direct question", "new direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 0
+
+    def test_evicted_unknown_source_not_captured(self):
+        """Fail-closed: an evicted entry with a source not in the allowlist
+        (e.g. a future source value) must not be captured."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {"role": "user", "content": "future source message", "source": "future-x"}
+        motor.historial[1] = {
+            "role": "assistant",
+            "content": "Kira replied to future-x. Done.",
+            "source": "future-x",
+        }
+        motor._commit_history("new direct question", "new direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 0
 
     def test_commit_history_is_thread_safe(self):
         """_commit_history called concurrently from 2 threads must not raise and

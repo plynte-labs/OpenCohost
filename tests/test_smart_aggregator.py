@@ -570,6 +570,56 @@ class TestAggregator:
         assert summary["top_intents"]
         assert "CONTEXTO PRIVADO" in summary["prompt"]
 
+    def test_activity_trigger_call_site_minimizes_metadata(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Defense-in-depth (D2): the aggregator call site itself drops
+        actions/examples/entities before calling add_context_snapshot,
+        independent of session_history's own sanitizer."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        cfg["activity"]["actions"] = {
+            "auto_reply": {"enabled": True, "message": "Chat en pico"},
+        }
+        cfg["intent"]["min_count"] = 2
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        agg.start_session("youtube", "headless_test")
+
+        captured = {}
+        original_add_snapshot = agg.history.add_context_snapshot
+
+        def _spy(*args, **kwargs):
+            captured["metadata"] = kwargs.get("metadata")
+            return original_add_snapshot(*args, **kwargs)
+
+        agg.history.add_context_snapshot = _spy
+
+        base = time.time()
+        for i, text in enumerate([
+            "me saludas hoy es mi cumpleaños soy tu fan",
+            "me saludas soy tu fan desde pequeño por favor",
+            "me puedo unir al server privado para jugar contigo",
+            "puedo jugar contigo porfa en el servidor privado",
+            "pa cuando video con los bros y con Fede",
+            "cuando regresan los bros para grabar otro video juntos",
+        ]):
+            agg.process_message({"user": f"u{i}", "text": text, "timestamp": base + (i * 0.01)})
+
+        assert captured.get("metadata") is not None
+        trigger_meta = captured["metadata"].get("trigger", {})
+        assert set(trigger_meta.keys()) <= {"rate", "threshold", "window_seconds"}
+        assert "actions" not in trigger_meta
+        top_intents = captured["metadata"].get("top_intents", [])
+        assert top_intents
+        for item in top_intents:
+            assert "examples" not in item
+            assert "entities" not in item
+
     def test_high_traffic_samples_context_and_skips_vibe_llm(self, smart_aggregator_config, temp_dir):
         """Massive streams should compact/sample instead of calling vibe LLM per spike."""
         cfg = deepcopy(smart_aggregator_config)
