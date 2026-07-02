@@ -380,14 +380,23 @@ class MemoriaStore:
     def delete_row(self, memoria_id: str) -> bool:
         """Hard-delete a single memoria row (per-row analog of purge_profile).
 
-        Returns True if a row was deleted, False if not found or the write
-        failed open (mirrors update_row/set_flags's bool contract, A-SF1 —
-        the slice-6 management UI checks this and surfaces a False rather
-        than silently assuming success).
+        Idempotent (A-N2/B-NOTE-1): returns True whenever the postcondition
+        holds — the row is absent from the store — whether this call
+        deleted it or it was already gone (rowcount == 0). Only a genuine
+        write error (e.g. lock contention) returns False; unlike
+        update_row/set_flags, a False here must mean the delete did NOT
+        take effect, never "the row wasn't there", or the slice-6
+        management UI would surface a misleading MEMORIAS_WRITE_FAILED_TEXT
+        for an already-deleted row.
         """
-        return self._execute_write(
-            "DELETE FROM memorias WHERE id = ?", [memoria_id], error_label="delete_row"
-        )
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                conn.execute("DELETE FROM memorias WHERE id = ?", (memoria_id,))
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store delete_row failed (fail-open): {type(exc).__name__}")
+            return False
+        self._clear_warn()
+        return True
 
     def purge_profile(self, profile_id: str) -> int:
         """Hard-delete ALL rows for profile_id. Returns the deleted row count."""

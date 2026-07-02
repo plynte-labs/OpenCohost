@@ -537,6 +537,52 @@ def test_purge_profile_leaves_other_profiles_untouched(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# delete_row idempotent semantics (2.22-2.24, A-N2/B-NOTE-1)
+# ---------------------------------------------------------------------------
+
+def test_delete_row_removes_existing_row_and_returns_true(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    row_id = store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "titulo", "contenido alpha beta")
+
+    ok = store.delete_row(row_id)
+
+    assert ok is True
+    assert store.get(row_id) is None
+
+
+def test_delete_row_on_nonexistent_id_is_idempotent_and_returns_true(tmp_path) -> None:
+    """A-N2/B-NOTE-1: a row that is already absent satisfies delete_row's
+    postcondition (row not in store) — this must return True, not the
+    False that would falsely surface MEMORIAS_WRITE_FAILED_TEXT to the
+    operator for a row that was never there or already gone."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    ok = store.delete_row("mem_does_not_exist")
+
+    assert ok is True
+    assert store.get("mem_does_not_exist") is None
+
+
+def test_delete_row_under_lock_contention_returns_false(tmp_path) -> None:
+    """A genuine write error (lock contention) is the ONLY case that must
+    surface as False — distinct from the not-found case above."""
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    row_id = store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "titulo", "contenido alpha beta")
+
+    blocker = sqlite3.connect(str(db_path))
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        ok = store.delete_row(row_id)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert ok is False
+    assert store.get(row_id) is not None  # delete did NOT take effect
+
+
+# ---------------------------------------------------------------------------
 # Growth cap (2.20-2.21, R16)
 # ---------------------------------------------------------------------------
 

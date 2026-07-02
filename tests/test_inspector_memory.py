@@ -659,6 +659,46 @@ class TestMemoriasSectionRender:
         assert inspector_memory.MEMORIAS_EMPTY_TEXT in texts
 
 
+class TestMemoriasRenderIdempotent:
+    """A-N4: memorias-rows analog of TestAgendaRenderIdempotent — two
+    consecutive renders against a fixed row set must not duplicate rows."""
+
+    def test_two_consecutive_renders_do_not_duplicate_memoria_rows(self):
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        rows = [_fake_row(id=f"mem_{i}", title=f"Titulo {i}") for i in range(3)]
+        store = MagicMock(list_for_profile=MagicMock(return_value=rows))
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()  # first render (initial auto-refresh)
+
+            event.clear()
+            refresh_buttons = _find_button_by_text(win, "Actualizar")
+            assert refresh_buttons, "expected an Actualizar button"
+            refresh_buttons[0].invoke()
+            assert event.wait(timeout=2)
+            calls[-1]()  # second render
+
+            texts = _collect_label_texts(win)
+
+        for i in range(3):
+            assert texts.count(f"Titulo {i}") == 1, "memoria rows must not duplicate across refreshes"
+        assert texts.count(inspector_memory.MEMORIAS_PTT_NOTE) == 1, (
+            "PTT note must survive refresh, not be cleared with the memoria rows"
+        )
+        assert texts.count(inspector_memory.FREEZE_RULE_TEXT) == 1, (
+            "freeze-rule note must survive refresh, not be cleared with the memoria rows"
+        )
+
+
 class TestMemoriaRowMetadata:
     def test_row_displays_metadata_created_at_updated_at_revision(self):
         from opencohost.ui.inspector_memory import format_memoria_row_metadata
@@ -936,6 +976,11 @@ class TestCurationWriteFailureSurfaced:
             )
             assert event.wait(timeout=2)
             calls[0]()
+            event.clear()  # A-N1: consume the initial-refresh signal so the
+            # next _wait_and_run_latest below waits for the mutation
+            # worker's OWN schedule_ui_update call instead of finding the
+            # (already-set) event and racing calls[-1]() before the worker
+            # thread has appended its error callback.
 
             pin_buttons = _find_button_by_text(win, "Fijar")
             assert pin_buttons
@@ -966,6 +1011,7 @@ class TestCurationWriteFailureSurfaced:
             )
             assert event.wait(timeout=2)
             calls[0]()
+            event.clear()  # A-N1: see rationale in the analogous set_flags test above.
 
             edit_buttons = _find_button_by_text(win, "Editar")
             assert edit_buttons
