@@ -783,7 +783,11 @@ class VocalAIApp(ctk.CTk):
         frame_right.grid_rowconfigure(1, weight=1)  # PTT stretches so the right column's bottom aligns with the taller Modelo column
         frame_profile = ctk.CTkFrame(frame_right, fg_color="#151d26", corner_radius=14)
         frame_profile.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 16))
-        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after, memoria_store_getter=(self.motor_ia._get_memoria_store if MEMORIAS_ENABLED else None))
+        # memoria_store_getter is a DEFERRED callable: self.motor_ia is created AFTER
+        # _build_ui() (see __init__ order, motor_ia assigned ~line 183), so we must not
+        # access it at build time. The lambda resolves motor_ia only when the getter is
+        # actually invoked (on an explicit profile delete, long after init).
+        self.profile_panel = ProfilePanel(parent_frame=frame_profile, ui_state=self._ui_state, dispatcher=self._profile_dispatcher, on_log=self._print_log, configurador_class=ConfiguradorPerfiles, schedule_ui_update=self._safe_after, memoria_store_getter=((lambda: self.motor_ia._get_memoria_store()) if MEMORIAS_ENABLED else None))
         self.profile_panel.set_profiles(self.perfiles)
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
