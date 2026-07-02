@@ -14,6 +14,7 @@ into llm_engine's module namespace at import time.
 
 import queue
 import threading
+from collections import deque
 from unittest.mock import MagicMock
 
 import pytest
@@ -203,6 +204,41 @@ def test_reenabling_capture_mid_session_never_retro_captures_private_window(monk
     motor._commit_history("nuevo tema deporte futbol pelota", "respuesta sobre deporte. Fin.", source="direct")
 
     assert _store(tmp_path).list_for_profile("profile-1") == []
+
+
+def test_concurrent_privacy_flip_mid_append_tags_both_pair_entries_consistently(monkeypatch):
+    """B-S1: set_memorias_private does not hold _history_lock, so a concurrent
+    flip landing BETWEEN the user and assistant historial.append() calls must
+    not split a pair's tag. The flag is snapshotted ONCE per turn and used for
+    both appends — regardless of when the flip lands."""
+    motor, _, _ = _make_motor()
+    assert motor._memorias_private is False
+
+    # Base collections.deque forbids per-instance attribute assignment, so a
+    # thin subclass is swapped in to spy on append() calls (empty at this
+    # point — nothing to migrate).
+    class _SpyDeque(deque):
+        pass
+
+    spy_historial = _SpyDeque(maxlen=motor.historial.maxlen)
+    calls = {"n": 0}
+
+    def flipping_append(entry):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate a concurrent set_memorias_private(True) call (e.g. from
+            # the Tk UI thread) landing right after the user entry is built
+            # but before the assistant entry is built.
+            motor.set_memorias_private(True)
+        return deque.append(spy_historial, entry)
+
+    monkeypatch.setattr(spy_historial, "append", flipping_append)
+    motor.historial = spy_historial
+
+    motor._commit_history("hola", "hola de vuelta.", source="direct")
+
+    assert calls["n"] == 2
+    assert motor.historial[-2]["private"] == motor.historial[-1]["private"]
 
 
 # ---------------------------------------------------------------------------

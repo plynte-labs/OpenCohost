@@ -2073,13 +2073,18 @@ class MotorVocalIA(threading.Thread):
             # later reads this tag from the EVICTED entry itself (state-at-event),
             # never the switch's state at eviction time — forward-only, no
             # retro-capture and no retro-hide of an already in-flight window.
+            # Snapshotted ONCE here (not re-read per append): set_memorias_private
+            # does not hold _history_lock, so a concurrent flip landing between
+            # the two appends must not split the pair's tag (B-S1) — the flip
+            # then correctly applies forward, to the next turn's pair instead.
+            priv = self._memorias_private
             self.historial.append({
                 'role': 'user', 'content': safe_context, 'source': source,
-                'private': self._memorias_private,
+                'private': priv,
             })
             self.historial.append({
                 'role': 'assistant', 'content': dialogo, 'source': source,
-                'private': self._memorias_private,
+                'private': priv,
             })
 
         if pending_memoria_capture is not None:
