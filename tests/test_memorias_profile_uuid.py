@@ -420,7 +420,7 @@ class TestProfilePanelDeleteSignalPlumbing:
     def test_profile_delete_wires_purge_for_deleted_profile_id(self):
         done = threading.Event()
         store = MagicMock()
-        store.list_for_profile.return_value = [MagicMock(), MagicMock()]
+        store.count_all.return_value = 2
         store.purge_profile.side_effect = lambda profile_id: done.set()
         panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
         try:
@@ -437,12 +437,12 @@ class TestProfilePanelDeleteSignalPlumbing:
             panel.cleanup()
             ui_state.shutdown(timeout=2.0)
 
-        store.list_for_profile.assert_called_once_with("old-id-123")
+        store.count_all.assert_called_once_with("old-id-123")
         store.purge_profile.assert_called_once_with("old-id-123")
 
     def test_profile_delete_declined_by_operator_never_purges(self):
         store = MagicMock()
-        store.list_for_profile.return_value = [MagicMock()]
+        store.count_all.return_value = 1
         panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
         try:
             with (
@@ -458,6 +458,56 @@ class TestProfilePanelDeleteSignalPlumbing:
             ui_state.shutdown(timeout=2.0)
 
         store.purge_profile.assert_not_called()
+
+    def test_profile_delete_shows_honest_unknown_count_on_count_read_exception(self):
+        """SF-1 facet 2: a count-read failure must never be silently
+        skipped (like a real empty profile) nor shown as a misleading "0"
+        — the confirm must still fire, with honest unknown-count copy."""
+        store = MagicMock()
+        store.count_all.side_effect = RuntimeError("boom")
+        panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
+        try:
+            with (
+                patch("opencohost.ui.profile_panel.guardar_perfiles"),
+                patch("opencohost.ui.profile_panel.mb.askyesno", return_value=False) as mock_confirm,
+            ):
+                panel._on_perfiles_guardados(
+                    {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
+                    deleted=("Vieja", "old-id-123"),
+                )
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+        assert mock_confirm.called
+        message = mock_confirm.call_args[0][1]
+        assert "0" not in message
+        assert "TODAS" in message
+        store.purge_profile.assert_not_called()
+
+    def test_profile_delete_confirm_dialog_is_modal_to_configurador_window(self):
+        """A-N1: the destructive confirm must be modal to the currently-open
+        configurator window (parent=), not unparented."""
+        store = MagicMock()
+        store.count_all.return_value = 2
+        panel, ui_state = self._make_panel(memoria_store_getter=lambda: store)
+        sentinel_window = MagicMock()
+        panel._active_configurador_window = sentinel_window
+        try:
+            with (
+                patch("opencohost.ui.profile_panel.guardar_perfiles"),
+                patch("opencohost.ui.profile_panel.mb.askyesno", return_value=False) as mock_confirm,
+            ):
+                panel._on_perfiles_guardados(
+                    {"Otro": {"id": "x", "prompt": "p", "use_system": False}},
+                    deleted=("Vieja", "old-id-123"),
+                )
+        finally:
+            panel.cleanup()
+            ui_state.shutdown(timeout=2.0)
+
+        assert mock_confirm.called
+        assert mock_confirm.call_args.kwargs.get("parent") is sentinel_window
 
     def test_no_deleted_profile_never_calls_purge(self):
         """A save-diff (deleted=None) must never trigger a purge — only an

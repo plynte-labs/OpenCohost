@@ -458,6 +458,29 @@ class MemoriaStore:
             self._warn_once(f"memoria store count_all_pinned failed (fail-open): {type(exc).__name__}")
             return 0
 
+    def count_all(self, profile_id: str) -> int:
+        """Total row count for profile_id — UNCAPPED by MEMORIAS_PROFILE_CAP
+        (SF-1, slice 7 judge round). purge_profile deletes ALL rows for a
+        profile; the purge confirm must never understate that with
+        len(list_for_profile(...)), which caps display reads at
+        MEMORIAS_PROFILE_CAP.
+
+        Returns -1 (never a valid count) on a genuine read failure, so a
+        destructive-action caller can tell "confirmed empty" (0) apart from
+        "count unknown" (-1) and show an honest warning instead of a
+        misleadingly low or zero count.
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM memorias WHERE profile_id = ?",
+                    (profile_id,),
+                ).fetchone()
+                return row["n"] if row is not None else 0
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store count_all failed (fail-open): {type(exc).__name__}")
+            return -1
+
     def list_injection_candidates(self, profile_id: str) -> list[sqlite3.Row]:
         """Eligible rows for retrieval injection (R9): private=0 AND
         inactive=0, scoped to profile_id, capped at MEMORIAS_PROFILE_CAP.

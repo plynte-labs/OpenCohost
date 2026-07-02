@@ -582,6 +582,42 @@ def test_count_all_pinned_zero_when_nothing_pinned(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# count_all (SF-1, slice 7 judge round) — the honest, uncapped purge-confirm
+# count; unlike list_for_profile, must never cap at MEMORIAS_PROFILE_CAP
+# since purge_profile deletes ALL rows regardless of the display cap.
+# ---------------------------------------------------------------------------
+
+def test_count_all_returns_true_total_including_rows_beyond_profile_cap(tmp_path) -> None:
+    from opencohost.config.settings import MEMORIAS_PROFILE_CAP
+
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    _seed_raw_drafts(db_path, "profile-1", MEMORIAS_PROFILE_CAP + 5)
+
+    assert store.count_all("profile-1") == MEMORIAS_PROFILE_CAP + 5
+    assert len(store.list_for_profile("profile-1")) == MEMORIAS_PROFILE_CAP
+
+
+def test_count_all_fails_open_to_negative_sentinel_on_locked_db(tmp_path) -> None:
+    """-1 (never a valid count) signals a genuine read failure — distinct
+    from a real 0, so a destructive-action caller never shows a
+    misleadingly low or zero count on failure."""
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    store.upsert_draft("profile-1", "profile-1|alpha-beta-gamma", "titulo", "contenido alpha beta")
+
+    blocker = sqlite3.connect(str(db_path))
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        assert store.count_all("profile-1") == -1
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert store.count_all("profile-1") == 1
+
+
+# ---------------------------------------------------------------------------
 # delete_row idempotent semantics (2.22-2.24, A-N2/B-NOTE-1)
 # ---------------------------------------------------------------------------
 

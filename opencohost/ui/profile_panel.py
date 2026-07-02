@@ -56,6 +56,11 @@ class ProfilePanel:
         # (name, id) of the last profile explicitly deleted via the
         # configurator window; purge wiring lands in a later slice.
         self.last_deleted_profile: Optional[tuple[str, Optional[str]]] = None
+        # A-N1: the currently-open configurator window (if any), so the
+        # profile-delete purge confirm can be made modal to it (parent=) —
+        # it runs synchronously from within that window's own save-callback,
+        # so the window is always alive when this is set and consumed.
+        self._active_configurador_window: Optional[ctk.CTkToplevel] = None
 
         # Widget references
         self.lbl_profile_header: Optional[ctk.CTkLabel] = None
@@ -178,6 +183,7 @@ class ProfilePanel:
             self._perfiles,
             self._on_perfiles_guardados,
         )
+        self._active_configurador_window = ventana
         ventana.grab_set()
 
     def _on_perfiles_guardados(
@@ -228,15 +234,30 @@ class ProfilePanel:
         if store is None:
             return
         try:
-            row_count = len(store.list_for_profile(profile_id))
+            row_count = store.count_all(profile_id)
         except Exception:
-            row_count = 0
+            row_count = -1
         if row_count == 0:
             return
+        # SF-1: a count-read failure (row_count < 0, or a non-int from a
+        # test/caller double) must NEVER be silently skipped like a real
+        # empty profile above, nor shown as a misleading "0" — show an
+        # honest all-inclusive warning instead.
+        if not isinstance(row_count, int) or row_count < 0:
+            confirm_text = (
+                f'¿Eliminar también las memorias guardadas del perfil "{nombre}"? No se pudo '
+                "determinar el número exacto, pero se borrarán TODAS sin excepción "
+                "(incluidas las fijadas y curadas). Esta acción no se puede deshacer."
+            )
+        else:
+            confirm_text = (
+                f'¿Eliminar también las {row_count} memoria(s) guardada(s) del perfil "{nombre}"? '
+                "Se incluyen las fijadas y curadas. Esta acción no se puede deshacer."
+            )
         if not mb.askyesno(
             "Eliminar memorias del perfil",
-            f'¿Eliminar también las {row_count} memoria(s) guardada(s) del perfil "{nombre}"? '
-            "Se incluyen las fijadas y curadas. Esta acción no se puede deshacer.",
+            confirm_text,
+            parent=self._active_configurador_window,
         ):
             return
         threading.Thread(target=lambda: store.purge_profile(profile_id), daemon=True).start()

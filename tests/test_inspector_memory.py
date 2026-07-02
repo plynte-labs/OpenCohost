@@ -1099,6 +1099,61 @@ class TestPurgeActiveProfile:
         # declined -> nothing purged
         assert len(store.list_for_profile("p1")) == 2
 
+    def test_purge_confirm_uses_uncapped_count_not_capped_list_length(self, tmp_path):
+        """SF-1: the confirm count must come from count_all (uncapped), not
+        len(list_for_profile(...)) which caps display reads at
+        MEMORIAS_PROFILE_CAP — a >200-row profile must show its true count."""
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MagicMock()
+        store.count_all.return_value = 205
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.mb.askyesno", return_value=False) as mock_confirm,
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            _wait_and_run_latest(calls, event)
+
+            purge_buttons = _find_button_by_text(win, inspector_memory.MEMORIAS_PURGE_BUTTON_TEXT)
+            purge_buttons[0].invoke()
+
+        message = mock_confirm.call_args[0][1]
+        assert "205" in message
+        store.count_all.assert_called_once_with("p1")
+
+    def test_purge_confirm_shows_honest_unknown_count_on_count_read_exception(self, tmp_path):
+        """SF-1 facet 2: a count-read failure must NEVER show "0" — that
+        would misleadingly suggest nothing is at stake while purge_profile
+        still deletes every row for the profile."""
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MagicMock()
+        store.count_all.side_effect = RuntimeError("boom")
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+            patch("opencohost.ui.inspector_memory.mb.askyesno", return_value=False) as mock_confirm,
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            _wait_and_run_latest(calls, event)
+
+            purge_buttons = _find_button_by_text(win, inspector_memory.MEMORIAS_PURGE_BUTTON_TEXT)
+            purge_buttons[0].invoke()
+
+        assert mock_confirm.called
+        message = mock_confirm.call_args[0][1]
+        assert message == inspector_memory.MEMORIAS_PURGE_CONFIRM_UNKNOWN_COUNT_TEXT
+        assert "0" not in message
+
 
 class TestCaptureSwitch:
     def _make_motor_ia(self, paused: bool):
@@ -1339,3 +1394,27 @@ class TestPinnedCounterF6bSemantics:
             texts = _collect_label_texts(win)
 
         assert "Fijadas: 5 · se inyectan 1" in texts
+
+    def test_m_is_zero_when_all_pinned_rows_are_private(self, tmp_path):
+        """B-N3: the overclaim guard — pinning N rows and marking ALL of
+        them private must show «se inyectan 0», proving M never overclaims
+        injection when every pinned row is excluded from the candidate set."""
+        from opencohost.core.memoria_store import MemoriaStore
+        import opencohost.ui.inspector_memory as inspector_memory
+
+        store = MemoriaStore(tmp_path / "memorias.db")
+        _make_pinned_rows(store, "p1", count=3, private_count=3)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(memoria_store=store, profile_id_getter=lambda: "p1", schedule_ui_update=schedule)
+            )
+            assert event.wait(timeout=2)
+            calls[0]()
+            texts = _collect_label_texts(win)
+
+        assert "Fijadas: 3 · se inyectan 0" in texts

@@ -79,6 +79,14 @@ MEMORIAS_PURGE_CONFIRM_TEMPLATE = (
     "las memorias fijadas y curadas — no hay excepciones. Esta acción no se "
     "puede deshacer."
 )
+# SF-1 (slice 7 judge round): shown instead of MEMORIAS_PURGE_CONFIRM_TEMPLATE
+# when the row count could not be read — NEVER falls back to "0 memoria(s)",
+# which would misleadingly suggest nothing is at stake.
+MEMORIAS_PURGE_CONFIRM_UNKNOWN_COUNT_TEXT = (
+    "¿Eliminar las memorias guardadas de este perfil? No se pudo determinar "
+    "el número exacto, pero se borrarán TODAS sin excepción (incluidas las "
+    "fijadas y curadas). Esta acción no se puede deshacer."
+)
 # R15: never "privado" — the switch is disk-only (F2), the RAM digest keeps
 # operating either way, so "privado" would overstate what pausing does.
 MEMORIAS_INDICATOR_ON = "Memorias: ON"
@@ -398,12 +406,16 @@ def open_inspector_memory(
         if not profile_id:
             return
         try:
-            row_count = len(memoria_store.list_for_profile(profile_id))
+            row_count = memoria_store.count_all(profile_id)
         except Exception:
-            row_count = 0
+            row_count = -1
+        if not isinstance(row_count, int) or row_count < 0:
+            confirm_text = MEMORIAS_PURGE_CONFIRM_UNKNOWN_COUNT_TEXT
+        else:
+            confirm_text = MEMORIAS_PURGE_CONFIRM_TEMPLATE.format(count=row_count)
         if not mb.askyesno(
             "Borrar memorias del perfil",
-            MEMORIAS_PURGE_CONFIRM_TEMPLATE.format(count=row_count),
+            confirm_text,
             parent=win,
         ):
             return
