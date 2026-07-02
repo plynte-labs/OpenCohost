@@ -2,7 +2,7 @@
 
 Design contract (engram sdd/kira-memory-persistence-20260701/design v2.1,
 section 1-3): own unshared SQLite file (memorias.db, PRAGMA user_version=1),
-single guarded upsert (INSERT .. ON CONFLICT(stable_key) DO UPDATE ..
+single guarded upsert (INSERT .. ON CONFLICT(profile_id, stable_key) DO UPDATE ..
 WHERE status='draft'), unified curation rule F5 (edit/pin/private all
 promote to curated in the same statement; inactive is the sole pure
 visibility flag), stable_key/title derivation via domain-stopword filtering
