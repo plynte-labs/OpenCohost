@@ -29,9 +29,9 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
   - Log hygiene (RC-8, OBLIGATORY): failure logs and exception messages
     carry only ids/metadata/exception type, NEVER row title or content.
 
-MEMORIAS_ENABLED stays False until the final slice — this module is only
-exercised by its own unit tests until the capture/retrieval/UI slices wire
-it in.
+MEMORIAS_ENABLED is True as of slice 8 (flip+disclosure) — the
+capture/retrieval/UI slices are wired in; see opencohost/core/llm_engine.py
+and opencohost/ui/inspector_memory.py.
 """
 
 from __future__ import annotations

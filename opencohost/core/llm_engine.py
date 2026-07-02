@@ -253,15 +253,16 @@ class MotorVocalIA(threading.Thread):
         # any path that calls _commit_history.
         self._history_lock = threading.Lock()
 
-        # Memorias capture (R1-R4, dormant while MEMORIAS_ENABLED=False).
+        # Memorias capture (R1-R4). MEMORIAS_ENABLED is True as of slice 8.
         # Session-scoped privacy switch: False = capturing (default), True =
         # paused. Tagged onto BOTH pair entries at append time in
         # _commit_history (state-at-event) — forward-only, never re-gated on
         # the CURRENT switch state at eviction time (the T1 lesson).
         self._memorias_private: bool = False
         # Lazy — only instantiated the first time the full capture gate chain
-        # passes, so a MEMORIAS_ENABLED=False run never touches disk for this
-        # store (zero instantiation cost on the hot path).
+        # passes, so a run with MEMORIAS_ENABLED=False (e.g. tests that
+        # monkeypatch it) never touches disk for this store (zero
+        # instantiation cost on the hot path).
         self._memoria_store: Optional[MemoriaStore] = None
         # Slice 5 (R9): honest pin/injection counter from the most recent
         # direct-path retrieval — (total_pinned, injected). None until the

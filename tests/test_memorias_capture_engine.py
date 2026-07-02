@@ -139,10 +139,13 @@ def test_eviction_capture_skips_agenda_sentinel_entries(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_eviction_capture_skips_when_memorias_disabled_flag_false(monkeypatch, tmp_path):
-    """MEMORIAS_ENABLED stays False in production; capture must stay dormant."""
+    """MEMORIAS_ENABLED defaulted False through slice 7; slice 8 flips the
+    production default to True, so this OFF-behavior test now patches it
+    explicitly instead of relying on the old default."""
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", False)
     motor, _, _ = _make_motor()
     motor._current_profile_id = "profile-1"
-    # Deliberately NOT calling _enable_memorias — MEMORIAS_ENABLED is False.
+    # Deliberately NOT calling _enable_memorias — MEMORIAS_ENABLED forced False above.
 
     _fill_history_to_max(motor)
     motor.historial[0] = {"role": "user", "content": _ELIGIBLE_USER, "source": "direct", "private": False}

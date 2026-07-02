@@ -31,7 +31,11 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from opencohost.config.settings import MEMORIAS_ENABLED
+from opencohost.config.settings import (
+    MEMORIAS_ENABLED,
+    load_memorias_notice_dismissed,
+    save_memorias_notice_dismissed,
+)
 from opencohost.core.memoria_store import pinned_injection_counter
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 from opencohost.ui.window_utils import apply_app_icon, raise_window, show_toplevel
@@ -40,8 +44,9 @@ logger = logging.getLogger(__name__)
 
 HEADER_TEXT = (
     "La conversación y la memoria de fondo viven solo en RAM: se borran al "
-    "cerrar la app o cambiar de perfil. La agenda guardada sí persiste en "
-    "disco entre sesiones. El chat de viewers nunca se muestra."
+    "cerrar la app o cambiar de perfil. Las memorias guardadas y la agenda "
+    "guardada sí persisten en disco entre sesiones. El chat de viewers nunca "
+    "se muestra."
 )
 BADGE_CONVERSACION = "«Solo en RAM»"
 BADGE_MEMORIA_FONDO = "«Solo en RAM»"
@@ -52,12 +57,28 @@ AGENDA_PROVENANCE_NOTE = (
 )
 
 # Slice 6 (ui-core, R10) — "Memorias guardadas" management section.
-# MEMORIAS_ENABLED stays False through slice 7 (design v2.1 §10), so a real
-# run has nothing captured and this section renders empty — it does not
-# contradict the RAM-only HEADER_TEXT above, which slice 8 rewrites once the
-# flag flips. BADGE_MEMORIAS is placeholder copy until slice 8 updates it.
-BADGE_MEMORIAS = "«En preparación»"
+# MEMORIAS_ENABLED flipped True in slice 8 (flip+disclosure) — the badge
+# below is the real, accurate on-disk copy (same wording as
+# BADGE_AGENDA_GUARDADA), matching the rewritten HEADER_TEXT above.
+BADGE_MEMORIAS = "«En disco · persiste entre sesiones»"
 MEMORIAS_EMPTY_TEXT = "Sin memorias guardadas"
+# Slice 8 (R13) — durable analogue of AGENDA_PROVENANCE_NOTE: memorias come
+# only from the streamer's own direct/voice turns (never viewer chat), but
+# may name terms from chat-originated topics the operator already approved.
+# "extractos", never "destiladas" (structural truncation, B-N1).
+MEMORIAS_PROVENANCE_NOTE = (
+    "Las memorias se arman solo con tus propios turnos (voz o texto directo), "
+    "nunca del chat de viewers, aunque pueden nombrar términos de temas que vos "
+    "aprobaste desde Sugerencias de Kira. Son extractos que persisten entre "
+    "sesiones."
+)
+# Slice 8 (F1) — passive disclosure banner, shown every launch until
+# dismissed once (dismiss state persisted via MEMORIAS_NOTICE_FILE).
+MEMORIAS_BANNER_TEXT = (
+    "Kira ahora guarda memorias en disco: extractos de tus propios turnos "
+    "directos, por perfil. Podés revisarlas, editarlas, fijarlas, marcarlas "
+    "privadas o borrarlas en cualquier momento desde esta ventana."
+)
 # Divergence from format_conversation_entry's ptt masking, by design: a ptt
 # entry only ever reaches memorias.db after passing the R1 provenance gate
 # (source in {direct, ptt}, never chat) — it is the streamer's own recorded
@@ -182,18 +203,24 @@ def open_inspector_memory(
     schedule_ui_update: Callable[[Callable[[], None]], None],
     memoria_store: Any = None,
     profile_id_getter: Callable[[], str | None] | None = None,
+    notice_file: str | None = None,
 ) -> Any:
     """Open (or focus) the "Memoria de Kira" inspector (read-only sections
-    plus the slice-6 "Memorias guardadas" management section).
+    plus the "Memorias guardadas" management section and the slice-8 F1
+    disclosure banner).
 
     Guard: if a window is already open, focus it instead of opening a
     second one (see gear_popover.open_gear_popover). Returns the new
     CTkToplevel, or None if an existing one was focused instead.
 
     memoria_store/profile_id_getter are optional (default None) — the
-    production call site does not wire them yet this slice (MEMORIAS_ENABLED
-    stays False through slice 7), so the section renders MEMORIAS_EMPTY_TEXT.
-    Tests pass a real or mocked MemoriaStore to exercise the section.
+    production call site only wires them when MEMORIAS_ENABLED is True
+    (dormant-store invariant), so the section renders MEMORIAS_EMPTY_TEXT
+    otherwise. Tests pass a real or mocked MemoriaStore to exercise the
+    section regardless of the flag.
+
+    notice_file overrides MEMORIAS_NOTICE_FILE for testing (F1 banner
+    dismiss-state isolation); production callers leave it None.
     """
     existing = ref_getter()
     if existing is not None:
@@ -218,6 +245,26 @@ def open_inspector_memory(
         text_color="#d8e2ef",
     ).pack(pady=(14, 4), padx=16, anchor="w")
     ctk.CTkLabel(win, text=HEADER_TEXT, wraplength=560, justify="left", text_color="#8fa3b8").pack(padx=16, pady=(0, 8), anchor="w")
+
+    # F1 (slice 8) — passive disclosure banner: a plain label + dismiss
+    # button in the window body, never a blocking modal. Shown every launch
+    # until dismissed once; the dismiss state is a small local notice file
+    # (fail-open to "not dismissed" on any read error, same as
+    # load_tts_local_only's fail-open-to-default pattern).
+    if not load_memorias_notice_dismissed(notice_file):
+        banner = ctk.CTkFrame(win, fg_color="#1c2a1c", corner_radius=8)
+        banner.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            banner, text=MEMORIAS_BANNER_TEXT, wraplength=440, justify="left",
+        ).pack(side="left", padx=10, pady=8)
+
+        def _dismiss_banner() -> None:
+            save_memorias_notice_dismissed(True, notice_file)
+            banner.destroy()
+
+        ctk.CTkButton(banner, text="Entendido", width=90, command=_dismiss_banner).pack(
+            side="right", padx=10
+        )
 
     body = ctk.CTkScrollableFrame(win, fg_color="transparent")
     body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
@@ -253,11 +300,12 @@ def open_inspector_memory(
     memorias_counter_label = ctk.CTkLabel(memorias_header_row, text="", text_color="#8fa3b8")
     memorias_counter_label.pack(side="left", padx=(8, 0))
     ctk.CTkLabel(memorias_content, text=MEMORIAS_PTT_NOTE, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 2))
-    ctk.CTkLabel(memorias_content, text=FREEZE_RULE_TEXT, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 4))
+    ctk.CTkLabel(memorias_content, text=FREEZE_RULE_TEXT, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 2))
+    ctk.CTkLabel(memorias_content, text=MEMORIAS_PROVENANCE_NOTE, wraplength=520, justify="left", text_color="#6b7b8d").pack(anchor="w", pady=(0, 4))
 
     # Capture switch (R4/R15) — entirely absent (not just empty text) while
-    # MEMORIAS_ENABLED is False: the whole feature is dormant this slice, so
-    # a functional-but-meaningless toggle would only confuse the operator.
+    # MEMORIAS_ENABLED is False: the whole feature is dormant, so a
+    # functional-but-meaningless toggle would only confuse the operator.
     if MEMORIAS_ENABLED:
         switch_row = ctk.CTkFrame(memorias_content, fg_color="transparent")
         switch_row.pack(fill="x", pady=(0, 2), anchor="w")

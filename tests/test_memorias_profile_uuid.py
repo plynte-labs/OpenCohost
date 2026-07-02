@@ -524,9 +524,8 @@ class TestProfilePanelDeleteSignalPlumbing:
         store.purge_profile.assert_not_called()
 
     def test_no_memoria_store_getter_never_raises_or_purges(self):
-        """memoria_store_getter=None (production default while
-        MEMORIAS_ENABLED is False) must be a safe no-op, never crash the
-        profile-delete flow."""
+        """memoria_store_getter=None must be a safe no-op, never crash the
+        profile-delete flow — independent of MEMORIAS_ENABLED's value."""
         panel, ui_state = self._make_panel(memoria_store_getter=None)
         try:
             with patch("opencohost.ui.profile_panel.guardar_perfiles"):

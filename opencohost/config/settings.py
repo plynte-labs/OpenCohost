@@ -263,11 +263,12 @@ EDITORIAL_CARDS_DB = os.path.join(str(USER_DATA_DIR), "data", "editorial_cards",
 REFERENCE_WAV_PATH = os.path.join(str(USER_DATA_DIR), "referencia_grabada.wav")
 
 # Kira memorias — auto-captured + curated per-profile memory store (own,
-# unshared SQLite file; see opencohost/core/memoria_store.py). Stays
-# disabled until the capture/retrieval/UI slices are wired in (design
-# sdd/kira-memory-persistence-20260701).
+# unshared SQLite file; see opencohost/core/memoria_store.py). Enabled as of
+# slice 8 (flip+disclosure, design sdd/kira-memory-persistence-20260701) —
+# see docs/PRIVACY.md and docs/TRUST_MODEL.md for the disclosure copy that
+# had to land in the same commit as this flip.
 MEMORIAS_DB = os.path.join(str(USER_DATA_DIR), "data", "memorias", "memorias.db")
-MEMORIAS_ENABLED = False
+MEMORIAS_ENABLED = True
 MEMORIAS_MAX_INJECT_CHARS = 700
 MEMORIAS_PROFILE_CAP = 200
 # Pinned injection policy A (F6, slice 5): at most 2 oldest-pinned rows
@@ -276,6 +277,11 @@ MEMORIAS_PROFILE_CAP = 200
 # MEMORIAS_MAX_INJECT_CHARS - 2*220 = 260 chars regardless of pin count.
 MEMORIAS_MAX_PINNED_INJECT = 2
 MEMORIAS_PINNED_CLIP_CHARS = 220
+# F1 (slice 8) — passive disclosure banner dismiss state. Shown every launch
+# until the operator dismisses it once; fails open to "not dismissed" (shows
+# the banner again) on any read error, rather than silently hiding a
+# disclosure the operator never actually saw.
+MEMORIAS_NOTICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "memorias_notice.json")
 
 
 # ──────────────────────────────────────────────
@@ -526,6 +532,47 @@ def save_tts_local_only(value: bool, config_file: Optional[str] = None) -> None:
                 "tts_local_only": bool(value),
                 "saved_at": datetime.now().isoformat(),
             }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def load_memorias_notice_dismissed(config_file: Optional[str] = None) -> bool:
+    """Load the F1 disclosure-banner dismissed state from disk.
+
+    Returns False (not yet dismissed -> banner shows) when the file is
+    absent, unreadable, or corrupted. Fails open to SHOWING the banner
+    rather than silently hiding a disclosure the operator never dismissed.
+
+    Args:
+        config_file: Override path for testing. Uses MEMORIAS_NOTICE_FILE when None.
+    """
+    path = config_file if config_file is not None else MEMORIAS_NOTICE_FILE
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("dismissed", False))
+    except Exception:
+        return False
+
+
+def save_memorias_notice_dismissed(value: bool, config_file: Optional[str] = None) -> None:
+    """Persist the F1 disclosure-banner dismissed state using an atomic write.
+
+    Uses the same temp-file + os.replace pattern as save_tts_local_only.
+
+    Args:
+        value: True once the operator has dismissed the banner.
+        config_file: Override path for testing. Uses MEMORIAS_NOTICE_FILE when None.
+    """
+    path = config_file if config_file is not None else MEMORIAS_NOTICE_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"dismissed": bool(value)}, f)
         os.replace(tmp, path)
     except Exception:
         pass

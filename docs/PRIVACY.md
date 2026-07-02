@@ -1,7 +1,7 @@
 # Privacy & Data Policy
 
 **OpenCohost Lite** — local-first AI co-host platform  
-Last updated: 2026-06-23
+Last updated: 2026-07-02
 
 ---
 
@@ -20,7 +20,8 @@ All of the following are processed and stored **locally only** and are never tra
 | Viewer chat messages | Read from YouTube/Twitch APIs; never forwarded anywhere |
 | Viewer usernames | Same as above — used locally for context aggregation |
 | Prompts sent to the LLM | Sent to your local Ollama instance over loopback (`127.0.0.1`) |
-| Conversation history / memory | Held in RAM only; never written to disk; cleared on restart or profile switch |
+| Conversation history / background memory digest | Held in RAM only; never written to disk; cleared on restart or profile switch |
+| Kira's saved memorias (auto-captured + curated highlights) | Written to a local, per-profile SQLite database (`data/memorias/memorias.db`); persists across sessions until you purge them |
 | LLM-generated responses | Processed locally; only the voice-synthesis step involves a remote call (see below) |
 | Smart Aggregator session data | Stored in a local SQLite database (`data/smart_aggregator/sessions.db`) |
 | Cohost profiles and settings | Stored in local config files under your user data directory |
@@ -103,8 +104,16 @@ All persistent data is stored under your user data directory:
 | TTS audio chunks | `temp/tts_chunk_*.mp3 / *.wav` (deleted after playback) |
 | Fatal crash log | `logs/fatal.log` |
 | TTS speed config | `config/tts_speed.json` |
+| Kira's saved memorias | `data/memorias/memorias.db` (SQLite, per-profile) |
+| Memorias disclosure-banner dismiss state | `config/memorias_notice.json` |
 
-**Conversation memory** (the in-session history Kira uses for context) is RAM-only. It is never written to disk and is gone when the app closes, when you switch profiles, or when you use Clear History.
+**Conversation memory** (the in-session history and background digest Kira uses for context) is RAM-only. It is never written to disk and is gone when the app closes, when you switch profiles, or when you use Clear History.
+
+**Kira's saved memorias** are different: short, host-distilled extracts of your own direct/voice turns (never viewer chat) that Kira captures automatically and you can edit, pin, mark private, or delete from the "Memoria de Kira" window. They are written to a local, per-profile SQLite database (`data/memorias/memorias.db`) and persist across app restarts and profile switches — the one exception to the RAM-only rule above. This is a local-only write; no new network destination is introduced.
+
+- **Pausing memorias capture is disk-only.** It stops new memorias from being written going forward. It does not retroactively delete anything already captured, and it does not block the RAM-only conversation/digest above from continuing to operate normally — a turn already tagged as capturable before you paused may still be written to disk.
+- **A hard crash or force-kill can lose the current live window** (at most the last ~10 exchanges) that had not yet flushed to disk — the same way Clear History, a model switch, or a model download clears the live window without flushing it first. A clean app close always flushes first.
+- **To purge memorias**, open "Memoria de Kira" and use the per-profile delete action. It is explicit-only and scoped to the active profile; there is no automatic expiry.
 
 ---
 

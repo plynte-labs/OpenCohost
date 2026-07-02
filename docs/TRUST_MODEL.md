@@ -1,7 +1,7 @@
 # OpenCohost Trust Model
 
 > Architecture-level data-flow and threat model for OpenCohost Lite.
-> Last updated: 2026-06-23
+> Last updated: 2026-07-02
 
 ---
 
@@ -150,10 +150,21 @@ remote backend.
 | Smart Aggregator chat log | `%APPDATA%\OpenCohost\data\smart_aggregator\chat_log.jsonl` | Local only |
 | Editorial cards DB | `%APPDATA%\OpenCohost\data\editorial_cards\cards.db` | SQLite, local only |
 | TTS temp audio chunks | `%APPDATA%\OpenCohost\temp\tts_chunk_*` | Deleted after playback |
+| Kira's saved memorias | `%APPDATA%\OpenCohost\data\memorias\memorias.db` | SQLite, local only, per-profile |
 
 **Conversation memory** (`historial` deque and `MemoryDigest`) is RAM-only.
 It is never written to disk and is cleared on app restart, profile switch, or
 explicit clear.
+
+**Kira's saved memorias** (`memorias.db`) are the one exception: short,
+host-distilled extracts of the streamer's own direct/voice turns (never
+viewer chat), written to a local, per-profile SQLite database under the user
+data directory — a local-only write, no new network destination. Pausing
+capture is disk-only: it stops new writes going forward but never
+retroactively deletes existing rows or blocks the RAM-only conversation/
+digest above. A hard crash can still lose the current live window (at most
+~10 exchanges) that had not yet flushed. Purge is explicit-only, scoped to
+the active profile, from the "Memoria de Kira" window.
 
 ---
 

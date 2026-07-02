@@ -564,13 +564,41 @@ class TestFormatMemoryLauncherLabel:
 
 class TestVerbatimCopy:
     def test_header_text_verbatim(self):
+        """Slice 8 (flip+disclosure, R13): rewritten so it no longer implies
+        EVERYTHING is RAM-only — memorias guardadas now persist too, same as
+        the agenda."""
         from opencohost.ui.inspector_memory import HEADER_TEXT
 
         assert HEADER_TEXT == (
             "La conversación y la memoria de fondo viven solo en RAM: se borran al "
-            "cerrar la app o cambiar de perfil. La agenda guardada sí persiste en "
-            "disco entre sesiones. El chat de viewers nunca se muestra."
+            "cerrar la app o cambiar de perfil. Las memorias guardadas y la agenda "
+            "guardada sí persisten en disco entre sesiones. El chat de viewers nunca "
+            "se muestra."
         )
+
+    def test_badge_memorias_verbatim(self):
+        """Slice 8 (task 8.11, R13): the «En preparación» placeholder from
+        slice 6 becomes the real, accurate on-disk badge once MEMORIAS_ENABLED
+        flips True — same wording as BADGE_AGENDA_GUARDADA."""
+        from opencohost.ui.inspector_memory import BADGE_MEMORIAS
+
+        assert BADGE_MEMORIAS == "«En disco · persiste entre sesiones»"
+
+    def test_memorias_provenance_note_verbatim(self):
+        """Slice 8 (task 8.12, R13): durable analogue of
+        AGENDA_PROVENANCE_NOTE — memorias come only from the streamer's own
+        direct/voice turns, never viewer chat, but may name terms from
+        chat-originated topics the operator already approved; uses
+        "extractos" (structural truncation, B-N1), never "destiladas"."""
+        from opencohost.ui.inspector_memory import MEMORIAS_PROVENANCE_NOTE
+
+        assert MEMORIAS_PROVENANCE_NOTE == (
+            "Las memorias se arman solo con tus propios turnos (voz o texto directo), "
+            "nunca del chat de viewers, aunque pueden nombrar términos de temas que vos "
+            "aprobaste desde Sugerencias de Kira. Son extractos que persisten entre "
+            "sesiones."
+        )
+        assert "destiladas" not in MEMORIAS_PROVENANCE_NOTE
 
     def test_badge_conversacion_verbatim(self):
         from opencohost.ui.inspector_memory import BADGE_CONVERSACION
@@ -611,9 +639,9 @@ class TestVerbatimCopy:
 # ---------------------------------------------------------------------------
 # Slice 6 (ui-core, R10): "Memorias guardadas" management section — bounded
 # render, per-row metadata, edit modal, flag toggles, delete, unified
-# freeze-rule copy. MEMORIAS_ENABLED stays False in production this slice —
-# tests seed a real (or mocked) MemoriaStore and pass it in explicitly to
-# exercise the section, matching the still-empty RAM-only header.
+# freeze-rule copy. Written when MEMORIAS_ENABLED still defaulted False;
+# slice 8 flips it True in production, but these tests keep passing a real
+# (or mocked) MemoriaStore explicitly regardless of the flag's value.
 # ---------------------------------------------------------------------------
 
 
@@ -1031,10 +1059,11 @@ class TestCurationWriteFailureSurfaced:
 
 # ---------------------------------------------------------------------------
 # Slice 7 (ui-purge+switch): active-profile purge, capture switch + RC-4
-# copy, F6b honest pinned counter. MEMORIAS_ENABLED stays False in
-# production this slice too — switch/indicator tests explicitly monkeypatch
-# it True (design v2.1 §5/§8, B-SF6: the whole switch UI is absent, not
-# just empty, while the flag is False).
+# copy, F6b honest pinned counter. Written when MEMORIAS_ENABLED still
+# defaulted False; switch/indicator tests explicitly monkeypatch the flag to
+# the value each test needs (design v2.1 §5/§8, B-SF6: the whole switch UI
+# is absent, not just empty, while the flag is False) so they stay correct
+# after slice 8 flips the production default to True.
 # ---------------------------------------------------------------------------
 
 
@@ -1219,6 +1248,10 @@ class TestCaptureSwitch:
         with (
             patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
             patch("opencohost.ui.inspector_memory.show_toplevel"),
+            # Slice 8 release-gate hunt: MEMORIAS_ENABLED now defaults True in
+            # production, so this OFF-behavior test must patch it explicitly
+            # instead of relying on the old default.
+            patch("opencohost.ui.inspector_memory.MEMORIAS_ENABLED", False),
         ):
             win = inspector_memory.open_inspector_memory(**_open_kwargs(schedule_ui_update=schedule))
             assert event.wait(timeout=2)
@@ -1418,3 +1451,102 @@ class TestPinnedCounterF6bSemantics:
             texts = _collect_label_texts(win)
 
         assert "Fijadas: 3 · se inyectan 0" in texts
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 (flip+disclosure): F1 passive disclosure banner, shown every
+# launch until the operator dismisses it once, then never again (dismiss
+# state persisted to a small notice file, same atomic-write pattern as
+# save_tts_local_only). Passive = a label + button in the window body, never
+# a blocking modal.
+# ---------------------------------------------------------------------------
+
+
+class TestF1DisclosureBanner:
+    def test_banner_shown_until_dismissed_then_persists_dismissed_state(self, tmp_path):
+        import opencohost.ui.inspector_memory as inspector_memory
+        from opencohost.config.settings import load_memorias_notice_dismissed
+
+        notice_file = str(tmp_path / "memorias_notice.json")
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(schedule_ui_update=schedule, notice_file=notice_file)
+            )
+            texts = _collect_label_texts(win)
+            assert inspector_memory.MEMORIAS_BANNER_TEXT in texts, "banner must show pre-dismiss"
+
+            dismiss_buttons = _find_button_by_text(win, "Entendido")
+            assert dismiss_buttons, "expected a banner dismiss button"
+            dismiss_buttons[0].invoke()
+
+        assert load_memorias_notice_dismissed(notice_file) is True, (
+            "dismiss must persist to the notice file"
+        )
+
+    def test_banner_not_shown_again_after_dismiss_across_restarts(self, tmp_path):
+        """A fresh open_inspector_memory call (simulating a new app launch /
+        a second window open) must not show the banner once the notice file
+        already records dismissed=True."""
+        import opencohost.ui.inspector_memory as inspector_memory
+        from opencohost.config.settings import save_memorias_notice_dismissed
+
+        notice_file = str(tmp_path / "memorias_notice.json")
+        save_memorias_notice_dismissed(True, notice_file)
+        calls, schedule, event = _make_schedule()
+
+        with (
+            patch("opencohost.ui.inspector_memory.ctk", _make_fake_ctk()),
+            patch("opencohost.ui.inspector_memory.show_toplevel"),
+        ):
+            win = inspector_memory.open_inspector_memory(
+                **_open_kwargs(schedule_ui_update=schedule, notice_file=notice_file)
+            )
+            texts = _collect_label_texts(win)
+
+        assert inspector_memory.MEMORIAS_BANNER_TEXT not in texts
+        assert not _find_button_by_text(win, "Entendido")
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 (flip+disclosure, R13): PRIVACY.md / TRUST_MODEL.md must disclose
+# the new memorias.db persistence path now that MEMORIAS_ENABLED is True in
+# production — the old blanket "RAM only, never written to disk" claim no
+# longer covers Kira's saved memorias.
+# ---------------------------------------------------------------------------
+
+
+def _read_doc(relative_path):
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, relative_path), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+class TestDisclosureDocsUpdated:
+    def test_privacy_md_discloses_conversation_ram_only_vs_memorias_persisted(self):
+        text = _read_doc("docs/PRIVACY.md")
+        assert "Held in RAM only" in text  # conversation/digest claim still stands
+        assert "memorias.db" in text
+        assert "Kira's saved memorias" in text
+
+    def test_privacy_md_discloses_pause_does_not_retro_delete_or_block_already_capturable(self):
+        text = _read_doc("docs/PRIVACY.md")
+        assert "disk-only" in text
+        assert "does not retroactively delete" in text.lower()
+
+    def test_privacy_md_discloses_hard_crash_residual_loss_of_live_window(self):
+        text = _read_doc("docs/PRIVACY.md")
+        assert "hard crash" in text.lower()
+        assert "~10" in text
+
+    def test_trust_model_md_updated_for_memorias_persistence_disclosure(self):
+        text = _read_doc("docs/TRUST_MODEL.md")
+        assert "memorias.db" in text
+        assert "local-only write" in text.lower()
+        assert "local, per-profile sqlite" in text.lower()
