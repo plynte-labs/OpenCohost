@@ -262,6 +262,15 @@ AVATAR_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "avatar.yaml")
 EDITORIAL_CARDS_DB = os.path.join(str(USER_DATA_DIR), "data", "editorial_cards", "cards.db")
 REFERENCE_WAV_PATH = os.path.join(str(USER_DATA_DIR), "referencia_grabada.wav")
 
+# Kira memorias — auto-captured + curated per-profile memory store (own,
+# unshared SQLite file; see opencohost/core/memoria_store.py). Stays
+# disabled until the capture/retrieval/UI slices are wired in (design
+# sdd/kira-memory-persistence-20260701).
+MEMORIAS_DB = os.path.join(str(USER_DATA_DIR), "data", "memorias", "memorias.db")
+MEMORIAS_ENABLED = False
+MEMORIAS_MAX_INJECT_CHARS = 700
+MEMORIAS_PROFILE_CAP = 200
+
 
 # ──────────────────────────────────────────────
 # Experimental feature flags
