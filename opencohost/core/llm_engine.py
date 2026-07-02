@@ -490,16 +490,25 @@ class MotorVocalIA(threading.Thread):
                 daemon=True
             ).start()
 
-    def enqueue(self, payload: str, priority: int = 1, source: str = "chat") -> None:
+    def enqueue(
+        self,
+        payload: str,
+        priority: int = 1,
+        source: str = "chat",
+        history_text: Optional[str] = None,
+    ) -> None:
         """Add a message to the priority queue.
 
         Args:
             payload: The text to process.
             priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest).
             source: Origin identifier for logging.
+            history_text: Honest text to commit to historial for this turn
+                (agenda_ptt_commit_raw_text). None (default) commits `payload`
+                as before — every caller other than agenda-PTT stays unchanged.
         """
         with self._pq_lock:
-            self._priority_queue.append((priority, time.time(), payload, source))
+            self._priority_queue.append((priority, time.time(), payload, source, history_text))
             self._priority_queue.sort(key=lambda x: (x[0], x[1]))
             # Enforce max items — drop lowest priority (highest number) first,
             # breaking ties by newest timestamp. PTT (0) is always preserved over
@@ -737,7 +746,10 @@ class MotorVocalIA(threading.Thread):
             now = time.time()
             kept = []
             for item in self._priority_queue:
-                prio, ts, payload, source = item
+                # Slice first 4 — tolerates both the legacy 4-tuple (no
+                # history_text, e.g. tests constructing raw queue items) and
+                # the current 5-tuple produced by enqueue().
+                prio, ts, payload, source = item[:4]
                 if prio > 0 and (now - ts) > self._pq_ttl_seconds:
                     self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
                     # Measure-first telemetry seam: record (never alter) chat expiries.
@@ -774,7 +786,11 @@ class MotorVocalIA(threading.Thread):
                         self._complete_processing_cycle(process_queue=False)
                 return
 
-            priority, ts, payload, source = self._priority_queue.pop(0)
+            item = self._priority_queue.pop(0)
+            # Unpack tolerating both the legacy 4-tuple and the current
+            # 5-tuple (payload, source, history_text) produced by enqueue().
+            priority, ts, payload, source, *rest = item
+            history_text = rest[0] if rest else None
 
         source_label = "PTT" if source == "ptt" else source
         self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
@@ -783,7 +799,7 @@ class MotorVocalIA(threading.Thread):
             self._current_processing_source = source
         self.ui_callback("processing")
         try:
-            self._ejecutar_inferencia(payload, source=source)
+            self._ejecutar_inferencia(payload, source=source, history_text=history_text)
         finally:
             self._complete_processing_cycle()
 
@@ -1134,7 +1150,15 @@ class MotorVocalIA(threading.Thread):
         self._guardrail_fallback_idx = idx + 1
         return GUARDRAIL_FALLBACK_LINES[idx % len(GUARDRAIL_FALLBACK_LINES)]
 
-    def _generar_dialogo(self, contexto, source: str = "direct", *, commit_history: bool = True, log_prefix: str = "LLM") -> str:
+    def _generar_dialogo(
+        self,
+        contexto,
+        source: str = "direct",
+        *,
+        commit_history: bool = True,
+        log_prefix: str = "LLM",
+        history_text: Optional[str] = None,
+    ) -> str:
         request_model = self.current_model
         self._log(f"Analizando contexto con {request_model}...")
         try:
@@ -1448,7 +1472,7 @@ class MotorVocalIA(threading.Thread):
             logger.info(f"{log_prefix} response ({elapsed:.2f}s): {dialogo[:200]}")
 
             if commit_history:
-                self._commit_history(contexto, dialogo, source=source)
+                self._commit_history(contexto, dialogo, source=source, history_text=history_text)
 
             return dialogo
 
@@ -1957,11 +1981,23 @@ class MotorVocalIA(threading.Thread):
         except Exception:
             logger.exception("Agenda output recorder failed")
 
-    def _commit_history(self, contexto: str, dialogo: str, *, source: str = "direct") -> None:
+    def _commit_history(
+        self,
+        contexto: str,
+        dialogo: str,
+        *,
+        source: str = "direct",
+        history_text: Optional[str] = None,
+    ) -> None:
         if source.startswith("kira-agenda"):
             safe_context = "[agenda segura: prompt interno omitido]"
         else:
-            safe_context = self._sanitize_history_context(contexto)
+            # agenda_ptt_commit_raw_text: when a caller supplies the honest
+            # turn text (PTT path), store THAT instead of the raw contexto
+            # (which, for agenda-driven turns, is the full prompt template).
+            # Sanitizer pipeline is unchanged — it applies to whatever text
+            # ends up in safe_context.
+            safe_context = self._sanitize_history_context(history_text if history_text else contexto)
 
         # Hold _history_lock around the eviction-capture + both appends so
         # concurrent callers (worker loop and agenda speaker daemon) cannot
@@ -2037,8 +2073,8 @@ class MotorVocalIA(threading.Thread):
                 return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:300]
         return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:800]
 
-    def _ejecutar_inferencia(self, contexto, source: str = "direct"):
-        dialogo = self._generar_dialogo(contexto, source=source, commit_history=True)
+    def _ejecutar_inferencia(self, contexto, source: str = "direct", *, history_text: Optional[str] = None):
+        dialogo = self._generar_dialogo(contexto, source=source, commit_history=True, history_text=history_text)
         if dialogo:
 
             self._hablar(dialogo, source=source)

@@ -418,6 +418,38 @@ def test_ptt_outranks_waiting_agenda_continuation():
     assert controller.state == AgendaState.GENERATING
 
 
+# ---------------------------------------------------------------------------
+# agenda_ptt_commit_raw_text — honest history_text for PTT turns
+# ---------------------------------------------------------------------------
+
+
+def test_agenda_action_history_text_defaults_to_none():
+    """AgendaAction.history_text must default to None so every caller other
+    than the PTT path (direct/chat/kira-agenda/accumulated) stays byte-identical."""
+    action = AgendaAction(kind="enqueue", prompt="algo")
+    assert action.history_text is None
+
+
+def test_ptt_action_sets_honest_history_text_with_ptt_words():
+    """_streamer_action must set history_text to the streamer's real words
+    (not the full prompt template) so the commit seam can store the honest
+    turn instead of the boilerplate prompt."""
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema de fondo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+
+    action = controller.next_action(ptt_text="Cambiemos el tono, explicalo más simple")
+
+    assert action.history_text == "El streamer dijo (PTT): Cambiemos el tono, explicalo más simple"
+    # The template's forbidden output-scaffolding markers must NOT leak into history_text.
+    assert "TAREA:" not in action.history_text
+    assert "SALIDA PERMITIDA" not in action.history_text
+
+
 def test_compact_chat_outranks_topic_continuation_but_not_ptt():
     controller = KiraAgendaController()
     topic = controller.add_topic("Tema de fondo", approved=True)

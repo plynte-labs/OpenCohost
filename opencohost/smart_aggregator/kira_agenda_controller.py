@@ -211,6 +211,10 @@ class AgendaAction:
     priority: int = 2
     topic_id: Optional[str] = None
     turns: int = 1
+    # Honest text to commit to historial for this turn (agenda_ptt_commit_raw_text).
+    # None (default) means "commit the prompt/contexto as before" — every caller
+    # other than the PTT path stays byte-identical.
+    history_text: Optional[str] = None
 
     @classmethod
     def none(cls) -> "AgendaAction":
@@ -1170,7 +1174,13 @@ class KiraAgendaController:
             ptt_text=ptt_text,
         )
         self.state = AgendaState.GENERATING
-        return AgendaAction(kind="enqueue", prompt=prompt, source="ptt", priority=0, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
+        # Honest history_text: the streamer's real words, not the full prompt
+        # template (mirrors the voice_control register "El streamer acaba de
+        # decir (PTT): …"). Only called from next_action() with a guaranteed
+        # non-empty ptt_text.strip() (see the `if ptt_text.strip():` guard
+        # above) — no empty-text fallback needed.
+        history_text = f"El streamer dijo (PTT): {ptt_text}"
+        return AgendaAction(kind="enqueue", prompt=prompt, source="ptt", priority=0, topic_id=self.active_topic.id if self.active_topic else None, turns=1, history_text=history_text)
 
     def _closing_action(self) -> AgendaAction:
         if self.active_topic:

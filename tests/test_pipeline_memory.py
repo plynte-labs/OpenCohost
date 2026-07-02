@@ -342,6 +342,115 @@ class TestEvictionCapture:
         assert len(motor._memory_digest.lines) == 1
         assert "ptt spoken message" in motor._memory_digest.lines[0]
 
+    # -----------------------------------------------------------------------
+    # agenda_ptt_commit_raw_text — honest history_text seam in _commit_history
+    # -----------------------------------------------------------------------
+
+    def test_commit_history_stores_history_text_instead_of_contexto_when_provided(self):
+        """When history_text is provided, the USER slot must store it — not the
+        (agenda prompt template) contexto. This is the fix for the PTT commit
+        seam: the template never belongs in historial; the streamer's real
+        words do."""
+        motor, _, _ = _make_motor()
+        template = "TAREA: respondé al aire como Kira...\nSALIDA PERMITIDA: ..."
+        motor._commit_history(
+            template, "Kira's reply.", source="ptt", history_text="El streamer dijo (PTT): hola a todos",
+        )
+        stored_user_content = motor.historial[-2]["content"]
+        assert stored_user_content == "El streamer dijo (PTT): hola a todos"
+        assert "TAREA:" not in stored_user_content
+        assert "SALIDA PERMITIDA" not in stored_user_content
+
+    def test_commit_history_without_history_text_stores_contexto_as_before(self):
+        """Regression: history_text=None (the default — every non-PTT caller)
+        must leave the stored content byte-identical to pre-fix behavior."""
+        motor, _, _ = _make_motor()
+        motor._commit_history("what is the sky color?", "The sky is blue.", source="direct")
+        assert motor.historial[-2]["content"] == "what is the sky color?"
+
+    def test_evicted_ptt_pair_with_history_text_captures_real_words(self):
+        """End-to-end: once an agenda-PTT turn's honest history_text is stored
+        (simulating the result of a prior _commit_history(..., source="ptt",
+        history_text=...) call), a later eviction of that pair must surface
+        the streamer's real words in the digest — never the prompt template,
+        since the template is never stored at all."""
+        motor, _, _ = _make_motor()
+        self._fill_history_to_max(motor)
+        motor.historial[0] = {
+            "role": "user",
+            "content": "El streamer dijo (PTT): cambiemos de tema",
+            "source": "ptt",
+        }
+        motor.historial[1] = {
+            "role": "assistant",
+            "content": "Kira's reply to the streamer.",
+            "source": "ptt",
+        }
+        motor._commit_history("next direct question", "next direct answer.", source="direct")
+        assert len(motor._memory_digest.lines) == 1
+        assert "cambiemos de tema" in motor._memory_digest.lines[0]
+        assert "TAREA:" not in motor._memory_digest.lines[0]
+
+    def test_generar_dialogo_threads_history_text_to_commit_history(self):
+        """_generar_dialogo(commit_history=True, history_text=...) must forward
+        history_text to _commit_history so the honest text — not the agenda
+        prompt template passed as contexto — lands in the USER slot."""
+        motor, _, _ = _make_motor()
+        with patch.object(
+            motor, "_ollama_chat_with_watchdog",
+            return_value={"message": {"content": "Kira's reply to the streamer."}},
+        ):
+            motor._generar_dialogo(
+                "TAREA: respondé al aire como Kira...\nSALIDA PERMITIDA: ...",
+                source="ptt",
+                commit_history=True,
+                history_text="El streamer dijo (PTT): probemos este texto",
+            )
+        stored_user_content = motor.historial[-2]["content"]
+        assert stored_user_content == "El streamer dijo (PTT): probemos este texto"
+        assert "TAREA:" not in stored_user_content
+        assert "SALIDA PERMITIDA" not in stored_user_content
+
+    def test_enqueue_threads_history_text_through_queue_to_ejecutar_inferencia(self):
+        """End-to-end queue plumbing: enqueue(history_text=...) must survive the
+        priority-queue tuple round trip and reach _ejecutar_inferencia unchanged
+        (agenda_ptt_commit_raw_text)."""
+        motor, _, _ = _make_motor()
+        captured = {}
+
+        def fake_ejecutar(payload, source="direct", *, history_text=None):
+            captured["payload"] = payload
+            captured["source"] = source
+            captured["history_text"] = history_text
+
+        motor._ejecutar_inferencia = fake_ejecutar
+        motor.enqueue(
+            "TAREA: respondé al aire como Kira...",
+            priority=0,
+            source="ptt",
+            history_text="El streamer dijo (PTT): probemos esto",
+        )
+        motor._process_priority_queue()
+
+        assert captured["source"] == "ptt"
+        assert captured["history_text"] == "El streamer dijo (PTT): probemos esto"
+
+    def test_enqueue_default_history_text_is_none_for_other_sources(self):
+        """Regression: callers that never pass history_text (direct/chat/kira-agenda/
+        accumulated) must reach _ejecutar_inferencia with history_text=None,
+        preserving pre-fix behavior byte-for-byte."""
+        motor, _, _ = _make_motor()
+        captured = {}
+
+        def fake_ejecutar(payload, source="direct", *, history_text=None):
+            captured["history_text"] = history_text
+
+        motor._ejecutar_inferencia = fake_ejecutar
+        motor.enqueue("hola chat", priority=1, source="chat")
+        motor._process_priority_queue()
+
+        assert captured["history_text"] is None
+
     def test_evicted_missing_source_not_captured(self):
         """Fail-closed: an evicted entry with no `source` key must not be captured."""
         motor, _, _ = _make_motor()

@@ -1635,7 +1635,10 @@ class VocalAIApp(ctk.CTk):
         if action.source.startswith("kira-agenda") and hasattr(self.motor_ia, "replace_pending"):
             self.motor_ia.replace_pending(action.prompt, priority=action.priority, source=action.source)
         else:
-            self.motor_ia.enqueue(action.prompt, priority=action.priority, source=action.source)
+            self.motor_ia.enqueue(
+                action.prompt, priority=action.priority, source=action.source,
+                history_text=action.history_text,
+            )
 
     def _kira_agenda_has_higher_priority_pending(self, action: AgendaAction) -> bool:
         if not hasattr(self.motor_ia, "has_pending_priority_before"):

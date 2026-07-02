@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 # its target through the stale parent-package attribute while the lazy import
 # re-imports a fresh module, so the patch never reaches the code under test.
 import opencohost.ui.app_shell  # noqa: F401
+import opencohost.ui.obs_lifecycle  # noqa: F401
 import opencohost.avatar.avatar_config  # noqa: F401
 import opencohost.avatar.obs_client  # noqa: F401
 import opencohost.smart_aggregator.chat_input_contract  # noqa: F401
@@ -57,6 +58,15 @@ def _restore_app_shell_module(old_module) -> None:
 
 
 def test_obs_reconnect_loop_logs_exception_and_keeps_retrying():
+    """The OBS reconnect loop lives in obs_lifecycle.connect_obs_loop
+    (Phase-6 decomposition); app_shell._connect_obs_loop only delegates to it.
+    time.sleep() and logger.exception() are therefore called from
+    obs_lifecycle's module namespace, not app_shell's — app_shell itself has
+    no module-level `time` import (dead `#import time` — nothing at module
+    level in app_shell.py uses it). `logger` is still shared correctly since
+    get_logger() returns the same singleton for both modules."""
+    from opencohost.ui import obs_lifecycle
+
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:
         app = object.__new__(app_shell.VocalAIApp)
@@ -70,7 +80,7 @@ def test_obs_reconnect_loop_logs_exception_and_keeps_retrying():
         app.winfo_exists = MagicMock(return_value=False)
         app.after = MagicMock()
 
-        with patch.object(app_shell.time, "sleep") as mock_sleep:
+        with patch.object(obs_lifecycle.time, "sleep") as mock_sleep:
             with patch.object(app_shell.logger, "exception") as mock_exception:
                 app._connect_obs_loop(retry_delay=0.01)
 

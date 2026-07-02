@@ -537,7 +537,7 @@ def test_ptt_items_never_expire_via_ttl():
     motor._speaking = False
     motor._process_priority_queue()
 
-    motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt")
+    motor._ejecutar_inferencia.assert_called_once_with("ptt important", source="ptt", history_text=None)
 
 
 def test_tts_none_text_balances_events_and_clears_speech_source():

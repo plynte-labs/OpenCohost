@@ -771,3 +771,65 @@ class TestGAP005EmptyResponseRecovery:
             AgendaState.HARD_PAUSED,
         }
         assert enqueues <= 6  # real path is ~3 (open → continue → close)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# agenda_ptt_commit_raw_text — app_shell dispatch threads history_text
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAppShellThreadsHistoryTextToEnqueue:
+    """_enqueue_kira_agenda_action must forward action.history_text to
+    motor_ia.enqueue() for non-agenda sources (ptt/chat), and must leave the
+    kira-agenda replace_pending() call untouched (owner-gated, masked commit)."""
+
+    def _bare_app(self):
+        app = object.__new__(app_shell.VocalAIApp)
+        app._kira_agenda_prefetched_action = "stale"
+        return app
+
+    def test_ptt_action_history_text_reaches_motor_enqueue(self):
+        app = self._bare_app()
+        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+
+        action = AgendaAction(
+            kind="enqueue",
+            prompt="TAREA: respondé al aire como Kira...",
+            source="ptt",
+            priority=0,
+            history_text="El streamer dijo (PTT): probemos esto",
+        )
+        app._enqueue_kira_agenda_action(action)
+
+        app.motor_ia.enqueue.assert_called_once_with(
+            action.prompt, priority=0, source="ptt",
+            history_text="El streamer dijo (PTT): probemos esto",
+        )
+
+    def test_direct_chat_action_history_text_none_reaches_motor_enqueue(self):
+        """Regression: chat actions have history_text=None by default — the
+        enqueue call must still receive it explicitly as None (byte-identical
+        contract, no behavior change for non-PTT sources)."""
+        app = self._bare_app()
+        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+
+        action = AgendaAction(kind="enqueue", prompt="chat prompt", source="chat", priority=1)
+        app._enqueue_kira_agenda_action(action)
+
+        app.motor_ia.enqueue.assert_called_once_with(
+            action.prompt, priority=1, source="chat", history_text=None,
+        )
+
+    def test_kira_agenda_action_routes_through_replace_pending_untouched(self):
+        """kira-agenda sourced actions must keep using replace_pending — the
+        masked-commit path is owner-gated and out of scope for this fix."""
+        app = self._bare_app()
+        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+
+        action = AgendaAction(kind="enqueue", prompt="agenda prompt", source="kira-agenda", priority=2)
+        app._enqueue_kira_agenda_action(action)
+
+        app.motor_ia.replace_pending.assert_called_once_with(
+            action.prompt, priority=2, source="kira-agenda",
+        )
+        app.motor_ia.enqueue.assert_not_called()

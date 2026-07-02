@@ -39,13 +39,16 @@ PRIO_SOURCES = ((0, "ptt"), (1, "chat"), (2, "kira-agenda"))
 
 
 def _queue_item_ok(item) -> bool:
+    # 5th element (history_text) added by agenda_ptt_commit_raw_text — always
+    # None for enqueue() calls that don't pass it (every call in this test).
     return (
         isinstance(item, tuple)
-        and len(item) == 4
+        and len(item) == 5
         and isinstance(item[0], int)
         and isinstance(item[1], float)
         and isinstance(item[2], str)
         and isinstance(item[3], str)
+        and item[4] is None
     )
 
 
