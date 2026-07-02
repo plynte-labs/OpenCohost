@@ -19,6 +19,46 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-02 (kira_memory_persistence — 8/8 SLICES COMPLETE, release gate green, NOT merged)
+
+Persistent per-profile Kira memory ("opencohost_memorias") shipped end-to-end on a local
+feature-branch-chain. **17 commits** from maintenance tip `0643dee` → tip `ce9bdd0` on
+`feat/kira-memory-persistence-s8-flip-disclosure` (linear chain s1→s8; tracker
+`feat/kira-memory-persistence` still at 0643dee). **`MEMORIAS_ENABLED = True`** (settings.py:271).
+**FULL SUITE 3154 passed, 11 skipped, 0 failed — RELEASE GATE GREEN with the flag ON**, empirically
+verified no real memorias.db/notice written under USER_DATA_DIR. Every slice = feat + judge-fix,
+each dual-Opus approved; owner made all product decisions (Q1-Q6, F1-F6, F3b, F6b — engram #2770).
+
+### What shipped (all 16 spec requirements landed)
+- Per-profile SQLite store (`memorias.db`): host-distilled EXTRACTS from evicted direct/ptt pairs,
+  provenance-gated behind the T1 `_DIGEST_CAPTURE_SOURCES` fail-closed gate — viewer chat NEVER persists.
+- Write-through on eviction + bounded flush on clean close + atomic profile-switch flush (RC-2 window closed).
+- Session-scoped capture switch («Memorias: ON» / «sin guardar», DISK-ONLY, forward-only, no retro-capture).
+- Lexical top-k retrieval (match_score reuse) + max-2 pinned injection (F6) on the DIRECT path only;
+  private/inactive never injected; 700-char budget.
+- Management UI in "Memoria de Kira": edit/pin/private/inactive/delete, unified freeze rule (F5),
+  honest «Fijadas: N · se inyectan M» counter (F6b: N=all-pinned, M=injectable).
+- Active-profile + explicit-profile-delete purge (honest uncapped count, id-keyed).
+- Stable profile UUID in perfiles.json (rename-safe, atomic write). F1 passive disclosure banner
+  + honest PRIVACY.md/TRUST_MODEL.md/ADR-030 reconciliation.
+- Engram trail: sdd/kira-memory-persistence-20260701/{explore,proposal,spec,design,tasks,apply-progress,
+  owner-decisions,researcher-review,judge-round-slice1..8}. Full commit map in apply-progress #2780.
+
+### Accepted residuals (documented, NOT bugs)
+Hard-crash loses live window ≤10 pairs; clear/model-switch/download don't flush; plaintext-on-disk
+(v1 non-goal — no encryption/retention, matches sessions.db/cards.db); agenda-append eviction loss
+(pinned test); bag-of-words retrieval ceiling (no embeddings; pinning is the override). Deferred
+sub-tracks: memorias_fuzzy_upsert, automated PII redactor, historial_privacy_lanes_ui.
+
+### OWNER-OWED (open gates)
+1. **MERGE/LAND** — chain is LOCAL (never pushed; maintenance itself is unpushed). To land: fast-forward
+   `maintenance` to `ce9bdd0` (linear, clean), or keep on the branch. Owner decision — NOT done.
+2. **RUNTIME VALIDATION** (flag now ON, code-verified only, NOTHING validated live): converse with Kira →
+   close app → reopen → confirm she remembers via the memorias window; exercise the capture switch,
+   per-profile purge, «Fijadas» counter, and the F1 banner. This is the T2-style live gate.
+
+---
+
 ## LATEST SNAPSHOT — 2026-07-01 (privacy fixes + inspector windows + agenda-ptt honest commit + external-LLM API research — COMMITTED)
 
 Branch `maintenance/big-file-audit-small-fixes-20260629`. THREE judge-approved tracks, stacked
