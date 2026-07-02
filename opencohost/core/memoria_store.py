@@ -377,6 +377,18 @@ class MemoriaStore:
         sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE id = ?"
         return self._execute_write(sql, params, error_label="set_flags")
 
+    def delete_row(self, memoria_id: str) -> bool:
+        """Hard-delete a single memoria row (per-row analog of purge_profile).
+
+        Returns True if a row was deleted, False if not found or the write
+        failed open (mirrors update_row/set_flags's bool contract, A-SF1 —
+        the slice-6 management UI checks this and surfaces a False rather
+        than silently assuming success).
+        """
+        return self._execute_write(
+            "DELETE FROM memorias WHERE id = ?", [memoria_id], error_label="delete_row"
+        )
+
     def purge_profile(self, profile_id: str) -> int:
         """Hard-delete ALL rows for profile_id. Returns the deleted row count."""
         try:
