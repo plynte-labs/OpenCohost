@@ -2890,6 +2890,14 @@ class VocalAIApp(ctk.CTk):
 
     def on_closing(self) -> None:
         self._closing = True
+        # F4 slice 4 (task 4.13): bounded memorias flush, first on close.
+        # hasattr-guarded (older stubs lack it); fail-open (flush_memorias
+        # itself never raises — this is the last line of defense).
+        if hasattr(self, "motor_ia") and hasattr(self.motor_ia, "flush_memorias"):
+            try:
+                self.motor_ia.flush_memorias()
+            except Exception as exc:
+                logger.warning("memoria close-flush call failed (fail-open): %s", type(exc).__name__)
         logger.info("Cerrando aplicación...")
         # Cancel prefetch retry timer (fix #B) to avoid callbacks after teardown.
         if self.__dict__.get("_prefetch_retry_id") is not None:

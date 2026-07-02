@@ -851,6 +851,81 @@ def test_on_closing_shuts_down_audio_bed():
         _restore_app_shell_module(old_module)
 
 
+def test_on_closing_flushes_memorias_first_and_never_blocks_close_on_failure():
+    """F4 (kira_memory_persistence, slice 4, task 4.13): flush_memorias is
+    called as the first thing on close when present, and a flush failure
+    never blocks/crashes the rest of on_closing (fail-open at the call
+    site)."""
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._ui_state_sub_id = "sub-1"
+        app._ui_state = SimpleNamespace(unsubscribe=MagicMock())
+        app.status_bar = None
+        app._stop_speaking_alt_timer = MagicMock()
+        app._stop_inactivity_timer = MagicMock()
+        app._obs_client = None
+        app.ptt = SimpleNamespace(stop_listener=MagicMock())
+        app.health_monitor = None
+        app._avatar_bridge = SimpleNamespace(set_state=MagicMock())
+        app.smart_agg = None
+        app.stream_admin_ui = SimpleNamespace(chat_connected=False, cleanup=MagicMock())
+        app.winfo_x = MagicMock(return_value=1)
+        app.winfo_y = MagicMock(return_value=2)
+        app.winfo_width = MagicMock(return_value=3)
+        app.winfo_height = MagicMock(return_value=4)
+        app.motor_ia = SimpleNamespace(
+            command_queue=queue.Queue(),
+            release_owned_ollama_model=MagicMock(return_value=True),
+            flush_memorias=MagicMock(side_effect=RuntimeError("disk exploded")),
+        )
+        app.destroy = MagicMock()
+
+        with patch.object(app_shell, "cleanup_opencohost_temp_artifacts"):
+            app.on_closing()
+
+        app.motor_ia.flush_memorias.assert_called_once_with()
+        app.destroy.assert_called_once()  # close proceeded despite the flush failure
+    finally:
+        _restore_app_shell_module(old_module)
+
+
+def test_on_closing_tolerates_motor_ia_without_flush_memorias():
+    """hasattr guard: older stubs / test doubles that lack flush_memorias
+    must not crash on_closing (mirrors the SimpleNamespace(...) motor_ia used
+    by the other on_closing tests in this file, which never carry it)."""
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app._ui_state_sub_id = "sub-1"
+        app._ui_state = SimpleNamespace(unsubscribe=MagicMock())
+        app.status_bar = None
+        app._stop_speaking_alt_timer = MagicMock()
+        app._stop_inactivity_timer = MagicMock()
+        app._obs_client = None
+        app.ptt = SimpleNamespace(stop_listener=MagicMock())
+        app.health_monitor = None
+        app._avatar_bridge = SimpleNamespace(set_state=MagicMock())
+        app.smart_agg = None
+        app.stream_admin_ui = SimpleNamespace(chat_connected=False, cleanup=MagicMock())
+        app.winfo_x = MagicMock(return_value=1)
+        app.winfo_y = MagicMock(return_value=2)
+        app.winfo_width = MagicMock(return_value=3)
+        app.winfo_height = MagicMock(return_value=4)
+        app.motor_ia = SimpleNamespace(
+            command_queue=queue.Queue(),
+            release_owned_ollama_model=MagicMock(return_value=True),
+        )
+        app.destroy = MagicMock()
+
+        with patch.object(app_shell, "cleanup_opencohost_temp_artifacts"):
+            app.on_closing()  # must not raise AttributeError
+
+        app.destroy.assert_called_once()
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 class _ExistingLabel:
     def __init__(self):
         self.configure = MagicMock()

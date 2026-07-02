@@ -480,10 +480,22 @@ class MotorVocalIA(threading.Thread):
             self.use_system_role = payload.get("use_system", False)
             profile_name = payload.get("_profile_name", "desconocido")
             self._current_profile_name = profile_name
+            # RC-2 (slice 4, task 4.14): snapshot the departing profile's live
+            # window (drafts built with the OLD _current_profile_id), swap the
+            # id, and clear historial/_memory_digest as ONE atomic critical
+            # section under _history_lock. This widens the narrow lock block
+            # slice 1 introduced (which guarded only the id write) — closing
+            # the misattribution/loss window where a concurrent _commit_history
+            # could previously land between the id swap and the historial
+            # clear (tracked in apply-progress #2780, judge notes A-N2/B-S1).
             with self._history_lock:
+                switch_drafts = self._collect_flush_drafts()
                 self._current_profile_id = payload.get("id")
-            self.historial.clear()
-            self._memory_digest.clear()
+                self.historial.clear()
+                self._memory_digest.clear()
+            # RC-2/RC-3: disk upserts dispatched AFTER lock release, on a
+            # worker thread — the profile switch must never block on I/O.
+            self._dispatch_switch_flush(switch_drafts)
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
             # T4 coherence gate (warn-only; the profile always wins). Flags when a
             # custom persona's language is not governed by the active locale.
@@ -2057,15 +2069,19 @@ class MotorVocalIA(threading.Thread):
                     )
                     self._memory_digest.append(ledger_line)
 
-                    # T3 — memorias draft (R1-R4). Reuses the source+agenda
-                    # provenance check already done above (evicted_source in
-                    # _DIGEST_CAPTURE_SOURCES, not evicted_is_agenda); adds
-                    # the memoria-specific gates fail-closed, is_capturable
-                    # (via derive_stable_key) LAST — a signal/token-count
-                    # gate, never a substitute for provenance (Judge-B
-                    # forward, slice 2 N1).
+                    # T3 — memorias draft (R1-R4). _build_memoria_draft re-runs
+                    # the source+agenda checks internally (redundant here, since
+                    # the elif above already guarantees them — but that makes it
+                    # the single, self-contained gate chain reusable by F4 flush
+                    # (slice 4), which iterates the LIVE window's pairs instead
+                    # of only the evicted one). is_capturable (via
+                    # derive_stable_key) stays LAST — a signal/token-count gate,
+                    # never a substitute for provenance (Judge-B forward, slice
+                    # 2 N1).
                     pending_memoria_capture = self._build_memoria_draft(
                         evicted_user_content, evicted_asst_content, ledger_line,
+                        source=evicted_source,
+                        private=self.historial[0].get("private"),
                     )
 
             # Append-time privacy tagging (R2/R4): both pair entries carry the
@@ -2101,24 +2117,41 @@ class MotorVocalIA(threading.Thread):
         self._memorias_private = bool(value)
 
     def _build_memoria_draft(
-        self, evicted_user_content: str, evicted_asst_content: str, ledger_line: str,
+        self,
+        user_content: str,
+        asst_content: str,
+        ledger_line: str,
+        *,
+        source: Optional[str],
+        private,
     ) -> Optional[tuple[str, str, str, str]]:
-        """Pure, no-I/O: build a memoria draft, or None if any gate fails.
+        """Pure, no-I/O: full gate chain + draft builder for one (user,
+        assistant) pair, or None if any gate fails.
 
-        MUST be called while _history_lock is held — reads the EVICTED
-        entry's own tags (state-at-event). The caller has already confirmed
-        the evicted pair's source/agenda provenance (R1); this adds the
-        remaining gates, fail-closed, is_capturable (via derive_stable_key)
-        LAST. Returns (profile_id, stable_key, title, content) or None.
+        Single source of truth for R1-R4/RC-1, shared by eviction-capture
+        (T3, above) and F4 flush (slice 4 — close-flush and profile-switch
+        both iterate live-window pairs through this same chain instead of
+        duplicating gate logic). MUST be called while _history_lock is held
+        — reads the pair's own tags (state-at-event), never a switch's
+        current state. Order: source allowlist -> not agenda-sentinel ->
+        MEMORIAS_ENABLED -> private tag is False -> profile_id set ->
+        significant-token minimum (is_capturable, via derive_stable_key,
+        LAST — a signal gate, never a substitute for provenance, Judge-B
+        forward slice 2 N1). Returns (profile_id, stable_key, title,
+        content) or None.
         """
+        if source not in _DIGEST_CAPTURE_SOURCES:
+            return None
+        if user_content.startswith("[agenda segura"):
+            return None
         if not MEMORIAS_ENABLED:
             return None
-        if self.historial[0].get("private") is not False:
+        if private is not False:
             return None
         profile_id = self._current_profile_id
         if profile_id is None:
             return None
-        signature_text = f"{evicted_user_content} {evicted_asst_content}"
+        signature_text = f"{user_content} {asst_content}"
         stable_key = derive_stable_key(profile_id, signature_text)
         if stable_key is None:
             return None
@@ -2143,6 +2176,100 @@ class MotorVocalIA(threading.Thread):
         if self._memoria_store is None:
             self._memoria_store = MemoriaStore(MEMORIAS_DB)
         return self._memoria_store
+
+    def _collect_flush_drafts(self) -> list[tuple[str, str, str, str]]:
+        """F4 (slice 4) — snapshot the LIVE (un-evicted) historial window into
+        memoria drafts. Pure, no-I/O. MUST be called while _history_lock is
+        held: iterates historial in (user, assistant) pairs (historial only
+        ever holds complete pairs — see _commit_history), running each pair
+        through the exact same gate chain as eviction capture
+        (_build_memoria_draft — R1-R4/RC-1). Reused by both close-flush
+        (task 4.12) and profile-switch flush (task 4.14) — one snapshot
+        routine, two callers.
+        """
+        drafts: list[tuple[str, str, str, str]] = []
+        entries = list(self.historial)
+        for i in range(0, len(entries) - 1, 2):
+            user_entry, asst_entry = entries[i], entries[i + 1]
+            user_content = user_entry.get("content", "")
+            asst_content = asst_entry.get("content", "")
+            ledger_line = self._build_ledger_line(user_content, asst_content)
+            draft = self._build_memoria_draft(
+                user_content, asst_content, ledger_line,
+                source=user_entry.get("source"),
+                private=user_entry.get("private"),
+            )
+            if draft is not None:
+                drafts.append(draft)
+        return drafts
+
+    def flush_memorias(self, budget_seconds: float = 2.0) -> None:
+        """F4 (task 4.12) — bounded flush of the live memorias window on
+        clean app close (R14).
+
+        Snapshots eligible pairs under _history_lock (same gate chain as
+        eviction capture via _collect_flush_drafts), releases the lock, then
+        upserts each draft on the CALLING thread under a wall-clock budget.
+        Running on the calling thread (sanctioned Tk-thread exception, RC-3
+        — there is no more UI to protect after close, agenda_persistence.py
+        precedent) is safe specifically because it is time-bounded: stops
+        early and logs ONCE (count only, never content — RC-8) if the budget
+        is exceeded. Fail-open throughout: never raises, never blocks close.
+        """
+        try:
+            with self._history_lock:
+                drafts = self._collect_flush_drafts()
+        except Exception:
+            logger.warning("memoria close-flush snapshot failed (fail-open)")
+            return
+        if not drafts:
+            return
+
+        deadline = time.monotonic() + budget_seconds
+        flushed = 0
+        for profile_id, stable_key, title, content in drafts:
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "memoria close-flush budget exceeded, stopping early: flushed=%d remaining=%d",
+                    flushed, len(drafts) - flushed,
+                )
+                break
+            try:
+                self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+                flushed += 1
+            except Exception as exc:
+                logger.warning(
+                    "memoria close-flush upsert failed (fail-open): %s profile_id=%s",
+                    type(exc).__name__, profile_id,
+                )
+
+    def _dispatch_switch_flush(self, drafts: list[tuple[str, str, str, str]]) -> None:
+        """F4 (task 4.15) — dispatch profile-switch flush upserts to a
+        dedicated worker thread, fire-and-forget (RC-2/RC-3).
+
+        Runs off the Tk thread with NO time budget (task 4.16 — unlike
+        close-flush, there IS more UI to protect, so a slow disk must never
+        stall it; bounding by thread placement instead of wall-clock is
+        sufficient here since nothing is waiting on this thread).
+        """
+        if not drafts:
+            return
+        threading.Thread(target=self._run_switch_flush, args=(drafts,), daemon=True).start()
+
+    def _run_switch_flush(self, drafts: list[tuple[str, str, str, str]]) -> None:
+        """Worker-thread body for _dispatch_switch_flush. Fail-open; partial
+        failures log a COUNT only, never content (RC-8)."""
+        failed = 0
+        for profile_id, stable_key, title, content in drafts:
+            try:
+                self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+            except Exception:
+                failed += 1
+        if failed:
+            logger.warning(
+                "memoria switch-flush partial failure (fail-open): failed=%d of %d",
+                failed, len(drafts),
+            )
 
     @staticmethod
     def _first_words(text: str, max_words: int = 8) -> str:
