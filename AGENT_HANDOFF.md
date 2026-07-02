@@ -19,6 +19,84 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-01 (privacy fixes + inspector windows + agenda-ptt honest commit + external-LLM API research — COMMITTED)
+
+Branch `maintenance/big-file-audit-small-fixes-20260629`. THREE judge-approved tracks, stacked
+(T1 → T2 → T3). **FULL SUITE 100% GREEN: 2995 passed, 11 skipped, 0 failed.**
+Owner approved the commit split 2026-07-01 — landed as three commits (hunk-level split of the
+shared files llm_engine.py / app_shell.py / test_pipeline_memory.py):
+1. `61b7f26` `fix(privacy): gate digest eviction by source + redact/purge session_history persistence` (T1)
+2. `085c613` `feat(ui): read-only inspector windows for editorial cards and Kira memory` (T2)
+3. `831dbb1` `fix(engine): honest history_text seam for agenda-ptt commits + retarget stale OBS test patch` (T3)
+
+### (a) T1 — privacy_prereq_fixes_20260701
+- D1: MemoryDigest eviction capture now allowlists evicted-pair sources `{direct, ptt}`
+  (`_DIGEST_CAPTURE_SOURCES`, llm_engine.py) — viewer `chat` AND `accumulated` (which bundles verbatim
+  chat via `_flush_accumulation`) no longer enter the digest. Fail-closed on missing/unknown source.
+- D2: session_history.py redacts its ENTIRE persisted payload (summary strips "Referencias detectadas";
+  metadata top_intents allowlisted to `{intent,label,count,duplicates}` — `examples` AND `entities`
+  dropped; trigger allowlisted to scalars) + one-time `user_version`-guarded purge (DELETE
+  context_snapshots, DROP legacy `messages` table, unlink chat_log.jsonl; locked jsonl → retry next start).
+- Dual-Opus Judgment Day APPROVED (Judge A zero defects; Judge B should-fixes applied + verified).
+
+### (b) T2 — cards_memory_readonly_panels_20260701
+- Two read-only inspector windows from Configuración → M/Perfil: "Tarjetas editoriales (N)"
+  (opencohost/ui/inspector_cards.py) and "Memoria de Kira (N turnos)" (inspector_memory.py — honest
+  lifetime badges «Solo en RAM» / «En disco · persiste entre sesiones», agenda provenance note).
+- New read-only engine accessor `memory_inspector_snapshot()` (llm_engine.py): content only for
+  user+direct and assistant+direct|ptt; digest stats-only; snapshot-then-release under _history_lock.
+- app_shell.py +59 lines (launcher mini-frame + 2 openers); line-count guard raised 2710→2990 with
+  documented debt (tests/test_integration.py:247) — guard is GREEN again.
+- Judgment Day: Judge B (Opus) — privacy core SOUND, zero leak paths; 3 product must-fixes + 2
+  recommended ALL applied (agenda refresh idempotent, absolute "Actualizado HH:MM:SS" stamp,
+  winfo_exists guards on marshaled renders, "[turno oculto — N caracteres]" rows, memory stamp).
+  Judge A (Fable 5) was owner-stopped mid-run — optional re-run on the final diff.
+- Judge panel policy (owner decision): Judge A = Fable 5, Judge B = Opus 4.8 going forward.
+
+### (c) T3 — agenda_ptt_commit_raw_text (+ OBS red-test fix)
+- AgendaAction.history_text seam threaded end-to-end (controller → app_shell dispatch → enqueue →
+  5-tuple queue → _commit_history): agenda-ptt turns commit "El streamer dijo (PTT): {ptt_text}"
+  instead of the full "TAREA: …" template. Byte-identical for every other caller (default None).
+- Mixed Judgment Day (Judge A = Fable 5, Judge B = Opus 4.8): **BOTH APPROVED, zero must-fixes**.
+- KEY HONEST FRAMING (Judge B): the fixed seam is production-DORMANT — no live caller passes ptt_text
+  to next_action(); the real PTT path (voice_control.py) was ALREADY honest. This fixed a LATENT
+  defect in an unwired seam (future-proofing), NOT a live production leak.
+- Companion fix: tests/test_app_shell_obs_resilience.py now patches the REAL sleep site
+  (obs_lifecycle.time.sleep; app_shell.time was a stale target from the Phase-6 decomposition) —
+  the last red test is gone. `import time` in app_shell is genuinely dead; NOT restored.
+- Judge residuals (pre-existing, NOT regressions): (1) `_chat_action` still commits template
+  boilerplate for agenda HANDLE_CHAT turns — registered as `agenda_chat_action_raw_text` proposal;
+  (2) enqueue overflow-drop discards history_text when re-routing to accumulation
+  (llm_engine.py:516-519, LOW); (3) replace_pending doesn't forward history_text (safe today).
+
+### (d) External-LLM API engine research (exploration only, NO code) — engram sdd/external-llm-api-engine/explore
+- ALL four targets speak OpenAI chat-completions (Ollama /v1, Groq, Gemini compat endpoints verified
+  2026-07-01) → ONE client seam (base_url + api_key + model) can cover Ollama+OpenAI+Gemini+Groq.
+- Cost model (2h stream ≈ 518K in / 90K out; 12 streams/mo): Groq Llama-8B ~$0.39/mo · Groq 70B
+  ~$4.52 · Gemini Flash-Lite ~$3.15 · Gemini 3.5 Flash ~$19 · GPT-5.4-mini ~$9.51 · GPT-5.4 ~$31.80.
+- KEY INSIGHT: the ADR-029 front-eviction bug defeats prompt caching on EVERY provider (exact-prefix
+  match from position 0) → full-price billing; the ADR-029 fix becomes a COST prerequisite for any
+  cloud engine work.
+- Hard gates: Gemini free tier trains on API data (hard exclude); Groq free tier can't survive one
+  stream (paid tier from day one). PRIVACY: agenda prompts carry wrapped viewer chat → cloud transit
+  = new trust boundary → ADR + opt-in gate + TRUST_MODEL/PRIVACY updates mandatory before any code.
+
+### (e) State / next (owner gates when back)
+- FULL suite: **2995 passed, 11 skipped, 0 failed** — first fully green suite.
+- Commit decision DONE (3 commits above, 2026-07-01). Runtime validation: open both inspector windows live (no viewer
+  text anywhere, badges, counts, clipboard, refresh idempotency, close-mid-refresh). T3 has nothing
+  to validate live today (dormant seam).
+- Decide next: inspector v1.1 (ptt/digest content display — technically unlocked by T3, owner-gated);
+  external-LLM API proposal (owner questions in the engram artifact); Track 4 agent-contract ADR
+  (still blocked on real OpenClaw/Hermes contracts + trigger-speech stance).
+- Registered proposal-only backlog: `historial_privacy_lanes_ui`, `output_guardrails_prompt_extraction`,
+  `agenda_chat_action_raw_text` (new, from T3 judges).
+- Engram: sdd/privacy-prereq-fixes-20260701/*, sdd/cards-memory-readonly-panels-20260701/*,
+  sdd/agenda-ptt-commit-raw-text/*, sdd/agenda-chat-action-raw-text/proposal,
+  sdd/external-llm-api-engine/explore + session summaries.
+
+---
+
 ## LATEST SNAPSHOT — 2026-06-29/30 (big-file audit + Ollama hardening + Topic Scout DARK + ctx-discovery prod fix)
 
 Branch `maintenance/big-file-audit-small-fixes-20260629` — **49 commits ahead of `master`, NOT merged.**
