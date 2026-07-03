@@ -61,12 +61,29 @@ sub-tracks: memorias_fuzzy_upsert, automated PII redactor, historial_privacy_lan
 2. **RUNTIME VALIDATION — CORE PASSED live 2026-07-02** (persistence + host-only privacy + F4 flush).
    Optional UI-surface follow-up (owner not yet done): reopen app → confirm the 2 memorias render in the
    "Memoria de Kira" window; exercise the capture switch, per-profile purge, «Fijadas» counter, F1 banner.
-3. **NEW DIRECTION (owner, 2026-07-02): UI stack migration** off CustomTkinter → React+Tailwind in Tauri v2
-   with the Python core exposed via a local FastAPI sidecar. Owner will build the React/Tauri app; the
-   ask to US is the Python-side FastAPI API layer as a SEPARATE module that does NOT touch opencohost/ui/.
-   sdd-explore running for track `kira_fastapi_api_layer_20260702` (engram sdd/kira-fastapi-api-layer-20260702/explore).
-   Key insight: the core is already decoupled at the UIState-observer + command-dispatcher seam, and
-   editorial_cli.py already drives the core headless — the FastAPI layer attaches to the same seam.
+3. **NEW DIRECTION (owner, 2026-07-02): UI stack migration** off CustomTkinter → React+Tailwind in Tauri v2,
+   Python core exposed via a local FastAPI sidecar. Owner builds the React/Tauri app; binding model
+   "one or the other" (React REPLACES Tk at cutover — never two frontends on one live engine; Tk stays
+   as fallback). **BOTH tracks FULLY PLANNED + PAUSED before implementation** (owner cut at the planning
+   checkpoint 2026-07-02 — nothing implemented, no code, no E:\OpenCohost_UI created yet):
+   - **Backend `kira_fastapi_api_layer_20260702`** — proposal #2793(v2) · spec #2796 · design #2798(**v2.1,
+     dual-Opus judged** — judge round #2802) · tasks NOT yet run. Phase 1 = standalone `opencohost/api/`
+     FastAPI process owning its OWN MotorVocalIA, 2 endpoints (`GET /api/status`, `POST /api/perfiles/switch`),
+     concurrency/idempotency contract, `active_profile` in status (zero core edits — reads existing
+     `_current_profile_name`), CORS. Judges caught + folded: a PRIVACY regression (log_sink was persisting
+     Kira's dialogue → now a no-op drain), `is_`-prefixed field names, engine-stop via `command_queue.put(None)`,
+     bounded idempotency cache, cross-process lockfile, loopback bind. Est ~615-680 lines → **2-PR split**
+     (PR1 dispatch+models ~250; PR2 main+engine_host ~400 → size:exception or 3-way). NEVER imports ui/ or
+     touches core (verified).
+   - **Frontend `opencohost_react_ui_20260702`** — proposal #2794 · spec #2797 · design #2799 · tasks #2801.
+     Vite+React+TS+Tauri v2+Tailwind greenfield at E:\OpenCohost_UI (SEPARATE repo), feature-based, zustand
+     (UI) + TanStack Query (server state), NO Prisma, OpenAPI-generated types = anti-drift lock. FE Phase 1
+     = status+profiles pages vs the 2 backend endpoints. Open: R6 spec/design conflict (types committed vs
+     git-ignored — reconcile to owner's "on-demand not committed" default before verify).
+   - **Cross-track reconciliation** #2800 (active_profile + CORS) folded into backend. **Model directive**
+     #2795: backend design=Fable, everything else (explore/spec/frontend-design/judges/tasks)=Opus, apply=Sonnet 5.
+   - **TO RESUME**: backend `sdd-tasks` (Opus) → apply both (Sonnet, 2-PR backend + 1 FE slice), each impl
+     slice gets a per-PR judgment day. Backend judged-clean design is ready; frontend fully task-planned.
    Also noted (not fixed): avatar async-flash UI bug (engram #2790) — subsumed by the migration.
 
 ---
