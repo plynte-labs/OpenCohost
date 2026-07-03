@@ -34,12 +34,14 @@ from fastapi.responses import JSONResponse
 
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
-from opencohost.api.models import HealthState, StatusResponse, SwitchProfileRequest
+from opencohost.api.models import HealthState, ProfilesListResponse, StatusResponse, SwitchProfileRequest
 from opencohost.core.profiles import cargar_perfiles
 
 _DEFAULT_CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
     "http://tauri.localhost",
     "tauri://localhost",
 ]
@@ -96,6 +98,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             health=HealthState(**dataclasses.asdict(host.monitor.state)),
             state_version=request.app.state.dispatcher.state_version,
         )
+
+    @app.get("/api/perfiles", response_model=ProfilesListResponse)
+    def list_perfiles() -> ProfilesListResponse:
+        perfiles = cargar_perfiles()
+        if not isinstance(perfiles, dict):
+            return ProfilesListResponse(profiles=[])
+        return ProfilesListResponse(profiles=list(perfiles.keys()))
 
     @app.post("/api/perfiles/switch")
     def switch_profile(request: Request, body: SwitchProfileRequest):

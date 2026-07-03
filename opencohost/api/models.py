@@ -35,6 +35,12 @@ class StatusResponse(BaseModel):
     state_version: int
 
 
+class ProfilesListResponse(BaseModel):
+    """Profile NAMES only — never persona text, prompts, or other fields."""
+
+    profiles: list[str]
+
+
 class SwitchProfileRequest(BaseModel):
     name: str
     idempotency_key: Optional[str] = None

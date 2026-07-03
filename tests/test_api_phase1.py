@@ -545,8 +545,55 @@ def test_switch_profile_non_dict_perfiles_404(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# GET /api/perfiles
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_list_perfiles_returns_names_only_no_persona_leak(monkeypatch):
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(main_mod, "cargar_perfiles", _perfiles_fixture)
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles")
+        assert resp.status_code == 200
+        assert resp.json() == {"profiles": ["streamer_mode", "chill_mode"]}
+        # PRIVACY: only names may leave the process — no persona/prompt fields.
+        assert "prompt" not in resp.text
+        assert "modo streamer" not in resp.text
+        assert "modo relax" not in resp.text
+        assert "use_system" not in resp.text
+
+
+def test_list_perfiles_non_dict_returns_empty_list_not_500(monkeypatch):
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(main_mod, "cargar_perfiles", lambda: ["not", "a", "dict"])
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles")
+        assert resp.status_code == 200
+        assert resp.json() == {"profiles": []}
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # CORS (design test 13)
 # ──────────────────────────────────────────────────────────────────────────
+
+
+def test_cors_default_allowlist_includes_tauri_dev_origin():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost)  # real default origins, not test override
+    with TestClient(app) as client:
+        resp = client.options(
+            "/api/status",
+            headers={
+                "origin": "http://localhost:1420",
+                "access-control-request-method": "GET",
+            },
+        )
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:1420"
 
 
 def test_cors_preflight_allowed_origin_echoed_and_evil_origin_rejected():
