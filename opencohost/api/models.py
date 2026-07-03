@@ -112,6 +112,31 @@ class ModelsResponse(BaseModel):
     active_tier: str
 
 
+class MusicTrackOut(BaseModel):
+    """Mirrors `opencohost.core.music_library.MusicTrack` (READ-ONLY slice,
+    WS3 slice 4). `status` is derived, never the raw `missing`/`invalid`
+    booleans: ok (file present + valid signature), faltante (path gone),
+    invalido (file present but fails the audio-signature check).
+    """
+
+    id: str
+    label: str
+    mood: str
+    status: str
+
+
+class MusicLibraryResponse(BaseModel):
+    """GET /api/music/library (Tier B, direct read-only, no queue, no audio).
+
+    Server-side audio playback (`request_mood`) is deferred — this is a
+    pure library listing.
+    """
+
+    tracks: list[MusicTrackOut]
+    count: int
+    moods: list[str]
+
+
 class TTSConfigResponse(BaseModel):
     """GET /api/tts/config (Tier B, direct read). Pure config read, no I/O timeout needed."""
 

@@ -15,6 +15,7 @@ import ollama
 
 from opencohost.core.health_monitor import HealthMonitor
 from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.core.music_library import MusicLibrary
 from opencohost.smart_aggregator.aggregator import Aggregator
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
@@ -70,6 +71,7 @@ class EngineHost:
         # KiraAgendaController is plain lists/attrs, not thread-safe — one
         # global lock, mirrors aggregator_lock (one process, one controller).
         self.agenda_lock = threading.Lock()
+        self.music_library = None
 
     def start(self) -> None:
         self._acquire_lock()
@@ -99,14 +101,24 @@ class EngineHost:
             except Exception:
                 self.agenda = None
                 _logger.exception("KiraAgendaController construction failed; agenda endpoints disabled")
+            # WS3 slice 4: headless music library — pure file/JSON state read,
+            # no pygame, no audio device (server-side `request_mood` playback
+            # is deferred). A construction failure must not brick the rest of
+            # the host, mirrors the Aggregator/Agenda pattern above.
+            try:
+                self.music_library = MusicLibrary()
+                self.music_library.load()
+            except Exception:
+                self.music_library = None
+                _logger.exception("MusicLibrary construction failed; music endpoints disabled")
         except Exception:
             self.stop()
             raise
 
     def stop(self) -> None:
         """Best-effort teardown — each step swallows exceptions."""
-        # ponytail: KiraAgendaController is pure state (no threads, no close()/
-        # reset() method) — nothing to tear down here.
+        # ponytail: KiraAgendaController and MusicLibrary are both pure state
+        # (no threads, no close()/reset() method) — nothing to tear down here.
         if self.aggregator is not None:
             try:
                 # connect() spawns a daemon source thread; disconnect() joins

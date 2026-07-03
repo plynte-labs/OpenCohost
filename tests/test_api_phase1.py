@@ -295,6 +295,10 @@ class FakeHost:
         # one set `host.agenda = KiraAgendaController()` after construction.
         self.agenda = None
         self.agenda_lock = threading.Lock()
+        # WS3 slice 4: headless music library — defaults to None (mirrors a
+        # resilient-construction-failed EngineHost); tests that need a live
+        # one set `host.music_library = MusicLibrary(...)` after construction.
+        self.music_library = None
 
     def start(self):
         pass

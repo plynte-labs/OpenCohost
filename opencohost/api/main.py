@@ -56,6 +56,8 @@ from opencohost.api.models import (
     HealthState,
     MemoriaStatsResponse,
     ModelsResponse,
+    MusicLibraryResponse,
+    MusicTrackOut,
     ObsConfigRequest,
     ObsConfigResponse,
     ObsTestResponse,
@@ -315,6 +317,14 @@ def _agenda_response(agenda) -> AgendaResponse:
     )
 
 
+def _music_track_status(track) -> str:
+    if track.missing:
+        return "faltante"
+    if track.invalid:
+        return "invalido"
+    return "ok"
+
+
 def _avatar_config_response(cfg) -> AvatarConfigResponse:
     return AvatarConfigResponse(
         enabled=cfg.enabled,
@@ -442,6 +452,19 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             saved_memorias=saved_memorias,
             pinned=pinned,
             editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
+        )
+
+    @app.get("/api/music/library", response_model=MusicLibraryResponse)
+    def get_music_library(request: Request):
+        library = getattr(request.app.state.host, "music_library", None)
+        if library is None:
+            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
+        tracks = [
+            MusicTrackOut(id=t.id, label=t.label, mood=t.mood, status=_music_track_status(t))
+            for t in library.all_tracks()
+        ]
+        return MusicLibraryResponse(
+            tracks=tracks, count=len(tracks), moods=sorted({t.mood for t in tracks})
         )
 
     @app.get("/api/agenda", response_model=AgendaResponse)
