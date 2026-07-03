@@ -137,6 +137,31 @@ The app validates Ollama at startup and disables actions that depend on the LLM 
 
 The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing, model switching, and downloads until the service responds again.
 
+## HTTP API (experimental)
+
+`opencohost/api/` is a **standalone** FastAPI process that owns its own Kira
+engine — it is never shared with, or imported by, the Tk app. It exists so a
+future web/Tauri frontend can read status and switch profiles over HTTP.
+Install the optional extra, then run:
+
+```powershell
+pip install -e ".[api]"
+uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
+```
+
+**`--workers` MUST stay at 1.** A second worker means a second engine —
+double VRAM/Ollama load and a second audio device grab. `EngineHost` refuses
+to start a second time on the same machine via a lockfile.
+
+**Do not bind `--host 0.0.0.0`.** That exposes the engine control surface to
+your LAN. CORS only restricts browser callers — it does nothing against a
+script or `curl` hitting the port directly. Keep this on loopback unless you
+put an authenticating proxy in front of it.
+
+Endpoints: `GET /api/status` (read-only health/engine snapshot) and
+`POST /api/perfiles/switch` (switch the active personality profile,
+idempotent via the `Idempotency-Key` header).
+
 ## Testing
 
 ```powershell

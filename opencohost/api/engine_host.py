@@ -1,0 +1,112 @@
+"""Standalone engine host for the Kira FastAPI API layer (Phase 1).
+
+The ONLY file in `opencohost/api/` that imports the core engine classes.
+`EngineHost` constructs and owns a private `MotorVocalIA` + `HealthMonitor`
+pair for a standalone process — wired the same way `app_shell.py` wires
+the Tk app's engine, but never shared with it.
+"""
+
+import os
+import tempfile
+
+import ollama
+
+from opencohost.core.health_monitor import HealthMonitor
+from opencohost.core.llm_engine import MotorVocalIA
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Phase 1 targets Windows only
+    msvcrt = None
+
+_LOCK_PATH = os.path.join(tempfile.gettempdir(), "opencohost_api_engine.lock")
+
+
+class _Drain:
+    """No-op log sink.
+
+    PRIVACY (design v2.1 B-MF1): the engine only ever calls `.put()` on this
+    queue-like object (it never reads back). A pure drain both prevents
+    unbounded growth AND, critically, MUST NOT log or persist the message —
+    `log_queue.put` sites carry raw generated dialogue (llm_engine.py).
+    Logging it here would leak Kira's conversation content to disk.
+    """
+
+    def put(self, _msg):
+        pass
+
+
+def _noop_event(*_args, **_kwargs):
+    pass
+
+
+class EngineHost:
+    """Owns a standalone MotorVocalIA + HealthMonitor pair for this process."""
+
+    def __init__(self, lock_path: str = _LOCK_PATH):
+        self._lock_path = lock_path
+        self._lock_fd = None
+        self.motor = None
+        self.monitor = None
+
+    def start(self) -> None:
+        self._acquire_lock()
+        try:
+            self.motor = MotorVocalIA(_Drain(), ui_callback=_noop_event)
+            self.monitor = HealthMonitor()
+            self.motor.health_monitor = self.monitor  # mirrors app_shell.py:196-197
+            self.motor.start()
+            try:
+                self.monitor.qwen_manager.attach_existing()
+            except Exception:
+                pass
+            self.monitor.start()
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        """Best-effort teardown — each step swallows exceptions."""
+        if self.motor is not None:
+            try:
+                self.motor.command_queue.put(None)  # only engine-thread stop path
+            except Exception:
+                pass
+        if self.monitor is not None:
+            try:
+                self.monitor.stop()
+            except Exception:
+                pass
+        try:
+            model = getattr(self.motor, "current_model", None)
+            if model:
+                ollama.generate(model=model, prompt="", keep_alive=0)
+        except Exception:
+            pass
+        self._release_lock()
+
+    def _acquire_lock(self) -> None:
+        fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            os.close(fd)
+            raise RuntimeError(
+                f"Another OpenCohost API engine host is already running (lock: {self._lock_path})"
+            ) from exc
+        os.write(fd, str(os.getpid()).encode())
+        self._lock_fd = fd
+
+    def _release_lock(self) -> None:
+        if self._lock_fd is None:
+            return
+        try:
+            os.lseek(self._lock_fd, 0, os.SEEK_SET)
+            msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+        try:
+            os.close(self._lock_fd)
+        except Exception:
+            pass
+        self._lock_fd = None

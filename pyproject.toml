@@ -68,6 +68,13 @@ dev = [
     "detect-secrets==1.5.0",
     "pytest>=8.0",
 ]
+# api: standalone FastAPI process (opencohost/api/) exposing Kira's engine
+# control surface over HTTP for a future web/Tauri frontend. Never imported
+# by the Tk app — see opencohost/api/main.py for the run form and warnings.
+api = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
 
 [project.gui-scripts]
 opencohost = "opencohost.__main__:main"
