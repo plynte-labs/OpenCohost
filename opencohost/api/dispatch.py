@@ -39,8 +39,8 @@ class Dispatcher:
         self._ttl_seconds = ttl_seconds
         self._lock = Lock()
         self.state_version = 0
-        # key -> (payload_hash, command_id, expires_at)
-        self._cache: "OrderedDict[str, tuple[str, str, float]]" = OrderedDict()
+        # key -> (command, payload_hash, command_id, expires_at)
+        self._cache: "OrderedDict[str, tuple[str, str, str, float]]" = OrderedDict()
 
     def dispatch(self, command: str, payload: dict, key: Optional[str] = None) -> DispatchResult:
         with self._lock:
@@ -48,8 +48,8 @@ class Dispatcher:
             self._prune_expired(now)
 
             if key is not None and key in self._cache:
-                payload_hash, command_id, _expires_at = self._cache[key]
-                if payload_hash == self._hash_payload(payload):
+                cached_command, payload_hash, command_id, _expires_at = self._cache[key]
+                if cached_command == command and payload_hash == self._hash_payload(payload):
                     return DispatchResult(state="replay", command_id=command_id)
                 return DispatchResult(state="conflict")
 
@@ -63,12 +63,12 @@ class Dispatcher:
             if key is not None:
                 if len(self._cache) >= _CACHE_CAP:
                     self._cache.popitem(last=False)  # FIFO-evict oldest
-                self._cache[key] = (self._hash_payload(payload), command_id, now + self._ttl_seconds)
+                self._cache[key] = (command, self._hash_payload(payload), command_id, now + self._ttl_seconds)
 
             return DispatchResult(state="accepted", command_id=command_id)
 
     def _prune_expired(self, now: float) -> None:
-        expired = [k for k, (_h, _cid, expires_at) in self._cache.items() if expires_at <= now]
+        expired = [k for k, (_cmd, _h, _cid, expires_at) in self._cache.items() if expires_at <= now]
         for k in expired:
             del self._cache[k]
 

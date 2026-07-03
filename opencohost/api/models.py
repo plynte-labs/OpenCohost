@@ -55,3 +55,10 @@ class SwitchProfileResponse(BaseModel):
 class RejectedResponse(BaseModel):
     accepted: bool = False
     reason: str
+
+
+class HealthResponse(BaseModel):
+    """Fast liveness probe — no engine work, no queue. R8: no chat/model detail."""
+
+    status: str
+    engine_alive: bool

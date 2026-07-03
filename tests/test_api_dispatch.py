@@ -63,6 +63,22 @@ def test_conflict_same_key_different_payload():
     assert d.state_version == 1  # no bump
 
 
+def test_conflict_same_key_same_payload_different_command():
+    # Cross-verb false-replay guard: once a second verb exists, the same
+    # Idempotency-Key + a coincidentally-identical payload under a DIFFERENT
+    # command must NOT replay the original command_id — it must conflict.
+    q = Queue()
+    d = Dispatcher(q)
+    first = d.dispatch("set_profile", _payload(), key="k1")
+    assert first.state == "accepted"
+
+    result = d.dispatch("some_other_command", _payload(), key="k1")
+    assert result.state == "conflict"
+    assert result.command_id is None
+    assert q.qsize() == 1  # no false-replay enqueue
+    assert d.state_version == 1  # no bump
+
+
 def test_queue_full_gate_rejects_without_enqueue_or_bump():
     q = Queue()
     for _ in range(16):

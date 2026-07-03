@@ -215,6 +215,16 @@ class FakeMotor:
     def is_processing(self):
         return self._is_processing
 
+    def is_alive(self):
+        return True
+
+
+class _DeadMotor(FakeMotor):
+    """Motor whose worker thread is not running — for /api/health."""
+
+    def is_alive(self):
+        return False
+
 
 class _RaisingMotor:
     """Motor whose current_model access raises — for the sanitized-500 test."""
@@ -267,6 +277,20 @@ class FakeHost:
 
     def stop(self):
         self.stop_calls += 1
+
+
+class DeadEngineHost:
+    """Host whose motor thread has died — for /api/health engine_alive=False."""
+
+    def __init__(self):
+        self.motor = _DeadMotor()
+        self.monitor = FakeMonitor()
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
 
 class RaisingStatusHost:
@@ -385,6 +409,44 @@ def test_lifespan_teardown_calls_host_stop():
     with TestClient(app):
         host = app.state.host
     assert host.stop_calls == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/health
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_health_shape_and_engine_alive_true():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == {"status", "engine_alive"}
+        assert body["status"] == "ok"
+        assert body["engine_alive"] is True
+
+
+def test_health_engine_alive_false_when_worker_dead():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=DeadEngineHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json()["engine_alive"] is False
+
+
+def test_health_does_not_touch_command_queue():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        client.get("/api/health")
+        assert app.state.host.motor.command_queue.qsize() == 0
+        assert app.state.dispatcher.state_version == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────

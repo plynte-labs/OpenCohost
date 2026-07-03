@@ -34,7 +34,13 @@ from fastapi.responses import JSONResponse
 
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
-from opencohost.api.models import HealthState, ProfilesListResponse, StatusResponse, SwitchProfileRequest
+from opencohost.api.models import (
+    HealthResponse,
+    HealthState,
+    ProfilesListResponse,
+    StatusResponse,
+    SwitchProfileRequest,
+)
 from opencohost.core.profiles import cargar_perfiles
 
 _DEFAULT_CORS_ORIGINS = [
@@ -85,6 +91,15 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         allow_headers=["Content-Type", "Idempotency-Key"],
         allow_credentials=False,
     )
+
+    @app.get("/api/health", response_model=HealthResponse)
+    def get_health(request: Request) -> HealthResponse:
+        # Fast liveness probe: no engine work, no queue touch. Truthful even
+        # if the host has no motor yet (fresh process / no feeder).
+        motor = getattr(request.app.state.host, "motor", None)
+        is_alive = getattr(motor, "is_alive", None)
+        engine_alive = bool(is_alive()) if callable(is_alive) else False
+        return HealthResponse(status="ok", engine_alive=engine_alive)
 
     @app.get("/api/status", response_model=StatusResponse)
     def get_status(request: Request) -> StatusResponse:
