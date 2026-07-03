@@ -10,6 +10,15 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+class ModelCatalogEntry(BaseModel):
+    """Mirrors one entry of `opencohost.config.settings.MODELS_CATALOG`."""
+
+    display: str
+    desc: str
+    size_gb: float
+    family: str
+
+
 class HealthState(BaseModel):
     """Mirrors `opencohost.core.health_monitor.MonitorState`."""
 
@@ -75,3 +84,43 @@ class HealthResponse(BaseModel):
 
     status: str
     engine_alive: bool
+
+
+class ModelsResponse(BaseModel):
+    """GET /api/models (Tier B, direct read).
+
+    `discovered` degrades to `[]` when live Ollama discovery times out or
+    errors — the catalog + tiers still resolve to safe catalog-only values.
+    """
+
+    catalog: dict[str, ModelCatalogEntry]
+    discovered: list[str]
+    current_model: Optional[str]
+    tiers: dict[str, str]
+    active_tier: str
+
+
+class TTSConfigResponse(BaseModel):
+    """GET /api/tts/config (Tier B, direct read). Pure config read, no I/O timeout needed."""
+
+    piper_voice: str
+    local_only: bool
+    speed: float
+    engine: str
+    heavy_available: bool
+
+
+class MemoriaStatsResponse(BaseModel):
+    """GET /api/memoria/stats (Tier B, R8-CRITICAL).
+
+    COUNTS ONLY — never add a field carrying memoria/card title, content,
+    transcript, or any other text. See `_DIGEST_CAPTURE_SOURCES` /
+    `memory_inspector_snapshot` in opencohost/core/llm_engine.py (the only
+    provenance gates — reused verbatim, never re-derived).
+    """
+
+    session_turns: int
+    digest_entries: int
+    saved_memorias: int
+    pinned: int
+    editorial_cards_by_status: dict[str, int]

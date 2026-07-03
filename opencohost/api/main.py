@@ -26,8 +26,10 @@ importing this module has zero side effects on hardware/VRAM/Ollama.
 
 import dataclasses
 import os
-from contextlib import asynccontextmanager
+import sqlite3
+from contextlib import asynccontextmanager, closing
 
+import ollama
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -38,11 +40,90 @@ from opencohost.api.models import (
     CommandRequest,
     HealthResponse,
     HealthState,
+    MemoriaStatsResponse,
+    ModelsResponse,
     ProfilesListResponse,
     StatusResponse,
     SwitchProfileRequest,
+    TTSConfigResponse,
+)
+from opencohost.config.settings import (
+    EDITORIAL_CARDS_DB,
+    EXPERIMENTAL_HEAVY_TTS_ENABLED,
+    MEMORIAS_DB,
+    MEMORIAS_ENABLED,
+    MODELS_CATALOG,
+    _canonical_model_tag,
+    load_piper_voice,
+    load_tts_local_only,
+    load_tts_speed,
+    resolve_llm_tiers,
 )
 from opencohost.core.profiles import cargar_perfiles
+
+# GET /api/models external I/O bound — short client timeout so a stalled/
+# unreachable Ollama daemon degrades the response instead of pinning a
+# threadpool thread (design v2.1 Tier B resilience).
+_OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.5
+
+# GET /api/memoria/stats sqlite reads — short, mirrors memoria_store.py's
+# READ_TIMEOUT_SECONDS (bounded, fail-open to a zero count).
+_STATS_DB_READ_TIMEOUT_SECONDS = 0.5
+
+
+def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) -> list[str]:
+    """Best-effort live Ollama discovery, bounded by a short client timeout.
+
+    Mirrors the `ollama.Client(timeout=...)` pattern MotorVocalIA already
+    uses for chat calls (llm_engine.py `_create_ollama_chat_client`).
+    Degrades to `[]` on ANY failure (timeout, connection error, malformed
+    response) — never raises, never hangs the request thread.
+    """
+    try:
+        client = ollama.Client(timeout=timeout)
+        response = client.list()
+        models = getattr(response, "models", None)
+        if models is None and isinstance(response, dict):
+            models = response.get("models", [])
+        tags = set()
+        for model in models or []:
+            if isinstance(model, dict):
+                raw_tag = model.get("model") or model.get("name") or ""
+            else:
+                raw_tag = getattr(model, "model", None) or getattr(model, "name", None) or ""
+            tag = _canonical_model_tag(raw_tag)
+            if tag:
+                tags.add(tag)
+        return sorted(tags)
+    except Exception:
+        return []
+
+
+def _count_sql(db_path: str, sql: str) -> int:
+    """Bounded, fail-open COUNT(*) read. Never creates db_path as a side
+    effect: a missing file (e.g. a standalone API process that never
+    touched this store) returns 0 without connecting."""
+    if not db_path or not os.path.exists(db_path):
+        return 0
+    try:
+        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
+            row = conn.execute(sql).fetchone()
+            return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
+
+
+def _editorial_cards_by_status(db_path: str) -> dict:
+    """Bounded, fail-open status->count aggregation. Same missing-file/error
+    fail-open behavior as `_count_sql`; never returns row content."""
+    if not db_path or not os.path.exists(db_path):
+        return {}
+    try:
+        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
+            rows = conn.execute("SELECT status, COUNT(*) FROM editorial_cards GROUP BY status").fetchall()
+            return {status: count for status, count in rows}
+    except sqlite3.Error:
+        return {}
 
 # Server-side verb whitelist for POST /api/commands — exactly the verbs
 # MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
@@ -179,6 +260,63 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if not isinstance(perfiles, dict):
             return ProfilesListResponse(profiles=[])
         return ProfilesListResponse(profiles=list(perfiles.keys()))
+
+    @app.get("/api/models", response_model=ModelsResponse)
+    def get_models(request: Request) -> ModelsResponse:
+        host = request.app.state.host
+        try:
+            discovered = _discover_ollama_models()
+        except Exception:
+            # _discover_ollama_models already fails open internally; this
+            # outer guard is a second layer so a mocked/monkeypatched or
+            # future-refactored discovery call can never 500 this endpoint.
+            discovered = []
+        # Pass our bounded `discovered` in so resolve_llm_tiers never falls
+        # back to its own unbounded, no-timeout `_discover_installed_model_tags()`
+        # internally (settings.py) — one bounded discovery call per request.
+        tiers = resolve_llm_tiers(installed_model_tags=discovered)
+        return ModelsResponse(
+            catalog=MODELS_CATALOG,
+            discovered=discovered,
+            current_model=host.motor.current_model,
+            tiers=tiers,
+            active_tier=host.motor.active_llm_tier,
+        )
+
+    @app.get("/api/tts/config", response_model=TTSConfigResponse)
+    def get_tts_config(request: Request) -> TTSConfigResponse:
+        host = request.app.state.host
+        return TTSConfigResponse(
+            piper_voice=load_piper_voice(),
+            local_only=load_tts_local_only(),
+            speed=load_tts_speed(),
+            engine=host.motor.motor_tts,
+            heavy_available=EXPERIMENTAL_HEAVY_TTS_ENABLED,
+        )
+
+    @app.get("/api/memoria/stats", response_model=MemoriaStatsResponse)
+    def get_memoria_stats(request: Request) -> MemoriaStatsResponse:
+        host = request.app.state.host
+        # R8: reuse the ONLY provenance gate (memory_inspector_snapshot
+        # already applies _DIGEST_CAPTURE_SOURCES) — take counts only, never
+        # touch entry["content"] / digest line text.
+        snapshot = host.motor.memory_inspector_snapshot()
+        session_turns = len(snapshot["entries"])
+        digest_entries = snapshot["digest"]["line_count"]
+
+        saved_memorias = 0
+        pinned = 0
+        if MEMORIAS_ENABLED:
+            saved_memorias = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias")
+            pinned = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE pinned = 1")
+
+        return MemoriaStatsResponse(
+            session_turns=session_turns,
+            digest_entries=digest_entries,
+            saved_memorias=saved_memorias,
+            pinned=pinned,
+            editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
+        )
 
     @app.post("/api/perfiles/switch")
     def switch_profile(request: Request, body: SwitchProfileRequest):

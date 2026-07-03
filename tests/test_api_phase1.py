@@ -206,6 +206,15 @@ class FakeMotor:
         self._is_processing = False
         self._current_profile_name = "default"
         self.command_queue = Queue()
+        # B3 (Tier-B reads): mirrors MotorVocalIA.active_llm_tier / .motor_tts
+        # and the memory_inspector_snapshot() provenance-gated read.
+        self.active_llm_tier = "balanced"
+        self.motor_tts = "ligero"
+        self._memory_snapshot = {
+            "entries": [],
+            "source_breakdown": {},
+            "digest": {"line_count": 0, "total_chars": 0, "max_chars": 4000},
+        }
 
     @property
     def is_speaking(self):
@@ -217,6 +226,9 @@ class FakeMotor:
 
     def is_alive(self):
         return True
+
+    def memory_inspector_snapshot(self):
+        return self._memory_snapshot
 
 
 class _DeadMotor(FakeMotor):
