@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
+    CommandRequest,
     HealthResponse,
     HealthState,
     ProfilesListResponse,
@@ -42,6 +43,64 @@ from opencohost.api.models import (
     SwitchProfileRequest,
 )
 from opencohost.core.profiles import cargar_perfiles
+
+# Server-side verb whitelist for POST /api/commands — exactly the verbs
+# MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
+# A command NOT in this set is rejected before it ever reaches the queue.
+_COMMAND_WHITELIST = frozenset(
+    {
+        "clear_history",
+        "set_tts_local_only",
+        "set_tts_speed",
+        "set_piper_voice",
+        "set_motor_tts",
+        "switch_model",
+        "switch_llm_tier",
+    }
+)
+
+
+def _engine_command_payload(command: str, payload: dict):
+    """Translate the wire-level `{payload: dict}` body into the raw scalar
+    (or None) each engine verb actually consumes — `_dispatch_command`
+    reads `payload` directly as a str/float/bool/None per verb, never a
+    dict. `"value"` is the one wire key used until a verb needs more than
+    one field.
+    """
+    if command == "clear_history":
+        return None
+    return payload.get("value")
+
+
+def _validate_command_value(command: str, value) -> "str | None":
+    """Validate `value` against the per-verb contract `_dispatch_command`
+    (opencohost/core/llm_engine.py) actually expects. Returns None when the
+    value is acceptable, or a rejection reason string when it is not.
+
+    This is the trust-boundary fix for the DoS where an uncaught `TypeError`
+    (e.g. `float(None)` for `set_tts_speed`) inside `_dispatch_command`
+    kills the engine command-loop thread — that call sits outside the
+    `queue.Empty` try in `run()`. Rejecting bad values here means they are
+    never enqueued in the first place.
+    """
+    if command == "clear_history":
+        return None
+    if command == "set_tts_speed":
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return "set_tts_speed requires a numeric value"
+        return None
+    if command in ("switch_model", "switch_llm_tier", "set_piper_voice", "set_motor_tts"):
+        if not isinstance(value, str):
+            return f"{command} requires a non-None string value"
+        return None
+    if command == "set_tts_local_only":
+        if not isinstance(value, bool):
+            return "set_tts_local_only requires a boolean value"
+        return None
+    return None
+
 
 _DEFAULT_CORS_ORIGINS = [
     "http://localhost:5173",
@@ -132,6 +191,28 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         result = request.app.state.dispatcher.dispatch("set_profile", data, key)
         if result.state in ("accepted", "replay"):
             return {"accepted": True, "command_id": result.command_id, "status": "queued"}
+        if result.state == "conflict":
+            return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
+        return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    @app.post("/api/commands")
+    def post_command(request: Request, body: CommandRequest):
+        if body.command not in _COMMAND_WHITELIST:
+            return JSONResponse(status_code=422, content={"detail": "unknown command"})
+        engine_payload = _engine_command_payload(body.command, body.payload)
+        rejection = _validate_command_value(body.command, engine_payload)
+        if rejection is not None:
+            return JSONResponse(status_code=422, content={"detail": rejection})
+        key = request.headers.get("Idempotency-Key") or body.idempotency_key
+        dispatcher = request.app.state.dispatcher
+        result = dispatcher.dispatch(body.command, engine_payload, key)
+        if result.state in ("accepted", "replay"):
+            return {
+                "accepted": True,
+                "command_id": result.command_id,
+                "status": "queued",
+                "state_version": dispatcher.state_version,
+            }
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
         return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})

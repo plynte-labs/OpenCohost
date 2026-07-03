@@ -46,6 +46,19 @@ class SwitchProfileRequest(BaseModel):
     idempotency_key: Optional[str] = None
 
 
+class CommandRequest(BaseModel):
+    """Wire shape for POST /api/commands (Phase 2, B2).
+
+    `command` is checked against a server-side whitelist in main.py — this
+    model accepts any string so the handler controls the reject status code
+    (422) instead of pydantic's enum-validation 422 with a different body.
+    """
+
+    command: str
+    payload: dict = {}
+    idempotency_key: Optional[str] = None
+
+
 class SwitchProfileResponse(BaseModel):
     accepted: bool
     command_id: str
