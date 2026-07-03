@@ -109,3 +109,6 @@ docs/reportar_falso_positivo.md
 
 # Local UI prototype
 OpenCohost_TAURI/
+
+# React/Tauri frontend — versioned in its own git repo (migration; separate from the Python repo)
+OpenCohost_UI/
