@@ -151,6 +151,67 @@ class StreamLimitsRequest(BaseModel):
     filter_policy: Optional[str] = None
 
 
+class ObsConfigResponse(BaseModel):
+    """GET/PUT /api/obs/config response (Tier C).
+
+    R8/secret: NEVER carries the stored password — `password_set` is a bool
+    derived from it (`bool(non-empty stored password)`), nothing more.
+    """
+
+    enabled: bool
+    host: str
+    port: int
+    source: str
+    password_set: bool
+
+
+class ObsConfigRequest(BaseModel):
+    """PUT /api/obs/config body — a partial update.
+
+    Every field is optional; an omitted field leaves the stored value
+    unchanged. `password` is write-only: provide it to set it, omit it to
+    leave the stored password untouched (omitting never clears it).
+
+    Reused as-is for POST /api/obs/test's optional `{host, port, password}`
+    override (its `enabled`/`source` fields are simply ignored there).
+    """
+
+    enabled: Optional[bool] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    source: Optional[str] = None
+    password: Optional[str] = None
+
+
+class ObsTestResponse(BaseModel):
+    """POST /api/obs/test response. Never carries the password."""
+
+    ok: bool
+    error: Optional[str] = None
+
+
+class AvatarConfigResponse(BaseModel):
+    """GET/PUT /api/avatar/config response (Tier C). Paths only, no secrets."""
+
+    enabled: bool
+    mode: str
+    assets_folder: str
+    state_images: dict[str, str]
+
+
+class AvatarConfigRequest(BaseModel):
+    """PUT /api/avatar/config body — a partial update.
+
+    `state_images` keys are validated against `VALID_STATES` server-side
+    (unknown state -> 422) before anything is applied. Image UPLOAD is
+    deferred (owner decision) — values are paths only, never multipart.
+    """
+
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    state_images: Optional[dict[str, str]] = None
+
+
 class MemoriaStatsResponse(BaseModel):
     """GET /api/memoria/stats (Tier B, R8-CRITICAL).
 

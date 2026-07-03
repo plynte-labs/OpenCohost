@@ -24,10 +24,14 @@ is constructed only inside `lifespan()` — never at import time — so
 importing this module has zero side effects on hardware/VRAM/Ollama.
 """
 
+import concurrent.futures
 import dataclasses
 import os
 import sqlite3
+import threading
 from contextlib import asynccontextmanager, closing
+from pathlib import Path
+from typing import Optional
 
 import ollama
 from fastapi import FastAPI, Request
@@ -37,12 +41,17 @@ from fastapi.responses import JSONResponse
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
+    AvatarConfigRequest,
+    AvatarConfigResponse,
     ChatTurnRequest,
     CommandRequest,
     HealthResponse,
     HealthState,
     MemoriaStatsResponse,
     ModelsResponse,
+    ObsConfigRequest,
+    ObsConfigResponse,
+    ObsTestResponse,
     ProfilesListResponse,
     StatusResponse,
     StreamChatLiveResponse,
@@ -51,6 +60,8 @@ from opencohost.api.models import (
     SwitchProfileRequest,
     TTSConfigResponse,
 )
+from opencohost.avatar.avatar_config import VALID_STATES, load_avatar_config, save_avatar_config
+from opencohost.avatar.obs_client import OBSClient
 from opencohost.config.settings import (
     EDITORIAL_CARDS_DB,
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
@@ -217,6 +228,44 @@ _DEFAULT_CORS_ORIGINS = [
 # lockfile (cross-process, primary, in engine_host.py) -> this flag
 # (in-process) -> env var check below (best-effort) -> docs.
 _host_active = False
+
+# Tier-C config write-lock (WS3 slice 2): guards every PUT to avatar.yaml
+# (OBS + avatar config share the one file) so a read-modify-write is atomic
+# across concurrent requests. Reads do not need it — only read-modify-write.
+_config_lock = threading.Lock()
+
+# POST /api/obs/test bound: OBSClient.test_connection() (read-only file) makes
+# a real blocking socket connection with no timeout knob of its own. Bound it
+# here with a short-lived worker thread instead of touching that file.
+_OBS_TEST_TIMEOUT_SECONDS = 5.0
+
+
+def _test_obs_connection_bounded(client: OBSClient, timeout: float = _OBS_TEST_TIMEOUT_SECONDS):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client.test_connection)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return False, "OBS connection test timed out"
+
+
+def _obs_config_response(cfg) -> ObsConfigResponse:
+    return ObsConfigResponse(
+        enabled=cfg.obs.enabled,
+        host=cfg.obs.host,
+        port=cfg.obs.port,
+        source=cfg.obs.source_name,
+        password_set=bool(cfg.obs.password),
+    )
+
+
+def _avatar_config_response(cfg) -> AvatarConfigResponse:
+    return AvatarConfigResponse(
+        enabled=cfg.enabled,
+        mode=cfg.mode,
+        assets_folder=str(cfg.assets_folder),
+        state_images={state: str(path) for state, path in cfg.state_images.items()},
+    )
 
 
 def _check_single_worker() -> None:
@@ -474,6 +523,68 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
         return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    @app.get("/api/obs/config", response_model=ObsConfigResponse)
+    def get_obs_config() -> ObsConfigResponse:
+        return _obs_config_response(load_avatar_config())
+
+    @app.put("/api/obs/config", response_model=ObsConfigResponse)
+    def put_obs_config(body: ObsConfigRequest) -> ObsConfigResponse:
+        with _config_lock:
+            cfg = load_avatar_config()
+            if body.enabled is not None:
+                cfg.obs.enabled = body.enabled
+            if body.host is not None:
+                cfg.obs.host = body.host
+            if body.port is not None:
+                cfg.obs.port = body.port
+            if body.source is not None:
+                cfg.obs.source_name = body.source
+            if body.password is not None:
+                cfg.obs.password = body.password
+            save_avatar_config(cfg)
+            return _obs_config_response(cfg)
+
+    @app.post("/api/obs/test", response_model=ObsTestResponse)
+    def post_obs_test(body: Optional[ObsConfigRequest] = None) -> ObsTestResponse:
+        cfg = load_avatar_config()
+        obs_cfg = cfg.obs
+        if body is not None:
+            obs_cfg = dataclasses.replace(
+                obs_cfg,
+                host=body.host if body.host is not None else obs_cfg.host,
+                port=body.port if body.port is not None else obs_cfg.port,
+                password=body.password if body.password is not None else obs_cfg.password,
+            )
+        client = OBSClient(config=obs_cfg, assets_folder=cfg.assets_folder)
+        ok, message = _test_obs_connection_bounded(client)
+        return ObsTestResponse(ok=ok, error=None if ok else message)
+
+    @app.get("/api/avatar/config", response_model=AvatarConfigResponse)
+    def get_avatar_config() -> AvatarConfigResponse:
+        return _avatar_config_response(load_avatar_config())
+
+    @app.put("/api/avatar/config", response_model=AvatarConfigResponse)
+    def put_avatar_config(body: AvatarConfigRequest):
+        if body.state_images is not None:
+            unknown = sorted(set(body.state_images) - VALID_STATES)
+            if unknown:
+                return JSONResponse(
+                    status_code=422, content={"detail": f"unknown avatar state(s): {unknown}"}
+                )
+        with _config_lock:
+            cfg = load_avatar_config()
+            if body.enabled is not None:
+                cfg.enabled = body.enabled
+            if body.mode is not None:
+                cfg.mode = body.mode
+            if body.state_images is not None:
+                new_state_images = dict(cfg.state_images)
+                for state, path in body.state_images.items():
+                    new_state_images[state] = Path(path)
+                cfg.state_images = new_state_images
+            save_avatar_config(cfg)
+            return _avatar_config_response(cfg)
 
     return app
 
