@@ -74,6 +74,18 @@ class SwitchProfileResponse(BaseModel):
     status: str
 
 
+class ChatTurnRequest(BaseModel):
+    """Wire shape for POST /api/chat/turn (design v2.1 build-order step 4).
+
+    `text` is the raw viewer/operator message — dispatched verbatim as the
+    `process_context` payload (see `MotorVocalIA._dispatch_command` in
+    llm_engine.py). R8: `text` is NEVER echoed back in any response.
+    """
+
+    text: str
+    idempotency_key: Optional[str] = None
+
+
 class RejectedResponse(BaseModel):
     accepted: bool = False
     reason: str

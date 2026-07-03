@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
+    ChatTurnRequest,
     CommandRequest,
     HealthResponse,
     HealthState,
@@ -184,6 +185,22 @@ def _validate_command_value(command: str, value) -> "str | None":
         if not isinstance(value, bool):
             return "set_tts_local_only requires a boolean value"
         return None
+    return None
+
+
+# POST /api/chat/turn value guard — mirrors `_validate_command_value`'s
+# trust-boundary philosophy: reject empty/whitespace or unbounded text
+# BEFORE it ever reaches the engine command_queue. 4000 chars is a sane cap
+# for a single chat turn (process_context builds the full prompt from this).
+_CHAT_TEXT_MAX_LENGTH = 4000
+
+
+def _validate_chat_text(text: str) -> "str | None":
+    """Returns None when `text` is acceptable, or a rejection reason string."""
+    if not text.strip():
+        return "text must not be empty or whitespace-only"
+    if len(text) > _CHAT_TEXT_MAX_LENGTH:
+        return f"text exceeds max length of {_CHAT_TEXT_MAX_LENGTH} characters"
     return None
 
 
@@ -425,6 +442,28 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         key = request.headers.get("Idempotency-Key") or body.idempotency_key
         dispatcher = request.app.state.dispatcher
         result = dispatcher.dispatch(body.command, engine_payload, key)
+        if result.state in ("accepted", "replay"):
+            return {
+                "accepted": True,
+                "command_id": result.command_id,
+                "status": "queued",
+                "state_version": dispatcher.state_version,
+            }
+        if result.state == "conflict":
+            return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
+        return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    @app.post("/api/chat/turn")
+    def post_chat_turn(request: Request, body: ChatTurnRequest):
+        # R8-CRITICAL: this handler must never return `body.text` (or any
+        # derived dialogue) in the response, and must never log it. The ack
+        # below carries only accepted/command_id/status/state_version.
+        rejection = _validate_chat_text(body.text)
+        if rejection is not None:
+            return JSONResponse(status_code=422, content={"detail": rejection})
+        key = request.headers.get("Idempotency-Key") or body.idempotency_key
+        dispatcher = request.app.state.dispatcher
+        result = dispatcher.dispatch("process_context", body.text, key)
         if result.state in ("accepted", "replay"):
             return {
                 "accepted": True,
