@@ -290,6 +290,11 @@ class FakeHost:
         # after construction (host_factory takes no args).
         self.aggregator = None
         self.aggregator_lock = threading.Lock()
+        # WS3 slice 3: headless agenda controller — defaults to None (mirrors
+        # a resilient-construction-failed EngineHost); tests that need a live
+        # one set `host.agenda = KiraAgendaController()` after construction.
+        self.agenda = None
+        self.agenda_lock = threading.Lock()
 
     def start(self):
         pass

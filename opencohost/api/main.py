@@ -41,6 +41,13 @@ from fastapi.responses import JSONResponse
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
+    AgendaMetrics,
+    AgendaResponse,
+    AgendaSessionRequest,
+    AgendaSessionSettings,
+    AgendaTopicActionRequest,
+    AgendaTopicOut,
+    AgendaTopicRequest,
     AvatarConfigRequest,
     AvatarConfigResponse,
     ChatTurnRequest,
@@ -259,6 +266,55 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
     )
 
 
+# POST /api/agenda/topic/action verb whitelist — mirrors _COMMAND_WHITELIST.
+# "reject" is not a KiraAgendaController method (only approve/queue/remove/
+# move exist) — omitted rather than mapped to a lossy approximation.
+_AGENDA_ACTION_WHITELIST = frozenset({"approve", "queue", "remove", "move"})
+
+
+def _agenda_topic_out(topic) -> AgendaTopicOut:
+    return AgendaTopicOut(
+        id=topic.id,
+        title=topic.title,
+        angle=topic.angle,
+        priority=topic.priority,
+        response_length=topic.response_length,
+        status=topic.status.value,
+        turns_spoken=topic.turns_spoken,
+        confidence=topic.confidence,
+        source=topic.source,
+    )
+
+
+def _agenda_response(agenda) -> AgendaResponse:
+    metrics = agenda.get_metrics()
+    return AgendaResponse(
+        state=agenda.state.value,
+        active_topic=_agenda_topic_out(agenda.active_topic) if agenda.active_topic else None,
+        queued_topics=[_agenda_topic_out(t) for t in agenda.queued_topics()],
+        drafted_topics=[_agenda_topic_out(t) for t in agenda.drafted_topics()],
+        session_settings=AgendaSessionSettings(
+            max_turns_per_topic=agenda.max_turns_per_topic,
+            rhythm=agenda.rhythm,
+            response_length=agenda.response_length,
+            safety_mode=agenda.safety_mode,
+            profile_style=agenda.profile.get("style", ""),
+        ),
+        metrics=AgendaMetrics(
+            total_rejections=metrics["total_rejections"],
+            by_error_code=metrics["by_error_code"],
+            by_guardrail=metrics["by_guardrail"],
+            avg_similarity_overlap_pct=metrics["avg_similarity_overlap_pct"],
+            current_state=metrics["current_state"],
+            failure_count=metrics["failure_count"],
+            response_length=metrics["response_length"],
+            active_topic=metrics["active_topic"],
+            topics_queued=metrics["topics_queued"],
+            last_outputs_count=metrics["last_outputs_count"],
+        ),
+    )
+
+
 def _avatar_config_response(cfg) -> AvatarConfigResponse:
     return AvatarConfigResponse(
         enabled=cfg.enabled,
@@ -387,6 +443,69 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             pinned=pinned,
             editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
         )
+
+    @app.get("/api/agenda", response_model=AgendaResponse)
+    def get_agenda(request: Request):
+        agenda = getattr(request.app.state.host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        with request.app.state.host.agenda_lock:
+            return _agenda_response(agenda)
+
+    @app.post("/api/agenda/topic", response_model=AgendaResponse)
+    def post_agenda_topic(request: Request, body: AgendaTopicRequest):
+        host = request.app.state.host
+        agenda = getattr(host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        with host.agenda_lock:
+            try:
+                agenda.add_topic(body.title, angle=body.angle or "")
+            except ValueError as exc:
+                return JSONResponse(status_code=422, content={"detail": str(exc)})
+            return _agenda_response(agenda)
+
+    @app.post("/api/agenda/topic/action", response_model=AgendaResponse)
+    def post_agenda_topic_action(request: Request, body: AgendaTopicActionRequest):
+        host = request.app.state.host
+        agenda = getattr(host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        if body.action not in _AGENDA_ACTION_WHITELIST:
+            return JSONResponse(status_code=422, content={"detail": "unknown action"})
+        with host.agenda_lock:
+            try:
+                if body.action == "approve":
+                    agenda.approve_topic(body.topic_id)
+                elif body.action == "queue":
+                    agenda.queue_topic(body.topic_id)
+                elif body.action == "remove":
+                    agenda.remove_queued_topic(body.topic_id)
+                elif body.action == "move":
+                    agenda.move_queued_topic(body.topic_id, body.direction or 1)
+            except (ValueError, KeyError) as exc:
+                return JSONResponse(status_code=422, content={"detail": str(exc)})
+            return _agenda_response(agenda)
+
+    @app.put("/api/agenda/session", response_model=AgendaResponse)
+    def put_agenda_session(request: Request, body: AgendaSessionRequest):
+        host = request.app.state.host
+        agenda = getattr(host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        with host.agenda_lock:
+            if body.profile is not None and body.profile.style is not None:
+                try:
+                    agenda.set_profile({"style": body.profile.style})
+                except ValueError as exc:
+                    return JSONResponse(status_code=422, content={"detail": str(exc)})
+            agenda.set_session_settings(
+                max_turns_per_topic=body.max_turns_per_topic,
+                rhythm=body.rhythm,
+                response_length=body.response_length,
+                safety_mode=body.safety_mode,
+            )
+            return _agenda_response(agenda)
 
     @app.post("/api/perfiles/switch")
     def switch_profile(request: Request, body: SwitchProfileRequest):

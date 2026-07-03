@@ -16,6 +16,7 @@ import ollama
 from opencohost.core.health_monitor import HealthMonitor
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.smart_aggregator.aggregator import Aggregator
+from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
 try:
     import msvcrt
@@ -65,6 +66,10 @@ class EngineHost:
         # ponytail: one global lock, not per-source, since one process owns
         # exactly one Aggregator.
         self.aggregator_lock = threading.Lock()
+        self.agenda = None
+        # KiraAgendaController is plain lists/attrs, not thread-safe — one
+        # global lock, mirrors aggregator_lock (one process, one controller).
+        self.agenda_lock = threading.Lock()
 
     def start(self) -> None:
         self._acquire_lock()
@@ -86,12 +91,22 @@ class EngineHost:
             except Exception:
                 self.aggregator = None
                 _logger.exception("Aggregator construction failed; stream chat-live control-plane disabled")
+            # WS3 slice 3: headless agenda controller — pure state, no threads,
+            # no Ollama/TTS/OBS/UI calls. A construction failure must not brick
+            # the rest of the host, mirrors the Aggregator pattern above.
+            try:
+                self.agenda = KiraAgendaController()
+            except Exception:
+                self.agenda = None
+                _logger.exception("KiraAgendaController construction failed; agenda endpoints disabled")
         except Exception:
             self.stop()
             raise
 
     def stop(self) -> None:
         """Best-effort teardown — each step swallows exceptions."""
+        # ponytail: KiraAgendaController is pure state (no threads, no close()/
+        # reset() method) — nothing to tear down here.
         if self.aggregator is not None:
             try:
                 # connect() spawns a daemon source thread; disconnect() joins
