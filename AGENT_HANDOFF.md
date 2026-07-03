@@ -65,7 +65,10 @@ sub-tracks: memorias_fuzzy_upsert, automated PII redactor, historial_privacy_lan
    Python core exposed via a local FastAPI sidecar. Owner builds the React/Tauri app; binding model
    "one or the other" (React REPLACES Tk at cutover — never two frontends on one live engine; Tk stays
    as fallback). **BOTH tracks FULLY PLANNED + PAUSED before implementation** (owner cut at the planning
-   checkpoint 2026-07-02 — nothing implemented, no code, no E:\OpenCohost_UI created yet):
+   checkpoint 2026-07-02 — no backend code, no opencohost/api/ created). NOTE: the owner ALREADY has an
+   existing React/Tauri frontend at `E:\VoiceAI\OpenCohost_UI` (untracked, built 06-30, actively edited
+   07-02 incl. `src/lib/pythonEngineBridge.ts` + maquetación previews) — the frontend plan below is
+   greenfield and MUST RECONCILE with this existing scaffold, not overwrite it (engram #2803):
    - **Backend `kira_fastapi_api_layer_20260702`** — proposal #2793(v2) · spec #2796 · design #2798(**v2.1,
      dual-Opus judged** — judge round #2802) · tasks NOT yet run. Phase 1 = standalone `opencohost/api/`
      FastAPI process owning its OWN MotorVocalIA, 2 endpoints (`GET /api/status`, `POST /api/perfiles/switch`),
@@ -76,10 +79,14 @@ sub-tracks: memorias_fuzzy_upsert, automated PII redactor, historial_privacy_lan
      (PR1 dispatch+models ~250; PR2 main+engine_host ~400 → size:exception or 3-way). NEVER imports ui/ or
      touches core (verified).
    - **Frontend `opencohost_react_ui_20260702`** — proposal #2794 · spec #2797 · design #2799 · tasks #2801.
-     Vite+React+TS+Tauri v2+Tailwind greenfield at E:\OpenCohost_UI (SEPARATE repo), feature-based, zustand
-     (UI) + TanStack Query (server state), NO Prisma, OpenAPI-generated types = anti-drift lock. FE Phase 1
-     = status+profiles pages vs the 2 backend endpoints. Open: R6 spec/design conflict (types committed vs
-     git-ignored — reconcile to owner's "on-demand not committed" default before verify).
+     Vite+React+TS+Tauri v2+Tailwind, feature-based, zustand (UI) + TanStack Query (server state), NO Prisma,
+     OpenAPI-generated types = anti-drift lock. FE Phase 1 = status+profiles pages vs the 2 backend endpoints.
+     **MUST RECONCILE with the owner's EXISTING E:\VoiceAI\OpenCohost_UI scaffold** (#2803) — read their
+     pythonEngineBridge.ts/demoState.ts/App.tsx first, align our API-client + state design with it, keep
+     their maquetación previews, do NOT greenfield-overwrite; owner OK required before editing their WIP.
+     Also decide: nested at E:\VoiceAI\OpenCohost_UI (gitignore it — separate Rust/node build) vs sibling.
+     Open: R6 spec/design conflict (types committed vs git-ignored — reconcile to owner's "on-demand not
+     committed" default before verify).
    - **Cross-track reconciliation** #2800 (active_profile + CORS) folded into backend. **Model directive**
      #2795: backend design=Fable, everything else (explore/spec/frontend-design/judges/tasks)=Opus, apply=Sonnet 5.
    - **TO RESUME**: backend `sdd-tasks` (Opus) → apply both (Sonnet, 2-PR backend + 1 FE slice), each impl
