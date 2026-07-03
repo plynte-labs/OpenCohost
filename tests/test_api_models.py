@@ -4,6 +4,8 @@ Pins field names per design v2.1 (A-M1): StatusResponse MUST serialize
 `is_ready`/`is_speaking`/`is_processing` (NOT `ready`/`speaking`/`processing`).
 """
 
+import dataclasses
+
 from opencohost.api.models import (
     StatusResponse,
     HealthState,
@@ -11,6 +13,10 @@ from opencohost.api.models import (
     SwitchProfileResponse,
     RejectedResponse,
 )
+
+# Import from core is fine in a test — only the opencohost/api/ PACKAGE itself
+# must avoid core/ui imports.
+from opencohost.core.health_monitor import MonitorState
 
 
 def _health_kwargs():
@@ -70,20 +76,13 @@ def test_status_response_current_model_nullable():
 
 
 def test_health_state_mirrors_monitor_state_fields():
+    # Derived from the source of truth (not hardcoded): must fail if
+    # MonitorState gains/loses a field that HealthState does not mirror.
+    expected_fields = {f.name for f in dataclasses.fields(MonitorState)}
+
     health = HealthState(**_health_kwargs())
     dumped = health.model_dump()
-    assert set(dumped.keys()) == {
-        "vram_status",
-        "rtf_status",
-        "ollama_status",
-        "qwen_status",
-        "overall_status",
-        "ollama_lifecycle",
-        "qwen_lifecycle",
-        "free_vram_mb",
-        "rtf_rolling_avg",
-        "last_updated",
-    }
+    assert set(dumped.keys()) == expected_fields
 
 
 def test_health_state_rtf_rolling_avg_nullable():

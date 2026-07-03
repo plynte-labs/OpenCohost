@@ -13,7 +13,7 @@ from queue import Queue
 
 import pytest
 
-from opencohost.api.dispatch import Dispatcher
+from opencohost.api.dispatch import Dispatcher, _DEFAULT_TTL_SECONDS
 
 COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
 
@@ -142,3 +142,53 @@ def test_dispatch_does_no_io():
         builtins.open = original_open
 
     assert result.state == "accepted"
+
+
+def test_default_ttl_seconds_pinned():
+    # Pins the intended default so a regression (e.g. accidental unit change)
+    # fails the suite instead of silently shipping.
+    assert _DEFAULT_TTL_SECONDS == 120.0
+
+
+def test_hash_payload_is_key_order_independent():
+    # Pins sort_keys=True in _hash_payload — must fail if removed, since a
+    # dict re-serialized in a different key order would otherwise hash
+    # differently for what is semantically the same payload.
+    assert Dispatcher._hash_payload({"a": 1, "b": 2}) == Dispatcher._hash_payload({"b": 2, "a": 1})
+
+
+def test_rejected_dispatch_with_key_does_not_cache_queue_full():
+    q = Queue()
+    for _ in range(16):
+        q.put_nowait(("noop", {}))
+    d = Dispatcher(q)
+
+    result = d.dispatch("set_profile", _payload(), key="k1")
+    assert result.state == "queue_full"
+    assert result.command_id is None
+    assert "k1" not in d._cache
+
+    # Drain the queue and retry with the same key: must be a fresh accept,
+    # not a phantom replay of a command_id that was never actually enqueued.
+    for _ in range(16):
+        q.get_nowait()
+    retry = d.dispatch("set_profile", _payload(), key="k1")
+    assert retry.state == "accepted"
+    assert q.qsize() == 1
+
+
+def test_rejected_dispatch_with_key_does_not_cache_conflict():
+    q = Queue()
+    d = Dispatcher(q)
+    first = d.dispatch("set_profile", _payload(), key="k1")
+    assert first.state == "accepted"
+
+    conflict = d.dispatch("set_profile", _payload(name="other_profile"), key="k1")
+    assert conflict.state == "conflict"
+    assert conflict.command_id is None
+
+    # The rejected (conflicting) request must not have overwritten the cache
+    # entry — the original command_id must still replay for the original payload.
+    replay = d.dispatch("set_profile", _payload(), key="k1")
+    assert replay.state == "replay"
+    assert replay.command_id == first.command_id
