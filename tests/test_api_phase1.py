@@ -42,6 +42,30 @@ def test_log_sink_drain_never_logs_and_returns_instantly(caplog):
     assert len(caplog.records) == 0
 
 
+def test_log_sink_drain_leaks_nothing_to_any_channel(monkeypatch, capsys):
+    """PRIVACY: _Drain.put must not leak dialogue via stdout/stderr or disk —
+    `logging` is only one of several channels a regression could use."""
+    import builtins
+
+    import opencohost.api.engine_host as engine_host_mod
+
+    def _forbidden_open(*args, **kwargs):
+        raise AssertionError("_Drain.put must never open a file")
+
+    def _forbidden_print(*args, **kwargs):
+        raise AssertionError("_Drain.put must never print")
+
+    monkeypatch.setattr(builtins, "open", _forbidden_open)
+    monkeypatch.setattr(builtins, "print", _forbidden_print)
+
+    sink = engine_host_mod._Drain()
+    sink.put("\U0001f9e0 [Kira]: this is secret generated dialogue")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_engine_host_stop_sends_sentinel_and_tears_down(tmp_path, monkeypatch):
     import opencohost.api.engine_host as engine_host_mod
 
@@ -134,6 +158,39 @@ def test_engine_host_start_second_holder_raises(tmp_path, monkeypatch):
             second.start()
     finally:
         first.stop()
+
+
+def test_engine_host_start_wires_drain_as_log_queue_and_noop_ui_callback(tmp_path, monkeypatch):
+    """PRIVACY wiring: start() must construct MotorVocalIA with a _Drain
+    instance as the log_queue (not a real queue.Queue or logging-backed
+    sink) and the module's _noop_event as ui_callback."""
+    import opencohost.api.engine_host as engine_host_mod
+
+    fake_motor = MagicMock()
+    fake_motor.command_queue = Queue()
+    fake_motor.current_model = None
+    fake_monitor = MagicMock()
+
+    captured = {}
+
+    def _spy_motor_ctor(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return fake_motor
+
+    monkeypatch.setattr(engine_host_mod, "MotorVocalIA", _spy_motor_ctor)
+    monkeypatch.setattr(engine_host_mod, "HealthMonitor", lambda: fake_monitor)
+    monkeypatch.setattr(engine_host_mod, "ollama", MagicMock())
+
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+
+        assert len(captured["args"]) >= 1
+        assert isinstance(captured["args"][0], engine_host_mod._Drain)
+        assert captured["kwargs"].get("ui_callback") is engine_host_mod._noop_event
+    finally:
+        host.stop()
 
 
 # ──────────────────────────────────────────────────────────────────────────
