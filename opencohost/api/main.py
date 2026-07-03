@@ -44,6 +44,9 @@ from opencohost.api.models import (
     ModelsResponse,
     ProfilesListResponse,
     StatusResponse,
+    StreamChatLiveResponse,
+    StreamConnectRequest,
+    StreamLimitsRequest,
     SwitchProfileRequest,
     TTSConfigResponse,
 )
@@ -60,6 +63,7 @@ from opencohost.config.settings import (
     resolve_llm_tiers,
 )
 from opencohost.core.profiles import cargar_perfiles
+from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 # GET /api/models external I/O bound — short client timeout so a stalled/
 # unreachable Ollama daemon degrades the response instead of pinning a
@@ -332,6 +336,83 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
         return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    def _stream_state(agg) -> StreamChatLiveResponse:
+        # R8: STATE + LIMITS ONLY — never read anything but the accessors
+        # below (no message/user/text field exists on Aggregator's public
+        # surface for this to leak from).
+        source = agg._source
+        connected = source is not None and source.is_connected()
+        return StreamChatLiveResponse(
+            connected=connected,
+            platform=source.platform if source is not None else None,
+            source_id=source._source_id if source is not None else None,
+            threshold_per_second=agg.activity.threshold_per_second,
+            cooldown_seconds=agg.activity.cooldown_seconds,
+            max_messages_per_user=agg._spam_max_messages,
+            filter_policy=agg.get_filter_policy(),
+        )
+
+    @app.get("/api/stream/chat-live", response_model=StreamChatLiveResponse)
+    def get_stream_chat_live(request: Request):
+        agg = getattr(request.app.state.host, "aggregator", None)
+        if agg is None:
+            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
+        return _stream_state(agg)
+
+    @app.post("/api/stream/chat-live/connect", response_model=StreamChatLiveResponse)
+    def post_stream_connect(request: Request, body: StreamConnectRequest):
+        host = request.app.state.host
+        agg = getattr(host, "aggregator", None)
+        if agg is None:
+            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
+        try:
+            parsed = parse_chat_url(body.url)
+        except ValueError:
+            return JSONResponse(status_code=422, content={"detail": "invalid_url"})
+        if not host.aggregator_lock.acquire(blocking=False):
+            return JSONResponse(status_code=409, content={"detail": "busy"})
+        try:
+            agg.connect(parsed["source_id"], platform=parsed["platform"])
+        finally:
+            host.aggregator_lock.release()
+        return _stream_state(agg)
+
+    @app.post("/api/stream/chat-live/disconnect", response_model=StreamChatLiveResponse)
+    def post_stream_disconnect(request: Request):
+        host = request.app.state.host
+        agg = getattr(host, "aggregator", None)
+        if agg is None:
+            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
+        # Single-flight with connect: both mutate agg._source, so serialize
+        # them on the same lock (mirrors post_stream_connect) to avoid a
+        # disconnect racing an in-flight connect on _source.
+        if not host.aggregator_lock.acquire(blocking=False):
+            return JSONResponse(status_code=409, content={"detail": "busy"})
+        try:
+            agg.disconnect()
+        finally:
+            host.aggregator_lock.release()
+        return _stream_state(agg)
+
+    @app.put("/api/stream/chat-live/limits", response_model=StreamChatLiveResponse)
+    def put_stream_limits(request: Request, body: StreamLimitsRequest):
+        agg = getattr(request.app.state.host, "aggregator", None)
+        if agg is None:
+            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
+        if body.threshold_per_second is not None or body.cooldown_seconds is not None:
+            agg.set_activity_limits(
+                threshold_per_second=body.threshold_per_second,
+                cooldown_seconds=body.cooldown_seconds,
+            )
+        if body.max_messages_per_user is not None:
+            agg.set_spam_limits(max_messages_per_user=body.max_messages_per_user)
+        if body.filter_policy is not None:
+            try:
+                agg.set_filter_policy(body.filter_policy)
+            except ValueError:
+                return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
+        return _stream_state(agg)
 
     @app.post("/api/commands")
     def post_command(request: Request, body: CommandRequest):

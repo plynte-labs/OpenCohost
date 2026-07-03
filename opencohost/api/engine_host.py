@@ -6,13 +6,16 @@ pair for a standalone process — wired the same way `app_shell.py` wires
 the Tk app's engine, but never shared with it.
 """
 
+import logging
 import os
 import tempfile
+import threading
 
 import ollama
 
 from opencohost.core.health_monitor import HealthMonitor
 from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.smart_aggregator.aggregator import Aggregator
 
 try:
     import msvcrt
@@ -20,6 +23,15 @@ except ImportError:  # pragma: no cover - Phase 1 targets Windows only
     msvcrt = None
 
 _LOCK_PATH = os.path.join(tempfile.gettempdir(), "opencohost_api_engine.lock")
+
+# opencohost/api/engine_host.py -> opencohost/ -> opencohost/config/smart_aggregator.yaml
+_AGGREGATOR_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "smart_aggregator.yaml",
+)
+
+_logger = logging.getLogger(__name__)
 
 
 class _Drain:
@@ -48,6 +60,11 @@ class EngineHost:
         self._lock_fd = None
         self.motor = None
         self.monitor = None
+        self.aggregator = None
+        # RF3 control-plane single-flight guard for POST .../connect —
+        # ponytail: one global lock, not per-source, since one process owns
+        # exactly one Aggregator.
+        self.aggregator_lock = threading.Lock()
 
     def start(self) -> None:
         self._acquire_lock()
@@ -61,12 +78,27 @@ class EngineHost:
             except Exception:
                 pass
             self.monitor.start()
+            # RF3 stream chat-live control-plane: resilient by design — a
+            # missing config or optional chat-source dependency must not
+            # brick the engine/profiles/commands surface.
+            try:
+                self.aggregator = Aggregator(config_path=_AGGREGATOR_CONFIG_PATH, llm_interface=None)
+            except Exception:
+                self.aggregator = None
+                _logger.exception("Aggregator construction failed; stream chat-live control-plane disabled")
         except Exception:
             self.stop()
             raise
 
     def stop(self) -> None:
         """Best-effort teardown — each step swallows exceptions."""
+        if self.aggregator is not None:
+            try:
+                # connect() spawns a daemon source thread; disconnect() joins
+                # it. Must run before the motor/lock teardown below.
+                self.aggregator.disconnect()
+            except Exception:
+                pass
         if self.motor is not None:
             try:
                 self.motor.command_queue.put(None)  # only engine-thread stop path

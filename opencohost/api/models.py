@@ -110,6 +110,35 @@ class TTSConfigResponse(BaseModel):
     heavy_available: bool
 
 
+class StreamChatLiveResponse(BaseModel):
+    """GET /api/stream/chat-live (Tier C, R8-CRITICAL).
+
+    CONNECTION STATE + LIMITS ONLY — never add a field carrying viewer
+    message text. Mirrors opencohost.smart_aggregator.aggregator.Aggregator
+    state accessors (`_source`, `.activity`, `._spam_max_messages`,
+    `.get_filter_policy()`) verbatim.
+    """
+
+    connected: bool
+    platform: Optional[str]
+    source_id: Optional[str]
+    threshold_per_second: float
+    cooldown_seconds: float
+    max_messages_per_user: int
+    filter_policy: str
+
+
+class StreamConnectRequest(BaseModel):
+    url: str
+
+
+class StreamLimitsRequest(BaseModel):
+    threshold_per_second: Optional[float] = None
+    cooldown_seconds: Optional[float] = None
+    max_messages_per_user: Optional[int] = None
+    filter_policy: Optional[str] = None
+
+
 class MemoriaStatsResponse(BaseModel):
     """GET /api/memoria/stats (Tier B, R8-CRITICAL).
 

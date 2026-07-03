@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from queue import Queue
 from unittest.mock import MagicMock
 
@@ -283,6 +284,12 @@ class FakeHost:
         self.motor = FakeMotor()
         self.monitor = FakeMonitor()
         self.stop_calls = 0
+        # RF3 stream control-plane (Workstream 2): FakeHost defaults to no
+        # aggregator (mirrors a resilient-construction-failed EngineHost) —
+        # tests that need a live one set `host.aggregator = FakeAggregator()`
+        # after construction (host_factory takes no args).
+        self.aggregator = None
+        self.aggregator_lock = threading.Lock()
 
     def start(self):
         pass
