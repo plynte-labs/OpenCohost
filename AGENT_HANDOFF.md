@@ -19,6 +19,31 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-03 (React/Tauri migration: backend DONE+MERGED, frontend design-system built, UI PIVOT to a "music-player" concept — awaiting owner)
+
+Big session: the React/Tauri UI migration off CustomTkinter. **The Tk app is 100% untouched** (verified: `git diff d85dcdb..HEAD` on maintenance touches ONLY `opencohost/api/**` + tests + pyproject + README + .gitignore — ZERO edits to ui/core/__main__/config). Tk remains the real, working app.
+
+### Backend — FastAPI layer, DONE + MERGED to maintenance (@ `67a0c9c`)
+Standalone `opencohost/api/` (owns its OWN MotorVocalIA, never imports ui). Full SDD cycle (proposal→spec→design v2.1 judged→tasks). PR1 (pydantic models + command Dispatcher) + PR2 (engine_host + main app/lifespan/CORS, size:exception) each dual-Opus judged + mutation-verified fixes, + a `GET /api/perfiles` addendum. Endpoints: `GET /api/status`, `GET /api/perfiles` (names only), `POST /api/perfiles/switch` (Idempotency-Key). **accepted≠applied** contract. **LIVE runtime-validated** vs real MotorVocalIA + Ollama (qwen3:1.7b): status/switch-applied(~2s)/idempotent-replay/404/health/clean-shutdown all PASSED (engram #2811). 3202 tests, 0 regressions. NOT pushed. Optional `api` extra (Tk install never pulls fastapi/uvicorn).
+- **PHASE-2 PRIVACY BLOCKER (engram #2809):** `llm_engine.py:1531` `logger.info(...dialogo[:200])` persists Kira's dialogue to the on-disk file logger, BYPASSING the API's `_Drain` (the drain only covers the `log_queue`/UI path). INERT in Phase 1 (the API engine wires no generating feeder → never reaches :1531). Any future generating endpoint MUST neutralize :1531 first. (Pre-existing in the Tk app too.)
+
+### Frontend — OpenCohost_UI is its OWN git repo (git-init'd this session, gitignored in the Python repo)
+React 18 + Vite 5 + TS + Tauri v2 + Tailwind + **TanStack Query (pinned, owner chose despite the May-2026 npm supply-chain incident)** + Zustand + a **3-theme token design system (cockpit/aurora/studio) with a live switcher**. Slices on stacked branches, NONE merged to the frontend `master`:
+- Slice A (`feat/react-ui-s1-data-layer` @ `8e61b95`) — typed API client + hooks, judged + fixed (idempotency-key re-switch HIGH fixed, obs #2826).
+- Slice B1 (`feat/react-ui-s2-design-system` @ `47b66de`) — tokens/3-themes/switcher/primitives + StatusRail + ProfileSwitcher wired, judged + 4 fixes (tailwind-merge→2.6.0 focus-ring HIGH, FOUC, studio AA contrast, useTheme shared store). Follow-up #2828 (studio badge-tint <AA).
+- Slice B2 (`feat/react-ui-s3-panels`) — Modelo/tiers, Voz-TTS, PTT, Memoria panels (designed, local state — no backend endpoints exist for them). Judged clean (one MEDIUM: ModelCard tier radiogroup a11y — fix pending).
+- Slice B3 (`feat/react-ui-s4-experience-selects`, PARTIAL — stopped on the pivot) — committed: `Select` primitive, `ExperiencePanel` (avatar-states/transcript/composer), PTTCard affordance fix. Tauri icons committed (`ed06c42`).
+- `safe.directory` exception added for OpenCohost_UI (its files are owned by Windows user `CodexSandboxOffline` = owner's OTHER agent that scaffolded it). Supply-chain: exact pins, pnpm 11 script-block, `pnpm audit` (4 pre-existing vite-5 findings, dev-only). Avatar art copied to `public/avatar/` (gitignored — art never committed).
+
+### ⭐ OPEN DECISION — UI PIVOT to a "music-player" concept (AWAITING OWNER)
+Owner reconceived the whole UI as YT-Music/Spotify with Kira's essence: **Kira avatar = album cover**, **the conversation = the "up next" queue**, **sidebar = section nav + profiles-as-playlists**, **bottom bar = "now playing Kira"** (Hablar=play, TTS progress=seek, PTT, LiveVoice). **Memories NOT music-styled.** Palette: CTk-legacy dark blue-black + **Kira spectrum** (cyan→violet→pink, her hair) — distinctive, not Spotify-green/YT-red. Mockup published (artifact `39bf1d45-91ac-4a7d-a532-f306bd96d2bc`, scratchpad `kira-player-concept.html`). **Next: owner reacts/adjusts, then reshape the shell** — the design system + B1/B2/B3 components (ExperiencePanel→album-art, transcript→queue, Select, control cards, avatar-states) are REUSABLE; only the shell/layout changes.
+
+### Model directive (this migration)
+Owner: "solo agentes Opus, Sonnet" (no Fable). Backend design used Fable 5; everything else Opus/Sonnet; apply = Sonnet 5.
+
+### Non-migration owner-owed (still open)
+Push maintenance to origin (never pushed); VocalAIApp flag-ON smoke test (#2789 init-order gap); the mutation-testing "don't revert" message was investigated → **benign harness file-tracking artifact, not injection** (engram #2812).
+
 ## LATEST SNAPSHOT — 2026-07-02 (kira_memory_persistence — 8/8 SLICES COMPLETE + live-validated + MERGED to maintenance)
 
 Persistent per-profile Kira memory ("opencohost_memorias") shipped end-to-end on a local
