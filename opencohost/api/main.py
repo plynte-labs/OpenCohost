@@ -50,10 +50,15 @@ from opencohost.api.models import (
     AgendaTopicRequest,
     AvatarConfigRequest,
     AvatarConfigResponse,
+    ChatLastReplyResponse,
     ChatTurnRequest,
     CommandRequest,
     HealthResponse,
     HealthState,
+    MemoriaListResponse,
+    MemoriaListItem,
+    MemoriaPurgeRequest,
+    MemoriaPurgeResponse,
     MemoriaStatsResponse,
     ModelsResponse,
     MusicLibraryResponse,
@@ -94,6 +99,9 @@ _OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.5
 # GET /api/memoria/stats sqlite reads — short, mirrors memoria_store.py's
 # READ_TIMEOUT_SECONDS (bounded, fail-open to a zero count).
 _STATS_DB_READ_TIMEOUT_SECONDS = 0.5
+
+# POST /api/memoria/purge — mirrors memoria_store.py's WRITE_TIMEOUT_SECONDS.
+_MEMORIA_WRITE_TIMEOUT_SECONDS = 1.0
 
 
 def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) -> list[str]:
@@ -149,6 +157,40 @@ def _editorial_cards_by_status(db_path: str) -> dict:
             return {status: count for status, count in rows}
     except sqlite3.Error:
         return {}
+
+
+def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
+    """Bounded, fail-open metadata read for GET /api/memoria/list (R8).
+
+    The SELECT names ONLY metadata columns — title/content are never read
+    off disk in the first place, so there is nothing to filter out of the
+    row before it reaches MemoriaListItem (defense in depth, not just a
+    field omission on the Pydantic model)."""
+    if not db_path or not os.path.exists(db_path):
+        return []
+    try:
+        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, created_at, updated_at, revision, pinned, private FROM memorias "
+                "WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
+                (profile_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
+def _purge_memoria(db_path: str, profile_id: str) -> int:
+    """Bounded, fail-open hard-delete for POST /api/memoria/purge."""
+    if not db_path or not os.path.exists(db_path):
+        return 0
+    try:
+        with closing(sqlite3.connect(db_path, timeout=_MEMORIA_WRITE_TIMEOUT_SECONDS)) as conn, conn:
+            cur = conn.execute("DELETE FROM memorias WHERE profile_id = ?", (profile_id,))
+            return cur.rowcount
+    except sqlite3.Error:
+        return 0
 
 # Server-side verb whitelist for POST /api/commands — exactly the verbs
 # MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
@@ -380,14 +422,29 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.get("/api/status", response_model=StatusResponse)
     def get_status(request: Request) -> StatusResponse:
         host = request.app.state.host
+        is_ready = host.motor.is_ready
+        is_speaking = host.motor.is_speaking
+        is_processing = host.motor.is_processing
+        # F4: derive coarse avatar state (motor has no AvatarStateBridge).
+        # Mirrors the FE deriveAvatarState fallback so both agree.
+        if is_speaking:
+            avatar_state = "speaking"
+        elif is_processing:
+            avatar_state = "thinking"
+        elif not is_ready:
+            avatar_state = "sleeping"
+        else:
+            avatar_state = "idle"
         return StatusResponse(
-            is_ready=host.motor.is_ready,
+            is_ready=is_ready,
             current_model=host.motor.current_model,
-            is_speaking=host.motor.is_speaking,
-            is_processing=host.motor.is_processing,
+            is_speaking=is_speaking,
+            is_processing=is_processing,
             active_profile=host.motor._current_profile_name,
             health=HealthState(**dataclasses.asdict(host.monitor.state)),
             state_version=request.app.state.dispatcher.state_version,
+            ollama_warming=getattr(host, "ollama_warming", False),
+            avatar_state=avatar_state,
         )
 
     @app.get("/api/perfiles", response_model=ProfilesListResponse)
@@ -453,6 +510,32 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             pinned=pinned,
             editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
         )
+
+    @app.get("/api/memoria/list", response_model=MemoriaListResponse)
+    def get_memoria_list(profile_id: str) -> MemoriaListResponse:
+        if not MEMORIAS_ENABLED:
+            return MemoriaListResponse(items=[])
+        rows = _list_memoria_metadata(MEMORIAS_DB, profile_id)
+        return MemoriaListResponse(
+            items=[
+                MemoriaListItem(
+                    id=row["id"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    revision=row["revision"],
+                    pinned=bool(row["pinned"]),
+                    private=bool(row["private"]),
+                )
+                for row in rows
+            ]
+        )
+
+    @app.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)
+    def post_memoria_purge(body: MemoriaPurgeRequest) -> MemoriaPurgeResponse:
+        if not MEMORIAS_ENABLED:
+            return MemoriaPurgeResponse(deleted=0)
+        deleted = _purge_memoria(MEMORIAS_DB, body.profile_id)
+        return MemoriaPurgeResponse(deleted=deleted)
 
     @app.get("/api/music/library", response_model=MusicLibraryResponse)
     def get_music_library(request: Request):
@@ -665,6 +748,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
         return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    @app.get("/api/chat/last-reply", response_model=ChatLastReplyResponse)
+    def get_chat_last_reply(request: Request) -> ChatLastReplyResponse:
+        # R8-safe: surfaces Kira's OWN generated reply text only — see
+        # ChatReplySink docstring (engine_host.py). Never the viewer/operator
+        # text that triggered it.
+        return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
 
     @app.get("/api/obs/config", response_model=ObsConfigResponse)
     def get_obs_config() -> ObsConfigResponse:

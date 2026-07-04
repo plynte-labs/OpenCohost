@@ -284,6 +284,9 @@ class FakeHost:
         self.motor = FakeMotor()
         self.monitor = FakeMonitor()
         self.stop_calls = 0
+        # S4: eager-wake warming flag — defaults False (mirrors a fresh
+        # EngineHost that has not yet triggered `_wake_ollama_eager`).
+        self.ollama_warming = False
         # RF3 stream control-plane (Workstream 2): FakeHost defaults to no
         # aggregator (mirrors a resilient-construction-failed EngineHost) —
         # tests that need a live one set `host.aggregator = FakeAggregator()`
@@ -299,6 +302,11 @@ class FakeHost:
         # resilient-construction-failed EngineHost); tests that need a live
         # one set `host.music_library = MusicLibrary(...)` after construction.
         self.music_library = None
+        # P3: bounded chat-reply sink — real ChatReplySink (not a fake), so
+        # main.py's endpoint tests exercise the same read contract as prod.
+        from opencohost.api.engine_host import ChatReplySink
+
+        self.chat_sink = ChatReplySink()
 
     def start(self):
         pass
@@ -500,7 +508,12 @@ def test_status_shape_and_read_purity():
                 "active_profile",
                 "health",
                 "state_version",
+                "ollama_warming",
+                "avatar_state",
             }
+            assert isinstance(body["avatar_state"], str)
+            # FakeMotor is ready, not speaking, not processing -> derived "idle".
+            assert body["avatar_state"] == "idle"
         assert body["state_version"] == 0
         assert app.state.host.motor.command_queue.qsize() == 0
         assert app.state.dispatcher.state_version == 0

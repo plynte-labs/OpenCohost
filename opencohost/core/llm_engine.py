@@ -14,7 +14,7 @@ try:
 except ImportError:
     edge_tts = None  # optional cloud-TTS dependency; Piper offline path stays available
 from collections import deque, Counter
-from typing import Optional
+from typing import Callable, Optional
 
 from opencohost.config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
@@ -168,10 +168,13 @@ class MotorVocalIA(threading.Thread):
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
     y comunicación con el servidor TTS vía HTTP.
     """
-    def __init__(self, log_queue, ui_callback):
+    def __init__(self, log_queue, ui_callback, dialogue_callback: Optional[Callable[[str, str], None]] = None):
         super().__init__(daemon=True)
         self.log_queue = log_queue
         self.ui_callback = ui_callback
+        # P3 producer (opt-in): Kira's OWN generated reply text, never raw
+        # viewer chat (R8). None = zero behavior change for the CTk app.
+        self.dialogue_callback = dialogue_callback
         self.command_queue = queue.Queue()
         self._reasoning_model_cache: dict[str, bool] = {}
         self._model_ctx_limit: dict[str, int] = {}
@@ -641,6 +644,7 @@ class MotorVocalIA(threading.Thread):
             self._record_accepted_agenda_output(dialogo)
             self._log("Agenda: usando respuesta prefabricada durante el audio anterior.")
             self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
+            self._emit_dialogue(dialogo, item.get("source", "kira-agenda"))
             self._hablar(dialogo, source=item.get("source", "kira-agenda"))
 
         threading.Thread(target=speaker, daemon=True).start()
@@ -1528,6 +1532,9 @@ class MotorVocalIA(threading.Thread):
 
             if commit_history:
                 self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
+                # FIX-B2: emission moved to the speak site (_ejecutar_inferencia)
+                # so guardrail/repetition fallbacks — which return EARLIER than
+                # this block yet are still spoken — also update last-reply.
             logger.info(f"{log_prefix} response ({elapsed:.2f}s): {dialogo[:200]}")
 
             if commit_history:
@@ -2377,6 +2384,14 @@ class MotorVocalIA(threading.Thread):
     def _ejecutar_inferencia(self, contexto, source: str = "direct", *, history_text: Optional[str] = None):
         dialogo = self._generar_dialogo(contexto, source=source, commit_history=True, history_text=history_text)
         if dialogo:
+            # FIX-B2: single emit chokepoint for every spoken live line — the
+            # main reply AND the guardrail/repetition fallbacks all arrive here
+            # as a non-empty `dialogo` and are spoken below, so last-reply stays
+            # in sync with what Kira actually says. Agenda prefetch playback
+            # emits from its own speaker (play_prefetched_agenda). Guarded, so a
+            # raising callback never blocks speech. R8: Kira's own text only.
+            emit_source = source if source.startswith("kira-agenda") else "kira"
+            self._emit_dialogue(dialogo, emit_source)
 
             self._hablar(dialogo, source=source)
             # Measure-first telemetry seam: a chat turn actually played to completion —
@@ -2809,6 +2824,20 @@ class MotorVocalIA(threading.Thread):
             self._speaking = False
             self._current_speech_source = None
         self.ui_callback("speaking_end")
+
+    def _emit_dialogue(self, text: str, source: str) -> None:
+        """P3 producer sink: forwards Kira's own generated reply text.
+
+        Opt-in (dialogue_callback defaults to None). A raising callback must
+        never break the turn, so it's guarded the same way ui_callback sites
+        are — logged, swallowed, never re-raised.
+        """
+        if self.dialogue_callback is None:
+            return
+        try:
+            self.dialogue_callback(text, source)
+        except Exception:
+            logger.exception("dialogue_callback failed")
 
     def _log(self, msg, level="info"):
         prefix = "[IA]"

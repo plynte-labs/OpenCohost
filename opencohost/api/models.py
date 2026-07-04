@@ -42,6 +42,16 @@ class StatusResponse(BaseModel):
     active_profile: str
     health: HealthState
     state_version: int
+    # S4 (P2): eager-wake warming visibility — True while the daemon-thread
+    # `EngineHost._wake_ollama_eager` wake is still waiting on Ollama.
+    ollama_warming: bool = False
+    # F4: coarse avatar/pipeline state for the FE avatar view. The motor
+    # (MotorVocalIA) does NOT expose the UI-layer AvatarStateBridge, so this
+    # is DERIVED from is_speaking/is_processing/is_ready in the /api/status
+    # handler. Only "speaking"/"thinking"/"idle"/"sleeping" can be produced
+    # here; the richer states (listening/speaking_alt/angry) live solely in
+    # app_shell's bridge and are not reachable from the API host.
+    avatar_state: str = "idle"
 
 
 class ProfilesListResponse(BaseModel):
@@ -84,6 +94,22 @@ class ChatTurnRequest(BaseModel):
 
     text: str
     idempotency_key: Optional[str] = None
+
+
+class ChatLastReplyResponse(BaseModel):
+    """GET /api/chat/last-reply (P3, R8-safe).
+
+    Surfaces Kira's OWN generated reply text ONLY — mirrors the `_Drain` /
+    `ChatReplySink` privacy contract in engine_host.py. This is NOT the
+    viewer/operator chat that triggered the reply; that text never crosses
+    HTTP (R8). Before any turn: `{text: null, source: null, turn_id: 0,
+    ts: null}`.
+    """
+
+    text: Optional[str]
+    source: Optional[str]
+    turn_id: int
+    ts: Optional[float]
 
 
 class RejectedResponse(BaseModel):
@@ -352,3 +378,38 @@ class MemoriaStatsResponse(BaseModel):
     saved_memorias: int
     pinned: int
     editorial_cards_by_status: dict[str, int]
+
+
+class MemoriaListItem(BaseModel):
+    """One row of GET /api/memoria/list (Tier B, R8-CRITICAL).
+
+    METADATA ONLY — mirrors MemoriaStatsResponse's contract. Deliberately
+    has no `title`/`content` field, and the endpoint's SQL SELECT never
+    reads those columns in the first place (defense in depth, not just
+    field omission here).
+    """
+
+    id: str
+    created_at: str
+    updated_at: str
+    revision: int
+    pinned: bool
+    private: bool
+
+
+class MemoriaListResponse(BaseModel):
+    """GET /api/memoria/list response body."""
+
+    items: list[MemoriaListItem]
+
+
+class MemoriaPurgeRequest(BaseModel):
+    """POST /api/memoria/purge body."""
+
+    profile_id: str
+
+
+class MemoriaPurgeResponse(BaseModel):
+    """POST /api/memoria/purge response body."""
+
+    deleted: int

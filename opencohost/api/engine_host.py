@@ -6,16 +6,22 @@ pair for a standalone process — wired the same way `app_shell.py` wires
 the Tk app's engine, but never shared with it.
 """
 
+import collections
 import logging
 import os
+import shutil
 import tempfile
 import threading
+import time
 
 import ollama
 
-from opencohost.core.health_monitor import HealthMonitor
+from opencohost.config.settings import EDITORIAL_CARDS_DB, LOG_DIR, OLLAMA_MODELS_DIR
+from opencohost.core.agenda_persistence import AgendaPersistence
+from opencohost.core.health_monitor import HealthMonitor, OllamaWatchdog
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.music_library import MusicLibrary
+from opencohost.core.ollama_startup import OllamaStartupManager
 from opencohost.smart_aggregator.aggregator import Aggregator
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
@@ -54,6 +60,65 @@ def _noop_event(*_args, **_kwargs):
     pass
 
 
+def _find_ollama_executable():
+    """Locate the Ollama executable.
+
+    ponytail: duplicated (not imported) from
+    `opencohost/ui/model_panel.py:_find_ollama_executable` — that file is
+    forbidden for this slice, and importing `opencohost.ui` here would
+    violate this package's "never imports opencohost.ui" contract (see
+    main.py module docstring). Accept the ~15-line duplication instead.
+    Keep both copies in sync if the discovery order ever changes.
+    """
+    ollama_exe = shutil.which("ollama")
+    if ollama_exe:
+        return ollama_exe
+
+    candidates = []
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(os.path.join(local_appdata, "Programs", "Ollama", "ollama.exe"))
+
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(os.path.join(program_files, "Ollama", "ollama.exe"))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+class ChatReplySink:
+    """Bounded, thread-safe sink for GET /api/chat/last-reply (P3, R8-safe).
+
+    PRIVACY (mirrors `_Drain` above): this only ever receives Kira's OWN
+    generated reply text via `MotorVocalIA.dialogue_callback` — never raw
+    viewer/operator chat. R8 permits surfacing Kira's own words; it forbids
+    surfacing the trigger. Guarded by a lock, mirrors `aggregator_lock`
+    (one process, one sink) — ponytail: one global lock, not per-source.
+    """
+
+    def __init__(self, maxlen: int = 16):
+        self._replies = collections.deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+        self._turn_id = 0
+
+    def record(self, text: str, source: str) -> None:
+        with self._lock:
+            self._turn_id += 1
+            self._replies.append(
+                {"text": text, "source": source, "turn_id": self._turn_id, "ts": time.time()}
+            )
+
+    def last(self) -> dict:
+        with self._lock:
+            if not self._replies:
+                return {"text": None, "source": None, "turn_id": 0, "ts": None}
+            return dict(self._replies[-1])
+
+
 class EngineHost:
     """Owns a standalone MotorVocalIA + HealthMonitor pair for this process."""
 
@@ -72,11 +137,80 @@ class EngineHost:
         # global lock, mirrors aggregator_lock (one process, one controller).
         self.agenda_lock = threading.Lock()
         self.music_library = None
+        # P3: bounded sink for Kira's own generated reply text (R8-safe —
+        # see ChatReplySink docstring). Always present, even before start().
+        self.chat_sink = ChatReplySink()
+        # S4: single-flight guard for the eager Ollama wake below — one
+        # process, one wake attempt (mirrors aggregator_lock/agenda_lock).
+        self.ollama_wake_lock = threading.Lock()
+        self.ollama_warming = False
+
+    def _wake_ollama_eager(self) -> None:
+        """S4 (P2): eager, non-blocking Ollama server wake.
+
+        REJECTED alternative: lazy wake inside dispatch.py — rejected
+        because dispatch.py is a pure in-memory `queue.put_nowait`; probing
+        the network there would re-block the exact request path P2 exists
+        to protect. Owner's model is "like a microservice": warm eagerly on
+        boot, never block a request waiting for it.
+
+        Single-flight via `ollama_wake_lock.acquire(blocking=False)`: the
+        lock is acquired here, synchronously, before any thread is spawned,
+        so two concurrent callers can never both win and both spawn
+        `ollama serve`. The readiness probe (reused `OllamaWatchdog`, same
+        `/api/tags` check health_monitor already uses) and the actual
+        `start_and_wait` blocking wait both run ONLY on the daemon thread —
+        this method itself always returns immediately.
+        """
+        if not self.ollama_wake_lock.acquire(blocking=False):
+            return
+        ollama_exe = _find_ollama_executable()
+        if ollama_exe is None:
+            self.ollama_wake_lock.release()
+            return
+
+        self.ollama_warming = True
+
+        def _worker() -> None:
+            watchdog = OllamaWatchdog()
+
+            def _is_ready() -> bool:
+                watchdog.poll()
+                return watchdog.status == "healthy"
+
+            try:
+                # S4/FIX-B1: same log-file redirection as model_panel.py's UI
+                # path — the default stdout=PIPE/stderr=PIPE is undrained
+                # here, so `ollama serve` blocks once the OS pipe buffer
+                # fills and the whole engine stalls.
+                manager = OllamaStartupManager(
+                    is_ready=_is_ready,
+                    stdout_log_path=os.path.join(LOG_DIR, "ollama_startup_stdout.log"),
+                    stderr_log_path=os.path.join(LOG_DIR, "ollama_startup_stderr.log"),
+                )
+                manager.start_and_wait(ollama_exe, OLLAMA_MODELS_DIR)
+            except Exception:
+                _logger.exception("Eager Ollama wake failed")
+                # FIX-BE: release only on failure so a later retry can
+                # re-acquire — otherwise a raised start_and_wait leaves the
+                # lock held forever and Ollama can never be re-woken
+                # without a process restart. On success the lock stays
+                # held (matches prior behavior): single-flight for
+                # concurrent triggers depends on it, and a successful wake
+                # never needs a retry anyway.
+                self.ollama_wake_lock.release()
+            finally:
+                self.ollama_warming = False
+
+        threading.Thread(target=_worker, daemon=True, name="ollama-wake").start()
 
     def start(self) -> None:
         self._acquire_lock()
         try:
-            self.motor = MotorVocalIA(_Drain(), ui_callback=_noop_event)
+            self._wake_ollama_eager()
+            self.motor = MotorVocalIA(
+                _Drain(), ui_callback=_noop_event, dialogue_callback=self.chat_sink.record
+            )
             self.monitor = HealthMonitor()
             self.motor.health_monitor = self.monitor  # mirrors app_shell.py:196-197
             self.motor.start()
@@ -98,6 +232,7 @@ class EngineHost:
             # the rest of the host, mirrors the Aggregator pattern above.
             try:
                 self.agenda = KiraAgendaController()
+                AgendaPersistence(EDITORIAL_CARDS_DB).load_into(self.agenda)
             except Exception:
                 self.agenda = None
                 _logger.exception("KiraAgendaController construction failed; agenda endpoints disabled")
