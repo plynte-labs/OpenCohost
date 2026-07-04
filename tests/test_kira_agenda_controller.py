@@ -964,6 +964,32 @@ def test_suggestion_reject_marks_skipped():
     assert action.kind == "none"
 
 
+def test_reject_topic_drafted_becomes_skipped():
+    """reject_topic on a DRAFTED suggestion flips it to SKIPPED and returns None."""
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Borrador a rechazar")
+    assert topic.status == TopicStatus.DRAFTED
+    assert controller.reject_topic(topic.id) is None
+    assert topic.status == TopicStatus.SKIPPED
+
+
+def test_reject_topic_non_drafted_raises_value_error():
+    """reject_topic on a QUEUED (non-DRAFTED) topic raises ValueError."""
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema en cola", approved=True)
+    controller.queue_topic(topic.id)
+    assert topic.status == TopicStatus.QUEUED
+    with pytest.raises(ValueError, match="Only drafted suggestions can be rejected"):
+        controller.reject_topic(topic.id)
+
+
+def test_reject_topic_unknown_id_raises_key_error():
+    """reject_topic on an unknown topic_id raises KeyError via _topic()."""
+    controller = KiraAgendaController()
+    with pytest.raises(KeyError):
+        controller.reject_topic("does-not-exist")
+
+
 def test_suggestion_approve_reject_preserves_confidence_metadata():
     """Confidence and source metadata from the suggester survive through suggest_topics."""
     controller = KiraAgendaController()

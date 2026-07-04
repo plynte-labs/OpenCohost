@@ -56,6 +56,11 @@ from opencohost.api.models import (
     AvatarConfigResponse,
     ChatLastReplyResponse,
     ChatTurnRequest,
+    CohostProfileOut,
+    CohostProfileSaveRequest,
+    CohostProfileSelectRequest,
+    CohostProfileSelectResponse,
+    CohostProfilesResponse,
     CommandRequest,
     HealthResponse,
     HealthState,
@@ -65,6 +70,8 @@ from opencohost.api.models import (
     MemoriaListItem,
     MemoriaCaptureRequest,
     MemoriaMutationResponse,
+    MemoriaNoticeRequest,
+    MemoriaNoticeResponse,
     MemoriaPurgeRequest,
     MemoriaPurgeResponse,
     MemoriaStatsResponse,
@@ -101,8 +108,10 @@ from opencohost.config.settings import (
     MEMORIAS_ENABLED,
     MODELS_CATALOG,
     _canonical_model_tag,
+    load_memorias_notice_dismissed,
     load_piper_voice,
     load_tts_local_only,
+    save_memorias_notice_dismissed,
     load_tts_speed,
     resolve_llm_tiers,
 )
@@ -111,6 +120,12 @@ from opencohost.core.music_library import (
     ALLOWED_AUDIO_EXTENSIONS,
     KNOWN_MOODS,
     is_supported_audio_path,
+)
+from opencohost.core.cohost_profiles import (
+    load_cohost_profiles,
+    normalize_cohost_profile,
+    sanitize_profile_name,
+    save_cohost_profiles,
 )
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.smart_aggregator.url_parser import parse_chat_url
@@ -339,6 +354,25 @@ _config_lock = threading.Lock()
 # which is avatar.yaml-specific — a separate file gets a separate lock (D4).
 _profiles_lock = threading.Lock()
 
+# cohost_profiles.json write-lock (WU3): guards the read-modify-write of the
+# cohost-profiles file (save). A separate file gets a separate lock (D4).
+_cohost_profiles_lock = threading.Lock()
+
+
+def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
+    return CohostProfilesResponse(
+        profiles=[
+            CohostProfileOut(
+                name=name,
+                style=str(p.get("style", "")),
+                default_priority=str(p.get("default_priority", "normal")),
+                default_response_length=str(p.get("default_response_length", "normal")),
+            )
+            for name, p in profiles.items()
+        ]
+    )
+
+
 # POST/PUT /api/perfiles bounds — profiles.json is loaded whole per request,
 # so cap the write to keep a single profile from ballooning the file.
 _PROFILE_NAME_MAX_LENGTH = 100
@@ -370,9 +404,9 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
 
 
 # POST /api/agenda/topic/action verb whitelist — mirrors _COMMAND_WHITELIST.
-# "reject" is not a KiraAgendaController method (only approve/queue/remove/
-# move exist) — omitted rather than mapped to a lossy approximation.
-_AGENDA_ACTION_WHITELIST = frozenset({"approve", "queue", "remove", "move"})
+# "reject" acts on the pre-approval DRAFTED suggestion inbox (-> SKIPPED),
+# distinct from "remove" which drops a post-approval QUEUED topic.
+_AGENDA_ACTION_WHITELIST = frozenset({"approve", "queue", "remove", "move", "reject"})
 
 # POST /api/agenda/session/action verb whitelist — the three KiraAgendaController
 # mode controls. None of them raise, so the handler needs no try/except.
@@ -800,6 +834,20 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         request.app.state.host.motor.set_memorias_private(body.paused)
         return MemoriaMutationResponse(ok=True)
 
+    @app.get("/api/memoria/notice", response_model=MemoriaNoticeResponse)
+    def get_memoria_notice() -> MemoriaNoticeResponse:
+        # Fail-open to False (banner shows) when the flag file is absent — no
+        # host state, works even before host init. No lock: single-flag read.
+        return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
+
+    @app.post("/api/memoria/notice", response_model=MemoriaNoticeResponse)
+    def post_memoria_notice(body: MemoriaNoticeRequest) -> MemoriaNoticeResponse:
+        # Atomic single-flag write (os.replace), no read-modify-write, so no
+        # lock. Re-read from disk so the response reflects actual persisted
+        # state (save swallows write errors by design — CTK fail-open parity).
+        save_memorias_notice_dismissed(body.dismissed)
+        return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
+
     @app.get("/api/music/library", response_model=MusicLibraryResponse)
     def get_music_library(request: Request):
         host = request.app.state.host
@@ -987,6 +1035,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     agenda.remove_queued_topic(body.topic_id)
                 elif body.action == "move":
                     agenda.move_queued_topic(body.topic_id, body.direction or 1)
+                elif body.action == "reject":
+                    agenda.reject_topic(body.topic_id)
             except (ValueError, KeyError) as exc:
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
             return _agenda_response(agenda)
@@ -1010,6 +1060,48 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 safety_mode=body.safety_mode,
             )
             return _agenda_response(agenda)
+
+    @app.get("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
+    def get_cohost_profiles() -> CohostProfilesResponse:
+        # Disk-only read; no host needed. Falls back to the 3 defaults when the
+        # file is absent. No `selected` field — selection is stateless (RAM).
+        with _cohost_profiles_lock:
+            return _cohost_profiles_response(load_cohost_profiles())
+
+    @app.post("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
+    def save_cohost_profile(body: CohostProfileSaveRequest):
+        clean = sanitize_profile_name(body.name)
+        if not clean:
+            return JSONResponse(status_code=422, content={"detail": "empty profile name"})
+        with _cohost_profiles_lock:
+            profiles = load_cohost_profiles()
+            profiles[clean] = normalize_cohost_profile(
+                {
+                    "style": body.style,
+                    "default_priority": body.priority or "normal",
+                    "default_response_length": body.length or "normal",
+                }
+            )
+            save_cohost_profiles(profiles)
+            return _cohost_profiles_response(profiles)
+
+    @app.post("/api/agenda/cohost-profiles/select", response_model=CohostProfileSelectResponse)
+    def select_cohost_profile(request: Request, body: CohostProfileSelectRequest):
+        host = request.app.state.host
+        agenda = getattr(host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        # Load under the disk lock but NEVER write — selection is stateless.
+        with _cohost_profiles_lock:
+            profiles = load_cohost_profiles()
+        if body.name not in profiles:
+            return JSONResponse(status_code=404, content={"detail": "profile not found"})
+        with host.agenda_lock:
+            try:
+                agenda.set_profile({"style": profiles[body.name]["style"]})
+            except ValueError as exc:
+                return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return CohostProfileSelectResponse(selected=body.name)
 
     @app.post("/api/agenda/session/action", response_model=AgendaResponse)
     def post_agenda_session_action(request: Request, body: AgendaSessionActionRequest):

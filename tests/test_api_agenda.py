@@ -278,12 +278,15 @@ def test_topic_action_move_reorders_queue():
 
 
 def test_topic_action_unknown_action_422():
+    # Regression guard: adding "reject" to the whitelist must NOT loosen it —
+    # a genuinely bogus verb still yields 422 "unknown action".
     controller = KiraAgendaController()
     topic = controller.add_topic("Tema uno")
     app = _app(_host_with_agenda(controller))
     with TestClient(app) as client:
-        resp = client.post("/api/agenda/topic/action", json={"action": "reject", "topic_id": topic.id})
+        resp = client.post("/api/agenda/topic/action", json={"action": "obliterate", "topic_id": topic.id})
         assert resp.status_code == 422
+        assert resp.json()["detail"] == "unknown action"
 
 
 def test_topic_action_unknown_topic_id_422():
@@ -309,6 +312,48 @@ def test_topic_action_503_when_agenda_none():
     app = _app(_host_with_agenda(None))
     with TestClient(app) as client:
         resp = client.post("/api/agenda/topic/action", json={"action": "approve", "topic_id": "x"})
+        assert resp.status_code == 503
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/agenda/topic/action — reject (drafted suggestion inbox)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_topic_action_reject_removes_drafted_topic():
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Sugerencia a rechazar")
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/topic/action", json={"action": "reject", "topic_id": topic.id})
+        assert resp.status_code == 200
+        drafted_ids = [t["id"] for t in resp.json()["drafted_topics"]]
+        assert topic.id not in drafted_ids
+        assert controller._topic(topic.id).status.value == "skipped"
+
+
+def test_topic_action_reject_queued_topic_422():
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema en cola", approved=True)
+    controller.queue_topic(topic.id)
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/topic/action", json={"action": "reject", "topic_id": topic.id})
+        assert resp.status_code == 422
+
+
+def test_topic_action_reject_unknown_id_422():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/topic/action", json={"action": "reject", "topic_id": "does-not-exist"})
+        assert resp.status_code == 422
+
+
+def test_topic_action_reject_503_when_agenda_none():
+    app = _app(_host_with_agenda(None))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/topic/action", json={"action": "reject", "topic_id": "x"})
         assert resp.status_code == 503
 
 

@@ -615,6 +615,12 @@ class KiraAgendaController:
             raise ValueError("Only queued topics can be removed from the queue")
         topic.status = TopicStatus.SKIPPED
 
+    def reject_topic(self, topic_id: str) -> None:
+        topic = self._topic(topic_id)
+        if topic.status != TopicStatus.DRAFTED:
+            raise ValueError("Only drafted suggestions can be rejected")
+        topic.status = TopicStatus.SKIPPED
+
     def move_queued_topic(self, topic_id: str, direction: int) -> None:
         topic = self._topic(topic_id)
         if topic.status != TopicStatus.QUEUED:

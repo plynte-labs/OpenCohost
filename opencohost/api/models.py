@@ -452,9 +452,9 @@ class AgendaTopicActionRequest(BaseModel):
 
     `action` is checked against a server-side whitelist in main.py (mirrors
     `CommandRequest.command`) — accepts any string so the handler controls
-    the 422 body shape. `direction` is only consumed by `move` (>=0 means
-    move later/down, <0 means move earlier/up — passed straight through to
-    `move_queued_topic`).
+    the 422 body shape. Whitelisted verbs: approve, queue, remove, move,
+    reject. `direction` is only consumed by `move` (>=0 means move later/down,
+    <0 means move earlier/up — passed straight through to `move_queued_topic`).
     """
 
     action: str
@@ -586,6 +586,64 @@ class MemoriaMutationResponse(BaseModel):
     title/content — read-back stays metadata-only via /api/memoria/list."""
 
     ok: bool
+
+
+class MemoriaNoticeResponse(BaseModel):
+    """GET/POST /api/memoria/notice response — F1 disclosure-banner state.
+
+    `dismissed=False` means the operator has not yet dismissed the banner, so
+    it shows. Fails open to False (banner shows) when the flag is absent.
+    """
+
+    dismissed: bool
+
+
+class MemoriaNoticeRequest(BaseModel):
+    """POST /api/memoria/notice body — sets the F1 disclosure-banner state."""
+
+    dismissed: bool
+
+
+class CohostProfileOut(BaseModel):
+    """One cohost profile as returned by GET/POST /api/agenda/cohost-profiles."""
+
+    name: str
+    style: str
+    default_priority: str
+    default_response_length: str
+
+
+class CohostProfilesResponse(BaseModel):
+    """GET/POST /api/agenda/cohost-profiles response.
+
+    NO `selected` field by design: profile selection is stateless (RAM-only on
+    the running controller), never persisted. GET returns the on-disk profiles;
+    clients default to "Natural" (CTK parity).
+    """
+
+    profiles: list[CohostProfileOut]
+
+
+class CohostProfileSaveRequest(BaseModel):
+    """POST /api/agenda/cohost-profiles body. `priority`/`length` map to the
+    stored default_priority/default_response_length (CTK save-form parity)."""
+
+    name: str
+    style: str
+    priority: Optional[str] = None
+    length: Optional[str] = None
+
+
+class CohostProfileSelectRequest(BaseModel):
+    """POST /api/agenda/cohost-profiles/select body."""
+
+    name: str
+
+
+class CohostProfileSelectResponse(BaseModel):
+    """POST /api/agenda/cohost-profiles/select response — RAM-only apply."""
+
+    selected: str
 
 
 class MemoriaPurgeRequest(BaseModel):
