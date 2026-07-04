@@ -313,6 +313,13 @@ class FakeHost:
         # resilient-construction-failed EngineHost); tests that need a live
         # one set `host.music_library = MusicLibrary(...)` after construction.
         self.music_library = None
+        # Phase 2: API-only music orchestration state + its guard, always
+        # present (mirrors the EngineHost precedent — constructed even before
+        # start(), like agenda_lock). Local import mirrors ChatReplySink below.
+        from opencohost.api.engine_host import MusicState
+
+        self.music_state = MusicState()
+        self.music_lock = threading.Lock()
         # P3: bounded chat-reply sink — real ChatReplySink (not a fake), so
         # main.py's endpoint tests exercise the same read contract as prod.
         from opencohost.api.engine_host import ChatReplySink

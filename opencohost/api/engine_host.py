@@ -119,6 +119,46 @@ class ChatReplySink:
             return dict(self._replies[-1])
 
 
+class MusicState:
+    """Client-side-playback orchestration state (music-orchestration-model).
+
+    The API holds WHAT should be playing (active mood, later a fade intent);
+    the Tauri client reads it and PLAYS. This NEVER drives backend audio — the
+    headless host has no AudioBedEngine (that lives only in the CTK process).
+    Lock-guarded and always constructed, mirroring `ChatReplySink` above.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active_mood = "normal"
+        # {"direction","duration_ms","seq","ts"} — recorded by set_fade. `seq`
+        # is monotonic (never resets) so a polling client runs a fade exactly
+        # once, when it sees a seq greater than its last.
+        self._fade = None
+        self._fade_seq = 0
+
+    def set_mood(self, mood: str) -> None:
+        with self._lock:
+            self._active_mood = mood
+
+    def set_fade(self, direction: str, duration_ms: int) -> None:
+        with self._lock:
+            self._fade_seq += 1
+            self._fade = {
+                "direction": direction,
+                "duration_ms": duration_ms,
+                "seq": self._fade_seq,
+                "ts": time.time(),
+            }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "active_mood": self._active_mood,
+                "fade": dict(self._fade) if self._fade else None,
+            }
+
+
 class EngineHost:
     """Owns a standalone MotorVocalIA + HealthMonitor pair for this process."""
 
@@ -137,6 +177,12 @@ class EngineHost:
         # global lock, mirrors aggregator_lock (one process, one controller).
         self.agenda_lock = threading.Lock()
         self.music_library = None
+        # Phase 2: API-only music orchestration state + its guard. Always
+        # constructed (like chat_sink), even before start(). music_lock guards
+        # ALL MusicLibrary access (D4) — the library has no internal lock and
+        # FastAPI's threadpool serves concurrent requests. Mirrors agenda_lock.
+        self.music_state = MusicState()
+        self.music_lock = threading.Lock()
         # P3: bounded sink for Kira's own generated reply text (R8-safe —
         # see ChatReplySink docstring). Always present, even before start().
         self.chat_sink = ChatReplySink()

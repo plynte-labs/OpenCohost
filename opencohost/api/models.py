@@ -198,6 +198,73 @@ class MusicLibraryResponse(BaseModel):
     moods: list[str]
 
 
+class MusicMoodRequest(BaseModel):
+    """POST /api/music/mood body. `mood` is case/whitespace-normalized then
+    checked against KNOWN_MOODS in main.py (422 on unknown) — a stricter
+    contract than music_library.normalize_mood's silent fallback to 'normal'.
+    """
+
+    mood: str
+
+
+class MusicFadeOut(BaseModel):
+    """A recorded fade INTENT (client-side-playback model). Populated by WU2's
+    POST /api/music/fade; carried on MusicStateResponse.fade so a polling
+    client executes the fade when it sees a `seq` greater than its last."""
+
+    direction: str  # "in" | "out"
+    duration_ms: int
+    seq: int
+    ts: float
+
+
+class MusicFadeRequest(BaseModel):
+    """POST /api/music/fade body. `direction` ('in'|'out') is checked against
+    _MUSIC_FADE_DIRECTIONS in main.py (422 on unknown). `duration_ms` defaults
+    server-side to _MUSIC_FADE_DEFAULT_MS when omitted, then range-capped to
+    (0, _MUSIC_FADE_MAX_MS] — the fade is an INTENT the client executes."""
+
+    direction: str
+    duration_ms: Optional[int] = None
+
+
+class MusicStateResponse(BaseModel):
+    """GET /api/music/state (and the POST mood/fade responses). Orchestration
+    state ONLY (music-orchestration-model): the API never plays audio; the
+    client reads this and plays. `fade` is None until a fade intent is set."""
+
+    active_mood: str
+    fade: Optional[MusicFadeOut] = None
+
+
+class MusicMoodResponse(BaseModel):
+    """POST /api/music/mood response. No playback/audio field — the client
+    reads `suggested_track_id` (select_for_mood's mood->normal->any fallback)
+    and the valid `tracks` in the bucket, then plays client-side."""
+
+    active_mood: str
+    tracks: list[MusicTrackOut]
+    suggested_track_id: Optional[str]
+
+
+class MusicImportRequest(BaseModel):
+    """POST /api/music/import body (WU3). `path` is an absolute local audio
+    file the server copies into the managed library dir; `mood` is
+    case/whitespace-normalized then checked against KNOWN_MOODS (422 on
+    unknown). Client and server share a filesystem (local-first product)."""
+
+    path: str
+    mood: str
+
+
+class MusicImportResponse(BaseModel):
+    """POST /api/music/import response. Orchestration fields only — the nested
+    `track` carries NO filesystem `path` (resolution 2914: audio is delivered
+    via a FileResponse endpoint, so the raw path is never leaked)."""
+
+    track: MusicTrackOut
+
+
 class TTSConfigResponse(BaseModel):
     """GET /api/tts/config (Tier B, direct read). Pure config read, no I/O timeout needed."""
 
