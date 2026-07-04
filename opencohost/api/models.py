@@ -65,6 +65,41 @@ class SwitchProfileRequest(BaseModel):
     idempotency_key: Optional[str] = None
 
 
+class ProfileDetailResponse(BaseModel):
+    """GET /api/perfiles/{name} response (R8/D5).
+
+    prompt + use_system ONLY — never the stored `id` or any other field. The
+    handler builds this from explicit field picks (never `**data`), so a new
+    persisted field can never leak through this endpoint.
+    """
+
+    name: str
+    prompt: str
+    use_system: bool
+
+
+class ProfileCreateRequest(BaseModel):
+    """POST /api/perfiles body — create a new profile. A stable `id` is
+    minted server-side (never accepted from the wire)."""
+
+    name: str
+    prompt: str
+    use_system: bool = False
+
+
+class ProfileUpdateRequest(BaseModel):
+    """PUT /api/perfiles/{name} body — a partial update.
+
+    Every field optional; an omitted field leaves the stored value unchanged.
+    `new_name` renames the profile while preserving its stable on-disk `id`
+    (R12).
+    """
+
+    new_name: Optional[str] = None
+    prompt: Optional[str] = None
+    use_system: Optional[bool] = None
+
+
 class CommandRequest(BaseModel):
     """Wire shape for POST /api/commands (Phase 2, B2).
 
@@ -325,10 +360,20 @@ class AgendaResponse(BaseModel):
 
 
 class AgendaTopicRequest(BaseModel):
-    """POST /api/agenda/topic body."""
+    """POST /api/agenda/topic body.
+
+    `constraints`/`priority`/`response_length` are sanitized/normalized by
+    `KiraAgendaController.add_topic` — an unknown priority/response_length
+    silently normalizes to "normal" (controller contract, no 422). A
+    constraint whose text fails `sanitize_topic_text` (emoji/code/too long)
+    raises ValueError, surfaced as 422 by the existing handler path.
+    """
 
     title: str
     angle: Optional[str] = ""
+    constraints: Optional[list[str]] = None
+    priority: Optional[str] = None
+    response_length: Optional[str] = None
 
 
 class AgendaProfileRequest(BaseModel):
@@ -348,6 +393,17 @@ class AgendaTopicActionRequest(BaseModel):
     action: str
     topic_id: str
     direction: Optional[int] = None
+
+
+class AgendaSessionActionRequest(BaseModel):
+    """POST /api/agenda/session/action body.
+
+    `action` is checked against a server-side whitelist in main.py (mirrors
+    `AgendaTopicActionRequest`) — accepts any string so the handler controls
+    the 422 body shape rather than pydantic's enum-validation 422.
+    """
+
+    action: str
 
 
 class AgendaSessionRequest(BaseModel):
@@ -395,12 +451,74 @@ class MemoriaListItem(BaseModel):
     revision: int
     pinned: bool
     private: bool
+    inactive: bool
 
 
 class MemoriaListResponse(BaseModel):
     """GET /api/memoria/list response body."""
 
     items: list[MemoriaListItem]
+
+
+class MemoriaFlagsRequest(BaseModel):
+    """POST /api/memoria/flags body — a partial flag update.
+
+    Every flag is optional; an omitted flag is left unchanged. The handler
+    rejects a body with all three omitted (422) rather than issuing a no-op
+    write. F5: pin/private promote status='curated' in the store (same
+    statement); un-pin never demotes; `inactive` never touches status.
+    """
+
+    profile_id: str
+    id: str
+    pinned: Optional[bool] = None
+    private: Optional[bool] = None
+    inactive: Optional[bool] = None
+
+
+class MemoriaDeleteRequest(BaseModel):
+    """POST /api/memoria/delete body — hard-delete one row by id.
+
+    Reuses MemoriaMutationResponse. The handler's store.get pre-check owns
+    the 404 for a missing/wrong-profile row, so delete_row's False can only
+    mean a genuine write failure (503), never "already gone".
+    """
+
+    profile_id: str
+    id: str
+
+
+class MemoriaUpdateRequest(BaseModel):
+    """POST /api/memoria/update body — operator edit of one row's text.
+
+    R8 note: title/content flow INBOUND only; the response never echoes them
+    (MemoriaMutationResponse is ok-only) and read-back stays metadata-only via
+    /api/memoria/list. The handler strips + length-caps both before the write;
+    update_row then whitespace-normalizes and promotes status='curated' (F5).
+    """
+
+    profile_id: str
+    id: str
+    title: str
+    content: str
+
+
+class MemoriaCaptureRequest(BaseModel):
+    """POST /api/memoria/capture body — session-scoped capture-privacy toggle.
+
+    `paused=True` pauses auto-capture; `False` resumes it. The handler calls
+    `host.motor.set_memorias_private(paused)` DIRECTLY (mirrors the CTK path in
+    inspector_memory.py), NOT via /api/commands (design resolution 2905/D3).
+    """
+
+    paused: bool
+
+
+class MemoriaMutationResponse(BaseModel):
+    """POST /api/memoria/{flags,delete,update} response. R8: never echoes
+    title/content — read-back stays metadata-only via /api/memoria/list."""
+
+    ok: bool
 
 
 class MemoriaPurgeRequest(BaseModel):

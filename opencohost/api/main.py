@@ -29,6 +29,7 @@ import dataclasses
 import os
 import sqlite3
 import threading
+import uuid
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,7 @@ from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
     AgendaMetrics,
     AgendaResponse,
+    AgendaSessionActionRequest,
     AgendaSessionRequest,
     AgendaSessionSettings,
     AgendaTopicActionRequest,
@@ -55,17 +57,25 @@ from opencohost.api.models import (
     CommandRequest,
     HealthResponse,
     HealthState,
+    MemoriaDeleteRequest,
+    MemoriaFlagsRequest,
     MemoriaListResponse,
     MemoriaListItem,
+    MemoriaCaptureRequest,
+    MemoriaMutationResponse,
     MemoriaPurgeRequest,
     MemoriaPurgeResponse,
     MemoriaStatsResponse,
+    MemoriaUpdateRequest,
     ModelsResponse,
     MusicLibraryResponse,
     MusicTrackOut,
     ObsConfigRequest,
     ObsConfigResponse,
     ObsTestResponse,
+    ProfileCreateRequest,
+    ProfileDetailResponse,
+    ProfileUpdateRequest,
     ProfilesListResponse,
     StatusResponse,
     StreamChatLiveResponse,
@@ -88,7 +98,8 @@ from opencohost.config.settings import (
     load_tts_speed,
     resolve_llm_tiers,
 )
-from opencohost.core.profiles import cargar_perfiles
+from opencohost.core.memoria_store import MemoriaStore
+from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 # GET /api/models external I/O bound — short client timeout so a stalled/
@@ -172,7 +183,7 @@ def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
         with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT id, created_at, updated_at, revision, pinned, private FROM memorias "
+                "SELECT id, created_at, updated_at, revision, pinned, private, inactive FROM memorias "
                 "WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
                 (profile_id,),
             ).fetchall()
@@ -191,6 +202,25 @@ def _purge_memoria(db_path: str, profile_id: str) -> int:
             return cur.rowcount
     except sqlite3.Error:
         return 0
+
+
+# Lazy module-level MemoriaStore singleton (design D1). MemoriaStore.__init__
+# mkdirs + runs CREATE TABLE / PRAGMA writes, so it must NEVER be constructed
+# at import time (module contract: importing has zero side effects). One shared
+# instance is thread-safe across FastAPI's threadpool — the store opens a fresh
+# connection per operation and guards its warn-once state with its own lock —
+# and preserves that warn-once episode state (a per-request instance would
+# reset it every call).
+_memoria_store: "MemoriaStore | None" = None
+_memoria_store_lock = threading.Lock()
+
+
+def _get_memoria_store() -> MemoriaStore:
+    global _memoria_store
+    with _memoria_store_lock:
+        if _memoria_store is None:
+            _memoria_store = MemoriaStore(MEMORIAS_DB)
+        return _memoria_store
 
 # Server-side verb whitelist for POST /api/commands — exactly the verbs
 # MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
@@ -256,6 +286,12 @@ def _validate_command_value(command: str, value) -> "str | None":
 # for a single chat turn (process_context builds the full prompt from this).
 _CHAT_TEXT_MAX_LENGTH = 4000
 
+# POST /api/memoria/update length caps — mirror _CHAT_TEXT_MAX_LENGTH's
+# trust-boundary bound. update_row whitespace-normalizes but never validates
+# length/emptiness, so both checks are API-side before the write.
+_MEMORIA_TITLE_MAX_LENGTH = 200
+_MEMORIA_CONTENT_MAX_LENGTH = 4000
+
 
 def _validate_chat_text(text: str) -> "str | None":
     """Returns None when `text` is acceptable, or a rejection reason string."""
@@ -284,6 +320,16 @@ _host_active = False
 # (OBS + avatar config share the one file) so a read-modify-write is atomic
 # across concurrent requests. Reads do not need it — only read-modify-write.
 _config_lock = threading.Lock()
+
+# profiles.json write-lock (WU5): guards every read-modify-write of the
+# profiles file (create/update/delete). Deliberately NOT `_config_lock`,
+# which is avatar.yaml-specific — a separate file gets a separate lock (D4).
+_profiles_lock = threading.Lock()
+
+# POST/PUT /api/perfiles bounds — profiles.json is loaded whole per request,
+# so cap the write to keep a single profile from ballooning the file.
+_PROFILE_NAME_MAX_LENGTH = 100
+_PROFILE_PROMPT_MAX_LENGTH = 20000
 
 # POST /api/obs/test bound: OBSClient.test_connection() (read-only file) makes
 # a real blocking socket connection with no timeout knob of its own. Bound it
@@ -314,6 +360,17 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
 # "reject" is not a KiraAgendaController method (only approve/queue/remove/
 # move exist) — omitted rather than mapped to a lossy approximation.
 _AGENDA_ACTION_WHITELIST = frozenset({"approve", "queue", "remove", "move"})
+
+# POST /api/agenda/session/action verb whitelist — the three KiraAgendaController
+# mode controls. None of them raise, so the handler needs no try/except.
+_AGENDA_SESSION_ACTION_WHITELIST = frozenset({"enable", "soft_stop", "emergency_stop"})
+
+# POST /api/agenda/topic raw-constraint DoS bound = 2x controller MAX_CONSTRAINTS
+# (12). add_topic sanitizes EVERY submitted constraint (regex chain) BEFORE
+# slicing to MAX_CONSTRAINTS, so an unbounded list is unbounded regex work at a
+# trust boundary. Truncation-to-12 stays the controller's contract; this only
+# caps the raw count before any sanitization runs.
+_AGENDA_CONSTRAINTS_RAW_MAX = 24
 
 
 def _agenda_topic_out(topic) -> AgendaTopicOut:
@@ -405,7 +462,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins if cors_origins is not None else _DEFAULT_CORS_ORIGINS,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Idempotency-Key"],
         allow_credentials=False,
     )
@@ -453,6 +510,94 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if not isinstance(perfiles, dict):
             return ProfilesListResponse(profiles=[])
         return ProfilesListResponse(profiles=list(perfiles.keys()))
+
+    @app.get("/api/perfiles/{name}", response_model=ProfileDetailResponse)
+    def get_perfil(name: str):
+        # R8/D5: explicit field picks — never `**data` — so the stored `id`
+        # (or any future field) can never leak. GET is lock-free like list.
+        perfiles = cargar_perfiles()
+        if not isinstance(perfiles, dict) or name not in perfiles or not isinstance(
+            perfiles[name], dict
+        ):
+            return JSONResponse(status_code=404, content={"detail": "profile not found"})
+        data = perfiles[name]
+        return ProfileDetailResponse(
+            name=name,
+            prompt=str(data.get("prompt", "")),
+            use_system=bool(data.get("use_system", False)),
+        )
+
+    @app.post("/api/perfiles", response_model=ProfileDetailResponse)
+    def create_perfil(body: ProfileCreateRequest):
+        name = body.name.strip()
+        if not name or len(name) > _PROFILE_NAME_MAX_LENGTH:
+            return JSONResponse(status_code=422, content={"detail": "invalid profile name"})
+        if len(body.prompt) > _PROFILE_PROMPT_MAX_LENGTH:
+            return JSONResponse(status_code=422, content={"detail": "prompt exceeds max length"})
+        with _profiles_lock:
+            perfiles = cargar_perfiles()
+            if not isinstance(perfiles, dict):
+                return JSONResponse(status_code=503, content={"detail": "profiles_unavailable"})
+            if name in perfiles:
+                return JSONResponse(status_code=409, content={"detail": "profile already exists"})
+            # Stable id minted server-side (R12) — never accepted from the wire.
+            perfiles[name] = {
+                "id": str(uuid.uuid4()),
+                "prompt": body.prompt,
+                "use_system": body.use_system,
+            }
+            guardar_perfiles(perfiles)
+        return ProfileDetailResponse(name=name, prompt=body.prompt, use_system=body.use_system)
+
+    @app.put("/api/perfiles/{name}", response_model=ProfileDetailResponse)
+    def update_perfil(name: str, body: ProfileUpdateRequest):
+        new_name = body.new_name.strip() if body.new_name is not None else None
+        if new_name is not None and (not new_name or len(new_name) > _PROFILE_NAME_MAX_LENGTH):
+            return JSONResponse(status_code=422, content={"detail": "invalid profile name"})
+        if body.prompt is not None and len(body.prompt) > _PROFILE_PROMPT_MAX_LENGTH:
+            return JSONResponse(status_code=422, content={"detail": "prompt exceeds max length"})
+        with _profiles_lock:
+            perfiles = cargar_perfiles()
+            if not isinstance(perfiles, dict) or name not in perfiles:
+                return JSONResponse(status_code=404, content={"detail": "profile not found"})
+            # Copy preserves the stable id (R12) across both edit and rename.
+            data = dict(perfiles[name])
+            if body.prompt is not None:
+                data["prompt"] = body.prompt
+            if body.use_system is not None:
+                data["use_system"] = body.use_system
+            target = name
+            if new_name and new_name != name:
+                if new_name in perfiles:
+                    return JSONResponse(
+                        status_code=409, content={"detail": "profile already exists"}
+                    )
+                del perfiles[name]
+                target = new_name
+            perfiles[target] = data
+            guardar_perfiles(perfiles)
+        return ProfileDetailResponse(
+            name=target,
+            prompt=str(data.get("prompt", "")),
+            use_system=bool(data.get("use_system", False)),
+        )
+
+    @app.delete("/api/perfiles/{name}")
+    def delete_perfil(name: str):
+        with _profiles_lock:
+            perfiles = cargar_perfiles()
+            if not isinstance(perfiles, dict) or name not in perfiles:
+                return JSONResponse(status_code=404, content={"detail": "profile not found"})
+            # Last-profile guard ONLY (resolution 2905): deleting the active
+            # profile is allowed — the engine keeps its in-memory copy until
+            # the next switch (CTK parity, not an improvement).
+            if len(perfiles) <= 1:
+                return JSONResponse(
+                    status_code=409, content={"detail": "cannot delete the last profile"}
+                )
+            del perfiles[name]
+            guardar_perfiles(perfiles)
+        return {"ok": True}
 
     @app.get("/api/models", response_model=ModelsResponse)
     def get_models(request: Request) -> ModelsResponse:
@@ -525,6 +670,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     revision=row["revision"],
                     pinned=bool(row["pinned"]),
                     private=bool(row["private"]),
+                    inactive=bool(row["inactive"]),
                 )
                 for row in rows
             ]
@@ -536,6 +682,82 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return MemoriaPurgeResponse(deleted=0)
         deleted = _purge_memoria(MEMORIAS_DB, body.profile_id)
         return MemoriaPurgeResponse(deleted=deleted)
+
+    @app.post("/api/memoria/flags", response_model=MemoriaMutationResponse)
+    def post_memoria_flags(body: MemoriaFlagsRequest):
+        if not MEMORIAS_ENABLED:
+            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors purge deleted=0
+        if body.pinned is None and body.private is None and body.inactive is None:
+            return JSONResponse(status_code=422, content={"detail": "no flags provided"})
+        store = _get_memoria_store()
+        row = store.get(body.id)
+        # Same 404 for a wrong-profile row as for a missing one (R7: no
+        # cross-profile existence oracle — identical shape and detail).
+        if row is None or row["profile_id"] != body.profile_id:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+        # F5: set_flags enforces the freeze rule (pin/private promote curated,
+        # un-pin never demotes). A False means the write genuinely failed — it
+        # MUST surface as 503, never be swallowed, or the next auto-capture
+        # could overwrite a row the operator believed frozen.
+        if not store.set_flags(
+            body.id, pinned=body.pinned, private=body.private, inactive=body.inactive
+        ):
+            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+        return MemoriaMutationResponse(ok=True)
+
+    @app.post("/api/memoria/delete", response_model=MemoriaMutationResponse)
+    def post_memoria_delete(body: MemoriaDeleteRequest):
+        if not MEMORIAS_ENABLED:
+            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/purge
+        store = _get_memoria_store()
+        row = store.get(body.id)
+        # Same 404 for a wrong-profile row as for a missing one (R7: no
+        # cross-profile existence oracle). This pre-check owns the "already
+        # gone" case, so delete_row's False below can only mean a real write
+        # failure — never "the row wasn't there".
+        if row is None or row["profile_id"] != body.profile_id:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+        if not store.delete_row(body.id):
+            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+        return MemoriaMutationResponse(ok=True)
+
+    @app.post("/api/memoria/update", response_model=MemoriaMutationResponse)
+    def post_memoria_update(body: MemoriaUpdateRequest):
+        if not MEMORIAS_ENABLED:
+            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/delete
+        # Empty-check is API-side: update_row whitespace-normalizes without
+        # validating emptiness, so an all-whitespace body would write ''.
+        title, content = body.title.strip(), body.content.strip()
+        if not title or not content:
+            return JSONResponse(
+                status_code=422, content={"detail": "title and content must not be empty"}
+            )
+        if len(title) > _MEMORIA_TITLE_MAX_LENGTH or len(content) > _MEMORIA_CONTENT_MAX_LENGTH:
+            return JSONResponse(
+                status_code=422, content={"detail": "title or content exceeds max length"}
+            )
+        store = _get_memoria_store()
+        row = store.get(body.id)
+        # Same 404 for a wrong-profile row as for a missing one (R7: no
+        # cross-profile existence oracle — identical shape and detail).
+        if row is None or row["profile_id"] != body.profile_id:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+        # F5: update_row promotes status='curated' in the same statement. A
+        # False means the write genuinely failed — surface as 503, never swallow
+        # (else the next auto-capture could overwrite a row believed frozen).
+        if not store.update_row(body.id, title=title, content=content):
+            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+        return MemoriaMutationResponse(ok=True)
+
+    @app.post("/api/memoria/capture", response_model=MemoriaMutationResponse)
+    def post_memoria_capture(request: Request, body: MemoriaCaptureRequest):
+        if not MEMORIAS_ENABLED:
+            return MemoriaMutationResponse(ok=False)  # gated no-op, mirrors flags/delete/update
+        # Direct motor call (design resolution 2905/D3): the CTK toggles this on
+        # the motor directly (inspector_memory.py), NOT via the command queue.
+        # No llm_engine.py change, no _COMMAND_WHITELIST entry.
+        request.app.state.host.motor.set_memorias_private(body.paused)
+        return MemoriaMutationResponse(ok=True)
 
     @app.get("/api/music/library", response_model=MusicLibraryResponse)
     def get_music_library(request: Request):
@@ -564,9 +786,19 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         agenda = getattr(host, "agenda", None)
         if agenda is None:
             return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        # Raw-count guard BEFORE the lock/sanitization: bound the regex work the
+        # controller does per constraint (truncation-to-12 stays its contract).
+        if body.constraints is not None and len(body.constraints) > _AGENDA_CONSTRAINTS_RAW_MAX:
+            return JSONResponse(status_code=422, content={"detail": "too many constraints"})
         with host.agenda_lock:
             try:
-                agenda.add_topic(body.title, angle=body.angle or "")
+                agenda.add_topic(
+                    body.title,
+                    angle=body.angle or "",
+                    constraints=body.constraints or [],
+                    priority=body.priority or "normal",
+                    response_length=body.response_length or "normal",
+                )
             except ValueError as exc:
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
             return _agenda_response(agenda)
@@ -611,6 +843,25 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 response_length=body.response_length,
                 safety_mode=body.safety_mode,
             )
+            return _agenda_response(agenda)
+
+    @app.post("/api/agenda/session/action", response_model=AgendaResponse)
+    def post_agenda_session_action(request: Request, body: AgendaSessionActionRequest):
+        host = request.app.state.host
+        agenda = getattr(host, "agenda", None)
+        if agenda is None:
+            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
+        if body.action not in _AGENDA_SESSION_ACTION_WHITELIST:
+            return JSONResponse(status_code=422, content={"detail": "unknown action"})
+        with host.agenda_lock:
+            if body.action == "enable":
+                agenda.enable()
+            elif body.action == "soft_stop":
+                # Returned AgendaAction (closing line) deliberately ignored: the
+                # headless host has no speech pipeline to play it (CTK does).
+                agenda.soft_stop()
+            elif body.action == "emergency_stop":
+                agenda.emergency_stop()
             return _agenda_response(agenda)
 
     @app.post("/api/perfiles/switch")

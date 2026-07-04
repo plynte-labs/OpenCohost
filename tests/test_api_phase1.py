@@ -211,6 +211,10 @@ class FakeMotor:
         # and the memory_inspector_snapshot() provenance-gated read.
         self.active_llm_tier = "balanced"
         self.motor_tts = "ligero"
+        # WU4: session-scoped capture-privacy switch — mirrors
+        # MotorVocalIA._memorias_private / set_memorias_private / memorias_private
+        # so the fake stays a faithful stand-in for the /api/memoria/capture route.
+        self._memorias_private = False
         self._memory_snapshot = {
             "entries": [],
             "source_breakdown": {},
@@ -230,6 +234,13 @@ class FakeMotor:
 
     def memory_inspector_snapshot(self):
         return self._memory_snapshot
+
+    def set_memorias_private(self, value):
+        self._memorias_private = bool(value)
+
+    @property
+    def memorias_private(self):
+        return self._memorias_private
 
 
 class _DeadMotor(FakeMotor):

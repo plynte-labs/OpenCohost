@@ -154,6 +154,90 @@ def test_post_agenda_topic_503_when_agenda_none():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# WU7: POST /api/agenda/topic — constraints/priority/response_length passthrough
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_post_agenda_topic_passes_constraints_priority_response_length():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/agenda/topic",
+            json={
+                "title": "Nueva IA local",
+                "angle": "privacidad primero",
+                "constraints": ["no politics", "stay upbeat"],
+                "priority": "urgent",
+                "response_length": "short",
+            },
+        )
+        assert resp.status_code == 200
+    # AgendaTopicOut has no constraints field (design note) — assert on
+    # controller state directly, not the HTTP body.
+    topic = controller.topics[-1]
+    assert topic.constraints == ["no politics", "stay upbeat"]
+    assert topic.priority == KiraAgendaController.normalize_priority("urgent")
+    assert topic.response_length == KiraAgendaController.normalize_response_length("short")
+
+
+def test_post_agenda_topic_constraints_truncated_to_max():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    constraints = [f"constraint numero {i}" for i in range(15)]
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/agenda/topic",
+            json={"title": "Tema", "constraints": constraints},
+        )
+        assert resp.status_code == 200
+    # >12 constraints get truncated to MAX_CONSTRAINTS by the controller.
+    assert len(controller.topics[-1].constraints) == KiraAgendaController.MAX_CONSTRAINTS
+    assert KiraAgendaController.MAX_CONSTRAINTS == 12
+
+
+def test_post_agenda_topic_too_many_constraints_422():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    constraints = [f"constraint numero {i}" for i in range(25)]
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/agenda/topic",
+            json={"title": "Tema", "constraints": constraints},
+        )
+        assert resp.status_code == 422
+        assert "too many constraints" in resp.json()["detail"]
+    # 422 fires BEFORE any sanitization/truncation — no topic appended.
+    assert controller.topics == []
+
+
+def test_post_agenda_topic_priority_normalizes():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/agenda/topic",
+            json={"title": "Tema", "priority": "URGENT "},
+        )
+        assert resp.status_code == 200
+    # Assert the controller's real normalization output, not a guess.
+    assert controller.topics[-1].priority == KiraAgendaController.normalize_priority("URGENT ")
+
+
+def test_post_agenda_topic_invalid_constraint_422():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        # Emoji fails sanitize_topic_text -> ValueError -> existing 422 path.
+        resp = client.post(
+            "/api/agenda/topic",
+            json={"title": "Tema", "constraints": ["no \U0001f525 fire"]},
+        )
+        assert resp.status_code == 422
+    assert controller.topics == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # POST /api/agenda/topic/action — approve/queue/move/remove
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -274,6 +358,67 @@ def test_put_agenda_session_503_when_agenda_none():
     with TestClient(app) as client:
         resp = client.put("/api/agenda/session", json={"rhythm": "calmo"})
         assert resp.status_code == 503
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/agenda/session/action — enable / soft_stop / emergency_stop
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_post_agenda_session_action_enable_from_off():
+    controller = KiraAgendaController()
+    assert controller.state.value == "OFF"
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+        assert resp.status_code == 200
+        # enable(): OFF -> IDLE. AgendaState.IDLE.value == "IDLE" (the enum
+        # value is uppercase — see kira_agenda_controller.py:20).
+        assert resp.json()["state"] == "IDLE"
+
+
+def test_post_agenda_session_action_soft_stop():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        client.post("/api/agenda/session/action", json={"action": "enable"})
+        resp = client.post("/api/agenda/session/action", json={"action": "soft_stop"})
+        assert resp.status_code == 200
+        # soft_stop() from IDLE with no active_topic -> state OFF, stop_requested True
+        # (kira_agenda_controller.py:641-645).
+        assert resp.json()["state"] == "OFF"
+    assert controller.stop_requested is True
+
+
+def test_post_agenda_session_action_emergency_stop_clears_active_topic():
+    controller = KiraAgendaController()
+    controller.active_topic = controller.add_topic("Tema activo")
+    assert controller.active_topic is not None
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "emergency_stop"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["active_topic"] is None
+        assert body["state"] == "OFF"
+    assert controller.active_topic is None
+
+
+def test_post_agenda_session_action_unknown_action_422():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "bogus"})
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "unknown action"
+
+
+def test_post_agenda_session_action_503_when_agenda_none():
+    app = _app(_host_with_agenda(None))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "agenda_unavailable"
 
 
 # ──────────────────────────────────────────────────────────────────────────

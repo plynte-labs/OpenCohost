@@ -90,6 +90,7 @@ def test_memoria_list_shape_and_no_text_leak(tmp_path, monkeypatch):
                 "revision",
                 "pinned",
                 "private",
+                "inactive",
             }
         raw = resp.text.lower()
         assert "content" not in raw
@@ -102,6 +103,35 @@ def test_memoria_list_shape_and_no_text_leak(tmp_path, monkeypatch):
         assert by_id["mem_a"]["private"] is False
         assert by_id["mem_b"]["revision"] == 2
         assert by_id["mem_b"]["private"] is True
+
+
+def test_memoria_list_includes_inactive_field(tmp_path, monkeypatch):
+    import opencohost.api.main as main_mod
+
+    db_path = tmp_path / "memorias.db"
+    _seed_memorias_db(db_path)
+    # Seed one row with inactive=1 to prove the bool round-trips from disk.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+        "pinned, private, inactive, created_at, updated_at) VALUES "
+        "('mem_c', 'default', 'k3', 1, 't c', 'c c', 0, 0, 1, "
+        "'2026-01-03T00:00:00+00:00', '2026-01-03T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main_mod, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(main_mod, "MEMORIAS_DB", str(db_path))
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/memoria/list", params={"profile_id": "default"})
+        assert resp.status_code == 200
+        by_id = {item["id"]: item for item in resp.json()["items"]}
+        assert "inactive" in by_id["mem_a"]
+        assert by_id["mem_a"]["inactive"] is False
+        assert by_id["mem_c"]["inactive"] is True
 
 
 def test_memoria_list_disabled_returns_empty(tmp_path, monkeypatch):
