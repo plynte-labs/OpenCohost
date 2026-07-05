@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,29 @@ USER_DATA_DIR = get_user_data_dir()
 # Config files live inside the opencohost package directory
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_CONFIG_FILE = _PACKAGE_DIR / "config" / "storage.yaml"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically: temp file in the same directory, then
+    ``os.replace`` into place.
+
+    A crash or failure mid-write can never leave *path* truncated or partially
+    written — the original file survives until the atomic rename succeeds. On
+    any failure the temp file is removed and the exception (e.g. ``OSError``)
+    is re-raised so callers can decide whether to swallow or surface it. Mirrors
+    ``guardar_perfiles`` (opencohost/core/profiles.py), but raising.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 @dataclass(frozen=True)

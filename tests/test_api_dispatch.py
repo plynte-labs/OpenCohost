@@ -162,8 +162,29 @@ def test_dispatch_does_no_io():
 
 def test_default_ttl_seconds_pinned():
     # Pins the intended default so a regression (e.g. accidental unit change)
-    # fails the suite instead of silently shipping.
-    assert _DEFAULT_TTL_SECONDS == 120.0
+    # fails the suite instead of silently shipping. WU4 raised this 120 -> 600
+    # so a legitimate retry of a stalled >120s chat turn replays instead of
+    # double-firing Kira (OLLAMA_CHAT_TIMEOUT=180s + watchdog + operator retry).
+    assert _DEFAULT_TTL_SECONDS == 600.0
+
+
+def test_replay_survives_beyond_old_120s_ttl(monkeypatch):
+    # A stalled heavy chat turn can take >120s; the operator's retry must replay
+    # the cached command_id, not enqueue a second one. Under the old 120s TTL the
+    # entry would have expired and this second dispatch would be a fresh accept.
+    q = Queue()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("opencohost.api.dispatch.time.time", lambda: clock["t"])
+    d = Dispatcher(q)  # default TTL (600s)
+    first = d.dispatch("set_profile", _payload(), key="k1")
+    assert first.state == "accepted"
+
+    clock["t"] = 1000.0 + 200.0  # past the old 120s window, inside the new 600s one
+    second = d.dispatch("set_profile", _payload(), key="k1")
+    assert second.state == "replay"
+    assert second.command_id == first.command_id
+    assert q.qsize() == 1  # no double-fire
+    assert d.state_version == 1
 
 
 def test_hash_payload_is_key_order_independent():

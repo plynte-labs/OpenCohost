@@ -138,6 +138,22 @@ def test_post_agenda_topic_appends_drafted_topic():
     assert len(controller.topics) == 1
 
 
+def test_post_agenda_topic_dedups_same_title_angle():
+    # WU4 idempotency: a double-click / retry that re-sends the same title+angle
+    # must NOT append a duplicate topic — the controller returns the existing
+    # non-terminal topic (also fixes the CTK double-click dup, accepted per 2939).
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        body = {"title": "IA local", "angle": "privacidad primero"}
+        first = client.post("/api/agenda/topic", json=body)
+        second = client.post("/api/agenda/topic", json=body)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert len(second.json()["drafted_topics"]) == 1
+    assert len(controller.topics) == 1
+
+
 def test_post_agenda_topic_422_on_invalid_title():
     controller = KiraAgendaController()
     app = _app(_host_with_agenda(controller))

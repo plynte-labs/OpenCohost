@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from opencohost.config.settings import COHOST_PROFILES_FILE
+from opencohost.config.storage import atomic_write_text
 from opencohost.config.logger import get_logger
 
 
@@ -38,20 +40,40 @@ def load_cohost_profiles() -> dict[str, dict[str, Any]]:
         try:
             with open(COHOST_PROFILES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and data:
-                return {name: normalize_cohost_profile(profile) for name, profile in data.items()}
+        except json.JSONDecodeError:
+            # Corrupt file: quarantine instead of silently returning defaults,
+            # so a crash-truncated file is preserved and not overwritten blind.
+            corrupt = str(COHOST_PROFILES_FILE) + ".corrupt"
+            try:
+                os.replace(COHOST_PROFILES_FILE, corrupt)
+            except OSError:
+                pass
+            logger.warning("cohost profiles corrupt — quarantined to %s", corrupt)
+            return deepcopy(DEFAULT_COHOST_PROFILES)
         except Exception as e:
             logger.error(f"Error cargando perfiles Co-host: {e}")
+            return deepcopy(DEFAULT_COHOST_PROFILES)
+        if isinstance(data, dict) and data:
+            return {name: normalize_cohost_profile(profile) for name, profile in data.items()}
     return deepcopy(DEFAULT_COHOST_PROFILES)
 
 
-def save_cohost_profiles(profiles: dict[str, dict[str, Any]]) -> None:
+def save_cohost_profiles(profiles: dict[str, dict[str, Any]]) -> bool:
+    """Persist co-host profiles atomically. Never raises (fail-open + log).
+
+    Returns True when the write landed, False when it failed — the API
+    handler checks the bool and surfaces a 503 instead of a false 200.
+    """
     safe = {sanitize_profile_name(name): normalize_cohost_profile(profile) for name, profile in profiles.items() if sanitize_profile_name(name)}
     try:
-        with open(COHOST_PROFILES_FILE, "w", encoding="utf-8") as f:
-            json.dump(safe or deepcopy(DEFAULT_COHOST_PROFILES), f, indent=4, ensure_ascii=False)
+        atomic_write_text(
+            Path(COHOST_PROFILES_FILE),
+            json.dumps(safe or deepcopy(DEFAULT_COHOST_PROFILES), indent=4, ensure_ascii=False),
+        )
+        return True
     except Exception as e:
-        logger.error(f"Error guardando perfiles Co-host: {e}")
+        logger.error(f"Error guardando perfiles Co-host: {type(e).__name__}")
+        return False
 
 
 def sanitize_profile_name(name: str) -> str:

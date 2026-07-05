@@ -216,18 +216,25 @@ class OBSClient:
 
     # -- manual test -------------------------------------------------------
 
-    def test_connection(self) -> tuple[bool, str]:
-        """Test OBS connection and return (success, message)."""
+    def test_connection(self, timeout: float | None = None) -> tuple[bool, str]:
+        """Test OBS connection and return (success, message).
+
+        ``timeout`` (seconds) is threaded into obsws so the underlying websocket
+        connect self-bounds (baseclient passes it to ws.connect). ``None`` keeps
+        the original blocking behaviour for the CTK caller. disconnect() runs in
+        a finally so a mid-request failure never leaks the websocket.
+        """
+        client = None
         try:
             import obsws_python as obs
             client = obs.ReqClient(
                 host=self.config.host,
                 port=self.config.port,
                 password=self.config.password or None,
+                timeout=timeout,
             )
             version = client.get_version()
             obs_version = getattr(version, 'obs_version', '?') or '?'
-            client.disconnect()
             return True, f"Conectado a OBS {obs_version}"
         except ImportError:
             return False, "obsws-python no instalado"
@@ -235,6 +242,12 @@ class OBSClient:
             return False, f"Conexión rechazada en {self.config.host}:{self.config.port}"
         except Exception as e:
             return False, str(e)
+        finally:
+            if client is not None:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
 
     def set_obs_text(self, source_name: str, text: str) -> bool:
         """Update an OBS Text (GDI+) source with new content.

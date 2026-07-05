@@ -98,7 +98,7 @@ def cargar_perfiles() -> dict:
     }
 
 
-def guardar_perfiles(perfiles: dict) -> None:
+def guardar_perfiles(perfiles: dict) -> bool:
     """Write profiles to PROFILES_FILE atomically.
 
     Writes to a temp file in the same directory, then ``os.replace()``s it
@@ -107,6 +107,10 @@ def guardar_perfiles(perfiles: dict) -> None:
     failure, logs one warning with the path + exception type only — never
     profile content (CLAUDE.md: never expose raw chat/profile content in
     logs) — and leaves the pre-existing file on disk untouched.
+
+    Returns True when the write landed, False when it failed (the never-raise
+    contract is preserved; callers that must know — the API handlers — check
+    the bool and surface a 503 instead of a false 200).
     """
     target_dir = os.path.dirname(PROFILES_FILE) or "."
     tmp_path = None
@@ -116,6 +120,7 @@ def guardar_perfiles(perfiles: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(perfiles, f, indent=4, ensure_ascii=False)
         os.replace(tmp_path, PROFILES_FILE)
+        return True
     except Exception as e:
         logger.warning(f"Failed to save profiles to {PROFILES_FILE}: {type(e).__name__}")
         if tmp_path and os.path.exists(tmp_path):
@@ -123,3 +128,4 @@ def guardar_perfiles(perfiles: dict) -> None:
                 os.remove(tmp_path)
             except OSError:
                 pass
+        return False

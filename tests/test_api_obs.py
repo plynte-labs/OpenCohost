@@ -55,7 +55,7 @@ def _fake_obs_client_factory(result):
             _FakeOBSClient.last_config = config
             _FakeOBSClient.last_assets_folder = assets_folder
 
-        def test_connection(self):
+        def test_connection(self, timeout=None):
             return result
 
     return _FakeOBSClient

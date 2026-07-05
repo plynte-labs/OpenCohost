@@ -40,6 +40,7 @@ import ollama
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
@@ -99,7 +100,12 @@ from opencohost.api.models import (
     SwitchProfileRequest,
     TTSConfigResponse,
 )
-from opencohost.avatar.avatar_config import VALID_STATES, load_avatar_config, save_avatar_config
+from opencohost.avatar.avatar_config import (
+    VALID_STATES,
+    AvatarConfigUnreadableError,
+    load_avatar_config,
+    save_avatar_config,
+)
 from opencohost.avatar.obs_client import OBSClient
 from opencohost.config.settings import (
     EDITORIAL_CARDS_DB,
@@ -250,6 +256,19 @@ def _get_memoria_store() -> MemoriaStore:
             _memoria_store = MemoriaStore(MEMORIAS_DB)
         return _memoria_store
 
+
+def _memoria_store_or_none() -> "MemoriaStore | None":
+    """Construct/return the shared store, or None if it can't be built.
+
+    MemoriaStore.__init__ runs CREATE TABLE / PRAGMA writes, so a locked or
+    corrupt db makes construction raise. Callers map None -> 503
+    memoria_unavailable instead of letting an opaque 500 escape.
+    """
+    try:
+        return _get_memoria_store()
+    except (sqlite3.Error, OSError):
+        return None
+
 # Server-side verb whitelist for POST /api/commands — exactly the verbs
 # MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
 # A command NOT in this set is rejected before it ever reaches the queue.
@@ -378,19 +397,24 @@ def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
 _PROFILE_NAME_MAX_LENGTH = 100
 _PROFILE_PROMPT_MAX_LENGTH = 20000
 
-# POST /api/obs/test bound: OBSClient.test_connection() (read-only file) makes
-# a real blocking socket connection with no timeout knob of its own. Bound it
-# here with a short-lived worker thread instead of touching that file.
+# POST /api/obs/test bound: the socket timeout is now threaded into
+# OBSClient.test_connection (obsws ws.connect self-bounds), so the worker
+# returns on its own. This executor is only a backstop for anything the socket
+# timeout can't cover — and it must NOT join a stuck worker: a `with` block's
+# shutdown(wait=True) would re-block on the very thread we timed out on, so we
+# manage the executor manually and shutdown(wait=False, cancel_futures=True).
 _OBS_TEST_TIMEOUT_SECONDS = 5.0
 
 
 def _test_obs_connection_bounded(client: OBSClient, timeout: float = _OBS_TEST_TIMEOUT_SECONDS):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(client.test_connection)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            return False, "OBS connection test timed out"
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(client.test_connection, timeout=timeout)
+        return future.result(timeout=timeout + 1.0)  # socket self-bounds; +1s backstop
+    except concurrent.futures.TimeoutError:
+        return False, "OBS connection test timed out"
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _obs_config_response(cfg) -> ObsConfigResponse:
@@ -621,7 +645,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 "prompt": body.prompt,
                 "use_system": body.use_system,
             }
-            guardar_perfiles(perfiles)
+            if not guardar_perfiles(perfiles):
+                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return ProfileDetailResponse(name=name, prompt=body.prompt, use_system=body.use_system)
 
     @app.put("/api/perfiles/{name}", response_model=ProfileDetailResponse)
@@ -650,7 +675,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 del perfiles[name]
                 target = new_name
             perfiles[target] = data
-            guardar_perfiles(perfiles)
+            if not guardar_perfiles(perfiles):
+                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return ProfileDetailResponse(
             name=target,
             prompt=str(data.get("prompt", "")),
@@ -671,7 +697,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     status_code=409, content={"detail": "cannot delete the last profile"}
                 )
             del perfiles[name]
-            guardar_perfiles(perfiles)
+            if not guardar_perfiles(perfiles):
+                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return {"ok": True}
 
     @app.get("/api/models", response_model=ModelsResponse)
@@ -764,32 +791,50 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors purge deleted=0
         if body.pinned is None and body.private is None and body.inactive is None:
             return JSONResponse(status_code=422, content={"detail": "no flags provided"})
-        store = _get_memoria_store()
-        row = store.get(body.id)
+        store = _memoria_store_or_none()
+        if store is None:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        try:
+            row = store.get(body.id, raising=True)
+        except sqlite3.Error:
+            # Transient lock/db error on the pre-check must NOT masquerade as a
+            # missing row (404) — surface it as unavailable (503).
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
         # Same 404 for a wrong-profile row as for a missing one (R7: no
         # cross-profile existence oracle — identical shape and detail).
         if row is None or row["profile_id"] != body.profile_id:
             return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         # F5: set_flags enforces the freeze rule (pin/private promote curated,
-        # un-pin never demotes). A False means the write genuinely failed — it
-        # MUST surface as 503, never be swallowed, or the next auto-capture
+        # un-pin never demotes). A genuine write failure raises (raising=True) —
+        # it MUST surface as 503, never be swallowed, or the next auto-capture
         # could overwrite a row the operator believed frozen.
-        if not store.set_flags(
-            body.id, pinned=body.pinned, private=body.private, inactive=body.inactive
-        ):
+        try:
+            applied = store.set_flags(
+                body.id, pinned=body.pinned, private=body.private, inactive=body.inactive, raising=True
+            )
+        except sqlite3.Error:
             return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+        if not applied:
+            # rowcount==0 on a pre-found row: it vanished in the check-then-act
+            # race window — that is not-found, not a write failure.
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         return MemoriaMutationResponse(ok=True)
 
     @app.post("/api/memoria/delete", response_model=MemoriaMutationResponse)
     def post_memoria_delete(body: MemoriaDeleteRequest):
         if not MEMORIAS_ENABLED:
             return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/purge
-        store = _get_memoria_store()
-        row = store.get(body.id)
+        store = _memoria_store_or_none()
+        if store is None:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        try:
+            row = store.get(body.id, raising=True)
+        except sqlite3.Error:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
         # Same 404 for a wrong-profile row as for a missing one (R7: no
         # cross-profile existence oracle). This pre-check owns the "already
         # gone" case, so delete_row's False below can only mean a real write
-        # failure — never "the row wasn't there".
+        # failure — never "the row wasn't there" (delete_row is idempotent).
         if row is None or row["profile_id"] != body.profile_id:
             return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         if not store.delete_row(body.id):
@@ -811,17 +856,27 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(
                 status_code=422, content={"detail": "title or content exceeds max length"}
             )
-        store = _get_memoria_store()
-        row = store.get(body.id)
+        store = _memoria_store_or_none()
+        if store is None:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        try:
+            row = store.get(body.id, raising=True)
+        except sqlite3.Error:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
         # Same 404 for a wrong-profile row as for a missing one (R7: no
         # cross-profile existence oracle — identical shape and detail).
         if row is None or row["profile_id"] != body.profile_id:
             return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         # F5: update_row promotes status='curated' in the same statement. A
-        # False means the write genuinely failed — surface as 503, never swallow
-        # (else the next auto-capture could overwrite a row believed frozen).
-        if not store.update_row(body.id, title=title, content=content):
+        # genuine write failure raises (raising=True) -> 503; a plain False now
+        # means only rowcount==0 (the row vanished in the check-then-act race)
+        # -> 404, never a misleading write-failed.
+        try:
+            applied = store.update_row(body.id, title=title, content=content, raising=True)
+        except sqlite3.Error:
             return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+        if not applied:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         return MemoriaMutationResponse(ok=True)
 
     @app.post("/api/memoria/capture", response_model=MemoriaMutationResponse)
@@ -930,13 +985,25 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 return JSONResponse(status_code=422, content={"detail": "file too large"})
         except OSError:
             return JSONResponse(status_code=422, content={"detail": "file not readable"})
-        # add_file re-validates the audio signature, copies into the managed
-        # dir under a uuid name (traversal-proof), and saves. No backend audio.
+        # WU5: dedup pre-check under the lock, then do the (up-to-200MB) copy
+        # OUTSIDE the lock so it never blocks concurrent control-plane reads,
+        # then re-take the lock only to register the finished track. stage_copy
+        # re-validates the audio signature and copies into the managed dir under
+        # a uuid name (traversal-proof); register_staged rechecks dedup and rolls
+        # back (pop + unlink) on save failure. No backend audio.
+        with host.music_lock:
+            existing = library.find_existing(source, mood)
+        if existing is not None:
+            return MusicImportResponse(track=_music_track_out(existing))
         try:
-            with host.music_lock:
-                track = library.add_file(source, mood)
+            staged = library.stage_copy(source)
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except OSError:
+            return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
+        try:
+            with host.music_lock:
+                track = library.register_staged(staged, source, mood)
         except OSError:
             return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
         return MusicImportResponse(track=_music_track_out(track))
@@ -952,7 +1019,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # entry is deregistered but its file survives. No backend audio.
         try:
             with host.music_lock:
-                removed = library.remove(track_id, delete_file=True)
+                removed = library.remove(track_id, delete_file=True, raising=True)
         except OSError:
             return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
         if not removed:
@@ -970,21 +1037,34 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         library = getattr(host, "music_library", None)
         if library is None:
             return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
+        # WU5/D8 TOCTOU: resolve, validate, AND open the file handle all under
+        # the lock, then hand the handle to FileResponse via BackgroundTask so
+        # it is closed only when the stream finishes. On Windows the open handle
+        # blocks a concurrent DELETE's unlink -> that DELETE gets a retryable
+        # 503 instead of pulling the file out from under a live stream (500).
+        # ponytail: handle-as-delete-guard is Windows semantics; POSIX would
+        # need fd-based serving to get the same interlock.
         with host.music_lock:
             track = library.tracks.get(track_id)
             if track is None:
                 return JSONResponse(status_code=404, content={"detail": "track not found"})
             library_root = library.library_dir.resolve()
             track_path = Path(track.path).resolve()
-        # Path-safety: serve ONLY files inside library_dir (mirrors
-        # _delete_managed_file's is_relative_to guard). is_supported_audio_path
-        # then covers both missing-on-disk and failed-signature in one check.
-        if not track_path.is_relative_to(library_root):
-            return JSONResponse(status_code=404, content={"detail": "track not found"})
-        if not is_supported_audio_path(track_path):
-            return JSONResponse(status_code=404, content={"detail": "track not found"})
+            # Path-safety: serve ONLY files inside library_dir (mirrors
+            # _delete_managed_file's is_relative_to guard). is_supported_audio_path
+            # then covers both missing-on-disk and failed-signature in one check.
+            if not track_path.is_relative_to(library_root):
+                return JSONResponse(status_code=404, content={"detail": "track not found"})
+            if not is_supported_audio_path(track_path):
+                return JSONResponse(status_code=404, content={"detail": "track not found"})
+            try:
+                fh = track_path.open("rb")
+            except OSError:
+                return JSONResponse(status_code=404, content={"detail": "track not found"})
         media_type = mimetypes.guess_type(str(track_path))[0] or "application/octet-stream"
-        return FileResponse(track_path, media_type=media_type)
+        return FileResponse(
+            track_path, media_type=media_type, background=BackgroundTask(fh.close)
+        )
 
     @app.get("/api/agenda", response_model=AgendaResponse)
     def get_agenda(request: Request):
@@ -1082,7 +1162,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     "default_response_length": body.length or "normal",
                 }
             )
-            save_cohost_profiles(profiles)
+            if not save_cohost_profiles(profiles):
+                return JSONResponse(status_code=503, content={"detail": "cohost_write_failed"})
             return _cohost_profiles_response(profiles)
 
     @app.post("/api/agenda/cohost-profiles/select", response_model=CohostProfileSelectResponse)
@@ -1272,7 +1353,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.put("/api/obs/config", response_model=ObsConfigResponse)
     def put_obs_config(body: ObsConfigRequest) -> ObsConfigResponse:
         with _config_lock:
-            cfg = load_avatar_config()
+            try:
+                cfg = load_avatar_config(strict=True)
+            except AvatarConfigUnreadableError:
+                return JSONResponse(status_code=503, content={"detail": "config_unreadable"})
             if body.enabled is not None:
                 cfg.obs.enabled = body.enabled
             if body.host is not None:
@@ -1283,7 +1367,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 cfg.obs.source_name = body.source
             if body.password is not None:
                 cfg.obs.password = body.password
-            save_avatar_config(cfg)
+            try:
+                save_avatar_config(cfg)
+            except (OSError, RuntimeError):
+                return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
             return _obs_config_response(cfg)
 
     @app.post("/api/obs/test", response_model=ObsTestResponse)
@@ -1314,7 +1401,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     status_code=422, content={"detail": f"unknown avatar state(s): {unknown}"}
                 )
         with _config_lock:
-            cfg = load_avatar_config()
+            try:
+                cfg = load_avatar_config(strict=True)
+            except AvatarConfigUnreadableError:
+                return JSONResponse(status_code=503, content={"detail": "config_unreadable"})
             if body.enabled is not None:
                 cfg.enabled = body.enabled
             if body.mode is not None:
@@ -1324,7 +1414,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 for state, path in body.state_images.items():
                     new_state_images[state] = Path(path)
                 cfg.state_images = new_state_images
-            save_avatar_config(cfg)
+            try:
+                save_avatar_config(cfg)
+            except (OSError, RuntimeError):
+                return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
             return _avatar_config_response(cfg)
 
     return app

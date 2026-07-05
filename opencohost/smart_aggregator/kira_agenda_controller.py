@@ -186,6 +186,10 @@ class TopicStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+# Terminal statuses never block a fresh add_topic dedup (WU4/D6).
+_TERMINAL_TOPIC_STATUSES = frozenset({TopicStatus.COMPLETED, TopicStatus.SKIPPED})
+
+
 @dataclass
 class AgendaTopic:
     title: str
@@ -443,6 +447,17 @@ class KiraAgendaController:
             for c in (constraints or [])
             if c and c.strip()
         ][: self.MAX_CONSTRAINTS]
+        # Idempotency (WU4/D6): a double-click or retry re-sends the same
+        # (title, angle). Return the existing non-terminal topic instead of
+        # appending a duplicate. A COMPLETED/SKIPPED topic never blocks a fresh
+        # add. This is the root-cause guard shared by CTK and the API (2939).
+        for existing in self.topics:
+            if (
+                existing.status not in _TERMINAL_TOPIC_STATUSES
+                and existing.title.casefold() == safe_title.casefold()
+                and existing.angle.casefold() == safe_angle.casefold()
+            ):
+                return existing
         topic = AgendaTopic(
             title=safe_title,
             angle=safe_angle,

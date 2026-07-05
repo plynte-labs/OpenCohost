@@ -18,10 +18,18 @@ except Exception:  # pragma: no cover - settings fallback
     yaml = None
 
 from opencohost.config.settings import AVATAR_CONFIG_FILE, BASE_DIR
-from opencohost.config.storage import USER_DATA_DIR
+from opencohost.config.storage import USER_DATA_DIR, atomic_write_text
 
 AVATAR_CONFIG_FILE = Path(AVATAR_CONFIG_FILE)
 DEFAULT_ASSETS_FOLDER = Path(USER_DATA_DIR) / "assets" / "avatar" / "kira"
+
+
+class AvatarConfigUnreadableError(RuntimeError):
+    """The avatar config file exists but cannot be read as a valid mapping.
+
+    Distinguishes an exists-but-corrupt/locked file from an absent one so the
+    read-modify-write PUT handlers can refuse to overwrite it with defaults.
+    """
 
 VALID_STATES = frozenset(
     {"idle", "listening", "thinking", "speaking", "speaking_alt", "sleeping", "angry", "error"}
@@ -62,19 +70,29 @@ class AvatarConfig:
         return None
 
 
-def load_avatar_config(config_file: Path | None = None) -> AvatarConfig:
-    """Load avatar configuration from YAML."""
+def load_avatar_config(config_file: Path | None = None, *, strict: bool = False) -> AvatarConfig:
+    """Load avatar configuration from YAML.
+
+    When *strict* is True and the file EXISTS but cannot be parsed as a mapping
+    (yaml error or top-level not a dict), raise :class:`AvatarConfigUnreadableError`
+    instead of silently returning defaults. An absent file always returns
+    defaults, strict or not.
+    """
     config_file = config_file or AVATAR_CONFIG_FILE
     raw: dict[str, Any] = {}
     if yaml is not None and config_file.exists():
         try:
             with open(config_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                return AvatarConfig()
-            raw = data.get("avatar", {}) or {}
-        except Exception:
+        except Exception as e:
+            if strict:
+                raise AvatarConfigUnreadableError(f"avatar config unreadable: {config_file}") from e
             return AvatarConfig()
+        if not isinstance(data, dict):
+            if strict:
+                raise AvatarConfigUnreadableError(f"avatar config not a mapping: {config_file}")
+            return AvatarConfig()
+        raw = data.get("avatar", {}) or {}
 
     assets_folder = DEFAULT_ASSETS_FOLDER
     af = raw.get("assets_folder", "")
@@ -141,8 +159,8 @@ def save_avatar_config(config: AvatarConfig, config_file: Path | None = None) ->
     if yaml is None:
         raise RuntimeError("PyYAML is not available; cannot save avatar config.")
 
-    with open(config_file, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    text = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    atomic_write_text(config_file, text)
 
 
 def assign_image_to_state(

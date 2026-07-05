@@ -312,7 +312,7 @@ class MemoriaStore:
             logger.debug("memoria upsert conflict stable_key=%s revision=%s", stable_key, revision)
         return written_id
 
-    def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None) -> bool:
+    def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None, raising: bool = False) -> bool:
         """Operator edit: promotes status to curated in the same statement (F5).
 
         Returns False if the write failed (e.g. lock contention) — the row
@@ -332,7 +332,7 @@ class MemoriaStore:
             params.append(" ".join(content.split()))
         params.append(memoria_id)
         sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE id = ?"
-        return self._execute_write(sql, params, error_label="update")
+        return self._execute_write(sql, params, error_label="update", raising=raising)
 
     def set_flags(
         self,
@@ -341,6 +341,7 @@ class MemoriaStore:
         pinned: bool | None = None,
         private: bool | None = None,
         inactive: bool | None = None,
+        raising: bool = False,
     ) -> bool:
         """Toggle pin/private/inactive flags.
 
@@ -375,7 +376,7 @@ class MemoriaStore:
             set_clauses.append("status = 'curated'")
         params.append(memoria_id)
         sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE id = ?"
-        return self._execute_write(sql, params, error_label="set_flags")
+        return self._execute_write(sql, params, error_label="set_flags", raising=raising)
 
     def delete_row(self, memoria_id: str) -> bool:
         """Hard-delete a single memoria row (per-row analog of purge_profile).
@@ -414,11 +415,21 @@ class MemoriaStore:
     # Read
     # ------------------------------------------------------------------
 
-    def get(self, memoria_id: str) -> sqlite3.Row | None:
+    def get(self, memoria_id: str, *, raising: bool = False) -> sqlite3.Row | None:
+        """Fetch a single row by id, or None when absent.
+
+        Fail-open by default (UI callers): a transient read failure logs once
+        and returns None. When *raising* is set (API callers), a genuine
+        ``sqlite3.Error`` propagates instead — so the handler can tell a
+        transient lock (503) apart from a truly absent row (None -> 404),
+        rather than collapsing both into a misleading 404.
+        """
         try:
             with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
                 return conn.execute("SELECT * FROM memorias WHERE id = ?", (memoria_id,)).fetchone()
         except sqlite3.Error as exc:
+            if raising:
+                raise
             self._warn_once(f"memoria store read failed (fail-open): {type(exc).__name__}")
             return None
 
@@ -558,12 +569,23 @@ class MemoriaStore:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _execute_write(self, sql: str, params: list[object], *, error_label: str) -> bool:
+    def _execute_write(self, sql: str, params: list[object], *, error_label: str, raising: bool = False) -> bool:
+        """Run a write; return True when it affected >=1 row.
+
+        Fail-open by default (UI callers): a lock/contention error logs once
+        and returns False. When *raising* is set (API callers), a genuine
+        ``sqlite3.Error`` propagates so the handler maps it to a 503
+        write-failed; a plain ``False`` return then means ONLY rowcount==0 —
+        the row vanished between the caller's pre-check and this write — which
+        the handler maps to 404, not a misleading write-failed 503.
+        """
         try:
             with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
                 cur = conn.execute(sql, params)
                 affected = cur.rowcount > 0
         except sqlite3.Error as exc:
+            if raising:
+                raise
             self._warn_once(f"memoria store {error_label} failed (fail-open): {type(exc).__name__}")
             return False
         self._clear_warn()

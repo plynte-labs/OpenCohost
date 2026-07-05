@@ -54,6 +54,8 @@ def test_status_response_wire_keys_exact():
         "active_profile",
         "health",
         "state_version",
+        "ollama_warming",
+        "avatar_state",
     }
     # A-M1 pin: NOT the shortened forms.
     assert "ready" not in dumped

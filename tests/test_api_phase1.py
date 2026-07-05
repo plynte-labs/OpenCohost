@@ -88,7 +88,13 @@ def test_engine_host_stop_sends_sentinel_and_tears_down(tmp_path, monkeypatch):
 
     assert fake_queue.get_nowait() is None
     fake_monitor.stop.assert_called_once()
-    fake_ollama.generate.assert_called_once_with(model="qwen3:8b", prompt="", keep_alive=0)
+    # WU5/D10: the unload is bounded via a timeout Client, NOT the unbounded
+    # module-level ollama.generate() (which could stall shutdown on a hung Ollama).
+    fake_ollama.Client.assert_called_once_with(timeout=2.0)
+    fake_ollama.Client.return_value.generate.assert_called_once_with(
+        model="qwen3:8b", prompt="", keep_alive=0
+    )
+    fake_ollama.generate.assert_not_called()
     assert host._lock_fd is None
 
 
@@ -96,7 +102,9 @@ def test_engine_host_stop_swallows_exceptions(tmp_path, monkeypatch):
     import opencohost.api.engine_host as engine_host_mod
 
     fake_ollama = MagicMock()
-    fake_ollama.generate.side_effect = RuntimeError("ollama unreachable")
+    # WU5/D10: the unload now goes through Client(timeout=2.0).generate(); make
+    # THAT path raise so this still exercises the swallow-on-unload-failure guard.
+    fake_ollama.Client.return_value.generate.side_effect = RuntimeError("ollama unreachable")
     monkeypatch.setattr(engine_host_mod, "ollama", fake_ollama)
 
     host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))

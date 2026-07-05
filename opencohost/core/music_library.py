@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import uuid
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Iterable
 
 from opencohost.config.settings import MUSIC_DIR, MUSIC_CONFIG_FILE
+from opencohost.config.storage import atomic_write_text
+from opencohost.config.logger import get_logger
+
+logger = get_logger()
 
 
 MUSIC_DIR = Path(MUSIC_DIR)
@@ -30,6 +35,11 @@ class MusicTrack:
     enabled: bool = True
     missing: bool = False
     invalid: bool = False
+    # Import idempotency key: "<resolved source>|<st_size>|<st_mtime_ns>".
+    # Old json rows lack it (dataclass default fills ""); NEW json read by
+    # pre-fix code drops these tracks via the load-time TypeError guard —
+    # one-way format, no rollback contract (design D5 / WU4).
+    source_sig: str = ""
 
 
 def normalize_mood(mood: str) -> str:
@@ -68,7 +78,15 @@ class MusicLibrary:
             return
         try:
             data = json.loads(self.config_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError:
+            # Transient read failure (locked/permission) — do not quarantine a
+            # potentially healthy file; leave it in place and load nothing.
+            return
+        except json.JSONDecodeError:
+            self._quarantine_corrupt()
+            return
+        if not isinstance(data, dict):
+            self._quarantine_corrupt()
             return
         for raw in data.get("tracks", []):
             try:
@@ -77,40 +95,120 @@ class MusicLibrary:
                 continue
             self.tracks[track.id] = self._refresh_track_state(track)
 
-    def save(self) -> None:
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"tracks": [asdict(track) for track in self.tracks.values()]}
-        self.config_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _quarantine_corrupt(self) -> None:
+        """Rename a corrupt config to ``<file>.corrupt`` instead of silently
+        loading empty — a crash-truncated file is preserved for inspection and
+        the next save starts clean rather than fail-open-to-nothing."""
+        corrupt = self.config_file.with_name(self.config_file.name + ".corrupt")
+        try:
+            os.replace(self.config_file, corrupt)
+        except OSError:
+            pass
+        logger.warning("music library config corrupt — quarantined to %s", corrupt)
 
-    def add_file(self, source: str | Path, mood: str) -> MusicTrack:
+    def save(self) -> None:
+        payload = {"tracks": [asdict(track) for track in self.tracks.values()]}
+        atomic_write_text(self.config_file, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def find_existing(self, source: str | Path, mood: str) -> MusicTrack | None:
+        """Dedup pre-check (read-only) so a caller can short-circuit BEFORE the
+        expensive stage_copy. Idempotency key = (source_sig, mood); the same
+        file to a DIFFERENT mood is intentionally a new variant (WU4/D5).
+        Caller holds the lock — this only reads self.tracks."""
+        source_sig = self._source_sig(Path(source))
+        if not source_sig:
+            return None
+        mood_key = normalize_mood(mood)
+        for existing in self.tracks.values():
+            if existing.source_sig == source_sig and existing.mood == mood_key:
+                return existing
+        return None
+
+    def stage_copy(self, source: str | Path) -> Path:
+        """Copy the source into library_dir under a fresh uuid name and return
+        the staged path. Validates the audio signature first. Touches NO
+        self.tracks state and computes no variant/label, so it is safe to call
+        OUTSIDE the music lock — the up-to-200MB copy must not block concurrent
+        control-plane reads (WU5). The label is assigned later in
+        register_staged; the on-disk name stays mood-free."""
         source_path = Path(source)
         if not is_supported_audio_path(source_path):
             raise ValueError("Solo se aceptan archivos .mp3 o .wav válidos.")
+        self.library_dir.mkdir(parents=True, exist_ok=True)
+        staged = self.library_dir / f"{uuid.uuid4().hex}{source_path.suffix.lower()}"
+        shutil.copy2(source_path, staged)
+        return staged
+
+    def register_staged(self, staged: Path, source: str | Path, mood: str) -> MusicTrack:
+        """Register an already-staged copy as a track. Caller holds the lock.
+        Rechecks dedup (a concurrent import of the same source may have won the
+        race while we copied) and on that hit discards our staged copy and
+        returns the winner. On save failure ROLLS BACK: pop the track and
+        unlink the staged file, then re-raise — a 503 must never leave a live
+        track or an orphan copy behind (WU5/D7)."""
+        source_path = Path(source)
         mood_key = normalize_mood(mood)
+        source_sig = self._source_sig(source_path)
+        if source_sig:
+            for existing in self.tracks.values():
+                if existing.source_sig == source_sig and existing.mood == mood_key:
+                    self._discard_staged(staged)
+                    return existing
         variant_index = self._next_variant_index(mood_key)
         label = self._label_for(mood_key, variant_index)
-        self.library_dir.mkdir(parents=True, exist_ok=True)
-        safe_suffix = source_path.suffix.lower()
-        target = self.library_dir / f"{label}_{uuid.uuid4().hex[:8]}{safe_suffix}"
-        shutil.copy2(source_path, target)
         track = MusicTrack(
             id=uuid.uuid4().hex,
             original_name=source_path.name,
-            path=str(target),
+            path=str(staged),
             mood=mood_key,
             label=label,
             variant_index=variant_index,
+            source_sig=source_sig,
         )
         self.tracks[track.id] = track
-        self.save()
+        try:
+            self.save()
+        except BaseException:
+            self.tracks.pop(track.id, None)
+            self._discard_staged(staged)
+            raise
         return track
 
-    def remove(self, track_id: str, *, delete_file: bool = False) -> bool:
-        track = self.tracks.pop(track_id, None)
+    def add_file(self, source: str | Path, mood: str) -> MusicTrack:
+        """Thin wrapper: dedup pre-check -> stage the copy -> register it. Kept
+        for direct callers/tests; the API handler splits these three so the
+        copy runs OUTSIDE the music lock (WU5)."""
+        existing = self.find_existing(source, mood)
+        if existing is not None:
+            return existing
+        staged = self.stage_copy(source)
+        return self.register_staged(staged, source, mood)
+
+    @staticmethod
+    def _discard_staged(staged: Path) -> None:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def remove(self, track_id: str, *, delete_file: bool = False, raising: bool = False) -> bool:
+        track = self.tracks.get(track_id)
         if not track:
             return False
+        # Delete the managed file BEFORE deregistering: if an in-flight audio
+        # stream holds the handle open (Windows blocks unlink), _delete_managed_file
+        # raises OSError. With raising=True (API) we keep the track registered and
+        # re-raise so the caller can surface a retryable 503 instead of dropping a
+        # track mid-stream (WU5/D8). With raising=False (CTK desktop) we fail open:
+        # deregister anyway so a locked file can't crash the Tk callback (the file
+        # is left orphaned, matching the pre-WU5 behavior).
         if delete_file:
-            self._delete_managed_file(track)
+            try:
+                self._delete_managed_file(track)
+            except OSError:
+                if raising:
+                    raise
+        self.tracks.pop(track_id, None)
         self.save()
         return True
 
@@ -164,10 +262,25 @@ class MusicLibrary:
             is_managed = library_root == track_path or library_root in track_path.parents
         if not is_managed:
             return
+        # OSError propagates: on Windows an in-flight audio stream's open handle
+        # blocks unlink -> the caller keeps the track and returns a retryable
+        # 503 rather than dropping a track whose bytes are still being served
+        # (WU5/D8). missing_ok=True already tolerates an already-gone file.
+        track_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _source_sig(source_path: Path) -> str:
+        """Stable import signature: resolved path + size + mtime_ns.
+        Returns "" if the file can't be stat'd (dedup then skipped, not matched).
+        # ponytail: path/size/mtime, not a content hash — covers the reported
+        # retry/double-click of the SAME file; a moved copy still dupes (upgrade
+        # path = sha256 sig). Documented ceiling per D5.
+        """
         try:
-            track_path.unlink(missing_ok=True)
+            st = source_path.stat()
+            return f"{source_path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
         except OSError:
-            pass
+            return ""
 
     def _next_variant_index(self, mood: str) -> int:
         existing = [track.variant_index for track in self.tracks.values() if track.mood == mood]

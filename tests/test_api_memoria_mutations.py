@@ -195,12 +195,20 @@ def test_post_memoria_flags_missing_id_404(tmp_path, monkeypatch):
 
 
 def test_post_memoria_flags_store_write_failure_503(tmp_path, monkeypatch):
+    import sqlite3
+
     import opencohost.core.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)
     _enable(monkeypatch, db_path)
-    monkeypatch.setattr(store_mod.MemoriaStore, "set_flags", lambda *a, **k: False)
+
+    # WU3: a GENUINE write failure now RAISES (raising=True) — a plain False
+    # return is reserved for rowcount==0 (row vanished in the race -> 404).
+    def _raise(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store_mod.MemoriaStore, "set_flags", _raise)
 
     with TestClient(_app()) as client:
         resp = client.post(
@@ -469,12 +477,20 @@ def test_post_memoria_update_missing_id_404(tmp_path, monkeypatch):
 
 
 def test_post_memoria_update_store_write_failure_503(tmp_path, monkeypatch):
+    import sqlite3
+
     import opencohost.core.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)
     _enable(monkeypatch, db_path)
-    monkeypatch.setattr(store_mod.MemoriaStore, "update_row", lambda *a, **k: False)
+
+    # WU3: a GENUINE write failure now RAISES (raising=True); a plain False
+    # return is reserved for rowcount==0 (row vanished in the race -> 404).
+    def _raise(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store_mod.MemoriaStore, "update_row", _raise)
 
     with TestClient(_app()) as client:
         resp = client.post(

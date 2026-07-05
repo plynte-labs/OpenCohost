@@ -17,7 +17,11 @@ from typing import Optional
 
 _QUEUE_FULL_THRESHOLD = 16
 _CACHE_CAP = 1024
-_DEFAULT_TTL_SECONDS = 120.0
+# Must exceed OLLAMA_CHAT_TIMEOUT (180s, settings.py) + watchdog recovery +
+# operator retry window, or a legitimate retry of a stalled >120s chat turn
+# double-fires Kira instead of replaying the cached command_id. 600s = ~3x the
+# chat timeout plus margin; the cache stays bounded by _CACHE_CAP (FIFO).
+_DEFAULT_TTL_SECONDS = 600.0
 
 
 @dataclass

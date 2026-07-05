@@ -297,7 +297,14 @@ class EngineHost:
             raise
 
     def stop(self) -> None:
-        """Best-effort teardown — each step swallows exceptions."""
+        """Best-effort teardown — each step swallows exceptions.
+
+        Eager-wake orphan (WU5/D10, intentional): _wake_ollama_eager may have
+        left `ollama serve` running (or a daemon wake thread mid-probe). We do
+        NOT kill it here — the owner's model keeps Ollama warm across API
+        restarts, and the wake thread is a daemon with log-file-redirected pipes
+        (no undrained-pipe stall). Killing it at shutdown would be an anti-feature.
+        """
         # ponytail: KiraAgendaController and MusicLibrary are both pure state
         # (no threads, no close()/reset() method) — nothing to tear down here.
         if self.aggregator is not None:
@@ -320,7 +327,11 @@ class EngineHost:
         try:
             model = getattr(self.motor, "current_model", None)
             if model:
-                ollama.generate(model=model, prompt="", keep_alive=0)
+                # WU5/D10: bound the unload. The module-level ollama.generate()
+                # uses the default client with NO timeout — a hung Ollama would
+                # stall API shutdown indefinitely. A dedicated Client(timeout=2.0)
+                # caps this teardown step at ~2s.
+                ollama.Client(timeout=2.0).generate(model=model, prompt="", keep_alive=0)
         except Exception:
             pass
         self._release_lock()

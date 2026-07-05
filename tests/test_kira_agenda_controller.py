@@ -24,6 +24,38 @@ def test_only_approved_topics_can_be_queued():
     assert topic.status == TopicStatus.QUEUED
 
 
+def test_add_topic_dedups_non_terminal_same_title_angle():
+    # WU4: identical (title, angle) against a live topic returns the existing one.
+    controller = KiraAgendaController()
+    a = controller.add_topic("Tema X", angle="un angulo")
+    b = controller.add_topic("Tema X", angle="un angulo")
+    assert a is b
+    assert len(controller.topics) == 1
+
+
+def test_add_topic_dedup_ignores_case_and_whitespace():
+    controller = KiraAgendaController()
+    a = controller.add_topic("Tema X", angle="Angulo")
+    b = controller.add_topic("  tema   x ", angle="angulo")
+    assert a is b
+    assert len(controller.topics) == 1
+
+
+def test_add_topic_terminal_status_does_not_block_fresh_add():
+    # A completed/skipped topic with the same title must NOT swallow a fresh add.
+    controller = KiraAgendaController()
+    first = controller.add_topic("Tema repetido")
+    first.status = TopicStatus.COMPLETED
+    second = controller.add_topic("Tema repetido")
+    assert first.id != second.id
+    assert len(controller.topics) == 2
+
+    third = controller.add_topic("Tema repetido")
+    third_expected_dup = second  # second is DRAFTED (non-terminal) -> dedup hits it
+    assert third is third_expected_dup
+    assert len(controller.topics) == 2
+
+
 def test_agenda_mode_does_nothing_without_topics():
     controller = KiraAgendaController()
     controller.enable()
