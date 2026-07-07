@@ -1,9 +1,13 @@
 """Tests for GET /api/memoria/list and POST /api/memoria/purge (F5, R8-CRITICAL).
 
-Mirrors test_api_reads.py's memoria/stats coverage: the list endpoint must
-expose ONLY metadata (id/created_at/updated_at/revision/pinned/private) and
-never leak the memoria's title/content, since the SELECT never reads those
-columns off disk in the first place.
+Mirrors test_api_reads.py's memoria/stats coverage. WU-H (operator viewing
+decision, 2026-07-05): the list projection now ALSO includes `title` — a
+deliberate, scoped relaxation of the prior metadata-only rule so the operator
+can recognize a row before deciding to load its content. `content` stays
+excluded from the list SELECT entirely; it is only readable one row at a time
+via GET /api/memoria/row/{id} (see test_api_memoria_row.py). R8 (raw viewer
+chat never leaves the API) is untouched — memoria title/content is Kira's
+curated/derived memory, not raw chat.
 """
 
 import sqlite3
@@ -67,7 +71,7 @@ def _seed_memorias_db(db_path):
     conn.close()
 
 
-def test_memoria_list_shape_and_no_text_leak(tmp_path, monkeypatch):
+def test_memoria_list_shape_includes_title_but_not_content(tmp_path, monkeypatch):
     import opencohost.api.main as main_mod
 
     db_path = tmp_path / "memorias.db"
@@ -85,6 +89,7 @@ def test_memoria_list_shape_and_no_text_leak(tmp_path, monkeypatch):
         for item in body["items"]:
             assert set(item.keys()) == {
                 "id",
+                "title",
                 "created_at",
                 "updated_at",
                 "revision",
@@ -93,16 +98,19 @@ def test_memoria_list_shape_and_no_text_leak(tmp_path, monkeypatch):
                 "inactive",
             }
         raw = resp.text.lower()
-        assert "content" not in raw
-        assert "text" not in raw
-        assert "secret title" not in raw
+        # WU-H: title is now part of the list contract...
+        assert "secret title a" in raw
+        assert "secret title b" in raw
+        # ...but content stays excluded (still one-row-at-a-time only).
         assert "secret content" not in raw
 
         by_id = {item["id"]: item for item in body["items"]}
         assert by_id["mem_a"]["pinned"] is True
         assert by_id["mem_a"]["private"] is False
+        assert by_id["mem_a"]["title"] == "secret title a"
         assert by_id["mem_b"]["revision"] == 2
         assert by_id["mem_b"]["private"] is True
+        assert by_id["mem_b"]["title"] == "secret title b"
 
 
 def test_memoria_list_includes_inactive_field(tmp_path, monkeypatch):

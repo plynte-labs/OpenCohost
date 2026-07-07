@@ -169,10 +169,14 @@ def test_engine_host_start_second_holder_raises(tmp_path, monkeypatch):
         first.stop()
 
 
-def test_engine_host_start_wires_drain_as_log_queue_and_noop_ui_callback(tmp_path, monkeypatch):
+def test_engine_host_start_wires_drain_as_log_queue_and_router_ui_callback(tmp_path, monkeypatch):
     """PRIVACY wiring: start() must construct MotorVocalIA with a _Drain
-    instance as the log_queue (not a real queue.Queue or logging-backed
-    sink) and the module's _noop_event as ui_callback."""
+    instance as the log_queue (not a real queue.Queue or logging-backed sink).
+
+    FIX-B: ui_callback is no longer the discarding _noop_event — it is now the
+    host's extensible motor-event router (_dispatch_motor_event), which fans
+    each status string out to the OBS push chain (and, later, the agenda). The
+    _Drain privacy contract for the log_queue is unchanged."""
     import opencohost.api.engine_host as engine_host_mod
 
     fake_motor = MagicMock()
@@ -197,7 +201,9 @@ def test_engine_host_start_wires_drain_as_log_queue_and_noop_ui_callback(tmp_pat
 
         assert len(captured["args"]) >= 1
         assert isinstance(captured["args"][0], engine_host_mod._Drain)
-        assert captured["kwargs"].get("ui_callback") is engine_host_mod._noop_event
+        # ui_callback is the host's router (bound method compares by ==, not is).
+        assert captured["kwargs"].get("ui_callback") == host._dispatch_motor_event
+        assert captured["kwargs"].get("ui_callback") is not engine_host_mod._noop_event
     finally:
         host.stop()
 
@@ -214,6 +220,10 @@ class FakeMotor:
         self._is_speaking = False
         self._is_processing = False
         self._current_profile_name = "default"
+        # Mirrors MotorVocalIA._current_profile_id: None until the engine
+        # applies its first profile switch (never seeded for the initial
+        # "default" profile at startup).
+        self._current_profile_id = None
         self.command_queue = Queue()
         # B3 (Tier-B reads): mirrors MotorVocalIA.active_llm_tier / .motor_tts
         # and the memory_inspector_snapshot() provenance-gated read.
@@ -532,10 +542,12 @@ def test_status_shape_and_read_purity():
                 "is_processing",
                 "current_model",
                 "active_profile",
+                "active_profile_id",
                 "health",
                 "state_version",
                 "ollama_warming",
                 "avatar_state",
+                "obs_connected",
             }
             assert isinstance(body["avatar_state"], str)
             # FakeMotor is ready, not speaking, not processing -> derived "idle".
@@ -555,6 +567,48 @@ def test_status_active_profile_reflects_applied_state():
         resp = client.get("/api/status")
         assert resp.json()["active_profile"] == "streamer_mode"
         assert app.state.dispatcher.state_version == before_version
+
+
+def test_status_active_profile_id_is_null_before_first_switch():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        # The engine does not seed _current_profile_id for the initial
+        # "default" profile at startup — only set_profile() writes it.
+        assert resp.json()["active_profile_id"] is None
+
+
+def test_status_active_profile_id_reflects_applied_switch():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        app.state.host.motor._current_profile_id = "profile-uuid-123"
+        resp = client.get("/api/status")
+        assert resp.json()["active_profile_id"] == "profile-uuid-123"
+
+
+def test_status_active_profile_id_defaults_to_null_when_motor_lacks_attr():
+    """FakeHost variants that predate _current_profile_id must not 500."""
+    import opencohost.api.main as main_mod
+
+    class _LegacyMotor(FakeMotor):
+        def __init__(self):
+            super().__init__()
+            del self._current_profile_id
+
+    class _LegacyHost(FakeHost):
+        def __init__(self):
+            super().__init__()
+            self.motor = _LegacyMotor()
+
+    app = main_mod.create_app(host_factory=_LegacyHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["active_profile_id"] is None
 
 
 def test_active_profile_source_scan_pin():

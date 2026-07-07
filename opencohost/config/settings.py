@@ -245,6 +245,10 @@ PTT_HOTKEY_LIST = [
 PTT_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "ptt_settings.json")
 WINDOW_GEOMETRY_FILE = os.path.join(str(USER_DATA_DIR), "config", "window_geometry.json")
 LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
+# Last successfully-activated profile NAME (FIX-A). Mirrors last_model.json so
+# the headless API engine host can seed the active profile at boot with the
+# operator's last choice instead of leaving it unset until the first switch.
+LAST_PROFILE_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_profile.json")
 LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
 TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
 PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
@@ -489,6 +493,44 @@ def save_last_model(tag: str, source: str = "user_switch") -> None:
                 "source": source,
             }, f)
         os.replace(tmp, LAST_MODEL_FILE)
+    except Exception:
+        pass
+
+
+def load_last_profile() -> Optional[str]:
+    """Return the persisted last-used profile NAME, or None (FIX-A).
+
+    Mirrors resolve_startup_model's read side for last_model.json. Returns
+    None when the file is absent, unreadable, corrupt, or holds an empty
+    name — the caller (EngineHost startup seed) then falls back to the first
+    profile on disk. Never raises.
+    """
+    try:
+        if os.path.exists(LAST_PROFILE_FILE):
+            with open(LAST_PROFILE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            name = str(data.get("profile", "")).strip()
+            return name or None
+    except Exception:
+        pass
+    return None
+
+
+def save_last_profile(name: str) -> None:
+    """Persist the last successfully-activated profile NAME (FIX-A).
+
+    Uses the same atomic temp-file + os.replace pattern as save_last_model to
+    avoid corruption on interrupted writes. Never raises.
+    """
+    try:
+        os.makedirs(os.path.dirname(LAST_PROFILE_FILE), exist_ok=True)
+        tmp = LAST_PROFILE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "profile": name,
+                "saved_at": datetime.now().isoformat(),
+            }, f)
+        os.replace(tmp, LAST_PROFILE_FILE)
     except Exception:
         pass
 

@@ -12,6 +12,48 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_obs_runtime():
+    """FIX-B: keep a real ``EngineHost.start()`` from opening a REAL OBS socket.
+
+    The API-hosted engine now constructs an ``ObsRuntime`` that reads the
+    machine's ``avatar.yaml`` and, when OBS is enabled, connects to a live OBS
+    instance (and can push image-source updates). Any test that drives a real
+    ``EngineHost.start()`` would otherwise attempt that websocket and could
+    mutate a developer's running OBS scene. Replace it with an inert stub by
+    default.
+
+    This never masks the FIX-B coverage: ``ObsRuntime``'s own unit tests import
+    the class directly from ``opencohost.avatar.obs_runtime`` (unaffected), and
+    the EngineHost-wiring tests monkeypatch ``engine_host.ObsRuntime`` themselves
+    inside the test body — that patch runs after this fixture and wins.
+    """
+    import opencohost.api.engine_host as engine_host_mod
+
+    class _InertObsRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start_from_config(self):
+            return False
+
+        def apply_config(self):
+            return False
+
+        def handle_motor_event(self, event):
+            pass
+
+        def stop(self):
+            pass
+
+        @property
+        def is_connected(self):
+            return False
+
+    with patch.object(engine_host_mod, "ObsRuntime", _InertObsRuntime):
+        yield
+
+
 @pytest.fixture(scope="session")
 def root_dir():
     """Return the project root directory."""

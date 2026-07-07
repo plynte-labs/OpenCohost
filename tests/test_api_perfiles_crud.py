@@ -68,15 +68,19 @@ def _app():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_get_perfil_returns_only_prompt_and_use_system(profiles_file):
+def test_get_perfil_returns_name_id_prompt_and_use_system(profiles_file):
     app = _app()
     with TestClient(app) as client:
         resp = client.get("/api/perfiles/default")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"name", "prompt", "use_system"}
-        assert "id" not in body  # R8/D5: the stored id must never leak
-        assert body == {"name": "default", "prompt": "Default prompt", "use_system": False}
+        assert set(body.keys()) == {"name", "id", "prompt", "use_system"}
+        assert body == {
+            "name": "default",
+            "id": "id-default",
+            "prompt": "Default prompt",
+            "use_system": False,
+        }
 
 
 def test_get_perfil_404_when_missing(profiles_file):
@@ -98,13 +102,17 @@ def test_create_perfil_then_visible_in_list_and_get(profiles_file):
             "/api/perfiles", json={"name": "newbie", "prompt": "Hi there", "use_system": True}
         )
         assert resp.status_code == 200
-        assert resp.json() == {"name": "newbie", "prompt": "Hi there", "use_system": True}
+        created = resp.json()
+        assert created["name"] == "newbie"
+        assert created["prompt"] == "Hi there"
+        assert created["use_system"] is True
+        assert isinstance(created["id"], str) and created["id"]  # server-minted uuid
 
         list_resp = client.get("/api/perfiles")
         assert "newbie" in list_resp.json()["profiles"]
 
         get_resp = client.get("/api/perfiles/newbie")
-        assert get_resp.json() == {"name": "newbie", "prompt": "Hi there", "use_system": True}
+        assert get_resp.json() == created  # GET matches what POST returned, id included
 
 
 def test_create_perfil_duplicate_name_409(profiles_file):

@@ -141,9 +141,18 @@ def test_memoria_stats_shape_counts_only():
             "digest_entries",
             "saved_memorias",
             "pinned",
+            "saved_memorias_total",
+            "pinned_total",
             "editorial_cards_by_status",
         }
-        for key in ("session_turns", "digest_entries", "saved_memorias", "pinned"):
+        for key in (
+            "session_turns",
+            "digest_entries",
+            "saved_memorias",
+            "pinned",
+            "saved_memorias_total",
+            "pinned_total",
+        ):
             assert isinstance(body[key], int)
 
 
@@ -221,6 +230,62 @@ def test_memoria_stats_memorias_enabled_true_counts_real_rows(tmp_path, monkeypa
         body = resp.json()
         assert body["saved_memorias"] == 2
         assert body["pinned"] == 1
+        # No profile_id -> per-profile figures coincide with the global totals.
+        assert body["saved_memorias_total"] == 2
+        assert body["pinned_total"] == 1
+
+
+def test_memoria_stats_profile_id_splits_per_profile_vs_global(tmp_path, monkeypatch):
+    """FIX-A: with ?profile_id=, saved_memorias/pinned filter to that profile
+    (parity with MemoriaStore.count_all/count_all_pinned) while
+    saved_memorias_total/pinned_total stay global."""
+    import sqlite3
+
+    import opencohost.api.main as main_mod
+
+    db_path = tmp_path / "memorias.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE memorias (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, "
+        "pinned INTEGER NOT NULL DEFAULT 0)"
+    )
+    # Profile "akira": 3 rows, 2 pinned. Profile "bravo": 1 row, 0 pinned.
+    conn.execute("INSERT INTO memorias (id, profile_id, pinned) VALUES ('a1', 'akira', 1)")
+    conn.execute("INSERT INTO memorias (id, profile_id, pinned) VALUES ('a2', 'akira', 1)")
+    conn.execute("INSERT INTO memorias (id, profile_id, pinned) VALUES ('a3', 'akira', 0)")
+    conn.execute("INSERT INTO memorias (id, profile_id, pinned) VALUES ('b1', 'bravo', 0)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main_mod, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(main_mod, "MEMORIAS_DB", str(db_path))
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/memoria/stats", params={"profile_id": "akira"})
+        assert resp.status_code == 200
+        body = resp.json()
+        # Per-profile figures for "akira".
+        assert body["saved_memorias"] == 3
+        assert body["pinned"] == 2
+        # Global totals across every profile.
+        assert body["saved_memorias_total"] == 4
+        assert body["pinned_total"] == 2
+
+        # A profile with a single, unpinned row.
+        resp_b = client.get("/api/memoria/stats", params={"profile_id": "bravo"})
+        body_b = resp_b.json()
+        assert body_b["saved_memorias"] == 1
+        assert body_b["pinned"] == 0
+        assert body_b["saved_memorias_total"] == 4
+        assert body_b["pinned_total"] == 2
+
+        # An unknown profile -> zero per-profile, totals unchanged.
+        resp_x = client.get("/api/memoria/stats", params={"profile_id": "ghost"})
+        body_x = resp_x.json()
+        assert body_x["saved_memorias"] == 0
+        assert body_x["pinned"] == 0
+        assert body_x["saved_memorias_total"] == 4
 
 
 def test_memoria_stats_memorias_disabled_returns_zeros_gracefully(tmp_path, monkeypatch):

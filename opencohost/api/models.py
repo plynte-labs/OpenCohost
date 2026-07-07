@@ -40,6 +40,12 @@ class StatusResponse(BaseModel):
     is_speaking: bool
     is_processing: bool
     active_profile: str
+    # Stable profile UUID (R12) mirrored from MotorVocalIA._current_profile_id
+    # so the FE can tag /api/memoria/* calls with the id memoria rows are
+    # actually stored under (profile_id column), not the display name. None
+    # until the first profile switch — the engine does not seed this at
+    # startup for the initial "default" profile (see main.py get_status).
+    active_profile_id: Optional[str] = None
     health: HealthState
     state_version: int
     # S4 (P2): eager-wake warming visibility — True while the daemon-thread
@@ -52,6 +58,10 @@ class StatusResponse(BaseModel):
     # here; the richer states (listening/speaking_alt/angry) live solely in
     # app_shell's bridge and are not reachable from the API host.
     avatar_state: str = "idle"
+    # FIX-B: real OBS websocket connection state from the API-hosted
+    # ObsRuntime. None when no runtime exists (construction failed, or a test
+    # host double without one) — the FE treats None as "unknown", not "down".
+    obs_connected: Optional[bool] = None
 
 
 class ProfilesListResponse(BaseModel):
@@ -68,12 +78,16 @@ class SwitchProfileRequest(BaseModel):
 class ProfileDetailResponse(BaseModel):
     """GET /api/perfiles/{name} response (R8/D5).
 
-    prompt + use_system ONLY — never the stored `id` or any other field. The
-    handler builds this from explicit field picks (never `**data`), so a new
-    persisted field can never leak through this endpoint.
+    `id` is included so the FE can target this (possibly non-active)
+    profile's memoria rows, which are stored keyed by the stable uuid `id`,
+    not the display name. prompt/use_system/id ONLY — never chat content or
+    any other field. The handler builds this from explicit field picks
+    (never `**data`), so a new persisted field can never leak through this
+    endpoint.
     """
 
     name: str
+    id: str
     prompt: str
     use_system: bool
 
@@ -424,6 +438,11 @@ class AgendaResponse(BaseModel):
     drafted_topics: list[AgendaTopicOut]
     session_settings: AgendaSessionSettings
     metrics: AgendaMetrics
+    # FIX-C: POST /api/agenda/session/action outcome flags. `applied` is False
+    # with `reason="empty_queue"` when `enable` is refused for an empty queue
+    # (CTK parity); every other agenda response leaves both null.
+    applied: Optional[bool] = None
+    reason: Optional[str] = None
 
 
 class AgendaTopicRequest(BaseModel):
@@ -498,21 +517,34 @@ class MemoriaStatsResponse(BaseModel):
 
     session_turns: int
     digest_entries: int
+    # FIX-A: `saved_memorias`/`pinned` are per-profile counts when the request
+    # carries `profile_id` (so the FE headline agrees with the per-profile
+    # list); they fall back to the global totals when it does not.
     saved_memorias: int
     pinned: int
+    # Global totals, always present regardless of `profile_id` — kept as
+    # separate fields for compatibility and honest "N of total" surfacing.
+    saved_memorias_total: int = 0
+    pinned_total: int = 0
     editorial_cards_by_status: dict[str, int]
 
 
 class MemoriaListItem(BaseModel):
-    """One row of GET /api/memoria/list (Tier B, R8-CRITICAL).
+    """One row of GET /api/memoria/list (Tier B).
 
-    METADATA ONLY — mirrors MemoriaStatsResponse's contract. Deliberately
-    has no `title`/`content` field, and the endpoint's SQL SELECT never
-    reads those columns in the first place (defense in depth, not just
-    field omission here).
+    WU-H (operator viewing decision, 2026-07-05): `title` is now included in
+    the list projection — a deliberate, scoped relaxation of the prior
+    metadata-only rule so the operator can recognize a row before deciding
+    to load it. `content` is still deliberately excluded, and the endpoint's
+    SQL SELECT never reads that column off disk in the first place (defense
+    in depth, not just field omission here) — content is only readable one
+    row at a time via GET /api/memoria/row/{id}. R8 (raw viewer chat never
+    leaves the API) is unaffected: memoria title/content is Kira's
+    curated/derived memory, not raw chat.
     """
 
     id: str
+    title: str
     created_at: str
     updated_at: str
     revision: int
@@ -525,6 +557,26 @@ class MemoriaListResponse(BaseModel):
     """GET /api/memoria/list response body."""
 
     items: list[MemoriaListItem]
+
+
+class MemoriaRowResponse(BaseModel):
+    """GET /api/memoria/row/{id} response body (WU-H, operator viewing decision).
+
+    The ONLY memoria surface that returns `content` — on-demand, one row at a
+    time, never preloaded alongside GET /api/memoria/list. Mirrors the
+    ownership-guard shape used by POST /api/memoria/{delete,update}: the
+    handler's store.get(raising=True) pre-check owns the 404 for a
+    missing/wrong-profile row (R7: identical 404 body either way).
+    """
+
+    id: str
+    title: str
+    content: str
+    created_at: str
+    updated_at: str
+    pinned: bool
+    private: bool
+    inactive: bool
 
 
 class MemoriaFlagsRequest(BaseModel):

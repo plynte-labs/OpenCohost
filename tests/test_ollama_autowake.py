@@ -203,6 +203,7 @@ def test_status_endpoint_exposes_ollama_warming():
             self.motor.is_speaking = False
             self.motor.is_processing = False
             self.motor._current_profile_name = "default"
+            self.motor._current_profile_id = None
             self.motor.command_queue = Queue()
             self.monitor = MagicMock()
             from opencohost.core.health_monitor import MonitorState

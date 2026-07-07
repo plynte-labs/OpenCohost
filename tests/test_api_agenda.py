@@ -8,6 +8,8 @@ must never surface `get_metrics().rejection_log` matched_text/matched_phrase
 or any raw viewer phrase — counts/state only.
 """
 
+from queue import Queue
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,6 +32,60 @@ def _host_with_agenda(agenda):
     def factory():
         host = FakeHost()
         host.agenda = agenda
+        return host
+
+    return factory
+
+
+class _RecordingMotor:
+    """Minimal motor stand-in that records the FIX-C soft_stop / emergency_stop
+    calls (replace_pending / enqueue / interrupt_speaking / drop_pending_sources)."""
+
+    def __init__(self):
+        self.is_processing = False
+        self.is_speaking = False
+        self.enqueued = []
+        self.replaced = []
+        self.interrupted = 0
+        self.dropped = []
+        # The app lifespan builds Dispatcher(host.motor.command_queue) on startup.
+        self.command_queue = Queue()
+        self.current_model = None
+
+    def enqueue(self, payload, priority=1, source="chat", history_text=None):
+        self.enqueued.append(source)
+
+    def replace_pending(self, payload, priority=1, source="chat"):
+        self.replaced.append(source)
+
+    def clear_prefetched_agenda(self):
+        pass
+
+    def interrupt_speaking(self):
+        self.interrupted += 1
+
+    def drop_pending_sources(self, prefixes):
+        self.dropped.append(prefixes)
+        return 0
+
+
+class _RecordingDriver:
+    """Records nudge() calls so the enable route's immediate-tick can be asserted."""
+
+    def __init__(self):
+        self.nudges = 0
+
+    def nudge(self):
+        self.nudges += 1
+
+
+def _host_with_agenda_and_motor(agenda, motor, driver=None):
+    def factory():
+        host = FakeHost()
+        host.agenda = agenda
+        host.motor = motor
+        if driver is not None:
+            host._agenda_driver = driver
         return host
 
     return factory
@@ -124,17 +180,22 @@ def test_get_agenda_never_leaks_rejection_log_matched_text():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_post_agenda_topic_appends_drafted_topic():
+def test_post_agenda_topic_queues_topic_directly():
+    # CTK parity decision 2026-07-05 (Option A): a POSTed topic is operator-
+    # approved and queued in one step ("Agregar a cola", app_shell.py:1317-1318),
+    # so it lands in queued_topics (status "queued"), NOT the drafted suggestion
+    # inbox. Only QUEUED topics are selectable by the agenda driver.
     controller = KiraAgendaController()
     app = _app(_host_with_agenda(controller))
     with TestClient(app) as client:
         resp = client.post("/api/agenda/topic", json={"title": "Nueva IA local", "angle": "privacidad primero"})
         assert resp.status_code == 200
         body = resp.json()
-        assert len(body["drafted_topics"]) == 1
-        assert body["drafted_topics"][0]["title"] == "Nueva IA local"
-        assert body["drafted_topics"][0]["angle"] == "privacidad primero"
-        assert body["drafted_topics"][0]["status"] == "drafted"
+        assert body["drafted_topics"] == []
+        assert len(body["queued_topics"]) == 1
+        assert body["queued_topics"][0]["title"] == "Nueva IA local"
+        assert body["queued_topics"][0]["angle"] == "privacidad primero"
+        assert body["queued_topics"][0]["status"] == "queued"
     assert len(controller.topics) == 1
 
 
@@ -150,7 +211,10 @@ def test_post_agenda_topic_dedups_same_title_angle():
         second = client.post("/api/agenda/topic", json=body)
         assert first.status_code == 200
         assert second.status_code == 200
-        assert len(second.json()["drafted_topics"]) == 1
+        # CTK parity decision 2026-07-05 (Option A): topics queue on POST; the
+        # idempotent re-POST returns the existing queued topic without
+        # re-queueing (queue_topic only accepts APPROVED, so a repeat is a no-op).
+        assert len(second.json()["queued_topics"]) == 1
     assert len(controller.topics) == 1
 
 
@@ -258,22 +322,36 @@ def test_post_agenda_topic_invalid_constraint_422():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_topic_action_approve_then_queue_then_remove():
+def test_topic_action_approve_queues_then_remove():
+    # CTK parity decision 2026-07-05 (Option A): approving a drafted suggestion
+    # also queues it atomically (topic_inbox_bridge.py:138-139), so it lands in
+    # queued_topics directly — a standalone "queue" step would now 422 (already
+    # queued). The flow is approve(->queued) then remove.
     controller = KiraAgendaController()
     topic = controller.add_topic("Tema uno")
     app = _app(_host_with_agenda(controller))
     with TestClient(app) as client:
         resp = client.post("/api/agenda/topic/action", json={"action": "approve", "topic_id": topic.id})
         assert resp.status_code == 200
-        assert controller._topic(topic.id).status.value == "approved"
-
-        resp = client.post("/api/agenda/topic/action", json={"action": "queue", "topic_id": topic.id})
-        assert resp.status_code == 200
+        assert controller._topic(topic.id).status.value == "queued"
         assert len(resp.json()["queued_topics"]) == 1
 
         resp = client.post("/api/agenda/topic/action", json={"action": "remove", "topic_id": topic.id})
         assert resp.status_code == 200
         assert resp.json()["queued_topics"] == []
+
+
+def test_topic_action_queue_on_approved_topic_still_works():
+    # The standalone "queue" verb remains valid for an APPROVED-but-not-queued
+    # topic (whitelist unchanged) even though "approve" now auto-queues.
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema aprobado", approved=True)
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/topic/action", json={"action": "queue", "topic_id": topic.id})
+        assert resp.status_code == 200
+        assert len(resp.json()["queued_topics"]) == 1
+        assert controller._topic(topic.id).status.value == "queued"
 
 
 def test_topic_action_move_reorders_queue():
@@ -427,15 +505,105 @@ def test_put_agenda_session_503_when_agenda_none():
 
 
 def test_post_agenda_session_action_enable_from_off():
+    # A queued topic makes enable meaningful — CTK parity refuses enable for an
+    # empty queue (see test_post_agenda_session_action_enable_empty_queue below).
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema", approved=True)
+    controller.queue_topic(topic.id)
+    assert controller.state.value == "OFF"
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+        assert resp.status_code == 200
+        body = resp.json()
+        # enable(): OFF -> IDLE. AgendaState.IDLE.value == "IDLE" (the enum
+        # value is uppercase — see kira_agenda_controller.py:20).
+        assert body["state"] == "IDLE"
+        assert body["applied"] is True
+
+
+def test_post_agenda_session_action_enable_empty_queue():
+    # CTK parity decision 2026-07-05 (Option A): enable with no queued topics and
+    # no active topic is refused — 200 with applied=False, reason="empty_queue"
+    # (app_shell.py:1415-1419), state stays OFF so the UI can explain instead of
+    # starting a silent session.
     controller = KiraAgendaController()
     assert controller.state.value == "OFF"
     app = _app(_host_with_agenda(controller))
     with TestClient(app) as client:
         resp = client.post("/api/agenda/session/action", json={"action": "enable"})
         assert resp.status_code == 200
-        # enable(): OFF -> IDLE. AgendaState.IDLE.value == "IDLE" (the enum
-        # value is uppercase — see kira_agenda_controller.py:20).
-        assert resp.json()["state"] == "IDLE"
+        body = resp.json()
+        assert body["applied"] is False
+        assert body["reason"] == "empty_queue"
+        assert body["state"] == "OFF"
+    assert controller.state.value == "OFF"
+
+
+def test_post_agenda_session_action_enable_nudges_driver_for_immediate_tick():
+    # CTK parity (app_shell.py:1432): enabling with a queued topic nudges the
+    # driver so Kira opens the first topic without waiting out the cadence. An
+    # empty-queue enable is refused and must NOT nudge.
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema", approved=True)
+    controller.queue_topic(topic.id)
+    motor = _RecordingMotor()
+    driver = _RecordingDriver()
+    app = _app(_host_with_agenda_and_motor(controller, motor, driver))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is True
+    assert driver.nudges == 1
+
+
+def test_post_agenda_session_action_enable_empty_queue_does_not_nudge():
+    controller = KiraAgendaController()
+    motor = _RecordingMotor()
+    driver = _RecordingDriver()
+    app = _app(_host_with_agenda_and_motor(controller, motor, driver))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is False
+    assert driver.nudges == 0
+
+
+def test_post_agenda_session_action_soft_stop_enqueues_closing_action():
+    # FIX-C: the headless host now has a speech pipeline (chat works), so
+    # soft_stop enqueues the controller's closing line into the motor via
+    # replace_pending (source kira-agenda-stop) — mirror app_shell.py:1435.
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()  # IDLE -> opens the topic -> GENERATING
+    controller.mark_generation_accepted()  # -> SPEAKING
+    controller.mark_speech_complete()  # -> WAITING_SIGNAL, active topic mid-way
+    motor = _RecordingMotor()
+    app = _app(_host_with_agenda_and_motor(controller, motor))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "soft_stop"})
+        assert resp.status_code == 200
+    assert motor.replaced == ["kira-agenda-stop"]
+    assert motor.enqueued == []
+
+
+def test_post_agenda_session_action_emergency_stop_interrupts_and_drops_pending():
+    # FIX-C: emergency_stop also interrupts in-flight speech and drops pending
+    # agenda turns from the motor queue (mirror app_shell.py:1494-1497).
+    controller = KiraAgendaController()
+    controller.active_topic = controller.add_topic("Tema activo")
+    motor = _RecordingMotor()
+    app = _app(_host_with_agenda_and_motor(controller, motor))
+    with TestClient(app) as client:
+        resp = client.post("/api/agenda/session/action", json={"action": "emergency_stop"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["active_topic"] is None
+        assert body["state"] == "OFF"
+    assert motor.interrupted == 1
+    assert motor.dropped == [("kira-agenda",)]
 
 
 def test_post_agenda_session_action_soft_stop():

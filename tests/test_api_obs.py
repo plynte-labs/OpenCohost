@@ -44,6 +44,39 @@ def _app():
     return main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
 
 
+class _RecordingObsRuntime:
+    """Recording ObsRuntime stub — counts apply_config() calls (FIX-B)."""
+
+    def __init__(self):
+        self.apply_calls = 0
+
+    def apply_config(self):
+        self.apply_calls += 1
+        return True
+
+
+class _ObsRuntimeHost(FakeHost):
+    """FakeHost carrying a recording obs_runtime so the PUT handlers'
+    apply_config() call is observable (FIX-B)."""
+
+    def __init__(self):
+        super().__init__()
+        self.obs_runtime = _RecordingObsRuntime()
+
+
+def _app_obs_runtime():
+    import opencohost.api.main as main_mod
+
+    return main_mod.create_app(host_factory=_ObsRuntimeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+
+
+def _write_unreadable_avatar_yaml(tmp_path):
+    # Top-level YAML list (not a mapping) -> load_avatar_config(strict=True)
+    # raises AvatarConfigUnreadableError -> the PUT handler returns 503 before
+    # any save or apply_config runs.
+    (tmp_path / "avatar.yaml").write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+
+
 def _fake_obs_client_factory(result):
     """Fake OBSClient — never opens a real OBS websocket connection."""
 
@@ -229,6 +262,54 @@ def test_post_obs_test_never_touches_command_queue(monkeypatch):
         client.post("/api/obs/test", json={"host": "x", "port": 1, "password": "y"})
         assert app.state.host.motor.command_queue.qsize() == 0
         assert app.state.dispatcher.state_version == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# FIX-B: a successful config PUT pushes the change to the live OBS runtime
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_put_obs_config_200_applies_runtime_exactly_once():
+    app = _app_obs_runtime()
+    with TestClient(app) as client:
+        resp = client.put("/api/obs/config", json={"host": "1.2.3.4", "port": 4455})
+        assert resp.status_code == 200
+        assert app.state.host.obs_runtime.apply_calls == 1
+
+
+def test_put_obs_config_503_does_not_apply_runtime(tmp_path):
+    _write_unreadable_avatar_yaml(tmp_path)
+    app = _app_obs_runtime()
+    with TestClient(app) as client:
+        resp = client.put("/api/obs/config", json={"host": "x"})
+        assert resp.status_code == 503
+        assert app.state.host.obs_runtime.apply_calls == 0
+
+
+def test_put_avatar_config_200_applies_runtime_exactly_once():
+    app = _app_obs_runtime()
+    with TestClient(app) as client:
+        resp = client.put("/api/avatar/config", json={"enabled": True})
+        assert resp.status_code == 200
+        assert app.state.host.obs_runtime.apply_calls == 1
+
+
+def test_put_avatar_config_503_does_not_apply_runtime(tmp_path):
+    _write_unreadable_avatar_yaml(tmp_path)
+    app = _app_obs_runtime()
+    with TestClient(app) as client:
+        resp = client.put("/api/avatar/config", json={"enabled": True})
+        assert resp.status_code == 503
+        assert app.state.host.obs_runtime.apply_calls == 0
+
+
+def test_put_obs_config_200_never_500s_when_host_has_no_obs_runtime():
+    # Base FakeHost has no obs_runtime attribute: the guarded getattr in the
+    # handler must make apply a silent no-op, never a 500.
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/obs/config", json={"host": "9.9.9.9"})
+        assert resp.status_code == 200
 
 
 # ──────────────────────────────────────────────────────────────────────────

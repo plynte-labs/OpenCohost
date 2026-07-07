@@ -52,10 +52,12 @@ def test_status_response_wire_keys_exact():
         "is_speaking",
         "is_processing",
         "active_profile",
+        "active_profile_id",
         "health",
         "state_version",
         "ollama_warming",
         "avatar_state",
+        "obs_connected",
     }
     # A-M1 pin: NOT the shortened forms.
     assert "ready" not in dumped

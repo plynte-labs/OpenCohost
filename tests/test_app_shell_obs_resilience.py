@@ -1504,3 +1504,86 @@ def test_app_shell_does_not_wire_rms_bar():
         assert not hasattr(app, "barra_rms")
     finally:
         _restore_app_shell_module(old_module)
+
+
+# ---------------------------------------------------------------------------
+# c865f59 regression guard — ProfilePanel's memoria_store_getter must stay
+# deferred with MEMORIAS_ENABLED=True (init-order crash gap, engram #2789)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_panel_memoria_getter_defers_motor_ia_access_with_flag_on():
+    """Regression guard for c865f59 (runtime crash with MEMORIAS_ENABLED=True).
+
+    Bug: _build_ui() wired ProfilePanel's memoria_store_getter as
+    `self.motor_ia._get_memoria_store if MEMORIAS_ENABLED else None` -- an
+    EAGER attribute access. self.motor_ia is only assigned AFTER _build_ui()
+    returns (see __init__ order: _build_ui() at ~line 180, self.motor_ia at
+    ~line 183), so with the flag ON this raised AttributeError at
+    construction time, before any window ever opened. The fix wraps the
+    access in a lambda so it is deferred until the getter is actually
+    invoked (see the comment directly above the ProfilePanel(...) call).
+
+    No test constructs VocalAIApp for real (requires a live Tk root/display,
+    same limitation documented on test_agenda_load_not_synchronous_on_main_thread
+    and test_load_agenda_worker_safe_after_fires_even_on_load_exception above),
+    so this exercises the exact wiring expression instead of the full app.
+
+    Non-vacuous strategy (mirrors test_startup_compacto_runtime_behavior in
+    this file): AST-extract the literal `memoria_store_getter=` expression
+    straight out of the real _build_ui source -- no hand-copied expression
+    that could silently drift from the fixed code -- eval it against a bare
+    stand-in for `self` that has NO motor_ia attribute yet (exactly the state
+    _build_ui runs in), and prove:
+      1. Building the getter with MEMORIAS_ENABLED=True does not touch
+         motor_ia (a revert to eager access reproduces the pre-fix crash
+         here: AttributeError, confirmed against the actual pre-c865f59
+         source during test authoring).
+      2. Once motor_ia exists and the getter is actually called, it forwards
+         to motor_ia._get_memoria_store().
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        src = textwrap.dedent(inspect.getsource(app_shell.VocalAIApp._build_ui))
+        tree = ast.parse(src)
+
+        getter_expr_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "ProfilePanel":
+                for kw in node.keywords:
+                    if kw.arg == "memoria_store_getter":
+                        getter_expr_node = kw.value
+
+        assert getter_expr_node is not None, (
+            "Could not find ProfilePanel(..., memoria_store_getter=...) in "
+            "_build_ui — was the wiring moved or renamed?"
+        )
+
+        getter_expr_src = ast.unparse(getter_expr_node)
+
+        class _BareApp:
+            """Stand-in for self at the point _build_ui runs: motor_ia does
+            NOT exist yet (assigned only after _build_ui() returns)."""
+
+        bare_self = _BareApp()
+
+        # Step 1 — build the getter exactly as _build_ui does, on an object
+        # that has no motor_ia yet. Must NOT raise: this is the RED
+        # reproduction site for the pre-fix eager-access bug.
+        namespace = {"self": bare_self, "MEMORIAS_ENABLED": True}
+        getter = eval(getter_expr_src, namespace)
+        assert getter is not None, "Expected a deferred getter when MEMORIAS_ENABLED=True"
+
+        # Step 2 — motor_ia now exists (as it does once __init__ completes);
+        # invoking the getter must forward to motor_ia._get_memoria_store().
+        sentinel_store = object()
+        bare_self.motor_ia = SimpleNamespace(_get_memoria_store=MagicMock(return_value=sentinel_store))
+
+        assert getter() is sentinel_store
+        bare_self.motor_ia._get_memoria_store.assert_called_once_with()
+    finally:
+        _restore_app_shell_module(old_module)

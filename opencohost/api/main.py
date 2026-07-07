@@ -42,6 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
+from opencohost.api.agenda_driver import enqueue_agenda_action
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
@@ -75,6 +76,7 @@ from opencohost.api.models import (
     MemoriaNoticeResponse,
     MemoriaPurgeRequest,
     MemoriaPurgeResponse,
+    MemoriaRowResponse,
     MemoriaStatsResponse,
     MemoriaUpdateRequest,
     ModelsResponse,
@@ -117,6 +119,7 @@ from opencohost.config.settings import (
     load_memorias_notice_dismissed,
     load_piper_voice,
     load_tts_local_only,
+    save_last_profile,
     save_memorias_notice_dismissed,
     load_tts_speed,
     resolve_llm_tiers,
@@ -134,6 +137,7 @@ from opencohost.core.cohost_profiles import (
     save_cohost_profiles,
 )
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
+from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 # GET /api/models external I/O bound — short client timeout so a stalled/
@@ -177,15 +181,18 @@ def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) 
         return []
 
 
-def _count_sql(db_path: str, sql: str) -> int:
+def _count_sql(db_path: str, sql: str, params: tuple = ()) -> int:
     """Bounded, fail-open COUNT(*) read. Never creates db_path as a side
     effect: a missing file (e.g. a standalone API process that never
-    touched this store) returns 0 without connecting."""
+    touched this store) returns 0 without connecting.
+
+    `params` are bound positionally for parameterized WHERE clauses (e.g. the
+    per-profile split in GET /api/memoria/stats) — never string-interpolated."""
     if not db_path or not os.path.exists(db_path):
         return 0
     try:
         with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
-            row = conn.execute(sql).fetchone()
+            row = conn.execute(sql, params).fetchone()
             return int(row[0]) if row else 0
     except sqlite3.Error:
         return 0
@@ -205,20 +212,22 @@ def _editorial_cards_by_status(db_path: str) -> dict:
 
 
 def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
-    """Bounded, fail-open metadata read for GET /api/memoria/list (R8).
+    """Bounded, fail-open metadata read for GET /api/memoria/list.
 
-    The SELECT names ONLY metadata columns — title/content are never read
-    off disk in the first place, so there is nothing to filter out of the
-    row before it reaches MemoriaListItem (defense in depth, not just a
-    field omission on the Pydantic model)."""
+    WU-H (operator viewing decision, 2026-07-05): the SELECT now ALSO reads
+    `title` — a deliberate, scoped relaxation of the prior metadata-only
+    rule so the operator can recognize a row before deciding to load it.
+    `content` still stays off this SELECT entirely; it is only readable one
+    row at a time via GET /api/memoria/row/{id} (R8 unaffected — memoria
+    title/content is Kira's curated/derived memory, not raw viewer chat)."""
     if not db_path or not os.path.exists(db_path):
         return []
     try:
         with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT id, created_at, updated_at, revision, pinned, private, inactive FROM memorias "
-                "WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
+                "SELECT id, title, created_at, updated_at, revision, pinned, private, inactive "
+                "FROM memorias WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
                 (profile_id,),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -427,6 +436,27 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
     )
 
 
+def _apply_avatar_runtime(request: Request) -> None:
+    """FIX-B: push the just-saved avatar.yaml to the live OBS runtime.
+
+    Best-effort and doubly guarded (getattr for the missing attribute, try/except
+    for a runtime error) so a successful config write never turns into a 500:
+    FakeHost test doubles carry no ``obs_runtime``, and a failed/absent runtime
+    must not fail the request. The ObsRuntime rebuilds its OBSClient (state_images
+    are snapshotted at construction — see obs_client.py) and reconnects on the
+    new host/port. Called ONLY after a successful save (never on the 503 paths).
+    """
+    host = getattr(request.app.state, "host", None)
+    runtime = getattr(host, "obs_runtime", None)
+    if runtime is None:
+        return
+    try:
+        runtime.apply_config()
+    except Exception:
+        # OBS is best-effort; a runtime rebuild failure never fails the write.
+        pass
+
+
 # POST /api/agenda/topic/action verb whitelist — mirrors _COMMAND_WHITELIST.
 # "reject" acts on the pre-approval DRAFTED suggestion inbox (-> SKIPPED),
 # distinct from "remove" which drops a post-approval QUEUED topic.
@@ -458,7 +488,7 @@ def _agenda_topic_out(topic) -> AgendaTopicOut:
     )
 
 
-def _agenda_response(agenda) -> AgendaResponse:
+def _agenda_response(agenda, *, applied=None, reason=None) -> AgendaResponse:
     metrics = agenda.get_metrics()
     return AgendaResponse(
         state=agenda.state.value,
@@ -484,6 +514,10 @@ def _agenda_response(agenda) -> AgendaResponse:
             topics_queued=metrics["topics_queued"],
             last_outputs_count=metrics["last_outputs_count"],
         ),
+        # FIX-C: session/action outcome. Only POST /api/agenda/session/action
+        # sets these; every other response leaves them null.
+        applied=applied,
+        reason=reason,
     )
 
 
@@ -591,16 +625,28 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             avatar_state = "sleeping"
         else:
             avatar_state = "idle"
+        # FIX-B: real OBS connection state from the API-hosted ObsRuntime.
+        # Guarded (getattr + try/except) so a host double without a runtime, or
+        # a runtime error, degrades to None rather than failing the probe.
+        runtime = getattr(host, "obs_runtime", None)
+        obs_connected: Optional[bool] = None
+        if runtime is not None:
+            try:
+                obs_connected = bool(runtime.is_connected)
+            except Exception:
+                obs_connected = None
         return StatusResponse(
             is_ready=is_ready,
             current_model=host.motor.current_model,
             is_speaking=is_speaking,
             is_processing=is_processing,
             active_profile=host.motor._current_profile_name,
+            active_profile_id=getattr(host.motor, "_current_profile_id", None),
             health=HealthState(**dataclasses.asdict(host.monitor.state)),
             state_version=request.app.state.dispatcher.state_version,
             ollama_warming=getattr(host, "ollama_warming", False),
             avatar_state=avatar_state,
+            obs_connected=obs_connected,
         )
 
     @app.get("/api/perfiles", response_model=ProfilesListResponse)
@@ -612,8 +658,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
 
     @app.get("/api/perfiles/{name}", response_model=ProfileDetailResponse)
     def get_perfil(name: str):
-        # R8/D5: explicit field picks — never `**data` — so the stored `id`
-        # (or any future field) can never leak. GET is lock-free like list.
+        # R8/D5: explicit field picks — never `**data` — so only name/id/
+        # prompt/use_system are ever returned; any future persisted field
+        # (or chat content) can never leak through. `id` IS returned so the
+        # FE can target this profile's memoria rows (stored keyed by uuid).
+        # GET is lock-free like list.
         perfiles = cargar_perfiles()
         if not isinstance(perfiles, dict) or name not in perfiles or not isinstance(
             perfiles[name], dict
@@ -622,6 +671,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         data = perfiles[name]
         return ProfileDetailResponse(
             name=name,
+            id=str(data.get("id", "")),
             prompt=str(data.get("prompt", "")),
             use_system=bool(data.get("use_system", False)),
         )
@@ -640,14 +690,17 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             if name in perfiles:
                 return JSONResponse(status_code=409, content={"detail": "profile already exists"})
             # Stable id minted server-side (R12) — never accepted from the wire.
+            new_id = str(uuid.uuid4())
             perfiles[name] = {
-                "id": str(uuid.uuid4()),
+                "id": new_id,
                 "prompt": body.prompt,
                 "use_system": body.use_system,
             }
             if not guardar_perfiles(perfiles):
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
-        return ProfileDetailResponse(name=name, prompt=body.prompt, use_system=body.use_system)
+        return ProfileDetailResponse(
+            name=name, id=new_id, prompt=body.prompt, use_system=body.use_system
+        )
 
     @app.put("/api/perfiles/{name}", response_model=ProfileDetailResponse)
     def update_perfil(name: str, body: ProfileUpdateRequest):
@@ -679,6 +732,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return ProfileDetailResponse(
             name=target,
+            id=str(data.get("id", "")),
             prompt=str(data.get("prompt", "")),
             use_system=bool(data.get("use_system", False)),
         )
@@ -735,7 +789,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         )
 
     @app.get("/api/memoria/stats", response_model=MemoriaStatsResponse)
-    def get_memoria_stats(request: Request) -> MemoriaStatsResponse:
+    def get_memoria_stats(request: Request, profile_id: Optional[str] = None) -> MemoriaStatsResponse:
         host = request.app.state.host
         # R8: reuse the ONLY provenance gate (memory_inspector_snapshot
         # already applies _DIGEST_CAPTURE_SOURCES) — take counts only, never
@@ -744,17 +798,40 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         session_turns = len(snapshot["entries"])
         digest_entries = snapshot["digest"]["line_count"]
 
+        # FIX-A: when `profile_id` is present, `saved_memorias`/`pinned` filter
+        # to that profile (semantics parity with MemoriaStore.count_all /
+        # count_all_pinned) so the headline count agrees with the per-profile
+        # GET /api/memoria/list. `saved_memorias_total`/`pinned_total` keep the
+        # global figures as separate fields. Without `profile_id`, the two
+        # halves coincide (both global) — preserves the pre-FIX-A contract for
+        # any old caller.
+        saved_total = 0
+        pinned_total = 0
         saved_memorias = 0
         pinned = 0
         if MEMORIAS_ENABLED:
-            saved_memorias = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias")
-            pinned = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE pinned = 1")
+            saved_total = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias")
+            pinned_total = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE pinned = 1")
+            if profile_id:
+                saved_memorias = _count_sql(
+                    MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE profile_id = ?", (profile_id,)
+                )
+                pinned = _count_sql(
+                    MEMORIAS_DB,
+                    "SELECT COUNT(*) FROM memorias WHERE profile_id = ? AND pinned = 1",
+                    (profile_id,),
+                )
+            else:
+                saved_memorias = saved_total
+                pinned = pinned_total
 
         return MemoriaStatsResponse(
             session_turns=session_turns,
             digest_entries=digest_entries,
             saved_memorias=saved_memorias,
             pinned=pinned,
+            saved_memorias_total=saved_total,
+            pinned_total=pinned_total,
             editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
         )
 
@@ -767,6 +844,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             items=[
                 MemoriaListItem(
                     id=row["id"],
+                    title=row["title"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     revision=row["revision"],
@@ -776,6 +854,38 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 )
                 for row in rows
             ]
+        )
+
+    @app.get("/api/memoria/row/{row_id}", response_model=MemoriaRowResponse)
+    def get_memoria_row(row_id: str, profile_id: str):
+        """One row's full content, on-demand (WU-H, operator viewing decision).
+
+        Mirrors the ownership-guard pattern from POST /api/memoria/{delete,
+        update}: store.get(raising=True) pre-check, then the SAME 404 body
+        for a missing row and a wrong-profile row (R7: no cross-profile
+        existence oracle). Disabled feature also maps to 404 — there is no
+        "empty" analog for a single-row GET the way list/stats have.
+        """
+        if not MEMORIAS_ENABLED:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+        store = _memoria_store_or_none()
+        if store is None:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        try:
+            row = store.get(row_id, raising=True)
+        except sqlite3.Error:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        if row is None or row["profile_id"] != profile_id:
+            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+        return MemoriaRowResponse(
+            id=row["id"],
+            title=row["title"],
+            content=row["content"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            pinned=bool(row["pinned"]),
+            private=bool(row["private"]),
+            inactive=bool(row["inactive"]),
         )
 
     @app.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)
@@ -1086,15 +1196,26 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(status_code=422, content={"detail": "too many constraints"})
         with host.agenda_lock:
             try:
-                agenda.add_topic(
+                # CTK parity decision 2026-07-05 (Option A): a POSTed topic is
+                # operator-approved and goes straight to the queue, matching the
+                # UI label "Agregar a cola" and app_shell.py:1317-1318
+                # (add_topic(approved=True) + queue_topic). Only QUEUED topics
+                # are selectable by the driver (_select_next_topic).
+                topic = agenda.add_topic(
                     body.title,
                     angle=body.angle or "",
                     constraints=body.constraints or [],
                     priority=body.priority or "normal",
                     response_length=body.response_length or "normal",
+                    approved=True,
                 )
             except ValueError as exc:
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
+            # Idempotent: a dedup that returns an already-QUEUED (or otherwise
+            # non-APPROVED) topic must not re-queue — queue_topic only accepts
+            # APPROVED and would raise on a repeat POST (WU4 idempotency test).
+            if topic.status == TopicStatus.APPROVED:
+                agenda.queue_topic(topic.id)
             return _agenda_response(agenda)
 
     @app.post("/api/agenda/topic/action", response_model=AgendaResponse)
@@ -1108,7 +1229,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         with host.agenda_lock:
             try:
                 if body.action == "approve":
+                    # CTK parity decision 2026-07-05 (Option A): approving a
+                    # drafted suggestion also queues it in one step, mirroring
+                    # topic_inbox_bridge.py:138-139. approve_topic raises on a
+                    # non-DRAFTED topic (surfaced as 422 below), so a repeat
+                    # never double-queues.
                     agenda.approve_topic(body.topic_id)
+                    agenda.queue_topic(body.topic_id)
                 elif body.action == "queue":
                     agenda.queue_topic(body.topic_id)
                 elif body.action == "remove":
@@ -1192,16 +1319,40 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
         if body.action not in _AGENDA_SESSION_ACTION_WHITELIST:
             return JSONResponse(status_code=422, content={"detail": "unknown action"})
+        motor = getattr(host, "motor", None)
         with host.agenda_lock:
             if body.action == "enable":
+                # CTK parity (app_shell.py:1415-1419): never start a session with
+                # an empty queue and no active topic. Return 200 with an explicit
+                # not-applied outcome so the UI can explain, instead of silently
+                # flipping to IDLE with nothing to say.
+                if not agenda.queued_topics() and not agenda.active_topic:
+                    return _agenda_response(agenda, applied=False, reason="empty_queue")
                 agenda.enable()
-            elif body.action == "soft_stop":
-                # Returned AgendaAction (closing line) deliberately ignored: the
-                # headless host has no speech pipeline to play it (CTK does).
-                agenda.soft_stop()
-            elif body.action == "emergency_stop":
-                agenda.emergency_stop()
-            return _agenda_response(agenda)
+                # CTK parity (app_shell.py:1432): tick immediately on enable so
+                # Kira opens the first topic without waiting out the driver
+                # cadence. nudge() just sets an Event — safe under the lock.
+                driver = getattr(host, "_agenda_driver", None)
+                if driver is not None:
+                    driver.nudge()
+                return _agenda_response(agenda, applied=True)
+            if body.action == "soft_stop":
+                # FIX-C: the headless host now HAS a speech pipeline (chat works),
+                # so enqueue the closing line the controller returns instead of
+                # dropping it (mirror app_shell.py:1435). A none() action (agenda
+                # already idle) is a no-op inside enqueue_agenda_action.
+                enqueue_agenda_action(motor, agenda.soft_stop())
+                return _agenda_response(agenda, applied=True)
+            # emergency_stop
+            agenda.emergency_stop()
+            # Mirror app_shell.py:1494-1497: interrupt in-flight speech and drop
+            # any pending agenda turns from the motor queue.
+            if motor is not None:
+                if hasattr(motor, "interrupt_speaking"):
+                    motor.interrupt_speaking()
+                if hasattr(motor, "drop_pending_sources"):
+                    motor.drop_pending_sources(("kira-agenda",))
+            return _agenda_response(agenda, applied=True)
 
     @app.post("/api/perfiles/switch")
     def switch_profile(request: Request, body: SwitchProfileRequest):
@@ -1213,6 +1364,14 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         data["_profile_name"] = body.name
         result = request.app.state.dispatcher.dispatch("set_profile", data, key)
         if result.state in ("accepted", "replay"):
+            # FIX-A: remember this as the last-used profile so the next engine
+            # boot seeds it (best-effort — persistence must never fail the
+            # switch; save_last_profile already swallows, the guard is defense
+            # in depth).
+            try:
+                save_last_profile(body.name)
+            except Exception:
+                pass
             return {"accepted": True, "command_id": result.command_id, "status": "queued"}
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
@@ -1351,7 +1510,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         return _obs_config_response(load_avatar_config())
 
     @app.put("/api/obs/config", response_model=ObsConfigResponse)
-    def put_obs_config(body: ObsConfigRequest) -> ObsConfigResponse:
+    def put_obs_config(request: Request, body: ObsConfigRequest) -> ObsConfigResponse:
         with _config_lock:
             try:
                 cfg = load_avatar_config(strict=True)
@@ -1371,7 +1530,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 save_avatar_config(cfg)
             except (OSError, RuntimeError):
                 return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
-            return _obs_config_response(cfg)
+            response = _obs_config_response(cfg)
+        # FIX-B: push the saved config to the live OBS runtime (outside the
+        # write-lock so an OBS reconnect never holds the shared-yaml lock).
+        _apply_avatar_runtime(request)
+        return response
 
     @app.post("/api/obs/test", response_model=ObsTestResponse)
     def post_obs_test(body: Optional[ObsConfigRequest] = None) -> ObsTestResponse:
@@ -1393,7 +1556,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         return _avatar_config_response(load_avatar_config())
 
     @app.put("/api/avatar/config", response_model=AvatarConfigResponse)
-    def put_avatar_config(body: AvatarConfigRequest):
+    def put_avatar_config(request: Request, body: AvatarConfigRequest):
         if body.state_images is not None:
             unknown = sorted(set(body.state_images) - VALID_STATES)
             if unknown:
@@ -1418,7 +1581,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 save_avatar_config(cfg)
             except (OSError, RuntimeError):
                 return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
-            return _avatar_config_response(cfg)
+            response = _avatar_config_response(cfg)
+        # FIX-B: a live OBSClient snapshots state_images at construction, so an
+        # avatar-card change needs a full runtime rebuild, not just a reconnect.
+        _apply_avatar_runtime(request)
+        return response
 
     return app
 
