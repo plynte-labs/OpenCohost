@@ -12,7 +12,8 @@ One ASGI-level middleware (``auth_middleware``, registered in
 
 1. Paths under ``/api/agent/`` require the agent OR operator token — ALWAYS
    enforced (new surface, nothing shipped calls it yet). 401 on missing or
-   invalid token; 503 if the token file is unusable.
+   invalid token; 503 if the token file is unusable; mutating calls are
+   additionally rate limited per token (``RateLimiter``, 429 on breach).
 2. Other ``/api/*`` POST/PUT/DELETE requests require the operator token, but
    only when ``settings.API_AUTH_ENFORCED`` is true (env OPENCOHOST_API_AUTH,
    default OFF). Owner decision D2: while the flag is off, a missing/invalid
@@ -28,6 +29,8 @@ import hmac
 import json
 import logging
 import secrets
+import threading
+import time
 from pathlib import Path
 
 from starlette.responses import JSONResponse
@@ -102,6 +105,53 @@ def verify_token(candidate: str, expected: str) -> bool:
     return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
 
 
+class RateLimiter:
+    """Fixed-window limiter for mutating agent-surface requests, per token.
+
+    Design 'Rate limit' (agent_context_gateway Phase 2): 60 mutating
+    requests per 60-second window per token, ``threading.Lock`` + dict —
+    the same stdlib-only pattern as ``Dispatcher`` (dispatch.py). Ceiling
+    justification: every agent store is already bounded (inbox 30 pending,
+    notices 20, cards are slug-upserts), so this only bounds SQLite write
+    churn and log spam; 60/min lets an agent sync its entire allowable
+    state in one window while making tight-loop floods harmless.
+
+    Only VALID tokens are counted (the middleware resolves the role first),
+    so the dict can never grow past one entry per real token.
+
+    # ponytail: fixed window, upgrade to sliding only if a real agent hits the edge
+    """
+
+    def __init__(
+        self,
+        limit: int = 60,
+        window_seconds: float = 60.0,
+        time_fn=time.time,
+    ) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._now = time_fn
+        self._lock = threading.Lock()
+        # token -> (window_start, count)
+        self._windows: dict[str, tuple[float, int]] = {}
+
+    def allow(self, token: str) -> bool:
+        """Consume one slot for ``token``; False when the window is exhausted."""
+        with self._lock:
+            now = self._now()
+            window_start, count = self._windows.get(token, (now, 0))
+            if now - window_start >= self._window_seconds:
+                window_start, count = now, 0
+            if count >= self._limit:
+                self._windows[token] = (window_start, count)
+                return False
+            self._windows[token] = (window_start, count + 1)
+            return True
+
+
+_rate_limiter = RateLimiter()
+
+
 def _bearer_token(request) -> str | None:
     value = request.headers.get("authorization") or ""
     scheme, _, token = value.partition(" ")
@@ -141,6 +191,12 @@ async def auth_middleware(request, call_next):
             return JSONResponse(status_code=503, content={"detail": "auth_unavailable"})
         if role is None:
             return JSONResponse(status_code=401, content={"detail": "invalid token"})
+        # Mutating agent-surface calls are rate limited per token (design
+        # 'Rate limit'); reads (GET /api/agent/status) are never counted.
+        # Operator routes (rule 2) stay unlimited — the Tauri app is the
+        # operator's own hands, not an unattended loop.
+        if request.method in _MUTATING_METHODS and not _rate_limiter.allow(token):
+            return JSONResponse(status_code=429, content={"detail": "rate_limited"})
         return await call_next(request)
 
     # Rule 2: other mutating /api/* routes — operator token, warn-only until

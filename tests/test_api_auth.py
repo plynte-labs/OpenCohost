@@ -193,9 +193,9 @@ class TestAgentSurfaceAlwaysEnforced:
             assert resp.status_code == 401
 
     def test_valid_agent_token_passes_middleware(self):
-        # No /api/agent/* routes exist yet (they land in Phase 2): a valid
-        # token must reach the router and get its plain 404, proving the
-        # middleware let the request through instead of rejecting it.
+        # A valid token must reach the route's own request validation (an
+        # empty body is a pydantic 422), proving the middleware let the
+        # request through instead of rejecting it with 401/403.
         auth.ensure_tokens()
         tokens = auth.load_tokens()
         app = _app()
@@ -203,7 +203,7 @@ class TestAgentSurfaceAlwaysEnforced:
             resp = client.post(
                 "/api/agent/topics", json={}, headers=_bearer(tokens["agent"])
             )
-            assert resp.status_code == 404
+            assert resp.status_code == 422
 
     def test_operator_token_is_accepted_on_agent_surface(self):
         # ADR-3: operator token is a superset — accepted wherever agent is.
@@ -214,7 +214,7 @@ class TestAgentSurfaceAlwaysEnforced:
             resp = client.post(
                 "/api/agent/topics", json={}, headers=_bearer(tokens["operator"])
             )
-            assert resp.status_code == 404
+            assert resp.status_code == 422
 
     def test_corrupt_token_file_yields_503_not_crash(self):
         _tokens_path().parent.mkdir(parents=True, exist_ok=True)

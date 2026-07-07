@@ -708,3 +708,49 @@ class MemoriaPurgeResponse(BaseModel):
     """POST /api/memoria/purge response body."""
 
     deleted: int
+
+
+class AgentTopicRequest(BaseModel):
+    """POST /api/agent/topics body (agent_context_gateway Phase 2).
+
+    Maps 1:1 to ``TopicInboxStore.propose(title, angle, tags, source=agent)``
+    — the store owns ALL content validation (TITLE_MAX=120, ANGLE_MAX=600,
+    TAGS_MAX=8x40, SOURCE_MAX=80, code/HTML rejection), so this model stays
+    permissive and the handler surfaces the store's own error string as the
+    422 detail (mirrors the ``CommandRequest`` whitelist pattern). ``agent``
+    is the self-reported provenance name stored in ``topic_inbox.source``
+    and rendered to the operator in the inbox UI.
+    """
+
+    agent: str
+    title: str
+    angle: str = ""
+    tags: list[str] = []
+
+
+class AgentTopicResponse(BaseModel):
+    """POST /api/agent/topics response.
+
+    Owner decision D1: a proposal lands in the human-gated topic inbox as
+    'proposed' — never in the agenda queue. ``deduped=True`` means the title
+    slug matched an existing proposed row, which was updated in place: the
+    store's dedupe-upsert IS the idempotency contract (repeat POSTs are
+    safe, no Idempotency-Key header).
+    """
+
+    id: str
+    status: str
+    deduped: bool
+
+
+class AgentStatusResponse(BaseModel):
+    """GET /api/agent/status (read-only, any valid token).
+
+    COUNTS ONLY — never add a field carrying topic/card/notice text.
+    ``notices_undismissed`` is pinned to 0 until the notice store lands
+    (Phase 3); the key ships now so the wire contract is stable for agents.
+    """
+
+    topics_pending: int
+    cards: dict[str, int]
+    notices_undismissed: int

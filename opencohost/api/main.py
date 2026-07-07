@@ -55,6 +55,9 @@ from opencohost.api.models import (
     AgendaTopicActionRequest,
     AgendaTopicOut,
     AgendaTopicRequest,
+    AgentStatusResponse,
+    AgentTopicRequest,
+    AgentTopicResponse,
     AvatarConfigRequest,
     AvatarConfigResponse,
     ChatLastReplyResponse,
@@ -138,6 +141,11 @@ from opencohost.core.cohost_profiles import (
     save_cohost_profiles,
 )
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
+from opencohost.core.topic_inbox import (
+    TopicInboxCapError,
+    TopicInboxStore,
+    TopicInboxValidationError,
+)
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
@@ -1595,6 +1603,55 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # avatar-card change needs a full runtime rebuild, not just a reconnect.
         _apply_avatar_runtime(request)
         return response
+
+    # ── Agent gateway (agent_context_gateway Phase 2) ────────────────────
+    # Token gating lives in auth_middleware rule 1: everything under
+    # /api/agent/ requires the agent OR operator token (always enforced),
+    # and mutating calls are rate limited per token (429 on breach).
+
+    @app.post("/api/agent/topics", response_model=AgentTopicResponse)
+    def post_agent_topic(body: AgentTopicRequest):
+        # Owner decision D1: this is the ONLY topic path agents get. The
+        # proposal lands in the human-gated topic_inbox as 'proposed' and
+        # the operator approves it in the app UI. POST /api/agenda/topic
+        # (auto-approve + queue) stays operator-token-only and is never
+        # called from here.
+        try:
+            store = TopicInboxStore(EDITORIAL_CARDS_DB)
+            # ponytail: read-before-write dedupe detection instead of a store
+            # API change; single-process local app, the race window is moot.
+            prior_ids = {row["id"] for row in store.list_all(status_filter="proposed")}
+            row = store.propose(body.title, body.angle, body.tags, source=body.agent)
+        except TopicInboxValidationError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except TopicInboxCapError as exc:
+            # Cap semantics for agents are "back off, tell your human" —
+            # retry-later 429 fits better than 409 (design, endpoint
+            # contracts).
+            return JSONResponse(status_code=429, content={"detail": str(exc)})
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "topic_inbox_unavailable"}
+            )
+        return AgentTopicResponse(
+            id=row["id"], status=row["status"], deduped=row["id"] in prior_ids
+        )
+
+    @app.get("/api/agent/status", response_model=AgentStatusResponse)
+    def get_agent_status():
+        # Read-only with any valid token; counts only (no topic/card text).
+        # Both reads are bounded + fail-open (0 / {}) like the memoria stats
+        # helpers they reuse.
+        return AgentStatusResponse(
+            topics_pending=_count_sql(
+                EDITORIAL_CARDS_DB,
+                "SELECT COUNT(*) FROM topic_inbox WHERE status='proposed'",
+            ),
+            cards=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
+            # Pinned to 0 until the notice store lands (Phase 3); the key
+            # ships now so the wire contract is stable for agents.
+            notices_undismissed=0,
+        )
 
     return app
 
