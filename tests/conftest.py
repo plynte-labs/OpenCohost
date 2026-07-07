@@ -54,6 +54,24 @@ def _neutralize_obs_runtime():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_api_tokens_file(tmp_path, monkeypatch):
+    """Keep API token minting out of the developer's real config/ directory.
+
+    create_app()'s lifespan mints ``USER_DATA_DIR/config/api_tokens.json`` at
+    startup (agent_context_gateway Phase 1). In dev mode USER_DATA_DIR is the
+    repo root, so any test entering a TestClient context would otherwise write
+    a real token file into the repo-root config/ directory. Redirect to a
+    per-test temp path; opencohost/api/auth.py reads settings.API_TOKENS_FILE
+    lazily, so monkeypatching the module attribute is sufficient.
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "API_TOKENS_FILE", str(tmp_path / "api_tokens.json")
+    )
+
+
 @pytest.fixture(scope="session")
 def root_dir():
     """Return the project root directory."""

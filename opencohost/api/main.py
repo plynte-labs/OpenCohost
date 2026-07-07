@@ -43,6 +43,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
 from opencohost.api.agenda_driver import enqueue_agenda_action
+from opencohost.api.auth import auth_middleware, ensure_tokens
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
@@ -578,6 +579,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     async def lifespan(app: FastAPI):
         global _host_active
         _check_single_worker()
+        # Mint the API bearer tokens once per install (agent_context_gateway
+        # Phase 1). Best-effort: a failed mint degrades to 503s on protected
+        # surfaces (auth.py), never blocks engine startup.
+        ensure_tokens()
         if _host_active:
             raise RuntimeError("An OpenCohost API engine host is already active in this process")
         _host_active = True
@@ -592,11 +597,15 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             _host_active = False
 
     app = FastAPI(lifespan=lifespan, debug=False)
+    # Auth gate (agent_context_gateway ADR-4): registered BEFORE CORSMiddleware
+    # so CORS — added last, therefore outermost in Starlette's stack — still
+    # decorates 401/403/503 auth responses and handles OPTIONS preflight.
+    app.middleware("http")(auth_middleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins if cors_origins is not None else _DEFAULT_CORS_ORIGINS,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Idempotency-Key"],
+        allow_headers=["Content-Type", "Idempotency-Key", "Authorization"],
         allow_credentials=False,
     )
 

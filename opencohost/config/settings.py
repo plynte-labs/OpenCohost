@@ -255,6 +255,27 @@ PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json"
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
 
+# HTTP API bearer tokens (agent_context_gateway_20260705, design ADR-3).
+# Minted once at API lifespan start by opencohost/api/auth.py::ensure_tokens();
+# never regenerated — delete the file and restart the backend to rotate.
+API_TOKENS_FILE = os.path.join(str(USER_DATA_DIR), "config", "api_tokens.json")
+
+
+def _resolve_api_auth_enforced() -> bool:
+    """Return whether operator-token auth is ENFORCED on mutating /api/* routes.
+
+    agent_context_gateway_20260705 owner decision D2 (warn-only rollout):
+      - The flag is True IFF OPENCOHOST_API_AUTH=1, in every environment.
+      - Default OFF so the shipped Tauri app (which sends no token yet) keeps
+        working; a missing/invalid token only logs a warning while off.
+      - /api/agent/* is ALWAYS token-gated regardless of this flag (new
+        surface — see opencohost/api/auth.py, design ADR-4).
+    """
+    return os.environ.get("OPENCOHOST_API_AUTH", "") == "1"
+
+
+API_AUTH_ENFORCED: bool = _resolve_api_auth_enforced()
+
 # Writable paths for Cohost, Music, and Avatar modules
 COHOST_PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "cohost_profiles.json")
 MUSIC_DIR = os.path.join(str(USER_DATA_DIR), "assets", "music")

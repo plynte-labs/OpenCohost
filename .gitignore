@@ -25,6 +25,9 @@ config/llm_tiers.json
 config/tts_local_only.json
 config/tts_speed.json
 config/avatar.yaml
+# Minted API bearer tokens (live secret — never commit)
+config/api_tokens.json
+opencohost/config/api_tokens.json
 # Stale pre-restructure leftovers; runtime never writes here anymore
 opencohost/config/ptt_settings.json
 opencohost/config/window_geometry.json
