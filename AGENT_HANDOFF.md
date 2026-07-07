@@ -19,6 +19,37 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-05 (Fable 5 planning session: 3 tracks designed + suggestions backlog — NO code changes)
+
+Owner-requested planning-only session (likely Fable 5's last). Audit + SDD explore→propose→design for
+three new tracks, all registered in `conductor/tracks.md` (top of file), NONE implemented:
+
+1. **`kira_bilingual_e2e_20260705`** — EN/ES across agenda + viewer chat + PTT + TTS + profiles.
+   Consolidates/absorbs: english_compatibility_i18n T5, i18n_engine_locale_residue (premise-corrected:
+   fallback lines NO LONGER commit to historial — FIX-B2), profile `locale` field. KEY AUDIT FACTS:
+   only llm_engine.py + server_qwen.py consume i18n_active; kira_agenda_controller has ZERO i18n
+   coupling; Character Contract Validator is Spanish-only (guardrail OFF in en — ship-blocker; design
+   makes it per-locale FAIL-CLOSED); Piper has no en voice; server_qwen.py:196 hardcodes
+   language="Spanish" despite an existing (dead) manifest slot. 7 phases, ~2,480 lines.
+2. **`kira_personalization_onboarding_20260705`** — ChatGPT-style "about you" (nickname/occupation/
+   interests/custom instructions), global JSON store + new <perfil_streamer> injection block +
+   /api/personalization + CTK/Tauri UI; Kira-led interview deferred to Phase 4. Note: ptt gains an
+   injection block it never had (deliberate, test-covered). 3 phases.
+3. **`agent_context_gateway_20260705`** — safe external-agent ingestion (Claude Code/Codex/Gemini CLI/
+   OpenClaw/Hermes). AUDIT FINDING: API has NO auth (loopback-only) and POST /api/chat/turn gives any
+   local process the STREAMER trust tier (memorias capture included); POST /api/agenda/topic
+   auto-approves (bypasses the CLI inbox's human gate). Design: agents propose→humans approve, two
+   bearer tokens (operator/agent) via token FILE for the Tauri spawn, cards upsert forced to DRAFT
+   (closes an ARMED-preserving upsert hole at editorial_cards.py:188), agents get NO chat/turn in v1.
+   TWO OWNER DECISIONS block apply (agenda/topic stays operator-only; enforcement-flip timing).
+
+Plus `conductor/fable_suggestions_20260705.md` — 6 prioritized backlog candidates (SSE /api/events,
+OBS captions, `opencohost doctor`, post-stream recap, persona packs, chat language bridge).
+Engram: sdd/kira-bilingual-e2e-20260705/*, sdd/kira-personalization-onboarding-20260705/*,
+sdd/agent-context-gateway-20260705/*, sdd/agent-gateway-personalization-20260705/explore.
+Operating mode UNCHANGED: runtime-validation gates still come first; these tracks are post-validation
+work requiring explicit owner approval before any sdd-tasks/apply.
+
 ## LATEST SNAPSHOT — 2026-07-03 (React/Tauri migration: backend DONE+MERGED, frontend design-system built, UI PIVOT to a "music-player" concept — awaiting owner)
 
 Big session: the React/Tauri UI migration off CustomTkinter. **The Tk app is 100% untouched** (verified: `git diff d85dcdb..HEAD` on maintenance touches ONLY `opencohost/api/**` + tests + pyproject + README + .gitignore — ZERO edits to ui/core/__main__/config). Tk remains the real, working app.

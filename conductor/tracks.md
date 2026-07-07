@@ -4,6 +4,64 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [ ] **Track: Kira Bilingual E2E — EN/ES across agenda, viewer chat, PTT, TTS, and profiles**
+  *Link: [./tracks/kira_bilingual_e2e_20260705/](./tracks/kira_bilingual_e2e_20260705/) (proposal.md + design.md)*
+  *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5 planning session), NOT implemented. Consolidation
+  track: absorbs the remaining T5 guardrails work of english_compatibility_i18n_20260617, the
+  (premise-corrected) i18n_engine_locale_residue_20260618 design, and the explicit profile `locale`
+  field from profile_locale_autodetect_20260618 (the heuristic stays deferred). Core: agenda/viewer-chat
+  prompt scaffolding + rules dicts + topic_suggester templates migrate to bundle slots; the Character
+  Contract Validator becomes per-locale and FAIL-CLOSED (missing patterns → agenda refuses to enable in
+  that locale, new GUARDRAILS_MISSING error code); Piper en voice + honest degrade (never silent Spanish
+  audio under locale=en); Qwen gets the missing qwen_language() accessor (server_qwen.py:196 hardcodes
+  "Spanish" today); locale config via GET/PUT /api/i18n + CTK + Tauri with honest next-boot restart UX.
+  7 chained-PR phases, ~2,480 est. lines, ship-blocker (validator + guardrails) first. Engram:
+  sdd/kira-bilingual-e2e-20260705/{explore,proposal,design}.*
+
+---
+
+- [ ] **Track: Kira Personalization & Onboarding — ChatGPT-style "about you" + optional interview**
+  *Link: [./tracks/kira_personalization_onboarding_20260705/](./tracks/kira_personalization_onboarding_20260705/) (proposal.md + design.md)*
+  *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5), NOT implemented. Global (profile-independent)
+  store config/personalization.json under USER_DATA_DIR (atomic-write, profiles.py pattern): nickname /
+  occupation / interests / custom_instructions with hard caps (60/120/240/400), injected as a new
+  read-only <perfil_streamer> block (own 900-char budget, i18n-slotted scaffolding) prepended first in
+  the direct/ptt user message. File-based GET/PUT/DELETE /api/personalization (no dispatcher — mirrors
+  perfiles CRUD), CTK panel + Tauri PersonalizationCard. "Kira interviews you" flow deferred to Phase 4
+  with a concrete sketch (commit_history=False seam already exists, llm_engine.py:1202). DELIBERATE
+  behavioral change, test-covered: ptt gains an injection block it never had (today ALL direct-only
+  enrichment gates are source=="direct" only). 3 phases (~310/~250/~420 lines), chained PRs recommended.
+  Engram: sdd/kira-personalization-onboarding-20260705/{proposal,design} (+ shared explore under
+  sdd/agent-gateway-personalization-20260705/explore).*
+
+---
+
+- [ ] **Track: Agent Context Gateway — safe CLI/API ingestion for external agents**
+  *Link: [./tracks/agent_context_gateway_20260705/](./tracks/agent_context_gateway_20260705/) (proposal.md + design.md + metadata.json)*
+  *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5), NOT implemented. Principle: agents PROPOSE,
+  humans APPROVE. New `agent` trust tier reaches Kira ONLY through the existing human-gated stores
+  (TopicInboxStore propose→approve; EditorialCardStore upsert FORCED to DRAFT — closes a real hole:
+  upsert preserved ARMED on content rewrite, editorial_cards.py:188); ZERO /api/chat/turn access for
+  agents in v1 (it runs the streamer trust tier end-to-end incl. memorias capture). Auth: two static
+  bearer tokens (operator/agent) minted at first API start into api_tokens.json; Tauri handoff via
+  token FILE (backend.rs reuse-healthy path never spawns → env var would break). Provenance
+  (agent name → topic_inbox.source 🤖 / cards origin / notices source) end-to-end. docs/AGENT_GATEWAY.md
+  contract; MCP wrapper spec'd but DEFERRED. TWO OWNER DECISIONS block apply: (1) POST /api/agenda/topic
+  auto-approve stays operator-token-only (agents → inbox), (2) enforcement-flip timing (warn-only release
+  first). ~1,350 est. lines, chained PRs recommended. AUDIT FINDING that motivated the track: the API has
+  NO auth (loopback-only defense) and POST /api/chat/turn makes any local process indistinguishable from
+  the streamer. Engram: sdd/agent-context-gateway-20260705/{proposal,design} (+ explore under
+  sdd/agent-gateway-personalization-20260705/explore).*
+
+---
+
+- [ ] **Backlog doc: Fable 5 suggestions (2026-07-05)** — [./fable_suggestions_20260705.md](./fable_suggestions_20260705.md):
+  /api/events SSE stream (highest leverage), OBS live captions overlay, `opencohost doctor` CLI
+  (launch support), post-stream session recap, shareable persona packs, viewer-chat language bridge
+  (post-bilingual). Suggestions only — each needs an owner decision.
+
+---
+
 - [~] **Track: Historial Source Tag — host/viewer origin per turn (Scout host-only)**
   *Link: [./tracks/history_source_tag_20260629/](./tracks/history_source_tag_20260629/) (design.md, gitignored)*
   *Status 2026-06-30: IMPLEMENTED (commit 418fc1a). Each historial entry now carries `source` (host=direct/ptt, viewer=chat, kira-agenda) — the value was already in scope at `_commit_history` and was being discarded. Stripped back to {role,content} at the prompt-build copy loop (REBUILD not mutate → the key never leaks to ollama.chat; the only path history reaches Ollama; guarded by `test_does_not_mutate_self_historial`). `_scout_render_history` now FILTER-then-SLICE to `source in {direct,ptt}` → the Topic Scout suggests from the HOST conversation only (not viewer chat), as the owner asked. OWNER-SIGNED behavior change: with host-only + the 2-line minimum, the Scout may produce ZERO suggestions in viewer-chat-dominated / host-quiet sessions (no host conversation → no host-derived topics — intended). Unblocks future engram host-only persistence (the source tag is its prerequisite). `stream_admin_ui.py:1340` silent-context writer left untagged (auto-excluded). Gated explore→design→critique(SOUND)→TDD A-D→2 judges(SOUND)→validate, 255 passed. Engram: architecture/history-source-tag.*
@@ -397,6 +455,9 @@ This file tracks all major tracks for the project. Each track has its own detail
   GUARDRAIL_FALLBACK_LINES (4 spoken es lines).
   ⚠️ NOT YET VALIDATED in en: RF3 smart-aggregator, RF4 stream-admin, and guardrails behavior — must
   test before declaring i18n done. Constraints: no PyInstaller bloat (dict/yaml), CTk thread-safety.*
+  *Status 2026-07-05: remaining work (T5 guardrails + agenda/viewer-chat/TTS coverage) ABSORBED by
+  kira_bilingual_e2e_20260705 — new language work lands there; this track stays as the historical record
+  of T0–T4.*
 
 - [ ] **Track: Profile-Language Auto-Detect → Locale Switch (comfort)**
   *Link: [./tracks/profile_locale_autodetect_20260618/](./tracks/profile_locale_autodetect_20260618/)*
@@ -404,6 +465,8 @@ This file tracks all major tracks for the project. Each track has its own detail
   the T4 warn-only coherence gate: detect a profile's language and offer/perform the matching locale
   switch (profile still wins; mismatch stays allowed-but-announced). Recommends an explicit `locale`
   field on profiles over heuristics; suggest-not-auto default; next-boot restart model. See proposal.md.*
+  *Status 2026-07-05: the explicit profile `locale` field is ABSORBED by kira_bilingual_e2e_20260705
+  (data-only, feeds the coherence gate); the autodetect heuristic itself stays deferred in this track.*
 
 - [x] **Track: Music-Mode Ducking — Configurable Speak-Volume + First-Turn Bug**
   *Link: [./tracks/music_mode_ducking_20260618/](./tracks/music_mode_ducking_20260618/)*
@@ -446,6 +509,9 @@ This file tracks all major tracks for the project. Each track has its own detail
   *Status 2026-06-23: EXPLORE + DESIGN DONE (see explore.md + design.md; staged, NOT implemented). 3-lens adversarial
   review found 16 issues, all revised in. Notable catch: a BREAKING REGRESSION — test_llm_engine_timeouts.py references
   GUARDRAIL_FALLBACK_LINES which the design removes (must be folded into the regression suite). Next: implement on approval.*
+  *Status 2026-07-05: design ABSORBED (premise-corrected) into kira_bilingual_e2e_20260705. STALE CLAIM
+  found by re-verification: fallback lines are NOT committed to historial anymore — llm_engine.py returns
+  the fallback BEFORE _commit_history (FIX-B2 decoupling); the new track's design carries current truth.*
   *Status 2026-06-18: PROPOSAL-ONLY (investigation-first), from the first English runtime probe. Two findings:
   (1) ARCHITECTURAL — the locale bundle persona is dead code: every profile carries a `prompt` so the engine never
   reaches i18n_active.system_prompt() (llm_engine.py:332); locale does NOT govern persona today. (2) Five hardcoded
