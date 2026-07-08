@@ -19,6 +19,54 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-08 (ALL 3 designed tracks IMPLEMENTED — gateway + personalization + bilingual)
+
+Owner-authorized autonomous implementation session (Fable 5 orchestrator; appliers Sonnet/Opus, judges
+1-Fable+2-Opus per owner policy, later all-Opus). SDD tasks→apply→judges→fix→commit→verify per track.
+**NOT pushed** (standing). All work on `maintenance/big-file-audit-small-fixes-20260629` + the separate
+OpenCohost_UI repo (branch feat/react-ui-s4-experience-selects).
+
+### What landed (chronological, both repos)
+1. Baseline: `2ca76b3` (July-5 backend parity committed) + `e977808` (planning docs).
+2. **agent_context_gateway** — `a2eed21` warn-only bearer auth (3-rule middleware, OPENCOHOST_API_AUTH
+   default OFF → Tauri unaffected); `71c103d` /api/agent/topics (human-gated inbox, D1) + status +
+   60/min rate limiter; `9b4a846` cards origin+DRAFT-demotion + AgentNoticeStore; `1701c8c`
+   docs/AGENT_GATEWAY.md. UI repo: `da108a0` (owner WIP rescue) + `a291aa9` (api_token command +
+   getAuthHeaders). **VERIFY PASS — 3640 passed, 0 critical/0 warnings.**
+3. **kira_personalization_onboarding** — `1a3354f` (personalization.json store, <perfil_streamer>
+   block FIRST in direct/ptt with 900-char budget + byte-identity-when-disabled, /api/personalization,
+   CTK panel) + `e099184` (panel mounted from ProfilePanel.build() — app_shell back to 2998; fixed a
+   real fixture hang). UI repo: `ee2bab7` PersonalizationCard. Interview flow deferred (design Phase 4).
+4. **kira_bilingual_e2e** — `f8a1d68` (9 units: per-locale FAIL-CLOSED agenda validator +
+   GUARDRAILS_MISSING, en guardrails complete, bundle-driven agenda/chat/topic prompts, es
+   byte-identity, Piper en voice + honest degrade, qwen_language() into server_qwen.py, profile
+   `locale` field, GET/PUT /api/i18n) + `255588c` (Idioma control extracted to
+   opencohost/ui/locale_control.py). UI repo: `acaec5d` SettingsPopover locale card. **Verify: all 9
+   functional hard gates PASS; suite 3868 passed + 1 KNOWN-RED (below).**
+
+### ⚠️ KNOWN-RED TEST (owner decision 2026-07-08 — do not "fix" without reading this)
+`tests/test_integration.py::TestAppShellStructure::test_app_shell_line_count_under_1500` fails:
+app_shell.py = 3015, gate <3000. After honest extraction (locale_control.py), the residual +15 lines
+are the bilingual fail-closed gate wiring + Piper locale coupling. Owner chose to LEAVE IT RED as
+visible debt until `app_shell_agenda_audio_decomposition_20260624` Phase 7 lands. Full-suite runs
+report 1 failed BY DESIGN — check any new failure is not hiding behind it.
+
+### OWNER-OWED (new items from this session)
+1. Runtime validation of the 3 tracks (Tauri + CTK): locale=en real session incl. agenda speech;
+   personalization form → Kira uses it in direct/PTT; gateway curl test with the token from
+   `config/api_tokens.json` (see docs/AGENT_GATEWAY.md).
+2. Governance: shipped cohost STYLE profiles are es-authored operator data that override en defaults
+   ungoverned (no locale field/coherence warning for cohost styles) — product decision needed.
+3. Pre-existing red/flaky surfaced: test_memorias_profile_uuid launch test HANGS headless (deselected
+   during verify; add pytest-timeout or a guard); OpenCohost_UI has 36 AgendaPanel + 2 AppLayout vitest
+   failures (pre-existing ToastProvider wiring gap) — cleanup candidate.
+4. docs/api-reference.md lacks the 6 /api/agent/* routes (gateway verify suggestion).
+5. Auth enforcement flip (OPENCOHOST_API_AUTH=1) whenever ready — everything ships warn-only.
+6. Push both repos to origin (standing decision, still owner-gated).
+
+Engram trail: sdd/{agent-context-gateway,kira-personalization-onboarding,kira-bilingual-e2e}-20260705/*
+(tasks, apply-progress, verify-report, orchestrator-checkpoint each) + session summaries.
+
 ## LATEST SNAPSHOT — 2026-07-05 (Fable 5 planning session: 3 tracks designed + suggestions backlog — NO code changes)
 
 Owner-requested planning-only session (likely Fable 5's last). Audit + SDD explore→propose→design for

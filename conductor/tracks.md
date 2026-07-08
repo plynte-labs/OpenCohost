@@ -4,7 +4,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Kira Bilingual E2E — EN/ES across agenda, viewer chat, PTT, TTS, and profiles**
+- [~] **Track: Kira Bilingual E2E — EN/ES across agenda, viewer chat, PTT, TTS, and profiles**
   *Link: [./tracks/kira_bilingual_e2e_20260705/](./tracks/kira_bilingual_e2e_20260705/) (proposal.md + design.md)*
   *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5 planning session), NOT implemented. Consolidation
   track: absorbs the remaining T5 guardrails work of english_compatibility_i18n_20260617, the
@@ -17,10 +17,22 @@ This file tracks all major tracks for the project. Each track has its own detail
   "Spanish" today); locale config via GET/PUT /api/i18n + CTK + Tauri with honest next-boot restart UX.
   7 chained-PR phases, ~2,480 est. lines, ship-blocker (validator + guardrails) first. Engram:
   sdd/kira-bilingual-e2e-20260705/{explore,proposal,design}.*
+  *Status 2026-07-08: IMPLEMENTED (9 units applied back-to-back; 1-Fable+2-Opus panel, 2 fix rounds +
+  confirmation round; commits f8a1d68 + 255588c, UI repo acaec5d). Verify (Opus): ALL 9 functional hard
+  gates PASS — fail-closed agenda gate (no bypass found), en guardrails complete/no cross-locale
+  fallback, es BYTE-IDENTITY green, no Spanish instruction text under en with a default profile
+  (style-slot fix), Piper en voice + honest degrade, qwen_language() wired, profile locale end-to-end,
+  /api/i18n truthful next-boot + CTK locale_control.py + Tauri SettingsPopover card. Full suite 3868
+  passed + 1 KNOWN-RED BY OWNER DECISION (2026-07-08): the app_shell <3000 line guard stays red at 3015
+  as documented debt until app_shell_agenda_audio_decomposition_20260624 Phase 7 lands. OWNER ITEMS:
+  shipped cohost styles are es-authored operator data that override en defaults ungoverned (needs a
+  locale/coherence decision); test_memorias_profile_uuid launch test hangs headless (pre-existing,
+  deselected — add a timeout guard); runtime validation of a real locale=en session owed. Engram:
+  sdd/kira-bilingual-e2e-20260705/{tasks,apply-progress,verify-report,orchestrator-checkpoint}.*
 
 ---
 
-- [ ] **Track: Kira Personalization & Onboarding — ChatGPT-style "about you" + optional interview**
+- [~] **Track: Kira Personalization & Onboarding — ChatGPT-style "about you" + optional interview**
   *Link: [./tracks/kira_personalization_onboarding_20260705/](./tracks/kira_personalization_onboarding_20260705/) (proposal.md + design.md)*
   *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5), NOT implemented. Global (profile-independent)
   store config/personalization.json under USER_DATA_DIR (atomic-write, profiles.py pattern): nickname /
@@ -33,10 +45,19 @@ This file tracks all major tracks for the project. Each track has its own detail
   enrichment gates are source=="direct" only). 3 phases (~310/~250/~420 lines), chained PRs recommended.
   Engram: sdd/kira-personalization-onboarding-20260705/{proposal,design} (+ shared explore under
   sdd/agent-gateway-personalization-20260705/explore).*
+  *Status 2026-07-08: IMPLEMENTED (4 units — store/injection, API, CTK panel, Tauri card; consolidated
+  judge panel 2 rounds; commits 1a3354f + fix e099184, UI repo ee2bab7). Verify: all 23 tasks confirmed
+  in code, byte-identity-when-disabled green for direct AND ptt, caps enforced server-side (422 at
+  cap+1), <perfil_streamer> first in the user message with 900-char budget, PRIVACY.md disclosed.
+  The verify CRITICAL (app_shell line guard) was resolved honestly by mounting the panel from
+  ProfilePanel.build() (e099184 — zero app_shell lines; also fixed a real test-fixture hang exposed by
+  the move). Phase 4 interview flow stays DEFERRED by design. OWNER ITEM: runtime validation owed
+  (fill the form, confirm Kira uses it in direct/ptt speech). Engram:
+  sdd/kira-personalization-onboarding-20260705/{tasks,apply-progress,verify-report,orchestrator-checkpoint}.*
 
 ---
 
-- [ ] **Track: Agent Context Gateway — safe CLI/API ingestion for external agents**
+- [~] **Track: Agent Context Gateway — safe CLI/API ingestion for external agents**
   *Link: [./tracks/agent_context_gateway_20260705/](./tracks/agent_context_gateway_20260705/) (proposal.md + design.md + metadata.json)*
   *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5), NOT implemented. Principle: agents PROPOSE,
   humans APPROVE. New `agent` trust tier reaches Kira ONLY through the existing human-gated stores
@@ -52,6 +73,16 @@ This file tracks all major tracks for the project. Each track has its own detail
   NO auth (loopback-only defense) and POST /api/chat/turn makes any local process indistinguishable from
   the streamer. Engram: sdd/agent-context-gateway-20260705/{proposal,design} (+ explore under
   sdd/agent-gateway-personalization-20260705/explore).*
+  *Status 2026-07-08: IMPLEMENTED + VERIFY PASS (full suite 3640 at verify time, 0 critical / 0
+  warnings; commits a2eed21 auth warn-only, 71c103d topics/status/limiter, 9b4a846 cards+notices,
+  1701c8c docs/AGENT_GATEWAY.md; UI repo da108a0 wip-rescue + a291aa9 token handoff). Per-phase judges
+  caught 6 real bugs (dev-mode token file not gitignored, empty agent name forging operator provenance,
+  hostile BLOB timestamps 500ing the notice board, Z-suffix ISO rejected on py3.10, wrong dev-mode token
+  path for Tauri, docs overclaiming accent-insensitive card dedupe) — all fixed RED-first. OWNER ITEMS:
+  docs/api-reference.md still lacks the 6 agent routes; enforcement flip (OPENCOHOST_API_AUTH=1) is a
+  future owner action (warn-only shipping default); real-agent runtime test owed (curl with the token
+  from config/api_tokens.json). Engram:
+  sdd/agent-context-gateway-20260705/{tasks,apply-progress,verify-report,orchestrator-checkpoint}.*
 
 ---
 
