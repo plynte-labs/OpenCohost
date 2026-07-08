@@ -5,6 +5,13 @@ context that Kira injects into agenda prompts via `<editorial_context>`.
 Designed for humans and for external agents (e.g. research or chat-watch
 agents) that shell out to it.
 
+> **External agent over HTTP instead of a local shell?** Use
+> `docs/AGENT_GATEWAY.md` — it covers `POST /api/agent/cards` and
+> `POST /api/agent/topics`, the token-authenticated HTTP equivalents of
+> `create` and `topic propose` below, plus the one behavioral difference (the
+> API demotes an `ARMED`/`ACTIVE` card back to `DRAFT` on update; this CLI
+> does not).
+
 ## Invocation
 
 ```
@@ -150,7 +157,9 @@ cards are excluded from auto-attach candidates and cannot be armed.
 Agents can also propose *stream topics* (not cards) for human review. A
 proposal is just a title + angle; the operator approves or discards it in the
 app UI. **Approval is never available via CLI** — `topic approve` always exits
-1 with an explanation. This is a deliberate human-only gate.
+1 with an explanation. This is a deliberate human-only gate. The same
+propose-only rule holds for the HTTP surface: `POST /api/agent/topics`
+(`docs/AGENT_GATEWAY.md`) has no approve/discard endpoint either.
 
 Proposals are untrusted input: validation runs at propose time AND again at
 read time inside the app, so writing rows directly to SQLite does not bypass
