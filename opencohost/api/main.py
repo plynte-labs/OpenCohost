@@ -113,6 +113,8 @@ from opencohost.api.models import (
     ObsConfigRequest,
     ObsConfigResponse,
     ObsTestResponse,
+    PersonalizationResponse,
+    PersonalizationUpdateRequest,
     ProfileCreateRequest,
     ProfileDetailResponse,
     ProfileUpdateRequest,
@@ -137,6 +139,10 @@ from opencohost.config.settings import (
     MEMORIAS_DB,
     MEMORIAS_ENABLED,
     MODELS_CATALOG,
+    PERSONALIZATION_INSTRUCTIONS_MAX,
+    PERSONALIZATION_INTERESTS_MAX,
+    PERSONALIZATION_NICKNAME_MAX,
+    PERSONALIZATION_OCCUPATION_MAX,
     _canonical_model_tag,
     load_memorias_notice_dismissed,
     load_piper_voice,
@@ -158,6 +164,11 @@ from opencohost.core.editorial_cards import (
     EditorialCardValidationError,
 )
 from opencohost.core.memoria_store import MemoriaStore
+from opencohost.core.personalization import (
+    clear_personalization,
+    load_personalization,
+    save_personalization,
+)
 from opencohost.core.music_library import (
     ALLOWED_AUDIO_EXTENSIONS,
     KNOWN_MOODS,
@@ -454,6 +465,11 @@ _profiles_lock = threading.Lock()
 # cohost_profiles.json write-lock (WU3): guards the read-modify-write of the
 # cohost-profiles file (save). A separate file gets a separate lock (D4).
 _cohost_profiles_lock = threading.Lock()
+
+# personalization.json write-lock (Phase 2, kira_personalization_onboarding):
+# guards every read-modify-write of the global personalization store. A
+# separate file gets a separate lock (D4).
+_personalization_lock = threading.Lock()
 
 
 def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
@@ -830,6 +846,72 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             del perfiles[name]
             if not guardar_perfiles(perfiles):
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
+        return {"ok": True}
+
+    def _personalization_response(data: dict) -> PersonalizationResponse:
+        # Explicit field picks only — never `**data` — so the internal
+        # `version` key (or any future field) can never leak through.
+        return PersonalizationResponse(
+            enabled=bool(data.get("enabled", True)),
+            nickname=str(data.get("nickname", "")),
+            occupation=str(data.get("occupation", "")),
+            interests=str(data.get("interests", "")),
+            custom_instructions=str(data.get("custom_instructions", "")),
+            updated_at=data.get("updated_at"),
+        )
+
+    @app.get("/api/personalization", response_model=PersonalizationResponse)
+    def get_personalization() -> PersonalizationResponse:
+        # Lock-free like list_perfiles/get_perfil — GET never mutates and
+        # load_personalization() already fails open to defaults.
+        return _personalization_response(load_personalization())
+
+    @app.put("/api/personalization", response_model=PersonalizationResponse)
+    def update_personalization(body: PersonalizationUpdateRequest):
+        if body.nickname is not None and len(body.nickname) > PERSONALIZATION_NICKNAME_MAX:
+            return JSONResponse(status_code=422, content={"detail": "nickname exceeds max length"})
+        if body.occupation is not None and len(body.occupation) > PERSONALIZATION_OCCUPATION_MAX:
+            return JSONResponse(
+                status_code=422, content={"detail": "occupation exceeds max length"}
+            )
+        if body.interests is not None and len(body.interests) > PERSONALIZATION_INTERESTS_MAX:
+            return JSONResponse(status_code=422, content={"detail": "interests exceeds max length"})
+        if (
+            body.custom_instructions is not None
+            and len(body.custom_instructions) > PERSONALIZATION_INSTRUCTIONS_MAX
+        ):
+            return JSONResponse(
+                status_code=422, content={"detail": "custom_instructions exceeds max length"}
+            )
+        with _personalization_lock:
+            data = load_personalization()
+            if body.enabled is not None:
+                data["enabled"] = body.enabled
+            if body.nickname is not None:
+                data["nickname"] = body.nickname
+            if body.occupation is not None:
+                data["occupation"] = body.occupation
+            if body.interests is not None:
+                data["interests"] = body.interests
+            if body.custom_instructions is not None:
+                data["custom_instructions"] = body.custom_instructions
+            if not save_personalization(data):
+                return JSONResponse(
+                    status_code=503, content={"detail": "personalization_write_failed"}
+                )
+            # Re-read: save_personalization stamps its own `updated_at` and
+            # re-clamps, so the response must reflect the persisted values,
+            # not the pre-save `data` dict.
+            data = load_personalization()
+        return _personalization_response(data)
+
+    @app.delete("/api/personalization")
+    def delete_personalization():
+        with _personalization_lock:
+            if not clear_personalization():
+                return JSONResponse(
+                    status_code=503, content={"detail": "personalization_write_failed"}
+                )
         return {"ok": True}
 
     @app.get("/api/models", response_model=ModelsResponse)

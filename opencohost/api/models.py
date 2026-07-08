@@ -120,6 +120,36 @@ class ProfileUpdateRequest(BaseModel):
     use_system: Optional[bool] = None
 
 
+class PersonalizationResponse(BaseModel):
+    """GET/PUT/DELETE /api/personalization response (design §4).
+
+    Explicit field picks only — never `**data` — mirrors
+    `ProfileDetailResponse`: a future persisted field (e.g. the internal
+    `version` key) can never leak through this endpoint.
+    """
+
+    enabled: bool
+    nickname: str
+    occupation: str
+    interests: str
+    custom_instructions: str
+    updated_at: Optional[str]
+
+
+class PersonalizationUpdateRequest(BaseModel):
+    """PUT /api/personalization body — a partial update.
+
+    Every field optional; an omitted field leaves the stored value
+    unchanged. Mirrors `ProfileUpdateRequest`.
+    """
+
+    enabled: Optional[bool] = None
+    nickname: Optional[str] = None
+    occupation: Optional[str] = None
+    interests: Optional[str] = None
+    custom_instructions: Optional[str] = None
+
+
 class CommandRequest(BaseModel):
     """Wire shape for POST /api/commands (Phase 2, B2).
 

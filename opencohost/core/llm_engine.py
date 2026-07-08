@@ -35,8 +35,10 @@ from opencohost.config.settings import (
     load_tts_speed, save_tts_speed,
     PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
     MEMORIAS_ENABLED, MEMORIAS_DB,
+    PERSONALIZATION_ENABLED,
 )
 from opencohost.core import context_budget
+from opencohost.core import personalization
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
@@ -67,6 +69,13 @@ _TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
 # the same reason. Missing/unknown source values are fail-closed (not
 # captured) — see the eviction gate in _commit_history.
 _DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
+
+# kira_personalization_onboarding_20260705 — sources that qualify for the
+# <perfil_streamer> injection. Deliberately its OWN gate (not nested inside
+# `source == "direct"` below): ptt gains this block too — a deliberate,
+# test-covered behavioral change (design §2), unlike every other direct-only
+# enrichment (digest/memorias/editorial), which stays direct-only.
+_PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
@@ -1290,6 +1299,22 @@ class MotorVocalIA(threading.Thread):
                 # it must appear earlier in the prompt than <memoria_de_fondo>.
                 if memorias_block:
                     enriched = f"{memorias_block}\n\n{enriched}"
+
+            # Personalization block (kira_personalization_onboarding_20260705,
+            # design §2): own gate, NOT nested inside `source == "direct"`
+            # above, so ptt also qualifies. Prepended BEFORE memorias_block so
+            # it ends up FIRST in the final message (stable-before-volatile,
+            # same rationale as the memorias-before-digest comment above).
+            # Fail-open: a raising build must never break a turn.
+            if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
+                try:
+                    personalization_block = personalization.build_injection_block(
+                        self._sanitize_history_context
+                    )
+                except Exception:
+                    personalization_block = ""
+                if personalization_block:
+                    enriched = f"{personalization_block}\n\n{enriched}"
 
             if self.use_system_role:
                 messages.append({'role': 'user', 'content': enriched})

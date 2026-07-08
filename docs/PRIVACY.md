@@ -106,6 +106,7 @@ All persistent data is stored under your user data directory:
 | TTS speed config | `config/tts_speed.json` |
 | Kira's saved memorias | `data/memorias/memorias.db` (SQLite, per-profile) |
 | Memorias disclosure-banner dismiss state | `config/memorias_notice.json` |
+| Streamer personalization (nickname, occupation, interests, custom instructions) | `config/personalization.json` |
 
 **Conversation memory** (the in-session history and background digest Kira uses for context) is RAM-only. It is never written to disk and is gone when the app closes, when you switch profiles, or when you use Clear History.
 
@@ -114,6 +115,8 @@ All persistent data is stored under your user data directory:
 - **Pausing memorias capture is disk-only.** It stops new memorias from being written going forward. It does not retroactively delete anything already captured, and it does not block the RAM-only conversation/digest above from continuing to operate normally — a turn already tagged as capturable before you paused may still be written to disk.
 - **A hard crash or force-kill can lose the current live window** (at most the last ~10 exchanges) that had not yet flushed to disk — the same way Clear History, a model switch, or a model download clears the live window without flushing it first. A clean app close attempts to flush first (best-effort, time-bounded — a very slow disk can still drop the tail on close).
 - **To purge memorias**, open "Memoria de Kira" and use the per-profile delete action. It is explicit-only and scoped to the active profile; there is no automatic expiry.
+
+**Streamer personalization** is a small, operator-authored form (nickname, occupation, interests, custom instructions) that you fill in yourself from the "Personalización..." panel — it is never inferred or auto-captured from chat. Unlike per-profile memorias, this store is global (shared across all Kira profiles/personas) and is read directly into Kira's prompt for your own direct/voice turns only; it is never applied to viewer chat processing. It is written in plaintext to a local file (`config/personalization.json`) under your user data directory and is never transmitted anywhere. You can disable it at any time with the "Habilitar personalización" checkbox, or permanently erase it with the panel's "Limpiar" (Clear) action — both take effect immediately, with no automatic expiry otherwise.
 
 ---
 

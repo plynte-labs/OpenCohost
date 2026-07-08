@@ -72,6 +72,29 @@ def _isolate_api_tokens_file(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_personalization_file(tmp_path, monkeypatch):
+    """Keep the personalization store out of the developer's real config/
+    directory.
+
+    PERSONALIZATION_ENABLED defaults to True and PERSONALIZATION_FILE
+    resolves to ``USER_DATA_DIR/config/personalization.json``, which in dev
+    mode is the repo root (same hazard as ``_isolate_api_tokens_file``
+    above). Unlike ``settings.API_TOKENS_FILE`` (read lazily by auth.py),
+    ``opencohost/core/personalization.py`` binds ``PERSONALIZATION_FILE`` via
+    a from-import at module load time, so the module attribute itself must
+    be patched — patching ``settings.PERSONALIZATION_FILE`` would have no
+    effect.
+    """
+    import opencohost.core.personalization as personalization_mod
+
+    monkeypatch.setattr(
+        personalization_mod,
+        "PERSONALIZATION_FILE",
+        str(tmp_path / "personalization.json"),
+    )
+
+
 @pytest.fixture(scope="session")
 def root_dir():
     """Return the project root directory."""

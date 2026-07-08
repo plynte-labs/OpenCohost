@@ -308,6 +308,19 @@ MEMORIAS_PINNED_CLIP_CHARS = 220
 # disclosure the operator never actually saw.
 MEMORIAS_NOTICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "memorias_notice.json")
 
+# Kira personalization — global (profile-independent) operator-authored
+# context injected into direct/ptt prompts (see opencohost/core/personalization.py,
+# design sdd/kira-personalization-onboarding-20260705). Own JSON store, own
+# read-only <perfil_streamer> delimiter block, own char budget — parallel to
+# the MEMORIAS cluster above but never mixed with it (no dedup, deliberate).
+PERSONALIZATION_FILE = os.path.join(str(USER_DATA_DIR), "config", "personalization.json")
+PERSONALIZATION_ENABLED = True
+PERSONALIZATION_MAX_INJECT_CHARS = 900
+PERSONALIZATION_NICKNAME_MAX = 60
+PERSONALIZATION_OCCUPATION_MAX = 120
+PERSONALIZATION_INTERESTS_MAX = 240
+PERSONALIZATION_INSTRUCTIONS_MAX = 400
+
 
 # ──────────────────────────────────────────────
 # Experimental feature flags
