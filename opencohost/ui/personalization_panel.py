@@ -15,7 +15,7 @@ so Save/Clear here only need to write the file.
 from __future__ import annotations
 
 import tkinter.messagebox as mb
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
@@ -82,6 +82,28 @@ class PersonalizationPanel:
         window = _PersonalizationWindow(self._parent, self._on_log)
         self._active_window = window
         window.grab_set()
+
+
+def mount(owner: Any, parent_frame: ctk.CTkFrame, on_log: Callable[[str], None]) -> None:
+    """Build the panel into `parent_frame` and attach it to `owner` as
+    `owner._personalization_panel`.
+
+    Single call-site helper — takes an explicit `on_log` rather than reaching
+    into `owner` for it, so any owner (VocalAIApp, ProfilePanel, ...) can
+    mount this sibling card without extra coupling
+    (kira_personalization_onboarding_20260705; app_shell.py has a hard
+    line-count budget — see tests/test_integration.py — so this card is
+    mounted from ProfilePanel, the owner of the shared parent frame).
+    """
+    owner._personalization_panel = PersonalizationPanel(parent_frame=parent_frame, on_log=on_log)
+    owner._personalization_panel.build()
+
+
+def unmount(owner: Any) -> None:
+    """Clean up the panel mounted via `mount`, if any. Mirrors the
+    hasattr-guarded cleanup pattern used by sibling panel cleanup() methods."""
+    if hasattr(owner, "_personalization_panel"):
+        owner._personalization_panel.cleanup()
 
 
 class _PersonalizationWindow(ctk.CTkToplevel):

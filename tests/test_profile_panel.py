@@ -150,7 +150,13 @@ def profile_panel(mock_ctk, mock_parent, ui_state, dispatcher, on_log, sample_pr
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
     yield panel
     panel.cleanup()
@@ -256,7 +262,13 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel.lbl_profile_header is not None
@@ -272,7 +284,13 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel.combo_perfiles.get() == "Kira (Default)"
@@ -286,7 +304,13 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel._observer_id is not None
@@ -301,7 +325,13 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles({})
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel.combo_perfiles.values == []
@@ -315,7 +345,13 @@ class TestUIConstruction:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert set(panel.combo_perfiles.values) == set(sample_profiles.keys())
@@ -481,7 +517,13 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel._observer_id is not None
@@ -496,7 +538,13 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         sub_id = panel._observer_id
@@ -512,7 +560,13 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         panel.cleanup()
@@ -531,7 +585,13 @@ class TestObserverIntegration:
             on_log=on_log,
         )
         panel.set_profiles(sample_profiles)
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         ui_state.current_profile = "Streamer Mode"
@@ -554,7 +614,13 @@ class TestEdgeCases:
             on_log=on_log,
         )
         panel.set_profiles({})
-        with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+        # build() also mounts the sibling PersonalizationPanel card
+        # (kira_personalization_onboarding_20260705 line-budget move: mount
+        # relocated from app_shell.py into ProfilePanel.build()), so its
+        # separately-imported `ctk` needs the same mock.
+        with patch("opencohost.ui.profile_panel.ctk", mock_ctk), patch(
+            "opencohost.ui.personalization_panel.ctk", mock_ctk
+        ):
             panel.build()
 
         assert panel.combo_perfiles.values == []

@@ -29,7 +29,6 @@ from opencohost.ui.ptt_manager import PTTManager
 from opencohost.ui.voice_control import VoiceControlPanel
 from opencohost.ui.model_panel import ModelPanel
 from opencohost.ui.profile_panel import ProfilePanel
-from opencohost.ui.personalization_panel import PersonalizationPanel
 from opencohost.ui.status_bar import StatusBar
 from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
 from opencohost.ui.stream_admin_ui import StreamAdminUI
@@ -793,10 +792,6 @@ class VocalAIApp(ctk.CTk):
         self.profile_panel.build()
         self.combo_perfiles = self.profile_panel.combo_perfiles
         self.btn_editar_perfiles = self.profile_panel.btn_editar_perfiles
-        # Personalization panel — global (profile-independent) streamer info,
-        # injected read-only into direct/ptt prompts (kira_personalization_onboarding_20260705).
-        self.personalization_panel = PersonalizationPanel(parent_frame=frame_profile, on_log=self._print_log)
-        self.personalization_panel.build()
         # Read-only product inspectors — Tarjetas editoriales + Memoria de Kira
         # (cards_memory_readonly_panels_20260701). Shared mini-frame, fail-open counts.
         from opencohost.ui.inspector_cards import format_launcher_label
@@ -2942,8 +2937,6 @@ class VocalAIApp(ctk.CTk):
             self.stream_admin_ui.cleanup()
         if hasattr(self, "_avatar_panel"):
             self._avatar_panel.cleanup()
-        if hasattr(self, "personalization_panel"):
-            self.personalization_panel.cleanup()
 
         self._stop_speaking_alt_timer()
         self._stop_inactivity_timer()

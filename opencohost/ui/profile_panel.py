@@ -16,6 +16,7 @@ import customtkinter as ctk
 from opencohost.core.profiles import guardar_perfiles
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui import personalization_panel
 
 
 class ProfilePanel:
@@ -137,6 +138,11 @@ class ProfilePanel:
 
         # Subscribe to UIState observer
         self._observer_id = self._ui_state.subscribe(self._on_state_change)
+
+        # Personalization card — sibling section in this same frame, mounted
+        # here (not app_shell.py) because that module has a hard line-count
+        # budget (kira_personalization_onboarding_20260705).
+        personalization_panel.mount(self, self._parent, self._on_log)
 
     # ------------------------------------------------------------------
     # Public methods
@@ -284,3 +290,6 @@ class ProfilePanel:
         if self._observer_id is not None:
             self._ui_state.unsubscribe(self._observer_id)
             self._observer_id = None
+        # cleanup() is a documented no-op today (see PersonalizationPanel);
+        # parity preserved here rather than in app_shell.py.
+        personalization_panel.unmount(self)
