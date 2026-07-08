@@ -11,7 +11,7 @@ meta:
   code: en
   display: English
   tier: official
-  status: partial         # TTS migrated (T2); persona (T3) + guardrails (T5) pending
+  status: partial         # TTS migrated (T2), persona (T3), guardrails (T5) shipped; UI catalog (T6+) still pending
   schema_version: 1
   fallback: []            # no cross-locale fallback — see degrade rule above
 
