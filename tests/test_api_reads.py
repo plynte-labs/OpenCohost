@@ -95,7 +95,7 @@ def test_models_discovery_error_degrades_never_500(monkeypatch):
 def test_tts_config_shape_from_accessors(monkeypatch):
     import opencohost.api.main as main_mod
 
-    monkeypatch.setattr(main_mod, "load_piper_voice", lambda: "es_kira")
+    monkeypatch.setattr(main_mod, "load_piper_voice", lambda **kwargs: "es_kira")
     monkeypatch.setattr(main_mod, "load_tts_local_only", lambda: True)
     monkeypatch.setattr(main_mod, "load_tts_speed", lambda: 1.25)
     monkeypatch.setattr(main_mod, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True)

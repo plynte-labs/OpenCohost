@@ -540,6 +540,36 @@ def test_post_agenda_session_action_enable_empty_queue():
     assert controller.state.value == "OFF"
 
 
+def test_post_agenda_session_action_enable_guardrails_missing_returns_false():
+    # A locale bundle shipping no guardrails.agenda makes the controller's
+    # fail-closed gate refuse enable() (state stays OFF). The API must report
+    # applied=False + reason="guardrails_missing" instead of claiming success
+    # (mirrors the empty_queue branch — GUARDRAILS_MISSING must be
+    # representable on the API surface, not silently swallowed).
+    from opencohost.i18n import active
+    from opencohost.i18n.contract import TIER_OFFICIAL, LocaleBundle
+
+    bare = LocaleBundle(code="xx", tier=TIER_OFFICIAL, data={"meta": {"code": "xx"}})
+    previous = active.get_active_bundle()
+    active.set_active_bundle(bare)
+    try:
+        controller = KiraAgendaController()
+        topic = controller.add_topic("Tema", approved=True)
+        controller.queue_topic(topic.id)
+        assert controller.state.value == "OFF"
+        app = _app(_host_with_agenda(controller))
+        with TestClient(app) as client:
+            resp = client.post("/api/agenda/session/action", json={"action": "enable"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["applied"] is False
+            assert body["reason"] == "guardrails_missing"
+            assert body["state"] == "OFF"
+        assert controller.state.value == "OFF"
+    finally:
+        active.set_active_bundle(previous)
+
+
 def test_post_agenda_session_action_enable_nudges_driver_for_immediate_tick():
     # CTK parity (app_shell.py:1432): enabling with a queued topic nudges the
     # driver so Kira opens the first topic without waiting out the cadence. An

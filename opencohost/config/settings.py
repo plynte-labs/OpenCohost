@@ -205,14 +205,35 @@ TTS_LIGHT_TIMEOUT = 45
 TTS_LOCAL_MODEL_PATH: str = os.path.join(
     str(STORAGE_PATHS.cache_root), "piper", "es_AR-daniela-high.onnx"
 )
-# Offline Piper voice registry for the in-app "Voz de Kira" toggle. Both voices
-# ship as local .onnx files under the piper cache dir, so switching never touches
-# the Edge-TTS cloud — the toggle stays bulletproof for live / offline demos.
+# Offline Piper voice registry for the in-app "Voz de Kira" toggle. The two es
+# voices ship as local .onnx files under the piper cache dir, so switching never
+# touches the Edge-TTS cloud — the toggle stays bulletproof for live / offline
+# demos. "english" has NO auto-download (D8): its .onnx must be manually placed
+# in the same piper cache dir until the model-orchestration track lands;
+# piper_voice_path() resolves the path regardless of whether the file exists,
+# app_shell.py's os.path.isfile() guard is what surfaces "not installed" to the
+# operator (see default_piper_voice_for_locale below for the locale-aware pick).
 PIPER_VOICES: dict[str, dict] = {
-    "argentina": {"label": "🇦🇷 Argentina", "file": "es_AR-daniela-high.onnx"},
-    "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx"},
+    "argentina": {"label": "🇦🇷 Argentina", "file": "es_AR-daniela-high.onnx", "lang": "es"},
+    "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx", "lang": "es"},
+    "english": {"label": "🇺🇸 English", "file": "en_US-lessac-high.onnx", "lang": "en"},
 }
 DEFAULT_PIPER_VOICE = "argentina"
+
+
+def default_piper_voice_for_locale(code: str | None) -> str:
+    """Pure locale -> Piper voice key mapping ('en' -> 'english', else DEFAULT_PIPER_VOICE).
+
+    Used ONLY at engine init when no user-persisted voice exists — an explicit
+    user pick always wins (existing load/save_piper_voice mechanism untouched).
+    No i18n import here (settings.py is imported BY opencohost.i18n.active, so
+    importing i18n back would be circular) — a bare BCP-47 primary-subtag split
+    is enough for this one comparison.
+    """
+    primary = (code or "").split("-", 1)[0].strip().lower()
+    return "english" if primary == "en" else DEFAULT_PIPER_VOICE
+
+
 # Piper speaking-rate control: 1.0 keeps the voice model default; values
 # above 1.0 slow speech down proportionally (1.15 ≈ 15% slower).
 # Ignored when the installed piper-tts does not expose SynthesisConfig.
@@ -663,22 +684,25 @@ def piper_voice_path(voice_key: str) -> str:
     return os.path.join(str(STORAGE_PATHS.cache_root), "piper", voice["file"])
 
 
-def load_piper_voice(config_file: Optional[str] = None) -> str:
+def load_piper_voice(config_file: Optional[str] = None, default: str = DEFAULT_PIPER_VOICE) -> str:
     """Load the selected Piper voice key from disk.
 
-    Returns DEFAULT_PIPER_VOICE when the file is absent, unreadable, corrupted,
-    or holds an unknown key. The default preserves the original Argentina voice.
+    Returns `default` (DEFAULT_PIPER_VOICE unless overridden) when the file is
+    absent, unreadable, corrupted, or holds an unknown key — i.e. whenever
+    there is no valid user-persisted choice. Engine init passes a
+    locale-aware `default` (see default_piper_voice_for_locale); every other
+    caller keeps the original Argentina-default behavior unchanged.
     """
     path = config_file if config_file is not None else PIPER_VOICE_FILE
     try:
         if not os.path.exists(path):
-            return DEFAULT_PIPER_VOICE
+            return default
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        key = str(data.get("piper_voice", DEFAULT_PIPER_VOICE))
-        return key if key in PIPER_VOICES else DEFAULT_PIPER_VOICE
+        key = str(data.get("piper_voice", default))
+        return key if key in PIPER_VOICES else default
     except Exception:
-        return DEFAULT_PIPER_VOICE
+        return default
 
 
 def save_piper_voice(voice_key: str, config_file: Optional[str] = None) -> None:

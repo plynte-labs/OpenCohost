@@ -10,6 +10,7 @@ import pytest
 
 from opencohost.core import llm_engine
 from opencohost.config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
+from opencohost.i18n import active as i18n_active
 
 
 def test_audio_queue_timeout_waits_for_heavy_tts_plus_margin():
@@ -273,7 +274,7 @@ def test_output_guard_blocks_direct_generation_before_history_commit():
 
     # R9 (AI self-ID) is global: blocked even for direct source. The spoken
     # fallback line replaces dead air but never reaches LLM history.
-    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
+    assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -290,7 +291,7 @@ def test_output_guard_blocks_chat_generation_before_history_commit():
 
     # R10 still applies to chat sources; the fallback line is spoken instead
     # of dead air and is never committed to LLM history.
-    assert dialogo in llm_engine.GUARDRAIL_FALLBACK_LINES
+    assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
     assert list(motor.historial) == []
 
 
@@ -762,13 +763,13 @@ def test_heavy_tts_continues_after_connection_error(tmp_path):
 def test_guardrail_fallback_returns_line_for_direct():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     line = motor._guardrail_fallback_line("direct")
-    assert line in llm_engine.GUARDRAIL_FALLBACK_LINES
+    assert line in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
 
 
 def test_guardrail_fallback_returns_line_for_chat_sources():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     for source in ("ptt", "chat", "accumulated"):
-        assert motor._guardrail_fallback_line(source) in llm_engine.GUARDRAIL_FALLBACK_LINES
+        assert motor._guardrail_fallback_line(source) in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
 
 
 def test_guardrail_fallback_empty_for_agenda_sources():
@@ -790,7 +791,7 @@ def test_guardrail_fallback_lines_pass_output_guard():
     """Canned lines must never trip the guard themselves, for any source."""
     from opencohost.config.validation import output_guard
 
-    for line in llm_engine.GUARDRAIL_FALLBACK_LINES:
+    for line in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES:
         for source in ("direct", "chat", "kira-agenda"):
             allowed, reason = output_guard(line, source=source)
             assert allowed, f"fallback line blocked ({source}): {line!r} — {reason}"

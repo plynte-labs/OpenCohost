@@ -128,8 +128,8 @@ _AI_SELF_ID_PATTERNS: list[re.Pattern] = [
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:as\s+an\s+(?:ai|artificial\s+intelligence|language\s+model|"
-        r"chatbot|llm|virtual\s+assistant))\b",
+        r"\b(?:as\s+an?\s+(?:ai|artificial\s+intelligence|large\s+language\s+model|"
+        r"language\s+model|chatbot|llm|virtual\s+assistant))\b",
         re.IGNORECASE,
     ),
     re.compile(

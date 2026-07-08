@@ -514,6 +514,15 @@ class TestHandlerSideEffects:
         table["speaking_end"]()
         deps["after_cancel"].assert_called_with(timer_id)
 
+    def test_on_piper_voice_locale_mismatch_notifies_operator(self):
+        """Honest-degrade notice (design D8/pillar 5) must reach the operator,
+        not just the raw ui_callback seam — dispatch must call notify_operator."""
+        deps = _make_deps()
+        from opencohost.ui.motor_event_handlers import get_handler_map
+        table = get_handler_map(deps)
+        table["piper_voice_locale_mismatch"]()
+        deps["notify_operator"].assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Helper — filter kwargs to only those accepted by a function

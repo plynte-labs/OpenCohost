@@ -1,0 +1,601 @@
+"""Direct-path residue migration (P2, kira_bilingual_e2e_20260705).
+
+Absorbs i18n_engine_locale_residue_20260618/design.md section 4's test plan
+(minus the R5-premised assertions — R5 turned out FALSE against current code:
+the guardrail/repetition fallback returns in _generar_dialogo happen BEFORE
+_commit_history, so there was never a memory-hardening coordination hazard to
+test for). Adds coverage for the THREE wrapper slots (ptt_wrapper,
+live_voice_wrapper, ptt_history_wrapper) that the residue design didn't know
+about — those were added by the kira_bilingual_e2e design (section 2.2).
+"""
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+from unittest.mock import MagicMock
+
+import pytest
+
+from opencohost.core import llm_engine
+from opencohost.i18n import active
+from opencohost.i18n.contract import TIER_OFFICIAL, LocaleBundle, resolve
+from opencohost.i18n.registry import build_chain, discover_bundles, official_locales_dir
+from opencohost.i18n.startup import resolve_active_bundle
+from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+
+
+@pytest.fixture
+def official():
+    return discover_bundles(official_locales_dir(), "official")
+
+
+@pytest.fixture(autouse=True)
+def _reset_active():
+    active.reset_active_bundle()
+    yield
+    active.reset_active_bundle()
+
+
+def _activate(code, official):
+    active.set_active_bundle(resolve_active_bundle(locale=code, registry=official))
+
+
+def _bare_bundle(code: str = "xx") -> LocaleBundle:
+    return LocaleBundle(code=code, tier=TIER_OFFICIAL, data={"meta": {"code": code}})
+
+
+def _make_motor() -> llm_engine.MotorVocalIA:
+    return llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+
+# ---------------------------------------------------------------------------
+# 1. guardrail_fallback_lines()
+# ---------------------------------------------------------------------------
+
+
+def test_guardrail_fallback_lines_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.guardrail_fallback_lines() == active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_lines_en_returns_english(official):
+    _activate("en", official)
+    for line in active.guardrail_fallback_lines():
+        assert "¿" not in line and "¡" not in line
+        assert line not in active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_lines_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.guardrail_fallback_lines() == active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_lines_wrong_type_returns_legacy():
+    bundle = LocaleBundle(
+        code="xx", tier=TIER_OFFICIAL,
+        data={"meta": {"code": "xx"}, "llm": {"guardrail_fallback_lines": "not a list"}},
+    )
+    active.set_active_bundle(bundle)
+    assert active.guardrail_fallback_lines() == active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_lines_empty_list_returns_legacy():
+    bundle = LocaleBundle(
+        code="xx", tier=TIER_OFFICIAL,
+        data={"meta": {"code": "xx"}, "llm": {"guardrail_fallback_lines": []}},
+    )
+    active.set_active_bundle(bundle)
+    assert active.guardrail_fallback_lines() == active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_guardrail_fallback_lines_returns_tuple():
+    bundle = LocaleBundle(
+        code="xx", tier=TIER_OFFICIAL,
+        data={"meta": {"code": "xx"}, "llm": {"guardrail_fallback_lines": ["a", "b", "c", "d"]}},
+    )
+    active.set_active_bundle(bundle)
+    assert isinstance(active.guardrail_fallback_lines(), tuple)
+
+
+# ---------------------------------------------------------------------------
+# 2. accumulation_ptt() / accumulation_chat()
+# ---------------------------------------------------------------------------
+
+
+def test_accumulation_ptt_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.accumulation_ptt() == active.LEGACY_ACCUMULATION_PTT
+
+
+def test_accumulation_chat_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.accumulation_chat() == active.LEGACY_ACCUMULATION_CHAT
+
+
+def test_accumulation_ptt_en_is_english(official):
+    _activate("en", official)
+    value = active.accumulation_ptt()
+    assert "{messages}" in value
+    assert "streamer dijo" not in value and "acumulado" not in value
+
+
+def test_accumulation_chat_en_is_english(official):
+    _activate("en", official)
+    value = active.accumulation_chat()
+    assert "{messages}" in value
+    assert "procesabas" not in value and "mensajes del chat" not in value
+
+
+def test_accumulation_ptt_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.accumulation_ptt() == active.LEGACY_ACCUMULATION_PTT
+
+
+def test_accumulation_ptt_template_formats_correctly(official):
+    _activate("es", official)
+    assert active.accumulation_ptt().format(messages="a; b") == "El streamer dijo (acumulado): a; b"
+
+
+def test_accumulation_chat_template_formats_correctly(official):
+    _activate("es", official)
+    assert (
+        active.accumulation_chat().format(messages="x | y")
+        == "Mientras procesabas, llegaron estos mensajes del chat: x | y"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. ledger_context_label() / ledger_kira_label()
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_context_label_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.ledger_context_label() == "contexto"
+
+
+def test_ledger_kira_label_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.ledger_kira_label() == "→ Kira"
+
+
+def test_ledger_context_label_en_is_english(official):
+    _activate("en", official)
+    assert active.ledger_context_label() == "context"
+
+
+def test_ledger_kira_label_en_unchanged(official):
+    _activate("en", official)
+    assert active.ledger_kira_label() == "→ Kira"
+
+
+def test_ledger_context_label_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.ledger_context_label() == "contexto"
+
+
+# ---------------------------------------------------------------------------
+# 4. agenda_sanitizer_fallback()
+# ---------------------------------------------------------------------------
+
+
+def test_agenda_sanitizer_fallback_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.agenda_sanitizer_fallback() == active.LEGACY_AGENDA_SANITIZER_FALLBACK
+
+
+def test_agenda_sanitizer_fallback_en_is_english(official):
+    _activate("en", official)
+    value = active.agenda_sanitizer_fallback()
+    assert not any(ch in value for ch in "¿¡óáéú")
+    assert "quedo" not in value and "matices" not in value
+
+
+def test_agenda_sanitizer_fallback_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.agenda_sanitizer_fallback() == active.LEGACY_AGENDA_SANITIZER_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# 5. ptt_wrapper() / live_voice_wrapper() / ptt_history_wrapper()
+# ---------------------------------------------------------------------------
+
+
+def test_ptt_wrapper_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.ptt_wrapper() == active.LEGACY_PTT_WRAPPER
+    assert active.ptt_wrapper().format(text="hola") == "El streamer acaba de decir (PTT): hola"
+
+
+def test_ptt_wrapper_en_formats_without_keyerror(official):
+    _activate("en", official)
+    value = active.ptt_wrapper()
+    assert "dijo" not in value
+    assert value.format(text="hi") == "The streamer just said (PTT): hi"
+
+
+def test_live_voice_wrapper_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.live_voice_wrapper() == active.LEGACY_LIVE_VOICE_WRAPPER
+    assert active.live_voice_wrapper().format(text="hola") == "El streamer acaba de decir: hola"
+
+
+def test_live_voice_wrapper_differs_from_ptt_wrapper(official):
+    """Pins the one-slot-vs-two decision: LiveVoice and PTT stay separate."""
+    _activate("es", official)
+    assert active.live_voice_wrapper() != active.ptt_wrapper()
+
+
+def test_live_voice_wrapper_en_formats_without_keyerror(official):
+    _activate("en", official)
+    value = active.live_voice_wrapper()
+    assert value.format(text="hi") == "The streamer just said: hi"
+
+
+def test_ptt_history_wrapper_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.ptt_history_wrapper() == active.LEGACY_PTT_HISTORY_WRAPPER
+    assert active.ptt_history_wrapper().format(text="hola") == "El streamer dijo (PTT): hola"
+
+
+def test_ptt_history_wrapper_differs_from_ptt_wrapper(official):
+    """Pins the byte-identity deviation: controller keeps its own 'dijo' wording."""
+    _activate("es", official)
+    assert active.ptt_history_wrapper() != active.ptt_wrapper()
+
+
+def test_ptt_history_wrapper_en_formats_without_keyerror(official):
+    _activate("en", official)
+    value = active.ptt_history_wrapper()
+    assert value.format(text="hi") == "The streamer said (PTT): hi"
+
+
+def test_ptt_wrapper_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.ptt_wrapper() == active.LEGACY_PTT_WRAPPER
+
+
+def test_live_voice_wrapper_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.live_voice_wrapper() == active.LEGACY_LIVE_VOICE_WRAPPER
+
+
+def test_ptt_history_wrapper_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.ptt_history_wrapper() == active.LEGACY_PTT_HISTORY_WRAPPER
+
+
+# ---------------------------------------------------------------------------
+# 6. Engine integration — _guardrail_fallback_line()
+# ---------------------------------------------------------------------------
+
+
+def test_engine_guardrail_fallback_returns_es_line_for_es_locale(official):
+    _activate("es", official)
+    motor = _make_motor()
+    assert motor._guardrail_fallback_line("direct") in active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_engine_guardrail_fallback_returns_en_line_for_en_locale(official):
+    _activate("en", official)
+    motor = _make_motor()
+    line = motor._guardrail_fallback_line("ptt")
+    assert line and line not in active.LEGACY_GUARDRAIL_FALLBACK_LINES
+
+
+def test_engine_guardrail_fallback_rotates_through_lines(official):
+    _activate("es", official)
+    motor = _make_motor()
+    results = [motor._guardrail_fallback_line("direct") for _ in range(5)]
+    assert set(results[:4]) == set(active.LEGACY_GUARDRAIL_FALLBACK_LINES)
+    assert results[4] == results[0]
+
+
+def test_engine_guardrail_fallback_en_lines_pass_output_guard(official):
+    from opencohost.config.validation import output_guard
+
+    _activate("en", official)
+    motor = _make_motor()
+    for _ in range(4):
+        line = motor._guardrail_fallback_line("direct")
+        allowed, reason = output_guard(line, source="direct")
+        assert allowed, f"en fallback line blocked: {line!r} — {reason}"
+
+
+def test_engine_guardrail_fallback_agenda_source_returns_empty(official):
+    _activate("en", official)
+    motor = _make_motor()
+    assert motor._guardrail_fallback_line("kira-agenda-main") == ""
+
+
+def test_engine_guardrail_fallback_returns_empty_for_agenda_prefix_variants(official):
+    _activate("es", official)
+    motor = _make_motor()
+    assert motor._guardrail_fallback_line("kira-agenda-secondary") == ""
+    assert motor._guardrail_fallback_line("kira-agenda") == ""
+
+
+# ---------------------------------------------------------------------------
+# 7. Engine integration — _flush_accumulation()
+# ---------------------------------------------------------------------------
+
+
+def test_flush_accumulation_ptt_es_uses_es_template(official):
+    _activate("es", official)
+    motor = _make_motor()
+    motor._accumulation_buffer.append((time.time(), "hello streamer", "ptt"))
+    result = motor._flush_accumulation()
+    assert result.startswith("El streamer dijo (acumulado):")
+
+
+def test_flush_accumulation_chat_es_uses_es_template(official):
+    _activate("es", official)
+    motor = _make_motor()
+    motor._accumulation_buffer.append((time.time(), "nice", "chat"))
+    result = motor._flush_accumulation()
+    assert result.startswith("Mientras procesabas")
+
+
+def test_flush_accumulation_ptt_en_uses_en_template(official):
+    _activate("en", official)
+    motor = _make_motor()
+    motor._accumulation_buffer.append((time.time(), "hello streamer", "ptt"))
+    result = motor._flush_accumulation()
+    assert "dijo" not in result
+    assert "hello streamer" in result
+
+
+def test_flush_accumulation_chat_en_uses_en_template(official):
+    _activate("en", official)
+    motor = _make_motor()
+    motor._accumulation_buffer.append((time.time(), "nice", "chat"))
+    result = motor._flush_accumulation()
+    assert "procesabas" not in result
+    assert "nice" in result
+
+
+def test_flush_accumulation_multi_entry_separator_correctness(official):
+    _activate("es", official)
+    motor = _make_motor()
+    now = time.time()
+    motor._accumulation_buffer.extend([
+        (now, "msg1", "ptt"),
+        (now, "msg2", "ptt"),
+        (now, "chat1", "chat"),
+        (now, "chat2", "chat"),
+    ])
+    result = motor._flush_accumulation()
+    assert "msg1; msg2" in result
+    assert "chat1 | chat2" in result
+
+
+def test_flush_accumulation_other_source_is_language_neutral(official):
+    _activate("en", official)
+    motor = _make_motor()
+    motor._accumulation_buffer.append((time.time(), "payload", "accumulated"))
+    result = motor._flush_accumulation()
+    assert result.startswith("[accumulated]")
+
+
+# ---------------------------------------------------------------------------
+# 8. Engine integration — _build_ledger_line()
+# ---------------------------------------------------------------------------
+
+
+def test_build_ledger_line_es_matches_legacy_format(official):
+    _activate("es", official)
+    result = llm_engine.MotorVocalIA._build_ledger_line("hola", "así es")
+    assert result == "contexto: hola → Kira: así es"
+
+
+def test_build_ledger_line_en_uses_english_labels(official):
+    _activate("en", official)
+    result = llm_engine.MotorVocalIA._build_ledger_line("hola", "así es")
+    assert result.startswith("context:")
+    assert "contexto" not in result
+
+
+def test_build_ledger_line_missing_slot_falls_back_to_es_labels():
+    active.set_active_bundle(_bare_bundle())
+    result = llm_engine.MotorVocalIA._build_ledger_line("hola", "así es")
+    assert result.startswith("contexto:")
+
+
+# ---------------------------------------------------------------------------
+# 9. Engine integration — _sanitize_agenda_output()
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_agenda_output_fallback_es_matches_legacy(official):
+    _activate("es", official)
+    motor = _make_motor()
+    result = motor._sanitize_agenda_output("hasta luego, nos vemos")
+    assert result == active.LEGACY_AGENDA_SANITIZER_FALLBACK
+
+
+def test_sanitize_agenda_output_fallback_en_is_english(official):
+    _activate("en", official)
+    motor = _make_motor()
+    result = motor._sanitize_agenda_output("hasta luego, nos vemos")
+    assert result and result != active.LEGACY_AGENDA_SANITIZER_FALLBACK
+
+
+def test_sanitize_agenda_output_clean_text_passes_through(official):
+    _activate("es", official)
+    motor = _make_motor()
+    assert motor._sanitize_agenda_output("un texto cualquiera sin cierres raros") == (
+        "un texto cualquiera sin cierres raros"
+    )
+
+
+def test_sanitize_agenda_output_empty_input_returns_empty(official):
+    _activate("es", official)
+    motor = _make_motor()
+    assert motor._sanitize_agenda_output("") == ""
+
+
+# ---------------------------------------------------------------------------
+# 10. Engine integration — voice_control.py wrapper call sites
+# ---------------------------------------------------------------------------
+
+
+def test_voice_control_ptt_flush_busy_uses_ptt_wrapper(official):
+    from opencohost.ui import voice_control
+
+    _activate("en", official)
+    panel = object.__new__(voice_control.VoiceControlPanel)
+    panel._ptt_lock = threading.Lock()
+    panel._ptt_buffer = "hello there"
+    panel._logger = logging.getLogger("test")
+    panel._motor_ia = MagicMock()
+    panel._motor_ia.is_speaking = True
+    panel._motor_ia.is_processing = False
+    panel._on_log = lambda *a, **k: None
+
+    panel._flush_ptt_buffer()
+
+    panel._motor_ia.enqueue.assert_called_once()
+    sent_text = panel._motor_ia.enqueue.call_args.args[0]
+    assert sent_text == active.ptt_wrapper().format(text="hello there")
+
+
+def test_voice_control_ptt_flush_idle_uses_ptt_wrapper(official):
+    from opencohost.ui import voice_control
+
+    _activate("en", official)
+    panel = object.__new__(voice_control.VoiceControlPanel)
+    panel._ptt_lock = threading.Lock()
+    panel._ptt_buffer = "hello there team"
+    panel._logger = logging.getLogger("test")
+    panel._motor_ia = MagicMock()
+    panel._motor_ia.is_speaking = False
+    panel._motor_ia.is_processing = False
+    panel._motor_ia.command_queue = queue.Queue()
+    panel._on_log = lambda *a, **k: None
+
+    panel._flush_ptt_buffer()
+
+    _, payload = panel._motor_ia.command_queue.get_nowait()
+    assert payload == active.ptt_wrapper().format(text="hello there team")
+
+
+# ---------------------------------------------------------------------------
+# 11. Engine integration — kira_agenda_controller.py history_text
+# ---------------------------------------------------------------------------
+
+
+def test_controller_ptt_history_text_uses_own_wrapper_es(official):
+    _activate("es", official)
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema de fondo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+
+    action = controller.next_action(ptt_text="probemos esto")
+
+    assert action.history_text == "El streamer dijo (PTT): probemos esto"
+
+
+def test_controller_ptt_history_text_uses_own_wrapper_en(official):
+    _activate("en", official)
+    controller = KiraAgendaController()
+    topic = controller.add_topic("background topic", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+
+    action = controller.next_action(ptt_text="let's try this")
+
+    assert action.history_text == active.ptt_history_wrapper().format(text="let's try this")
+    assert "dijo" not in action.history_text
+
+
+# ---------------------------------------------------------------------------
+# 12. Manifest schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_es_manifest_has_guardrail_fallback_lines():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    lines = resolve(es, "llm.guardrail_fallback_lines")
+    assert isinstance(lines, list) and len(lines) == 4
+
+
+def test_es_manifest_guardrail_fallback_lines_are_spanish():
+    import yaml
+
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    lines = resolve(es, "llm.guardrail_fallback_lines")
+    assert any(any(ch in line for ch in "¿¡") for line in lines)
+    # YAML round-trip: accented/¿¡ chars must survive re-serialization on Windows.
+    dumped = yaml.dump(lines, allow_unicode=True)
+    reparsed = yaml.safe_load(dumped)
+    assert reparsed == lines
+
+
+def test_en_manifest_has_guardrail_fallback_lines():
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    lines = resolve(en, "llm.guardrail_fallback_lines")
+    assert isinstance(lines, list) and len(lines) == 4
+
+
+def test_en_manifest_guardrail_fallback_lines_are_english():
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    lines = resolve(en, "llm.guardrail_fallback_lines")
+    assert all("¿" not in line and "¡" not in line for line in lines)
+
+
+def test_es_manifest_has_accumulation_slots():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    assert "{messages}" in resolve(es, "llm.scaffolding.accumulation_ptt")
+    assert "{messages}" in resolve(es, "llm.scaffolding.accumulation_chat")
+
+
+def test_en_manifest_has_accumulation_slots():
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    assert "{messages}" in resolve(en, "llm.scaffolding.accumulation_ptt")
+    assert "{messages}" in resolve(en, "llm.scaffolding.accumulation_chat")
+
+
+def test_es_manifest_has_ledger_labels():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    assert resolve(es, "llm.scaffolding.ledger_context_label") == "contexto"
+    assert resolve(es, "llm.scaffolding.ledger_kira_label") == "→ Kira"
+
+
+def test_en_manifest_has_ledger_labels():
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    assert resolve(en, "llm.scaffolding.ledger_context_label") == "context"
+
+
+def test_es_manifest_has_agenda_sanitizer_fallback():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    assert resolve(es, "llm.agenda_sanitizer_fallback")
+
+
+def test_en_manifest_has_agenda_sanitizer_fallback():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    assert resolve(en, "llm.agenda_sanitizer_fallback")
+    assert resolve(en, "llm.agenda_sanitizer_fallback") != resolve(es, "llm.agenda_sanitizer_fallback")
+
+
+def test_es_manifest_has_wrapper_slots():
+    es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
+    assert "{text}" in resolve(es, "llm.scaffolding.ptt_wrapper")
+    assert "{text}" in resolve(es, "llm.scaffolding.live_voice_wrapper")
+    assert "{text}" in resolve(es, "llm.scaffolding.ptt_history_wrapper")
+
+
+def test_en_manifest_has_wrapper_slots():
+    en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
+    assert "{text}" in resolve(en, "llm.scaffolding.ptt_wrapper")
+    assert "{text}" in resolve(en, "llm.scaffolding.live_voice_wrapper")
+    assert "{text}" in resolve(en, "llm.scaffolding.ptt_history_wrapper")

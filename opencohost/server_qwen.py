@@ -193,7 +193,7 @@ def generar_audio():
                 # Síntesis oficial usando la API de qwen_tts
                 wavs, sr = model.generate_voice_clone(
                     text=texto,
-                    language="Spanish",
+                    language=i18n_active.qwen_language(),
                     ref_audio=referencia,
                     ref_text=TEXTO_DE_TU_GRABACION,
                 )

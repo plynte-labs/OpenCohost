@@ -73,6 +73,26 @@ def _isolate_api_tokens_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_piper_voice_file(tmp_path, monkeypatch):
+    """Keep the persisted Piper-voice choice out of the developer's real
+    config/ directory.
+
+    MotorVocalIA.__init__ calls settings.load_piper_voice() unconditionally at
+    construction (same repo-root-config/ hazard as api_tokens/personalization
+    above) -- any real .../config/piper_voice.json on the developer's machine
+    would otherwise leak into tests that pin a locale and construct a real
+    MotorVocalIA (e.g. the P5 PIPER_VOICE_LOCALE_MISMATCH coherence checks).
+    load_piper_voice() reads settings.PIPER_VOICE_FILE lazily at call time, so
+    monkeypatching the module attribute is sufficient (same as API_TOKENS_FILE).
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "PIPER_VOICE_FILE", str(tmp_path / "piper_voice.json")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_personalization_file(tmp_path, monkeypatch):
     """Keep the personalization store out of the developer's real config/
     directory.
@@ -92,6 +112,29 @@ def _isolate_personalization_file(tmp_path, monkeypatch):
         personalization_mod,
         "PERSONALIZATION_FILE",
         str(tmp_path / "personalization.json"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_last_profile_and_model_files(tmp_path, monkeypatch):
+    """Keep last_profile.json / last_model.json out of the developer's real
+    config/ directory.
+
+    ``save_last_profile``/``load_last_profile`` (settings.py) read
+    ``settings.LAST_PROFILE_FILE`` at call time -- any test that hits
+    /api/perfiles/switch (main.py calls save_last_profile on a successful
+    switch) would otherwise clobber the real on-disk last-profile state (same
+    repo-root-config/ hazard as API_TOKENS_FILE/PIPER_VOICE_FILE above).
+    ``save_last_model``/``resolve_startup_model`` share the identical pattern
+    via ``settings.LAST_MODEL_FILE``, isolated here too for the same reason.
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "LAST_PROFILE_FILE", str(tmp_path / "last_profile.json")
+    )
+    monkeypatch.setattr(
+        settings_mod, "LAST_MODEL_FILE", str(tmp_path / "last_model.json")
     )
 
 

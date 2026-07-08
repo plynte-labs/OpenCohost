@@ -229,6 +229,37 @@ def test_kira_agenda_add_topic_validation_uses_non_blocking_notification():
         _restore_app_shell_module(old_module)
 
 
+def test_kira_agenda_enable_guardrails_missing_does_not_claim_activation():
+    """When KiraAgendaController.enable() refuses (fail-closed gate, state
+    stays OFF), _kira_agenda_enable must not log 'activado' nor start the
+    music bed — it must honestly report the refusal instead."""
+    app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
+    try:
+        app = object.__new__(app_shell.VocalAIApp)
+        app.kira_agenda = SimpleNamespace(
+            queued_topics=MagicMock(return_value=["topic"]),
+            active_topic=None,
+            enable=MagicMock(),  # gate refused -> state stays OFF (no-op)
+            state=app_shell.AgendaState.OFF,
+        )
+        app._kira_agenda_force_strict_chat_filter = MagicMock()
+        app._on_stream_admin_log = MagicMock()
+        app._kira_agenda_update_status = MagicMock()
+        app._kira_agenda_tick = MagicMock()
+        app.audio_bed = MagicMock()
+        app._dispatch_audio_play = MagicMock()
+
+        app._kira_agenda_enable()
+
+        app.kira_agenda.enable.assert_called_once()
+        app._dispatch_audio_play.assert_not_called()
+        app._kira_agenda_tick.assert_not_called()
+        logged = [c.args[0] for c in app._on_stream_admin_log.call_args_list]
+        assert not any("activado" in msg for msg in logged)
+    finally:
+        _restore_app_shell_module(old_module)
+
+
 def test_music_import_errors_use_non_blocking_notification():
     app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
     try:

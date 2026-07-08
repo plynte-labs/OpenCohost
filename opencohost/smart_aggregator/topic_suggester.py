@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Optional
 
+from opencohost.i18n import active as i18n_active
+
 # ---------------------------------------------------------------------------
 # Dataclass
 # ---------------------------------------------------------------------------
@@ -29,53 +31,31 @@ class TopicSuggestion:
 # ---------------------------------------------------------------------------
 # Templates by entity category
 # ---------------------------------------------------------------------------
-
-_TEMPLATES_BY_CATEGORY: dict[str, list[tuple[str, str]]] = {
-    "game": [
-        ("{entity}: ¿moda pasajera o acá para quedarse?", "Comparar con títulos similares y leer reacciones del chat."),
-        ("El dilema de {entity}", "¿Lo vale o está sobrevalorado? Abrir debate sin tomar partido absoluto."),
-        ("{entity} y la comunidad", "Qué dice el chat, qué cambió en los últimos meses."),
-        ("¿{entity} sigue vivo?", "Revisar estado actual, updates recientes, interés del público."),
-    ],
-    "trade": [
-        ("{entity} en el mercado actual", "Valores, tendencias y si conviene tradear ahora o esperar."),
-        ("Tradeos: el fenómeno {entity}", "Contar anécdotas, leer opiniones del chat, dar perspectiva."),
-    ],
-    "collab": [
-        ("Colaboraciones con {entity}", "¿Qué podría salir bien? ¿Qué podría salir… interesante?"),
-        ("{entity} en el radar", "Por qué aparece tanto en el chat y qué dice eso de la comunidad."),
-    ],
-    "generic": [
-        ("{entity}: ¿qué opina el chat?", "Leer ambiente, dar una opinión con matiz y abrir a respuestas."),
-        ("El fenómeno {entity}", "Contexto, por qué importa ahora y cómo llegamos acá."),
-        ("Hablemos de {entity}", "Ángulo fresco, sin repetir lo obvio ni sonar a Wikipedia."),
-    ],
-    "vibe_high": [
-        ("El chat está que arde: ¿qué está pasando?", "Leer la temperatura, nombrear lo que se siente sin exagerar."),
-        ("Momento de alto voltaje", "Comentar el pico de energía con humor seco, sin apagarlo."),
-    ],
-    "transition": [
-        ("¿Y ahora qué?", "Transición natural desde el último tema, abriendo ventana a lo que sigue."),
-        ("Cerramos ese capítulo… ¿qué sigue?", "Gancho para el próximo tema sin forzar estructura."),
-    ],
-}
+#
+# Migrated to `nlp.topic_templates.*` (P4, kira_bilingual_e2e) --
+# i18n_active.topic_templates() returns the es legacy dict (module-level
+# constants above the accessor in opencohost/i18n/active.py) on any i18n
+# failure, so this module keeps zero hard dependency on i18n loading
+# succeeding. Category keys are engine identifiers (locale-neutral); the
+# {entity} placeholder is preserved.
 
 
 def _pick_template(entity: str, intent: str | None = None) -> tuple[str, str]:
     """Choose a title+angle template appropriate for the entity and intent."""
     entity_lower = entity.lower() if entity else ""
+    templates_by_category = i18n_active.topic_templates()
     templates: list[tuple[str, str]]
 
     if intent in ("game_suggestion", "game_question"):
-        templates = _TEMPLATES_BY_CATEGORY["game"]
+        templates = templates_by_category["game"]
     elif intent in ("trade_request",):
-        templates = _TEMPLATES_BY_CATEGORY["trade"]
+        templates = templates_by_category["trade"]
     elif intent in ("video_collab",):
-        templates = _TEMPLATES_BY_CATEGORY["collab"]
+        templates = templates_by_category["collab"]
     elif _looks_like_game(entity_lower):
-        templates = _TEMPLATES_BY_CATEGORY["game"]
+        templates = templates_by_category["game"]
     else:
-        templates = _TEMPLATES_BY_CATEGORY["generic"]
+        templates = templates_by_category["generic"]
 
     # Deterministic pick: use entity hash so same entity → same template
     idx = hash(entity) % len(templates)
@@ -193,7 +173,7 @@ def generate_suggestions(
 
     # Source B: vibe-only when chat is hot but no entity-driven suggestions
     if not suggestions and vibe_temperature >= 70:
-        for tmpl in _TEMPLATES_BY_CATEGORY["vibe_high"]:
+        for tmpl in i18n_active.topic_templates()["vibe_high"]:
             title = tmpl[0]
             angle = tmpl[1]
             if not is_duplicate(title, existing_titles_lower):
@@ -210,7 +190,7 @@ def generate_suggestions(
     if not suggestions:
         last_completed = _find_last_completed(existing_topics)
         if last_completed is not None:
-            title_tmpl, angle_tmpl = _TEMPLATES_BY_CATEGORY["transition"][0]
+            title_tmpl, angle_tmpl = i18n_active.topic_templates()["transition"][0]
             title = title_tmpl
             angle = angle_tmpl
             if not is_duplicate(title, existing_titles_lower):

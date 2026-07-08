@@ -62,3 +62,28 @@ def test_set_then_reset_re_resolves():
     assert active.get_active_bundle() is sentinel
     active.reset_active_bundle()
     assert active.get_active_bundle() is not sentinel
+
+
+# ---------------------------------------------------------------------------
+# qwen_language() — P5 TTS locale coupling
+# ---------------------------------------------------------------------------
+
+def test_qwen_language_for_es_matches_legacy():
+    active.set_active_bundle(resolve_active_bundle(locale="es"))
+    assert active.qwen_language() == "Spanish"
+
+
+def test_qwen_language_reflects_injected_locale():
+    bundle = LocaleBundle(
+        code="en", tier=TIER_OFFICIAL,
+        data={"meta": {"code": "en"}, "tts": {"qwen_language": "English"}},
+    )
+    active.set_active_bundle(bundle)
+    assert active.qwen_language() == "English"
+
+
+def test_qwen_language_falls_back_to_legacy_when_slot_missing():
+    active.set_active_bundle(
+        LocaleBundle(code="xx", tier=TIER_OFFICIAL, data={"meta": {"code": "xx"}})
+    )
+    assert active.qwen_language() == "Spanish"

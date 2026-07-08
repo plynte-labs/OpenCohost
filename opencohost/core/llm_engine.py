@@ -34,6 +34,7 @@ from opencohost.config.settings import (
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
     PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
+    default_piper_voice_for_locale,
     MEMORIAS_ENABLED, MEMORIAS_DB,
     PERSONALIZATION_ENABLED,
 )
@@ -101,35 +102,10 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
-# Spoken when the output guard blocks a response, so Kira never goes silent
-# mid-conversation. No LLM call involved. Lines must stay neutral and must
-# not match any output_guard pattern themselves. Agenda sources are excluded
-# (the agenda state machine has its own rejection/recovery path).
-GUARDRAIL_FALLBACK_LINES = (
-    "Uy, se me trabó la lengua. ¿Qué me decías?",
-    "Perdón, me distraje un segundo. ¿Puedes repetirlo?",
-    "Espera, se me cruzaron los cables. Dame un momento.",
-    "Mmm, mejor lo dejo ahí. ¿Seguimos con otra cosa?",
-)
-
 # Topic Scout prompt — plain user message (NO system prompt / persona). Seeded
-# with a compact, sanitized rendering of the recent LIVE host turns.
-SCOUT_PROMPT_TEMPLATE = """Sos un asistente que sugiere próximos temas para un stream en vivo.
-A partir de estas notas de la conversación reciente, proponé 2 o 3 temas
-NUEVOS y ADYACENTES para seguir la charla: no repitas lo ya dicho, pensá
-hacia dónde podría derivar de forma natural lo que se vino hablando.
-
-Notas:
-{digest_block}
-
-Reglas de salida:
-- Solo títulos, uno por línea.
-- Máximo 6 palabras por título.
-- Sin numeración, sin viñetas, sin comillas, sin explicaciones.
-- Nada de código ni símbolos.
-
-Ejemplo: si se habló de modelos de lenguaje (LLMs), un tema adyacente válido
-sería "regulación de LLMs" o "alucinaciones de IA"."""
+# with a compact, sanitized rendering of the recent LIVE host turns. Migrated
+# to i18n_active.scout_prompt() (P4, kira_bilingual_e2e) -- es legacy default
+# lives in opencohost/i18n/active.py::LEGACY_SCOUT_PROMPT_TEMPLATE.
 
 # Max words allowed in a scout title (preamble filter rejects longer lines).
 SCOUT_TITLE_MAX_WORDS = 6
@@ -244,13 +220,28 @@ class MotorVocalIA(threading.Thread):
             self._edge_tts_offline: bool = True
         else:
             self._edge_tts_offline: bool = False
-        self._piper = PiperEngine(
-            piper_voice_path(load_piper_voice()), length_scale=load_tts_speed()
+        # An explicit user pick (persisted piper_voice.json) always wins; only
+        # when NO persisted choice exists does the active locale pick the
+        # default (es -> argentina, en -> english).
+        self._piper_voice_key: str = load_piper_voice(
+            default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
         )
+        self._piper = PiperEngine(
+            piper_voice_path(self._piper_voice_key), length_scale=load_tts_speed()
+        )
+        # Honest-degrade: one-shot ui_callback notice, latched the first time
+        # Piper actually engages as a fallback under a locale/voice mismatch.
+        self._piper_locale_mismatch_notified: bool = False
 
         # Optional health monitor for auto-fallback (set externally, None = backward compat)
         self.health_monitor = None
-        
+
+        # T4/P5 coherence gate at startup (warn-only; log_coherence never raises).
+        i18n_coherence.log_coherence(
+            i18n_active.get_active_bundle(),
+            piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
+        )
+
         self.system_prompt = i18n_active.system_prompt()
         self.use_system_role = False
 
@@ -486,6 +477,7 @@ class MotorVocalIA(threading.Thread):
             path = piper_voice_path(voice_key)
             if self._piper.reload(path):
                 save_piper_voice(voice_key)
+                self._piper_voice_key = voice_key
                 label = PIPER_VOICES.get(voice_key, {}).get("label", voice_key)
                 self._log(f"Voz de Kira cambiada a: {label}")
                 logger.info("Piper voice switched to %s (%s)", voice_key, path)
@@ -525,6 +517,7 @@ class MotorVocalIA(threading.Thread):
                 profile_name=profile_name,
                 profile_prompt_active=prompt_override_active,
                 profile_locale=payload.get("locale"),
+                piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
             )
 
         elif tipo == "download_model":
@@ -770,10 +763,12 @@ class MotorVocalIA(threading.Thread):
             parts = []
             for source, messages in by_source.items():
                 if source == "ptt":
-                    parts.append(f"El streamer dijo (acumulado): {'; '.join(messages)}")
+                    parts.append(i18n_active.accumulation_ptt().format(messages="; ".join(messages)))
                 elif source == "chat":
-                    parts.append(f"Mientras procesabas, llegaron estos mensajes del chat: {' | '.join(messages)}")
+                    parts.append(i18n_active.accumulation_chat().format(messages=" | ".join(messages)))
                 else:
+                    # Language-neutral: the source tag is a technical identifier,
+                    # not a user-facing label. Must not become a locale slot.
                     parts.append(f"[{source}] {'; '.join(messages)}")
 
             # Clear buffer after reading
@@ -1196,12 +1191,36 @@ class MotorVocalIA(threading.Thread):
         Agenda sources return "" — the agenda state machine already handles
         rejected outputs gracefully and a canned line would break topic flow.
         Lines rotate to avoid immediate repetition on consecutive blocks.
+        Lines come from the active locale bundle (i18n_active.guardrail_fallback_lines,
+        es legacy default) — must stay neutral and never match an output_guard
+        pattern themselves, or a block->fallback->block loop would result.
         """
         if source.startswith("kira-agenda"):
             return ""
+        lines = i18n_active.guardrail_fallback_lines()
         idx = getattr(self, "_guardrail_fallback_idx", 0)
         self._guardrail_fallback_idx = idx + 1
-        return GUARDRAIL_FALLBACK_LINES[idx % len(GUARDRAIL_FALLBACK_LINES)]
+        return lines[idx % len(lines)]
+
+    def _maybe_notify_piper_locale_mismatch(self) -> None:
+        """One-shot ui_callback notice fired the first time Piper actually
+        engages as the TTS fallback while its voice language disagrees with
+        the active locale (honest degrade — never silent Spanish audio under
+        locale=en). Per-process, not per-utterance: fires once, then no-ops.
+        """
+        if self._piper_locale_mismatch_notified:
+            return
+        voice_lang = PIPER_VOICES.get(self._piper_voice_key, {}).get("lang", "")
+        locale_lang = i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
+        if voice_lang and locale_lang and voice_lang != locale_lang:
+            self._piper_locale_mismatch_notified = True
+            self._log(
+                "Piper fallback engaged with a voice/locale language mismatch "
+                f"(voice={voice_lang!r} locale={locale_lang!r}); offline audio "
+                "will not match the active locale.",
+                level="warning",
+            )
+            self.ui_callback(i18n_coherence.PIPER_VOICE_LOCALE_MISMATCH)
 
     def _generar_dialogo(
         self,
@@ -1771,7 +1790,7 @@ class MotorVocalIA(threading.Thread):
             self._scout_last_input_hash = input_hash
             if self._ollama_scout_client is None:
                 self._ollama_scout_client = self._create_ollama_scout_client(self.ollama)
-            prompt = SCOUT_PROMPT_TEMPLATE.format(digest_block=input_block)
+            prompt = i18n_active.scout_prompt().format(digest_block=input_block)
             response = self._ollama_chat_with_watchdog(
                 timeout=LLM_SCOUT_TIMEOUT + 2,
                 chat_callable=self._ollama_scout_chat,
@@ -2395,7 +2414,9 @@ class MotorVocalIA(threading.Thread):
         """
         user_summary = cls._first_words(user_text)
         kira_summary = cls._first_sentence(asst_text)
-        return f"contexto: {user_summary} → Kira: {kira_summary}"
+        ctx_label = i18n_active.ledger_context_label()
+        kira_label = i18n_active.ledger_kira_label()
+        return f"{ctx_label}: {user_summary} {kira_label}: {kira_summary}"
 
     @staticmethod
     def _sanitize_history_context(context: str) -> str:
@@ -2465,21 +2486,16 @@ class MotorVocalIA(threading.Thread):
         if not clean:
             return ""
         lowered = clean.lower()
-        banned = (
-            "hasta luego",
-            "próximo episodio",
-            "proximo episodio",
-            "eso es todo",
-            "siguiente tema",
-            "finaliza",
-            "cerrar el tema",
-            "abordando este tema",
-            "voy a hablar",
-            "vamos a seguir hablando",
-        )
-        if any(term in lowered for term in banned):
+        # Active locale's banned-closure phrases; None means the locale ships
+        # none (guardrails domain, no cross-locale fallback). enable()'s
+        # fail-closed gate now also requires agenda_banned_closures() is not
+        # None, so in production this branch is unreachable while agenda
+        # mode is enabled — kept as a defensive no-op since this method is
+        # also exercised directly (e.g. in tests) outside that gate.
+        banned = i18n_active.agenda_banned_closures()
+        if banned and any(term in lowered for term in banned):
             self._log("Agenda: salida con cierre artificial detectada; usando fallback natural.", level="warning")
-            return "Me quedo con una idea: esto da para mirarlo con más matices, porque no es tan simple como parece a primera vista."
+            return i18n_active.agenda_sanitizer_fallback()
         return clean
 
     def _hablar(self, texto_a_generar, source: str = "direct"):
@@ -2595,6 +2611,7 @@ class MotorVocalIA(threading.Thread):
                 # If Piper is unavailable, drop the chunk (degraded) rather than
                 # silently re-enabling Edge-TTS (which would betray the privacy promise).
                 if effective_motor == "ligero" and local_only:
+                    self._maybe_notify_piper_locale_mismatch()
                     archivo_chunk_wav = os.path.join(
                         TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
                     )
@@ -2621,6 +2638,7 @@ class MotorVocalIA(threading.Thread):
                 # package is not installed) — go straight to Piper without
                 # attempting a network call.
                 if effective_motor == "ligero" and (self._edge_tts_offline or edge_tts is None):
+                    self._maybe_notify_piper_locale_mismatch()
                     archivo_chunk_wav = os.path.join(
                         TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
                     )
@@ -2699,6 +2717,7 @@ class MotorVocalIA(threading.Thread):
                     # Piper fallback. asyncio.TimeoutError and other errors do NOT.
                     if effective_motor == "ligero" and _is_connection_error(e):
                         self._edge_tts_offline = True
+                        self._maybe_notify_piper_locale_mismatch()
                         if self._piper.is_available():
                             self._log(
                                 "Edge-TTS sin conexion; usando TTS local (Piper) "

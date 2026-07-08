@@ -256,6 +256,15 @@ class TestOutputGuard:
         )
         assert allowed is False
 
+    def test_ai_self_id_english_indefinite_article_variant_blocked(self):
+        """Regression: 'as a large language model' (indefinite article "a",
+        not just "an") must be blocked too — "large language model" starts
+        with a consonant sound, so real leaks use "a", not "an"."""
+        allowed, _ = output_guard(
+            "As a large language model, I can't feel the hype."
+        )
+        assert allowed is False
+
     def test_meta_commentary_blocked(self):
         allowed, reason = output_guard(
             "Tu audiencia está muy activa hoy, están diciendo muchas cosas."

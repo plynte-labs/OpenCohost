@@ -51,8 +51,12 @@ from opencohost.config.settings import (
     STREAM_ADMIN_ENABLED,
     load_tts_local_only,
     PIPER_VOICES, load_piper_voice, piper_voice_path, DEFAULT_PIPER_VOICE,
+    default_piper_voice_for_locale,
 )
 from opencohost.config.logger import get_logger
+from opencohost.i18n import active as i18n_active
+from opencohost.i18n import state as i18n_state
+from opencohost.i18n.startup import load_registry as i18n_load_registry
 from opencohost.core.agenda_persistence import AgendaPersistence
 from opencohost.core.topic_inbox import TopicInboxStore
 from opencohost.ui.topic_inbox_bridge import TopicInboxBridge
@@ -106,6 +110,11 @@ class _ButtonStub:
 install_crash_handler()
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
+
+    # D6 (kira_bilingual_e2e_20260705): locale switching is next-boot only —
+    # this banner must never claim the language already changed.
+    _IDIOMA_RESTART_BANNER = "Se aplicará en el próximo inicio de OpenCohost."
+
     def __init__(self) -> None:
         super().__init__()
         self.title("Kira — OpenCohost")
@@ -883,7 +892,9 @@ class VocalAIApp(ctk.CTk):
             command=self._on_kira_voice_change,
         )
         self.seg_kira_voice.pack(fill="x", padx=10, pady=(10, 2))
-        _saved_voice = load_piper_voice()
+        _saved_voice = load_piper_voice(
+            default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
+        )
         _saved_label = next(
             (lbl for lbl, key in self._kira_voice_labels.items() if key == _saved_voice),
             next(iter(self._kira_voice_labels), ""),
@@ -914,6 +925,31 @@ class VocalAIApp(ctk.CTk):
         frame_speed = ctk.CTkFrame(frame_tts_memory, fg_color="#101923", corner_radius=10)
         frame_speed.pack(fill="x", padx=10, pady=(0, 10))
         self.tts_speed_selector = build_tts_speed_selector(frame_speed, lambda scale: self.motor_ia.command_queue.put(("set_tts_speed", scale)))
+        # Idioma group (kira_bilingual_e2e_20260705 P7 — config surface). D6:
+        # next-boot only, so this control writes the PERSISTED locale choice
+        # and NEVER dispatches to the engine — there is nothing to hot-swap.
+        frame_idioma = ctk.CTkFrame(frame_tts_memory, fg_color="#101923", corner_radius=10)
+        frame_idioma.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkLabel(frame_idioma, text="Idioma", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 2))
+        self._idioma_labels = self._i18n_available_bundles()
+        _idioma_persisted = i18n_state.get_locale()
+        _idioma_active = i18n_active.get_active_bundle().code
+        _idioma_current_label = next(
+            (lbl for lbl, code in self._idioma_labels.items() if code == _idioma_persisted),
+            next(iter(self._idioma_labels), ""),
+        )
+        self.combo_idioma = ctk.CTkOptionMenu(
+            frame_idioma, values=list(self._idioma_labels.keys()), command=self._on_idioma_change
+        )
+        self.combo_idioma.pack(fill="x", padx=10, pady=(0, 4))
+        if _idioma_current_label:
+            self.combo_idioma.set(_idioma_current_label)
+        self.lbl_idioma_restart = ctk.CTkLabel(
+            frame_idioma,
+            text=(self._IDIOMA_RESTART_BANNER if _idioma_persisted != _idioma_active else ""),
+            font=ctk.CTkFont(size=10), text_color="#e0b64a", anchor="w", justify="left", wraplength=400,
+        )
+        self.lbl_idioma_restart.pack(fill="x", padx=10, pady=(0, 10))
         # Memoria card — separate concern from voice; clearing wipes conversation context only.
         frame_memory = ctk.CTkFrame(tab_cfg_audio_voice, fg_color="#151d26", corner_radius=14)
         frame_memory.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
@@ -1419,6 +1455,13 @@ class VocalAIApp(ctk.CTk):
             return
         self._kira_agenda_force_strict_chat_filter()
         self.kira_agenda.enable()
+        if self.kira_agenda.state == AgendaState.OFF:
+            # Fail-closed gate refused (GUARDRAILS_MISSING) — do not claim
+            # activation or start the music bed. _kira_agenda_update_status
+            # already renders the error code/label to the operator.
+            self._on_stream_admin_log("[Kira Agenda] No se activa: guardrails de agenda faltantes.")
+            self._kira_agenda_update_status()
+            return
         self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
         # Start music bed when co-host mode activates — it's an intentional segment.
         # FR3: the idle check is now atomic inside request_mood (only_if_idle=True)
@@ -2428,6 +2471,7 @@ class VocalAIApp(ctk.CTk):
             actualizar_pipeline=g(self, "_actualizar_pipeline"),
             log_accion=g(self, "_log_accion"),
             print_log=g(self, "_print_log"),
+            notify_operator=g(self, "_notify_operator"),
             check_pending_audio_bed_stop=g(self, "_check_pending_audio_bed_stop"),
             kira_agenda_schedule_tick=g(self, "_kira_agenda_schedule_tick"),
             kira_agenda_update_status=g(self, "_kira_agenda_update_status"),
@@ -2478,6 +2522,7 @@ class VocalAIApp(ctk.CTk):
     def _on_motor_download_done(self) -> None: self._dispatch_motor_handler("on_motor_download_done")
     def _on_motor_download_error(self) -> None: self._dispatch_motor_handler("on_motor_download_error")
     def _on_ctx_pressure_high(self) -> None: self._dispatch_motor_handler("on_ctx_pressure_high")
+    def _on_piper_voice_locale_mismatch(self) -> None: self._dispatch_motor_handler("on_piper_voice_locale_mismatch")
 
     # ------------------------------------------------------------------
     # OBS lifecycle delegates — bodies live in opencohost/ui/obs_lifecycle.py
@@ -2592,6 +2637,30 @@ class VocalAIApp(ctk.CTk):
         enabled = bool(self.switch_local_only.get())
         self.motor_ia.command_queue.put(("set_tts_local_only", enabled))
 
+    @staticmethod
+    def _i18n_available_bundles() -> dict:
+        """Return {display_name: code} for every discovered locale bundle
+        (kira_bilingual_e2e_20260705 P7 — reuses the same registry discovery
+        as GET /api/i18n, zero new state)."""
+        registry = i18n_load_registry()
+        return {
+            str((bundle.data.get("meta") or {}).get("display", code)): code
+            for code, bundle in sorted(registry.items())
+        }
+
+    def _on_idioma_change(self, label: str) -> None:
+        """Persist the selected locale for the NEXT start (D6: next-boot
+        only). NO engine dispatch — there is nothing to hot-swap; the running
+        process keeps the bundle it loaded at startup."""
+        code = self._idioma_labels.get(label)
+        if not code:
+            return
+        i18n_state.set_locale(code)
+        active_code = i18n_active.get_active_bundle().code
+        self.lbl_idioma_restart.configure(
+            text=self._IDIOMA_RESTART_BANNER if code != active_code else ""
+        )
+
     def _on_kira_voice_change(self, label: str) -> None:
         """Switch Kira's voice (Argentina ↔ Neutral), both offline Piper voices.
 
@@ -2609,7 +2678,9 @@ class VocalAIApp(ctk.CTk):
         # raises), leaving the engine on the old voice while the UI already shows
         # the new label + flipped local-only — a broken, persisted desync.
         if not os.path.isfile(piper_voice_path(voice_key)):
-            prev_key = load_piper_voice()
+            prev_key = load_piper_voice(
+                default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
+            )
             prev_label = next(
                 (lbl for lbl, key in self._kira_voice_labels.items() if key == prev_key),
                 label,

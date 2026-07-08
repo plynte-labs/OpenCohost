@@ -15,7 +15,8 @@ import time
 from unittest.mock import MagicMock
 
 from opencohost.core import llm_engine as le
-from opencohost.core.llm_engine import GUARDRAIL_FALLBACK_LINES, MotorVocalIA
+from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.i18n import active as i18n_active
 
 
 def _resp(text):
@@ -58,7 +59,7 @@ def test_spoken_guardrail_fallback_updates_last_reply(monkeypatch):
 
     motor._ejecutar_inferencia("hola", source="chat")
 
-    fallback = GUARDRAIL_FALLBACK_LINES[0]
+    fallback = i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES[0]
     # Kira audibly spoke the fallback...
     motor._hablar.assert_called_once_with(fallback, source="chat")
     # ...and last-reply now reflects THAT fallback, emitted exactly once.

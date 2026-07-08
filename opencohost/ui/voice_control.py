@@ -29,6 +29,7 @@ from opencohost.config.settings import (
     BASE_DIR, TEMP_DIR,
 )
 from opencohost.config.logger import get_logger
+from opencohost.i18n import active as i18n_active
 from opencohost.ui.state import UIState
 
 logger = get_logger()
@@ -222,7 +223,7 @@ class VoiceControlPanel:
         if motor_busy:
             self._logger.debug("[PTT Flush] Motor ocupado → cola prioritaria")
             self._motor_ia.enqueue(
-                f"El streamer acaba de decir (PTT): {texto}",
+                i18n_active.ptt_wrapper().format(text=texto),
                 priority=0,
                 source="ptt",
             )
@@ -237,7 +238,7 @@ class VoiceControlPanel:
         self._on_log(f"[PTT]: {texto[:30]}{'...' if len(texto) > 30 else ''}")
         self._motor_ia.command_queue.put((
             "process_context",
-            f"El streamer acaba de decir (PTT): {texto}"
+            i18n_active.ptt_wrapper().format(text=texto)
         ))
 
     # ------------------------------------------------------------------
@@ -540,7 +541,7 @@ class VoiceControlPanel:
                         self._on_log(f"[LiveAudio]: {texto_transcrito[:30]}{'...' if len(texto_transcrito) > 30 else ''}")
                         self._motor_ia.command_queue.put((
                             "process_context",
-                            f"El streamer acaba de decir: {texto_transcrito}"
+                            i18n_active.live_voice_wrapper().format(text=texto_transcrito)
                         ))
                         # Fix: audit/ui-security-perf-2026-05-17 — truncate speech to prevent PII in logs
                         self._logger.info(

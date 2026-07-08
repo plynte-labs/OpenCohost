@@ -96,6 +96,10 @@ class ProfileDetailResponse(BaseModel):
     id: str
     prompt: str
     use_system: bool
+    # D7 (kira_bilingual_e2e): data-only locale declaration for the T4
+    # coherence gate (opencohost/i18n/coherence.py). None means "ungoverned"
+    # (today's PROFILE_PERSONA_UNGOVERNED behavior) — profile always wins.
+    locale: Optional[str] = None
 
 
 class ProfileCreateRequest(BaseModel):
@@ -105,6 +109,7 @@ class ProfileCreateRequest(BaseModel):
     name: str
     prompt: str
     use_system: bool = False
+    locale: Optional[str] = None
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -118,6 +123,50 @@ class ProfileUpdateRequest(BaseModel):
     new_name: Optional[str] = None
     prompt: Optional[str] = None
     use_system: Optional[bool] = None
+    locale: Optional[str] = None
+
+
+class I18nBundleInfo(BaseModel):
+    """One entry of GET /api/i18n's `available` list (design §7.1).
+
+    Mirrors a discovered locale bundle's `meta` section — `display`/`status`
+    come straight from the manifest (`opencohost/locales/{code}/manifest.yaml`),
+    `tier` is the registry's authoritative (source-directory-stamped) tier,
+    never the manifest's own claim (security boundary, registry.py:8-10)."""
+
+    code: str
+    display: str
+    tier: str
+    status: str
+
+
+class I18nWarning(BaseModel):
+    """One `opencohost.i18n.coherence.CoherenceWarning` (stable `code`, human `message`)."""
+
+    code: str
+    message: str
+
+
+class I18nStateResponse(BaseModel):
+    """GET/PUT /api/i18n response (design §7.1).
+
+    `active_locale` is what THIS running process loaded at startup;
+    `persisted_locale` is what the NEXT start will load (D6: next-boot only,
+    no hot-swap). `pending_restart` is true when they disagree — the config
+    surface (API/CTK/Tauri) uses it to show a "restart required" state."""
+
+    active_locale: str
+    persisted_locale: str
+    pending_restart: bool
+    available: list[I18nBundleInfo]
+    warnings: list[I18nWarning]
+
+
+class I18nSetLocaleRequest(BaseModel):
+    """PUT /api/i18n body. `locale` is normalized (BCP-47) and matched
+    against the discovered bundles server-side; unmatched -> 422."""
+
+    locale: str
 
 
 class PersonalizationResponse(BaseModel):
@@ -476,7 +525,9 @@ class AgendaResponse(BaseModel):
     metrics: AgendaMetrics
     # FIX-C: POST /api/agenda/session/action outcome flags. `applied` is False
     # with `reason="empty_queue"` when `enable` is refused for an empty queue
-    # (CTK parity); every other agenda response leaves both null.
+    # (CTK parity), or `reason="guardrails_missing"` when the controller's
+    # fail-closed gate refuses (state stays OFF); every other agenda response
+    # leaves both null.
     applied: Optional[bool] = None
     reason: Optional[str] = None
 

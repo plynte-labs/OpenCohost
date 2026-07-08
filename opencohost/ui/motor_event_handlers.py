@@ -598,6 +598,27 @@ def on_ctx_pressure_high(**_: Any) -> None:
     logger.warning("UI: ctx_pressure_high signal received from LLM engine.")
 
 
+def on_piper_voice_locale_mismatch(
+    *,
+    notify_operator: Callable[..., None],
+    **_: Any,
+) -> None:
+    """Piper engaged as TTS fallback with a voice language that disagrees
+    with the active locale — honest degrade (design D8/pillar 5): the
+    operator must never be left assuming the audio matches the locale.
+
+    Direction-neutral copy: the engine-side trigger fires symmetrically for
+    ANY voice_lang != locale_lang (es voice under en locale, or en voice
+    under es locale), so the notice must not hardcode one direction — a
+    fixed "Spanish voice / English not installed" message is simply false
+    in the reverse case.
+    """
+    notify_operator(
+        "Piper TTS",
+        "Offline Piper voice language does not match the active locale.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single source of truth: status string → handler function name
 # ---------------------------------------------------------------------------
@@ -625,6 +646,7 @@ STATUS_TO_HANDLER: dict[str, str] = {
     "download_done":            "on_motor_download_done",
     "download_error":           "on_motor_download_error",
     "ctx_pressure_high":        "on_ctx_pressure_high",
+    "piper_voice_locale_mismatch": "on_piper_voice_locale_mismatch",
 }
 
 

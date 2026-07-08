@@ -18,6 +18,7 @@ import pytest
 
 from opencohost.i18n.coherence import (
     BUNDLE_VOICE_MISMATCH,
+    PIPER_VOICE_LOCALE_MISMATCH,
     PROFILE_LOCALE_MISMATCH,
     PROFILE_PERSONA_UNGOVERNED,
     CoherenceWarning,
@@ -129,6 +130,19 @@ class TestCheckCoherence:
         assert PROFILE_PERSONA_UNGOVERNED not in _codes(mismatched)
         assert PROFILE_LOCALE_MISMATCH in _codes(mismatched)
 
+    # --- P5: offline Piper voice vs active locale ---------------------------
+
+    def test_piper_voice_locale_mismatch_warns(self):
+        assert PIPER_VOICE_LOCALE_MISMATCH in _codes(check_coherence(EN, piper_voice_lang="es"))
+
+    def test_piper_voice_locale_match_is_silent(self):
+        assert check_coherence(EN, piper_voice_lang="en") == []
+        assert check_coherence(ES, piper_voice_lang="es") == []
+
+    def test_piper_voice_lang_none_is_silent(self):
+        # No voice info supplied (default) -> never a false mismatch.
+        assert PIPER_VOICE_LOCALE_MISMATCH not in _codes(check_coherence(EN))
+
 
 # ---------------------------------------------------------------------------
 # log_coherence — emits non-blocking WARNINGs
@@ -203,3 +217,44 @@ class TestSetProfileWiring:
                 "locale": "es",
             })
         assert PROFILE_LOCALE_MISMATCH in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# P5 — startup coherence check + locale-aware Piper default (engine init)
+# ---------------------------------------------------------------------------
+
+class TestPiperVoiceStartupCoherence:
+    @pytest.fixture(autouse=True)
+    def _pin_en_locale(self):
+        from opencohost.i18n import active
+        from opencohost.i18n.startup import resolve_active_bundle
+        active.set_active_bundle(resolve_active_bundle(locale="en"))
+        yield
+        active.reset_active_bundle()
+
+    def test_init_picks_english_voice_when_no_persisted_choice(self):
+        # No persisted piper_voice.json (isolated by conftest's autouse fixture)
+        # under en locale -> the locale-aware default engages.
+        motor = _make_motor()
+        assert motor._piper_voice_key == "english"
+
+    def test_init_logs_mismatch_when_persisted_choice_disagrees(self, tmp_path, monkeypatch, caplog):
+        from opencohost.config import settings as settings_mod
+
+        path = str(tmp_path / "piper_voice.json")
+        settings_mod.save_piper_voice("argentina", config_file=path)
+        monkeypatch.setattr(settings_mod, "PIPER_VOICE_FILE", path)
+        with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+            motor = _make_motor()
+        assert motor._piper_voice_key == "argentina"  # explicit user pick always wins
+        assert PIPER_VOICE_LOCALE_MISMATCH in caplog.text
+
+    def test_init_silent_when_persisted_choice_matches_locale(self, tmp_path, monkeypatch, caplog):
+        from opencohost.config import settings as settings_mod
+
+        path = str(tmp_path / "piper_voice.json")
+        settings_mod.save_piper_voice("english", config_file=path)
+        monkeypatch.setattr(settings_mod, "PIPER_VOICE_FILE", path)
+        with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+            _make_motor()
+        assert "coherence" not in caplog.text

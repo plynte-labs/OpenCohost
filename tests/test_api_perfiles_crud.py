@@ -10,7 +10,11 @@ active profile is allowed, matching CTK parity, not an improvement).
 Isolation: `opencohost.core.profiles.PROFILES_FILE` is monkeypatched to a
 tmp json file — no real user profiles are touched. `cargar_perfiles` /
 `guardar_perfiles` read that module global at call time, so patching it
-redirects both the API handlers and the on-disk assertions.
+redirects both the API handlers and the on-disk assertions. The
+`_isolate_last_profile_and_model_files` autouse fixture in tests/conftest.py
+separately redirects `settings.LAST_PROFILE_FILE` — /api/perfiles/switch
+calls `save_last_profile` on success, and without that fixture it would
+write the developer's real `config/last_profile.json`.
 """
 
 import json
@@ -50,7 +54,12 @@ def profiles_file(tmp_path, monkeypatch):
         path,
         {
             "default": {"id": "id-default", "prompt": "Default prompt", "use_system": False},
-            "streamer": {"id": "id-streamer", "prompt": "Streamer prompt", "use_system": True},
+            "streamer": {
+                "id": "id-streamer",
+                "prompt": "Streamer prompt",
+                "use_system": True,
+                "locale": "en",
+            },
         },
     )
     monkeypatch.setattr(profiles_mod, "PROFILES_FILE", str(path))
@@ -74,13 +83,22 @@ def test_get_perfil_returns_name_id_prompt_and_use_system(profiles_file):
         resp = client.get("/api/perfiles/default")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"name", "id", "prompt", "use_system"}
+        assert set(body.keys()) == {"name", "id", "prompt", "use_system", "locale"}
         assert body == {
             "name": "default",
             "id": "id-default",
             "prompt": "Default prompt",
             "use_system": False,
+            "locale": None,
         }
+
+
+def test_get_perfil_returns_declared_locale(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles/streamer")
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
 
 
 def test_get_perfil_404_when_missing(profiles_file):
@@ -136,6 +154,25 @@ def test_create_perfil_prompt_too_long_422(profiles_file):
         assert resp.status_code == 422
 
 
+def test_create_perfil_with_locale_persists_and_returns_it(profiles_file):
+    # D7 (kira_bilingual_e2e): real HTTP round-trip, not just model
+    # validation — the on-disk write must not strip the new key.
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "gringo", "prompt": "Hi there", "locale": "en"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+
+        data = _read_profiles(profiles_file)
+        assert data["gringo"]["locale"] == "en"
+
+        get_resp = client.get("/api/perfiles/gringo")
+        assert get_resp.json()["locale"] == "en"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # PUT /api/perfiles/{name} (update / rename)
 # ──────────────────────────────────────────────────────────────────────────
@@ -181,6 +218,31 @@ def test_update_perfil_404_when_missing(profiles_file):
         assert resp.status_code == 404
 
 
+def test_update_perfil_sets_locale_on_a_profile_without_one(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/perfiles/default", json={"locale": "en"})
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+
+        data = _read_profiles(profiles_file)
+        assert data["default"]["locale"] == "en"
+        assert data["default"]["prompt"] == "Default prompt"  # untouched
+
+
+def test_update_perfil_omitted_locale_leaves_existing_value_unchanged(profiles_file):
+    # "streamer" is seeded with locale="en" (see profiles_file fixture).
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/perfiles/streamer", json={"prompt": "New streamer prompt"})
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+
+        data = _read_profiles(profiles_file)
+        assert data["streamer"]["locale"] == "en"
+        assert data["streamer"]["prompt"] == "New streamer prompt"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # DELETE /api/perfiles/{name} (last-profile guard only)
 # ──────────────────────────────────────────────────────────────────────────
@@ -220,6 +282,29 @@ def test_delete_active_profile_is_allowed(profiles_file):
         assert app.state.host.motor._current_profile_name == "default"
         resp = client.delete("/api/perfiles/default")
         assert resp.status_code == 200
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/perfiles/switch — locale pass-through (D7)
+#
+# switch_profile's dispatch payload is `dict(perfiles[name])` (main.py) — a
+# real HTTP round-trip proves the wire model / json.dump on-disk write don't
+# silently drop the new key before it reaches the command queue that feeds
+# `set_profile` (which already forwards `payload.get("locale")` to the T4
+# coherence gate — zero engine changes needed, see llm_engine.py:519).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_switch_profile_enqueues_payload_with_locale(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post("/api/perfiles/switch", json={"name": "streamer"})
+        assert resp.status_code == 200
+
+        queued = app.state.host.motor.command_queue.get_nowait()
+        command, payload = queued
+        assert command == "set_profile"
+        assert payload["locale"] == "en"
 
 
 # ──────────────────────────────────────────────────────────────────────────

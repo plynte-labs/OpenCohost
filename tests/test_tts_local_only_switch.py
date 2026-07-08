@@ -539,6 +539,78 @@ class TestPiperVoiceSettings:
         assert "/piper/" in p
 
 
+# ===========================================================================
+# 10. TTS locale coupling (P5) — Piper 'english' entry + locale-aware default
+# ===========================================================================
+
+class TestPiperVoiceRegistryLang:
+    def test_english_voice_registered(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.PIPER_VOICES["english"] == {
+            "label": "🇺🇸 English", "file": "en_US-lessac-high.onnx", "lang": "en",
+        }
+
+    def test_es_voices_tagged_lang_es(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.PIPER_VOICES["argentina"]["lang"] == "es"
+        assert cfg.PIPER_VOICES["neutral"]["lang"] == "es"
+
+    def test_voice_path_resolves_english(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.piper_voice_path("english").endswith("en_US-lessac-high.onnx")
+
+
+class TestDefaultPiperVoiceForLocale:
+    def test_en_maps_to_english(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.default_piper_voice_for_locale("en") == "english"
+        assert cfg.default_piper_voice_for_locale("en-US") == "english"
+        assert cfg.default_piper_voice_for_locale("EN") == "english"
+
+    def test_es_and_unknown_map_to_default(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.default_piper_voice_for_locale("es") == cfg.DEFAULT_PIPER_VOICE
+        assert cfg.default_piper_voice_for_locale("fr") == cfg.DEFAULT_PIPER_VOICE
+        assert cfg.default_piper_voice_for_locale(None) == cfg.DEFAULT_PIPER_VOICE
+        assert cfg.default_piper_voice_for_locale("") == cfg.DEFAULT_PIPER_VOICE
+
+
+class TestLoadPiperVoiceLocaleAwareDefault:
+    def test_missing_file_returns_custom_default(self):
+        from opencohost.config import settings as cfg
+
+        assert cfg.load_piper_voice(
+            config_file="/nonexistent/voice.json", default="english"
+        ) == "english"
+
+    def test_missing_file_default_param_preserves_argentina(self):
+        # No `default` passed -> unchanged pre-P5 behavior.
+        from opencohost.config import settings as cfg
+
+        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "argentina"
+
+    def test_persisted_choice_wins_over_custom_default(self, tmp_path):
+        # An explicit user pick always wins over the locale-aware default.
+        from opencohost.config import settings as cfg
+
+        path = str(tmp_path / "piper_voice.json")
+        cfg.save_piper_voice("argentina", config_file=path)
+        assert cfg.load_piper_voice(config_file=path, default="english") == "argentina"
+
+    def test_corrupted_key_falls_back_to_custom_default(self, tmp_path):
+        from opencohost.config import settings as cfg
+
+        path = str(tmp_path / "piper_voice.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"piper_voice": "klingon"}))
+        assert cfg.load_piper_voice(config_file=path, default="english") == "english"
+
+
 class TestPiperVoiceCommand:
     def test_set_piper_voice_reloads_and_persists(self):
         from unittest.mock import patch, MagicMock
@@ -561,3 +633,24 @@ class TestPiperVoiceCommand:
         with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
             motor._dispatch_command("set_piper_voice", "neutral")
         mock_save.assert_not_called()
+
+    def test_set_piper_voice_updates_tracked_voice_key_on_success(self):
+        from unittest.mock import patch, MagicMock
+
+        motor, *_ = _make_motor()
+        motor._piper = MagicMock()
+        motor._piper.reload.return_value = True
+        with patch("opencohost.core.llm_engine.save_piper_voice"):
+            motor._dispatch_command("set_piper_voice", "english")
+        assert motor._piper_voice_key == "english"
+
+    def test_set_piper_voice_keeps_tracked_key_on_reload_failure(self):
+        from unittest.mock import patch, MagicMock
+
+        motor, *_ = _make_motor()
+        motor._piper_voice_key = "argentina"
+        motor._piper = MagicMock()
+        motor._piper.reload.return_value = False
+        with patch("opencohost.core.llm_engine.save_piper_voice"):
+            motor._dispatch_command("set_piper_voice", "neutral")
+        assert motor._piper_voice_key == "argentina"

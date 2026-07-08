@@ -16,7 +16,8 @@ import inspect
 import queue
 from unittest.mock import MagicMock
 
-from opencohost.core.llm_engine import MotorVocalIA, GUARDRAIL_FALLBACK_LINES
+from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.i18n import active as i18n_active
 
 
 def _chat_motor():
@@ -102,7 +103,7 @@ def test_verbatim_dup_uses_neutral_fallback():
 
     motor._generar_dialogo("tema uno", source="chat", commit_history=True)
     out2 = motor._generar_dialogo("tema dos", source="chat", commit_history=True)
-    assert out2 in set(GUARDRAIL_FALLBACK_LINES)
+    assert out2 in set(i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES)
 
 
 def test_synonym_swap_template_suppressed():

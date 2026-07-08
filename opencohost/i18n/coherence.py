@@ -31,6 +31,7 @@ from opencohost.i18n.contract import LocaleBundle, resolve
 BUNDLE_VOICE_MISMATCH = "bundle_voice_mismatch"
 PROFILE_LOCALE_MISMATCH = "profile_locale_mismatch"
 PROFILE_PERSONA_UNGOVERNED = "profile_persona_ungoverned"
+PIPER_VOICE_LOCALE_MISMATCH = "piper_voice_locale_mismatch"
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ def check_coherence(
     profile_name: str | None = None,
     profile_prompt_active: bool = False,
     profile_locale: str | None = None,
+    piper_voice_lang: str | None = None,
 ) -> list[CoherenceWarning]:
     """Return coherence warnings for the active bundle + profile. Never raises, never mutates.
 
@@ -70,6 +72,10 @@ def check_coherence(
         profile_locale: the profile's declared locale, if any (Option B). When
             present, the gate compares languages precisely and the generic
             "ungoverned" notice is suppressed.
+        piper_voice_lang: the ``lang`` of the currently selected offline Piper
+            voice, if known (e.g. ``PIPER_VOICES[key]["lang"]``). ``None``
+            (the default) skips this check silently — callers that have no
+            Piper voice info yet never produce a false mismatch.
     """
     warnings: list[CoherenceWarning] = []
     locale_lang = primary_subtag(bundle.code)
@@ -108,6 +114,18 @@ def check_coherence(
             f"text matches '{locale_lang}' for a coherent voice + persona.",
         ))
 
+    # Check 3 — offline Piper voice vs active locale (honest-degrade warning).
+    # Silent when no voice lang is supplied or it matches the active locale.
+    if piper_voice_lang:
+        voice_primary = primary_subtag(piper_voice_lang)
+        if voice_primary and locale_lang and voice_primary != locale_lang:
+            warnings.append(CoherenceWarning(
+                PIPER_VOICE_LOCALE_MISMATCH,
+                f"Active locale '{bundle.code}' but the selected offline Piper "
+                f"voice speaks '{voice_primary}' — install/select a "
+                f"'{locale_lang}' Piper voice for a coherent offline fallback.",
+            ))
+
     return warnings
 
 
@@ -117,6 +135,7 @@ def log_coherence(
     profile_name: str | None = None,
     profile_prompt_active: bool = False,
     profile_locale: str | None = None,
+    piper_voice_lang: str | None = None,
     logger: logging.Logger | None = None,
 ) -> list[CoherenceWarning]:
     """Run :func:`check_coherence` and log each finding at WARNING. Returns the findings."""
@@ -126,6 +145,7 @@ def log_coherence(
         profile_name=profile_name,
         profile_prompt_active=profile_prompt_active,
         profile_locale=profile_locale,
+        piper_voice_lang=piper_voice_lang,
     )
     for w in warnings:
         log.warning("i18n coherence [%s]: %s", w.code, w.message)

@@ -516,6 +516,34 @@ def test_compact_chat_can_steer_waiting_topic():
     assert "El chat filtrado pregunta por mods" in action.prompt
 
 
+def test_compact_chat_via_next_action_reaches_the_same_build_prompt_call():
+    """Viewer-chat (RF3) rides for free: app_shell.py's compact_chat handler
+    calls next_action(compact_chat=...) -> _chat_action -> _build_prompt, the
+    SAME method agenda beats use. No separate migration/prompt path exists
+    (design §3 Path B note). Pin that next_action's resulting prompt is
+    byte-identical to calling _build_prompt directly with the same instruction
+    and compact_chat -- proving there is no parallel/forked prompt builder."""
+    controller = KiraAgendaController(chat_cadence_blocks=1)
+    topic = controller.add_topic("Tema de fondo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+
+    compact_chat = "El chat filtrado pregunta por mods."
+    action = controller.next_action(compact_chat=compact_chat)
+
+    from opencohost.i18n import active as i18n_active_test
+
+    expected = controller._build_prompt(
+        instruction=i18n_active_test.agenda_instructions()["chat"],
+        compact_chat=compact_chat,
+    )
+    assert action.source == "chat"
+    assert action.prompt == expected
+
+
 def test_chat_signal_due_only_when_waiting_and_cadence_allows_it():
     controller = KiraAgendaController(turn_batch_size=1, chat_cadence_blocks=2)
     topic = controller.add_topic("Tema de fondo", approved=True)

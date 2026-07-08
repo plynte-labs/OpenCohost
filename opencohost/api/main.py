@@ -88,6 +88,8 @@ from opencohost.api.models import (
     CommandRequest,
     HealthResponse,
     HealthState,
+    I18nSetLocaleRequest,
+    I18nStateResponse,
     MemoriaDeleteRequest,
     MemoriaFlagsRequest,
     MemoriaListResponse,
@@ -144,6 +146,7 @@ from opencohost.config.settings import (
     PERSONALIZATION_NICKNAME_MAX,
     PERSONALIZATION_OCCUPATION_MAX,
     _canonical_model_tag,
+    default_piper_voice_for_locale,
     load_memorias_notice_dismissed,
     load_piper_voice,
     load_tts_local_only,
@@ -181,12 +184,17 @@ from opencohost.core.cohost_profiles import (
     save_cohost_profiles,
 )
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
+from opencohost.i18n import active as i18n_active
+from opencohost.i18n import state as i18n_state
+from opencohost.i18n import tags as i18n_tags
+from opencohost.i18n.coherence import check_coherence
+from opencohost.i18n.startup import load_registry
 from opencohost.core.topic_inbox import (
     TopicInboxCapError,
     TopicInboxStore,
     TopicInboxValidationError,
 )
-from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
+from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, TopicStatus
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 # GET /api/models external I/O bound — short client timeout so a stalled/
@@ -767,6 +775,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             id=str(data.get("id", "")),
             prompt=str(data.get("prompt", "")),
             use_system=bool(data.get("use_system", False)),
+            locale=data.get("locale"),
         )
 
     @app.post("/api/perfiles", response_model=ProfileDetailResponse)
@@ -788,11 +797,16 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 "id": new_id,
                 "prompt": body.prompt,
                 "use_system": body.use_system,
+                "locale": body.locale,
             }
             if not guardar_perfiles(perfiles):
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return ProfileDetailResponse(
-            name=name, id=new_id, prompt=body.prompt, use_system=body.use_system
+            name=name,
+            id=new_id,
+            prompt=body.prompt,
+            use_system=body.use_system,
+            locale=body.locale,
         )
 
     @app.put("/api/perfiles/{name}", response_model=ProfileDetailResponse)
@@ -812,6 +826,8 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 data["prompt"] = body.prompt
             if body.use_system is not None:
                 data["use_system"] = body.use_system
+            if body.locale is not None:
+                data["locale"] = body.locale
             target = name
             if new_name and new_name != name:
                 if new_name in perfiles:
@@ -828,6 +844,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             id=str(data.get("id", "")),
             prompt=str(data.get("prompt", "")),
             use_system=bool(data.get("use_system", False)),
+            locale=data.get("locale"),
         )
 
     @app.delete("/api/perfiles/{name}")
@@ -847,6 +864,52 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             if not guardar_perfiles(perfiles):
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return {"ok": True}
+
+    def _i18n_state_response() -> I18nStateResponse:
+        # Reuses load_registry() (official + community discovery, official-wins
+        # anti-shadowing merge) and get_active_bundle() — zero new state
+        # (design §7.1). `available` reads each bundle's own `meta.display`/
+        # `meta.status` (already authored per-locale), not a re-derived check.
+        registry = load_registry()
+        active_bundle = i18n_active.get_active_bundle()
+        persisted_locale = i18n_state.get_locale()
+        pending_restart = i18n_tags.normalize(persisted_locale) != active_bundle.code
+        available = [
+            {
+                "code": code,
+                "display": str((bundle.data.get("meta") or {}).get("display", code)),
+                "tier": bundle.tier,
+                "status": str((bundle.data.get("meta") or {}).get("status", "unknown")),
+            }
+            for code, bundle in sorted(registry.items())
+        ]
+        # Bundle-level only (design §7.1) — no profile/piper args, so only
+        # BUNDLE_VOICE_MISMATCH can ever fire here.
+        warnings = [
+            {"code": w.code, "message": w.message} for w in check_coherence(active_bundle)
+        ]
+        return I18nStateResponse(
+            active_locale=active_bundle.code,
+            persisted_locale=persisted_locale,
+            pending_restart=pending_restart,
+            available=available,
+            warnings=warnings,
+        )
+
+    @app.get("/api/i18n", response_model=I18nStateResponse)
+    def get_i18n() -> I18nStateResponse:
+        return _i18n_state_response()
+
+    @app.put("/api/i18n", response_model=I18nStateResponse)
+    def set_i18n(body: I18nSetLocaleRequest):
+        registry = load_registry()
+        matched = i18n_tags.match(body.locale, list(registry.keys()))
+        if not matched:
+            return JSONResponse(status_code=422, content={"detail": "unknown locale"})
+        # D6: next-boot only — persists the choice, never hot-swaps the
+        # running process's active bundle.
+        i18n_state.set_locale(matched)
+        return _i18n_state_response()
 
     def _personalization_response(data: dict) -> PersonalizationResponse:
         # Explicit field picks only — never `**data` — so the internal
@@ -940,7 +1003,9 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     def get_tts_config(request: Request) -> TTSConfigResponse:
         host = request.app.state.host
         return TTSConfigResponse(
-            piper_voice=load_piper_voice(),
+            piper_voice=load_piper_voice(
+                default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
+            ),
             local_only=load_tts_local_only(),
             speed=load_tts_speed(),
             engine=host.motor.motor_tts,
@@ -1488,6 +1553,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 if not agenda.queued_topics() and not agenda.active_topic:
                     return _agenda_response(agenda, applied=False, reason="empty_queue")
                 agenda.enable()
+                if agenda.state == AgendaState.OFF:
+                    # Fail-closed gate refused (GUARDRAILS_MISSING) — mirror the
+                    # empty_queue branch above: honest applied=False instead of
+                    # claiming success while the state never left OFF.
+                    return _agenda_response(agenda, applied=False, reason="guardrails_missing")
                 # CTK parity (app_shell.py:1432): tick immediately on enable so
                 # Kira opens the first topic without waiting out the driver
                 # cadence. nudge() just sets an Event — safe under the lock.

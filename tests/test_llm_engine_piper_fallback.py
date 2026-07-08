@@ -22,6 +22,8 @@ import sys
 import wave
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -204,6 +206,66 @@ class TestSubsequentChunkSkipsEdgeTTS:
         communicate.assert_not_called()
         assert piper.synthesize.called
         assert loaded and loaded[-1].endswith(".wav")
+
+
+# ---------------------------------------------------------------------------
+# P5 — one-shot honest-degrade ui_callback notice on locale/voice mismatch
+# ---------------------------------------------------------------------------
+
+class TestPiperLocaleMismatchNotice:
+    @pytest.fixture(autouse=True)
+    def _pin_en_locale(self):
+        from opencohost.i18n import active
+        from opencohost.i18n.startup import resolve_active_bundle
+        active.set_active_bundle(resolve_active_bundle(locale="en"))
+        yield
+        active.reset_active_bundle()
+
+    def test_fallback_engage_notifies_once_on_mismatch(self):
+        """en locale + es Piper voice: falling back to Piper fires the notice
+        exactly once even across two separate fallback-triggering utterances."""
+        motor, _log_q, ui_events = _make_motor()
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper_voice_key = "argentina"  # es voice under en locale -> mismatch
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+
+        _drive_hablar(motor, "Hello world", edge_save_side_effect=socket.gaierror("dns"))
+        assert motor._piper_locale_mismatch_notified is True
+        assert ui_events.count("piper_voice_locale_mismatch") == 1
+
+        # Second utterance takes the already-latched fast path; must not re-notify.
+        _drive_hablar(motor, "Second utterance")
+        assert ui_events.count("piper_voice_locale_mismatch") == 1
+
+    def test_fallback_engage_silent_when_voice_matches_locale(self):
+        """en locale + english Piper voice: no mismatch, no notice."""
+        motor, _log_q, ui_events = _make_motor()
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper_voice_key = "english"
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+
+        _drive_hablar(motor, "Hello world", edge_save_side_effect=socket.gaierror("dns"))
+        assert motor._piper_locale_mismatch_notified is False
+        assert "piper_voice_locale_mismatch" not in ui_events
+
+    def test_fallback_engage_also_logs_a_warning(self):
+        """design S5.1(3): the notice must fire 'in addition to the WARNING
+        log' — not just the ui_callback event."""
+        motor, log_q, _ui_events = _make_motor()
+        motor.tts_local_only = False
+        motor._edge_tts_offline = False
+        motor._piper_voice_key = "argentina"  # es voice under en locale -> mismatch
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+
+        _drive_hablar(motor, "Hello world", edge_save_side_effect=socket.gaierror("dns"))
+
+        assert motor._piper_locale_mismatch_notified is True
+        queued = []
+        while not log_q.empty():
+            queued.append(log_q.get_nowait())
+        assert any("mismatch" in line.lower() for line in queued)
 
 
 # ---------------------------------------------------------------------------
