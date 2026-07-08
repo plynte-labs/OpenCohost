@@ -84,6 +84,10 @@ class EditorialCard:
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
     use_count: int = 0
+    # Provenance of the write (agent_context_gateway): the agent name for
+    # cards written through /api/agent/cards; '' means operator (CLI/UI
+    # flows never set it — behavior unchanged).
+    origin: str = ""
     raw_chat: str | None = field(default=None, repr=False)
     raw_page: str | None = field(default=None, repr=False)
 
@@ -92,6 +96,7 @@ class EditorialCard:
     TOPIC_MAX_CHARS = 120
     ITEM_MAX_CHARS = 240
     MAX_ITEMS = 8
+    ORIGIN_MAX_CHARS = 80
 
     def __post_init__(self) -> None:
         if self.raw_chat or self.raw_page:
@@ -111,6 +116,13 @@ class EditorialCard:
             raise EditorialCardValidationError("topic_slug is required")
         if not isinstance(self.status, EditorialCardStatus):
             self.status = EditorialCardStatus(str(self.status))
+        # origin is optional ('' = operator) but bounded: it is rendered in
+        # operator-facing labels, same cap as topic_inbox.SOURCE_MAX.
+        self.origin = " ".join((self.origin or "").split())
+        if len(self.origin) > self.ORIGIN_MAX_CHARS:
+            raise EditorialCardValidationError(
+                f"origin exceeds {self.ORIGIN_MAX_CHARS} characters"
+            )
 
     @classmethod
     def _clean_required(cls, value: str, field_name: str, max_chars: int) -> str:
@@ -195,8 +207,9 @@ class EditorialCardStore:
                 INSERT INTO editorial_cards (
                     id, topic_slug, status, topic, summary, streamer_take,
                     counterpoints_json, discussion_hooks_json, triggers_json,
-                    created_at, updated_at, expires_at, last_used_at, use_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, expires_at, last_used_at, use_count,
+                    origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic_slug) DO UPDATE SET
                     status=excluded.status,
                     topic=excluded.topic,
@@ -208,7 +221,8 @@ class EditorialCardStore:
                     updated_at=excluded.updated_at,
                     expires_at=excluded.expires_at,
                     last_used_at=excluded.last_used_at,
-                    use_count=excluded.use_count
+                    use_count=excluded.use_count,
+                    origin=excluded.origin
                 """,
                 self._to_row(card),
             )
@@ -366,6 +380,24 @@ class EditorialCardStore:
                 )
         return True
 
+    def demote_to_draft(self, card_id: str) -> bool:
+        """Move an ARMED or ACTIVE card back to DRAFT; True when demoted.
+
+        Agent-surface demotion rule (agent_context_gateway design): upsert
+        preserves an existing card's status, so an agent rewriting an ARMED
+        card would otherwise keep it auto-firing with unreviewed content.
+        The /api/agent/cards handler calls this right after upsert; CLI/UI
+        flows deliberately never do (their behavior is unchanged).
+        """
+        card = self.get(card_id)
+        if card is None or card.status not in {
+            EditorialCardStatus.ARMED,
+            EditorialCardStatus.ACTIVE,
+        }:
+            return False
+        self._set_status(card.id, EditorialCardStatus.DRAFT)
+        return True
+
     def disable(self, card_id: str) -> bool:
         """Move any non-USED card to EXPIRED. Idempotent when already EXPIRED.
 
@@ -413,10 +445,21 @@ class EditorialCardStore:
                     updated_at TEXT NOT NULL,
                     expires_at TEXT,
                     last_used_at TEXT,
-                    use_count INTEGER NOT NULL DEFAULT 0
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    origin TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            # Idempotent migration for DBs created before the origin column
+            # existed (agent_context_gateway provenance). PRAGMA-guarded so
+            # re-running is a no-op — same connection-per-call store.
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(editorial_cards)")
+            }
+            if "origin" not in columns:
+                conn.execute(
+                    "ALTER TABLE editorial_cards ADD COLUMN origin TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS editorial_card_ratings (
@@ -460,6 +503,7 @@ class EditorialCardStore:
             _dt_to_text(card.expires_at),
             _dt_to_text(card.last_used_at),
             int(card.use_count),
+            card.origin,
         )
 
     @staticmethod
@@ -479,6 +523,7 @@ class EditorialCardStore:
             expires_at=_dt_from_text(row["expires_at"]),
             last_used_at=_dt_from_text(row["last_used_at"]),
             use_count=int(row["use_count"] or 0),
+            origin=row["origin"] or "",
         )
 
     @staticmethod

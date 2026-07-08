@@ -33,6 +33,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import asynccontextmanager, closing
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -43,7 +44,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
 from opencohost.api.agenda_driver import enqueue_agenda_action
-from opencohost.api.auth import auth_middleware, ensure_tokens
+
+# _bearer_token/_resolve_role are auth-internal, imported here ONLY to
+# differentiate operator vs agent on the operator-only notice routes —
+# auth_middleware rule 1 already guaranteed the token is valid.
+from opencohost.api.auth import (
+    TokenFileError,
+    _bearer_token,
+    _resolve_role,
+    auth_middleware,
+    ensure_tokens,
+)
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
 from opencohost.api.models import (
@@ -55,6 +66,13 @@ from opencohost.api.models import (
     AgendaTopicActionRequest,
     AgendaTopicOut,
     AgendaTopicRequest,
+    AgentCardRequest,
+    AgentCardResponse,
+    AgentNoticeDismissResponse,
+    AgentNoticeOut,
+    AgentNoticeRequest,
+    AgentNoticeResponse,
+    AgentNoticesResponse,
     AgentStatusResponse,
     AgentTopicRequest,
     AgentTopicResponse,
@@ -127,6 +145,17 @@ from opencohost.config.settings import (
     save_memorias_notice_dismissed,
     load_tts_speed,
     resolve_llm_tiers,
+)
+from opencohost.core.agent_notices import (
+    AgentNoticeCapError,
+    AgentNoticeStore,
+    AgentNoticeValidationError,
+)
+from opencohost.core.editorial_cards import (
+    EditorialCard,
+    EditorialCardStatus,
+    EditorialCardStore,
+    EditorialCardValidationError,
 )
 from opencohost.core.memoria_store import MemoriaStore
 from opencohost.core.music_library import (
@@ -205,6 +234,37 @@ def _count_sql(db_path: str, sql: str, params: tuple = ()) -> int:
             return int(row[0]) if row else 0
     except sqlite3.Error:
         return 0
+
+
+def _parse_iso8601_utc(value: str | None) -> datetime | None:
+    """Parse an optional ISO-8601 timestamp; naive values are treated as UTC
+    (same normalization editorial_cards applies on storage). Raises
+    ValueError on malformed input."""
+    if not value:
+        return None
+    if value.endswith(("Z", "z")):
+        # Python 3.10 fromisoformat rejects the Z suffix — the canonical
+        # machine-emitted UTC form (Date.toISOString(), RFC3339 emitters).
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _agent_request_role(request: Request) -> str | None:
+    """Token role of an already-authenticated /api/agent/* caller.
+
+    auth_middleware rule 1 guarantees a valid bearer token reached the
+    handler; this only differentiates operator vs agent for the
+    operator-only notice surface (agent token -> 403, design error
+    contract). Fail-closed: any token-file hiccup reads as no role.
+    """
+    token = _bearer_token(request)
+    if token is None:
+        return None
+    try:
+        return _resolve_role(token)
+    except TokenFileError:
+        return None
 
 
 def _editorial_cards_by_status(db_path: str) -> dict:
@@ -1648,10 +1708,117 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 "SELECT COUNT(*) FROM topic_inbox WHERE status='proposed'",
             ),
             cards=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
-            # Pinned to 0 until the notice store lands (Phase 3); the key
-            # ships now so the wire contract is stable for agents.
-            notices_undismissed=0,
+            notices_undismissed=_count_sql(
+                EDITORIAL_CARDS_DB,
+                "SELECT COUNT(*) FROM agent_notices WHERE status='proposed'",
+            ),
         )
+
+    @app.post("/api/agent/cards", response_model=AgentCardResponse)
+    def post_agent_card(body: AgentCardRequest):
+        # Card content validation is owned by the EditorialCard dataclass
+        # (same rules as the CLI); its error string becomes the 422 detail.
+        try:
+            expires = _parse_iso8601_utc(body.expires_at)
+        except ValueError:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "expires_at is not a valid ISO-8601 timestamp"},
+            )
+        try:
+            card = EditorialCard(
+                topic=body.topic,
+                summary=body.summary,
+                streamer_take=body.streamer_take,
+                counterpoints=body.counterpoints,
+                discussion_hooks=body.discussion_hooks,
+                triggers=body.triggers,
+                expires_at=expires,
+                origin=body.agent,
+            )
+        except EditorialCardValidationError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        try:
+            store = EditorialCardStore(EDITORIAL_CARDS_DB)
+            stored = store.upsert(card)
+            # Demotion rule (design 'POST /api/agent/cards'): upsert
+            # preserves existing status, so an agent rewriting an ARMED/
+            # ACTIVE card would silently keep it auto-firing with
+            # unreviewed content. Force it back to DRAFT — the operator
+            # re-arms via CLI/UI. New cards are already DRAFT (no-op).
+            demoted = store.demote_to_draft(stored.id)
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "editorial_cards_unavailable"}
+            )
+        return AgentCardResponse(
+            id=stored.id,
+            topic_slug=stored.topic_slug,
+            status=EditorialCardStatus.DRAFT.value if demoted else stored.status.value,
+            demoted=demoted,
+        )
+
+    @app.post("/api/agent/notice", response_model=AgentNoticeResponse)
+    def post_agent_notice(body: AgentNoticeRequest):
+        try:
+            store = AgentNoticeStore(EDITORIAL_CARDS_DB)
+            # ponytail: read-before-write dedupe detection, same pattern as
+            # POST /api/agent/topics — single-process local app.
+            prior_ids = {row["id"] for row in store.list_all(status_filter="proposed")}
+            row = store.propose(body.text, source=body.agent)
+        except AgentNoticeValidationError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        except AgentNoticeCapError as exc:
+            return JSONResponse(status_code=429, content={"detail": str(exc)})
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "agent_notices_unavailable"}
+            )
+        return AgentNoticeResponse(id=row["id"], deduped=row["id"] in prior_ids)
+
+    @app.get("/api/agent/notices", response_model=AgentNoticesResponse)
+    def get_agent_notices(request: Request):
+        # Operator surface: the agent token can CREATE notices but never
+        # read the board back (other agents' notices are not its business).
+        if _agent_request_role(request) != "operator":
+            return JSONResponse(
+                status_code=403, content={"detail": "operator token required"}
+            )
+        pending = AgentNoticeStore(EDITORIAL_CARDS_DB).list_pending()
+        return AgentNoticesResponse(
+            notices=[
+                AgentNoticeOut(
+                    id=row["id"],
+                    text=row["text"],
+                    source=row["source"],
+                    created_at=row["created_at"],
+                )
+                for row in pending["valid"]
+            ]
+        )
+
+    @app.post(
+        "/api/agent/notices/{notice_id}/dismiss",
+        response_model=AgentNoticeDismissResponse,
+    )
+    def dismiss_agent_notice(notice_id: str, request: Request):
+        # Operator surface: a self-dismissing agent could hide its own
+        # messages from the human — only the operator token may dismiss.
+        if _agent_request_role(request) != "operator":
+            return JSONResponse(
+                status_code=403, content={"detail": "operator token required"}
+            )
+        try:
+            dismissed = AgentNoticeStore(EDITORIAL_CARDS_DB).dismiss(notice_id)
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "agent_notices_unavailable"}
+            )
+        if not dismissed:
+            return JSONResponse(
+                status_code=404, content={"detail": "notice_not_found"}
+            )
+        return AgentNoticeDismissResponse(dismissed=True)
 
     return app
 

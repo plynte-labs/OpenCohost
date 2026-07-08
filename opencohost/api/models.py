@@ -5,9 +5,15 @@ Field names on `StatusResponse` are pinned to the `is_`-prefixed forms
 shortened `ready`/`speaking`/`processing` forms.
 """
 
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
+
+# Agent provenance name — REQUIRED non-blank in every agent write (design
+# 'Provenance'). Blank/whitespace would be stored as '' — which
+# editorial_cards defines as OPERATOR provenance — so all /api/agent/*
+# write models share this 422-at-the-boundary constraint.
+AgentName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class ModelCatalogEntry(BaseModel):
@@ -722,7 +728,7 @@ class AgentTopicRequest(BaseModel):
     and rendered to the operator in the inbox UI.
     """
 
-    agent: str
+    agent: AgentName
     title: str
     angle: str = ""
     tags: list[str] = []
@@ -747,10 +753,91 @@ class AgentStatusResponse(BaseModel):
     """GET /api/agent/status (read-only, any valid token).
 
     COUNTS ONLY — never add a field carrying topic/card/notice text.
-    ``notices_undismissed`` is pinned to 0 until the notice store lands
-    (Phase 3); the key ships now so the wire contract is stable for agents.
+    ``notices_undismissed`` counts agent_notices rows still 'proposed'
+    (wired in Phase 3).
     """
 
     topics_pending: int
     cards: dict[str, int]
     notices_undismissed: int
+
+
+class AgentCardRequest(BaseModel):
+    """POST /api/agent/cards body (agent_context_gateway Phase 3).
+
+    Maps to ``EditorialCardStore.upsert`` with the ``EditorialCard``
+    dataclass's own validation (SUMMARY_MAX=1200, STREAMER_TAKE_MAX=800,
+    TOPIC_MAX=120, ITEM_MAX=240x8, raw_chat/raw_page rejection), so this
+    model stays permissive and the handler surfaces the dataclass's error
+    string as the 422 detail. ``agent`` is the self-reported provenance
+    name written to the ``editorial_cards.origin`` column ('' = operator).
+    ``expires_at`` is an optional ISO-8601 timestamp.
+    """
+
+    agent: AgentName
+    topic: str
+    summary: str
+    streamer_take: str
+    counterpoints: list[str] = []
+    discussion_hooks: list[str] = []
+    triggers: list[str] = []
+    expires_at: str | None = None
+
+
+class AgentCardResponse(BaseModel):
+    """POST /api/agent/cards response.
+
+    Demotion rule (design 'POST /api/agent/cards'): a new card always lands
+    DRAFT; when the upsert hit an existing ARMED/ACTIVE card it is set back
+    to DRAFT and ``demoted`` is true — the operator must re-arm via CLI/UI
+    before the rewritten content can auto-fire again.
+    """
+
+    id: str
+    topic_slug: str
+    status: str
+    demoted: bool
+
+
+class AgentNoticeRequest(BaseModel):
+    """POST /api/agent/notice body — a short agent-to-operator message.
+
+    ``AgentNoticeStore`` owns validation (text <= 280, source <= 80,
+    code/HTML rejection); the handler surfaces its error string as the
+    422 detail.
+    """
+
+    agent: AgentName
+    text: str
+
+
+class AgentNoticeResponse(BaseModel):
+    """POST /api/agent/notice response. ``deduped=True`` means an identical
+    (source, text) pair already existed among undismissed notices and that
+    row was returned — repeat POSTs are safe (natural idempotency)."""
+
+    id: str
+    deduped: bool
+
+
+class AgentNoticeOut(BaseModel):
+    """One undismissed notice as shown to the operator."""
+
+    id: str
+    text: str
+    source: str
+    created_at: str
+
+
+class AgentNoticesResponse(BaseModel):
+    """GET /api/agent/notices response (operator surface). Only rows that
+    pass read-time validation are surfaced — hostile direct-DB rows stay
+    quarantined in the store's invalid bucket."""
+
+    notices: list[AgentNoticeOut]
+
+
+class AgentNoticeDismissResponse(BaseModel):
+    """POST /api/agent/notices/{id}/dismiss response (operator surface)."""
+
+    dismissed: bool
