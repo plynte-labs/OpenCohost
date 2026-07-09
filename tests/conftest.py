@@ -138,6 +138,29 @@ def _isolate_last_profile_and_model_files(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_api_log_dir(tmp_path, monkeypatch):
+    """Keep API-tree logging out of the developer's real ``logs/`` directory.
+
+    ``create_app()``'s lifespan now calls ``setup_api_logging()`` and
+    registers ``audit_middleware`` (api_observability_20260708 WU-C/WU-B),
+    and ``EngineHost.__init__`` registers ``log_motor_accion`` into
+    ``_motor_event_handlers`` (WU-A) -- all three resolve their target file
+    from ``settings.LOG_DIR`` / ``settings.ACCIONES_LOG_FILE`` at call time
+    (same lazy-read pattern as ``API_TOKENS_FILE`` etc. above), so any test
+    that drives a real ``TestClient`` or a real ``EngineHost._dispatch_motor_event``
+    without this isolation writes into the developer's real
+    ``E:/VoiceAI/logs/`` (opencohost_api.log, api_audit.jsonl,
+    acciones.jsonl) -- same repo-root hazard as the fixtures above.
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(
+        settings_mod, "ACCIONES_LOG_FILE", str(tmp_path / "logs" / "acciones.jsonl")
+    )
+
+
 @pytest.fixture(scope="session")
 def root_dir():
     """Return the project root directory."""

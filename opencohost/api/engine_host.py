@@ -30,6 +30,7 @@ from opencohost.core.music_library import MusicLibrary
 from opencohost.core.ollama_startup import OllamaStartupManager
 from opencohost.avatar.obs_runtime import ObsRuntime
 from opencohost.api.agenda_driver import AgendaDriver, route_motor_event_to_agenda
+from opencohost.api.observability import log_motor_accion
 from opencohost.smart_aggregator.aggregator import Aggregator
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, KiraAgendaController
 
@@ -183,7 +184,11 @@ class EngineHost:
         # fans each status string out to every handler in this list. Kept a
         # list (not a hardcoded call) so a later work unit can also route these
         # events to the agenda without touching the callback plumbing.
-        self._motor_event_handlers = []
+        # WU-A: log_motor_accion is registered here (not in start()) so
+        # acciones.jsonl parity holds even for a constructed-but-not-started
+        # host, and so the existing per-handler exception guard in
+        # _dispatch_motor_event contains any failure.
+        self._motor_event_handlers = [log_motor_accion]
         self.aggregator = None
         # RF3 control-plane single-flight guard for POST .../connect —
         # ponytail: one global lock, not per-source, since one process owns
@@ -277,8 +282,10 @@ class EngineHost:
         Passed to MotorVocalIA as ``ui_callback`` (replacing the old
         ``_noop_event``), so this runs on the ENGINE thread. Each handler is
         guarded — a slow or failing handler must never break Kira's turn loop.
-        Handlers must not perform blocking I/O here; ObsRuntime, for one, only
-        enqueues (see its threading contract).
+        Handlers must not perform slow/network I/O here (ObsRuntime, for one,
+        only enqueues — see its threading contract); log_motor_accion's local
+        file append is the accepted exception, same as CTK's synchronous
+        _guardar_accion.
         """
         for handler in self._motor_event_handlers:
             try:

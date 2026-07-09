@@ -57,6 +57,7 @@ from opencohost.api.auth import (
 )
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost
+from opencohost.api.observability import audit_middleware, setup_api_logging
 from opencohost.api.models import (
     AgendaMetrics,
     AgendaResponse,
@@ -670,6 +671,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _host_active
+        # Persist + redact the opencohost.api logger tree (WU-C) before
+        # anything else in startup can log — idempotent, safe across
+        # repeated create_app()/TestClient cycles in one process.
+        setup_api_logging()
         _check_single_worker()
         # Mint the API bearer tokens once per install (agent_context_gateway
         # Phase 1). Best-effort: a failed mint degrades to 503s on protected
@@ -693,6 +698,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     # so CORS — added last, therefore outermost in Starlette's stack — still
     # decorates 401/403/503 auth responses and handles OPTIONS preflight.
     app.middleware("http")(auth_middleware)
+    # Audit trail (WU-B, api_observability): registered AFTER auth_middleware
+    # and BEFORE CORSMiddleware — later registration = outer in Starlette's
+    # stack — so it wraps auth and audits its 401/403/429/503 rejections too.
+    app.middleware("http")(audit_middleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins if cors_origins is not None else _DEFAULT_CORS_ORIGINS,
