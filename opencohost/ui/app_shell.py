@@ -2443,6 +2443,7 @@ class VocalAIApp(ctk.CTk):
             print_log=g(self, "_print_log"),
             notify_operator=g(self, "_notify_operator"),
             check_pending_audio_bed_stop=g(self, "_check_pending_audio_bed_stop"),
+            dispatch_audio_play=g(self, "_dispatch_audio_play"),
             kira_agenda_schedule_tick=g(self, "_kira_agenda_schedule_tick"),
             kira_agenda_update_status=g(self, "_kira_agenda_update_status"),
             kira_agenda_prefetch_while_speaking=g(self, "_kira_agenda_prefetch_while_speaking"),

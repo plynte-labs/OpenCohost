@@ -69,6 +69,7 @@ def _make_deps(**overrides):
         print_log=MagicMock(),
         notify_operator=MagicMock(),
         check_pending_audio_bed_stop=MagicMock(),
+        dispatch_audio_play=MagicMock(),
         kira_agenda_schedule_tick=MagicMock(),
         kira_agenda_update_status=MagicMock(),
         kira_agenda_prefetch_while_speaking=MagicMock(),
@@ -513,6 +514,23 @@ class TestHandlerSideEffects:
         table = get_handler_map(deps)
         table["speaking_end"]()
         deps["after_cancel"].assert_called_with(timer_id)
+
+    def test_on_motor_speaking_end_dispatches_audio_bed_boundary_off_thread(self):
+        """FR3 gap: audio_bed.on_boundary() decodes a pygame Sound synchronously
+        (audio_bed.py _play_selected Phase 2). speaking_end must route it through
+        dispatch_audio_play (a worker-thread dispatcher), never call it inline
+        on the calling (Tk main) thread."""
+        deps = _make_deps()
+        deps["voice_panel"].is_ws_connected.return_value = False
+        deps["audio_bed"].current_track = object()  # truthy -> on_boundary path taken
+        from opencohost.ui.motor_event_handlers import get_handler_map
+        table = get_handler_map(deps)
+        table["speaking_end"]()
+        deps["audio_bed"].on_boundary.assert_not_called()
+        deps["dispatch_audio_play"].assert_called_once()
+        dispatched_fn = deps["dispatch_audio_play"].call_args[0][0]
+        dispatched_fn()
+        deps["audio_bed"].on_boundary.assert_called_once()
 
     def test_on_piper_voice_locale_mismatch_notifies_operator(self):
         """Honest-degrade notice (design D8/pillar 5) must reach the operator,

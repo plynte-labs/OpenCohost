@@ -259,7 +259,10 @@ def test_chat_speech_does_not_start_music_bed_boundary() -> None:
     ui = source + read_text(MOTOR_HANDLERS)  # speaking-end boundary moved here (Phase 6)
 
     assert "if agenda_speech or audio_bed.current_track is not None:" in ui
-    assert "audio_bed.on_boundary()" in ui
+    # FR3 gap fix (ui_thread_hardening_agenda_audio_20260624): on_boundary()
+    # decodes a pygame Sound synchronously, so it is dispatched off the Tk
+    # main thread instead of called inline.
+    assert "dispatch_audio_play(audio_bed.on_boundary)" in ui
 
 
 def test_avatar_panel_is_gridded_into_its_parent() -> None:

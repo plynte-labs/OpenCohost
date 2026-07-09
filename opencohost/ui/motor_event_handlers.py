@@ -390,6 +390,7 @@ def on_motor_speaking_end(
     kira_agenda_schedule_tick: Callable[[int], None],
     kira_agenda_clear_prefetch: Callable[[], None],
     check_pending_audio_bed_stop: Callable[[], None],
+    dispatch_audio_play: Callable[[Callable[[], Any]], None],
     get_speaking_alt_timer_id: Callable[[], Any],
     set_speaking_alt_timer_id: Callable[[Any], None],
     after_cancel: Callable[[Any], None],
@@ -424,7 +425,10 @@ def on_motor_speaking_end(
     if audio_bed is not None:
         audio_bed.unduck()
         if agenda_speech or audio_bed.current_track is not None:
-            audio_bed.on_boundary()
+            # FR3 gap: on_boundary() decodes a pygame Sound synchronously
+            # (audio_bed._play_selected Phase 2) on rotation/deferred plays.
+            # Route it through the worker dispatcher, not the Tk main thread.
+            dispatch_audio_play(audio_bed.on_boundary)
     # Fix 3: fire the deferred graceful audio-bed stop if soft_stop was
     # called while Kira was speaking.  This runs AFTER mark_speech_complete()
     # so the agenda state is already settled (OFF when closing speech ended).
