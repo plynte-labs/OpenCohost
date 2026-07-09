@@ -129,9 +129,11 @@ def test_post_music_mood_empty_bucket_falls_back_to_normal(tmp_path):
         assert resp.status_code == 200
         body = resp.json()
         assert body["active_mood"] == "sad"
-        # No 'sad' valid tracks -> empty bucket list...
-        assert body["tracks"] == []
-        # ...but select_for_mood's mood->normal->any chain still suggests one.
+        # No 'sad' valid tracks -> tracks falls back to the normal pool so the
+        # client can still rotate (tests/test_api_music_mood_fallback.py).
+        assert [t["id"] for t in body["tracks"]] == ["n1"]
+        assert body["fallback"] is True
+        # ...and select_for_mood's mood->normal->any chain still suggests one.
         assert body["suggested_track_id"] == "n1"
 
 
@@ -161,7 +163,7 @@ def test_post_music_mood_no_backend_audio(tmp_path):
 
         resp = client.post("/api/music/mood", json={"mood": "hype"})
         assert resp.status_code == 200
-        assert set(resp.json().keys()) == {"active_mood", "tracks", "suggested_track_id"}
+        assert set(resp.json().keys()) == {"active_mood", "tracks", "suggested_track_id", "fallback"}
 
 
 def test_get_music_state_default_before_any_post(tmp_path):

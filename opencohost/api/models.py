@@ -339,11 +339,15 @@ class MusicStateResponse(BaseModel):
 class MusicMoodResponse(BaseModel):
     """POST /api/music/mood response. No playback/audio field — the client
     reads `suggested_track_id` (select_for_mood's mood->normal->any fallback)
-    and the valid `tracks` in the bucket, then plays client-side."""
+    and the valid `tracks` in the bucket, then plays client-side. When the
+    requested mood's bucket is empty, `tracks` is populated with the same
+    normal->any fallback pool and `fallback` is True so the client can rotate
+    instead of always replaying `suggested_track_id`."""
 
     active_mood: str
     tracks: list[MusicTrackOut]
     suggested_track_id: Optional[str]
+    fallback: bool = False
 
 
 class MusicImportRequest(BaseModel):

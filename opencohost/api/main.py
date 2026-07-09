@@ -1266,11 +1266,22 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         host.music_state.set_mood(mood)
         with host.music_lock:
             valid = library.valid_tracks()
+            matching = [t for t in valid if t.mood == mood]
             suggested = library.select_for_mood(mood)
+            fallback = not matching
+            if fallback:
+                # Mirror select_for_mood's mood->normal->any fallback chain so
+                # `tracks` and `suggested_track_id` stay consistent — an empty
+                # bucket must never leave the client rotating over nothing.
+                normal_pool = [t for t in valid if t.mood == "normal"]
+                pool = normal_pool if normal_pool else valid
+            else:
+                pool = matching
         return MusicMoodResponse(
             active_mood=mood,
-            tracks=[_music_track_out(t) for t in valid if t.mood == mood],
+            tracks=[_music_track_out(t) for t in pool],
             suggested_track_id=suggested.id if suggested else None,
+            fallback=fallback,
         )
 
     @app.get("/api/music/state", response_model=MusicStateResponse)
