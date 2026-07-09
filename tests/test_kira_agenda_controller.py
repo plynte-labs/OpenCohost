@@ -666,6 +666,23 @@ def test_output_sanitizer_rejects_recent_line_and_near_repeat():
     assert controller.accept_output("Y en eso aparece un ángulo interesante sobre la cultura digital, la confianza pública y esas decisiones técnicas que casi nadie revisa con calma.") is False
 
 
+def test_agenda_rejects_skeleton_repetition():
+    # This synonym-swap pair slips every pre-existing detector: not an exact/near
+    # match (is_repetition), no shared sentence (repeats_recent_line), fewer than
+    # 8 tokens>=4 chars (is_too_similar_to_recent), and no "Y eso..." opening
+    # (reuses_looping_opening). Only the skeleton (scaffold) detector catches it.
+    controller = KiraAgendaController()
+    controller.record_accepted_output("Cada partida es un abismo sin fin")
+
+    assert controller.accept_output("Cada derrota es un abismo sin salida") is False
+    assert controller.rejection_log[-1]["guardrail"] == "skeleton_repetition"
+
+    # Happy-path sentinel: a genuinely different line is still accepted.
+    controller = KiraAgendaController()
+    controller.record_accepted_output("Cada partida es un abismo sin fin")
+    assert controller.accept_output("El chat propuso armar un torneo relámpago para el sábado.") is True
+
+
 @pytest.mark.parametrize(
     "first,second",
     [
@@ -1620,3 +1637,44 @@ def test_character_contract_feature_flag_off():
         )
     finally:
         KiraAgendaController.CHARACTER_CONTRACT_ENABLED = original
+
+
+def test_trailing_empty_signal_after_force_complete_keeps_idle():
+    """WU1: the trailing empty re-signal must not resurrect the None-loop.
+
+    A rejected agenda turn is two guardrail signals: the rejected generation
+    (llm_engine.py:1573) and a trailing empty (llm_engine.py:2461). When a
+    CLOSING topic hits the >=3 force-complete gate on the first signal,
+    active_topic becomes None. The second (empty) signal then runs with no
+    active topic and, on the buggy code, falls through to REGENERATING_SAFE —
+    a state that never returns to IDLE, so the queue never advances. After the
+    fix it must settle on IDLE and let the next topic be selected.
+    """
+    controller = KiraAgendaController(max_turns_per_topic=2, turn_batch_size=1)
+    t1 = controller.add_topic("Tema uno", "angulo", approved=True)
+    t2 = controller.add_topic("Tema dos", "angulo", approved=True)
+    controller.queue_topic(t1.id)
+    controller.queue_topic(t2.id)
+    controller.enable()
+
+    dup = "kira comenta el tema de prueba"
+    controller.record_accepted_output(dup)
+
+    # Reproduce the double-signal on a CLOSING topic already at its failure cap,
+    # exactly as the engine does — without a driver.
+    controller.active_topic = t1
+    t1.status = TopicStatus.CLOSING
+    controller.recovery._failures = 2  # next failure hits the >=3 force-complete gate
+
+    assert controller.accept_output(dup) is False  # force-completes t1 -> IDLE
+    assert controller.active_topic is None
+    assert controller.accept_output("") is False  # trailing empty: the bug point
+
+    assert controller.state == AgendaState.IDLE
+    assert t1.status == TopicStatus.COMPLETED
+
+    # The queue advances on the next action (only reachable from IDLE).
+    action = controller.next_action()
+    assert action.kind == "enqueue"
+    assert controller.active_topic is not None
+    assert controller.active_topic.id == t2.id

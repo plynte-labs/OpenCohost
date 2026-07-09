@@ -58,6 +58,45 @@ class FakeMotor:
         self.replaced.clear()
 
 
+class RejectingFakeMotor(FakeMotor):
+    """FakeMotor that reproduces the real engine reject contract.
+
+    The engine validates every dequeued agenda generation through the
+    controller guardrail callback (``llm_engine.py:1573`` ->
+    ``accept_output(dialogo)``) and then ALWAYS fires a trailing
+    ``accept_output("")`` (``llm_engine.py:2461``).  A mode-collapse turn is
+    rejected on the first call; the trailing empty is rejected on the second.
+    The stock ``FakeMotor`` only ever drives ACCEPTED outputs, so the reject
+    path / double register_failure / None-loop are untested.  This stand-in
+    replays that exact double-signal synchronously the moment an agenda turn is
+    enqueued, driving the controller state machine down the reject path.
+    """
+
+    #: Pre-seeded into ``controller.last_outputs`` so ``is_repetition`` rejects
+    #: it deterministically — no LLM, no randomness.
+    DUP_LINE = "kira comenta el tema de prueba"
+
+    def __init__(self, controller):
+        super().__init__()
+        self._controller = controller
+
+    def _reject_cycle(self, source):
+        if not source.startswith("kira-agenda"):
+            return
+        # Mirror llm_engine.py:1573 (reject the generated dup) then :2461
+        # (trailing empty re-signal) for one rejected agenda turn.
+        self._controller.accept_output(self.DUP_LINE)
+        self._controller.accept_output("")
+
+    def enqueue(self, payload, priority=1, source="chat", history_text=None):
+        super().enqueue(payload, priority=priority, source=source, history_text=history_text)
+        self._reject_cycle(source)
+
+    def replace_pending(self, payload, priority=1, source="chat"):
+        super().replace_pending(payload, priority=priority, source=source)
+        self._reject_cycle(source)
+
+
 def _driver(controller, motor, tick_seconds=4.5):
     return AgendaDriver(
         get_agenda=lambda: controller,
@@ -358,5 +397,85 @@ def test_tick_noop_when_state_off():
     driver.tick_once()
 
     assert controller.state == AgendaState.OFF
+    assert motor.enqueued == []
+    assert motor.replaced == []
+
+
+# ── reject path: the None-loop after a rejected closing turn (WU1) ─────────
+
+
+def _rejecting_setup(num_topics=1, **kwargs):
+    """Enabled controller + RejectingFakeMotor + driver, with the dup seeded.
+
+    Every kira-agenda* turn the driver enqueues is rejected twice (dup + trailing
+    empty), reproducing the runtime None-loop trigger.  tick1 forces the open
+    topic to its turn cap (WAITING_SIGNAL); tick2 rejects the closing line and
+    hits the >=3 force-complete gate — the trailing empty then runs with the
+    topic already gone (the bug point).
+    """
+    controller = KiraAgendaController(**kwargs)
+    topics = []
+    for i in range(num_topics):
+        topic = controller.add_topic(f"Tema {i + 1}", "angulo", approved=True)
+        controller.queue_topic(topic.id)
+        topics.append(topic)
+    controller.enable()
+    controller.record_accepted_output(RejectingFakeMotor.DUP_LINE)
+    motor = RejectingFakeMotor(controller)
+    driver = _driver(controller, motor)
+    return controller, motor, driver, topics
+
+
+def test_rejected_closing_turn_advances_to_next_topic():
+    controller, motor, driver, topics = _rejecting_setup(
+        num_topics=2, max_turns_per_topic=2, turn_batch_size=1
+    )
+    t1, t2 = topics
+
+    driver.tick_once()  # tick1: open turn rejected -> turns forced, WAITING_SIGNAL
+    driver.tick_once()  # tick2: closing turn rejected -> force-complete + trailing empty
+
+    # The trailing empty signal runs with active_topic already None. On the buggy
+    # code it lands in REGENERATING_SAFE and never returns to IDLE; fixed, it
+    # settles on IDLE so the queue can advance.
+    assert controller.state == AgendaState.IDLE
+    assert controller.active_topic is None
+    assert t1.status == TopicStatus.COMPLETED
+
+    driver.tick_once()  # tick3: IDLE must select the next queued topic
+    assert controller.active_topic is not None
+    assert controller.active_topic.id == t2.id
+
+
+def test_rejected_closing_turn_with_empty_queue_reaches_off():
+    controller, motor, driver, _ = _rejecting_setup(
+        num_topics=1, max_turns_per_topic=2, turn_batch_size=1
+    )
+
+    driver.tick_once()  # open turn rejected
+    driver.tick_once()  # closing turn rejected -> force-complete, empty queue
+    driver.tick_once()  # IDLE + empty queue -> driver auto-exit to OFF
+
+    assert controller.state == AgendaState.OFF
+
+
+def test_soft_stop_terminates_after_rejected_closing():
+    controller, motor, driver, _ = _rejecting_setup(
+        num_topics=1, max_turns_per_topic=2, turn_batch_size=1
+    )
+
+    driver.tick_once()  # open turn rejected
+    driver.tick_once()  # closing turn rejected -> force-complete settles state
+
+    motor.reset()
+    action = controller.soft_stop()
+
+    # From IDLE with no active topic, soft_stop must drop straight to OFF. On the
+    # buggy code the controller is stuck in REGENERATING_SAFE and soft_stop
+    # returns none() without terminating.
+    assert controller.state == AgendaState.OFF
+    assert action.kind == "none"
+
+    driver.tick_once()  # OFF is inert -> no further motor traffic
     assert motor.enqueued == []
     assert motor.replaced == []

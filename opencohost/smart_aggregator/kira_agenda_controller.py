@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
 from opencohost.config.logger import get_logger
+from opencohost.core.repetition_guard import detect_repetition
 from opencohost.i18n import active as i18n_active
 
 logger = get_logger()
@@ -972,6 +973,18 @@ class KiraAgendaController:
             self.response_length = self.recovery.degraded_length(self.response_length)
         if self.recovery.should_pause():
             self.state = AgendaState.PAUSED_NEEDS_OPERATOR
+        elif self.active_topic is None and (self.stop_requested or self.queued_topics()):
+            # Belt-and-suspenders for the None-loop: a failure with no active topic
+            # must never land in REGENERATING_SAFE while there is still session
+            # work pending (a queued topic to advance to, or a pending stop) —
+            # without a topic that state never returns to IDLE, so the queue would
+            # never advance. Route to a terminal/idle state and reset the recovery
+            # ladder like force-complete does (:963): IDLE selects the next topic,
+            # OFF ends the session. A topic-less controller with no queue and no
+            # pending stop still climbs the normal recovery ladder (degrade/pause).
+            self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
+            self.stop_requested = False
+            self.recovery.record_success()
         else:
             self.state = AgendaState.REGENERATING_SAFE
 
@@ -995,7 +1008,26 @@ class KiraAgendaController:
         clean = " ".join((output or "").strip().split())
         if not clean:
             if mutate:
-                self.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="El modelo devolvió vacío")
+                if self.active_topic is None:
+                    # The engine fires a trailing accept_output("") after every
+                    # agenda turn (llm_engine.py:2461). When the preceding
+                    # rejection already force-completed the topic (active_topic is
+                    # now None), re-running the failure ladder here double-counts
+                    # the same rejection and, with no active topic, drops into
+                    # REGENERATING_SAFE — the None-loop. Treat this trailing empty
+                    # as a lightweight state-nudge instead: do NOT register a
+                    # second failure; just settle into a terminal/idle state so the
+                    # queue advances (IDLE) or the session ends (OFF on soft_stop).
+                    if self.state not in {
+                        AgendaState.OFF,
+                        AgendaState.IDLE,
+                        AgendaState.PAUSED_NEEDS_OPERATOR,
+                        AgendaState.HARD_PAUSED,
+                    }:
+                        self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
+                        self.stop_requested = False
+                else:
+                    self.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="El modelo devolvió vacío")
             return False
         # ── HIGH-2: reset matched phrase so register_failure never captures a stale
         #    cross-generation value from a previous validation call.
@@ -1032,6 +1064,14 @@ class KiraAgendaController:
         elif self.is_too_similar_to_recent(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Respuesta muy parecida a las últimas 3", "token_overlap"
             extra["overlap_pct"] = round(self._last_similarity_overlap * 100, 1)
+        elif (skeleton_match := detect_repetition(clean, self.last_outputs)).is_repetitive:
+            # WU2: skeleton/synonym-swap detector (dead on agenda turns until now —
+            # llm_engine.py:1558 gates it to source=="chat"). Runs here instead, in
+            # the shared validator every caller (CTK, API, prefetch preview) routes
+            # through. No raw model text goes into rejection_log — only the sub-type.
+            error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Repitió el mismo esqueleto con sinónimos", "skeleton_repetition"
+            if skeleton_match.detail:
+                self._last_matched_phrase = skeleton_match.detail
         elif self.reuses_looping_opening(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'", "reused_opening"
         elif self.claims_inner_life(clean):
