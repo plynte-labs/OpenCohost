@@ -155,9 +155,11 @@ def _isolate_api_log_dir(tmp_path, monkeypatch):
     """
     from opencohost.config import settings as settings_mod
 
-    monkeypatch.setattr(settings_mod, "LOG_DIR", str(tmp_path / "logs"))
+    log_dir = tmp_path / "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    monkeypatch.setattr(settings_mod, "LOG_DIR", str(log_dir))
     monkeypatch.setattr(
-        settings_mod, "ACCIONES_LOG_FILE", str(tmp_path / "logs" / "acciones.jsonl")
+        settings_mod, "ACCIONES_LOG_FILE", str(log_dir / "acciones.jsonl")
     )
 
 
