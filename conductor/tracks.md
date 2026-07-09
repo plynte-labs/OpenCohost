@@ -4,6 +4,28 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Agenda None-Loop Fix — topics advance, sessions stop, repetition guard wired**
+  *Link: [./tracks/agenda_none_loop_fix_20260708/](./tracks/agenda_none_loop_fix_20260708/) (design.md)*
+  *Status 2026-07-08: DONE + VERIFY PASS (commit d383c35). Found in a real Tauri+API runtime session
+  (owner configured 5 topics, Kira looped ~20 turns on ONE topic, "agenda finalizada" fired but
+  generation continued, only emergency-stop terminated it). ROOT CAUSE ("None-loop"): a rejected agenda
+  turn was double-counted as two register_failure calls (llm_engine.py:1573 validator-reject +
+  trailing _accept_agenda_output("") at :2461); when it coincided with a CLOSING force-complete the
+  second failure ran with active_topic already None, fell to terminal REGENERATING_SAFE and never
+  re-reached IDLE — the ONLY caller of _select_next_topic — so topics never advanced and soft_stop
+  (gated on active_topic) could not terminate. FIX (shared CTK+API code, so CTK benefits): the trailing
+  empty-signal no longer runs the full failure ladder when active_topic is None + register_failure
+  routes to IDLE when a stop is requested or topics remain queued. BUG3 also fixed: repetition_guard
+  was hard-gated to source=="chat" (llm_engine.py:1558) so the skeleton/synonym-swap detector never ran
+  on kira-agenda turns (why the paraphrased duplicates survived) — gate widened to cover kira-agenda,
+  sourcing controller.last_outputs. CRITICAL test gap closed: the reject/None-loop path was 100%
+  untested (FakeMotor never rejected — 138 green-by-absence); shipped 5 RED-first regression tests
+  proven to reproduce the loop on pre-fix code. Agenda suites 143 passed. DEFERRED to follow-up phases
+  (owner liked the behavior as a feature): opt-in single-topic "deep-dive" mode (keep active_topic
+  NON-None) + Tauri agenda events/logging (Tier-1 turns_spoken/state badges, Tier-2 sanitized events
+  array). Diagnosis engram: runtime/agenda-infinite-single-topic-20260708; track engram:
+  sdd/agenda-none-loop-fix-20260708/{design,verify-report,orchestrator-checkpoint}.*
+
 - [~] **Track: Kira Bilingual E2E — EN/ES across agenda, viewer chat, PTT, TTS, and profiles**
   *Link: [./tracks/kira_bilingual_e2e_20260705/](./tracks/kira_bilingual_e2e_20260705/) (proposal.md + design.md)*
   *Status 2026-07-05: PROPOSAL + DESIGN done (Fable 5 planning session), NOT implemented. Consolidation

@@ -19,6 +19,28 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-08 PM (runtime finding fixed: agenda None-loop)
+
+Owner runtime-tested Tauri+API and hit a real bug: agenda looped ~20 turns on ONE topic, never
+advanced through the 5 configured, "agenda finalizada" fired yet generation continued, only
+emergency-stop worked. Diagnosed (3-agent read-only workflow, engram runtime/agenda-infinite-single-topic-20260708)
+and FIXED (commit **d383c35**, VERIFY PASS, 5 RED-first regression tests + 143 agenda tests green).
+Root cause = the "None-loop": a rejected agenda turn double-counted as two register_failure calls
+(llm_engine.py:1573 + trailing :2461); coinciding with a CLOSING force-complete, the second failure
+ran with active_topic already None → terminal REGENERATING_SAFE → never re-reached IDLE (the only
+caller of _select_next_topic) → topics never advanced, soft_stop couldn't stop it. Also fixed BUG3:
+repetition_guard was gated to source=="chat" so it never ran on kira-agenda turns (why the paraphrased
+duplicates survived) — now covers kira-agenda. Shared CTK+API code, so the CTK app benefits too.
+**Answer to "do guardrails run in the API?"**: the character-contract + coarse-similarity validator DID
+run headless (engine_host.py:310, and ADR-011's detect-but-emit-stale bug is fixed — rejects now
+suppress the turn); only the skeleton/synonym repetition guard was dead on agenda (now fixed).
+**DEFERRED (owner liked the loop AS a feature)**: opt-in single-topic "deep-dive" mode (active_topic
+stays NON-None so stops still work) + Tauri agenda events/logging (Tier-1 turns_spoken + state badges,
+Tier-2 sanitized events array). Both scoped in the diagnosis; neither built.
+Note: full `pytest tests` in ONE invocation deadlocks on a PRE-EXISTING headless hang
+(test_memorias_profile_uuid.py::...seeds_ids_for_all_legacy_profiles — Tk mainloop); run split or add
+pytest-timeout. The app_shell <3000 line guard is still owner-accepted RED (3015).
+
 ## LATEST SNAPSHOT — 2026-07-08 (ALL 3 designed tracks IMPLEMENTED — gateway + personalization + bilingual)
 
 Owner-authorized autonomous implementation session (Fable 5 orchestrator; appliers Sonnet/Opus, judges
