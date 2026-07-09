@@ -49,11 +49,23 @@ mislabel FIXED). Item A tests 40/40. GOTCHA: 36 PRE-EXISTING red tests in OpenCo
 render AgendaPanel without a ToastProvider wrapper — from prior commit da108a0, NOT this change) block a green
 FULL vitest suite; small follow-up = wrap those test renders in ToastProvider. Engram: event-engine-a-20260709.
 
-DECISION PENDING (owner): B (backend event log GET /api/events?since=cursor, deque(500), metadata-only, lands
-in the Python repo) and C (SSE push) were delivered as DESIGN-ONLY. Recommendation: A now (done); B next only
-when engine-initiated events (autonomous tier switches, health, CTK-driven agenda) need to show in the feed;
-defer C until a real-time consumer exists. Still owed by owner: locale=en runtime session, personalization
-form use, gateway curl, auth enforcement flip, push to origin (both repos).
+**Event Log B** (backend E:/VoiceAI commit **adfb3ea**, client OpenCohost_UI commit **e7a3877**, VERIFY
+PASS-WITH-WARNINGS) — owner chose "implementar B ahora". Closes A's blind spot (engine-initiated events).
+Backend: EventLogSink ring (deque(200)+lock+seq+boot) hooked into the SAME EngineHost._motor_event_handlers
+as the observability track; GET /api/events?since=seq (read-tier) returns {events, cursor, boot}, since=0
+backfills, boot signals restart. Client: hand-typed src/api/events.ts polls 1500ms and feeds new seqs through
+the EXISTING emitAppEvent chokepoint (srv-<seq>, toast:false — engine events persist but don't toast).
+PRIVACY = closed two-gate whitelist (server frozenset of 19 status enums, detail always null; client subset
+of 14) — both Opus judges found no leak. useAgendaEvents NOT refactored (non-goal). Backend 3869 passed / 1
+known-red (app_shell). NOTE: the Opus design agent implemented the backend during design (blueprint is
+"as-built"). KNOWN LOW (owner to decide): cold-start backfill stamps replayed events with Date.now() so old
+engine events can read as "now"; whitelist hand-synced in 3 places. Engram: event-log-b-20260709.
+
+MODEL NOTE (2026-07-09): Fable was returning null on DESIGN agents this session (terminal error) — designs
+and judges were switched to Opus. Revisit Fable when it stabilizes.
+
+C (SSE push) remains DESIGN-ONLY, deferred until a real-time consumer exists. Still owed by owner: locale=en
+runtime session, personalization form use, gateway curl, auth enforcement flip, push to origin (both repos).
 
 ## LATEST SNAPSHOT — 2026-07-08 PM (runtime finding fixed: agenda None-loop)
 

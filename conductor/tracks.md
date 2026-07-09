@@ -4,6 +4,29 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Event Log B — backend engine-event ring + GET /api/events, polled into the Tauri feed** (both repos)
+  *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (backend E:/VoiceAI commit adfb3ea; client
+  OpenCohost_UI commit e7a3877). Owner chose "implementar B ahora" after event-engine A shipped. B closes
+  A's blind spot: ENGINE-initiated events (autonomous tier switches, health/recovery, downloads, ctx
+  pressure, TTS/voice mismatch — things the operator did NOT click). Backend: an in-memory EventLogSink
+  ring (deque(maxlen=200) + lock + monotonic seq + boot timestamp) hooked into the SAME
+  EngineHost._motor_event_handlers as the observability track's log_motor_accion; GET /api/events?since=seq
+  (read-tier, GET open) returns {events, cursor, boot}, since=0 backfills, boot signals a process restart.
+  Client: hand-typed src/api/events.ts polls at 1500ms and feeds new seqs through the EXISTING emitAppEvent
+  chokepoint from A with srv-<seq> ids and toast:false (engine events persist to the feed but do NOT toast;
+  operator toasts stay A-only). PRIVACY = closed TWO-GATE whitelist: server _MOTOR_EVENT_WHITELIST
+  (frozenset of 19 status enums) drops any unmapped/hostile status, source hardcoded "motor", detail always
+  null (schema-parity only); client EVENT_LABELS is a deliberate 14-of-19 SUBSET (per-turn churn like
+  processing/idle/speaking_start/end dropped so it never spams the feed). Both judges (Opus x2 — Fable was
+  failing on designs this session, swapped to Opus) found NO privacy leak; 3 LOW findings, 0 actionable.
+  Backend suite 3869 passed / 1 known-red (app_shell 3015>3000, untouched); client item-B tests 16/16 green
+  (36 pre-existing AgendaPanel/AppLayout ToastProvider failures are unrelated owner debt). Non-goal honored:
+  useAgendaEvents NOT refactored. NOTE: the Opus design agent implemented the backend during the design
+  phase (blueprint is "as-built"); backend apply added the 4 missing coverage tests. KNOWN LOW (deferred,
+  owner to decide): cold-start backfill replays the ring stamped with Date.now() so old engine events can
+  read as "now" — fix = use server ts or adopt-cursor-without-emit on first poll. Whitelist is hand-synced
+  in 3 places (drift risk). Engram: event-log-b-20260709.*
+
 - [x] **Track: Tauri Event Engine A — client event bus + toasts persisted into the events feed** (UI repo)
   *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (OpenCohost_UI commit 3f9d8b6, separate Tauri repo).
   Owner said the Tauri app felt like a black box: operator actions gave no durable feedback. Item A adds a
