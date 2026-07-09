@@ -4,6 +4,16 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [ ] **Track: OpenCohost Tauri UI/UX audit and calm-operations refinement**
+  *Link: [./tracks/opencohost_ui_ux_audit_20260709/](./tracks/opencohost_ui_ux_audit_20260709/)*
+  *Status 2026-07-09: PROPOSAL + SPEC + PLAN ONLY. Dedicated branches created in both repositories:
+  `codex/ui-ux-audit-proposal-20260709`. The standalone concept lives at
+  `OpenCohost_UI/ux-audit-proposal-20260709.html`. Baseline validation passed: UI build green,
+  52 test files / 479 tests green. No production UI behavior changed; runtime accessibility and
+  viewport validation remain required before implementation.*
+
+---
+
 - [x] **Track: Event Log B — backend engine-event ring + GET /api/events, polled into the Tauri feed** (both repos)
   *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (backend E:/VoiceAI commit adfb3ea; client
   OpenCohost_UI commit e7a3877). Owner chose "implementar B ahora" after event-engine A shipped. B closes
@@ -383,11 +393,28 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: UI-Thread Hardening (Agenda / Audio) - Encapsulate Interrupt, Off-Thread Recompute & Decode**
+- [x] **Track: UI-Thread Hardening (Agenda / Audio) - Encapsulate Interrupt, Off-Thread Recompute & Decode**
   *Link: [./tracks/ui_thread_hardening_agenda_audio_20260624/](./tracks/ui_thread_hardening_agenda_audio_20260624/)*
   *Status 2026-06-24: PLANNED. Behavior/threading fixes from a 3-opus audit — FR1 motor_ia.interrupt_speaking()
   (ADR-AUD-005 HIGH, gated with the heavy-model runtime gate), FR2 idle-tick recompute off-thread,
   FR3 pygame Sound decode off-thread, FR4 audio_bed.shutdown() in on_closing. No decomposition.*
+  *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS. DISCOVERY: all 4 FRs were ALREADY implemented on
+  2026-06-25 (this entry sat stale at PLANNED): FR4 da4f1f3 (shutdown in on_closing), FR3 eb8849c (3-phase
+  decode off-lock with _play_seq supersession; tests landed as test_audio_bed_offthread.py, NOT the plan's
+  test_audio_bed.py name), FR2 d0bf19e (recompute on worker + _suggestion_gen guard + IDLE-state/closing
+  guards; also fixed the latent vibe_thermometer->thermometer attr bug the inline except:pass swallowed),
+  FR1 5f83724 (MotorVocalIA.interrupt_speaking at llm_engine.py:336; zero _lock/_speaking reach-ins remain,
+  negative source guards in test_audio_teardown.py:956-963). This session's 1-Fable+1-Opus judge pass over
+  the whole track found 1 REAL medium gap and FIXED it (commit 31458c5): on_motor_speaking_end called
+  audio_bed.on_boundary() inline on the Tk main thread for boundary-deferred/rotation plays — now routed
+  through the injected _dispatch_audio_play worker (RED-first test in test_motor_event_handlers.py).
+  Full suite 3870 passed / 1 known-red (app_shell line budget, now 3016>3000 — 31458c5 added one line;
+  Phase 7 decomposition erases it). GATE UNCHANGED: FR1's interrupt-path change validates together with
+  heavy_model_inference_recovery under a real heavy/stalling model BEFORE any push (FR1's commit body
+  predates the gate-note convention — recorded here instead). 4 residual LOW findings documented in the
+  verify report (only_if_idle check-then-act on in-flight plays; leave-and-return supersession gap;
+  shutdown() not terminal vs late workers; hardcoded abs path in the FR1 source-guard test). Engram:
+  sdd/ui-thread-hardening-20260624/verify-report.*
 
 ---
 
