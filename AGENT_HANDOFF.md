@@ -19,6 +19,31 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-09 (API observability landed + music empty-mood fixed)
+
+Two runtime findings from the Tauri+API session are now closed, both committed to master:
+
+**API Observability** (commit **2485ac1**, backend-only, VERIFY PASS-WITH-WARNINGS) — answers the owner's
+"do we keep API run logs for telemetry like CTK?". Three gaps closed: **C** the API's own `opencohost.api.*`
+logger now persists to a rotating file WITH the `SensitiveDataFilter` (was dying unredacted on stderr);
+**B** a per-request audit JSONL with a CLOSED metadata-only whitelist (method, path, role, status,
+duration_ms, idempotency-key — NEVER bodies, NEVER the Authorization token, NEVER query content; judges'
+primary lens was privacy and the masked-secret held); **A** motor lifecycle events under the headless API
+host now mirror into CTK's `acciones.jsonl` for parity. Pure add-on, sinks fail-open + rotation-bounded, no
+endpoint behavior changed. FOLLOW-UP (one line, not a blocker): tests/conftest.py::_isolate_api_log_dir
+monkeypatches settings.LOG_DIR without os.makedirs → ISOLATED runs of test_integration.py cascade
+FileNotFoundError (config/logger.py:39 builds a module FileHandler at import, no makedirs). Full suite
+unaffected. Engram: sdd/api-observability-20260708/*.
+
+**Music empty-mood** (backend **5a937c9** + UI **5422b3c**) — a mood with no own tracks always replayed the
+same song (endpoint returned only suggested_track_id); backend now returns the normal->any fallback pool + a
+flag and the Tauri MusicPanel rotates over it.
+
+NEXT (last approved item): event-engine **A** — client-side event bus + toasts persisted to the Tauri ALL/
+events feed (no rerenders/lag/stutter), plus a B (backend event log + GET /api/events?since=cursor) and C
+(SSE) design for the owner to decide. Still owed by owner: locale=en runtime session, personalization form
+use, gateway curl, auth enforcement flip, push to origin.
+
 ## LATEST SNAPSHOT — 2026-07-08 PM (runtime finding fixed: agenda None-loop)
 
 Owner runtime-tested Tauri+API and hit a real bug: agenda looped ~20 turns on ONE topic, never

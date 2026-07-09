@@ -4,6 +4,33 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: API Observability — persist+redact the API logger, request audit trail, acciones.jsonl parity**
+  *Link: [./tracks/api_observability_20260708/](./tracks/api_observability_20260708/) (design.md)*
+  *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (commit 2485ac1, backend-only). Closes the 3
+  observability gaps found diagnosing the Tauri+API runtime (owner asked "do we keep API run logs for
+  telemetry like CTK does?"). GAP C: the API's own `opencohost.api.*` logger tree previously died on
+  stderr with no redaction — now persists to a rotating file WITH the `SensitiveDataFilter` (Authorization
+  token masked). GAP B: a per-request audit JSONL with a CLOSED metadata-only whitelist — method, path,
+  role, status, duration_ms, idempotency-key ONLY; NEVER request/response bodies, NEVER the token value,
+  NEVER query content (privacy was the judges' primary lens: they tried to leak a secret and it stayed
+  masked). GAP A: motor lifecycle events under the headless API host now mirror into CTK's `acciones.jsonl`
+  so API runs reach telemetry parity with CTK. Pure add-on: no endpoint behavior changed, all sinks
+  fail-open and rotation-bounded. 2 judge rounds (1-Fable+2-Opus), 4 medium fixes applied. Full suite
+  (split to skip the pre-existing test_memorias_profile_uuid seed-hang): 3860 passed / 11 skipped / 1
+  failed = the owner-accepted KNOWN-RED app_shell line-count (3015>3000, ui/ untouched by this track).
+  KNOWN WARNING (follow-up, not a blocker): tests/conftest.py::_isolate_api_log_dir monkeypatches
+  settings.LOG_DIR without os.makedirs, so ISOLATED runs of tests/test_integration.py cascade
+  FileNotFoundError (config/logger.py:39 builds a module-level FileHandler at import with no makedirs);
+  full suite unaffected. One-line fix owed: add makedirs inside the fixture. Engram:
+  sdd/api-observability-20260708/{design,apply-progress,verify-report}.*
+
+- [x] **Fix: Music empty-mood rotation — client can rotate when a mood bucket is empty**
+  *Status 2026-07-08: DONE (backend commit 5a937c9, UI repo commit 5422b3c). Selecting a mood with no
+  tracks of its own always replayed the SAME song because POST /api/music/mood returned only
+  suggested_track_id (one deterministic track). Backend now populates `tracks` with the normal->any
+  fallback pool (mirrors MusicLibrary.select_for_mood's chain) plus a flag; the Tauri MusicPanel
+  pickRotationTrack rotates over that pool instead of pinning suggested_track_id. Judges passed first try.*
+
 - [x] **Track: Agenda None-Loop Fix — topics advance, sessions stop, repetition guard wired**
   *Link: [./tracks/agenda_none_loop_fix_20260708/](./tracks/agenda_none_loop_fix_20260708/) (design.md)*
   *Status 2026-07-08: DONE + VERIFY PASS (commit d383c35). Found in a real Tauri+API runtime session
