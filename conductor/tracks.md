@@ -22,10 +22,12 @@ This file tracks all major tracks for the project. Each track has its own detail
   Backend suite 3869 passed / 1 known-red (app_shell 3015>3000, untouched); client item-B tests 16/16 green
   (36 pre-existing AgendaPanel/AppLayout ToastProvider failures are unrelated owner debt). Non-goal honored:
   useAgendaEvents NOT refactored. NOTE: the Opus design agent implemented the backend during the design
-  phase (blueprint is "as-built"); backend apply added the 4 missing coverage tests. KNOWN LOW (deferred,
-  owner to decide): cold-start backfill replays the ring stamped with Date.now() so old engine events can
-  read as "now" — fix = use server ts or adopt-cursor-without-emit on first poll. Whitelist is hand-synced
-  in 3 places (drift risk). Engram: event-log-b-20260709.*
+  phase (blueprint is "as-built"); backend apply added the 4 missing coverage tests. FOLLOW-UP LANDED
+  (owner chose "backfill + real ts", UI commit ddde903): emitAppEvent accepts an optional ts override and
+  srv-<seq> events now carry the SERVER timestamp (seconds*1000 -> ms), so cold-start backfill sorts old
+  engine events into the past with their real time instead of stamping everything "now"; operator (item A)
+  events unchanged, 16/16 tests + tsc clean. Remaining LOW: whitelist is hand-synced in 3 places (drift
+  risk). Engram: event-log-b-20260709.*
 
 - [x] **Track: Tauri Event Engine A — client event bus + toasts persisted into the events feed** (UI repo)
   *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (OpenCohost_UI commit 3f9d8b6, separate Tauri repo).

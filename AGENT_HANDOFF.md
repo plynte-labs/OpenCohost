@@ -61,8 +61,9 @@ known-red (app_shell). NOTE: the Opus design agent implemented the backend durin
 "as-built"). KNOWN LOW (owner to decide): cold-start backfill stamps replayed events with Date.now() so old
 engine events can read as "now"; whitelist hand-synced in 3 places. Engram: event-log-b-20260709.
 
-MODEL NOTE (2026-07-09): Fable was returning null on DESIGN agents this session (terminal error) — designs
-and judges were switched to Opus. Revisit Fable when it stabilizes.
+MODEL NOTE (2026-07-09): Fable briefly returned null on DESIGN agents (item B's first run) — that run was
+redone on Opus. Later the same day Fable recovered and the OWNER DIRECTED: use Fable for ALL heavy phases
+again (designs, judges, verify, hard applies); Sonnet stays for mechanical work (small fixes, commits).
 
 C (SSE push) remains DESIGN-ONLY, deferred until a real-time consumer exists. Still owed by owner: locale=en
 runtime session, personalization form use, gateway curl, auth enforcement flip, push to origin (both repos).
