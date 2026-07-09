@@ -343,6 +343,11 @@ class FakeHost:
         from opencohost.api.engine_host import ChatReplySink
 
         self.chat_sink = ChatReplySink()
+        # Item B: bounded event log — real EventLogSink (not a fake), same
+        # reasoning as chat_sink above.
+        from opencohost.api.engine_host import EventLogSink
+
+        self.event_log = EventLogSink()
 
     def start(self):
         pass

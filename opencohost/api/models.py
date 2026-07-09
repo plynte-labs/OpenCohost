@@ -246,6 +246,38 @@ class ChatLastReplyResponse(BaseModel):
     ts: Optional[float]
 
 
+class EventOut(BaseModel):
+    """One entry in GET /api/events?since=cursor (item B).
+
+    PRIVACY: `source`/`action` are drawn from EngineHost's closed
+    `_MOTOR_EVENT_WHITELIST` (engine_host.py) -- never free text. `detail`
+    is reserved for schema parity with the client-side event bus (item A,
+    appEvents.ts) but is always null today; it must never carry dialogue,
+    chat, or request/response bodies if a future caller populates it.
+    """
+
+    seq: int
+    ts: float
+    source: str
+    action: str
+    detail: Optional[str] = None
+
+
+class EventLogResponse(BaseModel):
+    """GET /api/events?since=cursor (item B).
+
+    `cursor` is the sink's current max `seq` -- callers poll again with
+    `since=cursor`. `boot` changes across a process restart (`seq` resets
+    to 0 too); a client must reset its own `since` to 0 when `boot` changes,
+    or a stale (too-high) `since` silently returns an empty backfill
+    forever (see EventLogSink docstring, engine_host.py).
+    """
+
+    events: list[EventOut]
+    cursor: int
+    boot: float
+
+
 class RejectedResponse(BaseModel):
     accepted: bool = False
     reason: str

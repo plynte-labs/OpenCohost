@@ -87,6 +87,7 @@ from opencohost.api.models import (
     CohostProfileSelectResponse,
     CohostProfilesResponse,
     CommandRequest,
+    EventLogResponse,
     HealthResponse,
     HealthState,
     I18nSetLocaleRequest,
@@ -1753,6 +1754,14 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # ChatReplySink docstring (engine_host.py). Never the viewer/operator
         # text that triggered it.
         return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
+
+    @app.get("/api/events", response_model=EventLogResponse)
+    def get_events(request: Request, since: int = 0) -> EventLogResponse:
+        # Item B: engine-thread event log, metadata-only (see EventLogSink /
+        # EngineHost._record_motor_event's closed whitelist, engine_host.py).
+        # GET stays open per auth.py rule 3 (non-mutating reads are never
+        # gated), same tier as /api/status and /api/chat/last-reply above.
+        return EventLogResponse(**request.app.state.host.event_log.since(since))
 
     @app.get("/api/obs/config", response_model=ObsConfigResponse)
     def get_obs_config() -> ObsConfigResponse:

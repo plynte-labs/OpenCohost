@@ -50,6 +50,38 @@ _AGGREGATOR_CONFIG_PATH = os.path.join(
 
 _logger = logging.getLogger(__name__)
 
+# Item B (event-engine-a-20260709 follow-up): CLOSED whitelist of motor
+# status strings that may reach GET /api/events. Duplicated (not imported)
+# from ui/motor_event_handlers.py's dispatch table -- this package must
+# never import opencohost.ui (see _find_ollama_executable above / main.py
+# module docstring). Any status NOT in this set is dropped silently by
+# EngineHost._record_motor_event, never forwarded verbatim -- PRIVACY: this
+# is the only data that ever reaches EventLogSink, so the set below IS the
+# gate. Keep in sync manually with motor_event_handlers.py's dispatch keys.
+_MOTOR_EVENT_WHITELIST = frozenset(
+    {
+        "ready",
+        "model_warming",
+        "ollama_unavailable",
+        "processing",
+        "idle",
+        "llm_timeout_recovered",
+        "speaking_start",
+        "speaking_end",
+        "model_changed",
+        "model_switch_pending",
+        "model_switch_applied",
+        "model_switch_failed",
+        "llm_tier_switch_applied",
+        "llm_tier_switch_failed",
+        "download_start",
+        "download_done",
+        "download_error",
+        "ctx_pressure_high",
+        "piper_voice_locale_mismatch",
+    }
+)
+
 
 class _Drain:
     """No-op log sink.
@@ -128,6 +160,47 @@ class ChatReplySink:
             return dict(self._replies[-1])
 
 
+class EventLogSink:
+    """Bounded, thread-safe ring buffer for GET /api/events?since=cursor
+    (item B -- engine-thread visibility item A's client-only mutation bus
+    can't see, see conductor/tracks.md's Tauri Event Engine A entry).
+    Mirrors ChatReplySink's shape (deque+lock) with a monotonic `seq`
+    cursor instead of a turn id.
+
+    PRIVACY: `record()` only ever stores (source, action) pairs already
+    passed through the closed `_MOTOR_EVENT_WHITELIST` gate below (see
+    `EngineHost._record_motor_event`) -- this class does not itself
+    validate, so no other caller may feed it a raw/unmapped string.
+    `detail` exists for schema parity with item A's event shape but is
+    never populated here (the motor callback carries no extra payload) --
+    it must never carry free text if a future caller adds one.
+
+    `boot` is this sink's own construction time: it changes every process
+    restart (when `seq` also resets to 0), so a polling client can tell a
+    smaller `cursor` apart from a stale/empty poll and knows to reset its
+    own `since` cursor instead of silently missing events forever (see
+    src/api/events.ts::useServerEvents).
+    """
+
+    def __init__(self, maxlen: int = 200):
+        self._events = collections.deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+        self._seq = 0
+        self.boot = time.time()
+
+    def record(self, source: str, action: str, detail: "str | None" = None) -> None:
+        with self._lock:
+            self._seq += 1
+            self._events.append(
+                {"seq": self._seq, "ts": time.time(), "source": source, "action": action, "detail": detail}
+            )
+
+    def since(self, cursor: int) -> dict:
+        with self._lock:
+            events = [dict(e) for e in self._events if e["seq"] > cursor]
+            return {"events": events, "cursor": self._seq, "boot": self.boot}
+
+
 class MusicState:
     """Client-side-playback orchestration state (music-orchestration-model).
 
@@ -188,7 +261,13 @@ class EngineHost:
         # acciones.jsonl parity holds even for a constructed-but-not-started
         # host, and so the existing per-handler exception guard in
         # _dispatch_motor_event contains any failure.
-        self._motor_event_handlers = [log_motor_accion]
+        # Item B: bounded event log for GET /api/events?since=cursor, always
+        # constructed (mirrors chat_sink/music_state below) so it's live even
+        # before start(). Registered into the SAME extensible router as
+        # log_motor_accion, right next to it, for the same reason (holds even
+        # for a constructed-but-not-started host).
+        self.event_log = EventLogSink()
+        self._motor_event_handlers = [log_motor_accion, self._record_motor_event]
         self.aggregator = None
         # RF3 control-plane single-flight guard for POST .../connect —
         # ponytail: one global lock, not per-source, since one process owns
@@ -275,6 +354,19 @@ class EngineHost:
                 self.ollama_warming = False
 
         threading.Thread(target=_worker, daemon=True, name="ollama-wake").start()
+
+    def _record_motor_event(self, status) -> None:
+        """Item B: record engine-thread motor lifecycle into `event_log`.
+
+        Gated by `_MOTOR_EVENT_WHITELIST` -- an unmapped status is dropped
+        silently, never forwarded verbatim (privacy gate for GET /api/events).
+        Registered into `_motor_event_handlers` in `__init__`, so like
+        `log_motor_accion` it relies on `_dispatch_motor_event`'s per-handler
+        exception guard below rather than its own try/except.
+        """
+        if status not in _MOTOR_EVENT_WHITELIST:
+            return
+        self.event_log.record("motor", status)
 
     def _dispatch_motor_event(self, status, *_args, **_kwargs) -> None:
         """Fan a motor status string out to every registered handler.
