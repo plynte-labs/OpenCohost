@@ -4,6 +4,24 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Tauri Event Engine A — client event bus + toasts persisted into the events feed** (UI repo)
+  *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (OpenCohost_UI commit 3f9d8b6, separate Tauri repo).
+  Owner said the Tauri app felt like a black box: operator actions gave no durable feedback. Item A adds a
+  SINGLE client-side emission chokepoint (src/lib/appEvents.ts: whitelisted source.action->label map +
+  sanitizeDetail that rejects body-shaped text, a global TanStack MutationCache subscriber reading each
+  mutation's tiny meta.event) that fires a transient toast (reusing the existing ToastProvider) AND persists
+  the same event into a bounded 200-event zustand ring buffer (src/store/eventStore.ts). A null-render
+  EventBridge mounts it; ConversationPanel interleaves events as alert dividers by ts. NO jank (external
+  store + sliced selector = only the feed rerenders; bounded ring = no DOM growth), ZERO new deps, reuses
+  ToastProvider + the zustand pattern. PRIVACY: labels are metadata/action ONLY (Modelo->x, Perfil->x,
+  Musica->x, OBS escena->x, Stream iniciado) — Opus judge found no leak; Fable judge's 1 medium (OBS config
+  save mislabeled as toggle) was FIXED (onMutate ref snapshot). 1 low left as documented scope (engine
+  commands emit at HTTP-accept, not apply time). Item A's own tests 40/40 green. NOTE: 36 PRE-EXISTING red
+  tests in that repo (AgendaPanel/AppLayout render AgendaPanel without a ToastProvider wrapper — from prior
+  commit da108a0, NOT this change; base had 38, this reduced to 36). B (backend event log GET
+  /api/events?since=cursor) and C (SSE) delivered as DESIGN-ONLY for owner decision — recommendation: A now,
+  B when engine-side visibility is wanted, defer C. Engram: event-engine-a-20260709.*
+
 - [x] **Track: API Observability — persist+redact the API logger, request audit trail, acciones.jsonl parity**
   *Link: [./tracks/api_observability_20260708/](./tracks/api_observability_20260708/) (design.md)*
   *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (commit 2485ac1, backend-only). Closes the 3

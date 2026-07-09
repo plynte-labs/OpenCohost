@@ -39,10 +39,21 @@ unaffected. Engram: sdd/api-observability-20260708/*.
 same song (endpoint returned only suggested_track_id); backend now returns the normal->any fallback pool + a
 flag and the Tauri MusicPanel rotates over it.
 
-NEXT (last approved item): event-engine **A** — client-side event bus + toasts persisted to the Tauri ALL/
-events feed (no rerenders/lag/stutter), plus a B (backend event log + GET /api/events?since=cursor) and C
-(SSE) design for the owner to decide. Still owed by owner: locale=en runtime session, personalization form
-use, gateway curl, auth enforcement flip, push to origin.
+**Event Engine A** (OpenCohost_UI commit **3f9d8b6**, VERIFY PASS-WITH-WARNINGS) — the last approved item, now
+shipped. A single client-side emission chokepoint (src/lib/appEvents.ts: whitelisted source.action->label +
+sanitizeDetail, a global TanStack MutationCache subscriber reading each mutation's meta.event) fires a
+transient toast (reusing the existing ToastProvider) AND persists the same event into a bounded 200-event
+zustand ring buffer, interleaved into ConversationPanel as alert dividers. No jank (external store + sliced
+selector), zero new deps, metadata-only labels (Opus judge found no privacy leak; Fable judge's 1 medium OBS
+mislabel FIXED). Item A tests 40/40. GOTCHA: 36 PRE-EXISTING red tests in OpenCohost_UI (AgendaPanel/AppLayout
+render AgendaPanel without a ToastProvider wrapper — from prior commit da108a0, NOT this change) block a green
+FULL vitest suite; small follow-up = wrap those test renders in ToastProvider. Engram: event-engine-a-20260709.
+
+DECISION PENDING (owner): B (backend event log GET /api/events?since=cursor, deque(500), metadata-only, lands
+in the Python repo) and C (SSE push) were delivered as DESIGN-ONLY. Recommendation: A now (done); B next only
+when engine-initiated events (autonomous tier switches, health, CTK-driven agenda) need to show in the feed;
+defer C until a real-time consumer exists. Still owed by owner: locale=en runtime session, personalization
+form use, gateway curl, auth enforcement flip, push to origin (both repos).
 
 ## LATEST SNAPSHOT — 2026-07-08 PM (runtime finding fixed: agenda None-loop)
 
