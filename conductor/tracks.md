@@ -6,13 +6,92 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: OpenCohost Tauri UI/UX audit and calm-operations refinement**
   *Link: [./tracks/opencohost_ui_ux_audit_20260709/](./tracks/opencohost_ui_ux_audit_20260709/)*
-  *Status 2026-07-09: PROPOSAL + SPEC + PLAN ONLY. Dedicated branches created in both repositories:
-  `codex/ui-ux-audit-proposal-20260709`. The standalone concept lives at
-  `OpenCohost_UI/ux-audit-proposal-20260709.html`. Baseline validation passed: UI build green,
-  52 test files / 479 tests green. No production UI behavior changed; runtime accessibility and
-  viewport validation remain required before implementation.*
+  *Status 2026-07-09: AUDIT COMPLETE; PROPOSAL + SPEC + PLAN ONLY, revised after owner review to
+  be faithful to the existing UI. The static audit found no demonstrated P0 and now covers the
+  real TSX/API/Tauri seams, loading first-paint delay, truthful `engine_alive` readiness, event
+  restart safety, polling/contract drift, dead affordances, and the scoped first-visit Welcome
+  card restored from Settings. Dedicated branches exist in both repositories:
+  `codex/ui-ux-audit-proposal-20260709`. The standalone concept uses the real Kira/avatar and
+  OpenCohost assets at `OpenCohost_UI/ux-audit-proposal-20260709.html`. Baseline validation passed:
+  UI build green, 52 test files / 479 tests green. No production UI behavior changed; runtime
+  accessibility and viewport validation remain required before implementation.*
 
 ---
+
+- [x] **Track: LiveAudio PTT Tauri — real hold-to-talk via headless WhisperLive bridge + HTTP guillotine** (both repos)
+  *Status 2026-07-10: DONE + VERIFY PASS-WITH-WARNINGS (0 critical). Backend commits 8e08151 (WU1) +
+  ce3f304 (WU2); client OpenCohost_UI 53dbe25 + judge fix 26077d5. Closes the parity gap from the
+  liveaudio explore: Tauri PTTCard was a pure UI stub. KEY FINDING (design phase, voice_control.py read in
+  full): the CTK client NEVER streams mic audio — _ws_listener is recv-only; WhisperLive captures the mic
+  itself and pushes {"text": ...} JSON. So the bridge is text-segment plumbing: NEW opencohost/api/
+  ptt_session.py (headless PttSession, recv-only WS consumer in a daemon thread; single recv loop with
+  watchdog tick doubles as the guillotine; 5s grace with in-grace extension; 2000-char cap; anti-loop regex
+  from voice_control.py:456) + single-slot PttController dispatching flushes through the SAME
+  dispatcher.dispatch("process_context", ...) path as /api/chat/turn. Routes: POST /api/ptt/start
+  (200 listening | 409 session_active | 503 stt_unreachable — never fake-listening), POST /api/ptt/keepalive
+  (1 Hz, state rides the response; starvation = server-side guillotine that still DELIVERS the buffer),
+  POST /api/ptt/stop (always 200, idempotent), GET /api/ptt/state (counts only). /api/events gains source
+  "ptt" with fixed literal actions, detail ALWAYS None. PRIVACY proven by sentinel integration test: the
+  transcript reaches ONLY the dispatch queue (wrapped "El streamer acaba de decir (PTT): ..."), never any
+  response body, event, or log (char counts only — stricter than CTK's [:30] previews). Client: src/api/
+  ptt.ts usePttHold hook (pointer capture, in-app Space/Enter gated on activeElement after judge fix
+  26077d5, window-blur safety, honest states, 503 -> inline "STT no disponible") + PTTCard.tsx rewrite;
+  every missed client release is backstopped by the server watchdog. Global OS shortcut DEFERRED to
+  ptt_global_shortcut (4-surface native change + Rust rebuild + cross-app key-up risk = CTK's guillotine
+  failure class). LiveVoice continuous mode ("hasta que diga ya") = phase-2, NOT implemented (PTT/LiveVoice
+  stay separate per repo rule); CTK untouched (voice/ptt suites 160 passed by construction). Tests: strict
+  TDD vs mocked WS — backend focused 29, FULL 3945 passed / 0 failed; UI vitest 498/498 (+19), tsc clean.
+  RESIDUAL LOWS (documented, not fixed): flush ignores DispatchResult (queue_full still emits "flushed");
+  grace re-arm can pin the slot until the char cap under continuous ambient speech; _on_session_closed
+  lacks the identity guard start() has; stale flush-poll cache skips "Procesando..." on 2nd+ holds
+  (cosmetic). GATE UPDATE 2026-07-10: owner validated LIVE against real LiveAudio — (1) start returns 200
+  listening (503 was a port collision: the API had squatted 8765 because it launched first; resolution =
+  START ORDER, LiveAudio first then the app, run-api.bat falls back to 8770 as designed); (2) dictation
+  reached Kira as ONE turn and she replied, reply text rendered in the feed. Still owed: (3) kill-app
+  mid-hold watchdog proof. Bonus tool: ptt_f10_bridge.py (repo root) — global F10 hold via
+  GetAsyncKeyState driving the same /api/ptt/* endpoints, works while gaming (webviews cannot see
+  unfocused keys; the deferred Rust plugin is the native fix).
+  Engram: sdd/liveaudio-tauri-parity/explore + design obs #3171 + verify obs.*
+
+- [ ] **Track: PTT transcript echo — render the operator's own dictation in the Tauri feed**
+  *Scoped 2026-07-10 (owner decision: document as follow-up, do not land on close day). Gap found in
+  runtime validation: Kira's reply renders (last-reply poll) but the operator's dictated words never
+  appear — BY DESIGN, the PTT privacy contract keeps transcript text out of every /api/ptt/* response
+  (sentinel-tested; client only sees char counts). APPROACH CHOSEN: the Tauri webview connects DIRECTLY
+  to LiveAudio's transcript WS (same recv-only pattern as the OBS browser source and CTK's
+  voice_control panel) and renders segments display-only while a PTT hold is active — the API privacy
+  contract stays untouched. Touches: Tauri CSP (allow ws://127.0.0.1 connect), a small WS consumer
+  hook, ConversationPanel user-turn append. REJECTED alternative: returning the final text in the
+  stop/flush response — reverses a judged privacy invariant for a cosmetic win. Sibling follow-up:
+  ptt_global_shortcut (global OS hotkey via @tauri-apps/plugin-global-shortcut, 4-surface native
+  change + Rust rebuild; ptt_f10_bridge.py covers the need meanwhile).*
+
+- [x] **Track: Command Starvation Fix — engine drains control commands at turn boundaries, straggler speech cancelled** (both repos)
+  *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (0 critical). Found by the OWNER runtime-testing the
+  new Tauri build: TTS speed/engine changes "ignored" (toast said applied), a full agenda turn PLAYED after
+  emergency_stop + "agenda finalizada", switch_llm_tier applied minutes late. Diagnosis (engram
+  runtime/tts-command-deferral-20260709, second-by-second log correlation): the single engine thread never
+  returns to run()'s command_queue.get (llm_engine.py:378) while agenda turns recurse through
+  _complete_processing_cycle (:861) — 4x set_tts_speed sat 8+ min and applied in the SAME second the first
+  emergency_stop drained the queue. FIXES (strict TDD, RED reproductions verified against pre-track code by
+  reverting llm_engine): bedff32 WU1 boundary drain — _DRAIN_SAFE_COMMANDS whitelist applied at the idle
+  point of _complete_processing_cycle (get_nowait/put_nowait only, no re-entrancy: no whitelisted branch can
+  dispatch a turn; process_context/check_ollama/shutdown stay deferred); c945fee WU2 straggler kill —
+  cancel_speech_for_sources(("kira-agenda",)) set by BOTH emergency paths BEFORE interrupt_speaking, checked
+  at _hablar entry before _speaking=True, reset ONLY on agenda enable (soft_stop untouched: its closing line
+  must speak); dad8330 WU3 Edge-TTS rate — edge_rate_for_length_scale() (length_scale is INVERSE: 1.30 ->
+  "-23%", both engines now slow TOGETHER; the naive +30% would have sped Edge up) wired into Communicate,
+  false "No afecta a Edge-TTS" caption fixed; UI 73b1487 WU4 accept-shaped toast copy ("Ajuste enviado",
+  "Cambio de modelo enviado") pairing with the motor.* applied events from the event ring. Judge panel
+  (Opus x2): 1 medium CONFIRMED + FIXED (889a5b4: drain reordered FIFO by promoting whitelisted commands
+  past an earlier process_context — rewritten to drain only the contiguous leading whitelisted run via
+  peek-under-mutex). Full Python suite 3916 passed / 0 failed; UI 479/479. RESIDUAL LOWS (documented, not
+  blockers): TOCTOU window between the cancel check and _speaking=True (two lock acquisitions);
+  CTK-parity token paths untested (API paths covered); profile.switch/clear-history labels stay
+  applied-shaped (profile has real convergence polling; accepted). GATE: WU1/WU2 carry the heavy-model
+  runtime-validation gate note in their commit bodies (dad8330/889a5b4 missed the note — recorded here);
+  owner must re-validate in runtime (speed change applies at next turn boundary mid-agenda, no straggler
+  after emergency stop) before push. Engram: sdd/command-starvation-fix-20260709/{design,verify-report}.*
 
 - [x] **Track: Event Log B — backend engine-event ring + GET /api/events, polled into the Tauri feed** (both repos)
   *Status 2026-07-09: DONE + VERIFY PASS-WITH-WARNINGS (backend E:/VoiceAI commit adfb3ea; client
@@ -418,11 +497,29 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: app_shell Phase 7 - Agenda/Audio Cluster Decomposition**
+- [x] **Track: app_shell Phase 7 - Agenda/Audio Cluster Decomposition**
   *Link: [./tracks/app_shell_agenda_audio_decomposition_20260624/](./tracks/app_shell_agenda_audio_decomposition_20260624/)*
   *Status 2026-06-24: PLANNED. Behavior-preserving extraction of the agenda/audio cluster to a
   controller module (function-module + thin delegate). Sequenced AFTER ui_thread_hardening and
   BEFORE qwen_tts_lifecycle_hardening.*
+  *Status 2026-07-09: DONE + VERIFY PASS — FULL SUITE GREEN (3899 passed / 11 skipped / 0 failed),
+  first all-green run: the line-budget known-red is ERASED (app_shell.py 3016 -> 2655 lines, cap
+  ratcheted 3000 -> 2660 with dated never-raise note). Commits: bdc3a79 (23 characterization pins,
+  written BEFORE the move, green against pre-move code — clusters: tick lifecycle, pending-chat/
+  prefetch, enable, chat-filter save-once (previously zero coverage), aggregator routing) + 20e0ab3
+  (the move: 20-function cluster -> opencohost/ui/agenda_audio_controller.py, 796 lines,
+  function-module + thin same-named delegates, obs_lifecycle pattern, NO app_shell import; shared
+  state owned by the shell via injected getter/setters — _pending_audio_bed_stop single-owner,
+  filter-policy save-once, cancelable timer ids; new delegate-consistency gate in
+  test_agenda_audio_controller.py). Judge panel (Opus x2): PASS, ZERO findings. Two documented
+  deviations: cap landed at <2660 not the blueprint's 2650 (real post-move size 2655; ratchet still
+  -340 lines); thread_cls injected as a keyword-only seam so test_topic_scout_integration's
+  _SyncThread monkeypatch stays effective (testability seam, not behavior). Non-goals honored:
+  no _music_* move, no triad change, headless API host unaffected. NOTE: commits live on branch
+  codex/ui-ux-audit-proposal-20260709 (the checked-out branch mid-session; linear, contains all
+  session work; maintenance/big-file-audit-small-fixes-20260629 sits behind at 7779283 — branch
+  naming/merge decision owed before push). Engram: sdd/app-shell-phase7-20260624/{design,
+  characterization,verify-report}.*
 
 ---
 
