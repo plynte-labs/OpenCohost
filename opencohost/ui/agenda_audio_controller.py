@@ -418,6 +418,7 @@ def kira_agenda_enable(
     *,
     kira_agenda: Any,
     audio_bed: Any,
+    motor_ia: Any = None,
     stream_admin_log: Callable[[str], None],
     kira_agenda_force_strict_chat_filter: Callable[[], None],
     kira_agenda_update_status: Callable[[], None],
@@ -438,6 +439,11 @@ def kira_agenda_enable(
         stream_admin_log("[Kira Agenda] No se activa: guardrails de agenda faltantes.")
         kira_agenda_update_status()
         return
+    # Bug B fix: clear any speech-cancellation token left by a prior emergency
+    # stop so this legitimate agenda run can speak. CTk parity with main.py
+    # enable branch.
+    if motor_ia is not None and hasattr(motor_ia, "clear_speech_cancel"):
+        motor_ia.clear_speech_cancel()
     stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
     # Start music bed when co-host mode activates — it's an intentional segment.
     # FR3: the idle check is now atomic inside request_mood (only_if_idle=True)
@@ -548,6 +554,12 @@ def kira_agenda_emergency_stop(
     # pre-filled audio queue.  Do this before drop_pending_sources so the
     # engine sees the interrupt signal first.
     if motor_ia is not None:
+        # Bug B fix: set the speech-cancellation token BEFORE interrupt so a
+        # turn already popped from the priority queue during its generation
+        # phase (the straggler) is refused at _hablar entry instead of playing
+        # after the stop. CTk parity with main.py emergency branch.
+        if hasattr(motor_ia, "cancel_speech_for_sources"):
+            motor_ia.cancel_speech_for_sources(("kira-agenda",))
         motor_ia.interrupt_speaking()
         if hasattr(motor_ia, "drop_pending_sources"):
             motor_ia.drop_pending_sources(("kira-agenda",))

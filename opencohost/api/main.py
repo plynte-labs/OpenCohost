@@ -1579,6 +1579,10 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     # empty_queue branch above: honest applied=False instead of
                     # claiming success while the state never left OFF.
                     return _agenda_response(agenda, applied=False, reason="guardrails_missing")
+                # Bug B fix: clear any speech-cancellation token left by a prior
+                # emergency stop so this legitimate agenda run can speak.
+                if motor is not None and hasattr(motor, "clear_speech_cancel"):
+                    motor.clear_speech_cancel()
                 # CTK parity (app_shell.py:1432): tick immediately on enable so
                 # Kira opens the first topic without waiting out the driver
                 # cadence. nudge() just sets an Event — safe under the lock.
@@ -1598,6 +1602,12 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             # Mirror app_shell.py:1494-1497: interrupt in-flight speech and drop
             # any pending agenda turns from the motor queue.
             if motor is not None:
+                # Bug B fix: set the speech-cancellation token BEFORE interrupt
+                # so a turn already popped from the priority queue during its
+                # generation phase (the straggler) is refused at _hablar entry
+                # instead of playing after the stop.
+                if hasattr(motor, "cancel_speech_for_sources"):
+                    motor.cancel_speech_for_sources(("kira-agenda",))
                 if hasattr(motor, "interrupt_speaking"):
                     motor.interrupt_speaking()
                 if hasattr(motor, "drop_pending_sources"):

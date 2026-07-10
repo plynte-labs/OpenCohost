@@ -188,6 +188,12 @@ class MotorVocalIA(threading.Thread):
         self._processing = False
         self._speaking = False
         self._current_speech_source: Optional[str] = None
+        # Speech-cancellation token (guarded by self._lock). Source prefixes for
+        # which _hablar() must refuse at entry — kills the Bug B straggler whose
+        # turn was popped from the priority queue during its GENERATION phase
+        # before an emergency stop landed. Set by the emergency paths BEFORE
+        # interrupt_speaking(); cleared only on agenda enable.
+        self._cancelled_speech_prefixes: tuple[str, ...] = ()
         self._current_processing_source: Optional[str] = None
         self._downloading = False
         _startup_model, self._model_source = resolve_startup_model()
@@ -365,6 +371,23 @@ class MotorVocalIA(threading.Thread):
         """
         with self._lock:
             self._speaking = False
+
+    def cancel_speech_for_sources(self, prefixes: tuple[str, ...]) -> None:
+        """Refuse to START any upcoming _hablar() whose source matches a prefix.
+
+        Called by the emergency paths BEFORE interrupt_speaking() and
+        drop_pending_sources() so no window exists where a turn already popped
+        from the priority queue (Bug B straggler) slips into _hablar between
+        interrupt and drop. Scoped to ("kira-agenda",) so a concurrent
+        direct/PTT reply is not silenced. Cleared only on agenda enable.
+        """
+        with self._lock:
+            self._cancelled_speech_prefixes = tuple(prefixes)
+
+    def clear_speech_cancel(self) -> None:
+        """Clear the speech-cancellation token. Called only on agenda enable."""
+        with self._lock:
+            self._cancelled_speech_prefixes = ()
 
     def run(self):
         self._log("Inicializando cliente ligero...")
@@ -2557,6 +2580,18 @@ class MotorVocalIA(threading.Thread):
         return clean
 
     def _hablar(self, texto_a_generar, source: str = "direct"):
+        # Bug B fix: refuse a turn whose source was cancelled during its
+        # generation phase (already popped from the priority queue, so
+        # drop_pending_sources can't reach it). Checked BEFORE _speaking=True /
+        # speaking_start so a straggler never starts playback after an emergency
+        # stop. Mid-playback truncation is handled separately by the _speaking
+        # guard in the consumer loop via interrupt_speaking().
+        with self._lock:
+            cancelled = self._cancelled_speech_prefixes
+        if cancelled and any(source.startswith(p) for p in cancelled):
+            self._log(f"Habla suprimida (cancelada): source={source}", level="warning")
+            return
+
         with self._lock:
             self._speaking = True
             self._current_speech_source = source
