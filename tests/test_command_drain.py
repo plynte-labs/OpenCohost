@@ -92,6 +92,35 @@ def test_none_sentinel_survives_drain(monkeypatch):
     assert motor.command_queue.get_nowait() is None
 
 
+def test_process_context_blocks_later_control_commands_from_jumping_ahead(monkeypatch):
+    # WU5 — FIFO fix: a set_profile queued AFTER an earlier process_context
+    # must not be applied first. Applying it first would wipe historial /
+    # switch system_prompt before the earlier-queued direct turn runs,
+    # answering it under the wrong profile.
+    motor, _ = _make_motor()
+    call_log: list = []
+
+    def fake_infer(payload, source="direct", history_text=None):
+        call_log.append(payload)
+
+    monkeypatch.setattr(motor, "_ejecutar_inferencia", fake_infer)
+    motor.system_prompt = "original-prompt"
+
+    motor._priority_queue = [_agenda_item("agenda-turn")]
+    motor.command_queue.put(("process_context", "x"))
+    motor.command_queue.put(("set_profile", {"prompt": "new-prompt", "_profile_name": "P2"}))
+
+    motor._process_priority_queue()
+
+    # Neither command was touched — both stay queued, in original order,
+    # for run() to consume. The profile switch did not jump ahead.
+    assert motor.command_queue.get_nowait() == ("process_context", "x")
+    assert motor.command_queue.get_nowait() == ("set_profile", {"prompt": "new-prompt", "_profile_name": "P2"})
+    assert motor.system_prompt == "original-prompt"
+    assert "x" not in call_log
+    assert call_log == ["agenda-turn"]
+
+
 def test_drain_emits_motor_event(monkeypatch):
     motor, events = _make_motor()
 

@@ -926,39 +926,43 @@ class MotorVocalIA(threading.Thread):
             self._process_priority_queue()
 
     def _drain_control_commands(self) -> None:
-        """Apply queued safe control commands at a turn boundary.
+        """Apply a contiguous run of whitelisted control commands from the
+        FRONT of command_queue at a turn boundary.
 
         The engine is single-threaded: run() only reads command_queue when it is
         NOT inside a dispatch, so control commands posted during a continuous
         priority-queue run (recursive _process_priority_queue) sit unread until
         the queue empties (the command-starvation bug). This boundary is a true
-        idle point (_processing and _speaking both False), so every whitelisted
-        command present is applied now, before the next turn dispatches.
+        idle point (_processing and _speaking both False), so a leading run of
+        whitelisted commands is applied now, before the next turn dispatches.
 
-        Non-whitelisted verbs (process_context — dispatches a turn and would
-        recurse; check_ollama — network), the None shutdown sentinel, and any
-        unknown type are re-queued in original order for run() to consume later.
-        Bounded by a qsize() snapshot and get_nowait/put_nowait only, so it can
-        never block the engine thread or re-pop its own re-puts.
+        Stops at the first non-whitelisted verb (process_context — dispatches a
+        turn and would recurse; check_ollama — network), the None shutdown
+        sentinel, or any unknown type, and leaves it AND everything behind it
+        untouched, in original queue order. This preserves FIFO relative to
+        that earlier-queued item — otherwise a later whitelisted command (e.g.
+        set_profile) could jump ahead and mutate state before the earlier item
+        runs (e.g. answering a queued process_context under a just-switched
+        profile with wiped history).
+
+        Peeks under command_queue.mutex before popping, so a stopping item is
+        never removed and never needs to be re-queued (no put_nowait tail
+        re-insertion, which would itself reorder it behind whatever else
+        arrived while draining). Bounded by a qsize() snapshot so it can never
+        loop indefinitely even under a sustained stream of whitelisted commands.
         """
-        n = self.command_queue.qsize()
-        if n == 0:
-            return
         applied = 0
-        deferred: list = []
-        for _ in range(n):
-            try:
-                comando = self.command_queue.get_nowait()
-            except queue.Empty:
-                break
-            if comando is None or comando[0] not in _DRAIN_SAFE_COMMANDS:
-                deferred.append(comando)
-                continue
+        for _ in range(self.command_queue.qsize()):
+            with self.command_queue.mutex:
+                if not self.command_queue.queue:
+                    break
+                comando = self.command_queue.queue[0]
+                if comando is None or comando[0] not in _DRAIN_SAFE_COMMANDS:
+                    break
+                self.command_queue.queue.popleft()
             tipo, payload = comando
             self._dispatch_command(tipo, payload)
             applied += 1
-        for item in deferred:
-            self.command_queue.put_nowait(item)
         if applied > 0:
             self._log(f"Boundary drain: {applied} comando(s) de control aplicados.")
             self.ui_callback("commands_drained")
