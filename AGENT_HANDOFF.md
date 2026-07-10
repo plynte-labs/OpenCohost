@@ -19,6 +19,27 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-09 night (owner runtime validation + command-starvation fix track)
+
+Owner runtime-tested the NEW Tauri build: event feed A+B live (mutation toasts + motor ring events),
+personalization proven in-conversation, music rotation fixed, agenda advances + pauses cleanly, gateway
+curl 14/14 PASS (trust tier holds: proposals land as `proposed`, operator-only routes 403, idempotent
+dedupe, zero token leakage in audit; leftover test proposal ti_6edb78... for owner to reject in the UI).
+Privacy audit of the live session: PASS on all three sinks.
+
+Their testing exposed 3 REAL core bugs -> **command_starvation_fix_20260709 DONE** (see tracks.md entry;
+commits bedff32, c945fee, dad8330, 889a5b4 + UI 73b1487). Root cause: single engine thread never drains
+command_queue during recursive agenda cycles. Full Python suite now 3916 passed / 0 failed; UI 479/479.
+OWNER RE-VALIDATION OWED (runtime, after restarting the API): mid-agenda speed change applies at the next
+turn boundary; NO straggler turn after emergency stop; Edge-TTS speed audibly changes.
+
+Also explored (engram sdd/liveaudio-tauri-parity/explore): Tauri PTTCard is a UI stub (no mic/hotkey/net);
+CTK LiveVoice = WS client to external WhisperLive; guillotine = physical-key reconcile (ptt_manager.py:419).
+3 scoped options for parity, favorite = sidecar WS bridge (reuses ~90% CTK logic, no SSE dependency).
+Open product question from owner testing: agenda turn semantics — turn_batch_size=2 means the UI "turns"
+slider (max 8) counts HALF-blocks; 50 configured would sound like 25 blocks. Needs a product decision
+(relabel vs true per-turn counting) — small fix once decided.
+
 ## LATEST SNAPSHOT — 2026-07-09 PM (FULL SUITE GREEN: threading track closed + Phase 7 extraction landed)
 
 **Milestone: first all-green full suite** — 3899 passed / 11 skipped / **0 failed** (split only for the
