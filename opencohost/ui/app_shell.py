@@ -69,8 +69,7 @@ from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.health_monitor import HealthMonitor
 from opencohost.core.temp_file_cleanup import cleanup_opencohost_temp_artifacts
 from opencohost.core.music_library import MusicLibrary
-from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, ErrorCode, generate_suggestions, KiraAgendaController, RecoveryPolicy
-from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
+from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, generate_suggestions, KiraAgendaController
 logger = get_logger()
 def _cargar_geometria() -> dict | None:
     try:
@@ -107,6 +106,103 @@ class _ButtonStub:
         pass
 # ── Global crash handler: log unhandled exceptions before the process dies ──
 install_crash_handler()
+
+
+def _agenda_audio_deps(shell) -> dict:
+    """Deps for agenda_audio_controller functions (Phase 7 extraction).
+
+    Module-level function (NOT a method) so unbound
+    VocalAIApp.<delegate>(SimpleNamespace) calls in test_audio_teardown keep
+    working.  ``_d`` is the LIVE instance dict — the getter/setter lambdas
+    below see later writes.  Shared state stays owned by the shell as instance
+    attributes; agenda_audio_controller never duplicates it.
+
+    Intra-cluster callbacks are the shell-bound delegates (resolved via
+    _get_attr, instance-first) so instance-level MagicMock stubs in existing
+    tests keep intercepting — same contract as _motor_handler_deps.
+    """
+    _d = vars(shell)
+    g = VocalAIApp._get_attr  # object.__getattribute__ with default (no CTk recursion)
+    return dict(
+        # ── collaborators (snapshot per call, like _motor_handler_deps) ──
+        kira_agenda=_d.get("kira_agenda"),
+        motor_ia=_d.get("motor_ia"),
+        smart_agg=_d.get("smart_agg"),
+        smart_agg_ui=_d.get("smart_agg_ui"),
+        audio_bed=_d.get("audio_bed"),
+        ui_state=_d.get("_ui_state"),
+        status_bar=_d.get("status_bar"),
+        stream_admin_ui=_d.get("stream_admin_ui"),
+        cohost_agenda_panel=_d.get("cohost_agenda_panel"),
+        agenda_persistence=_d.get("_agenda_persistence"),
+        get_topic_inbox_bridge=lambda: _d.get("_topic_inbox_bridge"),  # set later by _on_agenda_loaded
+        # Injected (not imported by the module) so tests that patch
+        # app_shell.generate_suggestions keep working (obs_client_cls precedent).
+        generate_suggestions=generate_suggestions,
+        # Worker thread factory resolved from app_shell.threading at deps-build
+        # time so tests that patch app_shell.threading (e.g. the _SyncThread shim
+        # in test_topic_scout_integration) still drive the idle-suggestion worker
+        # synchronously after the tick body moved to agenda_audio_controller.
+        thread_cls=threading.Thread,
+        # ── marshaling / timers (frozen-boundary callables) ──
+        schedule_ui_update=g(shell, "_safe_after"),
+        after=g(shell, "after"),
+        after_cancel=g(shell, "after_cancel"),
+        # ── logging / operator ──
+        print_log=g(shell, "_print_log"),
+        log_accion=g(shell, "_log_accion"),
+        stream_admin_log=g(shell, "_on_stream_admin_log"),
+        notify_operator=g(shell, "_notify_operator"),
+        # ── shell services that STAY on VocalAIApp ──
+        dispatch_audio_play=g(shell, "_dispatch_audio_play"),
+        clear_obs_joyita=g(shell, "_clear_obs_joyita"),
+        is_kira_agenda_speech_source=g(shell, "_is_kira_agenda_speech_source"),
+        # ── intra-cluster callbacks: ALWAYS the shell-bound delegates ──
+        kira_agenda_tick=g(shell, "_kira_agenda_tick"),
+        kira_agenda_schedule_tick=g(shell, "_kira_agenda_schedule_tick"),
+        kira_agenda_update_status=g(shell, "_kira_agenda_update_status"),
+        enqueue_kira_agenda_action=g(shell, "_enqueue_kira_agenda_action"),
+        kira_agenda_force_strict_chat_filter=g(shell, "_kira_agenda_force_strict_chat_filter"),
+        kira_agenda_restore_chat_filter=g(shell, "_kira_agenda_restore_chat_filter"),
+        kira_agenda_has_higher_priority_pending=g(shell, "_kira_agenda_has_higher_priority_pending"),
+        kira_agenda_has_non_agenda_audio_work=g(shell, "_kira_agenda_has_non_agenda_audio_work"),
+        kira_agenda_clear_prefetch=g(shell, "_kira_agenda_clear_prefetch"),
+        kira_agenda_play_prefetched_if_ready=g(shell, "_kira_agenda_play_prefetched_if_ready"),
+        check_pending_audio_bed_stop=g(shell, "_check_pending_audio_bed_stop"),
+        dispatch_suggestion_recompute=g(shell, "_dispatch_suggestion_recompute"),
+        apply_idle_suggestions=g(shell, "_apply_idle_suggestions"),
+        # ── shared state: LIVE getter/setter pairs over the instance dict ──
+        is_closing=lambda: _d.get("_closing", False),
+        get_pending_audio_bed_stop=lambda: _d.get("_pending_audio_bed_stop", False),
+        set_pending_audio_bed_stop=lambda v: _d.__setitem__("_pending_audio_bed_stop", v),
+        get_kira_agenda_tick_id=lambda: _d.get("_kira_agenda_tick_id"),
+        set_kira_agenda_tick_id=lambda v: _d.__setitem__("_kira_agenda_tick_id", v),
+        get_prefetch_retry_id=lambda: _d.get("_prefetch_retry_id"),
+        set_prefetch_retry_id=lambda v: _d.__setitem__("_prefetch_retry_id", v),
+        get_prefetched_action=lambda: _d.get("_kira_agenda_prefetched_action"),
+        set_prefetched_action=lambda v: _d.__setitem__("_kira_agenda_prefetched_action", v),
+        get_idle_ticks=lambda: _d.get("_idle_ticks", 0),
+        set_idle_ticks=lambda v: _d.__setitem__("_idle_ticks", v),
+        get_suggestion_gen=lambda: _d.get("_suggestion_gen", 0),
+        set_suggestion_gen=lambda v: _d.__setitem__("_suggestion_gen", v),
+        get_pending_compact_chat=lambda: _d.get("_kira_agenda_pending_compact_chat", ""),
+        set_pending_compact_chat=lambda v: _d.__setitem__("_kira_agenda_pending_compact_chat", v),
+        # save-once guard — preserves hasattr/delattr semantics exactly:
+        has_previous_filter_policy=lambda: "_kira_agenda_previous_filter_policy" in _d,
+        get_previous_filter_policy=lambda: _d.get("_kira_agenda_previous_filter_policy"),
+        set_previous_filter_policy=lambda v: _d.__setitem__("_kira_agenda_previous_filter_policy", v),
+        clear_previous_filter_policy=lambda: _d.pop("_kira_agenda_previous_filter_policy", None),
+        get_agenda_was_paused=lambda: _d.get("_agenda_was_paused", False),
+        set_agenda_was_paused=lambda v: _d.__setitem__("_agenda_was_paused", v),
+    )
+
+
+def _agenda_audio_call(shell, fn: str, **kw):
+    """Call agenda_audio_controller.<fn> with the injected deps (Phase 7)."""
+    import opencohost.ui.agenda_audio_controller as _a  # lazy import (obs/motor precedent)
+    return getattr(_a, fn)(**_agenda_audio_deps(shell), **kw)
+
+
 class VocalAIApp(ctk.CTk):
     """Thin composition layer — delegates all work to panel modules."""
     def __init__(self) -> None:
@@ -1185,53 +1281,12 @@ class VocalAIApp(ctk.CTk):
 
         _threading.Thread(target=_worker, daemon=True).start()
 
+    # Agenda/audio delegates — bodies in agenda_audio_controller.py (Phase 7)
     def _dispatch_suggestion_recompute(self, gen: int, existing_topics: list, last_outputs: list, session_id: str) -> None:
-        """FR2: run heavy idle-tick reads on a worker; marshal result back via _safe_after."""
-        smart_agg = self.smart_agg
-        motor_ia = self.motor_ia
-        def _worker() -> None:
-            try:
-                intent_summary = smart_agg.intent_aggregator.summarize()
-                vibe_data = smart_agg.thermometer.compute_vibe()
-                vibe_temp = vibe_data.get("temperature", 50) if isinstance(vibe_data, dict) else 50
-                snapshots = smart_agg.history.get_recent_context_snapshots(session_id, max_items=3)
-                suggestions = generate_suggestions(
-                    intent_summary=intent_summary,
-                    snapshots=snapshots,
-                    vibe_temperature=vibe_temp,
-                    existing_topics=existing_topics,
-                    last_outputs=last_outputs,
-                )
-            except Exception:
-                logger.exception("idle-suggestion recompute failed")
-                return
-            # Topic Scout (topic_scout_llm_20260629): optional LLM "third source".
-            # scout_digest() is fully self-contained (returns [] on any failure and
-            # when SCOUT_ENABLED is off); wrapped defensively so it can never take
-            # the rule-based suggestions down with it.
-            try:
-                scout_titles = motor_ia.scout_digest()
-            except Exception:
-                logger.exception("topic scout failed")
-                scout_titles = []
-            if scout_titles:
-                suggestions = list(suggestions) + list(scout_titles)
-            self._safe_after(lambda: self._apply_idle_suggestions(gen, suggestions))
-        threading.Thread(target=_worker, daemon=True).start()
+        _agenda_audio_call(self, "dispatch_suggestion_recompute", gen=gen, existing_topics=existing_topics, last_outputs=last_outputs, session_id=session_id)
 
     def _apply_idle_suggestions(self, gen: int, suggestions: list) -> None:
-        """FR2: apply idle suggestions on UI thread (supersession guards: generation + agenda state)."""
-        # Post-teardown guard: a late worker can marshal here after on_closing
-        # set _closing; do not touch Tk/agenda during/after teardown.
-        if self.__dict__.get("_closing", False):
-            return
-        if gen != self._suggestion_gen:
-            return
-        if not hasattr(self, "kira_agenda") or self.kira_agenda.state != AgendaState.IDLE:
-            return
-        if suggestions:
-            self.kira_agenda.suggest_topics(suggestions)
-            self._kira_agenda_update_status()
+        _agenda_audio_call(self, "apply_idle_suggestions", gen=gen, suggestions=suggestions)
 
     def _music_play_mood(self, mood: str) -> None:
         # Bug A fix: single-flight for preview buttons — at most ONE worker, last-click
@@ -1315,18 +1370,9 @@ class VocalAIApp(ctk.CTk):
         sa.set_threshold_preset_callback(lambda v: self._on_stream_admin_threshold_preset(v))
         sa.set_cooldown_preset_callback(lambda v: self._on_stream_admin_cooldown_preset(v))
 
+    # Agenda/audio delegate — body in agenda_audio_controller.py (Phase 7)
     def _kira_agenda_add_topic(self, title: str, angle: str, constraints: list[str], priority: str = "normal", response_length: str = "normal", max_turns: int | None = None) -> None:
-        title = (title or "").strip()
-        try:
-            if max_turns is not None:
-                self.kira_agenda.set_session_settings(max_turns_per_topic=max_turns, response_length=response_length)
-            topic = self.kira_agenda.add_topic(title, angle, constraints, approved=True, priority=priority, response_length=response_length)
-            self.kira_agenda.queue_topic(topic.id)
-        except ValueError as e:
-            self._notify_operator("Kira Agenda", str(e))
-            return
-        self._on_stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}, {self.kira_agenda.max_turns_per_topic} turnos globales)")
-        self._kira_agenda_update_status()
+        _agenda_audio_call(self, "kira_agenda_add_topic", title=title, angle=angle, constraints=constraints, priority=priority, response_length=response_length, max_turns=max_turns)
 
     def _editorial_card_create_or_update(
         self,
@@ -1418,122 +1464,24 @@ class VocalAIApp(ctk.CTk):
         self._on_stream_admin_log(f"[Kira Agenda] Tema reordenado: {topic.title}")
         self._kira_agenda_update_status()
 
+    # Agenda/audio delegates — bodies in agenda_audio_controller.py (Phase 7)
     def _kira_agenda_enable(self) -> None:
-        if not self.kira_agenda.queued_topics() and not self.kira_agenda.active_topic:
-            self._on_stream_admin_log("[Kira Agenda] No se activa: no hay temas en cola.")
-            self._kira_agenda_update_status()
-            return
-        self._kira_agenda_force_strict_chat_filter()
-        self.kira_agenda.enable()
-        if self.kira_agenda.state == AgendaState.OFF:
-            # Fail-closed gate refused (GUARDRAILS_MISSING) — do not claim
-            # activation or start the music bed. _kira_agenda_update_status
-            # already renders the error code/label to the operator.
-            self._on_stream_admin_log("[Kira Agenda] No se activa: guardrails de agenda faltantes.")
-            self._kira_agenda_update_status()
-            return
-        self._on_stream_admin_log("[Kira Agenda] Modo co-host con agenda activado.")
-        # Start music bed when co-host mode activates — it's an intentional segment.
-        # FR3: the idle check is now atomic inside request_mood (only_if_idle=True)
-        # so the check-then-act race between concurrent enables is eliminated.
-        # request_mood already returns False when not enabled, so no pre-check needed.
-        if hasattr(self, "audio_bed"):
-            self._dispatch_audio_play(
-                lambda: self.audio_bed.request_mood("normal", force=True, boundary=True, only_if_idle=True)
-            )
-        self._kira_agenda_update_status()
-        self._kira_agenda_tick()
+        _agenda_audio_call(self, "kira_agenda_enable")
 
     def _kira_agenda_soft_stop(self) -> None:
-        action = self.kira_agenda.soft_stop()
-        self._enqueue_kira_agenda_action(action)
-        self._on_stream_admin_log("[Kira Agenda] Stop suave solicitado.")
-        # Fix 3: defer the graceful audio_bed.stop() so it fires only AFTER
-        # Kira finishes her in-flight closing speech.  Setting this flag here
-        # tells _check_pending_audio_bed_stop (called from _on_motor_speaking_end)
-        # to call audio_bed.stop(emergency=False) once the agenda is fully OFF.
-        if hasattr(self, "audio_bed"):
-            self._pending_audio_bed_stop = True
-            # Round 2 fix: when soft_stop() fast-exits (agenda already OFF/IDLE/
-            # WAITING_SIGNAL with no active topic), no speech is enqueued so
-            # _on_motor_speaking_end never fires.  Call the helper synchronously
-            # here so the graceful stop fires immediately in that case.  When the
-            # agenda IS still speaking, the helper's state != OFF guard returns
-            # early and the existing deferred path (_on_motor_speaking_end) still
-            # handles it — both call sites are intentionally kept.
-            self._check_pending_audio_bed_stop()
-        self._kira_agenda_update_status()
+        _agenda_audio_call(self, "kira_agenda_soft_stop")
 
     def _check_pending_audio_bed_stop(self) -> None:
-        """Fire the deferred graceful audio-bed stop if the agenda has finished.
-
-        Called from _on_motor_speaking_end after each speech segment ends.
-        Does nothing if the pending flag is not set or the agenda is still active.
-        """
-        if not getattr(self, "_pending_audio_bed_stop", False):
-            return
-        if not hasattr(self, "audio_bed"):
-            self._pending_audio_bed_stop = False
-            return
-        # Only fire once the agenda has fully wound down (state OFF).
-        # Intermediate states (SPEAKING, GENERATING, TOPIC_CLOSING) mean the
-        # closing speech is still being delivered — do not stop the music yet.
-        from opencohost.smart_aggregator.kira_agenda_controller import AgendaState
-        if hasattr(self, "kira_agenda") and self.kira_agenda.state != AgendaState.OFF:
-            return
-        self._pending_audio_bed_stop = False
-        self.audio_bed.stop(emergency=False)
+        _agenda_audio_call(self, "check_pending_audio_bed_stop")
 
     def _kira_agenda_emergency_stop(self) -> None:
-        self._kira_agenda_prefetched_action = None
-        self.kira_agenda.emergency_stop()
-        if self._kira_agenda_tick_id is not None:
-            try:
-                self.after_cancel(self._kira_agenda_tick_id)
-            except Exception:
-                pass
-            self._kira_agenda_tick_id = None
-        # Cancel any pending prefetch retry (fix #B).
-        if self.__dict__.get("_prefetch_retry_id") is not None:
-            try:
-                self.after_cancel(self._prefetch_retry_id)
-            except Exception:
-                pass
-            self._prefetch_retry_id = None
-        # Bug 4 fix: set _speaking=False on the motor so the in-flight _hablar
-        # thread's consumer loop exits immediately instead of draining the full
-        # pre-filled audio queue.  Do this before drop_pending_sources so the
-        # engine sees the interrupt signal first.
-        if hasattr(self, "motor_ia"):
-            self.motor_ia.interrupt_speaking()
-            if hasattr(self.motor_ia, "drop_pending_sources"):
-                self.motor_ia.drop_pending_sources(("kira-agenda",))
-        # Bug 1 fix: hard-stop the music bed immediately on emergency teardown.
-        # Secondary fix: clear any stale _pending_audio_bed_stop flag set by a
-        # prior soft_stop, so a deferred speaking_end callback cannot trigger an
-        # unwanted graceful stop after the hard stop has already fired.
-        if hasattr(self, "audio_bed"):
-            self._pending_audio_bed_stop = False
-            self.audio_bed.stop(emergency=True)
-        self._on_stream_admin_log("[Kira Agenda] Emergencia: agenda detenida y pendientes descartados.")
-        self._kira_agenda_restore_chat_filter()
-        self._clear_obs_joyita("KiraJoyita")
-        self._kira_agenda_update_status()
+        _agenda_audio_call(self, "kira_agenda_emergency_stop")
 
     def _kira_agenda_force_strict_chat_filter(self) -> None:
-        if not getattr(self, "smart_agg", None):
-            return
-        if not hasattr(self, "_kira_agenda_previous_filter_policy"):
-            self._kira_agenda_previous_filter_policy = self.smart_agg.get_filter_policy()
-        self.smart_agg.set_filter_policy("strict")
+        _agenda_audio_call(self, "kira_agenda_force_strict_chat_filter")
 
     def _kira_agenda_restore_chat_filter(self) -> None:
-        if not getattr(self, "smart_agg", None):
-            return
-        previous = getattr(self, "_kira_agenda_previous_filter_policy", None)
-        if previous:
-            self.smart_agg.set_filter_policy(previous)
-            delattr(self, "_kira_agenda_previous_filter_policy")
+        _agenda_audio_call(self, "kira_agenda_restore_chat_filter")
 
     def _kira_agenda_approve_suggestion(self, topic_id: str) -> None:
         """Approve a suggestion (DRAFTED topic or inbox proposal) and queue it."""
@@ -1549,267 +1497,40 @@ class VocalAIApp(ctk.CTk):
         self._topic_inbox_bridge.reject(topic_id, self.kira_agenda)
         self._kira_agenda_update_status()
 
+    # Agenda/audio delegates — bodies in agenda_audio_controller.py (Phase 7)
     def _kira_agenda_tick(self) -> None:
-        if not hasattr(self, "kira_agenda"):
-            return
-
-        # Auto-recovery: if PAUSED, check if the recovery policy permits a retry
-        if self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
-            if self.kira_agenda.can_auto_resume():
-                self._on_stream_admin_log(
-                    f"[Kira Agenda] Auto-recuperación: intento {self.kira_agenda.recovery.retry_attempt}"
-                    f" de {len(RecoveryPolicy.RETRY_DELAYS_SECONDS)}"
-                    f" | Error: {self.kira_agenda.recovery.error_code.human()}"
-                )
-                # Fall through to next_action — state is now IDLE
-            elif self.kira_agenda.state == AgendaState.HARD_PAUSED:
-                self._on_stream_admin_log(
-                    "[Kira Agenda] HARD_PAUSED: se requiere intervención del streamer. "
-                    f"Motivo: {self.kira_agenda.recovery.last_failure_reason or 'fallos repetidos'}"
-                )
-                self._kira_agenda_update_status()
-                return  # No tick for HARD_PAUSED
-            else:
-                # Timer not ready — reschedule and wait
-                self._kira_agenda_update_status()
-                self._kira_agenda_schedule_tick(4500)
-                return
-
-        # Auto-exit: when IDLE with no active topic and nothing queued,
-        # co-host has exhausted all planned work.  Transition to OFF so
-        # the tick stops, the UI reflects reality, and chat flows through
-        # the standalone RF3 path without overhead.
-        # Moved AFTER next_action() so _select_next_topic() has a chance
-        # to pick the next queued topic before we declare the session done.
-
-        try:
-            action = self.kira_agenda.next_action(
-                motor_busy=getattr(self.motor_ia, "is_processing", False),
-                kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-            )
-        except Exception:
-            # Safety net: if next_action ever throws (shouldn't — it's
-            # deterministic and runs on internal state only), log, skip
-            # this tick, and reschedule so Kira doesn't go permanently
-            # silent on a live stream.
-            logger.exception("KiraAgendaController.next_action() raised")
-            self._on_stream_admin_log(
-                "[Kira Agenda] Error interno en next_action; reintentando en el siguiente tick."
-            )
-            action = AgendaAction.none()
-
-        self._enqueue_kira_agenda_action(action)
-
-        if (
-            action.kind == "none"
-            and self.kira_agenda.state == AgendaState.IDLE
-            and self.kira_agenda.active_topic is None
-            and not self.kira_agenda.queued_topics()
-        ):
-            self.kira_agenda.state = AgendaState.OFF
-            self._on_stream_admin_log("[Kira Agenda] Sesión completada: sin temas pendientes.")
-            self._kira_agenda_restore_chat_filter()
-            self._kira_agenda_update_status()
-            self._clear_obs_joyita("KiraJoyita")
-            return
-
-        # Auto-suggestion trigger: on 3rd consecutive IDLE+empty-queue tick (~13.5s)
-        if self.kira_agenda.state == AgendaState.IDLE and not self.kira_agenda.queued_topics():
-            self._idle_ticks += 1
-            if self._idle_ticks >= 3 and self.kira_agenda.can_suggest():
-                # Rich-context gate: skip if aggregator has no data
-                if self.smart_agg and getattr(self.smart_agg, "_session_id", None):
-                    # FR2: snapshot mutable agenda state on main thread, then dispatch
-                    # heavy reads (summarize/compute_vibe/snapshots) off the UI thread.
-                    existing_topics = list(self.kira_agenda.topics)
-                    last_outputs = list(self.kira_agenda.last_outputs)
-                    self._suggestion_gen += 1
-                    self._dispatch_suggestion_recompute(
-                        self._suggestion_gen, existing_topics, last_outputs, self.smart_agg._session_id,
-                    )
-                self._idle_ticks = 0
-        else:
-            self._idle_ticks = 0
-
-        self._kira_agenda_update_status()
-        self._kira_agenda_schedule_tick(4500)
+        _agenda_audio_call(self, "kira_agenda_tick")
 
     def _kira_agenda_schedule_tick(self, delay_ms: int) -> None:
-        if self.kira_agenda.state in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}:
-            return
-        if self._kira_agenda_tick_id is not None:
-            try:
-                self.after_cancel(self._kira_agenda_tick_id)
-            except Exception:
-                pass
-        self._kira_agenda_tick_id = self.after(delay_ms, self._kira_agenda_tick)
+        _agenda_audio_call(self, "kira_agenda_schedule_tick", delay_ms=delay_ms)
 
     def _enqueue_kira_agenda_action(self, action: AgendaAction) -> None:
-        if action.kind != "enqueue" or not action.prompt:
-            return
-        self._kira_agenda_prefetched_action = None
-        if hasattr(self.motor_ia, "clear_prefetched_agenda"):
-            self.motor_ia.clear_prefetched_agenda()
-        if action.source.startswith("kira-agenda") and hasattr(self.motor_ia, "replace_pending"):
-            self.motor_ia.replace_pending(action.prompt, priority=action.priority, source=action.source)
-        else:
-            self.motor_ia.enqueue(
-                action.prompt, priority=action.priority, source=action.source,
-                history_text=action.history_text,
-            )
+        _agenda_audio_call(self, "enqueue_kira_agenda_action", action=action)
 
     def _kira_agenda_has_higher_priority_pending(self, action: AgendaAction) -> bool:
-        if not hasattr(self.motor_ia, "has_pending_priority_before"):
-            return False
-        return bool(self.motor_ia.has_pending_priority_before(action.priority))
+        return _agenda_audio_call(self, "kira_agenda_has_higher_priority_pending", action=action)
 
     def _kira_agenda_has_non_agenda_audio_work(self) -> bool:
-        """Return True when a human/direct path owns processing or speech."""
-        processing_source = str(getattr(self.motor_ia, "current_processing_source", "") or "")
-        speech_source = str(getattr(self.motor_ia, "current_speech_source", "") or "")
-        processing = bool(getattr(self.motor_ia, "is_processing", False))
-        speaking = bool(getattr(self.motor_ia, "is_speaking", False))
-
-        if processing and not processing_source.startswith("kira-agenda"):
-            return True
-        if speaking and not speech_source.startswith("kira-agenda"):
-            return True
-        return False
+        return _agenda_audio_call(self, "kira_agenda_has_non_agenda_audio_work")
 
     def _kira_agenda_consume_pending_chat_if_due(self) -> bool:
-        compact_chat = getattr(self, "_kira_agenda_pending_compact_chat", "").strip()
-        if not compact_chat or not hasattr(self, "kira_agenda"):
-            return False
-        if not hasattr(self.kira_agenda, "chat_signal_due") or not self.kira_agenda.chat_signal_due():
-            return False
-        action = self.kira_agenda.next_action(compact_chat=compact_chat)
-        if action.kind != "enqueue":
-            return False
-        self._kira_agenda_pending_compact_chat = ""
-        self._enqueue_kira_agenda_action(action)
-        self._kira_agenda_update_status()
-        return True
+        return _agenda_audio_call(self, "kira_agenda_consume_pending_chat_if_due")
 
     def _kira_agenda_prefetch_while_speaking(self) -> None:
-        if not hasattr(self, "kira_agenda") or not hasattr(self.motor_ia, "prefetch_agenda"):
-            return
-        if not self._is_kira_agenda_speech_source():
-            return
-        action = self.kira_agenda.prefetch_action_after_current_speech()
-        if action.kind != "enqueue" or not action.prompt:
-            return
-        if self.motor_ia.prefetch_agenda(action.prompt, priority=action.priority, source=action.source):
-            self._kira_agenda_prefetched_action = action
+        _agenda_audio_call(self, "kira_agenda_prefetch_while_speaking")
 
     def _kira_agenda_play_prefetched_if_ready(self) -> bool:
-        # Guard: teardown in progress — do not reschedule.
-        if self.__dict__.get("_closing", False):
-            return False
-        action = getattr(self, "_kira_agenda_prefetched_action", None)
-        if not action or not hasattr(self.motor_ia, "wait_prefetched_agenda"):
-            return False
-        if self._kira_agenda_has_higher_priority_pending(action):
-            self._on_stream_admin_log("[Kira Agenda] Prefetch pausado: hay PTT/chat pendiente con más prioridad.")
-            return self._kira_agenda_clear_prefetch()
-        if self._kira_agenda_has_non_agenda_audio_work():
-            self._on_stream_admin_log("[Kira Agenda] Prefetch cancelado: hay interacción directa activa.")
-            return self._kira_agenda_clear_prefetch()
-        # fix #B: non-blocking check (timeout=0); retry via after() if not ready yet.
-        if not self.motor_ia.wait_prefetched_agenda(timeout=0):
-            # Cancel any existing retry before scheduling a new one (double-schedule guard).
-            if self.__dict__.get("_prefetch_retry_id") is not None:
-                try:
-                    self.after_cancel(self._prefetch_retry_id)
-                except Exception:
-                    pass
-            # This method is always called from the Tk event loop (main thread).
-            # Use self.after() directly to capture the cancellable ID.
-            try:
-                self._prefetch_retry_id = self.after(50, self._kira_agenda_play_prefetched_if_ready)
-            except RuntimeError:
-                self._prefetch_retry_id = None
-            return False
-        if not self.kira_agenda.start_prefetched_action(action):
-            self._on_stream_admin_log("[Kira Agenda] Prefetch descartado: el tema ya se completó.")
-            return self._kira_agenda_clear_prefetch()
-        self._kira_agenda_prefetched_action = None
-        if self.motor_ia.play_prefetched_agenda():
-            self._kira_agenda_update_status()
-            return True
-        return False
+        return _agenda_audio_call(self, "kira_agenda_play_prefetched_if_ready")
 
     def _kira_agenda_clear_prefetch(self) -> bool:
-        self._kira_agenda_prefetched_action = None
-        # Cancel any pending prefetch retry to avoid a leaked timer (fix #4).
-        if self.__dict__.get("_prefetch_retry_id") is not None:
-            try:
-                self.after_cancel(self._prefetch_retry_id)
-            except Exception:
-                pass
-            self._prefetch_retry_id = None
-        if hasattr(self.motor_ia, "clear_prefetched_agenda"):
-            self.motor_ia.clear_prefetched_agenda()
-        return False
+        return _agenda_audio_call(self, "kira_agenda_clear_prefetch")
 
     def _is_kira_agenda_speech_source(self) -> bool:
         source = getattr(self.motor_ia, "current_speech_source", "") or ""
         return str(source).startswith("kira-agenda")
 
     def _kira_agenda_update_status(self) -> None:
-        if not hasattr(self, "stream_admin_ui") or not hasattr(self, "kira_agenda"):
-            return
-        # Write-through persistence: every agenda mutation funnels through
-        # this method; the call is a no-op when nothing actually changed.
-        self._agenda_persistence.save_if_changed(self.kira_agenda)
-        active = self.kira_agenda.active_topic
-        queued = len(self.kira_agenda.queued_topics())
-        recovery = self.kira_agenda.recovery
-        error_info = ""
-        if recovery.error_code != ErrorCode.NONE:
-            error_info = f" · ⚠ {recovery.error_code.human()} (intento {recovery.retry_attempt}/{len(RecoveryPolicy.RETRY_DELAYS_SECONDS)})"
-        if active:
-            text = f"Kira está desarrollando: “{active.title}” · Estado: {self.kira_agenda.state.value} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
-            current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {self.kira_agenda.rhythm}/{self.kira_agenda.response_length}/{self.kira_agenda.safety_mode}\nTurnos hablados: {active.turns_spoken}/{self.kira_agenda.max_turns_per_topic}"
-        else:
-            text = f"Agenda: {self.kira_agenda.state.value} · temas en cola: {queued} · modo: {self.kira_agenda.safety_mode} · fallos: {self.kira_agenda.failure_count}{error_info}"
-            current_topic = "Sin tema activo"
-        if self.kira_agenda.state == AgendaState.HARD_PAUSED:
-            color = "#cc3333"
-        elif self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR:
-            color = "#ffaa00"
-        else:
-            color = "#8fa3b8"
-        self.after(0, lambda: self.stream_admin_ui.set_agenda_status(text, color))
-        if hasattr(self, "cohost_agenda_panel"):
-            queue_lines = [
-                f"{idx}. [{topic.priority}] {topic.title}"
-                for idx, topic in enumerate(self.kira_agenda.queued_topics(), start=1)
-            ]
-            self.after(0, lambda: self.cohost_agenda_panel.update_status(
-                state=self.kira_agenda.state.value,
-                current_topic=current_topic,
-                queue_lines=queue_lines,
-                failures=self.kira_agenda.failure_count,
-                error_code=recovery.error_code.human(),
-                error_reasons=recovery.last_reasons,
-            ))
-            # Forward DRAFTED + inbox proposals to the suggestions panel
-            # Guard: bridge is None until _on_agenda_loaded fires (fix #C).
-            if self._topic_inbox_bridge is not None:
-                suggestions_list = self._topic_inbox_bridge.build_suggestions(self.kira_agenda)
-                self.after(0, lambda sl=suggestions_list: self.cohost_agenda_panel.update_suggestions(sl))
-        # BUG-003: visual signal for PAUSED_NEEDS_OPERATOR via TTS pill
-        # Only update on state transitions to avoid overwriting pipeline-driven TTS state
-        was_paused = getattr(self, "_agenda_was_paused", False)
-        is_paused = self.kira_agenda.state == AgendaState.PAUSED_NEEDS_OPERATOR
-        if self.status_bar and was_paused != is_paused:
-            # Route through the UIState setter (single source of truth + validation)
-            # instead of poking StatusBar directly. "paused" is a VALID_TTS_STATUSES value.
-            if is_paused:
-                self.after(0, lambda: setattr(self._ui_state, "tts_status", "paused"))
-            else:
-                self.after(0, lambda: setattr(self._ui_state, "tts_status", "idle"))
-        self._agenda_was_paused = is_paused
+        _agenda_audio_call(self, "kira_agenda_update_status")
 
     def _on_stream_admin_connect_chat_live(self) -> None:
         entry_url = self.stream_admin_ui._widget("entry_stream_chat_url")
@@ -2031,89 +1752,7 @@ class VocalAIApp(ctk.CTk):
         self.log_queue.put("[SmartAggregator] RF3 listo. Ingresa un video_id/URL de YouTube Live para conectar chat.")
 
     def _on_smart_aggregated_context(self, data: dict) -> None:
-        """Route compact chat either to Agenda Mode or the existing RF3 reaction."""
-        # When the controller is PAUSED_NEEDS_OPERATOR, chat must fall
-        # through to the standalone RF3 reaction path — otherwise chat
-        # responses are silently dropped while the operator sees a frozen UI.
-        if (
-            getattr(self, "kira_agenda", None)
-            and self.kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}
-            # When IDLE with no active topic and nothing queued, co-host has
-            # exhausted all planned topics.  Let chat fall through to the
-            # standalone RF3 reaction path instead of being silently consumed
-            # by next_action() which returns none() in IDLE+empty state.
-            and not (
-                self.kira_agenda.state == AgendaState.IDLE
-                and self.kira_agenda.active_topic is None
-                and not self.kira_agenda.queued_topics()
-            )
-        ):
-            intent_summary = data.get("intent_summary") or {}
-            compact_chat = intent_summary.get("prompt") or ""
-            if not compact_chat:
-                # SECURITY: this fallback joins UNSUMMARIZED viewer chat. It is
-                # contained downstream by _build_prompt's read-only data delimiters
-                # (KiraAgendaController._wrap_untrusted_chat), which make prompt
-                # injection structurally inert. The full fix — routing this path
-                # through the structured ChatContextPacket so RAW chat never reaches
-                # the prompt — is the "Raw-Chat Prompt Exposure" track in
-                # conductor/tracks.md. Do not remove the downstream delimiters.
-                context = data.get("context", [])[-6:]
-                compact_chat = "\n".join(m.get("text", "") for m in context if m.get("text"))
-            if getattr(self.motor_ia, "is_processing", False) or getattr(self.motor_ia, "is_speaking", False):
-                self._kira_agenda_pending_compact_chat = compact_chat.strip()
-                self._kira_agenda_update_status()
-                return
-            action = self.kira_agenda.next_action(
-                motor_busy=getattr(self.motor_ia, "is_processing", False),
-                kira_speaking=getattr(self.motor_ia, "is_speaking", False),
-                compact_chat=compact_chat,
-            )
-            self._enqueue_kira_agenda_action(action)
-            self._kira_agenda_update_status()
-            return
-        # ── Standalone RF3 path ─────────────────────────────────────────
-        # Phase B: use ChatContextPacket instead of defective compact_chat
-        import opencohost.smart_aggregator.chat_input_contract as _ic
-        if _ic.USE_INPUT_CONTRACT_PROMPT:
-            try:
-                context = data.get("context", [])
-                intent_summary = data.get("intent_summary", {})
-                old_compact = intent_summary.get("prompt", "")
-
-                builder = ChatContextPacketBuilder()
-                packet = builder.build(context)
-
-                if not packet.should_call_llm:
-                    # No useful signal — stay silent instead of generating
-                    # "qué paz", "qué silencio", etc.
-                    self._log_accion(
-                        f"[InputContract] stay_silent: "
-                        f"msgs={packet.total_messages} users={packet.unique_users} "
-                        f"event={packet.primary_event} confidence={packet.confidence:.2f}"
-                    )
-                    return
-
-                # Valid signal: use packet context as prompt source
-                new_context = packet.to_prompt_context()
-                # Inject into data dict for smart_agg_ui
-                data["intent_summary"]["prompt"] = new_context
-                data["_source_used"] = "input_contract"
-
-                self._log_accion(
-                    f"[InputContract] using packet: "
-                    f"event={packet.primary_event} goal={packet.response_goal} "
-                    f"highlight={'yes' if packet.selected_highlight else 'no'} "
-                    f"clusters={len(packet.topic_clusters)} "
-                    f"old_compact={old_compact[:80]!r}"
-                )
-            except Exception:
-                # Fallback: use old compact_chat on any error
-                data["_source_used"] = "fallback_old_compact"
-        else:
-            data["_source_used"] = "old_compact"
-
-        self.smart_agg_ui.on_aggregated_context(data)
+        _agenda_audio_call(self, "on_smart_aggregated_context", data=data)
 
     # ──────────────────────────────────────────────
     # View switching

@@ -256,7 +256,16 @@ class TestAppShellStructure:
         # MEMORIAS_ENABLED so a dormant run never touches disk), and
         # ProfilePanel gains memoria_store_getter for the R8 delete-purge signal.
         # Net +5 lines. Actual: 2994 lines. Decomposition debt unchanged.
-        assert len(lines) < 3000, f"app_shell.py has {len(lines)} lines, expected < 3000"
+        # Lowered 3000 -> 2660 (2026-07-09): app_shell_agenda_audio_decomposition_20260624
+        # Phase 7 — extracted the agenda/audio cluster (tick loop, prefetch, audio
+        # coordination, chat-filter lifecycle, status/aggregator glue; 20 functions)
+        # to opencohost/ui/agenda_audio_controller.py; thin same-named delegates +
+        # module-level _agenda_audio_deps()/_agenda_audio_call() left on VocalAIApp.
+        # Actual: 2655 lines (the design's 2592 projection was optimistic — deps
+        # builder + delegate verbosity ran long, the flagged risk; cap set to 2660
+        # for ~5 lines of slack). This also clears the pre-existing 3016>3000 red
+        # debt that shipped from HEAD. NEVER raise this cap.
+        assert len(lines) < 2660, f"app_shell.py has {len(lines)} lines, expected < 2660"
 
     def test_app_shell_imports_all_panels(self):
         from opencohost.ui import app_shell

@@ -17,6 +17,10 @@ APP_SHELL = ROOT / "opencohost" / "ui" / "app_shell.py"
 # Phase 6 decomposition relocated the motor-event/speaking handlers out of
 # app_shell.py into this module; source-level checks for that behavior read both.
 MOTOR_HANDLERS = ROOT / "opencohost" / "ui" / "motor_event_handlers.py"
+# Phase 7 decomposition relocated the agenda/audio cluster (tick loop, prefetch,
+# audio coordination, chat-filter lifecycle, status glue) out of app_shell.py into
+# this module; source-level checks for moved bodies read both.
+AGENDA_AUDIO = ROOT / "opencohost" / "ui" / "agenda_audio_controller.py"
 AVATAR_PANEL = ROOT / "opencohost" / "ui" / "avatar_panel.py"
 INVENTORY = ROOT / "conductor" / "tracks" / "product_ui_kira_avatar_refactor_20260513" / "inventory.md"
 
@@ -181,10 +185,15 @@ def test_kira_agenda_mode_wiring_stays_out_of_llm_engine() -> None:
     # RF4 shell wiring was relocated to the parked legacy module). CoHostAgendaPanel
     # above stays the primary agenda contract, so the "agenda lives in the UI layer,
     # not the core LLM engine" intent this test guards is preserved.
+    # The aggregator wiring line STAYS in app_shell._init_smart_aggregator (the
+    # delegate target moved, the wiring did not) — asserted against app_shell alone.
     assert "self.smart_agg.on_aggregated_context = self._on_smart_aggregated_context" in source
-    assert "drop_pending_sources((\"kira-agenda\",))" in source
+    # Phase 7: these literals live inside moved bodies (emergency stop / prefetch
+    # pause), so they are asserted against the shell + extracted controller together.
+    ui = source + read_text(AGENDA_AUDIO)
+    assert "drop_pending_sources((\"kira-agenda\",))" in ui
     assert "_kira_agenda_has_higher_priority_pending" in source
-    assert "Prefetch pausado: hay PTT/chat pendiente" in source
+    assert "Prefetch pausado: hay PTT/chat pendiente" in ui
     assert "_kira_agenda_pending_compact_chat" in source
 
 

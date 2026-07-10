@@ -937,27 +937,37 @@ class TestFR1InterruptSpeaking:
         )
 
     def test_emergency_stop_uses_public_interrupt_not_private_reach_in(self):
-        """app_shell._kira_agenda_emergency_stop must use interrupt_speaking(),
-        not reach into motor_ia._lock / motor_ia._speaking directly.
+        """kira_agenda_emergency_stop must use interrupt_speaking(), not reach
+        into motor_ia._lock / motor_ia._speaking directly.
+
+        Phase 7 (app_shell_agenda_audio_decomposition_20260624): the emergency
+        stop body moved to agenda_audio_controller.py, so the public-interrupt
+        assertion now targets that module. The Demeter reach-in ban is asserted
+        against BOTH files (strengthens the ADR-AUD-005 intent — neither the
+        shell nor the extracted module may reach in).
 
         RED: the private reach-in is still present in source — assertion fails.
         GREEN: source uses the public method only.
         """
         import pathlib
 
-        source = pathlib.Path(
+        app_shell = pathlib.Path(
             "E:/VoiceAI/opencohost/ui/app_shell.py"
         ).read_text(encoding="utf-8")
+        controller = pathlib.Path(
+            "E:/VoiceAI/opencohost/ui/agenda_audio_controller.py"
+        ).read_text(encoding="utf-8")
 
-        assert "self.motor_ia.interrupt_speaking()" in source, (
-            "app_shell._kira_agenda_emergency_stop must call "
+        assert "motor_ia.interrupt_speaking()" in controller, (
+            "agenda_audio_controller.kira_agenda_emergency_stop must call "
             "motor_ia.interrupt_speaking() (ADR-AUD-005 FR1)"
         )
-        assert "self.motor_ia._lock" not in source, (
-            "app_shell must NOT reach into motor_ia._lock directly "
-            "(ADR-AUD-005 Demeter violation)"
-        )
-        assert "self.motor_ia._speaking" not in source, (
-            "app_shell must NOT reach into motor_ia._speaking directly "
-            "(ADR-AUD-005 Demeter violation)"
-        )
+        for source in (app_shell, controller):
+            assert "motor_ia._lock" not in source, (
+                "must NOT reach into motor_ia._lock directly "
+                "(ADR-AUD-005 Demeter violation)"
+            )
+            assert "motor_ia._speaking" not in source, (
+                "must NOT reach into motor_ia._speaking directly "
+                "(ADR-AUD-005 Demeter violation)"
+            )
