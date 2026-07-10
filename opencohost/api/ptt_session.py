@@ -33,6 +33,8 @@ from typing import Callable, Optional
 
 import websockets
 
+from opencohost.i18n import active as i18n_active
+
 logger = logging.getLogger("opencohost.api.ptt_session")
 
 # Anti-Loop Whisper filter, copied verbatim from voice_control.py:456 — collapse
@@ -58,6 +60,11 @@ class PttUnreachable(Exception):
     within ``ws_open_timeout``. The caller frees the slot and returns an honest
     503 ``stt_unreachable`` — the session never fake-listens against an absent
     server."""
+
+
+class SessionActive(Exception):
+    """Raised by :meth:`PttController.start` when a session already exists
+    (listening OR flushing). One operator, one mic, one session -> 409."""
 
 
 class PttSession:
@@ -339,3 +346,108 @@ class PttSession:
             self._on_close(self._last_error)
         except Exception:
             logger.exception("PTT close callback failed")
+
+
+class PttController:
+    """Single-slot owner of the one live :class:`PttSession` (one operator, one
+    mic). Wired in ``main.py`` create_app with the app dispatcher + the host
+    event log. Composes the session with two callbacks:
+
+      - flush -> ``dispatcher.dispatch("process_context", ptt_wrapper(text))``
+        (the SAME R8-vetted path as POST /api/chat/turn — already verified not
+        to persist the trigger text).
+      - event -> ``event_log.record("ptt", action, None)`` with fixed literal
+        actions and ``detail`` ALWAYS None (same closed-set discipline as
+        _MOTOR_EVENT_WHITELIST).
+
+    All four HTTP handlers hit this from FastAPI's threadpool, so a lock guards
+    the single slot.
+    """
+
+    def __init__(self, ws_uri, dispatcher, event_log, *, session_factory=PttSession, **session_kwargs):
+        self._ws_uri = ws_uri
+        self._dispatcher = dispatcher
+        self._event_log = event_log
+        self._session_factory = session_factory
+        self._session_kwargs = session_kwargs
+        self._lock = threading.Lock()
+        self._session: Optional[PttSession] = None
+        # Survives after the session frees the slot so GET /api/ptt/state can
+        # honestly report the last exit reason (e.g. stt_lost). Cleared on the
+        # next successful start.
+        self._last_error: Optional[str] = None
+
+    def _record_event(self, action: str) -> None:
+        # PRIVACY: fixed literal action, detail ALWAYS None — the transcript
+        # never reaches here.
+        self._event_log.record("ptt", action, None)
+
+    def _dispatch(self, text: str) -> None:
+        self._dispatcher.dispatch(
+            "process_context", i18n_active.ptt_wrapper().format(text=text)
+        )
+
+    def start(self) -> str:
+        with self._lock:
+            if self._session is not None:
+                raise SessionActive()
+            session = self._session_factory(
+                self._ws_uri,
+                on_flush=self._dispatch,
+                on_event=self._record_event,
+                on_close=self._on_session_closed,
+                **self._session_kwargs,
+            )
+            self._session = session
+            self._last_error = None
+        try:
+            session.start()  # blocks until connect result is known
+        except PttUnreachable:
+            with self._lock:
+                if self._session is session:
+                    self._session = None
+                self._last_error = "stt_unreachable"
+            raise
+        return session.session_id
+
+    def keepalive(self, session_id: str) -> Optional[dict]:
+        with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id or session.state == _IDLE:
+                return None
+        session.keepalive()
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "buffered_chars": session.buffered_chars,
+        }
+
+    def stop(self, session_id: Optional[str] = None) -> dict:
+        with self._lock:
+            session = self._session
+            if session is None or (session_id is not None and session_id != session.session_id):
+                return {"state": _IDLE}
+        session.stop()  # idempotent, returns immediately; watcher flushes
+        return {"state": _FLUSHING}
+
+    def state(self) -> dict:
+        with self._lock:
+            session = self._session
+            if session is None:
+                return {
+                    "state": _IDLE,
+                    "session_id": None,
+                    "buffered_chars": 0,
+                    "last_error": self._last_error,
+                }
+            return {
+                "state": session.state,
+                "session_id": session.session_id,
+                "buffered_chars": session.buffered_chars,
+                "last_error": session.last_error,
+            }
+
+    def _on_session_closed(self, last_error: Optional[str]) -> None:
+        with self._lock:
+            self._session = None
+            self._last_error = last_error

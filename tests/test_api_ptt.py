@@ -1,0 +1,416 @@
+"""Contract, privacy, and auth tests for the /api/ptt/* routes + PttController
+(liveaudio_ptt_tauri_20260710, WU2).
+
+The WhisperLive STT server is ALWAYS mocked. HTTP-shape tests inject a fake
+controller; the integration/privacy test drives a REAL PttController + REAL
+PttSession over a monkeypatched ``websockets.connect``.
+
+PRIVACY (hard rule 2): the strongest property is that the transcript NEVER
+crosses HTTP. The integration test feeds a sentinel phrase through a full
+mocked session and asserts it appears ONLY in the dispatcher queue (the one
+allowed destination — the R8 process_context path) and is absent from every
+/api/ptt/* response body AND from every /api/events entry.
+"""
+
+import json
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from opencohost.config import settings
+from opencohost.api.ptt_session import PttController, PttUnreachable, SessionActive
+import opencohost.api.ptt_session as ptt_session_mod
+from tests.test_api_phase1 import FakeHost
+from tests.test_ptt_session import _FakeWS, _patch_connect
+
+_DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
+
+
+@pytest.fixture(autouse=True)
+def _reset_host_active():
+    import opencohost.api.main as main_mod
+
+    main_mod._host_active = False
+    yield
+    main_mod._host_active = False
+
+
+def _app():
+    import opencohost.api.main as main_mod
+
+    return main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Fake controller — HTTP shape only
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeController:
+    def __init__(self):
+        self.start_result = "ptt_deadbeef"
+        self.start_exc = None
+        self.keepalive_result = {
+            "session_id": "ptt_deadbeef",
+            "state": "listening",
+            "buffered_chars": 7,
+        }
+        self.stop_result = {"state": "flushing"}
+        self.state_result = {
+            "state": "idle",
+            "session_id": None,
+            "buffered_chars": 0,
+            "last_error": None,
+        }
+        self.calls = []
+
+    def start(self):
+        self.calls.append("start")
+        if self.start_exc is not None:
+            raise self.start_exc
+        return self.start_result
+
+    def keepalive(self, session_id):
+        self.calls.append(("keepalive", session_id))
+        return self.keepalive_result
+
+    def stop(self, session_id=None):
+        self.calls.append(("stop", session_id))
+        return self.stop_result
+
+    def state(self):
+        self.calls.append("state")
+        return self.state_result
+
+
+def _client_with_fake(fake):
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    app.state.ptt_controller = fake
+    return app, client
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/ptt/start
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_start_200_listening():
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/start", json={})
+        assert resp.status_code == 200
+        assert resp.json() == {"session_id": "ptt_deadbeef", "state": "listening"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_start_409_session_active():
+    fake = _FakeController()
+    fake.start_exc = SessionActive()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/start", json={})
+        assert resp.status_code == 409
+        assert resp.json() == {"detail": "session_active"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_start_503_stt_unreachable():
+    fake = _FakeController()
+    fake.start_exc = PttUnreachable()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/start", json={})
+        assert resp.status_code == 503
+        assert resp.json() == {"detail": "stt_unreachable"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/ptt/keepalive
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_keepalive_200_state_rides_response():
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/keepalive", json={"session_id": "ptt_deadbeef"})
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "session_id": "ptt_deadbeef",
+            "state": "listening",
+            "buffered_chars": 7,
+        }
+        assert fake.calls[-1] == ("keepalive", "ptt_deadbeef")
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_keepalive_409_session_not_active():
+    fake = _FakeController()
+    fake.keepalive_result = None  # controller says: no such active session
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/keepalive", json={"session_id": "stale"})
+        assert resp.status_code == 409
+        assert resp.json() == {"state": "idle", "detail": "session_not_active"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/ptt/stop — always 200, idempotent
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_stop_200_flushing_when_cutting_active():
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/stop", json={"session_id": "ptt_deadbeef"})
+        assert resp.status_code == 200
+        assert resp.json() == {"state": "flushing"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_stop_200_idle_for_unknown_session():
+    fake = _FakeController()
+    fake.stop_result = {"state": "idle"}
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/stop", json={"session_id": "who-dis"})
+        assert resp.status_code == 200
+        assert resp.json() == {"state": "idle"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_stop_200_with_no_body():
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/stop")
+        assert resp.status_code == 200
+        assert fake.calls[-1] == ("stop", None)
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/ptt/state
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_get_state_shape_counts_never_text():
+    fake = _FakeController()
+    fake.state_result = {
+        "state": "flushing",
+        "session_id": "ptt_deadbeef",
+        "buffered_chars": 42,
+        "last_error": None,
+    }
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.get("/api/ptt/state")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error"}
+        assert isinstance(body["buffered_chars"], int)
+        assert body["state"] == "flushing"
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auth: POST operator-token tier + NOT rate-limited; GET open
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_post_start_requires_operator_token_when_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "API_AUTH_ENFORCED", True)
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.post("/api/ptt/start", json={})
+        assert resp.status_code == 401  # missing bearer token
+        assert "start" not in fake.calls  # never reached the controller
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_state_open_when_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "API_AUTH_ENFORCED", True)
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.get("/api/ptt/state")
+        assert resp.status_code == 200  # GET stays open (rule 3)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_keepalive_not_rate_limited():
+    """1 Hz keepalives (and idempotent stops) must never hit the RateLimiter —
+    it counts only /api/agent/ mutations. Fire well past any threshold."""
+    fake = _FakeController()
+    app, client = _client_with_fake(fake)
+    try:
+        for _ in range(40):
+            resp = client.post("/api/ptt/stop", json={})
+            assert resp.status_code == 200  # never 429
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Integration + PRIVACY — real controller + real session over mocked WS
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _install_real_controller(app, ws, monkeypatch):
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        app.state.dispatcher,
+        app.state.host.event_log,
+        grace=0.15,
+        keepalive_timeout=0.3,
+        watchdog_tick=0.03,
+        ws_open_timeout=2.0,
+    )
+    app.state.ptt_controller = controller
+    return controller
+
+
+def _drain_dispatch_queue(app):
+    q = app.state.host.motor.command_queue
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+    return items
+
+
+def test_full_session_dispatches_turn_and_never_leaks_transcript(monkeypatch):
+    sentinel = "secret banana phrase whiskey tango"
+    ws = _FakeWS()
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _install_real_controller(app, ws, monkeypatch)
+
+        # Collect every /api/ptt/* response body to scan for leaks.
+        bodies = []
+
+        start = client.post("/api/ptt/start", json={})
+        assert start.status_code == 200
+        bodies.append(start.text)
+        sid = start.json()["session_id"]
+        assert start.json()["state"] == "listening"
+
+        ws.feed_text(sentinel)
+
+        # Hold: keepalive a couple of times (state rides the response).
+        for _ in range(2):
+            ka = client.post("/api/ptt/keepalive", json={"session_id": sid})
+            assert ka.status_code == 200
+            bodies.append(ka.text)
+            time.sleep(0.02)
+
+        stop = client.post("/api/ptt/stop", json={"session_id": sid})
+        assert stop.status_code == 200
+        assert stop.json() == {"state": "flushing"}
+        bodies.append(stop.text)
+
+        # Poll state until the background watcher flushes + frees the slot.
+        end = time.time() + 3.0
+        while time.time() < end:
+            st = client.get("/api/ptt/state")
+            bodies.append(st.text)
+            if st.json()["state"] == "idle":
+                break
+            time.sleep(0.03)
+        assert st.json()["state"] == "idle"
+
+        # 1) The dictation WAS dispatched exactly once, as ONE process_context
+        #    turn, wrapped by ptt_wrapper — the one allowed destination.
+        dispatched = _drain_dispatch_queue(app)
+        assert len(dispatched) == 1
+        command, payload = dispatched[0]
+        assert command == "process_context"
+        assert payload == f"El streamer acaba de decir (PTT): {sentinel}"
+
+        # 2) PRIVACY: the transcript never crossed HTTP — absent from EVERY
+        #    /api/ptt/* response body.
+        for body in bodies:
+            assert sentinel not in body
+
+        # 3) Events landed on the host event log: source "ptt", detail ALWAYS
+        #    None, only whitelisted lifecycle literals, never the transcript.
+        events = client.get("/api/events").json()["events"]
+        ptt_events = [e for e in events if e["source"] == "ptt"]
+        actions = [e["action"] for e in ptt_events]
+        assert actions == ["started", "stopped", "flushed"]
+        for e in ptt_events:
+            assert e["detail"] is None
+            assert sentinel not in json.dumps(e)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_concurrent_start_rejected_409(monkeypatch):
+    ws = _FakeWS()
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _install_real_controller(app, ws, monkeypatch)
+        first = client.post("/api/ptt/start", json={})
+        assert first.status_code == 200
+        try:
+            second = client.post("/api/ptt/start", json={})
+            assert second.status_code == 409
+            assert second.json() == {"detail": "session_active"}
+        finally:
+            client.post("/api/ptt/stop", json={})
+            end = time.time() + 3.0
+            while time.time() < end and client.get("/api/ptt/state").json()["state"] != "idle":
+                time.sleep(0.03)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_stt_unreachable_returns_503_and_frees_slot(monkeypatch):
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _patch_connect(monkeypatch, fail=True)
+        app.state.ptt_controller = PttController(
+            "ws://test/whisperlive",
+            app.state.dispatcher,
+            app.state.host.event_log,
+            grace=0.15,
+            keepalive_timeout=0.3,
+            watchdog_tick=0.03,
+            ws_open_timeout=0.2,
+        )
+        resp = client.post("/api/ptt/start", json={})
+        assert resp.status_code == 503
+        assert resp.json() == {"detail": "stt_unreachable"}
+
+        # Slot freed: state reports idle + the honest last_error, never fake
+        # listening. A retry can start cleanly.
+        st = client.get("/api/ptt/state").json()
+        assert st["state"] == "idle"
+        assert st["last_error"] == "stt_unreachable"
+    finally:
+        client.__exit__(None, None, None)

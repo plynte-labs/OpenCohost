@@ -958,3 +958,56 @@ class AgentNoticeDismissResponse(BaseModel):
     """POST /api/agent/notices/{id}/dismiss response (operator surface)."""
 
     dismissed: bool
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Push-to-Talk (liveaudio_ptt_tauri_20260710)
+#
+# PRIVACY (hard rule 2): NONE of these models carries transcript text. The
+# operator dictation travels WhisperLive WS -> PttSession buffer (RAM) ->
+# process_context dispatch and NEVER crosses HTTP. ``buffered_chars`` is an int
+# count only; ``last_error`` is a fixed enum-like string (stt_unreachable|
+# stt_lost); ``state`` is a lifecycle literal. The Tauri client literally never
+# receives the transcript, so it cannot leak client-side.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class PttKeepaliveRequest(BaseModel):
+    """POST /api/ptt/keepalive body. The client posts this ~1 Hz while the key
+    is held; the stream IS the server-side proof-of-life (guillotine)."""
+
+    session_id: str
+
+
+class PttStopRequest(BaseModel):
+    """POST /api/ptt/stop body. ``session_id`` is optional — stop is fully
+    idempotent, so an unknown/absent id still returns 200."""
+
+    session_id: Optional[str] = None
+
+
+class PttStartResponse(BaseModel):
+    session_id: str
+    state: str
+
+
+class PttKeepaliveResponse(BaseModel):
+    """State rides the keepalive so the holding client needs no extra poll.
+    ``buffered_chars`` is a count, NEVER the text."""
+
+    session_id: str
+    state: str
+    buffered_chars: int
+
+
+class PttStopResponse(BaseModel):
+    state: str
+
+
+class PttStateResponse(BaseModel):
+    """GET /api/ptt/state. ``buffered_chars`` is a count, NEVER the text."""
+
+    state: str
+    session_id: Optional[str] = None
+    buffered_chars: int = 0
+    last_error: Optional[str] = None

@@ -56,8 +56,9 @@ from opencohost.api.auth import (
     ensure_tokens,
 )
 from opencohost.api.dispatch import Dispatcher
-from opencohost.api.engine_host import EngineHost
+from opencohost.api.engine_host import EngineHost, EventLogSink
 from opencohost.api.observability import audit_middleware, setup_api_logging
+from opencohost.api.ptt_session import PttController, PttUnreachable, SessionActive
 from opencohost.api.models import (
     AgendaMetrics,
     AgendaResponse,
@@ -123,6 +124,12 @@ from opencohost.api.models import (
     ProfileDetailResponse,
     ProfileUpdateRequest,
     ProfilesListResponse,
+    PttKeepaliveRequest,
+    PttKeepaliveResponse,
+    PttStartResponse,
+    PttStateResponse,
+    PttStopRequest,
+    PttStopResponse,
     StatusResponse,
     StreamChatLiveResponse,
     StreamConnectRequest,
@@ -156,6 +163,7 @@ from opencohost.config.settings import (
     save_memorias_notice_dismissed,
     load_tts_speed,
     resolve_llm_tiers,
+    WS_URI,
 )
 from opencohost.core.agent_notices import (
     AgentNoticeCapError,
@@ -689,6 +697,19 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             host.start()
             app.state.host = host
             app.state.dispatcher = Dispatcher(host.motor.command_queue)
+            # PTT single-slot controller: recv-only WhisperLive bridge. ws_uri
+            # comes from settings.WS_URI (nothing hardcodes 8765/8770 here — the
+            # API's own uvicorn port is separate). Dispatches flushes through the
+            # SAME process_context path as /api/chat/turn; records lifecycle
+            # events (detail=None) on the host event log.
+            # getattr fallback mirrors the obs_runtime resiliency in get_status:
+            # a real EngineHost always has event_log, but minimal host doubles
+            # (health/status test fakes) may not — never break app startup.
+            app.state.ptt_controller = PttController(
+                WS_URI,
+                app.state.dispatcher,
+                getattr(host, "event_log", None) or EventLogSink(),
+            )
             yield
         finally:
             host.stop()
@@ -1757,6 +1778,54 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if result.state == "conflict":
             return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
         return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Push-to-Talk (liveaudio_ptt_tauri_20260710)
+    #
+    # PRIVACY (hard rule 2): NO /api/ptt/* request or response body ever carries
+    # transcript text — the dictation travels WhisperLive WS -> PttSession
+    # buffer (RAM) -> the process_context dispatch and never crosses HTTP, so
+    # the Tauri client literally never receives it. buffered_chars is an int
+    # count; events are fixed literals with detail=None (recorded by the
+    # controller on host.event_log). POSTs are operator-token tier (auth.py rule
+    # 2) and NOT rate-limited (RateLimiter counts only /api/agent/ mutations);
+    # GET stays open per rule 3.
+    # ──────────────────────────────────────────────────────────────────────
+    @app.post("/api/ptt/start")
+    def post_ptt_start(request: Request):
+        controller = request.app.state.ptt_controller
+        try:
+            session_id = controller.start()
+        except SessionActive:
+            return JSONResponse(status_code=409, content={"detail": "session_active"})
+        except PttUnreachable:
+            return JSONResponse(status_code=503, content={"detail": "stt_unreachable"})
+        return PttStartResponse(session_id=session_id, state="listening")
+
+    @app.post("/api/ptt/keepalive")
+    def post_ptt_keepalive(request: Request, body: PttKeepaliveRequest):
+        controller = request.app.state.ptt_controller
+        result = controller.keepalive(body.session_id)
+        if result is None:
+            # Server guillotined this session (watchdog) — client drops to idle.
+            return JSONResponse(
+                status_code=409, content={"state": "idle", "detail": "session_not_active"}
+            )
+        return PttKeepaliveResponse(**result)
+
+    @app.post("/api/ptt/stop")
+    def post_ptt_stop(request: Request, body: Optional[PttStopRequest] = None):
+        # ALWAYS 200, fully idempotent: returns immediately, the grace + flush
+        # happen in the background watcher. A stop on an unknown/absent session
+        # returns state=idle, so client retries and watchdog races never error.
+        controller = request.app.state.ptt_controller
+        session_id = body.session_id if body is not None else None
+        return PttStopResponse(**controller.stop(session_id))
+
+    @app.get("/api/ptt/state", response_model=PttStateResponse)
+    def get_ptt_state(request: Request) -> PttStateResponse:
+        # buffered_chars is an int count, NEVER text. GET stays open (rule 3).
+        return PttStateResponse(**request.app.state.ptt_controller.state())
 
     @app.get("/api/chat/last-reply", response_model=ChatLastReplyResponse)
     def get_chat_last_reply(request: Request) -> ChatLastReplyResponse:
