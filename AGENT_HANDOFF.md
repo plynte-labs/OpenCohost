@@ -19,6 +19,36 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-10 (FINAL AGENT DAY: LiveAudio PTT landed, release prep)
+
+**liveaudio_ptt_tauri_20260710 — DONE, VERIFY PASS-WITH-WARNINGS (0 critical).** Real hold-to-talk in the
+Tauri app. Backend 8e08151 + ce3f304: NEW opencohost/api/ptt_session.py — headless PttSession, a RECV-ONLY
+WhisperLive WS consumer (design-phase finding: CTK's voice_control.py never streams mic audio; WhisperLive
+captures the mic itself and pushes transcript JSON — zero audio bytes cross Python/Rust/webview) + single-slot
+PttController flushing through the same process_context dispatch path as /api/chat/turn. Routes:
+POST /api/ptt/{start,keepalive,stop} + GET /api/ptt/state. The keepalive-starvation watchdog is the HTTP
+guillotine: a dead client's session is auto-stopped AND its buffer still delivered. Privacy proven by a
+sentinel test — transcript text never appears in any response, event, or log (source "ptt" events carry
+detail=None, counts only). Client OpenCohost_UI 53dbe25 + 26077d5: usePttHold hook + real PTTCard (pointer
+capture, in-app Space/Enter gated on activeElement, blur safety, honest states — 503 renders "STT
+(WhisperLive) no disponible", never fake-listening). Global OS shortcut DEFERRED (ptt_global_shortcut
+follow-up); LiveVoice continuous mode = phase-2, NOT built (separation rule holds; CTK untouched, 160 voice/ptt
+tests green). Suites: backend FULL 3945 passed / 0 failed; UI 498/498 + tsc clean. Residual lows documented in
+tracks.md (DispatchResult ignored on flush, grace re-arm slot pinning, close-callback identity guard,
+cosmetic flush-poll cache).
+
+**OWNER RUNTIME GATE (before push, noted in commit bodies):** (1) real WhisperLive up -> POST /api/ptt/start
+returns 200 listening, not 503; (2) hold-to-talk in Tauri -> dictation reaches Kira as exactly ONE wrapped
+process_context turn, no transcript in any /api/ptt/* response or /api/events entry; (3) kill the app
+mid-hold -> watchdog auto-stops, still flushes the buffer, frees the slot for a fresh start.
+
+**Release state:** all Python work linear on codex/ui-ux-audit-proposal-20260709 (both repos on it); owner
+decides branch naming/merge, commits their own tracks.md WIP, then pushes BOTH repos. tracks.md deliberately
+left uncommitted (holds owner Codex WIP + agent annotations). Still owed by owner from earlier snapshots:
+Tauri drain re-validation, locale=en session, auth enforcement flip, heavy-model stall test, reject test
+proposal ti_6edb78... from the UI. Open product question: agenda turn semantics (turn_batch_size=2 vs UI
+slider labeling).
+
 ## LATEST SNAPSHOT — 2026-07-09 night (owner runtime validation + command-starvation fix track)
 
 Owner runtime-tested the NEW Tauri build: event feed A+B live (mutation toasts + motor ring events),
