@@ -148,6 +148,25 @@ INJECTION_MARKERS = (
     "de ahora en más sos",
 )
 
+# Control commands safe to apply at a turn boundary (see
+# MotorVocalIA._drain_control_commands). All are plain setters or a model
+# prepare/switch — none dispatches a turn or recurses into the processing
+# cycle. process_context (dispatches a turn), check_ollama (network), the None
+# shutdown sentinel, and unknown verbs are deliberately excluded and stay
+# deferred for run() to consume.
+_DRAIN_SAFE_COMMANDS = frozenset({
+    "set_voice",
+    "set_motor_tts",
+    "set_tts_local_only",
+    "set_tts_speed",
+    "set_piper_voice",
+    "set_profile",
+    "clear_history",
+    "switch_llm_tier",
+    "switch_model",
+})
+
+
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -856,9 +875,48 @@ class MotorVocalIA(threading.Thread):
             self._processing = False
             self._current_processing_source = None
         self.ui_callback("idle")
+        self._drain_control_commands()
         self._check_pending_model_switch()
         if process_queue:
             self._process_priority_queue()
+
+    def _drain_control_commands(self) -> None:
+        """Apply queued safe control commands at a turn boundary.
+
+        The engine is single-threaded: run() only reads command_queue when it is
+        NOT inside a dispatch, so control commands posted during a continuous
+        priority-queue run (recursive _process_priority_queue) sit unread until
+        the queue empties (the command-starvation bug). This boundary is a true
+        idle point (_processing and _speaking both False), so every whitelisted
+        command present is applied now, before the next turn dispatches.
+
+        Non-whitelisted verbs (process_context — dispatches a turn and would
+        recurse; check_ollama — network), the None shutdown sentinel, and any
+        unknown type are re-queued in original order for run() to consume later.
+        Bounded by a qsize() snapshot and get_nowait/put_nowait only, so it can
+        never block the engine thread or re-pop its own re-puts.
+        """
+        n = self.command_queue.qsize()
+        if n == 0:
+            return
+        applied = 0
+        deferred: list = []
+        for _ in range(n):
+            try:
+                comando = self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+            if comando is None or comando[0] not in _DRAIN_SAFE_COMMANDS:
+                deferred.append(comando)
+                continue
+            tipo, payload = comando
+            self._dispatch_command(tipo, payload)
+            applied += 1
+        for item in deferred:
+            self.command_queue.put_nowait(item)
+        if applied > 0:
+            self._log(f"Boundary drain: {applied} comando(s) de control aplicados.")
+            self.ui_callback("commands_drained")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         try:
