@@ -19,6 +19,32 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## LATEST SNAPSHOT — 2026-07-09 PM (FULL SUITE GREEN: threading track closed + Phase 7 extraction landed)
+
+**Milestone: first all-green full suite** — 3899 passed / 11 skipped / **0 failed** (split only for the
+pre-existing test_memorias_profile_uuid hang). The app_shell line-budget known-red is ERASED.
+
+**ui_thread_hardening_agenda_audio_20260624 — DONE.** Discovery: all 4 FRs were already committed on
+2026-06-25 (FR4 da4f1f3, FR3 eb8849c, FR2 d0bf19e, FR1 5f83724) while tracks.md sat stale at PLANNED.
+This session's judge pass found + fixed 1 real medium gap (31458c5: boundary-deferred audio decode was
+still on the Tk main thread — now routed via _dispatch_audio_play). FR1's push validation still shares
+the heavy-model runtime gate with heavy_model_inference_recovery.
+
+**app_shell Phase 7 — DONE (VERIFY PASS, judges Opus x2 zero findings).** bdc3a79 (23 characterization
+pins first) + 20e0ab3 (20-function agenda/audio cluster -> opencohost/ui/agenda_audio_controller.py,
+796 lines, function-module + thin delegates, obs_lifecycle pattern; shared state via injected
+getter/setters). app_shell.py: 3016 -> 2655 lines; cap ratcheted 3000 -> 2660 (never-raise).
+
+**Test-infra green-up (same session):** 7779283 (conftest LOG_DIR makedirs — isolated test_integration
+runs fixed) + OpenCohost_UI e7c509d (AgendaPanel/AppLayout ToastProvider wrap + stale contentinfo assert
+removed — UI suite 479/479 green).
+
+**BRANCH NOTE (decision owed before push):** mid-session the checkout moved to
+codex/ui-ux-audit-proposal-20260709 (created by the owner's Codex UI/UX-audit session). It linearly
+contains ALL session commits; maintenance/big-file-audit-small-fixes-20260629 sits behind at 7779283.
+The Codex session also left an UNCOMMITTED tracks.md revision of its own track entry — do not sweep it
+into unrelated commits. Owner decides branch naming/merge before any push.
+
 ## LATEST SNAPSHOT — 2026-07-09 (API observability landed + music empty-mood fixed)
 
 Two runtime findings from the Tauri+API session are now closed, both committed to master:
