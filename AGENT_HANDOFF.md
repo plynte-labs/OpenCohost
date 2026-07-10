@@ -42,12 +42,25 @@ returns 200 listening, not 503; (2) hold-to-talk in Tauri -> dictation reaches K
 process_context turn, no transcript in any /api/ptt/* response or /api/events entry; (3) kill the app
 mid-hold -> watchdog auto-stops, still flushes the buffer, frees the slot for a fresh start.
 
+**RUNTIME VALIDATION UPDATE (2026-07-10, owner live session):** PTT gates 1+2 PASS — real LiveAudio
+connect (200 listening) and dictation delivered to Kira as one turn, her reply rendered in the feed.
+The first 503 was a PORT COLLISION, not CORS: the API launched first and squatted 8765 (LiveAudio's WS
+port), LiveAudio then died on bind (Errno 10048). Resolution = START ORDER (LiveAudio first, then the
+app; run-api.bat falls back to 8770 as designed). Owner declined moving either default port. Gate 3
+still owed: kill-app-mid-hold watchdog proof. NEW TOOL: ptt_f10_bridge.py (repo root) — global F10 hold
+via GetAsyncKeyState against /api/ptt/*, works while gaming; webview key events are focus-scoped so the
+in-app button can never do this (native fix = the deferred ptt_global_shortcut plugin). NEW FOLLOW-UP
+TRACK documented in tracks.md: ptt_transcript_echo — render the operator's own dictation via a DIRECT
+webview->LiveAudio WS (display-only, same pattern as the OBS browser source); the API privacy contract
+(transcript never in /api/ptt/* responses) stays intact by design.
+
 **Release state:** all Python work linear on codex/ui-ux-audit-proposal-20260709 (both repos on it); owner
-decides branch naming/merge, commits their own tracks.md WIP, then pushes BOTH repos. tracks.md deliberately
-left uncommitted (holds owner Codex WIP + agent annotations). Still owed by owner from earlier snapshots:
-Tauri drain re-validation, locale=en session, auth enforcement flip, heavy-model stall test, reject test
-proposal ti_6edb78... from the UI. Open product question: agenda turn semantics (turn_batch_size=2 vs UI
-slider labeling).
+decides branch naming/merge, then pushes BOTH repos. tracks.md now committed (owner authorized "commit a
+todo" on close day, including their Codex audit-entry revision). NEVER committed regardless: repo-root
+config/ (owner tokens), OpenCohost_UI/.atl/, src-tauri/backend.config.json (machine-local), .pnpm-store/.
+Still owed by owner from earlier snapshots: watchdog kill-mid-hold proof, Tauri drain re-validation,
+locale=en session, auth enforcement flip, heavy-model stall test, reject test proposal ti_6edb78... from
+the UI. Open product question: agenda turn semantics (turn_batch_size=2 vs UI slider labeling).
 
 ## LATEST SNAPSHOT — 2026-07-09 night (owner runtime validation + command-starvation fix track)
 
