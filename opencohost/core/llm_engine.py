@@ -102,6 +102,22 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def edge_rate_for_length_scale(scale: float) -> str:
+    """Convert a Piper length_scale into the equivalent Edge-TTS rate string.
+
+    length_scale multiplies phoneme durations (higher = SLOWER), so the
+    effective speed multiplier is 1/scale. Edge-TTS's `rate` kwarg wants a
+    signed percentage ("-23%"), so both engines end up moving together
+    instead of in opposite directions (1.30 must slow Edge-TTS down too, not
+    speed it up 30%). Guard scale <= 0 (never divide by zero / invert
+    direction) by returning "+0%".
+    """
+    if scale <= 0:
+        return "+0%"
+    pct = round((1.0 / scale - 1.0) * 100)
+    return f"{pct:+d}%"
+
+
 # Topic Scout prompt — plain user message (NO system prompt / persona). Seeded
 # with a compact, sanitized rendering of the recent LIVE host turns. Migrated
 # to i18n_active.scout_prompt() (P4, kira_bilingual_e2e) -- es legacy default
@@ -251,8 +267,13 @@ class MotorVocalIA(threading.Thread):
         self._piper_voice_key: str = load_piper_voice(
             default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
         )
+        # Single source of truth for the current speed setting, shared by
+        # Piper (length_scale, above) and Edge-TTS (rate string, derived via
+        # edge_rate_for_length_scale). Piper's own _length_scale is a mirror,
+        # never read back.
+        self._tts_length_scale: float = load_tts_speed()
         self._piper = PiperEngine(
-            piper_voice_path(self._piper_voice_key), length_scale=load_tts_speed()
+            piper_voice_path(self._piper_voice_key), length_scale=self._tts_length_scale
         )
         # Honest-degrade: one-shot ui_callback notice, latched the first time
         # Piper actually engages as a fallback under a locale/voice mismatch.
@@ -510,6 +531,7 @@ class MotorVocalIA(threading.Thread):
 
         elif tipo == "set_tts_speed":
             scale = float(payload)
+            self._tts_length_scale = scale
             self._piper.set_length_scale(scale)
             save_tts_speed(scale)
             logger.info("Piper speech rate set to length_scale=%.2f", scale)
@@ -2654,6 +2676,9 @@ class MotorVocalIA(threading.Thread):
             # toggle cannot send remaining chunks to Edge-TTS.  The toggle takes
             # effect from the NEXT utterance only.
             local_only = self.tts_local_only
+            # Same snapshot contract for the Edge-TTS rate: a mid-utterance
+            # speed change applies from the next utterance only.
+            edge_rate = edge_rate_for_length_scale(self._tts_length_scale)
 
             # Determine effective motor for this request
             effective_motor = self.motor_tts
@@ -2752,7 +2777,9 @@ class MotorVocalIA(threading.Thread):
                 try:
                     if effective_motor == "ligero":
                         async def generar_edge():
-                            communicate = edge_tts.Communicate(oracion, i18n_active.edge_voice())
+                            communicate = edge_tts.Communicate(
+                                oracion, i18n_active.edge_voice(), rate=edge_rate
+                            )
                             await communicate.save(archivo_chunk)
 
                         asyncio.run(asyncio.wait_for(generar_edge(), timeout=TTS_LIGHT_TIMEOUT))

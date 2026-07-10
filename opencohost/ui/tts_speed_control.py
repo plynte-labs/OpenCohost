@@ -3,8 +3,10 @@
 Lives outside app_shell so the shell stays within its line budget; app_shell
 only calls build_tts_speed_selector() with a dispatch callback.
 
-Presets map UI labels to Piper length_scale values (>1.0 = slower). They
-apply to Piper only — Edge-TTS speech rate is not affected.
+Presets map UI labels to Piper length_scale values (>1.0 = slower). The same
+length_scale also drives the Edge-TTS rate (see
+opencohost.core.llm_engine.edge_rate_for_length_scale) so both engines slow
+down together.
 """
 from __future__ import annotations
 
@@ -55,7 +57,7 @@ def build_tts_speed_selector(parent, dispatch: Callable[[float], None]):
 
     ctk.CTkLabel(
         parent,
-        text="Velocidad de voz local (Piper). No afecta a Edge-TTS.",
+        text="Velocidad de voz (afecta a Piper y Edge-TTS).",
         font=ctk.CTkFont(size=10),
         text_color="#8fa3b8",
         anchor="w",
