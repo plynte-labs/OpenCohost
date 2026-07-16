@@ -115,3 +115,7 @@ OpenCohost_TAURI/
 
 # React/Tauri frontend — versioned in its own git repo (migration; separate from the Python repo)
 OpenCohost_UI/
+
+# Runtime user config (contains api_tokens.json — secrets must never land in git)
+config/
+.pnpm-store/
