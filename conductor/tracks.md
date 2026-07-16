@@ -4,6 +4,28 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [ ] **Track: Memoria/RAG Follow-ups — 2026-07-16 Findings**
+  *Link: [./tracks/memoria_rag_followups_20260716/](./tracks/memoria_rag_followups_20260716/)*
+  *Status 2026-07-16: PROPOSAL only, registry of 8 candidates surfaced diagnosing the memoria
+  (RAG-lite) injection pipeline and PTT observability, cross-referencing ADR-034. All 8 claims
+  verified by direct source read at proposal time. HIGH-value product gap: PTT/voice turns are
+  captured as memorias but never receive injection (llm_engine.py:1412 gates the whole block to
+  `source == "direct"` only) — now that the owner converses with Kira mainly via F10 voice, her
+  memories are effectively write-only. Also covers: retrieval-signature-scoring (score an 8-16
+  token signature instead of the 3-token title, memoria_store.py select_top_k/build_injection_lines);
+  false-memory-mitigation DECISION (injected memorias wrapper reads as flat fact with no fallibility
+  framing, i18n/active.py, combined with stable-key upsert that keeps refreshing a wrong statement);
+  ptt-bridge-observability (opencohost-ptt-bridge.log always empty — no -u/PYTHONUNBUFFERED on the
+  Tauri spawn, backend.rs spawn_ptt_bridge_process); ptt-buffer-cap-handling (25x buffer-cap-reached
+  in one session, ptt_session.py:294, long holds silently lose their tail); memoria-rekey-logging
+  (_rekey_legacy_memorias migrates silently, main.py:368-398); ptt-lifecycle-log-level (PTT logger
+  inherits root default WARNING — no basicConfig anywhere in opencohost/ — so INFO lifecycle lines
+  never reach the log); llm-reply-preview-in-temp-log DECISION (llm_engine.py:1715 logs a 200-char
+  cleartext reply preview into %TEMP%\opencohost-backend.log via the Tauri stdout redirect). NONE
+  approved for implementation — owner picks. See proposal.md.*
+
+---
+
 - [ ] **Track: UI Follow-ups — 2026-07-15 UI Refresh Candidates**
   *Link: [./tracks/ui_followups_20260715/](./tracks/ui_followups_20260715/)*
   *Status 2026-07-15 (evening): PROPOSAL + command-palette state registry. The proposal doc now
