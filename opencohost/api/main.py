@@ -345,6 +345,59 @@ def _purge_memoria(db_path: str, profile_id: str) -> int:
         return 0
 
 
+def _legacy_profile_key(profile_id: str) -> "str | None":
+    """The profile's current display NAME whose stable `id` == profile_id.
+
+    Memorias were historically saved keyed by the display name; the FE now
+    lists by the stable UUID, so the name is the legacy key we must migrate
+    from. Returns None when no profile carries this id (a deleted profile —
+    nothing to migrate) or when the resolved name would equal the UUID (never
+    the case in practice; guards against a pointless self-re-key). Renamed
+    profiles whose legacy rows sit under an OLD name are unreachable here —
+    cargar_perfiles only knows the current name — and are out of scope.
+    """
+    perfiles = cargar_perfiles()
+    if not isinstance(perfiles, dict):
+        return None
+    for name, data in perfiles.items():
+        if isinstance(data, dict) and data.get("id") == profile_id and name != profile_id:
+            return name
+    return None
+
+
+def _rekey_legacy_memorias(db_path: str, legacy_key: str, profile_id: str) -> int:
+    """Migrate-on-read: point legacy name-keyed rows at the profile's UUID.
+
+    Additive re-key of the profile_id column only (zero deletions), scoped to
+    legacy_key — the requested profile's current display name — so a different
+    profile's name-keyed rows are never swallowed. One bounded transaction;
+    idempotent (once re-keyed the name rows are gone, so the next call updates
+    nothing). Returns the rows re-keyed, fail-open to 0 on a missing db or any
+    sqlite error.
+
+    stable_key is deliberately left untouched: it embeds the old name
+    (`{name}|tokens`), but rewriting it to `{uuid}|tokens` could collide with a
+    row already captured fresh under the UUID and roll the WHOLE migration back
+    — leaving the reported bug (invisible legacy rows) unfixed. Keeping the
+    stale prefix keeps every row's (profile_id, stable_key) pair unique, so the
+    UPDATE never rolls back. ponytail: the only residual cost is that a future
+    auto-capture of identical content derives a fresh `{uuid}|tokens` key and
+    inserts a duplicate draft (self-heals via the growth-cap prune for drafts);
+    rewrite stable_key too only if duplicate curated rows become a real problem.
+    """
+    if not db_path or not os.path.exists(db_path) or not legacy_key or legacy_key == profile_id:
+        return 0
+    try:
+        with closing(sqlite3.connect(db_path, timeout=_MEMORIA_WRITE_TIMEOUT_SECONDS)) as conn, conn:
+            cur = conn.execute(
+                "UPDATE memorias SET profile_id = ? WHERE profile_id = ?",
+                (profile_id, legacy_key),
+            )
+            return cur.rowcount
+    except sqlite3.Error:
+        return 0
+
+
 # Lazy module-level MemoriaStore singleton (design D1). MemoriaStore.__init__
 # mkdirs + runs CREATE TABLE / PRAGMA writes, so it must NEVER be constructed
 # at import time (module contract: importing has zero side effects). One shared
@@ -1102,6 +1155,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     def get_memoria_list(profile_id: str) -> MemoriaListResponse:
         if not MEMORIAS_ENABLED:
             return MemoriaListResponse(items=[])
+        # Migrate-on-read: legacy rows keyed by the profile's display NAME are
+        # invisible to this UUID-scoped list. Re-key them to the UUID once, on
+        # the first list for this profile (the exact action that surfaced "No
+        # hay memorias guardadas"), then read normally.
+        legacy_key = _legacy_profile_key(profile_id)
+        if legacy_key:
+            _rekey_legacy_memorias(MEMORIAS_DB, legacy_key, profile_id)
         rows = _list_memoria_metadata(MEMORIAS_DB, profile_id)
         return MemoriaListResponse(
             items=[
