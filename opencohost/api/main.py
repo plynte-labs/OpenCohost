@@ -26,6 +26,7 @@ importing this module has zero side effects on hardware/VRAM/Ollama.
 
 import concurrent.futures
 import dataclasses
+import logging
 import mimetypes
 import os
 import re
@@ -517,6 +518,10 @@ _DEFAULT_CORS_ORIGINS = [
     "http://tauri.localhost",
     "tauri://localhost",
 ]
+
+# Child of the "opencohost.api" tree that setup_api_logging() attaches
+# handlers to and raises to INFO -- no separate wiring needed here.
+logger = logging.getLogger("opencohost.api.main")
 
 # In-process double-start guard. Layered defense, weakest to strongest:
 # lockfile (cross-process, primary, in engine_host.py) -> this flag
@@ -1161,7 +1166,9 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # hay memorias guardadas"), then read normally.
         legacy_key = _legacy_profile_key(profile_id)
         if legacy_key:
-            _rekey_legacy_memorias(MEMORIAS_DB, legacy_key, profile_id)
+            count = _rekey_legacy_memorias(MEMORIAS_DB, legacy_key, profile_id)
+            if count:
+                logger.info("rekeyed %d legacy memorias rows for profile %s", count, profile_id)
         rows = _list_memoria_metadata(MEMORIAS_DB, profile_id)
         return MemoriaListResponse(
             items=[

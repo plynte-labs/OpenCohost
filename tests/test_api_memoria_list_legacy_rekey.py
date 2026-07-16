@@ -13,6 +13,7 @@ deletions, one bounded transaction. Idempotent afterwards, scoped to the
 requested profile's name so another profile's rows are never swallowed.
 """
 
+import logging
 import sqlite3
 
 import pytest
@@ -173,6 +174,45 @@ def test_other_profiles_name_rows_are_not_swallowed(tmp_path, monkeypatch):
     ids = {item["id"] for item in resp.json()["items"]}
     assert "mem_legacy_bruno" not in ids
     assert _profile_id_of(db_path, "mem_legacy_bruno") == "Bruno"
+
+
+def test_rekey_with_rows_logs_info_line(tmp_path, monkeypatch, caplog):
+    """Rekeying rows for a profile must log an INFO line with the row count
+    and the profile_id -- the only observability the migrate-on-read path
+    had none of before."""
+    db_path = tmp_path / "memorias.db"
+    _seed(db_path)
+    _prime(monkeypatch, db_path)
+
+    app = _app()
+    with caplog.at_level(logging.INFO, logger="opencohost.api.main"):
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/list", params={"profile_id": _AKIRA_ID})
+
+    assert resp.status_code == 200
+    rekey_records = [r for r in caplog.records if "rekeyed" in r.message]
+    assert len(rekey_records) == 1
+    assert "2" in rekey_records[0].message
+    assert _AKIRA_ID in rekey_records[0].message
+
+
+def test_rekey_with_zero_rows_logs_nothing(tmp_path, monkeypatch, caplog):
+    """An unknown profile_id never resolves a legacy key, so no rekey happens
+    and nothing is logged."""
+    db_path = tmp_path / "memorias.db"
+    _seed(db_path)
+    _prime(monkeypatch, db_path)
+
+    app = _app()
+    with caplog.at_level(logging.INFO, logger="opencohost.api.main"):
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/memoria/list", params={"profile_id": "99999999-0000-4000-8000-000000000000"}
+            )
+
+    assert resp.status_code == 200
+    rekey_records = [r for r in caplog.records if "rekeyed" in r.message]
+    assert rekey_records == []
 
 
 def test_unknown_profile_id_is_a_noop(tmp_path, monkeypatch):

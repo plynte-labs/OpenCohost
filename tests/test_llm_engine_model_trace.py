@@ -524,6 +524,33 @@ class TestModelTrace:
         assert len(mismatch_logs) >= 1, f"No MODEL_MISMATCH_WARNING found in: {logs}"
         assert "desired=gemma4:e4b" in mismatch_logs[0]
 
+    def test_reply_preview_shown_in_debug_mode(self, tmp_path, caplog, monkeypatch):
+        """Candidate 8C: OPENCOHOST_DEBUG=1 keeps the cleartext reply preview
+        in the response(...) log line."""
+        monkeypatch.setenv("OPENCOHOST_DEBUG", "1")
+        motor, _, _ = self._setup_motor_for_generation(tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        response_records = [r for r in caplog.records if "response (" in r.message]
+        assert len(response_records) >= 1
+        assert "Respuesta de test" in response_records[0].message
+
+    def test_reply_preview_hidden_outside_debug_mode(self, tmp_path, caplog, monkeypatch):
+        """Candidate 8C: without OPENCOHOST_DEBUG, the response(...) log line
+        carries only the reply length, never the cleartext reply."""
+        monkeypatch.delenv("OPENCOHOST_DEBUG", raising=False)
+        motor, _, _ = self._setup_motor_for_generation(tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        response_records = [r for r in caplog.records if "response (" in r.message]
+        assert len(response_records) >= 1
+        assert "Respuesta de test" not in response_records[0].message
+        assert f"len={len('Respuesta de test')}" in response_records[0].message
+
 
 # ---------------------------------------------------------------------------
 # 5. Persistence roundtrip

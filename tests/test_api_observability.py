@@ -90,6 +90,38 @@ def test_setup_api_logging_redacts_bearer_token_through_propagation(
     assert "abc123token" not in content
 
 
+def test_setup_api_logging_sets_info_level_on_api_logger_tree(clean_api_logger):
+    """The shared ``opencohost.api`` logger must be raised to INFO so lifecycle
+    lines from every child (ptt_session, engine_host, agenda_driver, ...)
+    actually reach the attached handlers instead of falling to the stdlib
+    default of WARNING."""
+    observability.setup_api_logging()
+
+    assert logging.getLogger("opencohost.api.ptt_session").isEnabledFor(logging.INFO)
+
+
+def test_setup_api_logging_persists_child_info_record(tmp_path, monkeypatch, clean_api_logger):
+    """An INFO record logged on a child logger must reach the file handler
+    attached to the parent -- proving the tree-level setLevel(INFO), not just
+    isEnabledFor(), actually lets the record through."""
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path))
+
+    observability.setup_api_logging()
+
+    child_logger = logging.getLogger("opencohost.api.ptt_session")
+    child_logger.info("[PTT] flushing test")
+
+    for handler in clean_api_logger.handlers:
+        handler.flush()
+
+    log_path = tmp_path / "opencohost_api.log"
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8")
+    assert "[PTT] flushing test" in content
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # WU-B: per-request audit trail (audit_middleware)
 # ──────────────────────────────────────────────────────────────────────────

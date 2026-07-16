@@ -77,6 +77,7 @@ def setup_api_logging() -> None:
     handler with the reserved file-handler name is already present.
     """
     logger = logging.getLogger(_API_LOGGER_NAME)
+    logger.setLevel(logging.INFO)  # INFO lifecycle lines must reach the handlers
     if any(getattr(h, "name", None) == _FILE_HANDLER_NAME for h in logger.handlers):
         return
 

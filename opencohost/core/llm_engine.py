@@ -50,7 +50,7 @@ from opencohost.core.memoria_store import (
     build_injection_lines, pinned_injection_counter,
 )
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
-from opencohost.config.logger import get_logger
+from opencohost.config.logger import get_logger, _debug_enabled
 from opencohost.config.validation import output_guard
 
 logger = get_logger()
@@ -1712,7 +1712,8 @@ class MotorVocalIA(threading.Thread):
                 # FIX-B2: emission moved to the speak site (_ejecutar_inferencia)
                 # so guardrail/repetition fallbacks — which return EARLIER than
                 # this block yet are still spoken — also update last-reply.
-            logger.info(f"{log_prefix} response ({elapsed:.2f}s): {dialogo[:200]}")
+            preview = dialogo[:200] if _debug_enabled() else f"len={len(dialogo)}"
+            logger.info(f"{log_prefix} response ({elapsed:.2f}s): {preview}")
 
             if commit_history:
                 self._commit_history(contexto, dialogo, source=source, history_text=history_text)

@@ -1,5 +1,6 @@
 """Shared pytest fixtures for VoiceAI tests."""
 
+import logging
 import os
 import sys
 import tempfile
@@ -10,6 +11,23 @@ import pytest
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+
+@pytest.fixture(autouse=True)
+def _restore_api_logger_levels():
+    """setup_api_logging() pins process-wide levels on the opencohost.api tree
+    (INFO, by design for production). Without restoring ``.level`` between
+    tests, any test that touches create_app() pins the level for the rest of
+    the pytest process and caplog.at_level() expectations in unrelated files
+    become collection-order-dependent. Handlers are already restored by the
+    local fixtures in test_api_observability.py; levels are restored here for
+    the whole suite.
+    """
+    names = ("opencohost.api", "opencohost.api.audit")
+    saved = [(logging.getLogger(name), logging.getLogger(name).level) for name in names]
+    yield
+    for logger, level in saved:
+        logger.setLevel(level)
 
 
 @pytest.fixture(autouse=True)
