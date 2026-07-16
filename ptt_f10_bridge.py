@@ -45,19 +45,29 @@ def _post(base, path, body):
         return e.code, json.loads(e.read() or b"{}")
 
 
-def find_api():
+# The Tauri shell spawns this bridge alongside uvicorn; the backend's engine
+# warm-up can hold /api/health closed for a long while, so probe patiently.
+FIND_API_DEADLINE_S = 300.0
+FIND_API_SLEEP_S = 2.0
+
+
+def find_api(deadline_s=FIND_API_DEADLINE_S, sleep_s=FIND_API_SLEEP_S):
     explicit = os.environ.get("OPENCOHOST_API_URL")
     candidates = [explicit] if explicit else [
         "http://127.0.0.1:8770",  # normal spot when LiveAudio owns 8765
         "http://127.0.0.1:8765",
     ]
-    for base in candidates:
-        try:
-            with urllib.request.urlopen(base + "/api/health", timeout=2):
-                return base
-        except OSError:
-            continue
-    sys.exit("OpenCohost API not reachable on 8770/8765 — is the app running?")
+    deadline = time.monotonic() + deadline_s
+    while True:
+        for base in candidates:
+            try:
+                with urllib.request.urlopen(base + "/api/health", timeout=2):
+                    return base
+            except OSError:
+                continue
+        if time.monotonic() >= deadline:
+            sys.exit("OpenCohost API not reachable on 8770/8765 — is the app running?")
+        time.sleep(sleep_s)
 
 
 def main():
