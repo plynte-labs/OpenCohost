@@ -687,6 +687,46 @@ class TestHealthMonitor:
         assert state.overall_status == "red"
         assert monitor.should_use_heavy_tts(auto_fallback_enabled=True, manual_motor="pesado") is False
 
+    def test_qwen_never_started_status_is_unavailable_not_unknown(self):
+        """Owner decision: a Qwen that never started (Piper/Edge session, no
+        process spawned, no manual attach) must report 'unavailable', not the
+        old 'unknown' fallback — never-in-use Qwen is tolerable, not a failure.
+        """
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._qwen.is_running = False
+        monitor._qwen.is_manual = False
+        monitor._qwen.is_healthy = False
+        monitor._qwen.ownership = "none"
+
+        monitor._poll_all()
+
+        state = monitor.state
+        assert state.qwen_status == "unavailable"
+        assert state.overall_status == "green"
+
+    def test_qwen_owned_and_died_status_is_unhealthy_and_red(self):
+        """A Qwen WE spawned (ownership 'owned') that died without a manual
+        stop() is a real failure and must keep overall red — distinct from
+        the never-started case above.
+        """
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "healthy"
+        monitor._qwen.is_running = False
+        monitor._qwen.is_manual = False
+        monitor._qwen.is_healthy = False
+        monitor._qwen.ownership = "owned"
+
+        monitor._poll_all()
+
+        state = monitor.state
+        assert state.qwen_status == "unhealthy"
+        assert state.overall_status == "red"
+
     def test_thread_safety_concurrent_reads(self):
         """Multiple concurrent state reads don't crash."""
         monitor = self._make_monitor()

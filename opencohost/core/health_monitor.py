@@ -561,7 +561,9 @@ class HealthMonitor(threading.Thread):
             return "unhealthy"
         if self._qwen.is_manual:
             return "unavailable"
-        return "unknown"
+        if self._qwen.ownership == "owned":
+            return "unhealthy"  # we spawned it and it died — real failure
+        return "unavailable"  # never started / not attached — not in use (Piper/Edge session)
 
     def _compute_overall(self, qwen_status: Optional[str] = None) -> str:
         """Compute overall health: green, yellow, or red."""
