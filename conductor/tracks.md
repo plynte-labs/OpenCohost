@@ -12,9 +12,11 @@ This file tracks all major tracks for the project. Each track has its own detail
   ALTER TABLE + eager backfill; injection gate widening is TWO sites: llm_engine.py:1383 snapshot
   AND :1412 call); Batch B = bridge PYTHONUNBUFFERED + rekey logging + api log level (coupled:
   6 needs 7's setLevel(INFO)); Batch C = ptt buffer_full event (recommended over cap raise —
-  the cap protects turn latency). Owner decisions still open: candidate 3 curation gate
-  (D3.1/D3.2) and candidate 8 log-preview option. Next: sdd-tasks for whichever batch the
-  owner activates. Original registry follows.*
+  the cap protects turn latency). Owner decisions RESOLVED 2026-07-16: candidate 3 =
+  curation-nudge only (UI badge "sin curar", no TTL gate); candidate 8 = option C
+  (debug-gate the reply preview, len-only in normal runs) — joins Batch B. No open
+  decisions remain. Next: sdd-tasks for whichever batch the owner activates. Original
+  registry follows.*
   *Registry 2026-07-16: PROPOSAL registry of 8 candidates surfaced diagnosing the memoria
   (RAG-lite) injection pipeline and PTT observability, cross-referencing ADR-034. All 8 claims
   verified by direct source read at proposal time. HIGH-value product gap: PTT/voice turns are
