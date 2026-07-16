@@ -19,6 +19,17 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
+## OPEN TESTING DEBT (owner-flagged 2026-07-15 — do not clear without owner confirmation)
+
+**PTT + LiveAudio voice-death fix is implemented but NOT runtime-validated.** The TTS
+playback-recovery fix (llm_engine.py `_audio_reinit_needed` + `mark_audio_suspect()`,
+ptt_session.py `on_audio_suspect` hook, wired in api/main.py; unit-tested green) still
+needs the owner's real-runtime test: LiveAudio session + 2+ PTT cycles + a typed-chat
+turn, expecting the voice to KEEP working and the log line
+"Audio device re-inicializado (recovery)" on the recovery path. Owner: "aun no he
+probado el input de ptt y liveaudio y que no se corte la voz — deuda para testear
+hasta que lo rectifique." Gate 3 (kill-mid-hold watchdog proof) also remains pending.
+
 ## LATEST SNAPSHOT — 2026-07-10 (FINAL AGENT DAY: LiveAudio PTT landed, release prep)
 
 **liveaudio_ptt_tauri_20260710 — DONE, VERIFY PASS-WITH-WARNINGS (0 critical).** Real hold-to-talk in the

@@ -4,6 +4,21 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [ ] **Track: UI Follow-ups — 2026-07-15 UI Refresh Candidates**
+  *Link: [./tracks/ui_followups_20260715/](./tracks/ui_followups_20260715/)*
+  *Status 2026-07-15 (evening): PROPOSAL + command-palette state registry. The proposal doc now
+  also tracks the chat command palette (6 commands — /agenda, /perfil, /temas, /vivo, /acciones,
+  /sesion — ALL "maquetado": UI shipped in OpenCohost_UI, zero wiring; /acciones blocked on the
+  filter_policy preset decision). Candidates 1-9 remain not started. Umbrella of follow-up candidates surfaced
+  during the UI refresh session: STT/LiveAudio reachability signal in health endpoints, viewers-chat
+  muted banner not wired to real state, dev-only TestToastsCard shipping in AgendaPanel, chat
+  history persistence decision (session-local, wiped on restart), alert-component migration sweep
+  (~20 remaining bare role=alert paragraphs), copy centralization/i18n extraction (locale switcher
+  exists but strings are hardcoded es-AR), responsive shell track (fixed 1280px/248px/1fr/372px
+  grid), and the dead "Mostrar logs" settings stub. See proposal.md.*
+
+---
+
 - [ ] **Track: OpenCohost Tauri UI/UX audit and calm-operations refinement**
   *Link: [./tracks/opencohost_ui_ux_audit_20260709/](./tracks/opencohost_ui_ux_audit_20260709/)*
   *Status 2026-07-09: AUDIT COMPLETE; PROPOSAL + SPEC + PLAN ONLY, revised after owner review to
