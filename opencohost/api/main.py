@@ -709,6 +709,14 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 WS_URI,
                 app.state.dispatcher,
                 getattr(host, "event_log", None) or EventLogSink(),
+                # Recovery hook (2026-07-15 PTT voice-death fix): smallest
+                # possible surface into the engine -- a bound method, never
+                # the whole motor. getattr fallback mirrors event_log above:
+                # a real EngineHost always has motor.mark_audio_suspect, but
+                # minimal host doubles in tests may not.
+                on_audio_suspect=getattr(
+                    getattr(host, "motor", None), "mark_audio_suspect", None
+                ),
             )
             yield
         finally:

@@ -366,6 +366,53 @@ def test_full_session_dispatches_turn_and_never_leaks_transcript(monkeypatch):
         client.__exit__(None, None, None)
 
 
+def test_session_close_invokes_audio_suspect_hook(monkeypatch):
+    """Recovery wiring (2026-07-15 PTT voice-death fix): PttController must
+    call the on_audio_suspect hook DIRECTLY on session close (stopped here;
+    auto_stopped/error share the same PttSession._notify_close -> here path),
+    so MotorVocalIA re-inits its mixer before the caller's NEXT turn, not
+    only after a queued command drains."""
+    ws = _FakeWS()
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _patch_connect(monkeypatch, ws=ws)
+        calls = []
+        controller = PttController(
+            "ws://test/whisperlive",
+            app.state.dispatcher,
+            app.state.host.event_log,
+            on_audio_suspect=lambda: calls.append(1),
+            grace=0.15,
+            keepalive_timeout=0.3,
+            watchdog_tick=0.03,
+            ws_open_timeout=2.0,
+        )
+        app.state.ptt_controller = controller
+
+        start = client.post("/api/ptt/start", json={})
+        assert start.status_code == 200
+        sid = start.json()["session_id"]
+        assert calls == []  # never fired on start, only on close
+
+        stop = client.post("/api/ptt/stop", json={"session_id": sid})
+        assert stop.status_code == 200
+
+        end = time.time() + 3.0
+        st = None
+        while time.time() < end:
+            st = client.get("/api/ptt/state")
+            if st.json()["state"] == "idle":
+                break
+            time.sleep(0.03)
+        assert st is not None and st.json()["state"] == "idle"
+
+        assert calls == [1]
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_concurrent_start_rejected_409(monkeypatch):
     ws = _FakeWS()
     app = _app()

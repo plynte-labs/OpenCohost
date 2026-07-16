@@ -364,12 +364,26 @@ class PttController:
     the single slot.
     """
 
-    def __init__(self, ws_uri, dispatcher, event_log, *, session_factory=PttSession, **session_kwargs):
+    def __init__(
+        self,
+        ws_uri,
+        dispatcher,
+        event_log,
+        *,
+        session_factory=PttSession,
+        on_audio_suspect: Optional[Callable[[], None]] = None,
+        **session_kwargs,
+    ):
         self._ws_uri = ws_uri
         self._dispatcher = dispatcher
         self._event_log = event_log
         self._session_factory = session_factory
         self._session_kwargs = session_kwargs
+        # Recovery hook (2026-07-15 PTT voice-death fix): the smallest
+        # possible surface into MotorVocalIA — a bound
+        # ``motor.mark_audio_suspect`` callback, never the whole engine.
+        # Optional so unit tests / minimal host doubles need not supply it.
+        self._on_audio_suspect = on_audio_suspect
         self._lock = threading.Lock()
         self._session: Optional[PttSession] = None
         # Survives after the session frees the slot so GET /api/ptt/state can
@@ -451,3 +465,16 @@ class PttController:
         with self._lock:
             self._session = None
             self._last_error = last_error
+        # Recovery hook: EVERY PTT session close (stopped, auto_stopped, or
+        # error all route through PttSession._notify_close -> here) flags the
+        # shared pygame mixer suspect, regardless of last_error -- WASAPI
+        # endpoint churn from WhisperLive's mic open/close is a silent
+        # failure mode with no exception of its own to catch. Called
+        # DIRECTLY (not through the queued command channel), so the flag is
+        # already set before the NEXT _hablar() turn starts, not applied late
+        # after one is already mid-playback.
+        if self._on_audio_suspect is not None:
+            try:
+                self._on_audio_suspect()
+            except Exception:
+                logger.exception("PTT audio-suspect hook failed")

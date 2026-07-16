@@ -321,6 +321,19 @@ class MotorVocalIA(threading.Thread):
 
         self._lock = threading.Lock()
 
+        # Recovery flag (guarded by self._lock, same as _speaking): set when
+        # the shared pygame mixer is suspected zombied (a chunk raised during
+        # playback, or the PTT session that just closed may have churned the
+        # WASAPI endpoint under WhisperLive's mic open/close). Consumed once,
+        # at the start of the NEXT _hablar() pipeline run, which quits+re-inits
+        # the mixer before playing the first chunk. Gated (never unconditional
+        # per turn) because the CTk app shares this same mixer with
+        # AudioBedEngine (opencohost/core/audio_bed.py) for background music —
+        # an unconditional re-init would glitch/kill that music. PTT does not
+        # exist in the CTk app, so this flag is only ever set from the
+        # headless API's PTT teardown path or an actual playback exception.
+        self._audio_reinit_needed: bool = False
+
         # Priority queue: (priority, timestamp, payload, source)
         # priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest)
         self._priority_queue: list = []
@@ -392,6 +405,19 @@ class MotorVocalIA(threading.Thread):
         """
         with self._lock:
             self._speaking = False
+
+    def mark_audio_suspect(self) -> None:
+        """Flag the pygame mixer as possibly zombied so the NEXT _hablar()
+        call quits+re-inits it before playing its first chunk.
+
+        Thread-safe (bool + lock, cheap latch): called from the PTT WS thread
+        on session teardown (opencohost/api/ptt_session.py) and from the
+        playback consumer itself after a chunk raises. The actual
+        pygame.mixer.quit()/init() only ever runs on this engine's own
+        thread, inside _hablar — external callers never touch pygame.
+        """
+        with self._lock:
+            self._audio_reinit_needed = True
 
     def cancel_speech_for_sources(self, prefixes: tuple[str, ...]) -> None:
         """Refuse to START any upcoming _hablar() whose source matches a prefix.
@@ -2880,6 +2906,23 @@ class MotorVocalIA(threading.Thread):
         hilo_productor = threading.Thread(target=productor, daemon=True)
         hilo_productor.start()
 
+        # Recovery: consume the suspect flag once, before the first chunk of
+        # this turn plays. Gated on the flag (never unconditional per turn —
+        # see the _audio_reinit_needed comment in __init__) because the CTk
+        # app's AudioBedEngine shares this same mixer for background music;
+        # PTT (the only setter of this flag besides a playback exception)
+        # does not exist in the CTk app, so CTk never pays this reinit.
+        with self._lock:
+            reinit_needed = self._audio_reinit_needed
+            self._audio_reinit_needed = False
+        if reinit_needed:
+            try:
+                self.pygame.mixer.quit()
+                self.pygame.mixer.init()
+                self._log("Audio device re-inicializado (recovery)")
+            except Exception as e:
+                logger.warning(f"No se pudo re-inicializar pygame.mixer: {e}")
+
         chunks_played = 0
         try:
             while True:
@@ -2943,7 +2986,16 @@ class MotorVocalIA(threading.Thread):
                         break
 
                 except Exception as e:
+                    # Bug fix (2026-07-15 PTT voice-death): a playback
+                    # exception must count as a failed fragment, not just a
+                    # log line — otherwise the mixer can be zombied (e.g. a
+                    # migrated WASAPI stream) while every turn still reports
+                    # "completado" and speaking_end fires as if nothing
+                    # happened. error_count is _hablar's own local, not a
+                    # nested closure, so no `nonlocal` is needed here.
+                    error_count += 1
                     logger.warning(f"Error reproduciendo chunk {idx}: {e}")
+                    self.mark_audio_suspect()
                 finally:
                     try:
                         if os.path.exists(archivo_chunk):
