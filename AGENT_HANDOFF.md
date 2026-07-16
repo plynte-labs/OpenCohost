@@ -19,21 +19,18 @@ runtime uncertainty before packaging or broad product polish.
 5. If the request touches SDD/Conductor work, inspect the relevant track/spec before coding.
 
 
-## OPEN TESTING DEBT (owner-flagged 2026-07-15 — do not clear without owner confirmation)
+## TESTING DEBT STATUS
 
-**PTT + LiveAudio voice-death fix is implemented but NOT fully runtime-validated.** The TTS
-playback-recovery fix (llm_engine.py `_audio_reinit_needed` + `mark_audio_suspect()`,
-ptt_session.py `on_audio_suspect` hook, wired in api/main.py; unit-tested green) still
-needs the owner's real-runtime test: LiveAudio session + 2+ PTT cycles + a typed-chat
-turn, expecting the voice to KEEP working and the log line
-"Audio device re-inicializado (recovery)" on the recovery path. Owner: "aun no he
-probado el input de ptt y liveaudio y que no se corte la voz — deuda para testear
-hasta que lo rectifique." Gate 3 (kill-mid-hold watchdog proof) also remains pending.
+**PTT + LiveAudio voice-death — CLOSED by owner 2026-07-16.** The TTS playback-recovery
+fix (llm_engine.py `_audio_reinit_needed` + `mark_audio_suspect()`, ptt_session.py
+`on_audio_suspect` hook, wired in api/main.py; unit-tested green) was validated in real
+runtime: a 53-minute 11-turn F10 session with a mid-session profile switch — mixer
+re-init engaged on all 11 turns, zero voice incidents, zero non-200 responses (full log
+analysis 2026-07-16). Owner closed the debt the same day.
 
-**2026-07-16 runtime evidence:** 53-min 11-turn F10 session, mixer re-init engaged on all
-11 turns, zero voice incidents (strongest positive signal yet; LIGHT model only —
-heavy-model recovery gate still unexercised). Debt stays open until owner explicitly
-closes it.
+Deferred, explicitly NOT relevant yet per owner (2026-07-16): heavy-model recovery gate
+(`heavy_model_inference_recovery` — the session ran a light model, so that gate remains
+unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, not now.
 
 ## LATEST SNAPSHOT — 2026-07-10 (FINAL AGENT DAY: LiveAudio PTT landed, release prep)
 

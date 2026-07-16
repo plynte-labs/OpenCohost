@@ -4,9 +4,18 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Memoria/RAG Follow-ups — 2026-07-16 Findings**
+- [~] **Track: Memoria/RAG Follow-ups — 2026-07-16 Findings**
   *Link: [./tracks/memoria_rag_followups_20260716/](./tracks/memoria_rag_followups_20260716/)*
-  *Status 2026-07-16: PROPOSAL only, registry of 8 candidates surfaced diagnosing the memoria
+  *Status 2026-07-16 (design DONE, fable): design.md covers all 8 candidates as three batched
+  work units — Batch A = retrieval-signature-scoring → memoria-injection-for-voice-turns →
+  false-memory framing (single PR, ~250-350 lines, signature column via PRAGMA user_version 1→2
+  ALTER TABLE + eager backfill; injection gate widening is TWO sites: llm_engine.py:1383 snapshot
+  AND :1412 call); Batch B = bridge PYTHONUNBUFFERED + rekey logging + api log level (coupled:
+  6 needs 7's setLevel(INFO)); Batch C = ptt buffer_full event (recommended over cap raise —
+  the cap protects turn latency). Owner decisions still open: candidate 3 curation gate
+  (D3.1/D3.2) and candidate 8 log-preview option. Next: sdd-tasks for whichever batch the
+  owner activates. Original registry follows.*
+  *Registry 2026-07-16: PROPOSAL registry of 8 candidates surfaced diagnosing the memoria
   (RAG-lite) injection pipeline and PTT observability, cross-referencing ADR-034. All 8 claims
   verified by direct source read at proposal time. HIGH-value product gap: PTT/voice turns are
   captured as memorias but never receive injection (llm_engine.py:1412 gates the whole block to
@@ -23,6 +32,20 @@ This file tracks all major tracks for the project. Each track has its own detail
   never reach the log); llm-reply-preview-in-temp-log DECISION (llm_engine.py:1715 logs a 200-char
   cleartext reply preview into %TEMP%\opencohost-backend.log via the Tauri stdout redirect). NONE
   approved for implementation — owner picks. See proposal.md.*
+
+---
+
+- [ ] **Track: Memoria Retrieval Upgrade Ladder — FUTURE (activate on trigger, NOT scheduled)**
+  *Link: [./tracks/memoria_retrieval_upgrade_ladder/](./tracks/memoria_retrieval_upgrade_ladder/)*
+  *Status 2026-07-16: future-facing proposal per owner request — when an upgrade trigger fires
+  (1-3+ months out), work starts from this design instead of from zero. Ladder: T1 = signature
+  scoring (lives in memoria_rag_followups Batch A); T2 = FTS5/BM25 (trigger: cap deliberately
+  raised past ~1000 rows/profile); T3 = Ollama embeddings, HARD-gated on VRAM headroom (owner
+  reaffirmed 2026-07-16: no second resident model on current hardware — the real cost is
+  eviction-reload stalls inside the per-turn critical path); independent rung: off-peak LLM
+  consolidation pass (trigger: owner uses pin/curate and shallowness appears). Each rung records
+  its measurable trigger, files touched, and what T1 must not preclude. See proposal.md +
+  ADR-034.*
 
 ---
 
