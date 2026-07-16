@@ -1005,9 +1005,16 @@ class PttStopResponse(BaseModel):
 
 
 class PttStateResponse(BaseModel):
-    """GET /api/ptt/state. ``buffered_chars`` is a count, NEVER the text."""
+    """GET /api/ptt/state. ``buffered_chars`` is a count, NEVER the text.
+
+    ``stt_ws_url`` is the LiveAudio/WhisperLive viewer WebSocket URL the
+    backend itself consumes — exposed so the webview can open its OWN
+    recv-only connection (the OBS-browser-source pattern) for the transcript
+    echo. A URL/port is not transcript text; the privacy rule is untouched.
+    """
 
     state: str
     session_id: Optional[str] = None
     buffered_chars: int = 0
     last_error: Optional[str] = None
+    stt_ws_url: Optional[str] = None

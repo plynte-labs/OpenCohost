@@ -445,6 +445,9 @@ class PttController:
         return {"state": _FLUSHING}
 
     def state(self) -> dict:
+        # stt_ws_url: the LiveAudio viewer WS address (a URL, never text) —
+        # present in EVERY state (idle included) because the webview needs it
+        # at hold start to open its own recv-only transcript connection.
         with self._lock:
             session = self._session
             if session is None:
@@ -453,12 +456,14 @@ class PttController:
                     "session_id": None,
                     "buffered_chars": 0,
                     "last_error": self._last_error,
+                    "stt_ws_url": self._ws_uri,
                 }
             return {
                 "state": session.state,
                 "session_id": session.session_id,
                 "buffered_chars": session.buffered_chars,
                 "last_error": session.last_error,
+                "stt_ws_url": self._ws_uri,
             }
 
     def _on_session_closed(self, last_error: Optional[str]) -> None:

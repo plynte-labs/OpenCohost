@@ -62,6 +62,7 @@ class _FakeController:
             "session_id": None,
             "buffered_chars": 0,
             "last_error": None,
+            "stt_ws_url": "ws://127.0.0.1:8765",
         }
         self.calls = []
 
@@ -216,15 +217,42 @@ def test_get_state_shape_counts_never_text():
         "session_id": "ptt_deadbeef",
         "buffered_chars": 42,
         "last_error": None,
+        "stt_ws_url": "ws://127.0.0.1:8765",
     }
     app, client = _client_with_fake(fake)
     try:
         resp = client.get("/api/ptt/state")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error"}
+        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error", "stt_ws_url"}
         assert isinstance(body["buffered_chars"], int)
         assert body["state"] == "flushing"
+        # A URL/port is NOT transcript text — the privacy rule bans text, not
+        # the address of the viewer socket (same info the OBS overlay uses).
+        assert body["stt_ws_url"] == "ws://127.0.0.1:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_state_exposes_stt_ws_url_from_real_controller():
+    """The viewer WS URL rides /api/ptt/state (idle included) so the webview
+    can open its own recv-only connection to LiveAudio's broadcast socket —
+    the exact OBS-browser-source pattern. It is the URL the controller itself
+    was configured with, and it is present BEFORE any session exists (the
+    client needs it at hold start, not after)."""
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        controller = PttController(
+            "ws://test/whisperlive",
+            app.state.dispatcher,
+            app.state.host.event_log,
+        )
+        app.state.ptt_controller = controller
+        body = client.get("/api/ptt/state").json()
+        assert body["state"] == "idle"
+        assert body["stt_ws_url"] == "ws://test/whisperlive"
     finally:
         client.__exit__(None, None, None)
 
