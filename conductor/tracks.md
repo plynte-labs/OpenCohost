@@ -4,9 +4,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Memoria Quality — 2026-07-17 (history honesty, capture-at-commit, content shaping, prompt disclosure)**
+- [x] **Track: Memoria Quality — 2026-07-17 (history honesty, capture-at-commit, content shaping, prompt disclosure)**
   *Link: [./tracks/memoria_quality_20260717/](./tracks/memoria_quality_20260717/) (design.md + tasks.md)*
-  *Status 2026-07-17: DESIGN DONE + TASKS DONE, apply pending. Design re-verifies sonnet's memoria-quality
+  *Status 2026-07-17 EOD: IMPLEMENTED — WU1 6f11a8d (honest F10/legacy history), WU2+4R corrections
+  274f333 (capture-at-commit, shaped content, announced recall, commit-on-block), E1 dcadf49 backend +
+  c03efaf UI (chat-panel capture notice, coalesced). Full 4R ran on WU1+WU2 (0 critical, 8 warnings all
+  corrected in one bounded transaction); E1 verify PASS + reliability lens. The 4 polluted "acaba decir
+  ptt" rows were deleted via the live API (verified 0 remaining). Owner runtime validation pending:
+  voice memoria titles/content quality, chat capture notice, short-session survival on app close.
+  Prior status follows. DESIGN DONE + TASKS DONE. Design re-verifies sonnet's memoria-quality
   findings (F1-F6) against source + live memorias.db; owner approved a 6-bundle scope (obs #4262): A1 honest
   history_text through the F10/Dispatcher path (3-tuple tolerant unpack, mirrors the priority-queue 4→5
   precedent llm_engine.py:918-921) + A1-legacy same-disease fix in `voice_control.py` (parallel edit, PTT/
