@@ -79,6 +79,12 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         "download_error",
         "ctx_pressure_high",
         "piper_voice_locale_mismatch",
+        # E1 (memoria_quality_20260717): fresh-memoria notice for the Tauri
+        # chat-panel feed. Detail stays None (whitelist contract) — the event
+        # only says "a memoria was saved", never which one. Not added to the
+        # CTK ui/motor_event_handlers dispatch table on purpose: that frontend
+        # drops unmapped statuses as a no-op, so the desktop app ignores it.
+        "memoria_captured",
     }
 )
 

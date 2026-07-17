@@ -278,6 +278,43 @@ def test_upsert_insert_creates_draft_row_revision_1(tmp_path) -> None:
     assert row["inactive"] == 0
 
 
+def test_upsert_draft_return_created_reports_insert_vs_update(tmp_path) -> None:
+    """E1 (memoria_quality_20260717): with return_created=True, upsert_draft
+    reports whether the write was a FRESH insert (revision==1 -> created True)
+    or a refresh of an existing draft (created False). The default return
+    contract (a bare id string) is unchanged -- only the opt-in kwarg widens
+    the return so the engine can fire the memoria.captured notice on a genuine
+    new memoria only (not on every idempotent re-upsert)."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    key = "profile-1|alpha-beta-gamma"
+
+    row_id, created = store.upsert_draft(
+        "profile-1", key, "titulo alpha", "contenido alpha beta gamma", return_created=True
+    )
+    assert created is True
+    assert row_id is not None
+
+    refreshed_id, created_again = store.upsert_draft(
+        "profile-1", key, "titulo nuevo", "contenido nuevo aqui", return_created=True
+    )
+    assert created_again is False
+    assert refreshed_id == row_id  # same row, revision bumped
+
+    # Curated-immune / no-write path must report (None, False) -- callers can
+    # always unpack the pair, never crash on a no-op write.
+    store.update_row(row_id, title="titulo curado")
+    immune_id, immune_created = store.upsert_draft(
+        "profile-1", key, "titulo pisado", "contenido pisado aqui", return_created=True
+    )
+    assert immune_id is None
+    assert immune_created is False
+
+    # Backward compatibility: the default call (no kwarg) still returns a bare
+    # id string -- the ~50 existing callers stay untouched.
+    other = store.upsert_draft("profile-1", "profile-1|delta-epsilon-zeta", "t", "c uno dos tres")
+    assert isinstance(other, str)
+
+
 def test_upsert_same_stable_key_bumps_revision_replaces_draft_content(tmp_path) -> None:
     store = MemoriaStore(tmp_path / "memorias.db")
     key = "profile-1|alpha-beta-gamma"

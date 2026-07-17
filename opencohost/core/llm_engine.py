@@ -2523,16 +2523,34 @@ class MotorVocalIA(threading.Thread):
         the calling thread (engine worker loop / agenda speaker daemon).
         """
         try:
-            self._get_memoria_store().upsert_draft(
-                profile_id, stable_key, title, content, signature=signature
+            _row_id, created = self._get_memoria_store().upsert_draft(
+                profile_id, stable_key, title, content, signature=signature,
+                return_created=True,
             )
-            return True
         except Exception as exc:
             logger.warning(
                 "memoria capture failed (fail-open): %s profile_id=%s stable_key=%s",
                 type(exc).__name__, profile_id, stable_key,
             )
             return False
+        if created:
+            # E1 (memoria_quality_20260717): chat-panel notice, fresh INSERT
+            # only (revision==1). Runs on the engine thread at commit-time
+            # (before TTS); ui_callback -> EngineHost._dispatch_motor_event,
+            # whose handler chain includes the audit-log file append
+            # (log_motor_accion) BEFORE the in-memory event ring — the same
+            # bounded per-event cost every whitelisted motor status already
+            # pays several times per turn, so one extra event is marginal but
+            # NOT free. A refresh/re-upsert (created False) stays silent so
+            # the feed never re-announces a memoria Kira already saved.
+            # Guarded here (not the bare-callback idiom used elsewhere)
+            # because this whole method is a fail-open boundary: the notice
+            # must never crash the engine worker thread.
+            try:
+                self.ui_callback("memoria_captured")
+            except Exception:
+                pass
+        return True
 
     def _get_memoria_store(self) -> MemoriaStore:
         with self._memoria_store_lock:

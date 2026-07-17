@@ -435,6 +435,25 @@ def test_capture_fires_at_commit_not_only_at_eviction(monkeypatch, tmp_path):
     assert rows[0]["content"] != ""
 
 
+def test_fresh_insert_emits_memoria_captured_ui_callback(monkeypatch, tmp_path):
+    """E1 (memoria_quality_20260717): a FRESH memoria capture fires
+    ui_callback("memoria_captured") exactly once. Re-committing the same pair
+    (same stable_key -> a refresh/revision bump, not a new memoria) emits
+    nothing more, so the chat-panel feed never announces a memoria Kira
+    already saved."""
+    motor, _, ui_events = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    # Empty history -> B1 capture-at-commit, no eviction. A brand-new memoria.
+    motor._commit_history(_ELIGIBLE_USER, _ELIGIBLE_ASST, source="direct")
+    assert ui_events.count("memoria_captured") == 1
+    assert len(_store(tmp_path).list_for_profile("profile-1")) == 1
+
+    # Re-commit the identical pair -> same stable_key -> refresh, not insert.
+    motor._commit_history(_ELIGIBLE_USER, _ELIGIBLE_ASST, source="direct")
+    assert ui_events.count("memoria_captured") == 1  # still one -- refresh is silent
+
+
 def test_tic_only_kira_reply_stores_user_side_without_dangling_kira_label():
     """FIX3 (memoria_quality_20260717): when Kira's whole reply collapses to a
     leading tic ("Mirá vos,"), the contentful-sentence extractor yields nothing,

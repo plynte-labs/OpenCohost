@@ -293,8 +293,9 @@ class MemoriaStore:
     # ------------------------------------------------------------------
 
     def upsert_draft(
-        self, profile_id: str, stable_key: str, title: str, content: str, *, signature: str = ""
-    ) -> str | None:
+        self, profile_id: str, stable_key: str, title: str, content: str, *,
+        signature: str = "", return_created: bool = False,
+    ) -> "str | None | tuple[str | None, bool]":
         """Insert a new draft or refresh an existing draft sharing stable_key.
 
         Curated rows are upsert-immune (the WHERE clause makes the conflict
@@ -304,6 +305,12 @@ class MemoriaStore:
         required inputs. *signature* (candidate 2) is the optional retrieval
         signature (build_signature of the full pair); "" is valid — scoring
         falls back to the title.
+
+        *return_created* (E1, memoria_quality_20260717) is an OPT-IN widening:
+        when True, returns ``(row_id, created)`` where ``created`` is True only
+        for a genuine fresh INSERT (revision==1), False for a refresh/no-op.
+        Off by default so the ~50 existing callers keep the bare-id contract —
+        only the engine's memoria.captured notice needs the flag.
         """
         profile_id = (profile_id or "").strip()
         stable_key = (stable_key or "").strip()
@@ -339,18 +346,19 @@ class MemoriaStore:
                 result = cur.fetchone()
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store write failed (fail-open): {type(exc).__name__}")
-            return None
+            return (None, False) if return_created else None
 
         self._clear_warn()
         if result is None:
-            return None  # curated row: upsert-immune, no write happened
+            # curated row: upsert-immune, no write happened
+            return (None, False) if return_created else None
 
         written_id, revision = result["id"], result["revision"]
         if revision == 1:
             self._prune_profile(profile_id)
         else:
             logger.debug("memoria upsert conflict stable_key=%s revision=%s", stable_key, revision)
-        return written_id
+        return (written_id, revision == 1) if return_created else written_id
 
     def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None, raising: bool = False) -> bool:
         """Operator edit: promotes status to curated in the same statement (F5).
