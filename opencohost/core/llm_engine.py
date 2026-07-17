@@ -13,6 +13,10 @@ try:
     import edge_tts
 except ImportError:
     edge_tts = None  # optional cloud-TTS dependency; Piper offline path stays available
+try:
+    import winsound  # Windows-only stdlib; drives the PTT listening cue
+except ImportError:
+    winsound = None  # non-Windows: the PTT cue is a silent no-op
 from collections import deque, Counter
 from typing import Callable, Optional
 
@@ -37,6 +41,7 @@ from opencohost.config.settings import (
     default_piper_voice_for_locale,
     MEMORIAS_ENABLED, MEMORIAS_DB,
     PERSONALIZATION_ENABLED,
+    PTT_CUE_ENABLED, PTT_CUE_VOLUME,
 )
 from opencohost.core import context_budget
 from opencohost.core import personalization
@@ -365,6 +370,11 @@ class MotorVocalIA(threading.Thread):
         # headless API's PTT teardown path or an actual playback exception.
         self._audio_reinit_needed: bool = False
 
+        # Lazily-built, cached PTT listening blip as an in-memory WAV file
+        # (immutable bytes, reinit-proof). None until the first play_ptt_cue()
+        # builds it from a pure-stdlib sine; see play_ptt_cue / _ptt_cue_wav.
+        self._ptt_cue_wav_bytes = None
+
         # Priority queue: (priority, timestamp, payload, source)
         # priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest)
         self._priority_queue: list = []
@@ -449,6 +459,72 @@ class MotorVocalIA(threading.Thread):
         """
         with self._lock:
             self._audio_reinit_needed = True
+
+    def play_ptt_cue(self) -> None:
+        """Play a short, low-volume blip the instant a PTT hold starts listening.
+
+        A nicety so the operator knows the mic is live while gaming with the
+        app window unfocused/minimized: the frontend pauses its polls in the
+        background, so a UI-side sound would not fire reliably. Wired from
+        ``PttController.start`` (opencohost/api/ptt_session.py) via the
+        ``on_listening`` hook, on the HTTP handler thread.
+
+        Plays through ``winsound`` (a separate Windows audio path with ZERO
+        pygame/SDL interaction), so it is safe to fire from any thread — it
+        shares no state with the engine's pygame mixer, which the voice-death
+        reinit quits+re-inits on its own thread after every PTT close. The cue
+        is fire-and-forget (``SND_ASYNC``) and fail-open: ``PTT_CUE_ENABLED``
+        gates it off entirely, a non-Windows host (no ``winsound``) no-ops, and
+        every error is swallowed — a cue that fails must never break PTT start.
+        """
+        if not PTT_CUE_ENABLED or winsound is None:
+            return
+        try:
+            winsound.PlaySound(
+                self._ptt_cue_wav(),
+                winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+            )
+        except Exception:
+            logger.debug("PTT cue playback skipped (fail-open)", exc_info=True)
+
+    def _ptt_cue_wav(self) -> bytes:
+        """Lazily build and cache the PTT blip as an in-memory WAV file.
+
+        Pure stdlib (no numpy): a soft ~120 ms 880 Hz sine, 44100 Hz mono
+        16-bit, with a short fade in/out to kill click artifacts.
+        ``PTT_CUE_VOLUME`` is baked into the sample amplitude because winsound
+        has no volume control. The bytes are immutable and independent of the
+        pygame mixer, so they are built once and cached forever.
+        """
+        if self._ptt_cue_wav_bytes is not None:
+            return self._ptt_cue_wav_bytes
+        import io
+        import math
+        import struct
+        import wave
+
+        rate = 44100
+        n = max(1, int(rate * 0.12))
+        fade = max(1, n // 8)
+        amp = max(0.0, min(1.0, PTT_CUE_VOLUME)) * 32767.0
+        frames = bytearray()
+        for i in range(n):
+            if i < fade:
+                env = i / fade
+            elif i >= n - fade:
+                env = (n - i) / fade
+            else:
+                env = 1.0
+            sample = int(math.sin(2.0 * math.pi * 880.0 * i / rate) * env * amp)
+            frames += struct.pack("<h", sample)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            wav.writeframes(bytes(frames))
+        self._ptt_cue_wav_bytes = buf.getvalue()
+        return self._ptt_cue_wav_bytes
 
     def cancel_speech_for_sources(self, prefixes: tuple[str, ...]) -> None:
         """Refuse to START any upcoming _hablar() whose source matches a prefix.

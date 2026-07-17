@@ -775,6 +775,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 on_audio_suspect=getattr(
                     getattr(host, "motor", None), "mark_audio_suspect", None
                 ),
+                # Listening cue (ptt_cue_20260717): same smallest-surface,
+                # getattr-guarded pattern — a bound motor.play_ptt_cue fired
+                # when the hold reaches listening, so the operator hears the
+                # mic go live even with the app window unfocused.
+                on_listening=getattr(
+                    getattr(host, "motor", None), "play_ptt_cue", None
+                ),
             )
             yield
         finally:

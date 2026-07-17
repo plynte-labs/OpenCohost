@@ -387,6 +387,7 @@ class PttController:
         *,
         session_factory=PttSession,
         on_audio_suspect: Optional[Callable[[], None]] = None,
+        on_listening: Optional[Callable[[], None]] = None,
         **session_kwargs,
     ):
         self._ws_uri = ws_uri
@@ -399,6 +400,12 @@ class PttController:
         # ``motor.mark_audio_suspect`` callback, never the whole engine.
         # Optional so unit tests / minimal host doubles need not supply it.
         self._on_audio_suspect = on_audio_suspect
+        # Listening cue hook (ptt_cue_20260717): a bound ``motor.play_ptt_cue``
+        # fired once the session reaches listening, mirroring the on_audio_
+        # suspect surface — a nicety so the operator hears the mic go live even
+        # with the app window unfocused. Optional so tests / minimal host
+        # doubles need not supply it.
+        self._on_listening = on_listening
         self._lock = threading.Lock()
         self._session: Optional[PttSession] = None
         # Survives after the session frees the slot so GET /api/ptt/state can
@@ -445,6 +452,9 @@ class PttController:
                     self._session = None
                 self._last_error = "stt_unreachable"
             raise
+        # Session is now listening (start() returns only on success). Fire the
+        # cue AFTER — never on the stt_unreachable path, where nothing listens.
+        self._notify_listening()
         return session.session_id
 
     def keepalive(self, session_id: str) -> Optional[dict]:
@@ -488,6 +498,17 @@ class PttController:
                 "last_error": session.last_error,
                 "stt_ws_url": self._ws_uri,
             }
+
+    def _notify_listening(self) -> None:
+        """Fire the optional listening hook (the PTT audio cue) once the
+        session has reached listening. Fail-open: a hook error never fails the
+        start — the operator is already live and the cue is only a nicety."""
+        if self._on_listening is None:
+            return
+        try:
+            self._on_listening()
+        except Exception:
+            logger.exception("PTT listening hook failed")
 
     def _on_session_closed(self, last_error: Optional[str]) -> None:
         with self._lock:

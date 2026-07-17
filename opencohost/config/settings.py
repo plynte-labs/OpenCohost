@@ -259,6 +259,15 @@ PTT_DEFAULT_HOTKEY = "F10"
 PTT_MIN_DURATION = 0.5   # Duración mínima de grabación en segundos
 PTT_MAX_DURATION = 30.0  # Duración máxima (truncar si se excede)
 
+# Audio cue when a PTT hold begins listening (ptt_cue_20260717). A short,
+# low-volume blip so the operator knows the mic is live even while the app
+# window is unfocused/minimized during gaming — it plays via winsound (a
+# separate Windows audio path, no pygame/SDL), so it fires regardless of
+# window state, unlike a UI-side sound the background-paused frontend would
+# miss. Start-only; set PTT_CUE_ENABLED=False to silence it.
+PTT_CUE_ENABLED = True
+PTT_CUE_VOLUME = 0.2  # 0.0-1.0; deliberately low — it is a nicety, not TTS
+
 # Teclas disponibles para PTT (ordenadas)
 PTT_HOTKEY_LIST = [
     "F1", "F2", "F3", "F4", "F5", "F6",
