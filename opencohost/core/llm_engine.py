@@ -47,7 +47,7 @@ from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABE
 from opencohost.core.memory_digest import MemoryDigest
 from opencohost.core.memoria_store import (
     MemoriaStore, derive_stable_key, build_title, build_signature,
-    build_injection_lines, pinned_injection_counter,
+    build_injection_lines, pinned_injection_counter, significant_token_count,
 )
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger, _debug_enabled
@@ -506,11 +506,39 @@ class MotorVocalIA(threading.Thread):
                 self._log("Señal de cierre recibida. Terminando hilo IA.")
                 break
 
-            tipo, payload = comando
-            self._dispatch_command(tipo, payload)
+            self._consume_command(comando)
 
-    def _dispatch_command(self, tipo: str, payload) -> None:
-        """Dispatch a command tuple. Extracted from run() for testability."""
+    def _consume_command(self, comando) -> None:
+        """Unpack one command tuple and dispatch it. Extracted from run() for
+        testability (mirrors _dispatch_command's own extraction).
+
+        Tolerant unpack (A1, memoria_quality_20260717): legacy 2-tuples
+        (app_shell chat + control verbs) carry no history_text; the F10 PTT
+        Dispatcher (dispatch.py) and the legacy voice_control.py idle path put a
+        3-tuple (command, payload, history_text). Mirrors the priority-queue
+        4->5-tuple precedent in _process_priority_queue
+        (prio, ts, payload, source, *rest).
+        """
+        tipo, payload, *rest = comando
+        history_text = rest[0] if rest else None
+        self._dispatch_command(tipo, payload, history_text=history_text)
+
+    def _dispatch_command(self, tipo: str, payload, history_text: Optional[str] = None) -> None:
+        """Dispatch a command tuple. Extracted from run() for testability.
+
+        history_text (A1, memoria_quality_20260717), when present, is the honest
+        text committed to historial for a process_context turn — carried by the
+        F10 PTT Dispatcher path and the legacy voice_control.py idle path. None
+        keeps the pre-existing behavior (payload committed as-is) for every
+        chat/control caller.
+
+        NOTE (source honesty, deferred — see design.md): the process_context
+        branch hardcodes source="direct" for BOTH the idle and busy re-enqueue
+        paths, so F10 PTT and legacy LiveVoice turns log/telemeter as "direct".
+        This is an observability inaccuracy only — "direct" and "ptt" are both
+        allowlisted for capture+injection, so behavior is unaffected. Threading a
+        real source through the Dispatcher is a candidate follow-up, not this
+        track's scope."""
         if tipo == "set_voice":
             self.voz_referencia = payload
             if isinstance(payload, tuple):
@@ -528,14 +556,14 @@ class MotorVocalIA(threading.Thread):
             if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                self.enqueue(payload, priority=1, source="direct")
+                self.enqueue(payload, priority=1, source="direct", history_text=history_text)
                 return
             with self._lock:
                 self._processing = True
                 self._current_processing_source = "direct"
             self.ui_callback("processing")
             try:
-                self._ejecutar_inferencia(payload, source="direct")
+                self._ejecutar_inferencia(payload, source="direct", history_text=history_text)
             finally:
                 self._complete_processing_cycle()
 
@@ -1349,12 +1377,20 @@ class MotorVocalIA(threading.Thread):
         finally:
             self._downloading = False
 
-    def _guardrail_fallback_line(self, source: str) -> str:
+    def _guardrail_fallback_line(self, source: str, reason: str = "") -> str:
         """Return a canned spoken line for guard-blocked responses.
 
         Agenda sources return "" — the agenda state machine already handles
         rejected outputs gracefully and a canned line would break topic flow.
-        Lines rotate to avoid immediate repetition on consecutive blocks.
+
+        D4 (memoria_quality_20260717): the memory-flavored last bundle line is
+        reserved for turns blocked by the R9 AI-self-ID rule — the only guard
+        reason a "my memories got tangled" deflection actually fits. Every other
+        block reason (and the reason-less chat-repetition path) round-robins over
+        the FIRST FOUR generic lines only, so the memory line is never a
+        non-sequitur for an unrelated block. Bundles that ship fewer than five
+        lines round-robin over whatever they have (no reserved memory line).
+
         Lines come from the active locale bundle (i18n_active.guardrail_fallback_lines,
         es legacy default) — must stay neutral and never match an output_guard
         pattern themselves, or a block->fallback->block loop would result.
@@ -1362,9 +1398,14 @@ class MotorVocalIA(threading.Thread):
         if source.startswith("kira-agenda"):
             return ""
         lines = i18n_active.guardrail_fallback_lines()
+        # R9 self-ID block -> the memory-flavored line (bundle index 4), when the
+        # bundle actually ships it. Does not advance the generic rotation.
+        if "no_ai_self_identification" in reason and len(lines) >= 5:
+            return lines[4]
+        generic = lines[:4] if len(lines) >= 5 else lines
         idx = getattr(self, "_guardrail_fallback_idx", 0)
         self._guardrail_fallback_idx = idx + 1
-        return lines[idx % len(lines)]
+        return generic[idx % len(generic)]
 
     def _maybe_notify_piper_locale_mismatch(self) -> None:
         """One-shot ui_callback notice fired the first time Piper actually
@@ -1714,9 +1755,22 @@ class MotorVocalIA(threading.Thread):
             allowed, guard_reason = output_guard(dialogo, source=source)
             if not allowed:
                 self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
-                fallback = self._guardrail_fallback_line(source)
+                fallback = self._guardrail_fallback_line(source, guard_reason)
                 if fallback:
                     self._log("Guardrail fallback: usando línea neutral sin LLM.")
+                    # D4 (memoria_quality_20260717): a guardrail-blocked turn used
+                    # to return here BEFORE _commit_history, so the whole exchange
+                    # vanished from history AND capture (F4). Commit the user turn
+                    # + the spoken fallback line instead. Gated on commit_history
+                    # so callers that opted out are unaffected, and on a truthy
+                    # fallback so agenda sources (fallback="") keep their existing
+                    # state-machine handling with no empty pair appended. C1's
+                    # canned-fallback skip guarantees these pairs never become
+                    # memorias.
+                    if commit_history:
+                        self._commit_history(
+                            contexto, fallback, source=source, history_text=history_text,
+                        )
                     return fallback
                 return ""
 
@@ -2279,6 +2333,7 @@ class MotorVocalIA(threading.Thread):
         # _history_lock is held below; upsert_draft is called AFTER the lock
         # releases (upsert_draft must never run with _history_lock held).
         pending_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
+        committed_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
 
         # Hold _history_lock around the eviction-capture + both appends so
         # concurrent callers (worker loop and agenda speaker daemon) cannot
@@ -2323,11 +2378,18 @@ class MotorVocalIA(threading.Thread):
                     # derive_stable_key) stays LAST — a signal/token-count gate,
                     # never a substitute for provenance (Judge-B forward, slice
                     # 2 N1).
-                    pending_memoria_capture = self._build_memoria_draft(
-                        evicted_user_content, evicted_asst_content, ledger_line,
-                        source=evicted_source,
-                        private=self.historial[0].get("private"),
-                    )
+                    #
+                    # FIX2 (memoria_quality_20260717): skip the memoria re-capture
+                    # when this pair was already captured at commit-time (B1) —
+                    # a byte-identical re-upsert only bumps revision/updated_at
+                    # and flaps the panel order. The digest ledger above is a
+                    # SEPARATE in-memory feature and is always appended.
+                    if not self.historial[0].get("mem_captured", False):
+                        pending_memoria_capture = self._build_memoria_draft(
+                            evicted_user_content, evicted_asst_content,
+                            source=evicted_source,
+                            private=self.historial[0].get("private"),
+                        )
 
             # Append-time privacy tagging (R2/R4): both pair entries carry the
             # CURRENT switch state at the moment they enter historial. Capture
@@ -2339,17 +2401,39 @@ class MotorVocalIA(threading.Thread):
             # the two appends must not split the pair's tag (B-S1) — the flip
             # then correctly applies forward, to the next turn's pair instead.
             priv = self._memorias_private
-            self.historial.append({
+            committed_user_entry = {
                 'role': 'user', 'content': safe_context, 'source': source,
                 'private': priv,
-            })
+            }
+            self.historial.append(committed_user_entry)
             self.historial.append({
                 'role': 'assistant', 'content': dialogo, 'source': source,
                 'private': priv,
             })
 
+            # B1 (memoria_quality_20260717) — capture-at-commit: the pair that
+            # just ENTERED historial becomes a memoria immediately, not only
+            # when it is later evicted/flushed. This is the durability fix (F2):
+            # a hard kill before eviction/close no longer loses the exchange.
+            # Built under the lock (same discipline as eviction capture);
+            # upserted AFTER the lock releases. Belt-and-braces with eviction +
+            # flush: the stable_key upsert (ON CONFLICT(profile_id,stable_key)
+            # ... WHERE status='draft') is idempotent, so a pair captured here
+            # and again later is a no-op revision bump, never a duplicate row.
+            committed_memoria_capture = self._build_memoria_draft(
+                safe_context, dialogo, source=source, private=priv,
+            )
+
         if pending_memoria_capture is not None:
             self._capture_memoria(*pending_memoria_capture)
+        if committed_memoria_capture is not None:
+            # FIX2 (memoria_quality_20260717): flag the just-committed pair ONLY
+            # when the upsert actually persisted, so eviction/flush skip the
+            # byte-identical re-upsert (revision churn / panel-order flapping).
+            # On the fail-open path the flag stays unset → eviction/flush retain
+            # their retry role (belt-and-braces preserved for the failure case).
+            if self._capture_memoria(*committed_memoria_capture):
+                committed_user_entry["mem_captured"] = True
 
     def set_memorias_private(self, value: bool) -> None:
         """Session-scoped memorias capture-privacy switch (R2/R4).
@@ -2370,7 +2454,6 @@ class MotorVocalIA(threading.Thread):
         self,
         user_content: str,
         asst_content: str,
-        ledger_line: str,
         *,
         source: Optional[str],
         private,
@@ -2379,16 +2462,18 @@ class MotorVocalIA(threading.Thread):
         assistant) pair, or None if any gate fails.
 
         Single source of truth for R1-R4/RC-1, shared by eviction-capture
-        (T3, above) and F4 flush (slice 4 — close-flush and profile-switch
-        both iterate live-window pairs through this same chain instead of
-        duplicating gate logic). MUST be called while _history_lock is held
-        — reads the pair's own tags (state-at-event), never a switch's
-        current state. Order: source allowlist -> not agenda-sentinel ->
-        MEMORIAS_ENABLED -> private tag is False -> profile_id set ->
-        significant-token minimum (is_capturable, via derive_stable_key,
-        LAST — a signal gate, never a substitute for provenance, Judge-B
-        forward slice 2 N1). Returns (profile_id, stable_key, title,
-        content, signature) or None.
+        (T3, above), B1 capture-at-commit (memoria_quality_20260717), and F4
+        flush (slice 4 — close-flush and profile-switch both iterate live-window
+        pairs through this same chain instead of duplicating gate logic). MUST
+        be called while _history_lock is held — reads the pair's own tags
+        (state-at-event), never a switch's current state. Order: source
+        allowlist -> not agenda-sentinel -> MEMORIAS_ENABLED -> private tag is
+        False -> profile_id set -> significant-token minimum (is_capturable, via
+        derive_stable_key, LAST — a signal gate, never a substitute for
+        provenance, Judge-B forward slice 2 N1). Returns (profile_id,
+        stable_key, title, content, signature) or None. C1: content comes from
+        _build_memoria_content (24-word user budget + first contentful Kira
+        sentence), NOT the 8-word digest ledger line.
         """
         if source not in _DIGEST_CAPTURE_SOURCES:
             return None
@@ -2401,19 +2486,37 @@ class MotorVocalIA(threading.Thread):
         profile_id = self._current_profile_id
         if profile_id is None:
             return None
+        # C1 (memoria_quality_20260717): user-side-alone signal gate — a pair
+        # whose USER turn is a greeting/filler (< 2 significant tokens) dies
+        # even when Kira's reply is rich. Distinct from is_capturable below,
+        # which scores the COMBINED pair >= 3: a verbose Kira answer must not
+        # drag a contentless "hola" into a stored memoria.
+        if significant_token_count(user_content) < 2:
+            return None
+        # C1: skip canned guardrail-fallback assistant lines. D4 commits
+        # guardrail-blocked exchanges to history so they are not lost, but the
+        # fallback line itself carries zero memory signal. Literal match against
+        # the active locale's fallback set (the same lines D4 actually speaks).
+        if (asst_content or "").strip() in i18n_active.guardrail_fallback_lines():
+            return None
         signature_text = f"{user_content} {asst_content}"
         stable_key = derive_stable_key(profile_id, signature_text)
         if stable_key is None:
             return None
         return (
             profile_id, stable_key, build_title(signature_text),
-            ledger_line[:300], build_signature(signature_text),
+            self._build_memoria_content(user_content, asst_content),
+            build_signature(signature_text),
         )
 
     def _capture_memoria(
         self, profile_id: str, stable_key: str, title: str, content: str, signature: str = ""
-    ) -> None:
+    ) -> bool:
         """I/O: upsert a memoria draft. MUST be called AFTER _history_lock releases.
+
+        Returns True on a successful upsert, False on the fail-open path (so
+        capture-at-commit can flag a pair only when it actually persisted, and
+        a failure leaves eviction/flush their retry role — FIX2).
 
         Fail-open (R5): any exception is logged (ids/type only, never title
         or content — RC-8) and swallowed. A memorias write must never crash
@@ -2423,11 +2526,13 @@ class MotorVocalIA(threading.Thread):
             self._get_memoria_store().upsert_draft(
                 profile_id, stable_key, title, content, signature=signature
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "memoria capture failed (fail-open): %s profile_id=%s stable_key=%s",
                 type(exc).__name__, profile_id, stable_key,
             )
+            return False
 
     def _get_memoria_store(self) -> MemoriaStore:
         with self._memoria_store_lock:
@@ -2489,11 +2594,17 @@ class MotorVocalIA(threading.Thread):
         entries = list(self.historial)
         for i in range(0, len(entries) - 1, 2):
             user_entry, asst_entry = entries[i], entries[i + 1]
+            # FIX2 (memoria_quality_20260717): a pair already captured at
+            # commit-time (B1) is byte-identical on disk — skip the flush
+            # re-upsert (revision churn / panel-order flapping). Unflagged
+            # pairs (e.g. commit-capture failed, or appended directly) still
+            # flush, preserving flush's belt-and-braces role.
+            if user_entry.get("mem_captured", False):
+                continue
             user_content = user_entry.get("content", "")
             asst_content = asst_entry.get("content", "")
-            ledger_line = self._build_ledger_line(user_content, asst_content)
             draft = self._build_memoria_draft(
-                user_content, asst_content, ledger_line,
+                user_content, asst_content,
                 source=user_entry.get("source"),
                 private=user_entry.get("private"),
             )
@@ -2602,6 +2713,52 @@ class MotorVocalIA(threading.Thread):
         ctx_label = i18n_active.ledger_context_label()
         kira_label = i18n_active.ledger_kira_label()
         return f"{ctx_label}: {user_summary} {kira_label}: {kira_summary}"
+
+    # C1 (memoria_quality_20260717): closed leading-tic list stripped off the
+    # Kira side before picking the first CONTENTFUL sentence. Kira's stock
+    # openers ("Mirá vos," is 52% of legacy rows) carry zero memory signal and
+    # would otherwise become the whole stored content. Comma-inclusive so we
+    # only strip the opener, not a mid-sentence "Mirá".
+    _MEMORIA_KIRA_LEADING_TICS = ("Mirá vos,", "Mirá,", "Che,", "Posta,")
+    _MEMORIA_CONTENT_USER_WORDS = 24
+
+    @classmethod
+    def _contentful_kira_sentence(cls, asst_text: str) -> str:
+        """First sentence of *asst_text* with >=3 significant tokens, after
+        stripping a leading tic. Falls back to the first sentence when none
+        qualify. Returns "" when the reply is empty OR collapses to nothing
+        after tic-stripping (e.g. a tic-only reply like "Mirá vos,") — the
+        caller (_build_memoria_content) then stores the user side alone, with
+        no dangling Kira label."""
+        stripped = (asst_text or "").lstrip()
+        for tic in cls._MEMORIA_KIRA_LEADING_TICS:
+            if stripped.startswith(tic):
+                stripped = stripped[len(tic):].lstrip()
+                break
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", stripped) if s.strip()]
+        for sentence in sentences:
+            if significant_token_count(sentence) >= 3:
+                return sentence
+        return sentences[0] if sentences else stripped.strip()
+
+    @classmethod
+    def _build_memoria_content(cls, user_text: str, asst_text: str) -> str:
+        """C1 memoria body — richer than the 8-word digest ledger line.
+
+        user side = first 24 words (digest keeps 8 — decoupled). Kira side =
+        first CONTENTFUL sentence (see _contentful_kira_sentence). Capped at 300
+        chars, preserving the pre-C1 content-length invariant.
+        """
+        user_summary = cls._first_words(user_text, cls._MEMORIA_CONTENT_USER_WORDS)
+        kira_summary = cls._contentful_kira_sentence(asst_text)
+        ctx_label = i18n_active.ledger_context_label()
+        # FIX3 (memoria_quality_20260717): append the "→ Kira: ..." segment ONLY
+        # when Kira's side is non-empty. A tic-only reply collapses to "" — a
+        # contentless Kira side simply isn't stored (no dangling label).
+        if not kira_summary:
+            return f"{ctx_label}: {user_summary}"[:300]
+        kira_label = i18n_active.ledger_kira_label()
+        return f"{ctx_label}: {user_summary} {kira_label}: {kira_summary}"[:300]
 
     @staticmethod
     def _sanitize_history_context(context: str) -> str:

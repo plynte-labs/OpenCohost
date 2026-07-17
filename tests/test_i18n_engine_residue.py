@@ -285,21 +285,46 @@ def test_engine_guardrail_fallback_returns_en_line_for_en_locale(official):
     assert line and line not in active.LEGACY_GUARDRAIL_FALLBACK_LINES
 
 
-def test_engine_guardrail_fallback_rotates_through_lines(official):
+def test_engine_guardrail_fallback_rotates_through_first_four_generic_lines(official):
+    """D4 (memoria_quality_20260717): generic blocks round-robin over the FIRST
+    FOUR lines only — the memory-flavored 5th line is reserved for R9 self-ID
+    blocks and never appears in generic rotation."""
     _activate("es", official)
     motor = _make_motor()
-    results = [motor._guardrail_fallback_line("direct") for _ in range(5)]
-    assert set(results[:4]) == set(active.LEGACY_GUARDRAIL_FALLBACK_LINES)
-    assert results[4] == results[0]
+    generic = active.LEGACY_GUARDRAIL_FALLBACK_LINES[:4]
+    memory_line = active.LEGACY_GUARDRAIL_FALLBACK_LINES[4]
+    results = [motor._guardrail_fallback_line("direct") for _ in range(len(generic) + 1)]
+    assert set(results[:4]) == set(generic)
+    assert memory_line not in results        # never emitted by generic rotation
+    assert results[4] == results[0]          # wraps at 4, not 5
+
+
+def test_engine_guardrail_fallback_memory_line_only_on_self_id_reason(official):
+    """The memory-flavored line is returned ONLY when the block reason is the R9
+    AI-self-ID rule; a non-self-ID reason still round-robins the generic four."""
+    _activate("es", official)
+    motor = _make_motor()
+    r9_reason = "Non-negotiable violation [no_ai_self_identification]: contains AI self-ID"
+    assert (
+        motor._guardrail_fallback_line("direct", r9_reason)
+        == active.LEGACY_GUARDRAIL_FALLBACK_LINES[4]
+    )
+    other = motor._guardrail_fallback_line(
+        "direct", "Non-negotiable violation [never_promise]: contains a promise"
+    )
+    assert other in active.LEGACY_GUARDRAIL_FALLBACK_LINES[:4]
 
 
 def test_engine_guardrail_fallback_en_lines_pass_output_guard(official):
     from opencohost.config.validation import output_guard
 
     _activate("en", official)
-    motor = _make_motor()
-    for _ in range(4):
-        line = motor._guardrail_fallback_line("direct")
+    # Iterate the FULL en bundle directly (not via the rotating selector, which
+    # after D4 never emits the 5th memory-flavored line for a generic reason) so
+    # every line — including that 5th line — is verified guard-safe.
+    lines = active.guardrail_fallback_lines()
+    assert len(lines) == 5  # 4 generic + 1 memory-flavored (D4)
+    for line in lines:
         allowed, reason = output_guard(line, source="direct")
         assert allowed, f"en fallback line blocked: {line!r} — {reason}"
 
@@ -477,7 +502,9 @@ def test_voice_control_ptt_flush_idle_uses_ptt_wrapper(official):
 
     panel._flush_ptt_buffer()
 
-    _, payload = panel._motor_ia.command_queue.get_nowait()
+    # WU1 (memoria_quality_20260717) made the idle PTT flush enqueue a 3-tuple
+    # (command, payload, history_text); tolerant unpack mirrors run()'s consumer.
+    _cmd, payload, *_rest = panel._motor_ia.command_queue.get_nowait()
     assert payload == active.ptt_wrapper().format(text="hello there team")
 
 
@@ -525,7 +552,7 @@ def test_controller_ptt_history_text_uses_own_wrapper_en(official):
 def test_es_manifest_has_guardrail_fallback_lines():
     es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
     lines = resolve(es, "llm.guardrail_fallback_lines")
-    assert isinstance(lines, list) and len(lines) == 4
+    assert isinstance(lines, list) and len(lines) == 5  # +1 memory-flavored line (D4)
 
 
 def test_es_manifest_guardrail_fallback_lines_are_spanish():
@@ -543,7 +570,7 @@ def test_es_manifest_guardrail_fallback_lines_are_spanish():
 def test_en_manifest_has_guardrail_fallback_lines():
     en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
     lines = resolve(en, "llm.guardrail_fallback_lines")
-    assert isinstance(lines, list) and len(lines) == 4
+    assert isinstance(lines, list) and len(lines) == 5  # +1 memory-flavored line (D4)
 
 
 def test_en_manifest_guardrail_fallback_lines_are_english():

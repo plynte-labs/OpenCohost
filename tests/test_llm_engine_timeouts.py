@@ -261,7 +261,7 @@ def test_agenda_generation_uses_controller_guardrail_before_history_or_speech():
     assert list(motor.historial) == []
 
 
-def test_output_guard_blocks_direct_generation_before_history_commit():
+def test_output_guard_blocked_direct_commits_user_turn_and_fallback():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor.use_system_role = True
@@ -273,12 +273,17 @@ def test_output_guard_blocks_direct_generation_before_history_commit():
     dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
 
     # R9 (AI self-ID) is global: blocked even for direct source. The spoken
-    # fallback line replaces dead air but never reaches LLM history.
+    # fallback line replaces dead air. D4 (memoria_quality_20260717): the blocked
+    # exchange now ENTERS history as (user turn, spoken fallback) instead of
+    # vanishing (F4) — but the blocked LLM output itself never reaches history.
     assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
-    assert list(motor.historial) == []
+    assert len(motor.historial) == 2
+    assert motor.historial[-2]["content"] == "hola"
+    assert motor.historial[-1]["content"] == dialogo
+    assert "Como modelo de lenguaje" not in motor.historial[-1]["content"]
 
 
-def test_output_guard_blocks_chat_generation_before_history_commit():
+def test_output_guard_blocked_chat_commits_user_turn_and_fallback():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor.use_system_role = True
@@ -289,10 +294,14 @@ def test_output_guard_blocks_chat_generation_before_history_commit():
 
     dialogo = motor._generar_dialogo("chat compactado", source="chat", commit_history=True)
 
-    # R10 still applies to chat sources; the fallback line is spoken instead
-    # of dead air and is never committed to LLM history.
+    # R10 still applies to chat sources; the fallback line is spoken instead of
+    # dead air. D4: the blocked exchange enters history (user turn + fallback);
+    # the blocked LLM output ("Tu audiencia...") never does.
     assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
-    assert list(motor.historial) == []
+    assert len(motor.historial) == 2
+    assert motor.historial[-2]["content"] == "chat compactado"
+    assert motor.historial[-1]["content"] == dialogo
+    assert "Tu audiencia" not in motor.historial[-1]["content"]
 
 
 def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
@@ -810,7 +819,7 @@ def test_process_context_no_ref_does_not_drop_message():
     motor.is_ready = True
     motor.motor_tts = "pesado"
     motor.voz_referencia = None
-    motor._ejecutar_inferencia = lambda payload, source: inference_calls.append(payload)
+    motor._ejecutar_inferencia = lambda payload, source, history_text=None: inference_calls.append(payload)
 
     motor._dispatch_command("process_context", "hello world")
 
@@ -828,7 +837,7 @@ def test_process_context_no_ref_does_not_log_falta_audio():
     motor.motor_tts = "pesado"
     motor.voz_referencia = None
     motor._log = lambda msg, **kw: log_messages.append(msg)
-    motor._ejecutar_inferencia = lambda payload, source: None
+    motor._ejecutar_inferencia = lambda payload, source, history_text=None: None
 
     motor._dispatch_command("process_context", "hello world")
 

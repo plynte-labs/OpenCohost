@@ -73,6 +73,14 @@ _MIN_SHARED_TOKENS = 2
 # Do not expand/shrink without updating those tests in lockstep.
 _MEMORIA_DOMAIN_STOPWORDS: frozenset[str] = frozenset({
     "kira", "obs", "tema", "perfil", "usuario", "recuerda", "dice", "streamer", "chat",
+    # A2 (memoria_quality_20260717): PTT history-wrapper + legacy ledger-label
+    # boilerplate that leaks into derivation ("El streamer dijo (PTT): ...",
+    # "El streamer acaba de decir (PTT): ...", "contexto: ..."). LOAD-BEARING,
+    # not belt-and-braces: the honest ptt_history_wrapper still carries
+    # dijo/ptt. Also retroactively neutralizes the stored "contexto"-polluted
+    # signatures at scoring time, since select_top_k stopword-filters the topic
+    # side. Do not expand/shrink without updating the RC-1/RC-7 tests in lockstep.
+    "acaba", "decir", "dijo", "ptt", "contexto",
 })
 
 
@@ -98,6 +106,18 @@ def _significant_tokens(text: str) -> list[str]:
         seen.add(token)
         result.append(token)
     return result
+
+
+def significant_token_count(text: str) -> int:
+    """Public count of DISTINCT significant tokens in *text* (domain + generic
+    stopwords filtered).
+
+    C1 (memoria_quality_20260717): the engine's content-shaping gates reuse
+    this without reaching into the private _significant_tokens — the user-side
+    >=2-token capture gate and the Kira-side "first sentence with >=3
+    significant tokens" pick both count the same way capture already does.
+    """
+    return len(_significant_tokens(text))
 
 
 def is_capturable(text: str) -> bool:

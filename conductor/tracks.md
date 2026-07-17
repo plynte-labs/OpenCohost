@@ -4,6 +4,32 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: Memoria Quality — 2026-07-17 (history honesty, capture-at-commit, content shaping, prompt disclosure)**
+  *Link: [./tracks/memoria_quality_20260717/](./tracks/memoria_quality_20260717/) (design.md + tasks.md)*
+  *Status 2026-07-17: DESIGN DONE + TASKS DONE, apply pending. Design re-verifies sonnet's memoria-quality
+  findings (F1-F6) against source + live memorias.db; owner approved a 6-bundle scope (obs #4262): A1 honest
+  history_text through the F10/Dispatcher path (3-tuple tolerant unpack, mirrors the priority-queue 4→5
+  precedent llm_engine.py:918-921) + A1-legacy same-disease fix in `voice_control.py` (parallel edit, PTT/
+  LiveVoice paths stay separate) + A2 stopwords {acaba,decir,dijo,ptt,contexto} + A3a delete the 4 polluted
+  PTT rows (orchestrator-executed) + B1 capture-at-commit (durability by construction, eviction/flush kept
+  belt-and-braces) + B2a `flush_memorias()` in `EngineHost.stop()` + C1 content shaping (user 24-word budget
+  decoupled from the 8-word digest ledger; first CONTENTFUL Kira sentence stripping a closed tic list;
+  user-side ≥2-token capture gate kills greetings; canned guardrail-fallback pairs never captured) + D1
+  announces `<memorias_guardadas>` in the system prompt (byte-identity with `settings.SYSTEM_PROMPT` must be
+  kept) + nota softened to "pueden estar desactualizados" + D4 commits guardrail-blocked turns to history
+  (currently vanish, llm_engine.py:1714-1721) with a new memory-flavored fallback line + E1 `memoria.captured`
+  event on fresh INSERT (`upsert_draft` exposes created-vs-updated) surfaced as a chat-panel feed line
+  ("Kira guardó N memorias", client-coalesced) — "ver" click-through scoped OUT as non-trivial (no
+  action/link plumbing today), text-only line ships instead. Source-honesty check resolved: `source="direct"`
+  hardcoded in `_dispatch_command` also covers PTT turns today, but both are already in
+  `_DIGEST_CAPTURE_SOURCES`/`_MEMORIA_INJECT_SOURCES` — inert today, so NOT threaded this pass (documented,
+  deferred). Sequencing: backend core (A1+A1-legacy+A2+B1+B2a+C1+D1+D4) is one heavily-interlinked apply
+  batch, forecast HIGH risk (~550-700 lines) — tasks.md splits it into 2 stacked work units (WU1
+  plumbing/honesty, WU2 content/durability/prompt); E1 (WU3, backend+frontend) is a second, sequential batch.
+  STRICT TDD: every behavioral task names its RED test. Engram: sdd/memoria_quality_20260717/{design,tasks}.*
+
+---
+
 - [~] **Track: Memoria/RAG Follow-ups — 2026-07-16 Findings**
   *Link: [./tracks/memoria_rag_followups_20260716/](./tracks/memoria_rag_followups_20260716/)*
   *Status 2026-07-16 (design DONE, fable): design.md covers all 8 candidates as three batched

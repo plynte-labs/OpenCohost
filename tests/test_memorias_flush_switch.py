@@ -410,7 +410,9 @@ def test_hard_crash_loses_at_most_current_live_window(monkeypatch, tmp_path):
     motor.historial[0] = {"role": "user", "content": _ELIGIBLE_USER, "source": "direct", "private": False}
     motor.historial[1] = {"role": "assistant", "content": _ELIGIBLE_ASST, "source": "direct", "private": False}
     # Evicts the pair above; write-through captured immediately at eviction.
-    motor._commit_history("siguiente pregunta", "siguiente respuesta.", source="direct")
+    # B1 (memoria_quality_20260717): non-capturable trigger ("hola"/"chau.") so
+    # capture-at-commit adds no unrelated row — only the evicted pair survives.
+    motor._commit_history("hola", "chau.", source="direct")
 
     # A final pair enters the live window and is never evicted; no flush
     # (close/switch) is ever triggered -- simulates a hard kill.
@@ -427,6 +429,32 @@ def test_hard_crash_loses_at_most_current_live_window(monkeypatch, tmp_path):
     still_live_key = derive_stable_key("profile-1", f"{_ELIGIBLE_USER_2} {_ELIGIBLE_ASST_2}")
     stored_keys = {row["stable_key"] for row in rows}
     assert still_live_key not in stored_keys
+
+
+# ---------------------------------------------------------------------------
+# B2a — EngineHost.stop() flushes memorias before the stop sentinel
+# ---------------------------------------------------------------------------
+
+def test_engine_host_stop_flushes_memorias_before_stop_sentinel(tmp_path):
+    """B2a (memoria_quality_20260717): EngineHost.stop() must flush the live
+    memorias window BEFORE dropping the engine-thread stop sentinel, so a clean
+    API shutdown persists un-evicted pairs. Fail-open — a flush error never
+    blocks the sentinel (belt-and-braces with B1 capture-at-commit)."""
+    from opencohost.api import engine_host as engine_host_mod
+
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    calls: list[str] = []
+    motor = MagicMock()
+    motor.current_model = None  # skip the ollama unload generate() step in stop()
+    motor.flush_memorias.side_effect = lambda *a, **k: calls.append("flush")
+    motor.command_queue.put.side_effect = lambda *a, **k: calls.append("sentinel")
+    host.motor = motor
+
+    host.stop()
+
+    assert "flush" in calls, "stop() never flushed memorias"
+    assert "sentinel" in calls
+    assert calls.index("flush") < calls.index("sentinel")
 
 
 def _fill_history_to_max(motor, count=None):

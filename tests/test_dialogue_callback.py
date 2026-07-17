@@ -66,6 +66,23 @@ def test_spoken_guardrail_fallback_updates_last_reply(monkeypatch):
     spy.assert_called_once_with(fallback, "kira")
 
 
+def test_guardrail_blocked_turn_commits_user_and_fallback_to_history(monkeypatch):
+    """D4 (memoria_quality_20260717): a guardrail-blocked turn must ENTER history
+    — the user turn PLUS the spoken fallback line — instead of vanishing (F4).
+    Before D4 the block returned before _commit_history, dropping the exchange."""
+    motor = _chat_motor()
+    motor._hablar = MagicMock()
+    motor._ollama_chat = MagicMock(return_value=_resp("respuesta bloqueada por el guardrail"))
+    monkeypatch.setattr(le, "output_guard", lambda text, source="chat": (False, "blocked"))
+
+    assert len(motor.historial) == 0
+    motor._ejecutar_inferencia("pregunta honesta del usuario", source="chat")
+
+    fallback = i18n_active.guardrail_fallback_lines()[0]
+    assert motor.historial[-2]["content"] == "pregunta honesta del usuario"
+    assert motor.historial[-1]["content"] == fallback
+
+
 def test_spoken_normal_turn_emits_exactly_once():
     """A normal spoken turn must emit through the sink exactly once (no
     double-emit now that the emission point moved to the speak site)."""

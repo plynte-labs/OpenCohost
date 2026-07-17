@@ -456,7 +456,8 @@ def test_distinct_intent_pairs_shared_generic_vocab_produce_distinct_stable_keys
 def test_stable_key_uses_domain_stopwords_on_top_of_normalize_tokens() -> None:
     key = derive_stable_key(
         "profile-1",
-        "kira obs tema perfil usuario recuerda dice streamer chat musica synthwave calma",
+        "kira obs tema perfil usuario recuerda dice streamer chat "
+        "acaba decir dijo ptt contexto musica synthwave calma",
     )
     assert key is not None
     assert "kira" not in key
@@ -468,9 +469,63 @@ def test_stable_key_uses_domain_stopwords_on_top_of_normalize_tokens() -> None:
     assert "dice" not in key
     assert "streamer" not in key
     assert "chat" not in key
+    # A2 (memoria_quality_20260717) lockstep extension: PTT history-wrapper +
+    # legacy ledger-label boilerplate joins the closed domain-stopword set.
+    assert "acaba" not in key
+    assert "decir" not in key
+    assert "dijo" not in key
+    assert "ptt" not in key
+    assert "contexto" not in key
     assert "musica" in key
     assert "synthwave" in key
     assert "calma" in key
+
+
+def test_domain_stopwords_extended_acaba_decir_dijo_ptt_contexto() -> None:
+    """A2 (memoria_quality_20260717): the honest PTT history_text wrapper
+    ("El streamer dijo (PTT): ...") and the legacy ledger label ("contexto:")
+    still leak boilerplate tokens into memoria derivation, so
+    acaba/decir/dijo/ptt/contexto join the domain-stopword set. RC-1/RC-7
+    lockstep: these tokens never reach stable_key/title, and — retroactively —
+    can never be the shared token that scores a select_top_k match."""
+    from opencohost.core.memoria_store import _significant_tokens, select_top_k
+
+    # 1) The five new tokens are stripped from the significant-token set.
+    assert _significant_tokens("acaba decir dijo ptt contexto") == []
+
+    # 2) A PTT-flavored pair keeps only the REAL words in key + title.
+    text = "el streamer acaba de decir dijo ptt contexto musica synthwave calma"
+    key = derive_stable_key("profile-1", text)
+    assert key is not None
+    for boiler in ("acaba", "decir", "dijo", "ptt", "contexto"):
+        assert boiler not in key
+    assert build_title(text) == "musica synthwave calma"
+
+    # 3) Retroactive inertness: a legacy signature polluted with "contexto"/PTT
+    # boilerplate (stored BEFORE this extension) can no longer be matched by a
+    # query whose ONLY overlap is that boilerplate — the topic side is
+    # stopword-filtered, so the shared-token count drops below the >=2 floor.
+    legacy_polluted_signature = "contexto dijo ptt musica synthwave calma"
+    rows = [{"signature": legacy_polluted_signature, "title": "musica synthwave calma"}]
+    assert select_top_k("contexto dijo ptt acaba decir", rows) == []
+    # A genuinely on-topic query still matches (>=2 real shared tokens).
+    assert len(select_top_k("hablemos de musica synthwave", rows)) == 1
+
+
+def test_significant_token_count_public_helper() -> None:
+    """C1 (memoria_quality_20260717): a public token-count wrapper the engine
+    reuses for content shaping (user-side >=2 capture gate, Kira-side first
+    >=3-token sentence). Counts DISTINCT significant tokens (domain + generic
+    stopwords filtered), mirroring _significant_tokens exactly."""
+    from opencohost.core.memoria_store import _significant_tokens, significant_token_count
+
+    assert significant_token_count("kira obs streamer") == 0          # all domain stopwords
+    assert significant_token_count("streamer prefiere musica") == 2   # streamer filtered
+    assert significant_token_count("") == 0
+    assert significant_token_count("hola") == 1
+    # Parity with the private helper it wraps, for any text.
+    for text in ("musica synthwave calma nocturna", "el streamer dijo ptt contexto"):
+        assert significant_token_count(text) == len(_significant_tokens(text))
 
 
 def test_derive_stable_key_returns_none_below_significant_token_minimum() -> None:

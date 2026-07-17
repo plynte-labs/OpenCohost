@@ -117,8 +117,10 @@ def test_injection_first_before_memorias_block(monkeypatch, tmp_path):
     final_content = messages[-1]["content"]
 
     assert "perfil_streamer" in final_content
-    assert "memorias_guardadas" in final_content
-    assert final_content.index("perfil_streamer") < final_content.index("memorias_guardadas")
+    # D1 put the bare <memorias_guardadas> tag in the system prompt; assert on
+    # the injection-only close tag so the ordering compares the real blocks.
+    assert "</memorias_guardadas>" in final_content
+    assert final_content.index("perfil_streamer") < final_content.index("</memorias_guardadas>")
 
 
 # ---------------------------------------------------------------------------

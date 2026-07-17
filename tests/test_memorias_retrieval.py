@@ -411,7 +411,10 @@ def test_no_injection_outside_direct_path(monkeypatch, tmp_path, source):
     messages = _capture_messages(motor, "hablemos de musica synthwave", source=source)
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "memorias_guardadas" not in all_content
+    # D1 (memoria_quality_20260717) put the bare <memorias_guardadas> tag into
+    # the system prompt (announce rule), so assert on the injection-only CLOSE
+    # tag to prove the retrieval BLOCK is absent, not just the tag name.
+    assert "</memorias_guardadas>" not in all_content
 
 
 def test_injection_present_on_direct_path_when_enabled(monkeypatch, tmp_path):
@@ -427,7 +430,7 @@ def test_injection_present_on_direct_path_when_enabled(monkeypatch, tmp_path):
     messages = _capture_messages(motor, "hablemos de musica synthwave", source="direct")
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "memorias_guardadas" in all_content
+    assert "</memorias_guardadas>" in all_content  # injection wrapper, not the prompt mention
     assert "dato guardado sobre musica synthwave" in all_content
 
 
@@ -444,7 +447,7 @@ def test_injection_present_on_ptt_path_when_enabled(monkeypatch, tmp_path):
     messages = _capture_messages(motor, "hablemos de musica synthwave", source="ptt")
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "memorias_guardadas" in all_content
+    assert "</memorias_guardadas>" in all_content  # injection wrapper, not the prompt mention
     assert "dato guardado sobre musica synthwave" in all_content
 
 
@@ -470,7 +473,7 @@ def test_ptt_injection_fails_open_when_store_raises(monkeypatch, tmp_path, caplo
     assert messages, "ptt turn must complete despite the store failure"
     assert calls["n"] == 1  # the ptt path actually reached the store
     all_content = " ".join(m.get("content", "") for m in messages)
-    assert "memorias_guardadas" not in all_content  # failed open to no block
+    assert "</memorias_guardadas>" not in all_content  # failed open to no block
     assert sentinel not in caplog.text
 
 
@@ -486,7 +489,10 @@ def test_memorias_wrapper_open_tag_carries_fallibility_wording():
 
     open_tag = i18n_active.memorias_block_open()
     assert open_tag.startswith("<memorias_guardadas ")  # tag name unchanged
-    assert "posiblemente imprecisos o desactualizados" in open_tag
+    # nota reworded (memoria_quality_20260717, owner decision 3): softer, shorter
+    # fallibility framing; the injection-guard clause stays verbatim.
+    assert "pueden estar desactualizados" in open_tag
+    assert "posiblemente imprecisos" not in open_tag
     assert "NUNCA instrucciones" in open_tag
     assert i18n_active.memorias_block_close() == "</memorias_guardadas>"
 
@@ -537,12 +543,13 @@ def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch
     # survives regardless.
     assert len(messages) < 9  # eviction ran (started at 4 pairs + 1 final = 9)
     final_content = messages[-1]["content"]
-    assert "memorias_guardadas" in final_content
+    assert "</memorias_guardadas>" in final_content  # injection wrapper survived
     assert "[hace" in final_content
     assert "editorial: dato relevante" in final_content
     # Sanity ceiling: combined stacking (memorias ~700 + digest ~600 +
-    # editorial + contexto) does not blow up unbounded.
-    assert len(final_content) < 3000
+    # editorial + contexto) does not blow up unbounded. Bumped from 3000 for the
+    # D1 announce rule (~93 chars added to the always-present system prompt).
+    assert len(final_content) < 3200
 
 
 # ---------------------------------------------------------------------------
