@@ -297,6 +297,27 @@ def test_eligible_pair_meeting_token_minimum_creates_draft_with_nonempty_title_c
     assert len(row["content"]) <= 300
 
 
+def test_eviction_capture_stores_full_pair_signature(monkeypatch, tmp_path):
+    """Candidate 2 (memoria_rag_followups_20260716): the captured draft row
+    persists a retrieval signature built from the FULL user+assistant pair
+    via build_signature — the scorer's input, wider than the 3-token title."""
+    from opencohost.core.memoria_store import build_signature
+
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    _fill_history_to_max(motor)
+    motor.historial[0] = {"role": "user", "content": _ELIGIBLE_USER, "source": "direct", "private": False}
+    motor.historial[1] = {"role": "assistant", "content": _ELIGIBLE_ASST, "source": "direct", "private": False}
+    motor._commit_history("siguiente pregunta", "siguiente respuesta.", source="direct")
+
+    rows = _store(tmp_path).list_for_profile("profile-1")
+    assert len(rows) == 1
+    expected = build_signature(f"{_ELIGIBLE_USER} {_ELIGIBLE_ASST}")
+    assert expected != ""
+    assert rows[0]["signature"] == expected
+
+
 # ---------------------------------------------------------------------------
 # R5 wiring — build-under-lock, upsert-after-release (3.10); thread invariant (3.11)
 # ---------------------------------------------------------------------------
@@ -423,3 +444,46 @@ def test_two_evicted_pairs_different_intent_shared_vocab_never_merge_into_one_ro
     assert len(rows) == 2
     keys = {row["stable_key"] for row in rows}
     assert len(keys) == 2
+
+
+# ---------------------------------------------------------------------------
+# Lazy-store singleton thread-safety (memoria_rag_followups_20260716,
+# 4R correction round) — _get_memoria_store must construct exactly once even
+# when the switch-flush worker thread races the main thread's first use.
+# ---------------------------------------------------------------------------
+
+def test_get_memoria_store_constructs_exactly_once_under_racing_threads(monkeypatch, tmp_path):
+    """Two threads released simultaneously into _get_memoria_store against a
+    slow-constructing store: without the lock both pass the None-check and two
+    stores are built (deterministic red — the barrier guarantees both threads
+    are inside the window while the first construction sleeps). With the lock,
+    exactly one construction happens and both threads share the instance."""
+    import time
+
+    motor, _, _ = _make_motor()
+    monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
+
+    constructions = []  # list.append is atomic under the GIL
+
+    class SlowStore:
+        def __init__(self, db_path):
+            constructions.append(db_path)
+            time.sleep(0.2)  # hold the check-then-act window open
+
+    monkeypatch.setattr(llm_engine, "MemoriaStore", SlowStore)
+
+    barrier = threading.Barrier(2)
+    results = []
+
+    def race():
+        barrier.wait()
+        results.append(motor._get_memoria_store())
+
+    threads = [threading.Thread(target=race) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(constructions) == 1
+    assert len(results) == 2 and results[0] is results[1]

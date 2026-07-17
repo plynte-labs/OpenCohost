@@ -46,7 +46,7 @@ from opencohost.core.tts_piper import PiperEngine
 from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory_digest import MemoryDigest
 from opencohost.core.memoria_store import (
-    MemoriaStore, derive_stable_key, build_title,
+    MemoriaStore, derive_stable_key, build_title, build_signature,
     build_injection_lines, pinned_injection_counter,
 )
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
@@ -74,9 +74,17 @@ _DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
 # kira_personalization_onboarding_20260705 — sources that qualify for the
 # <perfil_streamer> injection. Deliberately its OWN gate (not nested inside
 # `source == "direct"` below): ptt gains this block too — a deliberate,
-# test-covered behavioral change (design §2), unlike every other direct-only
-# enrichment (digest/memorias/editorial), which stays direct-only.
+# test-covered behavioral change (design §2), unlike the remaining
+# direct-only enrichments (digest/editorial), which stay direct-only.
 _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
+
+# memoria_rag_followups_20260716 candidate 1 — sources that qualify for the
+# <memorias_guardadas> injection. Widened from direct-only to direct+ptt
+# (same precedent as _PERSONALIZATION_INJECT_SOURCES above): voice turns now
+# recall stored memorias too, under the SAME shared 700-char budget. This
+# gate has THREE sites: the profile-id snapshot, the injection call, and the
+# prompt prepend — all must use this frozenset or the ptt path stays dead.
+_MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt"})
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
@@ -163,6 +171,24 @@ INJECTION_MARKERS = (
     "de ahora en adelante eres",
     "de ahora en más sos",
 )
+
+
+def _strip_injection_markers(text: str) -> str:
+    """Remove INJECTION_MARKERS phrases outright, collapse whitespace.
+
+    Shared by the scout scrub (_scout_scrub_text) and the memorias injection
+    path (_build_memorias_injection_block): both surfaces re-render stored
+    text into the prompt, so a marker phrase must be stripped, not merely
+    truncated around (which _sanitize_history_context alone would do).
+    """
+    lowered = text.lower()
+    for marker in INJECTION_MARKERS:
+        idx = lowered.find(marker)
+        while idx != -1:
+            text = text[:idx] + text[idx + len(marker):]
+            lowered = text.lower()
+            idx = lowered.find(marker)
+    return " ".join(text.split())
 
 # Control commands safe to apply at a turn boundary (see
 # MotorVocalIA._drain_control_commands). All are plain setters or a model
@@ -313,6 +339,11 @@ class MotorVocalIA(threading.Thread):
         # monkeypatch it) never touches disk for this store (zero
         # instantiation cost on the hot path).
         self._memoria_store: Optional[MemoriaStore] = None
+        # Dedicated lock for the lazy-store check-then-act (mirrors
+        # api/main.py's _memoria_store_lock precedent): the switch-flush
+        # worker thread can race the main thread's first use. NEVER reuse
+        # _history_lock here — independent locks avoid ordering deadlocks.
+        self._memoria_store_lock = threading.Lock()
         # Slice 5 (R9): honest pin/injection counter from the most recent
         # direct-path retrieval — (total_pinned, injected). None until the
         # first direct-path turn with memorias enabled. Value only; rendered
@@ -1387,14 +1418,17 @@ class MotorVocalIA(threading.Thread):
                         unit_singular=i18n_active.digest_unit_singular(),
                         unit_plural=i18n_active.digest_unit_plural(),
                     )
-                    # Slice 5 (R9): snapshot the profile id under the lock
-                    # (engine state protected by _history_lock) — the actual
-                    # store READ happens AFTER the lock releases, below,
-                    # since memorias retrieval is disk I/O and _history_lock
-                    # must never be held during I/O (same rule as capture).
-                    memorias_profile_id = self._current_profile_id
                 else:
                     digest_block = ""
+                # Slice 5 (R9): snapshot the profile id under the lock
+                # (engine state protected by _history_lock) — the actual
+                # store READ happens AFTER the lock releases, below,
+                # since memorias retrieval is disk I/O and _history_lock
+                # must never be held during I/O (same rule as capture).
+                # Candidate 1: gate site 1 of 3 — direct AND ptt snapshot.
+                if source in _MEMORIA_INJECT_SOURCES:
+                    memorias_profile_id = self._current_profile_id
+                else:
                     memorias_profile_id = None
 
             # Rebuild a fresh {role, content} per entry — never append by
@@ -1404,12 +1438,13 @@ class MotorVocalIA(threading.Thread):
             for msg in history_snapshot:
                 messages.append({'role': msg['role'], 'content': msg['content']})
 
-            # Slice 5 (R9): memorias retrieval + injection, direct path only.
-            # Store I/O happens here, AFTER _history_lock released above (the
-            # store's own READ_TIMEOUT_SECONDS bounds the read). Fail-open to
-            # "" on any error — a retrieval failure must never break a turn.
+            # Slice 5 (R9): memorias retrieval + injection for direct and ptt
+            # turns (candidate 1: gate site 2 of 3). Store I/O happens here,
+            # AFTER _history_lock released above (the store's own
+            # READ_TIMEOUT_SECONDS bounds the read). Fail-open to "" on any
+            # error — a retrieval failure must never break a turn.
             memorias_block = ""
-            if source == "direct" and MEMORIAS_ENABLED and memorias_profile_id:
+            if source in _MEMORIA_INJECT_SOURCES and MEMORIAS_ENABLED and memorias_profile_id:
                 memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
 
             # Editorial direct-mode enrichment: inject matching ARMED card context for
@@ -1447,10 +1482,14 @@ class MotorVocalIA(threading.Thread):
                     )
                     enriched = f"{wrapped_digest}\n\n{enriched}"
                     logger.debug("L1 digest injected into direct prompt (len=%d)", len(digest_block))
-                # Memorias block (R9) is PREPENDED before the digest wrap —
-                # it must appear earlier in the prompt than <memoria_de_fondo>.
-                if memorias_block:
-                    enriched = f"{memorias_block}\n\n{enriched}"
+
+            # Memorias block (R9) is PREPENDED before the digest wrap — it
+            # must appear earlier in the prompt than <memoria_de_fondo>.
+            # Candidate 1: gate site 3 of 3 — own sibling gate (no longer
+            # nested inside `source == "direct"`), same pattern as
+            # _PERSONALIZATION_INJECT_SOURCES below, so ptt turns receive it.
+            if source in _MEMORIA_INJECT_SOURCES and memorias_block:
+                enriched = f"{memorias_block}\n\n{enriched}"
 
             # Personalization block (kira_personalization_onboarding_20260705,
             # design §2): own gate, NOT nested inside `source == "direct"`
@@ -1827,14 +1866,7 @@ class MotorVocalIA(threading.Thread):
         instructions — so it scrubs harder than the verbatim direct path.
         """
         text = re.sub(r"@\w+", "", text)
-        lowered = text.lower()
-        for marker in INJECTION_MARKERS:
-            idx = lowered.find(marker)
-            while idx != -1:
-                text = text[:idx] + text[idx + len(marker):]
-                lowered = text.lower()
-                idx = lowered.find(marker)
-        return " ".join(text.split())
+        return _strip_injection_markers(text)
 
     def _scout_extract_text(self, response) -> str:
         """Pull the assistant content out of a chat response (dict or object)."""
@@ -2246,7 +2278,7 @@ class MotorVocalIA(threading.Thread):
         # T3 — staged memorias draft (pure strings, no I/O). Built while
         # _history_lock is held below; upsert_draft is called AFTER the lock
         # releases (upsert_draft must never run with _history_lock held).
-        pending_memoria_capture: Optional[tuple[str, str, str, str]] = None
+        pending_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
 
         # Hold _history_lock around the eviction-capture + both appends so
         # concurrent callers (worker loop and agenda speaker daemon) cannot
@@ -2342,7 +2374,7 @@ class MotorVocalIA(threading.Thread):
         *,
         source: Optional[str],
         private,
-    ) -> Optional[tuple[str, str, str, str]]:
+    ) -> Optional[tuple[str, str, str, str, str]]:
         """Pure, no-I/O: full gate chain + draft builder for one (user,
         assistant) pair, or None if any gate fails.
 
@@ -2356,7 +2388,7 @@ class MotorVocalIA(threading.Thread):
         significant-token minimum (is_capturable, via derive_stable_key,
         LAST — a signal gate, never a substitute for provenance, Judge-B
         forward slice 2 N1). Returns (profile_id, stable_key, title,
-        content) or None.
+        content, signature) or None.
         """
         if source not in _DIGEST_CAPTURE_SOURCES:
             return None
@@ -2373,9 +2405,14 @@ class MotorVocalIA(threading.Thread):
         stable_key = derive_stable_key(profile_id, signature_text)
         if stable_key is None:
             return None
-        return profile_id, stable_key, build_title(signature_text), ledger_line[:300]
+        return (
+            profile_id, stable_key, build_title(signature_text),
+            ledger_line[:300], build_signature(signature_text),
+        )
 
-    def _capture_memoria(self, profile_id: str, stable_key: str, title: str, content: str) -> None:
+    def _capture_memoria(
+        self, profile_id: str, stable_key: str, title: str, content: str, signature: str = ""
+    ) -> None:
         """I/O: upsert a memoria draft. MUST be called AFTER _history_lock releases.
 
         Fail-open (R5): any exception is logged (ids/type only, never title
@@ -2383,7 +2420,9 @@ class MotorVocalIA(threading.Thread):
         the calling thread (engine worker loop / agenda speaker daemon).
         """
         try:
-            self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+            self._get_memoria_store().upsert_draft(
+                profile_id, stable_key, title, content, signature=signature
+            )
         except Exception as exc:
             logger.warning(
                 "memoria capture failed (fail-open): %s profile_id=%s stable_key=%s",
@@ -2391,12 +2430,14 @@ class MotorVocalIA(threading.Thread):
             )
 
     def _get_memoria_store(self) -> MemoriaStore:
-        if self._memoria_store is None:
-            self._memoria_store = MemoriaStore(MEMORIAS_DB)
-        return self._memoria_store
+        with self._memoria_store_lock:
+            if self._memoria_store is None:
+                self._memoria_store = MemoriaStore(MEMORIAS_DB)
+            return self._memoria_store
 
     def _build_memorias_injection_block(self, profile_id: str, contexto: str) -> str:
-        """Slice 5 (R9) — direct-path-only memorias retrieval + injection.
+        """Slice 5 (R9) — memorias retrieval + injection for the sources in
+        _MEMORIA_INJECT_SOURCES (direct + ptt as of candidate 1).
 
         MUST be called AFTER _history_lock releases (store I/O, bounded by
         the store's own READ_TIMEOUT_SECONDS). Fail-open to "" on any error
@@ -2415,7 +2456,13 @@ class MotorVocalIA(threading.Thread):
             lines = build_injection_lines(rows, contexto)
             if not lines:
                 return ""
-            sanitized = [self._sanitize_history_context(line) for line in lines]
+            # 4R correction round (R1): sanitize (control chars + truncation)
+            # then STRIP marker phrases — scout-scrub parity; truncation alone
+            # would leave an instruction-like marker verbatim in the wrapper.
+            sanitized = [
+                _strip_injection_markers(self._sanitize_history_context(line))
+                for line in lines
+            ]
             return (
                 i18n_active.memorias_block_open() + "\n"
                 + "\n".join(sanitized)
@@ -2428,7 +2475,7 @@ class MotorVocalIA(threading.Thread):
             )
             return ""
 
-    def _collect_flush_drafts(self) -> list[tuple[str, str, str, str]]:
+    def _collect_flush_drafts(self) -> list[tuple[str, str, str, str, str]]:
         """F4 (slice 4) — snapshot the LIVE (un-evicted) historial window into
         memoria drafts. Pure, no-I/O. MUST be called while _history_lock is
         held: iterates historial in (user, assistant) pairs (historial only
@@ -2438,7 +2485,7 @@ class MotorVocalIA(threading.Thread):
         (task 4.12) and profile-switch flush (task 4.14) — one snapshot
         routine, two callers.
         """
-        drafts: list[tuple[str, str, str, str]] = []
+        drafts: list[tuple[str, str, str, str, str]] = []
         entries = list(self.historial)
         for i in range(0, len(entries) - 1, 2):
             user_entry, asst_entry = entries[i], entries[i + 1]
@@ -2478,7 +2525,7 @@ class MotorVocalIA(threading.Thread):
 
         deadline = time.monotonic() + budget_seconds
         flushed = 0
-        for profile_id, stable_key, title, content in drafts:
+        for profile_id, stable_key, title, content, signature in drafts:
             if time.monotonic() > deadline:
                 logger.warning(
                     "memoria close-flush budget exceeded, stopping early: flushed=%d remaining=%d",
@@ -2486,7 +2533,9 @@ class MotorVocalIA(threading.Thread):
                 )
                 break
             try:
-                self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+                self._get_memoria_store().upsert_draft(
+                    profile_id, stable_key, title, content, signature=signature
+                )
                 flushed += 1
             except Exception as exc:
                 logger.warning(
@@ -2494,7 +2543,7 @@ class MotorVocalIA(threading.Thread):
                     type(exc).__name__, profile_id,
                 )
 
-    def _dispatch_switch_flush(self, drafts: list[tuple[str, str, str, str]]) -> None:
+    def _dispatch_switch_flush(self, drafts: list[tuple[str, str, str, str, str]]) -> None:
         """F4 (task 4.15) — dispatch profile-switch flush upserts to a
         dedicated worker thread, fire-and-forget (RC-2/RC-3).
 
@@ -2507,13 +2556,15 @@ class MotorVocalIA(threading.Thread):
             return
         threading.Thread(target=self._run_switch_flush, args=(drafts,), daemon=True).start()
 
-    def _run_switch_flush(self, drafts: list[tuple[str, str, str, str]]) -> None:
+    def _run_switch_flush(self, drafts: list[tuple[str, str, str, str, str]]) -> None:
         """Worker-thread body for _dispatch_switch_flush. Fail-open; partial
         failures log a COUNT only, never content (RC-8)."""
         failed = 0
-        for profile_id, stable_key, title, content in drafts:
+        for profile_id, stable_key, title, content, signature in drafts:
             try:
-                self._get_memoria_store().upsert_draft(profile_id, stable_key, title, content)
+                self._get_memoria_store().upsert_draft(
+                    profile_id, stable_key, title, content, signature=signature
+                )
             except Exception:
                 failed += 1
         if failed:

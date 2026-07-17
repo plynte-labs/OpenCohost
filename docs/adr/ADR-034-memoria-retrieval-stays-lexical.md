@@ -227,3 +227,13 @@ LLM-free on both capture and retrieval. The next actionable step is T1 (widen sc
 reject-vs-clip budget bug) whenever recall complaints materialize, not before. The PTT-injection gap
 (risk 3) is a separate product decision, not a retrieval-technology decision, and is not resolved by
 this ADR.
+
+## Addendum (2026-07-16, same day)
+
+Batch A of `memoria_rag_followups_20260716` activated trigger T1 early, together with the
+voice-injection gap fix (risk 3): signature scoring (a stored 12-token retrieval signature built
+from the full pair, requiring `>=2` shared tokens), budget-clip for oversized non-pinned rows
+(replacing reject-entirely), and `_MEMORIA_INJECT_SOURCES = {direct, ptt}` are now implemented.
+The architecture sections above (title-only 0.25 scoring, `_TopicShim`, direct-only gate,
+reject-not-clip) describe the state AT DECISION TIME and are kept unrewritten as the historical
+record; current truth lives in `conductor/tracks/memoria_rag_followups_20260716/design.md`.
