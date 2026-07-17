@@ -226,6 +226,11 @@ class VoiceControlPanel:
                 i18n_active.ptt_wrapper().format(text=texto),
                 priority=0,
                 source="ptt",
+                # Honest history_text (memoria_quality_20260717 A1-legacy):
+                # committed to historial in place of the raw prompt wrapper, so
+                # LiveVoice PTT-derived memorias keep the real words. Parallel to
+                # the F10 PttController path — the two PTT sources stay distinct.
+                history_text=i18n_active.ptt_history_wrapper().format(text=texto),
             )
             return
 
@@ -238,7 +243,10 @@ class VoiceControlPanel:
         self._on_log(f"[PTT]: {texto[:30]}{'...' if len(texto) > 30 else ''}")
         self._motor_ia.command_queue.put((
             "process_context",
-            i18n_active.ptt_wrapper().format(text=texto)
+            i18n_active.ptt_wrapper().format(text=texto),
+            # Honest history_text rides as the 3rd tuple element; run()'s
+            # tolerant unpack commits it to historial (A1-legacy).
+            i18n_active.ptt_history_wrapper().format(text=texto),
         ))
 
     # ------------------------------------------------------------------

@@ -187,6 +187,44 @@ def test_replay_survives_beyond_old_120s_ttl(monkeypatch):
     assert d.state_version == 1
 
 
+def test_dispatch_optional_history_text_produces_3tuple_hash_ignores_it():
+    # A1 (memoria_quality_20260717): dispatch() gains an OPTIONAL history_text.
+    # Given (F10 PTT path) -> the queue item is a 3-tuple (command, payload,
+    # history_text); omitted -> it stays a 2-tuple so every existing caller is
+    # unchanged. history_text NEVER enters the idempotency hash/cache key — a
+    # replay is decided on (command, payload) alone.
+    q = Queue()
+    d = Dispatcher(q)
+
+    # 3-tuple when history_text is given.
+    r1 = d.dispatch(
+        "process_context",
+        "El streamer acaba de decir (PTT): hola",
+        history_text="El streamer dijo (PTT): hola",
+    )
+    assert r1.state == "accepted"
+    assert q.get_nowait() == (
+        "process_context",
+        "El streamer acaba de decir (PTT): hola",
+        "El streamer dijo (PTT): hola",
+    )
+
+    # 2-tuple when history_text is omitted (every other caller).
+    r2 = d.dispatch("set_profile", _payload())
+    assert r2.state == "accepted"
+    assert q.get_nowait() == ("set_profile", _payload())
+
+    # Idempotency hash ignores history_text: same key+command+payload but a
+    # DIFFERENT history_text still replays (no conflict, no re-enqueue).
+    first = d.dispatch("process_context", "hola", key="k1", history_text="hist A")
+    assert first.state == "accepted"
+    assert q.get_nowait() == ("process_context", "hola", "hist A")
+    replay = d.dispatch("process_context", "hola", key="k1", history_text="hist B DIFFERENT")
+    assert replay.state == "replay"
+    assert replay.command_id == first.command_id
+    assert q.qsize() == 0  # no second enqueue — history_text is not part of identity
+
+
 def test_hash_payload_is_key_order_independent():
     # Pins sort_keys=True in _hash_payload — must fail if removed, since a
     # dict re-serialized in a different key order would otherwise hash

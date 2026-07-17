@@ -1232,3 +1232,41 @@ class TestWU13DeletionGuards:
         panel.create_voice_panel()
         assert not hasattr(panel, "barra_rms")
         panel.cleanup()
+
+
+# ===================================================================
+# 11. Legacy PTT honest history_text (memoria_quality_20260717 A1-legacy)
+# ===================================================================
+
+
+class TestPTTHonestHistoryText:
+    """The legacy LiveVoice PTT flush must carry an honest history_text
+    ("El streamer dijo (PTT): ...") alongside the ptt_wrapper prompt, on BOTH
+    the motor-busy (enqueue) and motor-idle (command_queue.put 3-tuple)
+    branches — parallel to the F10 PttController path, never merged (project
+    safety rule keeps LiveVoice and PTT sources distinct)."""
+
+    def test_busy_flush_enqueues_with_ptt_history_wrapper(self, voice_panel, mock_motor_ia):
+        mock_motor_ia.is_processing = True  # motor busy -> enqueue branch
+        voice_panel._ptt_buffer = "hola mundo esto es una prueba"
+        voice_panel._flush_ptt_buffer()
+
+        mock_motor_ia.enqueue.assert_called_once()
+        _args, kwargs = mock_motor_ia.enqueue.call_args
+        assert kwargs["source"] == "ptt"
+        assert kwargs["priority"] == 0
+        assert kwargs["history_text"] == "El streamer dijo (PTT): hola mundo esto es una prueba"
+
+    def test_idle_flush_puts_3tuple_with_ptt_history_wrapper(self, voice_panel, mock_motor_ia):
+        mock_motor_ia.is_processing = False
+        mock_motor_ia.is_speaking = False
+        voice_panel._ptt_buffer = "hola mundo esto es una prueba"
+        voice_panel._flush_ptt_buffer()
+
+        mock_motor_ia.command_queue.put.assert_called_once()
+        (item,), _kwargs = mock_motor_ia.command_queue.put.call_args
+        assert item == (
+            "process_context",
+            "El streamer acaba de decir (PTT): hola mundo esto es una prueba",
+            "El streamer dijo (PTT): hola mundo esto es una prueba",
+        )

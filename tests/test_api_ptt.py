@@ -372,9 +372,14 @@ def test_full_session_dispatches_turn_and_never_leaks_transcript(monkeypatch):
         #    turn, wrapped by ptt_wrapper — the one allowed destination.
         dispatched = _drain_dispatch_queue(app)
         assert len(dispatched) == 1
-        command, payload = dispatched[0]
+        # A1 (memoria_quality_20260717): the F10 path now puts a 3-tuple
+        # (command, payload, history_text). Tolerant unpack mirrors run().
+        command, payload, *rest = dispatched[0]
+        history_text = rest[0] if rest else None
         assert command == "process_context"
         assert payload == f"El streamer acaba de decir (PTT): {sentinel}"
+        # The honest history_text rides alongside the prompt wrapper.
+        assert history_text == f"El streamer dijo (PTT): {sentinel}"
 
         # 2) PRIVACY: the transcript never crossed HTTP — absent from EVERY
         #    /api/ptt/* response body.

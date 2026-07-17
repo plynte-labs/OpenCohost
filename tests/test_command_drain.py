@@ -121,6 +121,78 @@ def test_process_context_blocks_later_control_commands_from_jumping_ahead(monkey
     assert call_log == ["agenda-turn"]
 
 
+def test_run_tolerant_unpacks_2tuple_and_3tuple_commands(monkeypatch):
+    # A1 (memoria_quality_20260717): run()'s command consumer must tolerate BOTH
+    # the legacy 2-tuple (chat + control verbs, app_shell) and the 3-tuple
+    # (command, payload, history_text) put by the F10 PTT Dispatcher and the
+    # legacy voice_control.py idle path — mirroring the priority-queue 4->5-tuple
+    # tolerant unpack. history_text reaches _dispatch_command as None for a
+    # 2-tuple and as the 3rd element for a 3-tuple. Tested via the extracted
+    # _consume_command seam (run() itself does heavy pygame/ollama init; the
+    # sibling _dispatch_command was likewise "extracted from run() for
+    # testability").
+    motor, _ = _make_motor()
+    captured: list = []
+    monkeypatch.setattr(
+        motor,
+        "_dispatch_command",
+        lambda tipo, payload, history_text=None: captured.append((tipo, payload, history_text)),
+    )
+
+    motor._consume_command(("process_context", "hola"))  # legacy 2-tuple
+    motor._consume_command(
+        (
+            "process_context",
+            "El streamer acaba de decir (PTT): hola",
+            "El streamer dijo (PTT): hola",
+        )
+    )  # 3-tuple with honest history_text
+
+    assert captured == [
+        ("process_context", "hola", None),
+        (
+            "process_context",
+            "El streamer acaba de decir (PTT): hola",
+            "El streamer dijo (PTT): hola",
+        ),
+    ]
+
+
+def test_dispatch_command_process_context_forwards_history_text_idle_and_busy(monkeypatch):
+    # A1 (memoria_quality_20260717): _dispatch_command must forward history_text
+    # down BOTH process_context branches — idle -> _ejecutar_inferencia,
+    # busy -> enqueue — so the honest PTT text reaches _commit_history whether or
+    # not the motor was already speaking/processing.
+
+    # Idle branch forwards to _ejecutar_inferencia.
+    motor, _ = _make_motor()
+    infer_calls: list = []
+    monkeypatch.setattr(
+        motor,
+        "_ejecutar_inferencia",
+        lambda payload, source="direct", history_text=None: infer_calls.append((payload, source, history_text)),
+    )
+    monkeypatch.setattr(motor, "_complete_processing_cycle", lambda *a, **k: None)
+    motor._processing = False
+    motor._speaking = False
+    motor._dispatch_command("process_context", "ptt-wrapped", history_text="El streamer dijo (PTT): x")
+    assert infer_calls == [("ptt-wrapped", "direct", "El streamer dijo (PTT): x")]
+
+    # Busy branch forwards to enqueue (re-enqueued at chat priority today).
+    motor2, _ = _make_motor()
+    enqueue_calls: list = []
+    monkeypatch.setattr(
+        motor2,
+        "enqueue",
+        lambda payload, priority=1, source="chat", history_text=None: enqueue_calls.append(
+            (payload, priority, source, history_text)
+        ),
+    )
+    motor2._processing = True
+    motor2._dispatch_command("process_context", "ptt-wrapped", history_text="El streamer dijo (PTT): x")
+    assert enqueue_calls == [("ptt-wrapped", 1, "direct", "El streamer dijo (PTT): x")]
+
+
 def test_drain_emits_motor_event(monkeypatch):
     motor, events = _make_motor()
 

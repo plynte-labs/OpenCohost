@@ -17,12 +17,13 @@ import json
 import logging
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 import websockets
 
 import opencohost.api.ptt_session as ptt_session_mod
-from opencohost.api.ptt_session import PttSession, PttUnreachable
+from opencohost.api.ptt_session import PttController, PttSession, PttUnreachable
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -422,6 +423,40 @@ def test_ws_drop_midlistening_flushes_and_marks_stt_lost(monkeypatch):
     assert session.last_error == "stt_lost"
     assert "error" in rec.events
     assert rec.closes == ["stt_lost"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PttController._dispatch — honest history_text (memoria_quality_20260717 A1)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _RecordingDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, command, payload, key=None, history_text=None):
+        self.calls.append(
+            {"command": command, "payload": payload, "key": key, "history_text": history_text}
+        )
+
+
+def test_dispatch_sends_ptt_wrapper_prompt_and_ptt_history_wrapper_history_text():
+    # A1: the F10 flush must send the motor BOTH the ptt_wrapper prompt AND an
+    # honest history_text via ptt_history_wrapper, so the historial records
+    # "El streamer dijo (PTT): ..." instead of burying the real words under the
+    # "acaba de decir (PTT)" prompt boilerplate. The F10 path uses no
+    # idempotency key (key stays None).
+    disp = _RecordingDispatcher()
+    controller = PttController("ws://test/whisperlive", disp, MagicMock())
+
+    controller._dispatch("hola mundo esto es una prueba")
+
+    assert len(disp.calls) == 1
+    call = disp.calls[0]
+    assert call["command"] == "process_context"
+    assert call["payload"] == "El streamer acaba de decir (PTT): hola mundo esto es una prueba"
+    assert call["history_text"] == "El streamer dijo (PTT): hola mundo esto es una prueba"
+    assert call["key"] is None
 
 
 # ──────────────────────────────────────────────────────────────────────────

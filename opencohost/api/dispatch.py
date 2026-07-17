@@ -46,7 +46,13 @@ class Dispatcher:
         # key -> (command, payload_hash, command_id, expires_at)
         self._cache: "OrderedDict[str, tuple[str, str, str, float]]" = OrderedDict()
 
-    def dispatch(self, command: str, payload: dict, key: Optional[str] = None) -> DispatchResult:
+    def dispatch(
+        self,
+        command: str,
+        payload: dict,
+        key: Optional[str] = None,
+        history_text: Optional[str] = None,
+    ) -> DispatchResult:
         with self._lock:
             now = time.time()
             self._prune_expired(now)
@@ -61,7 +67,15 @@ class Dispatcher:
                 return DispatchResult(state="queue_full")
 
             command_id = f"cmd_{uuid.uuid4().hex}"
-            self._queue.put_nowait((command, payload))
+            # history_text (A1, memoria_quality_20260717) rides as an OPTIONAL
+            # 3rd tuple element for the F10 PTT path — run()'s tolerant unpack
+            # commits it to historial. Omitted -> a 2-tuple, unchanged for every
+            # other caller. It is deliberately NOT part of the idempotency
+            # hash/cache key (identity is (command, payload) only).
+            if history_text is not None:
+                self._queue.put_nowait((command, payload, history_text))
+            else:
+                self._queue.put_nowait((command, payload))
             self.state_version += 1
 
             if key is not None:

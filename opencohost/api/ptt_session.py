@@ -412,8 +412,16 @@ class PttController:
         self._event_log.record("ptt", action, None)
 
     def _dispatch(self, text: str) -> None:
+        # Honest history_text (memoria_quality_20260717 A1): the motor commits
+        # "El streamer dijo (PTT): ..." to historial instead of the raw
+        # "acaba de decir (PTT)" prompt wrapper, so PTT-derived memorias no
+        # longer bury the streamer's real words under boilerplate. Runs in
+        # parallel to the legacy voice_control.py idle path — the two PTT
+        # sources stay distinct and are never merged (project safety rule).
         self._dispatcher.dispatch(
-            "process_context", i18n_active.ptt_wrapper().format(text=text)
+            "process_context",
+            i18n_active.ptt_wrapper().format(text=text),
+            history_text=i18n_active.ptt_history_wrapper().format(text=text),
         )
 
     def start(self) -> str:
