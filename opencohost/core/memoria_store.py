@@ -50,7 +50,7 @@ from opencohost.config.settings import (
     MEMORIAS_PINNED_CLIP_CHARS,
     MEMORIAS_PROFILE_CAP,
 )
-from opencohost.core.editorial_matching import match_score, normalize_tokens
+from opencohost.core.editorial_matching import normalize_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,8 @@ WRITE_TIMEOUT_SECONDS: float = 1.0
 _MIN_SIGNIFICANT_TOKENS = 3
 _STABLE_KEY_TOKEN_COUNT = 6
 _TITLE_TOKEN_COUNT = 3
+_SIGNATURE_TOKEN_COUNT = 12  # within the design's 8-16 window
+_MIN_SHARED_TOKENS = 2
 
 # Closed list (design v2.1 residual risk #3): near-ubiquitous tokens in
 # captured co-host turns — Kira's own name, streaming tooling, and
@@ -128,6 +130,17 @@ def build_title(text: str) -> str:
     return " ".join(_significant_tokens(text)[:_TITLE_TOKEN_COUNT])
 
 
+def build_signature(text: str) -> str:
+    """First 12 distinct significant tokens of *text*, space-joined.
+
+    Candidate 2 (memoria_rag_followups_20260716): the retrieval signature is
+    derived from the FULL user+assistant pair at capture time (vs the 3-token
+    title), giving select_top_k a wider, still-distinctive token set to score
+    against. Reuses _significant_tokens — no new normalizer.
+    """
+    return " ".join(_significant_tokens(text)[:_SIGNATURE_TOKEN_COUNT])
+
+
 def _now_text() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -136,35 +149,29 @@ def _now_text() -> str:
 # Retrieval + injection (slice 5, design v2.1 §7, F6) — pure, no I/O
 # ---------------------------------------------------------------------------
 
-# One shared significant title token scores 1/3 ~= 0.33 >= 0.25. RC-7's
-# title derivation (domain stopwords excluded, see build_title above) is
-# what keeps this threshold from firing on shared domain-noise words.
-_TOPIC_MATCH_THRESHOLD = 0.25
-
-
-class _TopicShim:
-    """Exposes ONLY the title to match_score (design fix) — content is never
-    fed into the scorer, or the 0.25 threshold would effectively never fire
-    (titles are a handful of tokens; content is long and dilutes overlap).
-    editorial_matching.match_score is reused verbatim, unmodified."""
-
-    __slots__ = ("topic", "triggers")
-
-    def __init__(self, topic: str) -> None:
-        self.topic = topic
-        self.triggers: list[str] = []
+# Minimum remaining injection budget worth clipping a non-pinned row into —
+# a fragment shorter than this is noise, not context (candidate 2).
+_MIN_CLIP_REMAINDER_CHARS = 40
 
 
 def select_top_k(topic_text: str, rows, k: int = 3) -> list:
-    """Lexical top-k of *rows* against *topic_text* by title-only match_score.
+    """Lexical top-k of *rows* against *topic_text* by signature overlap.
 
-    Returns up to *k* rows scoring >= _TOPIC_MATCH_THRESHOLD, best first.
+    Candidate 2 (memoria_rag_followups_20260716): each row is scored on the
+    shared-token count between the topic's significant tokens and the row's
+    stored 12-token signature (title fallback when the signature is empty,
+    e.g. an all-stopword legacy backfill). Requires >= _MIN_SHARED_TOKENS
+    shared tokens — one incidental shared word never matches (stricter than
+    the old 1-token/0.25 title threshold, by design: precision over recall,
+    ADR-034). Returns up to *k* rows, best overlap ratio first.
     """
-    scored = [
-        (match_score(topic_text, _TopicShim(row["title"])), row)
-        for row in rows
-    ]
-    scored = [pair for pair in scored if pair[0] >= _TOPIC_MATCH_THRESHOLD]
+    topic = set(_significant_tokens(topic_text))
+    scored = []
+    for row in rows:
+        sig = set((row["signature"] or row["title"]).split())
+        shared = len(topic & sig)
+        if shared >= _MIN_SHARED_TOKENS:
+            scored.append((shared / max(len(sig), 1), row))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [row for _, row in scored[:k]]
 
@@ -223,11 +230,18 @@ def build_injection_lines(
     lines: list[str] = []
     used = 0
 
-    def _try_add(text: str) -> None:
+    def _try_add(text: str, *, clip_to_remaining: bool = False) -> None:
         nonlocal used
         sep = 1 if lines else 0
-        if used + sep + len(text) > max_chars:
-            return
+        remaining = max_chars - used - sep
+        if len(text) > remaining:
+            # Candidate 2: selected non-pinned rows are clipped into whatever
+            # budget remains instead of being silently dropped — unless the
+            # remainder is too small to carry meaning. Pinned rows keep the
+            # original reject-when-over-budget behavior (already pre-clipped).
+            if not clip_to_remaining or remaining < _MIN_CLIP_REMAINDER_CHARS:
+                return
+            text = _clip_for_injection(text, remaining)
         lines.append(text)
         used += sep + len(text)
 
@@ -235,7 +249,7 @@ def build_injection_lines(
         _try_add(_clip_for_injection(row["content"], pinned_clip_chars))
 
     for row in select_top_k(topic_text, non_pinned_rows, k=top_k):
-        _try_add(row["content"])
+        _try_add(row["content"], clip_to_remaining=True)
 
     return lines
 
@@ -258,19 +272,24 @@ class MemoriaStore:
     # Write
     # ------------------------------------------------------------------
 
-    def upsert_draft(self, profile_id: str, stable_key: str, title: str, content: str) -> str | None:
+    def upsert_draft(
+        self, profile_id: str, stable_key: str, title: str, content: str, *, signature: str = ""
+    ) -> str | None:
         """Insert a new draft or refresh an existing draft sharing stable_key.
 
         Curated rows are upsert-immune (the WHERE clause makes the conflict
         resolve to a no-op — no write, no exception). Returns the row id on
         success, or None when the row was curated-immune or the write
         failed open (locked db). Raises MemoriaValidationError for missing
-        required inputs.
+        required inputs. *signature* (candidate 2) is the optional retrieval
+        signature (build_signature of the full pair); "" is valid — scoring
+        falls back to the title.
         """
         profile_id = (profile_id or "").strip()
         stable_key = (stable_key or "").strip()
         title = " ".join((title or "").split())
         content = " ".join((content or "").split())
+        signature = " ".join((signature or "").split())
         if not profile_id or not stable_key or not title or not content:
             raise MemoriaValidationError(
                 "memoria upsert requires profile_id, stable_key, title, and content"
@@ -284,17 +303,18 @@ class MemoriaStore:
                     """
                     INSERT INTO memorias (
                         id, profile_id, stable_key, revision, title, content, status,
-                        pinned, private, inactive, created_at, updated_at
-                    ) VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?)
+                        pinned, private, inactive, created_at, updated_at, signature
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?, ?)
                     ON CONFLICT(profile_id, stable_key) DO UPDATE SET
                         content = excluded.content,
                         title = excluded.title,
+                        signature = excluded.signature,
                         revision = memorias.revision + 1,
                         updated_at = excluded.updated_at
                     WHERE memorias.status = 'draft'
                     RETURNING id, revision
                     """,
-                    (row_id, profile_id, stable_key, title, content, now, now),
+                    (row_id, profile_id, stable_key, title, content, now, now, signature),
                 )
                 result = cur.fetchone()
         except sqlite3.Error as exc:
@@ -562,7 +582,37 @@ class MemoriaStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memorias_profile_id ON memorias(profile_id)")
-            conn.execute("PRAGMA user_version = 1")
+            # v1 -> v2 (memoria_rag_followups_20260716, candidate 2): add the
+            # retrieval signature column + eager backfill from title+content.
+            # Gated on user_version so it runs exactly once per db (fresh dbs
+            # enter here at version 0 with zero rows to backfill; a second
+            # construction sees version 2 and skips). Backfill NEVER touches
+            # stable_key — legacy 2026-07-15 name-keyed rows keep their keys.
+            #
+            # Re-entrant + resumable (4R correction round): sqlite3's legacy
+            # transaction control commits the ALTER (DDL) immediately, so a
+            # kill between ALTER and the version bump leaves the column present
+            # with user_version still < 2. Tolerate the duplicate-column error
+            # on rerun and backfill only rows still empty (column default '').
+            prior_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if prior_version < 2:
+                try:
+                    conn.execute("ALTER TABLE memorias ADD COLUMN signature TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise  # genuinely broken db: keep the construction-raises contract
+                backfilled = 0
+                for row in conn.execute(
+                    "SELECT id, title, content FROM memorias WHERE signature = ''"
+                ).fetchall():
+                    sig = build_signature(f"{row[1]} {row[2]}")
+                    conn.execute("UPDATE memorias SET signature = ? WHERE id = ?", (sig, row[0]))
+                    backfilled += 1
+                conn.execute("PRAGMA user_version = 2")
+                logger.info(
+                    "memorias.db migrated to schema v2 (prior user_version=%d, backfilled=%d rows)",
+                    prior_version, backfilled,
+                )
 
     def _connect(self, timeout: float) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=timeout)

@@ -68,7 +68,7 @@ def _seed_raw_drafts(db_path, profile_id, count, *, pinned_ids=frozenset(), cura
 # Schema (2.1)
 # ---------------------------------------------------------------------------
 
-def test_memorias_db_created_at_user_data_dir_with_user_version_1(tmp_path) -> None:
+def test_memorias_db_created_at_user_data_dir_with_user_version_2(tmp_path) -> None:
     from opencohost.config.settings import MEMORIAS_DB
     from opencohost.config.storage import USER_DATA_DIR
 
@@ -81,12 +81,180 @@ def test_memorias_db_created_at_user_data_dir_with_user_version_1(tmp_path) -> N
     MemoriaStore(db_path)
     assert db_path.exists()
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert cols == {
         "id", "profile_id", "stable_key", "revision", "title", "content",
         "status", "pinned", "private", "inactive", "created_at", "updated_at",
+        "signature",
     }
+
+
+# ---------------------------------------------------------------------------
+# Schema migration v1 -> v2 (memoria_rag_followups_20260716, candidate 2)
+# ---------------------------------------------------------------------------
+
+_V1_DDL = """
+CREATE TABLE IF NOT EXISTS memorias (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    stable_key TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    private INTEGER NOT NULL DEFAULT 0,
+    inactive INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(profile_id, stable_key)
+)
+"""
+
+
+def _create_v1_db(db_path, rows=()) -> None:
+    """Build a pre-migration (user_version=1, no signature column) db by hand,
+    byte-equivalent to what _init_db produced before candidate 2."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(_V1_DDL)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memorias_profile_id ON memorias(profile_id)")
+        conn.execute("PRAGMA user_version = 1")
+        for row in rows:
+            conn.execute(
+                "INSERT INTO memorias (id, profile_id, stable_key, revision, title, "
+                "content, status, pinned, private, inactive, created_at, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?)",
+                (
+                    row["id"], row["profile_id"], row["stable_key"],
+                    row["title"], row["content"],
+                    "2026-07-15T00:00:00+00:00", "2026-07-15T00:00:00+00:00",
+                ),
+            )
+
+
+def test_legacy_v1_db_migrates_signature_column_and_backfills(tmp_path) -> None:
+    from opencohost.core.memoria_store import build_signature
+
+    db_path = tmp_path / "memorias.db"
+    # Legacy 2026-07-15 rows are NAME-keyed (stable_key prefix is the profile
+    # NAME, not the UUID) — the migration must backfill signature from the
+    # existing title+content and must NEVER touch stable_key.
+    legacy_key = "Guh|calma-musica-synthwave"
+    _create_v1_db(db_path, rows=[{
+        "id": "mem_legacy_1", "profile_id": "profile-1", "stable_key": legacy_key,
+        "title": "musica synthwave calma",
+        "content": "contexto: streamer prefiere musica synthwave calma nocturna",
+    }])
+
+    MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
+        assert "signature" in cols
+        row = conn.execute("SELECT * FROM memorias WHERE id = 'mem_legacy_1'").fetchone()
+
+    expected = build_signature("musica synthwave calma contexto: streamer prefiere musica synthwave calma nocturna")
+    assert expected != ""
+    assert row["signature"] == expected
+    assert row["stable_key"] == legacy_key  # backfill never rewrites keys
+
+
+def test_migration_is_idempotent_on_second_construction(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _create_v1_db(db_path, rows=[{
+        "id": "mem_legacy_1", "profile_id": "profile-1", "stable_key": "Guh|calma-musica-synthwave",
+        "title": "musica synthwave calma",
+        "content": "contexto: streamer prefiere musica synthwave calma nocturna",
+    }])
+
+    MemoriaStore(db_path)  # migrates 1 -> 2
+    # Plant a marker to prove the gated ALTER+backfill block does NOT rerun.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE memorias SET signature = 'marker-must-survive' WHERE id = 'mem_legacy_1'")
+
+    MemoriaStore(db_path)  # must not raise (no duplicate-column error)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
+    assert sig == "marker-must-survive"  # backfill did not rerun
+
+
+def test_interrupted_migration_column_present_version_stale_self_heals(tmp_path) -> None:
+    """4R blocker fix (memoria_rag_followups_20260716 correction round):
+    sqlite3's legacy transaction control commits the ALTER TABLE (DDL)
+    immediately — a kill after ALTER but before the version bump leaves the
+    column present with user_version still < 2. Construction must survive
+    (no duplicate-column crash), backfill, and bump the version."""
+    from opencohost.core.memoria_store import build_signature
+
+    db_path = tmp_path / "memorias.db"
+    _create_v1_db(db_path, rows=[{
+        "id": "mem_legacy_1", "profile_id": "profile-1", "stable_key": "Guh|calma-musica-synthwave",
+        "title": "musica synthwave calma",
+        "content": "contexto: streamer prefiere musica synthwave calma nocturna",
+    }])
+    # Simulate the interrupted state: ALTER committed, version bump lost.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE memorias ADD COLUMN signature TEXT NOT NULL DEFAULT ''")
+
+    MemoriaStore(db_path)  # must NOT raise duplicate-column
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
+    expected = build_signature("musica synthwave calma contexto: streamer prefiere musica synthwave calma nocturna")
+    assert sig == expected  # backfill still ran on the resumed migration
+
+
+def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -> None:
+    """Resume path: column present, user_version < 2, SOME rows already
+    backfilled. Construction must fill only the empty ones (never rewrite an
+    already-set signature) and bump the version."""
+    from opencohost.core.memoria_store import build_signature
+
+    db_path = tmp_path / "memorias.db"
+    _create_v1_db(db_path, rows=[
+        {
+            "id": "mem_done", "profile_id": "profile-1", "stable_key": "Guh|calma-musica-synthwave",
+            "title": "musica synthwave calma",
+            "content": "contexto: streamer prefiere musica synthwave calma nocturna",
+        },
+        {
+            "id": "mem_pending", "profile_id": "profile-1", "stable_key": "Guh|juegos-estrategia-turnos",
+            "title": "juegos estrategia turnos",
+            "content": "contexto: streamer prefiere juegos de estrategia por turnos",
+        },
+    ])
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE memorias ADD COLUMN signature TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE memorias SET signature = 'already-backfilled-marker' WHERE id = 'mem_done'")
+
+    MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        done = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_done'").fetchone()[0]
+        pending = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_pending'").fetchone()[0]
+    assert done == "already-backfilled-marker"  # resume never rewrites filled rows
+    assert pending == build_signature(
+        "juegos estrategia turnos contexto: streamer prefiere juegos de estrategia por turnos"
+    )
+
+
+def test_fresh_db_lands_directly_at_user_version_2_with_signature_column(tmp_path) -> None:
+    db_path = tmp_path / "fresh" / "memorias.db"
+
+    MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
+    assert "signature" in cols  # no user ever sees a version-1 schema
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +329,46 @@ def test_concurrent_upserts_against_curated_row_never_mutate_content(tmp_path) -
     assert row["title"] == "titulo curado"
     assert row["content"] == "contenido curado aqui"
     assert row["status"] == "curated"
+
+
+def test_curated_row_upsert_immune_when_signature_kwarg_passed(tmp_path) -> None:
+    """Candidate 2 (memoria_rag_followups_20260716): threading the new
+    signature kwarg through upsert_draft must not weaken curated immunity."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    key = "profile-1|alpha-beta-gamma"
+    row_id = store.upsert_draft(
+        "profile-1", key, "titulo original", "contenido original aqui", signature="alpha beta gamma"
+    )
+    store.update_row(row_id, title="titulo curado", content="contenido curado aqui")
+
+    result = store.upsert_draft(
+        "profile-1", key, "titulo pisado", "contenido pisado aqui", signature="delta epsilon zeta"
+    )
+    assert result is None  # curated-immune: no write happened
+
+    row = store.get(row_id)
+    assert row["title"] == "titulo curado"
+    assert row["content"] == "contenido curado aqui"
+    assert row["signature"] == "alpha beta gamma"  # signature immune too
+    assert row["status"] == "curated"
+
+
+def test_upsert_draft_stores_and_refreshes_signature_for_draft_rows(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    key = "profile-1|alpha-beta-gamma"
+    row_id = store.upsert_draft(
+        "profile-1", key, "titulo alpha", "contenido alpha beta gamma", signature="alpha beta gamma"
+    )
+    assert store.get(row_id)["signature"] == "alpha beta gamma"
+
+    # A draft refresh on the same stable_key updates the signature in lockstep
+    # (ON CONFLICT ... DO UPDATE SET signature = excluded.signature).
+    store.upsert_draft(
+        "profile-1", key, "titulo nuevo", "contenido nuevo aqui", signature="delta epsilon zeta"
+    )
+    row = store.get(row_id)
+    assert row["revision"] == 2
+    assert row["signature"] == "delta epsilon zeta"
 
 
 def test_edit_promotes_status_to_curated_in_same_statement(tmp_path) -> None:
