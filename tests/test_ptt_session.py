@@ -207,6 +207,64 @@ def test_buffer_respects_max_chars_cap(monkeypatch):
         _wait_state(session, "idle")
 
 
+def test_buffer_full_emits_once_per_cycle_not_per_dropped_segment(monkeypatch):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, max_chars=10)
+    session.start()
+    try:
+        for _ in range(25):
+            ws.feed_text("palabra")
+        end = time.time() + 2.0
+        while time.time() < end:
+            session.keepalive()
+            time.sleep(0.01)
+        assert rec.events.count("buffer_full") == 1
+    finally:
+        session.stop()
+        _wait_state(session, "idle")
+
+
+def test_buffer_full_flag_resets_on_new_session(monkeypatch):
+    rec = _Recorder()
+    for _ in range(2):
+        ws = _FakeWS()
+        _patch_connect(monkeypatch, ws=ws)
+        session = _fast_session(rec, max_chars=10)
+        session.start()
+        for _ in range(5):
+            ws.feed_text("palabra")
+        end = time.time() + 2.0
+        while time.time() < end:
+            session.keepalive()
+            time.sleep(0.01)
+        session.stop()
+        _wait_state(session, "idle")
+    assert rec.events.count("buffer_full") == 2
+
+
+def test_buffer_full_event_is_single_string_arg(monkeypatch):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, max_chars=10)
+    session.start()
+    try:
+        for _ in range(5):
+            ws.feed_text("palabra")
+        end = time.time() + 2.0
+        while time.time() < end:
+            session.keepalive()
+            time.sleep(0.01)
+        assert "buffer_full" in rec.events
+        idx = rec.events.index("buffer_full")
+        assert isinstance(rec.events[idx], str)
+    finally:
+        session.stop()
+        _wait_state(session, "idle")
+
+
 def test_antiloop_regex_collapses_repeats_before_dispatch(monkeypatch):
     rec = _Recorder()
     ws = _FakeWS()

@@ -78,7 +78,8 @@ class PttSession:
                               Called only when the buffer holds >= 2 words.
       - ``on_event(action)``: record a lifecycle event. ``action`` is one of the
                               fixed literals started|stopped|auto_stopped|
-                              flushed|empty|error. NEVER carries transcript text.
+                              flushed|empty|error|buffer_full. NEVER carries
+                              transcript text.
       - ``on_close(err)``   : (optional) the slot is now free; ``err`` is the
                               final ``last_error`` (None on a clean stop).
     """
@@ -114,6 +115,7 @@ class PttSession:
         self._grace_deadline = 0.0
         self._last_keepalive = 0.0
         self._last_error: Optional[str] = None
+        self._cap_emitted = False
 
         self._thread: Optional[threading.Thread] = None
         self._connected_evt = threading.Event()
@@ -152,6 +154,7 @@ class PttSession:
         """
         with self._lock:
             self._state = _CONNECTING
+            self._cap_emitted = False
         self._thread = threading.Thread(target=self._run, name="ptt-ws", daemon=True)
         self._thread.start()
         # +2s margin over the WS open timeout for thread spin-up / GC stalls.
@@ -288,17 +291,29 @@ class PttSession:
         text = _ANTILOOP_RE.sub(r"\1", text).strip()
         if not text:
             return
+        emit_cap = False
         with self._lock:
             if len(self._buffer) >= self._max_chars:
                 # Soft cap reached (CTK _ptt_max_chars parity) — drop the rest.
                 logger.warning("[PTT] buffer cap %d reached, dropping segment", self._max_chars)
-                return
-            self._buffer = text if not self._buffer else self._buffer + " " + text
-            # A segment arriving during grace extends the deadline (CTK
-            # voice_control.py:500-501 parity).
-            if self._state == _FLUSHING:
-                self._grace_deadline = time.monotonic() + self._grace
-            buffered = len(self._buffer)
+                if not self._cap_emitted:
+                    self._cap_emitted = True
+                    emit_cap = True
+                cap_hit = True
+            else:
+                cap_hit = False
+                self._buffer = text if not self._buffer else self._buffer + " " + text
+                # A segment arriving during grace extends the deadline (CTK
+                # voice_control.py:500-501 parity).
+                if self._state == _FLUSHING:
+                    self._grace_deadline = time.monotonic() + self._grace
+                buffered = len(self._buffer)
+        if emit_cap:
+            # Once per instance (guarded by self._cap_emitted above), emitted
+            # OUTSIDE the lock — same convention as _begin_grace/_flush_buffer.
+            self._emit("buffer_full")
+        if cap_hit:
+            return
         logger.debug("[PTT] buffered %d chars", buffered)
 
     def _flush_buffer(self) -> None:

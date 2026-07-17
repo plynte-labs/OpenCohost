@@ -394,6 +394,67 @@ def test_full_session_dispatches_turn_and_never_leaks_transcript(monkeypatch):
         client.__exit__(None, None, None)
 
 
+def test_buffer_full_event_reaches_api_events_once_with_no_detail(monkeypatch):
+    """PTT buffer cap cue (memoria_rag_followups_20260716 Batch C, candidate 5):
+    a hold that overflows the char cap emits exactly one ``buffer_full`` event
+    on the shared /api/events log, detail ALWAYS None (privacy — the cap DROP
+    behavior itself is unchanged, this only adds the signal)."""
+    sentinel = "secret cap overflow sentinel"
+    ws = _FakeWS()
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _patch_connect(monkeypatch, ws=ws)
+        controller = PttController(
+            "ws://test/whisperlive",
+            app.state.dispatcher,
+            app.state.host.event_log,
+            grace=0.15,
+            keepalive_timeout=0.3,
+            watchdog_tick=0.03,
+            ws_open_timeout=2.0,
+            max_chars=10,
+        )
+        app.state.ptt_controller = controller
+
+        start = client.post("/api/ptt/start", json={})
+        assert start.status_code == 200
+        sid = start.json()["session_id"]
+
+        ws.feed_text(sentinel)
+        for _ in range(20):
+            ws.feed_text("palabra")
+
+        end = time.time() + 2.0
+        while time.time() < end:
+            client.post("/api/ptt/keepalive", json={"session_id": sid})
+            time.sleep(0.02)
+
+        stop = client.post("/api/ptt/stop", json={"session_id": sid})
+        assert stop.status_code == 200
+
+        end = time.time() + 3.0
+        st = None
+        while time.time() < end:
+            st = client.get("/api/ptt/state")
+            if st.json()["state"] == "idle":
+                break
+            time.sleep(0.03)
+        assert st is not None and st.json()["state"] == "idle"
+
+        resp = client.get("/api/events")
+        body = resp.json()
+        buffer_full_events = [
+            e for e in body["events"] if e["source"] == "ptt" and e["action"] == "buffer_full"
+        ]
+        assert len(buffer_full_events) == 1
+        assert buffer_full_events[0]["detail"] is None
+        assert sentinel not in json.dumps(body)
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_session_close_invokes_audio_suspect_hook(monkeypatch):
     """Recovery wiring (2026-07-15 PTT voice-death fix): PttController must
     call the on_audio_suspect hook DIRECTLY on session close (stopped here;
