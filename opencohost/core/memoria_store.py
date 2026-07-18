@@ -173,6 +173,19 @@ def _now_text() -> str:
 # a fragment shorter than this is noise, not context (candidate 2).
 _MIN_CLIP_REMAINDER_CHARS = 40
 
+# W3 (memoria_recall_20260718): high-frequency Spanish function words that
+# survive normalize_tokens AND _MEMORIA_DOMAIN_STOPWORDS but never discriminate
+# between memories — they only inflate the shared-token score in select_top_k,
+# letting an incidental function-word overlap cross the >=2-shared-token gate.
+# SCORING-ONLY: subtracted from both the topic and signature sets inside
+# select_top_k. Deliberately NOT added to _MEMORIA_DOMAIN_STOPWORDS — that would
+# shift derive_stable_key / is_capturable (design rejected: re-capture dupes,
+# shaves user-side capture gates). Also retroactively neutralizes already-stored
+# polluted signatures at scoring time.
+_SCORING_STOPWORDS: frozenset[str] = frozenset({
+    "que", "mi", "se", "esa", "este", "como", "para",
+})
+
 
 def select_top_k(topic_text: str, rows, k: int = 3) -> list:
     """Lexical top-k of *rows* against *topic_text* by signature overlap.
@@ -185,10 +198,10 @@ def select_top_k(topic_text: str, rows, k: int = 3) -> list:
     the old 1-token/0.25 title threshold, by design: precision over recall,
     ADR-034). Returns up to *k* rows, best overlap ratio first.
     """
-    topic = set(_significant_tokens(topic_text))
+    topic = set(_significant_tokens(topic_text)) - _SCORING_STOPWORDS
     scored = []
     for row in rows:
-        sig = set((row["signature"] or row["title"]).split())
+        sig = set((row["signature"] or row["title"]).split()) - _SCORING_STOPWORDS
         shared = len(topic & sig)
         if shared >= _MIN_SHARED_TOKENS:
             scored.append((shared / max(len(sig), 1), row))

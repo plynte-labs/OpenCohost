@@ -556,3 +556,39 @@ def test_trim_messages_reactive_system_at_index0_unchanged():
     assert removed == 2
     assert messages[0]["role"] == "system"
     assert messages[-1]["content"] == "current"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 0 (memoria_recall_20260718 W1) — grown system message safety net
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_budget_preserves_grown_w1_system_message_byte_identical():
+    # W1 appends the <perfil_streamer> personalization block to the system
+    # message, growing it to ~900+ chars (system_prompt + perfil_streamer).
+    # Under a tight ctx_limit that forces eviction, index 0 must be preserved
+    # BYTE-IDENTICAL (role AND content) — only history pairs may be evicted.
+    # This pins apply_char_budget's unconditional system pin (context_budget.py
+    # line 126, front=1 branch) against W1's larger system payload. Pre-existing
+    # invariant, independent of content size — expected green immediately.
+    system_content = "SYSTEM_PROMPT\n\n<perfil_streamer>\n" + ("s" * 900)  # ~933 chars
+    system_msg = {"role": "system", "content": system_content}
+    messages = [
+        system_msg,
+        _msg("user", 2000),
+        _msg("assistant", 2000),
+        _msg("user", 2000),
+        _msg("assistant", 2000),
+        {"role": "user", "content": "CURRENT" + "x" * 100},
+    ]
+    # budget = (2048 - 512) * 1.0 = 1536; grown system (~933) + final (~107) fit,
+    # so every history pair evicts but the system message must survive intact.
+    out, evicted = cb.apply_char_budget(
+        messages, ctx_limit=2048, max_output_tokens=512, safety_factor=1.0
+    )
+    assert evicted >= 1  # history WAS evicted (non-vacuous)
+    # Index 0 preserved byte-identical: same object, same role, same content.
+    assert out[0] is system_msg
+    assert out[0]["role"] == "system"
+    assert out[0]["content"] == system_content
+    # Final current turn preserved at the end.
+    assert out[-1]["content"].startswith("CURRENT")
