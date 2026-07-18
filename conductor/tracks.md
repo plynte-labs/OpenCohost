@@ -4,6 +4,21 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Memoria Recall — 2026-07-18 (recall grounding: system-position personalization, summaries, meta router)**
+  *Link: [./tracks/memoria_recall_20260718/](./tracks/memoria_recall_20260718/)*
+  *Status 2026-07-18 IMPLEMENTED: WU1 21a5b8a (scoring stopset — function-word noise out of retrieval),
+  WU2 4cd32d0 (personalization to system position — kills the every-turn identity dominance; honest
+  contract: once-per-request stable copy, stateless chat API), WU3 52efc46 (durable session-summary
+  tier, status='summary', written at close/switch under budget; 4R fixed a cross-profile title
+  contamination CRITICAL), WU4 ad77f9b (meta-recall router: 12 anchored phrase patterns route memory
+  questions to recency — pinned first, <=2 summaries, fresh rows; red-first negative table proves
+  récord/acorde/'hablamos de X' never misroute; owner's two real failing queries are regression
+  fixtures). Full 4R ran on WU3 and WU4 (3 CRITICALs total, all corrected in bounded transactions).
+  Owner runtime validation pending: relaunch app twice (code load + one summarized session), then ask
+  '¿qué recordás de mí?' / '¿de qué hablamos la sesión pasada?' expecting grounded answers.
+  WIP parked by owner: PTT audio cue (dd786c4) — owner hears nothing; likely stale backend process
+  predating the code; retest after next relaunch, do not debug yet.*
+
 - [x] **Track: Memoria Quality — 2026-07-17 (history honesty, capture-at-commit, content shaping, prompt disclosure)**
   *Link: [./tracks/memoria_quality_20260717/](./tracks/memoria_quality_20260717/) (design.md + tasks.md)*
   *Status 2026-07-17 EOD: IMPLEMENTED — WU1 6f11a8d (honest F10/legacy history), WU2+4R corrections
