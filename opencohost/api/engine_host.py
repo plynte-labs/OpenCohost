@@ -448,6 +448,20 @@ class EngineHost:
         if self.agenda is not None:
             with self.agenda_lock:
                 bridge.register_provider()
+            # USED transition (D3): mirror the CTK agenda_output_recorder
+            # (app_shell.py:289), invoked by the engine on the agenda commit
+            # path (llm_engine.py:900, ENGINE thread). record + mark_used run
+            # under a single agenda_lock — same lock as register_provider /
+            # guardrails, since both mutate the not-thread-safe controller.
+            agenda, lock = self.agenda, self.agenda_lock
+
+            def _on_accepted_output(output: str) -> None:
+                with lock:
+                    agenda.record_accepted_output(output)
+                    if bridge.mark_used_after_successful_generation():
+                        _logger.info("editorial cue card marked USED")
+
+            self.motor.agenda_output_recorder = _on_accepted_output
         self.motor.direct_editorial_context_provider = bridge.resolve_direct_context
         self.editorial_bridge = bridge
 

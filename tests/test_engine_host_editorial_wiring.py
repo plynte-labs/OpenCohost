@@ -12,12 +12,23 @@ WU1 covers design test-plan items (a), (d), (e):
       (agenda=None: provider set, recorder NOT wired)
   (e) a forced bridge-wiring failure leaves EngineHost functional (start()
       completes, editorial_bridge is None, provider never set)
+
+WU2 covers design test-plan items (b), (c):
+  (b) a seeded armed card is resolved by the wired direct provider when a typed
+      turn hits the same call path the engine gate uses
+  (c) with agenda present, the wired agenda_output_recorder records the accepted
+      output AND flips the linked/consumed editorial card to USED
 """
 
 from queue import Queue
 from unittest.mock import MagicMock
 
 import opencohost.api.engine_host as engine_host_mod
+from opencohost.core.editorial_cards import (
+    EditorialCard,
+    EditorialCardStatus,
+    EditorialCardStore,
+)
 
 
 def _fake_motor():
@@ -102,5 +113,104 @@ def test_engine_host_start_survives_editorial_bridge_wiring_failure(tmp_path, mo
         host.start()  # must not raise
         assert host.editorial_bridge is None
         assert host.motor.direct_editorial_context_provider is None
+    finally:
+        host.stop()
+
+
+# ---------------------------------------------------------------------------
+# WU2 helpers + tests (design test-plan items b, c)
+# ---------------------------------------------------------------------------
+
+def _seed_armed_card(db_path, *, topic, summary, streamer_take, triggers):
+    """Seed one ARMED card into the tmp EDITORIAL_CARDS_DB before start().
+
+    Returns (store, refreshed_card). The store is a separate instance from the
+    bridge's own — same file, connection-per-call SQLite, so committed writes
+    from the bridge's store are visible here.
+    """
+    store = EditorialCardStore(str(db_path))
+    card = store.upsert(
+        EditorialCard(
+            topic=topic,
+            summary=summary,
+            streamer_take=streamer_take,
+            triggers=triggers,
+        )
+    )
+    store.arm(card.id)
+    return store, store.get(card.id)
+
+
+def test_engine_host_typed_turn_injects_armed_editorial_card(tmp_path, monkeypatch):
+    # (b) End-to-end: an armed card seeded into the tmp EDITORIAL_CARDS_DB is
+    # resolved by the wired direct provider when a typed turn hits the same call
+    # path the engine gate uses (motor.direct_editorial_context_provider(query)).
+    db_path = tmp_path / "cards.db"
+    _seed_armed_card(
+        db_path,
+        topic="GTA delay confirmed",
+        summary="Rockstar pushed the release window again.",
+        streamer_take="Quiero debatir si el retraso salva el hype pay-to-win.",
+        triggers=["gta", "delay"],
+    )
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, db_path)
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        # Deterministic: silence the background driver so it can't mutate card
+        # status (auto-attach) mid-assertion.
+        if host._agenda_driver is not None:
+            host._agenda_driver.stop()
+
+        provider = host.motor.direct_editorial_context_provider
+        block = provider("hey kira what do you think about the gta delay")
+
+        assert block is not None
+        assert "<editorial_context>" in block
+        assert "pay-to-win" in block
+    finally:
+        host.stop()
+
+
+def test_engine_host_recorder_marks_card_used_after_accepted_output(tmp_path, monkeypatch):
+    # (c) With agenda present, the recorder wired in the `if self.agenda is not
+    # None:` branch records the accepted output AND flips the linked/consumed
+    # editorial card to USED (bridge.mark_used_after_successful_generation()).
+    db_path = tmp_path / "cards.db"
+    store, card = _seed_armed_card(
+        db_path,
+        topic="Dificultad del juego",
+        summary="La comunidad discute si el juego se volvió más fácil.",
+        streamer_take="Quiero llevarlo a diseño y accesibilidad.",
+        triggers=["dificultad"],
+    )
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, db_path)
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        assert host.agenda is not None
+        # Deterministic: stop the background driver so it cannot advance state.
+        host._agenda_driver.stop()
+        controller = host.agenda
+        bridge = host.editorial_bridge
+
+        topic = controller.add_topic("Dificultad del juego", approved=True)
+        controller.queue_topic(topic.id)
+        assert bridge.link_card_to_topic(topic.id, card.id) is True
+        # Put the controller in the post-generation state mark_used expects.
+        controller.active_topic = topic
+        topic.editorial_card_consumed = True
+
+        recorder = host.motor.agenda_output_recorder
+        assert callable(recorder)
+        recorder("Respuesta aceptada de Kira")
+
+        # record_accepted_output ran (effect observed — it lowercases + stores) ...
+        assert controller.last_outputs
+        assert "respuesta aceptada" in controller.last_outputs[-1]
+        # ... and the linked card flipped to USED.
+        assert store.get(card.id).status is EditorialCardStatus.USED
     finally:
         host.stop()
