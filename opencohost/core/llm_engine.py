@@ -53,7 +53,8 @@ from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABE
 from opencohost.core.memory_digest import MemoryDigest
 from opencohost.core.memoria_store import (
     MemoriaStore, derive_stable_key, build_title, build_signature,
-    build_injection_lines, pinned_injection_counter, significant_token_count,
+    build_injection_lines, build_recency_lines, is_meta_recall_query,
+    pinned_injection_counter, significant_token_count,
 )
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger, _debug_enabled
@@ -2712,7 +2713,16 @@ class MotorVocalIA(threading.Thread):
             self._memorias_pin_counter = pinned_injection_counter(rows)
             if not rows:
                 return ""
-            lines = build_injection_lines(rows, contexto)
+            # W2b/W4 (memoria_recall_20260718): a meta/temporal recall query
+            # ("¿qué recordás de mí?", "de qué hablamos la sesión pasada") has
+            # no topical anchor for select_top_k — route it to RECENCY (session
+            # summaries first). W4 gating is structural: recency fires ONLY on a
+            # detected meta query; a topical 0-match keeps injecting nothing
+            # (owner mitigation — the existing select_top_k path, untouched).
+            if is_meta_recall_query(contexto):
+                lines = build_recency_lines(rows)
+            else:
+                lines = build_injection_lines(rows, contexto)
             if not lines:
                 return ""
             # 4R correction round (R1): sanitize (control chars + truncation)

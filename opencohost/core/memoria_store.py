@@ -45,6 +45,7 @@ and opencohost/ui/inspector_memory.py.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 from contextlib import closing
@@ -55,11 +56,16 @@ from uuid import uuid4
 from opencohost.config.settings import (
     MEMORIAS_MAX_INJECT_CHARS,
     MEMORIAS_MAX_PINNED_INJECT,
+    MEMORIAS_META_RECALL_K,
     MEMORIAS_PINNED_CLIP_CHARS,
     MEMORIAS_PROFILE_CAP,
     MEMORIAS_SUMMARY_CAP,
 )
-from opencohost.core.editorial_matching import normalize_tokens
+# Same accent folding as the editorial matcher — the meta-recall detector must
+# normalize exactly like the rest of the pipeline that feeds it. Single source
+# of truth on purpose (editorial_matching owns the normalizer; do not add a
+# second copy here).
+from opencohost.core.editorial_matching import _strip_accents, normalize_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +234,29 @@ def _clip_for_injection(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _append_within_budget(
+    lines: list[str], used: int, text: str, max_chars: int, *,
+    clip_to_remaining: bool = False,
+) -> int:
+    """Shared budget bookkeeping for injection-line assembly (4R WU4, D-hygiene).
+
+    Append *text* to *lines* when it fits the remaining *max_chars* budget
+    (accounting for the 1-char "\\n" join separator) and return the new *used*
+    count. An over-budget text is rejected, or — with *clip_to_remaining* —
+    clipped into the remainder unless that remainder is below
+    _MIN_CLIP_REMAINDER_CHARS (a fragment that small is noise, not context).
+    Single source of truth for build_injection_lines AND build_recency_lines.
+    """
+    sep = 1 if lines else 0
+    remaining = max_chars - used - sep
+    if len(text) > remaining:
+        if not clip_to_remaining or remaining < _MIN_CLIP_REMAINDER_CHARS:
+            return used
+        text = _clip_for_injection(text, remaining)
+    lines.append(text)
+    return used + sep + len(text)
+
+
 def pinned_injection_counter(rows, max_pinned: int = MEMORIAS_MAX_PINNED_INJECT) -> tuple[int, int]:
     """Honest pin/injection counter value (F6) — (total_pinned, injected).
 
@@ -272,26 +301,17 @@ def build_injection_lines(
     lines: list[str] = []
     used = 0
 
-    def _try_add(text: str, *, clip_to_remaining: bool = False) -> None:
-        nonlocal used
-        sep = 1 if lines else 0
-        remaining = max_chars - used - sep
-        if len(text) > remaining:
-            # Candidate 2: selected non-pinned rows are clipped into whatever
-            # budget remains instead of being silently dropped — unless the
-            # remainder is too small to carry meaning. Pinned rows keep the
-            # original reject-when-over-budget behavior (already pre-clipped).
-            if not clip_to_remaining or remaining < _MIN_CLIP_REMAINDER_CHARS:
-                return
-            text = _clip_for_injection(text, remaining)
-        lines.append(text)
-        used += sep + len(text)
-
+    # Candidate 2: selected non-pinned rows are clipped into whatever budget
+    # remains instead of being silently dropped (clip_to_remaining). Pinned
+    # rows keep the original reject-when-over-budget behavior (already
+    # pre-clipped to pinned_clip_chars).
     for row in pinned_rows:
-        _try_add(_clip_for_injection(row["content"], pinned_clip_chars))
+        used = _append_within_budget(
+            lines, used, _clip_for_injection(row["content"], pinned_clip_chars), max_chars,
+        )
 
     for row in select_top_k(topic_text, non_pinned_rows, k=top_k):
-        _try_add(row["content"], clip_to_remaining=True)
+        used = _append_within_budget(lines, used, row["content"], max_chars, clip_to_remaining=True)
 
     return lines
 
@@ -305,6 +325,150 @@ def build_injection_lines(
 # so a summary an operator later edits/pins (promoted to 'curated') drops out of
 # the cap and becomes permanent.
 _SESSION_SUMMARY_MARKER = "|session_summary:"
+
+
+# ---------------------------------------------------------------------------
+# W2b/W4 (memoria_recall_20260718) — meta/temporal recall router
+# ---------------------------------------------------------------------------
+
+# Closed, accent-tolerant regex list that marks a META/temporal RECALL query —
+# one asking Kira what she remembers or what happened in a PAST session, as
+# opposed to a topical question. On a hit _build_memorias_injection_block
+# retrieves by RECENCY (build_recency_lines) instead of lexical select_top_k,
+# which structurally CANNOT answer a temporal query (no recency term, no
+# "session" concept in the schema; the two production-failing owner queries —
+# "¿qué recordás de mí?" / "de qué se habló la sesión pasada" — are exactly
+# this class). Matched with re.search against ACCENT-STRIPPED, lowercased text,
+# so a PTT-wrapped query ("El streamer acaba de decir (PTT): ¿qué recordás?")
+# still matches through the wrapper prefix (substring search).
+#
+# 4R correction WU4 (finding A): ANCHORED PHRASES, not bare stems. A bare stem
+# misroutes topical turns to the recency dump, bypassing the W4 owner-gated
+# fallback ("récord" the gaming noun, "acorde"/"acordeón", indicative
+# "hablamos de X", resemblance "me recordás al profe"). Every pattern anchors
+# on an interrogative/recall bigram that a topical turn does not carry. All
+# patterns are linear-time (plain alternation + \w*, no nested quantifiers).
+# Closed list: extend only in lockstep with the positive/negative tables in
+# tests/test_memoria_recall_routing.py.
+_META_RECALL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in (
+    # "¿qué recordás/recuerdas (de mí)?", "lo que recordabas" — interrogative
+    # recall. The leading "que" excludes the gaming noun "récord" ("hice un
+    # nuevo récord") and resemblance uses ("me recordás al profe").
+    r"\bque\s+(record|recuerd)\w*",
+    # "recordás/recuerdas de mí" without the interrogative — verb-only stems
+    # (recorda- / recuerd-+suffix), so the bare noun "récord de ..." can never
+    # match.
+    r"\b(recorda\w*|recuerd\w+)\s+de\s+mi\b",
+    # "¿qué sabés/sabes/sabías de mí?" — knowledge-recall about the speaker.
+    r"\bsab(es|e|ias)\s+de\s+mi\b",
+    # "de qué hablamos / de qué se habló (la sesión pasada)" — interrogative
+    # word order; topical "hablamos de X" lacks the leading "de que".
+    r"\bde\s+que\s+(se\s+)?habl\w+",
+    # "qué hablamos ayer / la otra vez" — interrogative; "hablamos de Dark
+    # Souls" and "hablamos mañana" lack the leading "que".
+    r"\bque\s+hablamos\b",
+    # "qué se dijo / se habló / se contó / se comentó" — impersonal recall of
+    # a past conversation, anchored on the interrogative "que".
+    r"\bque\s+se\s+(hablo|dijo|conto|comento)\b",
+    # "te acordás (de ...)" — acordarse-as-recall, second person. The "te " +
+    # verb-stem anchor never matches "acorde"/"acordeón".
+    r"\bte\s+acorda\w*",
+    # "¿se acuerdan (de ...)?" / "se acuerda de aquella vez" — acordarse-as-
+    # recall, third person (irregular acuerd- stem the v1 list missed).
+    r"\bse\s+acuerda\w*",
+    # "no me acuerdo(, ¿vos sí?)" — the speaker asking Kira to fill a memory
+    # gap (irregular first-person acuerdo, missed by v1's acord- stem).
+    r"\bno\s+me\s+acuerdo\b",
+    # "sesión/charla/stream/conversación pasada|anterior|previa", both orders.
+    r"\b(sesion|charla|stream|conversacion)\w*\s+(pasad|anterior|previ)\w*",
+    r"\b(pasad|anterior|previ)\w*\s+(sesion|charla|stream|conversacion)\w*",
+    # "en base a mis/tus memorias" — explicit reference to the memoria store.
+    r"\b(mis|tus)\s+memorias\b",
+))
+
+
+def is_meta_recall_query(text: str) -> bool:
+    """True when *text* is a meta/temporal RECALL query (W2b/W4).
+
+    See _META_RECALL_PATTERNS. Accent-insensitive (reuses the editorial
+    normalizer's accent stripper) and wrapper-tolerant (substring re.search),
+    so both the direct and PTT-wrapped forms of a query resolve identically.
+    Pure, no I/O. Empty/None text is never meta.
+    """
+    if not text:
+        return False
+    normalized = _strip_accents(text.lower())
+    return any(pattern.search(normalized) for pattern in _META_RECALL_PATTERNS)
+
+
+# 4R correction WU4 (finding C): summaries' share of the k recency slots.
+# MEMORIAS_META_RECALL_K=5 slots under a 700-char budget: 2 summaries answer
+# the "la sesión pasada" class (the last session, plus the one before) while
+# leaving the majority of the slots — and the residual char budget — to live
+# regular rows; without this bound, >=k accumulated summaries starve every
+# live-session row out of (summaries + regular)[:k]. Mirrors the
+# MEMORIAS_MAX_PINNED_INJECT=2 policy shape.
+_META_RECALL_MAX_SUMMARIES = 2
+
+
+def build_recency_lines(
+    rows,
+    k: int = MEMORIAS_META_RECALL_K,
+    *,
+    max_chars: int = MEMORIAS_MAX_INJECT_CHARS,
+    max_pinned: int = MEMORIAS_MAX_PINNED_INJECT,
+    pinned_clip_chars: int = MEMORIAS_PINNED_CLIP_CHARS,
+) -> list[str]:
+    """RECENCY-ordered injection lines for a meta/temporal recall query (W2b).
+
+    Unlike select_top_k (lexical), this ignores topic overlap — a meta query has
+    no topical anchor to score against. Order (4R WU4, findings B+C): up to
+    *max_pinned* OLDEST-pinned rows FIRST, each clipped to ~*pinned_clip_chars*
+    (the same F6 carve-out as build_injection_lines — "¿qué recordás de mí?" is
+    exactly the class the pinned guarantee exists for), then machine-authored
+    session SUMMARIES (found by _SESSION_SUMMARY_MARKER in stable_key — the
+    durable tier) newest first but capped at _META_RECALL_MAX_SUMMARIES so they
+    never starve live rows, then the newest regular rows — *k* rows total,
+    assembled under the SAME *max_chars* budget (_append_within_budget; a
+    non-pinned over-budget row is clipped into the remainder, or skipped when
+    the remainder is below _MIN_CLIP_REMAINDER_CHARS). Pure, no I/O, never
+    mutates a row. The summary marker lives ONLY in stable_key, so
+    row["content"] is already clean display text.
+
+    *rows* MUST be the eligible candidate set (private=0, inactive=0, capped —
+    MemoriaStore.list_injection_candidates), same contract as
+    build_injection_lines.
+    """
+    pinned_rows = sorted(
+        (row for row in rows if row["pinned"]),
+        key=lambda row: (row["created_at"], row["id"]),
+    )[:max_pinned]
+    summaries: list = []
+    regular: list = []
+    for row in rows:
+        if row["pinned"]:
+            continue  # pinned rows (even a pinned summary) ride the carve-out
+        if _SESSION_SUMMARY_MARKER in (row["stable_key"] or ""):
+            summaries.append(row)
+        else:
+            regular.append(row)
+
+    def _recency(row):
+        return (row["updated_at"] or "", row["id"] or "")
+
+    summaries.sort(key=_recency, reverse=True)
+    regular.sort(key=_recency, reverse=True)
+
+    lines: list[str] = []
+    used = 0
+    for row in pinned_rows:
+        used = _append_within_budget(
+            lines, used, _clip_for_injection(row["content"], pinned_clip_chars), max_chars,
+        )
+    ordered = (summaries[:_META_RECALL_MAX_SUMMARIES] + regular)[: max(k - len(lines), 0)]
+    for row in ordered:
+        used = _append_within_budget(lines, used, row["content"], max_chars, clip_to_remaining=True)
+    return lines
 
 
 # ---------------------------------------------------------------------------
