@@ -32,8 +32,11 @@ from opencohost.core.memoria_store import (
     WRITE_TIMEOUT_SECONDS,
     MemoriaStore,
     MemoriaValidationError,
+    _IMPORT_MARKER,
     _SESSION_SUMMARY_MARKER,
+    build_recency_lines,
     build_title,
+    derive_import_key,
     derive_stable_key,
     is_capturable,
 )
@@ -63,6 +66,29 @@ def _seed_raw_drafts(db_path, profile_id, count, *, pinned_ids=frozenset(), cura
                 (row_id, profile_id, f"{profile_id}|seed-{i}", f"titulo {i}", f"contenido {i}", status, pinned, ts, ts),
             )
     return ids
+
+
+def _seed_row(
+    db_path, profile_id, row_id, *, content, stable_key, updated_at,
+    status="draft", pinned=False, signature="",
+):
+    """Insert one row with full control over stable_key/status/updated_at.
+
+    Used by the build_recency_lines partition tests (memoria_import_20260718),
+    which need deterministic recency ordering and hand-set stable_key markers —
+    mirrors the recall-routing suite's _seed helper. Ensures the schema exists
+    by constructing a MemoriaStore first.
+    """
+    MemoriaStore(db_path)
+    ts = updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO memorias (id, profile_id, stable_key, revision, title, "
+            "content, status, pinned, private, inactive, created_at, updated_at, signature) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+            (row_id, profile_id, stable_key, f"t {row_id}", content, status,
+             1 if pinned else 0, ts, ts, signature),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1089,3 +1115,191 @@ def test_summary_tier_write_failures_always_warn(monkeypatch, tmp_path, caplog) 
     warns = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("summary write failed" in r.getMessage() for r in warns)
     assert any("summary-cap prune failed" in r.getMessage() for r in warns)
+
+
+# ---------------------------------------------------------------------------
+# Imported tier — status='imported', dedup, immunities (memoria_import_20260718)
+# ---------------------------------------------------------------------------
+
+def test_insert_imported_creates_status_imported_row(tmp_path) -> None:
+    """D1 provenance: a machine-parsed import row carries status='imported'
+    (distinct from operator-touched 'curated') and an '|import:' stable_key."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    outcome = store.insert_imported(
+        "p", "[Gemini] jazz fotografia", "le gusta el jazz y la fotografia analogica"
+    )
+    assert outcome == "created"
+
+    rows = store.list_for_profile("p")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "imported"
+    assert _IMPORT_MARKER in rows[0]["stable_key"]
+
+
+def test_insert_imported_dedup_on_conflict_do_nothing(tmp_path) -> None:
+    """D6 dedup: re-importing the identical claim resolves to ON CONFLICT DO
+    NOTHING — no second row, no overwrite of the first import's content/title,
+    and the second call reports 'duplicate' (not 'created') so the route can
+    count it as a duplicate rather than a fresh insert."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    key = derive_import_key("p", "le gusta el jazz y la fotografia analogica")
+
+    assert store.insert_imported(
+        "p", "[Gemini] uno", "le gusta el jazz y la fotografia analogica", source_key=key
+    ) == "created"
+    assert store.insert_imported(
+        "p", "[Gemini] titulo distinto", "le gusta el jazz y la fotografia analogica", source_key=key
+    ) == "duplicate"
+
+    rows = store.list_for_profile("p")
+    assert len(rows) == 1
+    assert rows[0]["title"] == "[Gemini] uno"  # first write never overwritten
+
+
+def test_insert_imported_fail_open_on_locked_db(monkeypatch, tmp_path) -> None:
+    """A locked db fails open: insert_imported returns 'error' without raising
+    (mirrors the store's fail-open write convention). 'error' is DISTINCT from
+    'duplicate' — WU3's per-item accounting must never report a lock loss as a
+    successful dedup."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    def boom(timeout):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(store, "_connect", boom)
+    assert store.insert_imported("p", "[Gemini] t", "contenido importado significativo alpha") == "error"
+
+
+def test_insert_imported_skips_too_short_claim(tmp_path) -> None:
+    """A claim with fewer than 3 significant tokens has no dedup-safe key
+    (derive_import_key → None): insert_imported reports 'skipped', DISTINCT from
+    'duplicate' (a real dedup collision) and 'error' (a store failure). WU3's
+    per-item accounting must not conflate the three."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    assert store.insert_imported("p", "[Gemini] t", "jazz") == "skipped"
+    assert store.list_for_profile("p") == []
+
+
+def test_imported_row_survives_draft_growth_prune(monkeypatch, tmp_path) -> None:
+    """_prune_profile targets status='draft' only; a status='imported' row is
+    never a prune candidate however far the draft pool overflows the cap —
+    imports never eat the 200-draft pool (D1)."""
+    from opencohost.core import memoria_store as store_mod
+    monkeypatch.setattr(store_mod, "MEMORIAS_PROFILE_CAP", 3)
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    assert store.insert_imported("p", "[Gemini] dato importado", "dato importado duradero del perfil") == "created"
+    for i in range(8):  # far past the (patched) draft cap of 3
+        store.upsert_draft("p", f"p|draft-{i}", f"title {i} alpha", f"content {i} beta gamma")
+
+    imported = [r for r in store.list_for_profile("p", limit=10_000) if r["status"] == "imported"]
+    assert len(imported) == 1
+
+
+def test_imported_row_is_upsert_draft_immune(tmp_path) -> None:
+    """A draft upsert colliding on an imported row's stable_key must be a no-op:
+    upsert_draft's ON CONFLICT ... WHERE status='draft' excludes the imported
+    row (status='imported'), so a curated import can never be overwritten."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    key = derive_import_key("p", "dato importado duradero del perfil sintetico")
+    store.insert_imported("p", "[Gemini] original", "dato importado duradero del perfil sintetico", source_key=key)
+
+    result = store.upsert_draft("p", key, "attacker title", "attacker content overwrite here")
+
+    assert result is None  # conflict resolved to a no-op, no write
+    rows = store.list_for_profile("p")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "imported"
+    assert rows[0]["content"] == "dato importado duradero del perfil sintetico"  # untouched
+
+
+def test_count_imported_counts_only_imported_rows(tmp_path) -> None:
+    """count_imported mirrors count_all's shape but filters status='imported' —
+    the route uses it for the D2 import-time cap check."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    store.insert_imported(
+        "p", "[Gemini] uno", "dato importado uno alpha beta",
+        source_key=derive_import_key("p", "dato importado uno alpha beta"),
+    )
+    store.insert_imported(
+        "p", "[Gemini] dos", "dato importado dos gamma delta",
+        source_key=derive_import_key("p", "dato importado dos gamma delta"),
+    )
+    store.upsert_draft("p", "p|draft-x", "title draft", "content draft epsilon zeta")
+    store.insert_summary("p", "summary title", "summary content durable")
+
+    assert store.count_imported("p") == 2
+    assert store.count_imported("other") == 0
+
+
+def test_count_imported_fail_open_returns_negative_one(monkeypatch, tmp_path) -> None:
+    """Fail-open convention (MemoriaStore.count_all / count_imported docstrings):
+    a read error returns -1, never a valid count, so a cap-check caller can tell
+    'unknown' from 'zero'."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    def boom(timeout):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(store, "_connect", boom)
+    assert store.count_imported("p") == -1
+
+
+# ---------------------------------------------------------------------------
+# Imported tier — build_recency_lines third partition (D5)
+# ---------------------------------------------------------------------------
+
+def test_recency_imported_third_partition_one_slot_after_summaries(tmp_path) -> None:
+    """D5: imported rows are a third recency partition filling at most ONE slot,
+    placed AFTER summaries(<=2) and BEFORE regular rows — fresh imports never
+    drown session context, and never displace regular rows beyond that 1 slot."""
+    from opencohost.config.settings import MEMORIAS_META_RECALL_K
+    db_path = tmp_path / "memorias.db"
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    _seed_row(db_path, "p", "sum-1", content="resumen uno", status="summary",
+              stable_key=f"p{_SESSION_SUMMARY_MARKER}{(base + timedelta(hours=1)).isoformat()}",
+              updated_at=base + timedelta(hours=1))
+    _seed_row(db_path, "p", "sum-2", content="resumen dos", status="summary",
+              stable_key=f"p{_SESSION_SUMMARY_MARKER}{(base + timedelta(hours=2)).isoformat()}",
+              updated_at=base + timedelta(hours=2))
+    _seed_row(db_path, "p", "imp-old", content="dato importado viejo", status="imported",
+              stable_key=f"p{_IMPORT_MARKER}aaa-bbb-old", updated_at=base + timedelta(hours=3))
+    _seed_row(db_path, "p", "imp-new", content="dato importado nuevo", status="imported",
+              stable_key=f"p{_IMPORT_MARKER}ccc-ddd-new", updated_at=base + timedelta(hours=4))
+    for i in range(4):
+        _seed_row(db_path, "p", f"reg-{i}", content=f"regular fresco {i}",
+                  stable_key=f"p|reg-{i}", updated_at=base + timedelta(days=1, hours=i))
+
+    rows = MemoriaStore(db_path).list_injection_candidates("p")
+    lines = build_recency_lines(rows)
+
+    assert len(lines) == MEMORIAS_META_RECALL_K == 5
+    # Exactly one imported line — the newest — right after the two summaries.
+    assert [ln for ln in lines if ln.startswith("dato importado")] == ["dato importado nuevo"]
+    assert lines[0] == "resumen dos"
+    assert lines[1] == "resumen uno"
+    assert lines[2] == "dato importado nuevo"
+    # Regular rows still survive (imports capped at their single slot).
+    assert any(ln.startswith("regular fresco") for ln in lines)
+
+
+def test_recency_pinned_import_rides_carve_out_first(tmp_path) -> None:
+    """A pinned import rides the existing F6 pinned carve-out (before summaries):
+    pinned rows skip the summary/imported/regular partitioning and lead."""
+    db_path = tmp_path / "memorias.db"
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    _seed_row(db_path, "p", "imp-pin", content="import fijado clave", status="imported",
+              stable_key=f"p{_IMPORT_MARKER}fijado-clave-key", updated_at=base, pinned=True)
+    _seed_row(db_path, "p", "sum-1", content="resumen reciente", status="summary",
+              stable_key=f"p{_SESSION_SUMMARY_MARKER}{(base + timedelta(hours=2)).isoformat()}",
+              updated_at=base + timedelta(hours=2))
+    for i in range(3):
+        _seed_row(db_path, "p", f"reg-{i}", content=f"regular {i}",
+                  stable_key=f"p|reg-{i}", updated_at=base + timedelta(hours=3 + i))
+
+    rows = MemoriaStore(db_path).list_injection_candidates("p")
+    lines = build_recency_lines(rows)
+
+    assert lines[0] == "import fijado clave"

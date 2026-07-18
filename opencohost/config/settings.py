@@ -355,6 +355,17 @@ MEMORIAS_SUMMARY_MIN_TITLES = 2
 # (3): a recall answer wants a broader recent slice, still bounded by the same
 # MEMORIAS_MAX_INJECT_CHARS budget.
 MEMORIAS_META_RECALL_K = 5
+# memoria_import_20260718 — external-AI export import (parser + store + route).
+# IMPORT_CAP: import-time reject when existing_imported + new > this (D2 — no
+# background pruner; silent deletion of deliberately-imported rows is dishonest).
+# ITEM_CHARS: per-parsed-item clip at a word boundary (D4 — the 700-char inject
+# budget means one row is already ~half the budget). MAX_BYTES / MAX_ITEMS: the
+# route's honest-refusal caps (422, no silent truncation); the pure parser never
+# enforces them, it only parses.
+MEMORIAS_IMPORT_CAP = 300
+MEMORIAS_IMPORT_ITEM_CHARS = 300
+MEMORIAS_IMPORT_MAX_BYTES = 65536
+MEMORIAS_IMPORT_MAX_ITEMS = 100
 # F1 (slice 8) — passive disclosure banner dismiss state. Shown every launch
 # until the operator dismisses it once; fails open to "not dismissed" (shows
 # the banner again) on any read error, rather than silently hiding a

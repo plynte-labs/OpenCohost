@@ -16,14 +16,28 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
     engine never rewrites an operator-touched row. `inactive` is the ONLY
     pure visibility flag (soft mute, not a content judgment) and never
     changes status.
-  - Provenance tiers (memoria_recall_20260718): rows carry three statuses —
-    'draft' (auto-captured, expendable), 'curated' (operator-touched, F5
-    above), and 'summary' (machine-authored session summaries, insert_summary).
-    'summary' is deliberately DISTINCT from 'curated' so the durable tier is
-    never misreported as operator intent on any surface; it inherits curated's
-    prune- and upsert-immunity for free via the same status!='draft' guards
-    (_prune_profile / upsert_draft), and is capped separately by
-    _prune_summaries.
+  - Provenance tiers (memoria_recall_20260718 + memoria_import_20260718): rows
+    carry FOUR statuses —
+      'draft'    — auto-captured, expendable (the prunable pool);
+      'curated'  — operator-touched (F5 above), durable;
+      'summary'  — machine-authored session summaries (insert_summary), durable;
+      'imported' — machine-parsed external-AI export rows (insert_imported),
+                   durable.
+    'summary' and 'imported' are deliberately DISTINCT from 'curated' so a
+    machine-authored/parsed row is never misreported as operator intent on any
+    surface; both inherit curated's prune- and upsert-immunity for free via the
+    same status!='draft' guards (_prune_profile / upsert_draft). 'summary' is
+    capped separately by _prune_summaries; 'imported' has NO pruner (its cap is
+    enforced at the route via count_imported — silent deletion of deliberate
+    imports is dishonest).
+  - stable_key namespace (CANONICAL — the marker constants below point back
+    here): a 'draft'/'curated' row has a PLAIN key
+    ("{profile_id}|{sorted-tokens}", no ':' after the '|'); a 'summary' row
+    embeds _SESSION_SUMMARY_MARKER ("{profile_id}|session_summary:{utc-ts}");
+    an 'imported' row embeds _IMPORT_MARKER ("{profile_id}|import:{sorted-
+    tokens}"). The three namespaces never collide, so a plain
+    `MARKER in stable_key` substring test classifies any row unambiguously
+    (build_recency_lines and the UI rely on exactly this).
   - stable_key / title derivation applies a small domain-stopword list on
     top of opencohost.core.editorial_matching.normalize_tokens (which stays
     untouched) — see _MEMORIA_DOMAIN_STOPWORDS. Capture requires >=3
@@ -51,6 +65,7 @@ import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from opencohost.config.settings import (
@@ -174,6 +189,33 @@ def build_signature(text: str) -> str:
     against. Reuses _significant_tokens — no new normalizer.
     """
     return " ".join(_significant_tokens(text)[:_SIGNATURE_TOKEN_COUNT])
+
+
+# memoria_import_20260718 (D3/D6) — the stable_key infix that marks an imported
+# row (status='imported'). See the CANONICAL stable_key namespace note in the
+# module docstring for how the three namespaces stay collision-free. Embedded as
+# f"{profile_id}|import:{sorted-6-token-key}" so build_recency_lines and the UI
+# can detect imports with a plain `_IMPORT_MARKER in stable_key` substring test,
+# and so INSERT ON CONFLICT dedups a re-imported identical claim.
+_IMPORT_MARKER = "|import:"
+
+
+def derive_import_key(profile_id: str, claim: str) -> str | None:
+    """Deterministic dedup key for an imported *claim* within *profile_id* (D6).
+
+    Same 6-distinct-significant-token, order-independent shape as
+    derive_stable_key, but with the _IMPORT_MARKER infix so imports occupy their
+    own key namespace: a re-import of the identical claim collides (skipped, zero
+    dupes), while an operator's later curated edit keeps its own draft-derived
+    key and is never overwritten. Returns None when *claim* has fewer than 3
+    significant tokens — the route treats None as skipped_too_short (same bucket
+    as is_capturable), never as a captured row.
+    """
+    tokens = _significant_tokens(claim)
+    if len(tokens) < _MIN_SIGNIFICANT_TOKENS:
+        return None
+    key_tokens = sorted(tokens[:_STABLE_KEY_TOKEN_COUNT])
+    return f"{profile_id}{_IMPORT_MARKER}{'-'.join(key_tokens)}"
 
 
 def _now_text() -> str:
@@ -317,9 +359,11 @@ def build_injection_lines(
 
 
 # W2a (memoria_recall_20260718): the stable_key infix that marks a
-# machine-authored session-summary row (status='summary'). Embedded between the
-# profile_id and a UTC timestamp (f"{profile_id}{_SESSION_SUMMARY_MARKER}{ts}")
-# so a fresh timestamp is upsert-immune by construction. The W2b meta-router
+# machine-authored session-summary row (status='summary'). See the CANONICAL
+# stable_key namespace note in the module docstring for the collision-free
+# namespace layout. Embedded between the profile_id and a UTC timestamp
+# (f"{profile_id}{_SESSION_SUMMARY_MARKER}{ts}") so a fresh timestamp is
+# upsert-immune by construction. The W2b meta-router
 # discovers summaries with a plain `_SESSION_SUMMARY_MARKER in stable_key` test;
 # _prune_summaries caps the tier by the status='summary' filter (not the marker),
 # so a summary an operator later edits/pins (promoted to 'curated') drops out of
@@ -410,6 +454,15 @@ def is_meta_recall_query(text: str) -> bool:
 # MEMORIAS_MAX_PINNED_INJECT=2 policy shape.
 _META_RECALL_MAX_SUMMARIES = 2
 
+# memoria_import_20260718 (D5): imported rows are a third recency partition with
+# EXACTLY one slot — placed AFTER summaries, BEFORE regular. A bulk import has
+# the newest updated_at of everything the day it lands; without this bound 50
+# fresh imports would drown live session context on a "¿qué sabés de mí?" recall.
+# One slot surfaces the freshest import; the owner pins key imports into the
+# pinned carve-out for more. Lexical path is unchanged (imports score normally
+# via signatures). Mirrors the _META_RECALL_MAX_SUMMARIES policy shape.
+_META_RECALL_MAX_IMPORTED = 1
+
 
 def build_recency_lines(
     rows,
@@ -428,7 +481,10 @@ def build_recency_lines(
     exactly the class the pinned guarantee exists for), then machine-authored
     session SUMMARIES (found by _SESSION_SUMMARY_MARKER in stable_key — the
     durable tier) newest first but capped at _META_RECALL_MAX_SUMMARIES so they
-    never starve live rows, then the newest regular rows — *k* rows total,
+    never starve live rows, then at most _META_RECALL_MAX_IMPORTED newest
+    IMPORTED rows (found by _IMPORT_MARKER in stable_key — memoria_import D5, so
+    a fresh bulk import never drowns live session context), then the newest
+    regular rows — *k* rows total,
     assembled under the SAME *max_chars* budget (_append_within_budget; a
     non-pinned over-budget row is clipped into the remainder, or skipped when
     the remainder is below _MIN_CLIP_REMAINDER_CHARS). Pure, no I/O, never
@@ -444,12 +500,16 @@ def build_recency_lines(
         key=lambda row: (row["created_at"], row["id"]),
     )[:max_pinned]
     summaries: list = []
+    imported: list = []
     regular: list = []
     for row in rows:
         if row["pinned"]:
-            continue  # pinned rows (even a pinned summary) ride the carve-out
-        if _SESSION_SUMMARY_MARKER in (row["stable_key"] or ""):
+            continue  # pinned rows (even a pinned summary/import) ride the carve-out
+        stable_key = row["stable_key"] or ""
+        if _SESSION_SUMMARY_MARKER in stable_key:
             summaries.append(row)
+        elif _IMPORT_MARKER in stable_key:
+            imported.append(row)
         else:
             regular.append(row)
 
@@ -457,6 +517,7 @@ def build_recency_lines(
         return (row["updated_at"] or "", row["id"] or "")
 
     summaries.sort(key=_recency, reverse=True)
+    imported.sort(key=_recency, reverse=True)
     regular.sort(key=_recency, reverse=True)
 
     lines: list[str] = []
@@ -465,7 +526,11 @@ def build_recency_lines(
         used = _append_within_budget(
             lines, used, _clip_for_injection(row["content"], pinned_clip_chars), max_chars,
         )
-    ordered = (summaries[:_META_RECALL_MAX_SUMMARIES] + regular)[: max(k - len(lines), 0)]
+    ordered = (
+        summaries[:_META_RECALL_MAX_SUMMARIES]
+        + imported[:_META_RECALL_MAX_IMPORTED]
+        + regular
+    )[: max(k - len(lines), 0)]
     for row in ordered:
         used = _append_within_budget(lines, used, row["content"], max_chars, clip_to_remaining=True)
     return lines
@@ -614,6 +679,79 @@ class MemoriaStore:
         self._clear_warn()
         self._prune_summaries(profile_id)
         return row_id
+
+    def insert_imported(
+        self, profile_id: str, title: str, content: str, *,
+        signature: str = "", source_key: str = "",
+    ) -> Literal["created", "duplicate", "skipped", "error"]:
+        """memoria_import_20260718: insert ONE imported row (status='imported').
+
+        Mirrors insert_summary's status-literal INSERT shape, but with an
+        ON CONFLICT(profile_id, stable_key) DO NOTHING clause instead of a
+        unique-timestamp key (D6): a re-import of the identical claim (same
+        derive_import_key) collides and is skipped, so re-importing a file
+        yields zero duplicates and never overwrites an operator's later curated
+        edit. status='imported' is deliberately DISTINCT from 'curated' (F5 =
+        operator-*touched*) — a machine-parsed file is not an operator touch —
+        and inherits curated's durability for free: prune-immune (status!='draft'
+        rows are excluded from _prune_profile's draft-only WHERE) AND upsert-
+        immune (upsert_draft only overwrites status='draft'), so imports never
+        eat the 200-draft pool (D1). No pruner: the D2 import cap is enforced at
+        the route via count_imported (silent deletion of deliberate imports is
+        dishonest).
+
+        *source_key* is the caller-derived stable_key (derive_import_key of the
+        claim); when omitted it is derived from *content*.
+
+        Returns one of four DISTINCT per-item outcomes so WU3's route can account
+        for every claim honestly (R4 — a lock loss must never be reported as a
+        duplicate):
+          - "created"   — a genuine fresh INSERT landed a new imported row.
+          - "duplicate" — ON CONFLICT DO NOTHING: an identical claim (same
+            stable_key) already exists; nothing written, nothing overwritten.
+          - "skipped"   — the claim has too few significant tokens to derive a
+            dedup-safe key (derive_import_key → None); invalid to store, NOT a
+            collision. WU3 counts this as skipped_too_short, never a duplicate.
+          - "error"     — a fail-open store failure (locked db / sqlite3.Error);
+            the write did NOT happen and must be retried/surfaced, never counted
+            as a duplicate.
+
+        Never raises for a store error; raises MemoriaValidationError only for
+        missing required inputs (RC-8: message is content-free).
+        """
+        profile_id = (profile_id or "").strip()
+        title = " ".join((title or "").split())
+        content = " ".join((content or "").split())
+        signature = " ".join((signature or "").split())
+        if not profile_id or not title or not content:
+            raise MemoriaValidationError(
+                "memoria import requires profile_id, title, and content"
+            )
+        stable_key = (source_key or "").strip() or derive_import_key(profile_id, content)
+        if not stable_key:
+            return "skipped"  # too few significant tokens — nothing dedup-safe to store
+
+        now = _now_text()
+        row_id = f"mem_{uuid4().hex}"
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO memorias (
+                        id, profile_id, stable_key, revision, title, content, status,
+                        pinned, private, inactive, created_at, updated_at, signature
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'imported', 0, 0, 0, ?, ?, ?)
+                    ON CONFLICT(profile_id, stable_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (row_id, profile_id, stable_key, title, content, now, now, signature),
+                )
+                created = cur.fetchone() is not None
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria import write failed (fail-open): {type(exc).__name__}")
+            return "error"
+        self._clear_warn()
+        return "created" if created else "duplicate"
 
     def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None, raising: bool = False) -> bool:
         """Operator edit: promotes status to curated in the same statement (F5).
@@ -793,6 +931,25 @@ class MemoriaStore:
                 return row["n"] if row is not None else 0
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store count_all failed (fail-open): {type(exc).__name__}")
+            return -1
+
+    def count_imported(self, profile_id: str) -> int:
+        """Total imported rows for profile_id (status='imported'), UNCAPPED
+        (memoria_import_20260718). The route's D2 import-time cap check compares
+        count_imported + new against MEMORIAS_IMPORT_CAP.
+
+        Mirrors count_all: returns -1 (never a valid count) on a genuine read
+        failure so a cap caller can tell 'unknown' apart from 'zero'.
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM memorias WHERE profile_id = ? AND status = 'imported'",
+                    (profile_id,),
+                ).fetchone()
+                return row["n"] if row is not None else 0
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store count_imported failed (fail-open): {type(exc).__name__}")
             return -1
 
     def list_injection_candidates(self, profile_id: str) -> list[sqlite3.Row]:
