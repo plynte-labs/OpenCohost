@@ -413,6 +413,7 @@ class TestD1AgendaIsolation:
             "/api/agent/topics",
             "/api/agent/status",
             "/api/agent/cards",
+            "/api/agent/cards/{card_id}/arm",
             "/api/agent/notice",
             "/api/agent/notices",
             "/api/agent/notices/{notice_id}/dismiss",

@@ -69,8 +69,11 @@ from opencohost.api.models import (
     AgendaTopicActionRequest,
     AgendaTopicOut,
     AgendaTopicRequest,
+    AgentCardArmResponse,
+    AgentCardListItem,
     AgentCardRequest,
     AgentCardResponse,
+    AgentCardsListResponse,
     AgentNoticeDismissResponse,
     AgentNoticeOut,
     AgentNoticeRequest,
@@ -2240,6 +2243,58 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             status=EditorialCardStatus.DRAFT.value if demoted else stored.status.value,
             demoted=demoted,
         )
+
+    @app.get("/api/agent/cards", response_model=AgentCardsListResponse)
+    def get_agent_cards():
+        # Light projection (design D4): no summary/streamer_take/list
+        # fields — the operator UI only needs enough to show status and
+        # arm a draft, and terminal statuses are counts-only elsewhere.
+        try:
+            cards = EditorialCardStore(EDITORIAL_CARDS_DB).list_all()
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "editorial_cards_unavailable"}
+            )
+        return AgentCardsListResponse(
+            cards=[
+                AgentCardListItem(
+                    id=card.id,
+                    topic=card.topic,
+                    topic_slug=card.topic_slug,
+                    status=card.status.value,
+                    origin=card.origin,
+                    expires_at=card.expires_at.isoformat() if card.expires_at else None,
+                    updated_at=card.updated_at.isoformat(),
+                )
+                for card in cards
+            ]
+        )
+
+    @app.post("/api/agent/cards/{card_id}/arm", response_model=AgentCardArmResponse)
+    def post_agent_card_arm(card_id: str):
+        # Mirrors editorial_cli.py's arm semantics (store.arm): refuses
+        # expired/USED/ACTIVE cards, idempotent on an already-ARMED card.
+        try:
+            store = EditorialCardStore(EDITORIAL_CARDS_DB)
+            card = store.get(card_id)
+            if card is None:
+                return JSONResponse(status_code=404, content={"detail": "card_not_found"})
+            armed = store.arm(card_id)
+        except (sqlite3.Error, OSError):
+            return JSONResponse(
+                status_code=503, content={"detail": "editorial_cards_unavailable"}
+            )
+        if not armed:
+            # arm() already flipped an expired card to EXPIRED as a side
+            # effect; re-fetch to tell that apart from USED/ACTIVE.
+            current = store.get(card_id)
+            detail = (
+                "card_expired"
+                if current is not None and current.status is EditorialCardStatus.EXPIRED
+                else "card_not_armable"
+            )
+            return JSONResponse(status_code=409, content={"detail": detail})
+        return AgentCardArmResponse(id=card_id, status=EditorialCardStatus.ARMED.value)
 
     @app.post("/api/agent/notice", response_model=AgentNoticeResponse)
     def post_agent_notice(body: AgentNoticeRequest):

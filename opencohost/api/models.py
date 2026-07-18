@@ -959,6 +959,28 @@ class AgentCardResponse(BaseModel):
     demoted: bool
 
 
+class AgentCardListItem(BaseModel):
+    """One row of GET /api/agent/cards — light projection (design D4): no
+    summary/streamer_take/list fields, the UI never needs card bodies here."""
+
+    id: str
+    topic: str
+    topic_slug: str
+    status: str
+    origin: str
+    expires_at: str | None
+    updated_at: str
+
+
+class AgentCardsListResponse(BaseModel):
+    cards: list[AgentCardListItem]
+
+
+class AgentCardArmResponse(BaseModel):
+    id: str
+    status: str
+
+
 class AgentNoticeRequest(BaseModel):
     """POST /api/agent/notice body — a short agent-to-operator message.
 
