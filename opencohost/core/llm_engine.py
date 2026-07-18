@@ -40,6 +40,7 @@ from opencohost.config.settings import (
     PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
     MEMORIAS_ENABLED, MEMORIAS_DB,
+    MEMORIAS_SUMMARY_MIN_TITLES,
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
 )
@@ -90,6 +91,17 @@ _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
 # gate has THREE sites: the profile-id snapshot, the injection call, and the
 # prompt prepend — all must use this frozenset or the ptt path stays dead.
 _MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt"})
+
+# W2a (memoria_recall_20260718): max captured titles retained per session for
+# the mechanical session summary. Bounds the RAM held between summaries; the
+# summary keeps only the newest this-many when a long session overflows it.
+_SESSION_MEMORIA_TITLES_CAP = 40
+
+# W2a (memoria_recall_20260718): the close-flush session summary is ONE more
+# bounded disk write (~MemoriaStore.WRITE_TIMEOUT_SECONDS = 1.0s). Attempt it
+# only when at least this much of the flush budget remains, so the durable-tier
+# write can never push app close past the budget (R4: flush never blocks close).
+_MEMORIA_SUMMARY_WRITE_BUDGET_SECONDS = 1.1
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
@@ -339,6 +351,14 @@ class MotorVocalIA(threading.Thread):
         # _commit_history (state-at-event) — forward-only, never re-gated on
         # the CURRENT switch state at eviction time (the T1 lesson).
         self._memorias_private: bool = False
+        # W2a (memoria_recall_20260718): titles of this session's captured
+        # memorias, appended in _capture_memoria on success and snapshotted+
+        # cleared under _history_lock at profile switch (set_profile) / close
+        # (flush_memorias) to synthesize ONE mechanical session summary. A
+        # summary row is written via MemoriaStore.insert_summary, NOT through
+        # _capture_memoria, so it is never fed back here → never re-summarized.
+        # Capped at _SESSION_MEMORIA_TITLES_CAP (newest wins) to bound RAM.
+        self._session_memoria_titles: list[str] = []
         # Lazy — only instantiated the first time the full capture gate chain
         # passes, so a run with MEMORIAS_ENABLED=False (e.g. tests that
         # monkeypatch it) never touches disk for this store (zero
@@ -728,12 +748,20 @@ class MotorVocalIA(threading.Thread):
             # clear (tracked in apply-progress #2780, judge notes A-N2/B-S1).
             with self._history_lock:
                 switch_drafts = self._collect_flush_drafts()
+                # W2a: snapshot the DEPARTING profile id + this session's titles
+                # (before the id swap) and clear titles so the new profile starts
+                # a fresh session — same atomic critical section as the drafts.
+                departing_profile_id = self._current_profile_id
+                summary_titles = list(self._session_memoria_titles)
+                self._session_memoria_titles.clear()
                 self._current_profile_id = payload.get("id")
                 self.historial.clear()
                 self._memory_digest.clear()
             # RC-2/RC-3: disk upserts dispatched AFTER lock release, on a
-            # worker thread — the profile switch must never block on I/O.
-            self._dispatch_switch_flush(switch_drafts)
+            # worker thread — the profile switch must never block on I/O. The
+            # departing profile's mechanical session summary rides that same
+            # worker (W2a), so it never blocks the Tk thread either.
+            self._dispatch_switch_flush(switch_drafts, departing_profile_id, summary_titles)
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
             # T4 coherence gate (warn-only; the profile always wins). Flags when a
             # custom persona's language is not governed by the active locale.
@@ -2638,6 +2666,26 @@ class MotorVocalIA(threading.Thread):
                 self.ui_callback("memoria_captured")
             except Exception:
                 pass
+        # W2a (memoria_recall_20260718): record this session's captured title
+        # for the mechanical session summary. Brief _history_lock (no I/O — the
+        # store write above already released it) keeps this append consistent
+        # with the snapshot+clear in set_profile / flush_memorias. Tracked on
+        # every persisted capture (eviction + commit), never for a summary row
+        # (those bypass this method), so a summary is never re-summarized.
+        #
+        # R3 (cross-profile contamination): the upsert above ran UNLOCKED, so a
+        # concurrent set_profile could have snapshot+cleared the titles and
+        # swapped _current_profile_id between the draft build (this profile_id)
+        # and this locked append. Attribute the title ONLY while its profile is
+        # still the active one; on mismatch skip silently — a bounded,
+        # correctly-attributed loss (the departing summary misses one late
+        # title) rather than leaking it into the arriving profile's summary.
+        if title:
+            with self._history_lock:
+                if profile_id == self._current_profile_id:
+                    self._session_memoria_titles.append(title)
+                    if len(self._session_memoria_titles) > _SESSION_MEMORIA_TITLES_CAP:
+                        del self._session_memoria_titles[0]
         return True
 
     def _get_memoria_store(self) -> MemoriaStore:
@@ -2734,33 +2782,58 @@ class MotorVocalIA(threading.Thread):
         try:
             with self._history_lock:
                 drafts = self._collect_flush_drafts()
+                # W2a: snapshot this session's titles + profile under the same
+                # lock, then clear (a double close never writes two summaries).
+                summary_profile_id = self._current_profile_id
+                summary_titles = list(self._session_memoria_titles)
+                self._session_memoria_titles.clear()
         except Exception:
             logger.warning("memoria close-flush snapshot failed (fail-open)")
             return
-        if not drafts:
-            return
 
+        # R4: one wall-clock budget spans the WHOLE flush (drafts + summary), so
+        # the durable-tier summary write below can never push close past it.
         deadline = time.monotonic() + budget_seconds
-        flushed = 0
-        for profile_id, stable_key, title, content, signature in drafts:
-            if time.monotonic() > deadline:
-                logger.warning(
-                    "memoria close-flush budget exceeded, stopping early: flushed=%d remaining=%d",
-                    flushed, len(drafts) - flushed,
-                )
-                break
-            try:
-                self._get_memoria_store().upsert_draft(
-                    profile_id, stable_key, title, content, signature=signature
-                )
-                flushed += 1
-            except Exception as exc:
-                logger.warning(
-                    "memoria close-flush upsert failed (fail-open): %s profile_id=%s",
-                    type(exc).__name__, profile_id,
-                )
+        if drafts:
+            flushed = 0
+            for profile_id, stable_key, title, content, signature in drafts:
+                if time.monotonic() > deadline:
+                    logger.warning(
+                        "memoria close-flush budget exceeded, stopping early: flushed=%d remaining=%d",
+                        flushed, len(drafts) - flushed,
+                    )
+                    break
+                try:
+                    self._get_memoria_store().upsert_draft(
+                        profile_id, stable_key, title, content, signature=signature
+                    )
+                    flushed += 1
+                except Exception as exc:
+                    logger.warning(
+                        "memoria close-flush upsert failed (fail-open): %s profile_id=%s",
+                        type(exc).__name__, profile_id,
+                    )
 
-    def _dispatch_switch_flush(self, drafts: list[tuple[str, str, str, str, str]]) -> None:
+        # W2a: ONE mechanical session summary after the draft flush (single
+        # bounded upsert on the calling thread — same sanctioned Tk-thread
+        # exception as the flush above, RC-3). R4: attempt it only while a
+        # write's worth of budget remains — a close under a fully spent budget
+        # skips it silently (the next switch/close boundary covers the session)
+        # so the summary honours "never blocks close".
+        if deadline - time.monotonic() > _MEMORIA_SUMMARY_WRITE_BUDGET_SECONDS:
+            self._write_session_summary(summary_profile_id, summary_titles)
+        else:
+            logger.debug(
+                "memoria close-flush budget spent, skipping session summary (profile_id=%s)",
+                summary_profile_id,
+            )
+
+    def _dispatch_switch_flush(
+        self,
+        drafts: list[tuple[str, str, str, str, str]],
+        summary_profile_id: str | None = None,
+        summary_titles: list[str] | None = None,
+    ) -> None:
         """F4 (task 4.15) — dispatch profile-switch flush upserts to a
         dedicated worker thread, fire-and-forget (RC-2/RC-3).
 
@@ -2768,12 +2841,27 @@ class MotorVocalIA(threading.Thread):
         close-flush, there IS more UI to protect, so a slow disk must never
         stall it; bounding by thread placement instead of wall-clock is
         sufficient here since nothing is waiting on this thread).
-        """
-        if not drafts:
-            return
-        threading.Thread(target=self._run_switch_flush, args=(drafts,), daemon=True).start()
 
-    def _run_switch_flush(self, drafts: list[tuple[str, str, str, str, str]]) -> None:
+        W2a (memoria_recall_20260718): also carries the departing profile's
+        session-summary payload, written on the SAME worker thread after the
+        draft upserts. A worker is still spawned when there are no drafts to
+        flush but enough tracked titles to summarize.
+        """
+        summary_titles = summary_titles or []
+        if not drafts and len(summary_titles) < MEMORIAS_SUMMARY_MIN_TITLES:
+            return
+        threading.Thread(
+            target=self._run_switch_flush,
+            args=(drafts, summary_profile_id, summary_titles),
+            daemon=True,
+        ).start()
+
+    def _run_switch_flush(
+        self,
+        drafts: list[tuple[str, str, str, str, str]],
+        summary_profile_id: str | None = None,
+        summary_titles: list[str] | None = None,
+    ) -> None:
         """Worker-thread body for _dispatch_switch_flush. Fail-open; partial
         failures log a COUNT only, never content (RC-8)."""
         failed = 0
@@ -2788,6 +2876,49 @@ class MotorVocalIA(threading.Thread):
             logger.warning(
                 "memoria switch-flush partial failure (fail-open): failed=%d of %d",
                 failed, len(drafts),
+            )
+        # W2a: departing profile's mechanical session summary, same worker.
+        self._write_session_summary(summary_profile_id, summary_titles or [])
+
+    def _write_session_summary(self, profile_id: str | None, titles: list[str]) -> None:
+        """W2a (memoria_recall_20260718) — write ONE mechanical (NO LLM) session
+        summary memoria for *profile_id* from this session's captured *titles*.
+
+        Runs on the close-flush (calling) thread and the switch-flush worker
+        thread — the same bounded, fail-open teardown paths it rides — so it
+        must never call the model (EngineHost.stop has a 2s flush budget; a
+        profile switch must never block on inference) and never crash the
+        caller. The write itself is a single bounded upsert (insert_summary,
+        MemoriaStore.WRITE_TIMEOUT_SECONDS); it holds no internal wall-clock
+        budget — on the close path flush_memorias gates the call on remaining
+        budget (R4), so this durable-tier write never pushes app close past it.
+
+        Tiering (the 200-row MEMORIAS_PROFILE_CAP): per-turn drafts are the
+        EXPENDABLE pool (pruned oldest-first); this status='summary' row is the
+        DURABLE tier the W2b meta-router surfaces on recall queries, capped
+        separately by MemoriaStore._prune_summaries. Fewer than
+        MEMORIAS_SUMMARY_MIN_TITLES captured memorias -> no summary.
+
+        Silent by construction: unlike _capture_memoria it emits NO
+        'memoria_captured' notice (this fires at teardown / off the Tk thread),
+        and the summary row is written via insert_summary — never re-entering
+        _session_memoria_titles — so it is never itself re-summarized.
+        """
+        if not profile_id:
+            return
+        clean = [t for t in titles if t and t.strip()]
+        if len(clean) < MEMORIAS_SUMMARY_MIN_TITLES:
+            return
+        content = "; ".join(clean)
+        title = build_title(content) or "session summary"
+        try:
+            self._get_memoria_store().insert_summary(
+                profile_id, title, content, signature=build_signature(content),
+            )
+        except Exception as exc:
+            logger.warning(
+                "memoria session-summary write failed (fail-open): %s profile_id=%s",
+                type(exc).__name__, profile_id,
             )
 
     @staticmethod

@@ -215,7 +215,7 @@ def test_profile_switch_snapshot_swap_clear_execute_as_one_atomic_critical_secti
         return original_collect()
 
     monkeypatch.setattr(motor, "_collect_flush_drafts", spy_collect)
-    monkeypatch.setattr(motor, "_dispatch_switch_flush", lambda drafts: None)
+    monkeypatch.setattr(motor, "_dispatch_switch_flush", lambda *a, **k: None)
 
     motor._dispatch_command("set_profile", {
         "prompt": "New system prompt", "use_system": False,
@@ -228,6 +228,52 @@ def test_profile_switch_snapshot_swap_clear_execute_as_one_atomic_critical_secti
     assert motor._current_profile_id == "profile-new"
     assert len(motor.historial) == 0
     assert motor._memory_digest.lines == []
+
+
+def test_profile_switch_snapshots_and_clears_session_titles_under_same_lock(monkeypatch, tmp_path):
+    """R3/W2a: the departing session's titles must be snapshotted AND cleared
+    inside the SAME _history_lock acquisition as the drafts/historial snapshot,
+    never in a second lock window a concurrent _capture_memoria append could
+    slip into. Proven by observing, at the drafts-snapshot point, that the lock
+    is held and the titles are still present — then that they are empty after
+    the section and the exact snapshot was handed to the switch-flush."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="profile-old")
+
+    motor._session_memoria_titles.extend(["title one a", "title two b"])
+    motor.historial.append({"role": "user", "content": _ELIGIBLE_USER, "source": "direct", "private": False})
+    motor.historial.append({"role": "assistant", "content": _ELIGIBLE_ASST, "source": "direct", "private": False})
+
+    observed = {}
+    original_collect = motor._collect_flush_drafts
+
+    def spy_collect():
+        observed["locked"] = motor._history_lock.locked()
+        observed["titles_at_snapshot"] = list(motor._session_memoria_titles)
+        return original_collect()
+
+    monkeypatch.setattr(motor, "_collect_flush_drafts", spy_collect)
+
+    dispatched = {}
+
+    def spy_dispatch(drafts, summary_profile_id=None, summary_titles=None):
+        dispatched["titles"] = summary_titles
+        dispatched["profile_id"] = summary_profile_id
+
+    monkeypatch.setattr(motor, "_dispatch_switch_flush", spy_dispatch)
+
+    motor._dispatch_command("set_profile", {
+        "prompt": "p", "use_system": False, "_profile_name": "new-profile", "id": "profile-new",
+    })
+
+    # Same critical section: lock held AND titles still present at the drafts snapshot.
+    assert observed["locked"] is True
+    assert observed["titles_at_snapshot"] == ["title one a", "title two b"]
+    # Cleared inside that section -> the new profile's session starts empty.
+    assert motor._session_memoria_titles == []
+    # The departing snapshot (not the live list) rode to the switch-flush.
+    assert dispatched["titles"] == ["title one a", "title two b"]
+    assert dispatched["profile_id"] == "profile-old"
 
 
 def test_profile_switch_disk_upserts_run_on_worker_thread_after_lock_release_never_block_ui(monkeypatch, tmp_path):

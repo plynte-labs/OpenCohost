@@ -16,6 +16,14 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
     engine never rewrites an operator-touched row. `inactive` is the ONLY
     pure visibility flag (soft mute, not a content judgment) and never
     changes status.
+  - Provenance tiers (memoria_recall_20260718): rows carry three statuses —
+    'draft' (auto-captured, expendable), 'curated' (operator-touched, F5
+    above), and 'summary' (machine-authored session summaries, insert_summary).
+    'summary' is deliberately DISTINCT from 'curated' so the durable tier is
+    never misreported as operator intent on any surface; it inherits curated's
+    prune- and upsert-immunity for free via the same status!='draft' guards
+    (_prune_profile / upsert_draft), and is capped separately by
+    _prune_summaries.
   - stable_key / title derivation applies a small domain-stopword list on
     top of opencohost.core.editorial_matching.normalize_tokens (which stays
     untouched) — see _MEMORIA_DOMAIN_STOPWORDS. Capture requires >=3
@@ -49,6 +57,7 @@ from opencohost.config.settings import (
     MEMORIAS_MAX_PINNED_INJECT,
     MEMORIAS_PINNED_CLIP_CHARS,
     MEMORIAS_PROFILE_CAP,
+    MEMORIAS_SUMMARY_CAP,
 )
 from opencohost.core.editorial_matching import normalize_tokens
 
@@ -287,6 +296,17 @@ def build_injection_lines(
     return lines
 
 
+# W2a (memoria_recall_20260718): the stable_key infix that marks a
+# machine-authored session-summary row (status='summary'). Embedded between the
+# profile_id and a UTC timestamp (f"{profile_id}{_SESSION_SUMMARY_MARKER}{ts}")
+# so a fresh timestamp is upsert-immune by construction. The W2b meta-router
+# discovers summaries with a plain `_SESSION_SUMMARY_MARKER in stable_key` test;
+# _prune_summaries caps the tier by the status='summary' filter (not the marker),
+# so a summary an operator later edits/pins (promoted to 'curated') drops out of
+# the cap and becomes permanent.
+_SESSION_SUMMARY_MARKER = "|session_summary:"
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -372,6 +392,64 @@ class MemoriaStore:
         else:
             logger.debug("memoria upsert conflict stable_key=%s revision=%s", stable_key, revision)
         return (written_id, revision == 1) if return_created else written_id
+
+    def insert_summary(
+        self, profile_id: str, title: str, content: str, *, signature: str = "",
+    ) -> str | None:
+        """W2a (memoria_recall_20260718): insert ONE machine-authored
+        session-summary row (status='summary').
+
+        Unlike upsert_draft this is a plain INSERT of a status='summary' row
+        whose stable_key embeds a UTC timestamp
+        (f"{profile_id}{_SESSION_SUMMARY_MARKER}{ts}"). The 'summary' status is
+        deliberately DISTINCT from 'curated' (F5 = operator-touched): these rows
+        are machine-authored, so labelling them curated would misreport
+        provenance on every surface. They still inherit curated's durability for
+        free — prune-immune (status!='draft' rows are excluded from
+        _prune_profile's draft-only WHERE clause) AND upsert-immune (upsert_draft
+        only overwrites status='draft'; a fresh timestamp also never collides).
+        The summary is the DURABLE half of the 200-row tiering: per-turn drafts
+        are the expendable pool, these summaries the durable tier the W2b
+        meta-router surfaces on recall queries (found by _SESSION_SUMMARY_MARKER
+        in stable_key), capped independently at MEMORIAS_SUMMARY_CAP by
+        _prune_summaries after each insert.
+
+        Returns the new row id, or None on the fail-open path (locked db, or a
+        same-microsecond stable_key collision resolving to an IntegrityError).
+        Never raises for a store error; raises MemoriaValidationError only for
+        missing required inputs (RC-8: message is content-free).
+        """
+        profile_id = (profile_id or "").strip()
+        title = " ".join((title or "").split())
+        content = " ".join((content or "").split())
+        signature = " ".join((signature or "").split())
+        if not profile_id or not title or not content:
+            raise MemoriaValidationError(
+                "memoria summary requires profile_id, title, and content"
+            )
+
+        now = _now_text()
+        stable_key = f"{profile_id}{_SESSION_SUMMARY_MARKER}{now}"
+        row_id = f"mem_{uuid4().hex}"
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                conn.execute(
+                    """
+                    INSERT INTO memorias (
+                        id, profile_id, stable_key, revision, title, content, status,
+                        pinned, private, inactive, created_at, updated_at, signature
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'summary', 0, 0, 0, ?, ?, ?)
+                    """,
+                    (row_id, profile_id, stable_key, title, content, now, now, signature),
+                )
+        except sqlite3.Error as exc:
+            # R4: ALWAYS warn (bypass the shared warn-once flag) — losing a
+            # durable summary is the high-value signal, never a demoted repeat.
+            logger.warning(f"memoria summary write failed (fail-open): {type(exc).__name__}")
+            return None
+        self._clear_warn()
+        self._prune_summaries(profile_id)
+        return row_id
 
     def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None, raising: bool = False) -> bool:
         """Operator edit: promotes status to curated in the same statement (F5).
@@ -600,6 +678,37 @@ class MemoriaStore:
                 )
         except sqlite3.Error as exc:
             self._warn_once(f"memoria growth-cap prune failed (fail-open): {type(exc).__name__}")
+
+    def _prune_summaries(self, profile_id: str) -> None:
+        """Cap the machine-authored session-summary tier at MEMORIAS_SUMMARY_CAP
+        newest rows per profile (W2a).
+
+        Summary rows carry status='summary', so _prune_profile (draft-only)
+        never touches them — without this dedicated pruner the durable tier
+        would grow unbounded. The DELETE guard is the status='summary' filter,
+        so operator-curated rows (status='curated', including a summary an
+        operator later edits/pins) are never candidates for deletion. Newest by
+        created_at (which equals the stable_key timestamp, distinct per insert
+        by construction). Fail-open, and ALWAYS at WARNING (R4: losing a durable
+        summary is the high-value signal, never demoted to a warn-once repeat).
+        """
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                conn.execute(
+                    """
+                    DELETE FROM memorias
+                    WHERE profile_id = ? AND status = 'summary'
+                      AND id NOT IN (
+                        SELECT id FROM memorias
+                        WHERE profile_id = ? AND status = 'summary'
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                      )
+                    """,
+                    (profile_id, profile_id, MEMORIAS_SUMMARY_CAP),
+                )
+        except sqlite3.Error as exc:
+            logger.warning(f"memoria summary-cap prune failed (fail-open): {type(exc).__name__}")
 
     def _init_db(self) -> None:
         with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:

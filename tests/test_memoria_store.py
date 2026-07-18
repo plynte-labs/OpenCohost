@@ -32,6 +32,7 @@ from opencohost.core.memoria_store import (
     WRITE_TIMEOUT_SECONDS,
     MemoriaStore,
     MemoriaValidationError,
+    _SESSION_SUMMARY_MARKER,
     build_title,
     derive_stable_key,
     is_capturable,
@@ -1012,3 +1013,79 @@ def test_growth_cap_never_prunes_curated_or_pinned_rows(tmp_path) -> None:
     assert seeded_ids[0] in kept_ids  # pinned, never pruned
     assert seeded_ids[1] in kept_ids  # pinned, never pruned
     assert seeded_ids[2] in kept_ids  # curated, never pruned
+
+
+# ---------------------------------------------------------------------------
+# W2a summary tier — status='summary' provenance (memoria_recall_20260718)
+# ---------------------------------------------------------------------------
+
+def test_insert_summary_writes_status_summary_not_curated(tmp_path) -> None:
+    """R1/R2 provenance: machine-authored session summaries carry
+    status='summary', distinct from operator-touched status='curated' (F5)."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    store.insert_summary("p", "title a b", "content c d durable")
+
+    rows = store.list_for_profile("p")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "summary"
+    assert _SESSION_SUMMARY_MARKER in rows[0]["stable_key"]
+
+
+def test_summary_row_is_upsert_immune_via_status_guard(tmp_path) -> None:
+    """A draft upsert colliding on a summary row's stable_key must be a no-op:
+    upsert_draft's ON CONFLICT ... WHERE status='draft' excludes the summary
+    row (status='summary'), so its content can never be overwritten. This pins
+    the invariant independently of the stable_key's timestamp uniqueness."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+    store.insert_summary("p", "durable title", "durable summary content")
+    summary_key = store.list_for_profile("p")[0]["stable_key"]
+
+    # Upsert a draft on the EXACT summary key — the status guard must reject it.
+    result = store.upsert_draft("p", summary_key, "attacker title", "attacker content overwrite")
+
+    assert result is None  # conflict resolved to a no-op, no write
+    rows = store.list_for_profile("p")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "summary"
+    assert rows[0]["content"] == "durable summary content"  # untouched
+
+
+def test_summary_row_immune_to_draft_growth_prune_status(monkeypatch, tmp_path) -> None:
+    """_prune_profile targets status='draft' only; a status='summary' row is
+    never a prune candidate however far the draft pool overflows the cap."""
+    from opencohost.core import memoria_store as store_mod
+    monkeypatch.setattr(store_mod, "MEMORIAS_PROFILE_CAP", 3)
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    store.insert_summary("p", "durable summary", "content durable summary tier")
+    for i in range(8):  # far past the (patched) draft cap of 3
+        store.upsert_draft("p", f"p|draft-{i}", f"title {i} alpha", f"content {i} beta")
+
+    summaries = [
+        r for r in store.list_for_profile("p", limit=10_000)
+        if r["status"] == "summary"
+    ]
+    assert len(summaries) == 1
+
+
+def test_summary_tier_write_failures_always_warn(monkeypatch, tmp_path, caplog) -> None:
+    """R4: losing a durable summary is the high-value signal — insert_summary
+    and _prune_summaries must log at WARNING even when a prior draft-tier
+    failure already tripped the shared warn-once flag (which would otherwise
+    demote repeats to debug)."""
+    store = MemoriaStore(tmp_path / "memorias.db")
+
+    def boom(timeout):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(store, "_connect", boom)
+    caplog.set_level(logging.WARNING)
+
+    store._write_failure_warned = True  # a draft-tier episode already warned
+    assert store.insert_summary("p", "title a b", "content c d") is None
+    store._write_failure_warned = True
+    store._prune_summaries("p")
+
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("summary write failed" in r.getMessage() for r in warns)
+    assert any("summary-cap prune failed" in r.getMessage() for r in warns)

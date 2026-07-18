@@ -336,6 +336,17 @@ MEMORIAS_PROFILE_CAP = 200
 # MEMORIAS_MAX_INJECT_CHARS - 2*220 = 260 chars regardless of pin count.
 MEMORIAS_MAX_PINNED_INJECT = 2
 MEMORIAS_PINNED_CLIP_CHARS = 220
+# W2a (memoria_recall_20260718) — mechanical session-summary tier. At clean
+# close (flush_memorias) and profile switch (_dispatch_switch_flush) Kira writes
+# ONE curated summary memoria synthesized (NO LLM) from that session's captured
+# memoria titles. Tiering under the 200-row MEMORIAS_PROFILE_CAP: per-turn
+# drafts are the EXPENDABLE pool (pruned oldest-first), summaries the DURABLE
+# curated tier the W2b meta-router surfaces on recall queries. Summaries are
+# curated => prune-immune to the draft cap; _prune_summaries caps the tier
+# independently at MEMORIAS_SUMMARY_CAP. A session with fewer than
+# MEMORIAS_SUMMARY_MIN_TITLES captured memorias writes no summary at all.
+MEMORIAS_SUMMARY_CAP = 10
+MEMORIAS_SUMMARY_MIN_TITLES = 2
 # F1 (slice 8) — passive disclosure banner dismiss state. Shown every launch
 # until the operator dismisses it once; fails open to "not dismissed" (shows
 # the banner again) on any read error, rather than silently hiding a
