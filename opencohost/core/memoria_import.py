@@ -82,13 +82,25 @@ def _fold_dates(prueba_text: str) -> str:
     return ", ".join(g for g in groups if g)
 
 
+def strip_control_chars(text: str) -> str:
+    """Remove C0 control bytes (except \\t/\\n) from *text* — the single public
+    entry point to _CONTROL_CHARS.
+
+    The WU3 import route reuses this to sanitize the untrusted ``source_label``
+    before it becomes a row title prefix: an embedded NUL/control char would
+    otherwise reach sqlite3, which raises ``ValueError`` (NOT ``sqlite3.Error``)
+    on a NUL and so escapes the store's fail-open catch → an uncaught 500.
+    """
+    return _CONTROL_CHARS.sub("", text or "")
+
+
 def _clip_item(text: str, limit: int = MEMORIAS_IMPORT_ITEM_CHARS) -> str:
     """Clip *text* to at most *limit* chars, never cutting a word in half.
 
     Strips C0 control bytes (except \\t/\\n, handled by the whitespace collapse)
     from the untrusted import text first — see _CONTROL_CHARS.
     """
-    text = _CONTROL_CHARS.sub("", text)
+    text = strip_control_chars(text)
     text = " ".join(text.split())  # collapse internal whitespace/newlines
     if len(text) <= limit:
         return text

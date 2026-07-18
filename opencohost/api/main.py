@@ -96,6 +96,8 @@ from opencohost.api.models import (
     I18nStateResponse,
     MemoriaDeleteRequest,
     MemoriaFlagsRequest,
+    MemoriaImportRequest,
+    MemoriaImportResponse,
     MemoriaListResponse,
     MemoriaListItem,
     MemoriaCaptureRequest,
@@ -150,6 +152,9 @@ from opencohost.config.settings import (
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     MEMORIAS_DB,
     MEMORIAS_ENABLED,
+    MEMORIAS_IMPORT_CAP,
+    MEMORIAS_IMPORT_MAX_BYTES,
+    MEMORIAS_IMPORT_MAX_ITEMS,
     MODELS_CATALOG,
     PERSONALIZATION_INSTRUCTIONS_MAX,
     PERSONALIZATION_INTERESTS_MAX,
@@ -177,7 +182,14 @@ from opencohost.core.editorial_cards import (
     EditorialCardStore,
     EditorialCardValidationError,
 )
-from opencohost.core.memoria_store import MemoriaStore
+from opencohost.core.memoria_import import parse_import, strip_control_chars
+from opencohost.core.memoria_store import (
+    MemoriaStore,
+    build_signature,
+    build_title,
+    derive_import_key,
+    is_capturable,
+)
 from opencohost.core.personalization import (
     clear_personalization,
     load_personalization,
@@ -325,7 +337,7 @@ def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
         with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT id, title, created_at, updated_at, revision, pinned, private, inactive "
+                "SELECT id, title, created_at, updated_at, revision, pinned, private, inactive, status "
                 "FROM memorias WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
                 (profile_id,),
             ).fetchall()
@@ -499,6 +511,17 @@ _CHAT_TEXT_MAX_LENGTH = 4000
 # length/emptiness, so both checks are API-side before the write.
 _MEMORIA_TITLE_MAX_LENGTH = 200
 _MEMORIA_CONTENT_MAX_LENGTH = 4000
+
+# POST /api/memoria/import source-label cap (memoria_import_20260718). The
+# label becomes the row title prefix `[{label}] `; 40 chars matches the
+# client-side <Input maxLength> and bounds the untrusted provenance tag.
+_MEMORIA_IMPORT_LABEL_MAX_LENGTH = 40
+
+# POST /api/memoria/import early-abort threshold: after this many CONSECUTIVE
+# insert_imported 'error' outcomes the DB is provably unavailable for this
+# request, so the remaining items are not attempted and count into `failed`
+# (R4) — bounds a locked-DB import to ~3 * WRITE_TIMEOUT_SECONDS, not ~100s.
+_MAX_CONSECUTIVE_IMPORT_ERRORS = 3
 
 
 def _validate_chat_text(text: str) -> "str | None":
@@ -1188,6 +1211,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     pinned=bool(row["pinned"]),
                     private=bool(row["private"]),
                     inactive=bool(row["inactive"]),
+                    imported=bool(row["status"] == "imported"),
                 )
                 for row in rows
             ]
@@ -1325,6 +1349,123 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         if not applied:
             return JSONResponse(status_code=404, content={"detail": "memoria not found"})
         return MemoriaMutationResponse(ok=True)
+
+    @app.post("/api/memoria/import", response_model=MemoriaImportResponse)
+    def post_memoria_import(body: MemoriaImportRequest):
+        """Import an external-AI export into the per-profile store as 'imported'
+        rows (memoria_import_20260718, WU3).
+
+        Posture mirrors post_memoria_update: MEMORIAS_ENABLED no-op, 422 for the
+        trust-boundary caps, 503 memoria_unavailable when the store is down, same
+        loopback auth as the sibling routes (no rate limiting — single operator).
+
+        Counts-only response (R8 — never echoes claim/title/content). Every parsed
+        claim maps to exactly one of the four insert_imported outcomes so a lock
+        loss is reported as `failed`, never a `duplicate` (R4).
+
+        Bounded work: the byte cap bounds parse cost, the 100-item cap bounds the
+        per-item loop, and each insert_imported is bounded by WRITE_TIMEOUT_SECONDS.
+        Under a sustained DB lock the loop early-aborts after 3 consecutive `error`
+        outcomes (remaining items count into `failed`, R4), so the worst case is
+        ~3s of lock probing plus parse time — not ~100s of grinding every item.
+
+        D6 cap honesty: a profile already at MEMORIAS_IMPORT_CAP is rejected
+        pre-flight (422); otherwise the cap is enforced in-loop — only `created`
+        rows consume headroom, and creatable items past the cap are counted in
+        `skipped_cap`, so a full-duplicate re-import near the cap lands 0 rows and
+        is never falsely rejected (duplicates/too-short never consume headroom).
+        """
+        if not MEMORIAS_ENABLED:
+            # Benign no-op, mirrors flags/delete/update. Zeroed counts.
+            return MemoriaImportResponse(
+                ok=False, imported=0, skipped_duplicates=0,
+                skipped_too_short=0, skipped_cap=0, failed=0,
+            )
+        # profile_id is the store's per-profile scope key; a blank one would pass
+        # Pydantic (non-empty str is optional) but make insert_imported raise
+        # MemoriaValidationError (uncaught -> 500). Reject it at the boundary,
+        # matching the sibling routes' 422 error style.
+        if not (body.profile_id or "").strip():
+            return JSONResponse(status_code=422, content={"detail": "invalid profile_id"})
+        content = body.content or ""
+        if not content.strip():
+            return JSONResponse(status_code=422, content={"detail": "content must not be empty"})
+        # Sanitize the untrusted provenance tag before it becomes a title prefix:
+        # strip control chars (an embedded NUL raises ValueError inside sqlite3,
+        # escaping the store's sqlite3.Error catch -> 500) then collapse whitespace.
+        label = " ".join(strip_control_chars(body.source_label).split())
+        if len(label) > _MEMORIA_IMPORT_LABEL_MAX_LENGTH:
+            return JSONResponse(
+                status_code=422, content={"detail": "source_label exceeds max length"}
+            )
+        # Byte cap first — bounds the parser's input before any work.
+        if len(content.encode("utf-8")) > MEMORIAS_IMPORT_MAX_BYTES:
+            return JSONResponse(status_code=422, content={"detail": "content exceeds max size"})
+        items = parse_import(content)
+        if len(items) > MEMORIAS_IMPORT_MAX_ITEMS:
+            return JSONResponse(
+                status_code=422, content={"detail": "too many items, split the file"}
+            )
+        store = _memoria_store_or_none()
+        if store is None:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        # D2/D6 import cap — pre-flight reject ONLY when the profile is already
+        # full (no silent pruning of deliberate imports). A -1 fail-open count
+        # means the read itself failed -> 503. The batch itself is bounded
+        # in-loop below, so a full-duplicate re-import near the cap is never
+        # falsely rejected (0 new rows would land).
+        existing = store.count_imported(body.profile_id)
+        if existing < 0:
+            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
+        if existing >= MEMORIAS_IMPORT_CAP:
+            return JSONResponse(status_code=422, content={"detail": "import cap exceeded"})
+        headroom = MEMORIAS_IMPORT_CAP - existing  # >= 1 (guaranteed above)
+
+        imported = skipped_duplicates = skipped_too_short = skipped_cap = failed = 0
+        consecutive_errors = 0
+        for idx, item in enumerate(items):
+            claim = item.content
+            if not is_capturable(claim):
+                skipped_too_short += 1
+                continue
+            # D6: only `created` rows consume cap headroom. Once it is spent, a
+            # further creatable claim is not attempted (would breach the cap) —
+            # counted as skipped_cap, honestly distinct from a duplicate.
+            if imported >= headroom:
+                skipped_cap += 1
+                continue
+            source_key = derive_import_key(body.profile_id, claim) or ""
+            title = f"[{label}] {build_title(claim)}" if label else build_title(claim)
+            signature = build_signature(f"{item.section} {claim}")
+            outcome = store.insert_imported(
+                body.profile_id, title, claim, signature=signature, source_key=source_key
+            )
+            if outcome == "created":
+                imported += 1
+                consecutive_errors = 0
+            elif outcome == "duplicate":
+                skipped_duplicates += 1
+                consecutive_errors = 0
+            elif outcome == "skipped":
+                skipped_too_short += 1
+                consecutive_errors = 0
+            else:  # "error" — fail-open store failure, surfaced honestly (R4)
+                failed += 1
+                consecutive_errors += 1
+                if consecutive_errors >= _MAX_CONSECUTIVE_IMPORT_ERRORS:
+                    # DB provably unavailable for this request: stop grinding,
+                    # count every remaining (unattempted) item as failed.
+                    failed += len(items) - (idx + 1)
+                    break
+
+        return MemoriaImportResponse(
+            ok=failed == 0,
+            imported=imported,
+            skipped_duplicates=skipped_duplicates,
+            skipped_too_short=skipped_too_short,
+            skipped_cap=skipped_cap,
+            failed=failed,
+        )
 
     @app.post("/api/memoria/capture", response_model=MemoriaMutationResponse)
     def post_memoria_capture(request: Request, body: MemoriaCaptureRequest):

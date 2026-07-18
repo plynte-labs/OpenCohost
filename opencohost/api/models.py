@@ -674,6 +674,10 @@ class MemoriaListItem(BaseModel):
     pinned: bool
     private: bool
     inactive: bool
+    # memoria_import_20260718 (WU3): True when status='imported' — an
+    # externally-imported row, so the UI can render the "importada" badge
+    # next to pinned/private/inactive. Metadata-only; no content exposure.
+    imported: bool
 
 
 class MemoriaListResponse(BaseModel):
@@ -761,6 +765,45 @@ class MemoriaMutationResponse(BaseModel):
     title/content — read-back stays metadata-only via /api/memoria/list."""
 
     ok: bool
+
+
+class MemoriaImportRequest(BaseModel):
+    """POST /api/memoria/import body — a bounded external-AI export (memoria_
+    import_20260718).
+
+    `content` is the raw markdown/plain-text export (parsed server-side into
+    per-profile 'imported' rows); `source_label` is a short provenance tag
+    ("Gemini", "ChatGPT", …) that becomes the row title prefix. R8: content
+    flows INBOUND only; the response is counts-only and never echoes it.
+    The route enforces the 64 KB / 100-item / 40-char-label / import-cap
+    trust-boundary bounds before any write.
+    """
+
+    profile_id: str
+    source_label: str
+    content: str
+
+
+class MemoriaImportResponse(BaseModel):
+    """POST /api/memoria/import response — counts ONLY (R8), one field per
+    per-item outcome of the four-state insert_imported contract.
+
+    `imported` = fresh rows created; `skipped_duplicates` = ON-CONFLICT
+    collisions (already present, nothing overwritten); `skipped_too_short` =
+    claims with too few significant tokens to store; `skipped_cap` = creatable
+    claims left unattempted because the profile's import cap headroom was
+    exhausted in-loop (D6 — only `created` rows consume headroom); `failed` =
+    fail-open store errors (a lock loss is surfaced honestly here, NEVER counted
+    as a duplicate — R4). `ok` is False for the disabled no-op or when any item
+    failed to write.
+    """
+
+    ok: bool
+    imported: int
+    skipped_duplicates: int
+    skipped_too_short: int
+    skipped_cap: int
+    failed: int
 
 
 class MemoriaNoticeResponse(BaseModel):
