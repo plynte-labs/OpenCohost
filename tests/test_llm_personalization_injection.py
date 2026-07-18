@@ -1,9 +1,17 @@
 """Engine-wiring tests for the personalization injection gate
 (kira_personalization_onboarding_20260705, design §2, §9).
 
+W1 update (memoria_recall_20260718): the <perfil_streamer> block now lives at
+the SYSTEM position (system_prompt prefix / system message), no longer prepended
+into the user turn. In the default use_system_role=False engine config there is
+one combined message, so the block sits BEFORE the `[label]:` marker instead of
+after it. Placement across BOTH use_system_role branches is covered in
+tests/test_personalization_prompt_position.py.
+
 Mirrors tests/test_memorias_retrieval.py's `_make_motor` / `_capture_messages`
 helpers. Locks:
-- block present and FIRST (before memorias_block) for source in {direct, ptt}
+- block present and at the SYSTEM position (before [label]:, before memorias_block)
+  for source in {direct, ptt}
 - block absent for chat / accumulated / kira-agenda*
 - PERSONALIZATION_ENABLED=False or an empty store -> byte-identical prompt
 - build_injection_block raising -> fail-open, turn still succeeds
@@ -100,6 +108,10 @@ def test_injection_present_for_direct_and_ptt(monkeypatch, tmp_path, source):
 
     assert "perfil_streamer" in final_content
     assert "nickname: Ash" in final_content
+    # W1: block sits at the system position — before the user-message label,
+    # not prepended into the user turn.
+    label = f"[{i18n_active.user_message_label()}]:"
+    assert final_content.index("perfil_streamer") < final_content.index(label)
 
 
 def test_injection_first_before_memorias_block(monkeypatch, tmp_path):
@@ -120,6 +132,10 @@ def test_injection_first_before_memorias_block(monkeypatch, tmp_path):
     # D1 put the bare <memorias_guardadas> tag in the system prompt; assert on
     # the injection-only close tag so the ordering compares the real blocks.
     assert "</memorias_guardadas>" in final_content
+    # W1: personalization is at the system position (before [label]:); memorias
+    # rides in the user context after it — so perfil still precedes memorias.
+    label = f"[{i18n_active.user_message_label()}]:"
+    assert final_content.index("perfil_streamer") < final_content.index(label)
     assert final_content.index("perfil_streamer") < final_content.index("</memorias_guardadas>")
 
 

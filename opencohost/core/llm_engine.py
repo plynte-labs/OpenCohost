@@ -1517,8 +1517,32 @@ class MotorVocalIA(threading.Thread):
         try:
             messages = []
 
+            # Personalization block (kira_personalization_onboarding_20260705,
+            # design §2; memoria_recall_20260718 W1): built ONCE PER REQUEST and
+            # emitted at the SYSTEM position — mirroring set_profile's persona
+            # (self.system_prompt, llm_engine.py:715-737). This is a stable
+            # per-request copy at the system position, NOT literally once-per-
+            # session: ollama.chat is stateless, so identity must be re-supplied
+            # every request. It never enters historial or memoria capture
+            # (_commit_history stores raw contexto, not this system content).
+            # Same _PERSONALIZATION_INJECT_SOURCES gate as before. Fail-open: a
+            # raising build must never break a turn.
+            personalization_block = ""
+            if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
+                try:
+                    personalization_block = personalization.build_injection_block(
+                        self._sanitize_history_context
+                    )
+                except Exception:
+                    personalization_block = ""
+            system_content = (
+                f"{self.system_prompt}\n\n{personalization_block}"
+                if personalization_block
+                else self.system_prompt
+            )
+
             if self.use_system_role:
-                messages.append({'role': 'system', 'content': self.system_prompt})
+                messages.append({'role': 'system', 'content': system_content})
 
             # Take a consistent snapshot of historial and (for direct-path) the
             # digest block under _history_lock so that a concurrent _commit_history
@@ -1608,26 +1632,14 @@ class MotorVocalIA(threading.Thread):
             if source in _MEMORIA_INJECT_SOURCES and memorias_block:
                 enriched = f"{memorias_block}\n\n{enriched}"
 
-            # Personalization block (kira_personalization_onboarding_20260705,
-            # design §2): own gate, NOT nested inside `source == "direct"`
-            # above, so ptt also qualifies. Prepended BEFORE memorias_block so
-            # it ends up FIRST in the final message (stable-before-volatile,
-            # same rationale as the memorias-before-digest comment above).
-            # Fail-open: a raising build must never break a turn.
-            if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
-                try:
-                    personalization_block = personalization.build_injection_block(
-                        self._sanitize_history_context
-                    )
-                except Exception:
-                    personalization_block = ""
-                if personalization_block:
-                    enriched = f"{personalization_block}\n\n{enriched}"
-
+            # W1 (memoria_recall_20260718): the personalization <perfil_streamer>
+            # block no longer prepends the user turn here — it was built above and
+            # folded into `system_content` at the SYSTEM position. Only the
+            # memorias/digest/editorial context rides in `enriched` now.
             if self.use_system_role:
                 messages.append({'role': 'user', 'content': enriched})
             else:
-                prompt_completo = f"{self.system_prompt}\n\n[{i18n_active.user_message_label()}]: {enriched}"
+                prompt_completo = f"{system_content}\n\n[{i18n_active.user_message_label()}]: {enriched}"
                 messages.append({'role': 'user', 'content': prompt_completo})
 
             # Layer 1+2: discover the model's native context window (cached, free
