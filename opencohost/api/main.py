@@ -2280,14 +2280,15 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             if card is None:
                 return JSONResponse(status_code=404, content={"detail": "card_not_found"})
             armed = store.arm(card_id)
+            if not armed:
+                # arm() already flipped an expired card to EXPIRED as a side
+                # effect; re-fetch to tell that apart from USED/ACTIVE.
+                current = store.get(card_id)
         except (sqlite3.Error, OSError):
             return JSONResponse(
                 status_code=503, content={"detail": "editorial_cards_unavailable"}
             )
         if not armed:
-            # arm() already flipped an expired card to EXPIRED as a side
-            # effect; re-fetch to tell that apart from USED/ACTIVE.
-            current = store.get(card_id)
             detail = (
                 "card_expired"
                 if current is not None and current.status is EditorialCardStatus.EXPIRED

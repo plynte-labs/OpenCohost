@@ -11,6 +11,8 @@ so this file stays runnable standalone (pytest fixtures do not cross modules
 without a shared conftest.py).
 """
 
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -275,3 +277,28 @@ class TestAgentCardArm:
             resp = client.post("/api/agent/cards/ec_whatever/arm", headers=agent_headers)
         assert resp.status_code == 503
         assert resp.json()["detail"] == "editorial_cards_unavailable"
+
+    def test_arm_503_when_post_arm_refetch_raises(self, agent_headers, monkeypatch):
+        """A not-armable card (arm() itself returns False cleanly) whose
+        post-arm re-fetch (main.py's `current = store.get(card_id)`) hits a
+        sqlite error must still map to 503, not an unhandled 500."""
+        store = _cards_store()
+        card = store.upsert(_new_card("Used topic for refetch failure"))
+        store.mark_used(card.id)
+        app = _app()
+
+        original_get = EditorialCardStore.get
+        calls = {"n": 0}
+
+        def flaky_get(self, card_id):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                raise sqlite3.OperationalError("boom")
+            return original_get(self, card_id)
+
+        monkeypatch.setattr(EditorialCardStore, "get", flaky_get)
+
+        with TestClient(app) as client:
+            resp = client.post(f"/api/agent/cards/{card.id}/arm", headers=agent_headers)
+        assert resp.status_code == 503
+        assert resp.json() == {"detail": "editorial_cards_unavailable"}
