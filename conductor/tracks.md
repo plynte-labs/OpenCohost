@@ -4,6 +4,22 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Editorial Bridge in API Host — 2026-07-18 (armed cue cards now fire in the Tauri app)**
+  *Link: [./tracks/editorial_bridge_api_host_20260718/](./tracks/editorial_bridge_api_host_20260718/)*
+  *Status 2026-07-18 IMPLEMENTED: root cause was NOT source attribution (typed and PTT turns already
+  dispatch source="direct"; the only "chat" producer is the Tkinter aggregator UI, which is unwired in
+  the API host) — the FastAPI EngineHost simply never wired EditorialAgendaBridge, so
+  direct_editorial_context_provider stayed None (llm_engine.py:426) and armed cards could never inject
+  in the Tauri app. WU1 707e150 (_wire_editorial_bridge: store+bridge constructed unconditionally,
+  register_provider under agenda_lock only when agenda exists, lock-free store-only direct provider,
+  resilient try/except in start()). WU2 1134524 (agenda_output_recorder closure: record_accepted_output
+  + mark_used_after_successful_generation under one lock acquisition). Verify PASS (137 tests, scope
+  confined to engine_host.py + new wiring test file). Resilience lens: 0 blockers, 1 bounded WARNING
+  kept as follow-up (closure holds agenda_lock across SQLite I/O — delayed turn-loop events only under
+  a concurrent writer, fail-open, no data loss). Owner runtime validation pending: relaunch the app,
+  type a message matching the armed "Look Outside" card, expect <editorial_context> in the reply
+  grounding; the card flips to USED after an accepted agenda output.*
+
 - [x] **Track: Memoria Import — 2026-07-18 (external AI memories into the per-profile store)**
   *Link: [./tracks/memoria_import_20260718/](./tracks/memoria_import_20260718/)*
   *Status 2026-07-18 IMPLEMENTED: WU1+2 93cdd9d (Gemini-aware parser + status='imported' fourth
