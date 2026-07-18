@@ -4,6 +4,31 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Knowledge Cards Upload — 2026-07-18 (operator creates and arms editorial cards from the UI)**
+  *Link: [./tracks/knowledge_cards_upload_20260718/](./tracks/knowledge_cards_upload_20260718/)*
+  *Status 2026-07-18 IMPLEMENTED: WU1 4fe41f2 backend (GET /api/agent/cards light projection +
+  POST /api/agent/cards/{id}/arm — 404/409-expired/409-used/idempotent, Bearer + 60/min inherited
+  via /api/agent/ prefix, 17 tests + literal-route-set regression fix), WU2 797899e UI api layer
+  (editorialCards.ts hand-typed 1:1 with Python models, authFetch, TanStack hooks, 11 tests),
+  WU3 da09ebd UI (EditorialCardsCard: structured form — NO raw-MD parser, model boundary rejects
+  raw dumps — single ConfirmFooter, DRAFT/ARMED list with Armar, demote-on-reupsert surfaced in
+  voseo copy, 15 tests; sibling Card in Memoria y personalización). Verify PASS. Full 4R: 0 blockers;
+  bounded correction af8ed6c + a95f34f fixed 2 warnings (arm mutation missing memoria-stats
+  invalidation; post-arm re-fetch escaping the 503 mapping) + 1 comment honesty fix. Registered
+  follow-ups: pre-existing upsert+demote two-transaction hazard, silent 503s, extractDetail dedup,
+  hook naming, MSW default handler. Owner decision pending: operator-only gate on the list route
+  (agents can currently enumerate card topics; notices are operator-only). Owner runtime validation
+  pending: create + arm a card from Controles, expect injection after the editorial-bridge fix.*
+
+- [x] **Track: Memoria Panel Chips — 2026-07-18 (Ticket C: provenance filter chips)**
+  *Link: [./tracks/memoria_panel_chips_20260718/](./tracks/memoria_panel_chips_20260718/)*
+  *Status 2026-07-18 IMPLEMENTED: df11677 UI (Segmented chips Todas/Importadas/Propias over the
+  imported flag — honest tiers only; per-source chips need the list route to expose the label,
+  registered as follow-up; 6 tests, 47/47 file total). proposal.md holds the overnight decisions
+  digest: caps recommendation (keep draft 200; imports have their own 300), graph view registered
+  as idea only, authorization asymmetry decision, lens follow-ups, and the owner runtime
+  validation checklist.*
+
 - [x] **Track: Editorial Bridge in API Host — 2026-07-18 (armed cue cards now fire in the Tauri app)**
   *Link: [./tracks/editorial_bridge_api_host_20260718/](./tracks/editorial_bridge_api_host_20260718/)*
   *Status 2026-07-18 IMPLEMENTED: root cause was NOT source attribution (typed and PTT turns already
