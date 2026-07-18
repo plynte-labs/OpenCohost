@@ -4,6 +4,20 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [x] **Track: Memoria Import — 2026-07-18 (external AI memories into the per-profile store)**
+  *Link: [./tracks/memoria_import_20260718/](./tracks/memoria_import_20260718/)*
+  *Status 2026-07-18 IMPLEMENTED: WU1+2 93cdd9d (Gemini-aware parser + status='imported' fourth
+  provenance tier, |import: stable_key namespace, ON CONFLICT dedup, four-state insert result,
+  1 recency slot), WU3 5685efb (POST /api/memoria/import — counts-only privacy, honest caps with
+  skipped_cap, 3-consecutive-error abort; 4R fixed 2 criticals: blank profile_id and NUL label
+  escaping as 500s), WU4 7b5af5c UI (Importar memorias card: pre-read size check, neutral-tone
+  ConfirmFooter, singular/plural voseo counts, visible Importando state, kind 404/network copy,
+  'importada' badge). Every WU passed full 4R (2 criticals + 12 warnings total, all corrected in
+  bounded transactions). Owner's real Gemini export materialized at owner_real_export.local.md
+  (gitignored — PII never committed). Owner runtime validation pending: relaunch app (old backend
+  lacks the route → kind 404 copy until then), import the file, expect ~30 [Gemini] rows + badges;
+  re-import = all duplicates. Knowledge-cards track remains distinct and deferred.*
+
 - [x] **Track: Memoria Recall — 2026-07-18 (recall grounding: system-position personalization, summaries, meta router)**
   *Link: [./tracks/memoria_recall_20260718/](./tracks/memoria_recall_20260718/)*
   *Status 2026-07-18 IMPLEMENTED: WU1 21a5b8a (scoring stopset — function-word noise out of retrieval),
