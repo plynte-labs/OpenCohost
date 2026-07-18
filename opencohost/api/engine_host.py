@@ -23,6 +23,8 @@ from opencohost.config.settings import (
     load_last_profile,
 )
 from opencohost.core.agenda_persistence import AgendaPersistence
+from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial_cards import EditorialCardStore
 from opencohost.core.health_monitor import HealthMonitor, OllamaWatchdog
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.profiles import cargar_perfiles
@@ -287,6 +289,10 @@ class EngineHost:
         # (CTK's _kira_agenda_tick has no headless equivalent). None until
         # start() wires it; stays None if agenda construction/wiring fails.
         self._agenda_driver = None
+        # Editorial cue-card bridge. None until start() wires it; stays None if
+        # wiring fails (D4) — leaving the direct-injection provider unset, the
+        # status-quo behavior before this fix.
+        self.editorial_bridge = None
         self.music_library = None
         # Phase 2: API-only music orchestration state + its guard. Always
         # constructed (like chat_sink), even before start(). music_lock guards
@@ -429,6 +435,22 @@ class EngineHost:
         driver.start()
         self._agenda_driver = driver
 
+    def _wire_editorial_bridge(self) -> None:
+        """Wire the editorial cue-card bridge's direct-injection provider (D1).
+
+        Constructs store + bridge unconditionally: resolve_direct_context is
+        store-only (D2) and must work even when the agenda failed to construct.
+        register_provider() touches the controller, so it only runs when
+        self.agenda is not None (skipped keeps the store-only direct path alive).
+        """
+        store = EditorialCardStore(EDITORIAL_CARDS_DB)
+        bridge = EditorialAgendaBridge(store, self.agenda)
+        if self.agenda is not None:
+            with self.agenda_lock:
+                bridge.register_provider()
+        self.motor.direct_editorial_context_provider = bridge.resolve_direct_context
+        self.editorial_bridge = bridge
+
     def _seed_startup_profile(self) -> None:
         """FIX-A: dispatch a set_profile for the startup profile at boot.
 
@@ -535,6 +557,15 @@ class EngineHost:
                     self._wire_agenda_driver()
                 except Exception:
                     _logger.exception("Agenda driver wiring failed; agenda stays passive")
+            # Editorial cue-card bridge — resilient (D4): a wiring failure must
+            # not brick the host, it only leaves the direct-injection provider
+            # unset (status quo). Runs regardless of agenda state so the
+            # store-only direct path survives an agenda-construction failure.
+            try:
+                self._wire_editorial_bridge()
+            except Exception:
+                self.editorial_bridge = None
+                _logger.exception("Editorial bridge wiring failed; cue-card injection disabled")
             # WS3 slice 4: headless music library — pure file/JSON state read,
             # no pygame, no audio device (server-side `request_mood` playback
             # is deferred). A construction failure must not brick the rest of
