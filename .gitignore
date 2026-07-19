@@ -101,6 +101,7 @@ opencohost/config/last_model.json
 
 # ── Runtime user state (seeded from opencohost/config/default_profiles.json on first run) ──
 perfiles.json
+cohost_profiles.json
 CLAUDE.local.md
 opencode.json
 
