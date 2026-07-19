@@ -1239,3 +1239,35 @@ PREFERENCE (owner runs `monologue`), not a defect.
   information-architecture issue, not only a toolkit issue. Owner rejected the first radical/dashboard preview; revised
   direction is faithful polish: preserve the current two-column OpenCohost identity, improve hierarchy/spacing/error
   framing, and only later decide whether to refine, complement, or replace the current UI.*
+
+---
+
+- [~] **Track: Editorial Cards Reusable-by-Default (single_use opt-in)**
+  *Link: [./tracks/editorial_cards_reusable_20260718/](./tracks/editorial_cards_reusable_20260718/)*
+  *Status 2026-07-18: IMPLEMENTED (all 6 WUs). Owner decision: cards are reusable by default; single-use is an opt-in
+  flag at creation. Driven by runtime evidence: an armed card grounded a typed reply but stayed ARMED (USED only fired
+  on agenda-accepted output). New: single_use + last_injected_at columns (PRAGMA-guarded migration), bridge pending-id
+  commit via new engine seam `direct_editorial_usage_recorder`, 300s reuse cooldown, atomic `complete_reusable_injection`
+  (WHERE status='active'), best-effort `release_active_card` gate release, API single_use field, UI checkbox + badge.
+  Backend commits 38af63f + ea7d05e + e90881f (LOCAL, unpushed); UI commits eddb2f5 + 5e64d20 (pushed). Codex-as-judge
+  ran 3 rounds (receipts 001cea44…, 571445e2…, 385126a9…): all round-1/2 findings fixed and verified; ONE open HIGH —
+  theoretical ABA race in stale compensation (release could free a newer activation). Judgment-day fix rounds exhausted;
+  OWNER DECISION pending: accept as follow-up (single engine worker + agenda_lock make it unreachable today; fix shape:
+  expected-updated_at token in the conditional release) or authorize an extra fix round. Backend push held on that call.*
+
+- [x] **Ticket: Controls UX — sub-collapsibles, textarea heights, 465px chat, horizontal-scroll fix (UI repo)**
+  *Status 2026-07-18: DONE and pushed (OpenCohost_UI c05e875 + db8d13f). Codex-as-judge round 1 REJECT (MAJOR: collapsed
+  CollapsibleBody stayed mounted/focusable — destructive actions activatable while hidden; inherited primitive defect made
+  dangerous by new usage) → fixed with inert + aria-hidden + aria-controls + hardened tests → round 2 APPROVE (receipts
+  d298a6f0…, 400a200e…). Scroll root cause: body min-width:1280px duplicated Tauri's native minimum (removed); AppLayout
+  min-w-[1180px] → w-full min-w-0. KiraCover responsive-avatar suggestion NOT applied (owner-locked file). Owner runtime
+  validation pending at 1280px viewport.*
+
+- [ ] **Track: Chat Commands Wiring + Chat/Comandos/Logs tabs**
+  *Link: [./tracks/chat_commands_wiring_20260718/](./tracks/chat_commands_wiring_20260718/)*
+  *Status 2026-07-18: PROPOSAL. 6 of 7 palette commands already have live endpoints (only /musica partial: transport is
+  client-side by design, free-text search has no backend). Logs tab achievable UI-only: GET /api/events is already
+  metadata-only detail=null and polled into the client eventStore — privacy-safe by construction; "no endpoint" claim in
+  SettingsPopover was stale. Recommended first tickets: /temas (pure read, zero decisions) + ActionRow submit pipe (the
+  single choke point unblocking 4 commands). 6 OWNER DECISIONS block later WUs (perfil target, acciones preset mapping,
+  sesion button mapping, musica scope, logs option a/b, agenda es-vocab). Next: spec + design after owner picks.*
