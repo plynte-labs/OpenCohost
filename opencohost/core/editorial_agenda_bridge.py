@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 from opencohost.config import settings
@@ -189,26 +190,35 @@ class EditorialAgendaBridge:
         """Commit the linked card once Agenda accepts a generated response (D3).
 
         single_use → mark_used (→USED, current behavior). Reusable →
-        record_injection + reset ACTIVE→ARMED so the one-ACTIVE gate frees up,
-        then detach the topic link. Method name/signature unchanged so both host
-        recorders need zero changes.
+        complete_reusable_injection: one atomic transaction that records the
+        injection and resets ACTIVE→ARMED so the one-ACTIVE gate frees up,
+        then detach the topic link. Method name/signature unchanged so both
+        host recorders need zero changes.
+        Fail-open: any persistence error (sqlite3.Error, OSError) anywhere in
+        this commit path is logged with the card id only — never card content
+        — and this returns False instead of propagating into the
+        accepted-output recorder. Mirrors resolve_direct_context's fail-open
+        style.
         """
         topic: AgendaTopic | None = self.controller.active_topic
         if not topic or not topic.editorial_card_id or not topic.editorial_card_consumed:
             return False
         card_id = topic.editorial_card_id
-        card = self.store.get(card_id)
-        if card is not None and not card.single_use:
-            # Reusable: record usage and return the card to ARMED (still eligible).
-            if self.store.record_injection(card_id):
-                self.store._set_status(card_id, EditorialCardStatus.ARMED)
+        try:
+            card = self.store.get(card_id)
+            if card is not None and not card.single_use:
+                # Reusable: one atomic transaction records usage and resets ARMED.
+                if self.store.complete_reusable_injection(card_id, datetime.now(timezone.utc)):
+                    topic.editorial_card_id = None
+                    topic.editorial_card_consumed = False
+                    return True
+                return False
+            # single_use (or a card that vanished): retire to USED as before.
+            if self.store.mark_used(card_id):
                 topic.editorial_card_id = None
                 topic.editorial_card_consumed = False
                 return True
             return False
-        # single_use (or a card that vanished): retire to USED as before.
-        if self.store.mark_used(card_id):
-            topic.editorial_card_id = None
-            topic.editorial_card_consumed = False
-            return True
-        return False
+        except (sqlite3.Error, OSError) as exc:
+            log.warning("editorial agenda commit: store error for card %s: %s", card_id, exc)
+            return False

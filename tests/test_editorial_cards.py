@@ -659,6 +659,47 @@ def test_record_injection_sets_last_injected_at_bumps_use_count_and_keeps_status
     assert store.record_injection("ec_missing") is False
 
 
+def test_upsert_cannot_resurrect_used_card_via_changed_single_use(tmp_path) -> None:
+    """Security-relevant regression: re-upserting a USED card with a different
+    single_use value must NOT resurrect it out of USED — status and usage
+    history (use_count/last_used_at) are preserved by the topic_slug upsert,
+    only content-like fields (single_use included) are taken from the
+    incoming card."""
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = store.upsert(
+        EditorialCard(
+            topic="Resurrect me not",
+            summary="Summary here.",
+            streamer_take="Take here.",
+            single_use=True,
+        )
+    )
+    store.arm(card.id)
+    store.activate_for_topic(card.topic_slug)
+    store.mark_used(card.id)
+
+    used = store.get(card.id)
+    assert used.status is EditorialCardStatus.USED
+    assert used.use_count == 1
+    assert used.last_used_at is not None
+
+    resurrected = store.upsert(
+        EditorialCard(
+            topic="Resurrect me not",
+            summary="Updated summary.",
+            streamer_take="Updated take.",
+            single_use=False,
+        )
+    )
+
+    assert resurrected.id == card.id
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.USED  # NOT resurrected to ARMED/DRAFT
+    assert refreshed.use_count == 1  # usage history preserved
+    assert refreshed.last_used_at == used.last_used_at
+    assert refreshed.single_use is False  # content-like field taken from incoming card
+
+
 def test_in_cooldown_true_within_window_false_outside_and_when_never_injected() -> None:
     """D4: in_cooldown is True only while last_injected_at is inside the window."""
     now = datetime.now(timezone.utc)

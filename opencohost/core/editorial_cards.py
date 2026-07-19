@@ -337,6 +337,37 @@ class EditorialCardStore:
             )
         return True
 
+    def complete_reusable_injection(self, card_id: str, injected_at: datetime) -> bool:
+        """Atomically record a reusable-card injection and reset ACTIVE->ARMED.
+
+        Single-transaction replacement for record_injection + a separate
+        _set_status(ARMED) call on the reusable-completion path (D3): one
+        UPDATE both records the injection and validates the card is still
+        ACTIVE at commit time, so a status change racing between the caller's
+        get() and this call — or a failure between two separate writes —
+        can never leave the card stuck ACTIVE (permanently occupying the
+        one-ACTIVE gate). Returns False (no exception raised) when the card
+        is missing or no longer ACTIVE — the WHERE clause simply matches
+        zero rows.
+        """
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE editorial_cards
+                SET last_injected_at = ?, use_count = use_count + 1, updated_at = ?, status = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    _dt_to_text(injected_at),
+                    _dt_to_text(now),
+                    EditorialCardStatus.ARMED.value,
+                    card_id,
+                    EditorialCardStatus.ACTIVE.value,
+                ),
+            )
+        return cur.rowcount > 0
+
     def record_rating(self, rating: EditorialCardRating) -> EditorialCardRating:
         """Persist a post-use rating without storing raw chat context."""
 

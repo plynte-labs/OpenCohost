@@ -280,3 +280,75 @@ def test_engine_host_recorder_keeps_reusable_card_armed_after_accepted_output(tm
         assert topic.editorial_card_id is None
     finally:
         host.stop()
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: per-card-mode direct-turn integration — drive provider+recorder
+# through the wired EngineHost (same seam the real motor fires) and assert
+# the FINAL DATABASE STATE via store.get, for both card modes.
+# ---------------------------------------------------------------------------
+
+def test_engine_host_direct_turn_reusable_card_final_state_stays_armed(tmp_path, monkeypatch):
+    """Reusable (single_use=False, default): after provider + usage-recorder
+    fire for a direct turn, the card's final DB state is ARMED with
+    last_injected_at set."""
+    db_path = tmp_path / "cards.db"
+    store, card = _seed_armed_card(
+        db_path,
+        topic="GTA delay confirmed",
+        summary="Rockstar pushed the release window again.",
+        streamer_take="Quiero debatir si el retraso salva el hype pay-to-win.",
+        triggers=["gta", "delay"],
+        # single_use defaults to False -> reusable
+    )
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, db_path)
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        if host._agenda_driver is not None:
+            host._agenda_driver.stop()
+
+        provider = host.motor.direct_editorial_context_provider
+        recorder = host.motor.direct_editorial_usage_recorder
+        block = provider("hey kira what do you think about the gta delay")
+        assert block is not None
+        recorder()  # mirrors the engine's post-generation commit (D2)
+
+        refreshed = store.get(card.id)
+        assert refreshed.status is EditorialCardStatus.ARMED
+        assert refreshed.last_injected_at is not None
+    finally:
+        host.stop()
+
+
+def test_engine_host_direct_turn_single_use_card_final_state_flips_used(tmp_path, monkeypatch):
+    """single_use=True: after provider + usage-recorder fire for a direct
+    turn, the card's final DB state is USED."""
+    db_path = tmp_path / "cards.db"
+    store, card = _seed_armed_card(
+        db_path,
+        topic="GTA delay confirmed",
+        summary="Rockstar pushed the release window again.",
+        streamer_take="Quiero debatir si el retraso salva el hype pay-to-win.",
+        triggers=["gta", "delay"],
+        single_use=True,
+    )
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, db_path)
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        if host._agenda_driver is not None:
+            host._agenda_driver.stop()
+
+        provider = host.motor.direct_editorial_context_provider
+        recorder = host.motor.direct_editorial_usage_recorder
+        block = provider("hey kira what do you think about the gta delay")
+        assert block is not None
+        recorder()
+
+        refreshed = store.get(card.id)
+        assert refreshed.status is EditorialCardStatus.USED
+    finally:
+        host.stop()

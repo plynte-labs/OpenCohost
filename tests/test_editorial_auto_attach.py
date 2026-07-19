@@ -221,3 +221,67 @@ def test_auto_attach_skips_card_in_cooldown(tmp_path) -> None:
     assert action.kind == "enqueue"
     assert "<editorial_context>" not in action.prompt
     assert store.get(card.id).status is EditorialCardStatus.ARMED
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: cooldown-expiry re-admission — the sibling of the exclusion test
+# above. Seeds a deterministic OLD last_injected_at (no sleeping) at exactly
+# EDITORIAL_REUSE_COOLDOWN_SECONDS ago; in_cooldown uses strict '<', so a card
+# injected exactly (or more than) cooldown_s ago must be re-admitted by BOTH
+# auto_attach and resolve_direct_context.
+# ---------------------------------------------------------------------------
+
+def _seed_old_injection(store: EditorialCardStore, card_id: str, seconds_ago: float) -> None:
+    """Directly set last_injected_at to *seconds_ago* in the past — deterministic,
+    no sleep. Mirrors the raw-UPDATE pattern used elsewhere in the test suite
+    (e.g. test_editorial_cards.py expiry tests)."""
+    from datetime import datetime, timedelta, timezone
+
+    old_ts = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE editorial_cards SET last_injected_at = ? WHERE id = ?",
+            (old_ts.isoformat(), card_id),
+        )
+
+
+def test_auto_attach_readmits_card_at_cooldown_boundary(tmp_path) -> None:
+    """D4 boundary: a reusable card last injected exactly
+    EDITORIAL_REUSE_COOLDOWN_SECONDS ago is no longer in_cooldown (strict '<'),
+    so auto_attach re-admits it and links it to a matching topic."""
+    import opencohost.config.settings as settings
+
+    store, controller, bridge = _setup(tmp_path)
+
+    card = _make_card(store, "GTA retraso confirmado")
+    store.arm(card.id)
+    _seed_old_injection(store, card.id, settings.EDITORIAL_REUSE_COOLDOWN_SECONDS)
+
+    topic = controller.add_topic("El retraso de GTA confirmado noticias", approved=True)
+    controller.queue_topic(topic.id)
+
+    controller.enable()
+    action = controller.next_action()
+
+    assert action.kind == "enqueue"
+    assert "<editorial_context>" in action.prompt
+    assert store.get(card.id).status is EditorialCardStatus.ACTIVE
+
+
+def test_resolve_direct_context_readmits_card_at_cooldown_boundary(tmp_path) -> None:
+    """D4 boundary: resolve_direct_context follows the same in_cooldown
+    semantics as auto_attach — a card injected exactly cooldown_s ago is
+    eligible again for a direct-turn match."""
+    import opencohost.config.settings as settings
+
+    store, controller, bridge = _setup(tmp_path)
+
+    card = _make_card(store, "GTA retraso confirmado")
+    store.arm(card.id)
+    _seed_old_injection(store, card.id, settings.EDITORIAL_REUSE_COOLDOWN_SECONDS)
+
+    result = bridge.resolve_direct_context("El retraso de GTA confirmado")
+
+    assert result is not None
+    assert "<editorial_context>" in result
+    assert bridge._pending_direct_card_id == card.id
