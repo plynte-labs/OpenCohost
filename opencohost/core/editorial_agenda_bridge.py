@@ -199,14 +199,23 @@ class EditorialAgendaBridge:
         — and this returns False instead of propagating into the
         accepted-output recorder. Mirrors resolve_direct_context's fail-open
         style.
+        Real guarantee on failure: reusable cards get a best-effort
+        compensating release (release_active_card) back to ARMED so the
+        one-ACTIVE gate does not stay stuck; if that release also fails the
+        card remains ACTIVE. single_use cards are NOT compensated here —
+        a card left ACTIVE after a transient mark_used failure self-heals on
+        the next accepted-output pass (retry semantics: it must not be
+        re-armed).
         """
         topic: AgendaTopic | None = self.controller.active_topic
         if not topic or not topic.editorial_card_id or not topic.editorial_card_consumed:
             return False
         card_id = topic.editorial_card_id
+        reusable_attempt = False
         try:
             card = self.store.get(card_id)
             if card is not None and not card.single_use:
+                reusable_attempt = True
                 # Reusable: one atomic transaction records usage and resets ARMED.
                 if self.store.complete_reusable_injection(card_id, datetime.now(timezone.utc)):
                     topic.editorial_card_id = None
@@ -214,6 +223,9 @@ class EditorialAgendaBridge:
                     return True
                 return False
             # single_use (or a card that vanished): retire to USED as before.
+            # No compensation on failure here by design — a card left ACTIVE
+            # after a transient mark_used failure self-heals on the next
+            # accepted output; single_use must not be re-armed by a retry.
             if self.store.mark_used(card_id):
                 topic.editorial_card_id = None
                 topic.editorial_card_consumed = False
@@ -221,4 +233,17 @@ class EditorialAgendaBridge:
             return False
         except (sqlite3.Error, OSError) as exc:
             log.warning("editorial agenda commit: store error for card %s: %s", card_id, exc)
+            if reusable_attempt:
+                try:
+                    if self.store.release_active_card(card_id):
+                        log.warning(
+                            "editorial agenda commit: released active card %s after failed injection completion",
+                            card_id,
+                        )
+                except (sqlite3.Error, OSError) as release_exc:
+                    log.warning(
+                        "editorial agenda commit: failed to release active card %s: %s",
+                        card_id,
+                        release_exc,
+                    )
             return False

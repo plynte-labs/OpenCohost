@@ -344,11 +344,17 @@ class EditorialCardStore:
         _set_status(ARMED) call on the reusable-completion path (D3): one
         UPDATE both records the injection and validates the card is still
         ACTIVE at commit time, so a status change racing between the caller's
-        get() and this call — or a failure between two separate writes —
-        can never leave the card stuck ACTIVE (permanently occupying the
-        one-ACTIVE gate). Returns False (no exception raised) when the card
-        is missing or no longer ACTIVE — the WHERE clause simply matches
-        zero rows.
+        get() and this call cannot double-apply. Returns False (no exception
+        raised) when the card is missing or no longer ACTIVE — the WHERE
+        clause simply matches zero rows; nothing is stuck in that case.
+
+        Real guarantee: atomic when it commits (the row either fully updates
+        or the WHERE match leaves it untouched). If the UPDATE itself raises
+        (sqlite3.Error/OSError), the transaction rolls back and the card
+        stays ACTIVE — this method does not self-heal that case. The caller
+        (EditorialAgendaBridge.mark_used_after_successful_generation) is
+        responsible for a best-effort compensating release via
+        release_active_card().
         """
         now = datetime.now(timezone.utc)
         with self._connect() as conn:
@@ -362,6 +368,29 @@ class EditorialCardStore:
                     _dt_to_text(injected_at),
                     _dt_to_text(now),
                     EditorialCardStatus.ARMED.value,
+                    card_id,
+                    EditorialCardStatus.ACTIVE.value,
+                ),
+            )
+        return cur.rowcount > 0
+
+    def release_active_card(self, card_id: str) -> bool:
+        """Best-effort compensation: reset a stuck ACTIVE card back to ARMED.
+
+        Used by the bridge when complete_reusable_injection raises and the
+        card is left occupying the one-ACTIVE gate. Single conditional
+        UPDATE, rowcount-validated; deliberately does not touch
+        last_injected_at/use_count since it is unknown whether that write
+        landed before the failure. Returns False when the card is missing
+        or already left ACTIVE (nothing to release).
+        """
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE editorial_cards SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (
+                    EditorialCardStatus.ARMED.value,
+                    _dt_to_text(now),
                     card_id,
                     EditorialCardStatus.ACTIVE.value,
                 ),
