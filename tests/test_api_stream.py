@@ -65,11 +65,15 @@ class FakeAggregator:
         self.disconnect_calls = 0
         # optional gate a test can hold closed to simulate an in-flight connect
         self.block_connect = None  # threading.Event
+        # optional exception a test injects to exercise connect error mapping
+        self.raise_on_connect = None  # Exception instance
 
     def connect(self, source_id, platform="youtube"):
         self.connect_calls.append((source_id, platform))
         if self.block_connect is not None:
             self.block_connect.wait(timeout=5)
+        if self.raise_on_connect is not None:
+            raise self.raise_on_connect
         self._source = _FakeSource(source_id, platform)
 
     def disconnect(self):
@@ -245,6 +249,75 @@ def test_connect_single_flight_second_concurrent_call_409_busy():
             agg.block_connect.set()
             t.join(timeout=5)
         assert results["first"].status_code == 200
+
+
+def test_connect_runtime_error_maps_503_chat_source_unavailable():
+    """RuntimeError from agg.connect (e.g. pytchat not installed) must be a
+    typed 503 chat_source_unavailable, not a raw 500."""
+    agg = FakeAggregator()
+    agg.raise_on_connect = RuntimeError("pytchat no esta instalado")
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/stream/chat-live/connect",
+            json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        )
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "chat_source_unavailable"
+
+
+def test_connect_value_error_maps_422_unsupported_platform():
+    """ValueError from agg.connect (unsupported platform) must be a typed 422
+    unsupported_platform — distinct from the parse-stage invalid_url."""
+    agg = FakeAggregator()
+    agg.raise_on_connect = ValueError("Plataforma no soportada: kick")
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/stream/chat-live/connect",
+            json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "unsupported_platform"
+
+
+def test_connect_generic_exception_maps_503_stream_unavailable_no_leak():
+    """Any unexpected exception must degrade to 503 stream_unavailable without
+    leaking the internal message or a traceback into the response body."""
+    agg = FakeAggregator()
+    agg.raise_on_connect = OSError("socket boom leak-token-xyz")
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/stream/chat-live/connect",
+            json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        )
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "stream_unavailable"
+        assert "leak-token-xyz" not in resp.text
+        assert "Traceback" not in resp.text
+
+
+def test_connect_releases_lock_after_exception():
+    """The single-flight lock must be released even when connect raises, so a
+    later connect is not permanently stuck at 409 busy."""
+    agg = FakeAggregator()
+    agg.raise_on_connect = RuntimeError("boom")
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/stream/chat-live/connect",
+            json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        )
+        assert first.status_code == 503
+        # lock released -> a subsequent valid connect succeeds (not 409 busy)
+        agg.raise_on_connect = None
+        second = client.post(
+            "/api/stream/chat-live/connect",
+            json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        )
+        assert second.status_code == 200
+        assert second.json()["connected"] is True
 
 
 def test_disconnect_calls_aggregator_disconnect():

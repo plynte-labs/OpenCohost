@@ -1921,6 +1921,21 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(status_code=409, content={"detail": "busy"})
         try:
             agg.connect(parsed["source_id"], platform=parsed["platform"])
+        except ValueError:
+            # Aggregator rejected the platform (e.g. "Plataforma no soportada").
+            return JSONResponse(status_code=422, content={"detail": "unsupported_platform"})
+        except RuntimeError:
+            # Chat connector unavailable (e.g. pytchat not installed).
+            return JSONResponse(status_code=503, content={"detail": "chat_source_unavailable"})
+        except Exception:
+            # Unexpected failure: degrade to 503 without leaking internals.
+            # R8: log id/platform only — never chat content or the raw message.
+            logger.warning(
+                "chat-live connect failed platform=%s source_id=%s",
+                parsed["platform"],
+                parsed["source_id"],
+            )
+            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
         finally:
             host.aggregator_lock.release()
         return _stream_state(agg)
