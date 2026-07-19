@@ -83,7 +83,11 @@ class EditorialCard:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
+    last_injected_at: datetime | None = None
     use_count: int = 0
+    # Reusable by default (D1): a card stays eligible across many replies.
+    # single_use=True opts a card into retiring (→USED) on its first injection.
+    single_use: bool = False
     # Provenance of the write (agent_context_gateway): the agent name for
     # cards written through /api/agent/cards; '' means operator (CLI/UI
     # flows never set it — behavior unchanged).
@@ -153,6 +157,16 @@ class EditorialCard:
         current = now or datetime.now(timezone.utc)
         return self.expires_at <= current
 
+    def in_cooldown(self, now: datetime, cooldown_s: float) -> bool:
+        """Return True while this card was injected within *cooldown_s* seconds.
+
+        A never-injected card (last_injected_at is None) is never in cooldown.
+        Used by the bridge to space out reuse of a reusable card (D4).
+        """
+        if self.last_injected_at is None:
+            return False
+        return (now - self.last_injected_at).total_seconds() < cooldown_s
+
     def to_prompt_block(self, *, max_chars: int = 1200) -> str:
         """Render a bounded structured prompt block for one-turn use."""
 
@@ -200,6 +214,10 @@ class EditorialCardStore:
             card.status = existing.status
             card.use_count = existing.use_count
             card.last_used_at = existing.last_used_at
+            # last_injected_at is usage history like use_count/last_used_at:
+            # preserved across upserts. single_use is content-like (the writer
+            # redeclares intent) so it is taken from the incoming card.
+            card.last_injected_at = existing.last_injected_at
         card.updated_at = now
         with self._connect() as conn:
             conn.execute(
@@ -208,8 +226,8 @@ class EditorialCardStore:
                     id, topic_slug, status, topic, summary, streamer_take,
                     counterpoints_json, discussion_hooks_json, triggers_json,
                     created_at, updated_at, expires_at, last_used_at, use_count,
-                    origin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    origin, single_use, last_injected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic_slug) DO UPDATE SET
                     status=excluded.status,
                     topic=excluded.topic,
@@ -222,7 +240,9 @@ class EditorialCardStore:
                     expires_at=excluded.expires_at,
                     last_used_at=excluded.last_used_at,
                     use_count=excluded.use_count,
-                    origin=excluded.origin
+                    origin=excluded.origin,
+                    single_use=excluded.single_use,
+                    last_injected_at=excluded.last_injected_at
                 """,
                 self._to_row(card),
             )
@@ -292,6 +312,28 @@ class EditorialCardStore:
                 WHERE id = ?
                 """,
                 (EditorialCardStatus.USED.value, _dt_to_text(now), _dt_to_text(now), card_id),
+            )
+        return True
+
+    def record_injection(self, card_id: str) -> bool:
+        """Record a reusable-card injection without retiring it.
+
+        Mirrors mark_used's shape but NEVER touches status: sets
+        last_injected_at, bumps use_count, and refreshes updated_at so a
+        reusable card stays eligible for future injections (D1/D2).
+        """
+        card = self.get(card_id)
+        if card is None:
+            return False
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE editorial_cards
+                SET last_injected_at = ?, use_count = use_count + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (_dt_to_text(now), _dt_to_text(now), card_id),
             )
         return True
 
@@ -446,7 +488,9 @@ class EditorialCardStore:
                     expires_at TEXT,
                     last_used_at TEXT,
                     use_count INTEGER NOT NULL DEFAULT 0,
-                    origin TEXT NOT NULL DEFAULT ''
+                    origin TEXT NOT NULL DEFAULT '',
+                    single_use INTEGER NOT NULL DEFAULT 0,
+                    last_injected_at TEXT
                 )
                 """
             )
@@ -459,6 +503,16 @@ class EditorialCardStore:
             if "origin" not in columns:
                 conn.execute(
                     "ALTER TABLE editorial_cards ADD COLUMN origin TEXT NOT NULL DEFAULT ''"
+                )
+            # Reusable-by-default columns (D5): same PRAGMA-guarded pattern.
+            # Existing rows land reusable via the column default (owner intent).
+            if "single_use" not in columns:
+                conn.execute(
+                    "ALTER TABLE editorial_cards ADD COLUMN single_use INTEGER NOT NULL DEFAULT 0"
+                )
+            if "last_injected_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE editorial_cards ADD COLUMN last_injected_at TEXT"
                 )
             conn.execute(
                 """
@@ -504,6 +558,8 @@ class EditorialCardStore:
             _dt_to_text(card.last_used_at),
             int(card.use_count),
             card.origin,
+            int(card.single_use),
+            _dt_to_text(card.last_injected_at),
         )
 
     @staticmethod
@@ -522,8 +578,10 @@ class EditorialCardStore:
             updated_at=_dt_from_text(row["updated_at"]),
             expires_at=_dt_from_text(row["expires_at"]),
             last_used_at=_dt_from_text(row["last_used_at"]),
+            last_injected_at=_dt_from_text(row["last_injected_at"]),
             use_count=int(row["use_count"] or 0),
             origin=row["origin"] or "",
+            single_use=bool(row["single_use"]),
         )
 
     @staticmethod

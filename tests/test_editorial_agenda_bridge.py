@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
-from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.smart_aggregator import AgendaState, KiraAgendaController, TopicStatus
 
 
@@ -18,6 +18,7 @@ def test_bridge_create_arm_link_inject_and_mark_used(tmp_path) -> None:
         summary="La comunidad critica precios nuevos.",
         streamer_take="Quiero debatir si cruza a pay-to-win.",
         discussion_hooks=["¿Dónde está la línea justa?"],
+        single_use=True,  # D3/D7 pin: recorder retires a single_use card to USED
     )
     assert bridge.arm_card(card.id) is True
 
@@ -53,6 +54,7 @@ def test_bridge_does_not_link_missing_unarmed_or_used_cards(tmp_path) -> None:
         topic="Notas del parche",
         summary="El parche ajusta balance y progresión.",
         streamer_take="Quiero compararlo con lo que pedía la comunidad.",
+        single_use=True,  # D3/D7 pin: this test asserts recorder→USED
     )
     topic = controller.add_topic("Notas del parche", approved=True)
 
@@ -85,6 +87,7 @@ def test_bridge_marks_used_through_controller_recorder_after_generation(tmp_path
         topic="Dificultad del juego",
         summary="La comunidad discute si el juego se volvió más fácil.",
         streamer_take="Quiero llevarlo a diseño y accesibilidad.",
+        single_use=True,  # D3/D7 pin: single_use card retires to USED
     )
     bridge.arm_card(card.id)
     topic = controller.add_topic("Dificultad del juego", approved=True)
@@ -101,3 +104,36 @@ def test_bridge_marks_used_through_controller_recorder_after_generation(tmp_path
     assert topic.status is TopicStatus.ACTIVE
     assert store.get(card.id).status is EditorialCardStatus.USED
     assert "respuesta aceptada" in controller.last_outputs[-1]
+
+
+def test_bridge_reusable_card_via_recorder_stays_armed_and_records_injection(tmp_path) -> None:
+    """D3: a reusable (single_use=False) card run through the agenda recorder
+    path stays ARMED with last_injected_at set and the topic link detached —
+    the opposite of the single_use pin above (which retires to USED)."""
+    store = EditorialCardStore(tmp_path / "cards.db")
+    controller = KiraAgendaController()
+    bridge = EditorialAgendaBridge(store, controller)
+    bridge.register_provider()
+
+    card = store.upsert(EditorialCard(
+        topic="Reusable difficulty debate",
+        summary="La comunidad discute si el juego se volvió más fácil.",
+        streamer_take="Quiero llevarlo a diseño y accesibilidad.",
+        single_use=False,
+    ))
+    store.arm(card.id)
+    topic = controller.add_topic("Reusable difficulty debate", approved=True)
+    controller.queue_topic(topic.id)
+    assert bridge.link_card_to_topic(topic.id, card.id) is True
+    assert store.get(card.id).status is EditorialCardStatus.ACTIVE
+
+    controller.active_topic = topic
+    topic.editorial_card_consumed = True
+
+    assert bridge.mark_used_after_successful_generation() is True
+
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.ARMED  # stays eligible (D1/D3)
+    assert refreshed.last_injected_at is not None
+    assert refreshed.use_count == 1
+    assert topic.editorial_card_id is None  # link detached as today

@@ -463,6 +463,10 @@ class EngineHost:
 
             self.motor.agenda_output_recorder = _on_accepted_output
         self.motor.direct_editorial_context_provider = bridge.resolve_direct_context
+        # Direct-turn USED trigger (D2): store-only, fail-open, no controller —
+        # wired even when agenda is None (same scope as the provider above). The
+        # engine fires it once after a successful direct generation.
+        self.motor.direct_editorial_usage_recorder = bridge.commit_direct_injection
         self.editorial_bridge = bridge
 
     def _seed_startup_profile(self) -> None:

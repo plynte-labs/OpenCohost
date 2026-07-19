@@ -319,6 +319,12 @@ AVATAR_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "avatar.yaml")
 # Paths that must live under USER_DATA_DIR so packaged builds under
 # Program Files (read-only) do not crash on first write.
 EDITORIAL_CARDS_DB = os.path.join(str(USER_DATA_DIR), "data", "editorial_cards", "cards.db")
+# Reusable editorial cards (D4): minimum seconds between injections of the same
+# reusable card, so it grounds at most ~1 in N matching replies instead of every
+# reply. Operator-tunable. single_use cards are unaffected (they retire on first
+# use). ponytail: time-based cooldown; add per-card N-turn cooldown only if
+# streams need turn-counted spacing the store doesn't track today.
+EDITORIAL_REUSE_COOLDOWN_SECONDS: int = 300
 REFERENCE_WAV_PATH = os.path.join(str(USER_DATA_DIR), "referencia_grabada.wav")
 
 # Kira memorias — auto-captured + curated per-profile memory store (own,

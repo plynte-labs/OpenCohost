@@ -529,3 +529,145 @@ def test_auto_attach_returns_false_on_corrupt_store(tmp_path) -> None:
     topic = AgendaTopic(title="GTA retraso confirmado")
     result = bridge.auto_attach(topic)
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# WU1: reusable-by-default (single_use), last_injected_at, record_injection,
+# in_cooldown, migration + upsert semantics (design D1, D4, D5)
+# ---------------------------------------------------------------------------
+
+def test_editorial_card_defaults_to_reusable() -> None:
+    """D1: a bare card is reusable by default and has never been injected."""
+    card = EditorialCard(
+        topic="Default reuse", summary="Summary here.", streamer_take="Take here."
+    )
+    assert card.single_use is False
+    assert card.last_injected_at is None
+
+
+def test_init_db_migrates_legacy_db_adding_new_columns(tmp_path) -> None:
+    """D5: a pre-existing DB missing single_use/last_injected_at is migrated
+    idempotently; existing rows land reusable (column default) with no history."""
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    # Build a legacy editorial_cards table WITHOUT the two new columns.
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE editorial_cards (
+                id TEXT PRIMARY KEY,
+                topic_slug TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                streamer_take TEXT NOT NULL,
+                counterpoints_json TEXT NOT NULL,
+                discussion_hooks_json TEXT NOT NULL,
+                triggers_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT,
+                last_used_at TEXT,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                origin TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO editorial_cards (id, topic_slug, status, topic, summary, "
+            "streamer_take, counterpoints_json, discussion_hooks_json, triggers_json, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ec_legacy", "legacy-topic", "armed", "Legacy topic", "Summary",
+                "Take", "[]", "[]", "[]",
+                "2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00",
+            ),
+        )
+
+    # Constructing the store triggers the idempotent migration.
+    store = EditorialCardStore(db)
+    with store._connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(editorial_cards)")}
+    assert "single_use" in columns
+    assert "last_injected_at" in columns
+
+    card = store.get("ec_legacy")
+    assert card is not None
+    assert card.single_use is False  # existing rows land reusable by default
+    assert card.last_injected_at is None
+
+    # Idempotent: a second construction over the migrated DB must not error.
+    EditorialCardStore(db)
+
+
+def test_upsert_takes_single_use_from_incoming_and_preserves_last_injected_at(tmp_path) -> None:
+    """D5: single_use is content-like (from the incoming card); last_injected_at
+    is usage history and is preserved on re-upsert (like use_count/last_used_at)."""
+    store = EditorialCardStore(tmp_path / "cards.db")
+    first = store.upsert(
+        EditorialCard(
+            topic="Reuse me",
+            summary="Summary here.",
+            streamer_take="Take here.",
+            single_use=True,
+        )
+    )
+    assert store.get(first.id).single_use is True
+
+    # Record an injection so last_injected_at becomes non-null usage history.
+    assert store.record_injection(first.id) is True
+    injected_at = store.get(first.id).last_injected_at
+    assert injected_at is not None
+
+    updated = store.upsert(
+        EditorialCard(
+            topic="Reuse me",
+            summary="Updated summary.",
+            streamer_take="Updated take.",
+            single_use=False,
+        )
+    )
+    assert updated.id == first.id
+    refreshed = store.get(first.id)
+    assert refreshed.single_use is False  # taken from incoming card
+    assert refreshed.last_injected_at == injected_at  # preserved history
+
+
+def test_record_injection_sets_last_injected_at_bumps_use_count_and_keeps_status(tmp_path) -> None:
+    """D2: record_injection sets last_injected_at, +1 use_count, never touches status."""
+    store = EditorialCardStore(tmp_path / "cards.db")
+    card = store.upsert(
+        EditorialCard(topic="Injectable", summary="Summary.", streamer_take="Take.")
+    )
+    store.arm(card.id)
+    assert store.get(card.id).status is EditorialCardStatus.ARMED
+
+    before = store.get(card.id)
+    assert before.last_injected_at is None
+    assert before.use_count == 0
+
+    assert store.record_injection(card.id) is True
+    after = store.get(card.id)
+    assert after.last_injected_at is not None
+    assert after.use_count == 1
+    assert after.status is EditorialCardStatus.ARMED  # reusable card stays eligible
+
+    assert store.record_injection(card.id) is True
+    assert store.get(card.id).use_count == 2
+
+    assert store.record_injection("ec_missing") is False
+
+
+def test_in_cooldown_true_within_window_false_outside_and_when_never_injected() -> None:
+    """D4: in_cooldown is True only while last_injected_at is inside the window."""
+    now = datetime.now(timezone.utc)
+    card = EditorialCard(topic="Cool", summary="Summary.", streamer_take="Take.")
+
+    assert card.in_cooldown(now, 300) is False  # never injected
+
+    card.last_injected_at = now - timedelta(seconds=10)
+    assert card.in_cooldown(now, 300) is True
+
+    card.last_injected_at = now - timedelta(seconds=600)
+    assert card.in_cooldown(now, 300) is False

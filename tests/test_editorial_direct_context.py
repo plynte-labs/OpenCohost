@@ -264,3 +264,174 @@ def test_integration_chat_flow_no_block(tmp_path: Path) -> None:
 
     all_content = " ".join(m.get("content", "") for m in captured_messages)
     assert "<editorial_context>" not in all_content
+
+
+# ---------------------------------------------------------------------------
+# WU2: pending-id lifecycle, commit_direct_injection, cooldown filter (D2/D4)
+# ---------------------------------------------------------------------------
+
+def test_resolve_direct_context_sets_pending_card_id_on_match(tmp_path: Path) -> None:
+    """D2: resolve_direct_context records the matched card id on the bridge."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])
+
+    result = bridge.resolve_direct_context("hey kira what about the gta delay")
+
+    assert result is not None
+    assert bridge._pending_direct_card_id == card.id
+
+
+def test_resolve_direct_context_clears_pending_when_no_match(tmp_path: Path) -> None:
+    """D2: a stale pending id is cleared at entry so a later non-matching turn
+    never commits a false USED on the previously matched card."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])
+
+    bridge.resolve_direct_context("gta delay")
+    assert bridge._pending_direct_card_id == card.id
+
+    result = bridge.resolve_direct_context("what is the weather like today")
+    assert result is None
+    assert bridge._pending_direct_card_id is None
+
+
+def test_commit_direct_injection_reusable_records_injection_stays_armed(tmp_path: Path) -> None:
+    """D2: committing a reusable pending injection records it and keeps ARMED."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])  # reusable default
+
+    bridge.resolve_direct_context("gta delay")
+    assert bridge._pending_direct_card_id == card.id
+
+    bridge.commit_direct_injection()
+
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.ARMED
+    assert refreshed.last_injected_at is not None
+    assert refreshed.use_count == 1
+    assert bridge._pending_direct_card_id is None  # cleared after commit
+
+
+def test_commit_direct_injection_single_use_marks_used(tmp_path: Path) -> None:
+    """D2: committing a single_use pending injection retires the card (→USED)."""
+    store, bridge = _make_bridge(tmp_path)
+    card = store.upsert(EditorialCard(
+        topic="One shot topic",
+        summary="Summary here.",
+        streamer_take="Take here.",
+        triggers=["oneshot"],
+        single_use=True,
+    ))
+    store.arm(card.id)
+
+    bridge.resolve_direct_context("tell me about oneshot")
+    assert bridge._pending_direct_card_id == card.id
+
+    bridge.commit_direct_injection()
+
+    assert store.get(card.id).status is EditorialCardStatus.USED
+
+
+def test_commit_direct_injection_noop_when_no_pending(tmp_path: Path) -> None:
+    """D2: with no pending id, commit is a no-op — the card is untouched."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])
+
+    bridge.commit_direct_injection()
+
+    refreshed = store.get(card.id)
+    assert refreshed.status is EditorialCardStatus.ARMED
+    assert refreshed.last_injected_at is None
+    assert refreshed.use_count == 0
+
+
+def test_commit_direct_injection_is_fail_open_on_store_error(tmp_path: Path) -> None:
+    """D2: a store failure during commit is swallowed and pending is cleared,
+    so a retry cannot double-commit."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])
+
+    bridge.resolve_direct_context("gta delay")
+    assert bridge._pending_direct_card_id == card.id
+
+    with patch.object(store, "get", side_effect=RuntimeError("DB corrupt")):
+        bridge.commit_direct_injection()  # must not raise
+
+    assert bridge._pending_direct_card_id is None
+
+
+def test_resolve_direct_context_skips_card_in_cooldown(tmp_path: Path) -> None:
+    """D4: a card injected within the cooldown window is not eligible, so no
+    block is returned and no pending id is set."""
+    store, bridge = _make_bridge(tmp_path)
+    card = _arm_card(store, "GTA delay confirmed", triggers=["gta", "delay"])
+    store.record_injection(card.id)  # last_injected_at = now -> in cooldown
+
+    result = bridge.resolve_direct_context("hey kira what about the gta delay")
+
+    assert result is None
+    assert bridge._pending_direct_card_id is None
+
+
+# ---------------------------------------------------------------------------
+# WU3: engine usage-recorder seam (D2) — fires only on non-empty dialogo +
+# injected block, fail-open on callback exceptions.
+# ---------------------------------------------------------------------------
+
+def test_usage_recorder_fires_once_on_direct_turn_with_block(tmp_path: Path) -> None:
+    """D2: direct_editorial_usage_recorder is invoked exactly once, no args,
+    when the turn injected a block and produced a non-empty dialogo."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    block = "<editorial_context>\n{\"topic\":\"test\"}\n</editorial_context>"
+    motor.direct_editorial_context_provider = MagicMock(return_value=block)
+    recorder = MagicMock()
+    motor.direct_editorial_usage_recorder = recorder
+    motor._ollama_chat = MagicMock(side_effect=lambda **kw: {"message": {"content": "nice reply"}})
+
+    motor._generar_dialogo("host query about the topic", source="direct")
+
+    recorder.assert_called_once_with()
+
+
+def test_usage_recorder_not_fired_when_no_block(tmp_path: Path) -> None:
+    """D2: no card matched (block empty) -> the recorder must not fire even
+    though the dialogo is non-empty."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    motor.direct_editorial_context_provider = MagicMock(return_value=None)
+    recorder = MagicMock()
+    motor.direct_editorial_usage_recorder = recorder
+    motor._ollama_chat = MagicMock(side_effect=lambda **kw: {"message": {"content": "nice reply"}})
+
+    motor._generar_dialogo("host query about the topic", source="direct")
+
+    recorder.assert_not_called()
+
+
+def test_usage_recorder_not_fired_when_dialogo_empty(tmp_path: Path) -> None:
+    """D2: a block was injected but generation produced an empty dialogo ->
+    the recorder must not fire (no successful generation to commit)."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    block = "<editorial_context>\n{}\n</editorial_context>"
+    motor.direct_editorial_context_provider = MagicMock(return_value=block)
+    recorder = MagicMock()
+    motor.direct_editorial_usage_recorder = recorder
+    motor._ollama_chat = MagicMock(side_effect=lambda **kw: {"message": {"content": "   "}})
+
+    motor._generar_dialogo("host query about the topic", source="direct")
+
+    recorder.assert_not_called()
+
+
+def test_usage_recorder_exception_does_not_propagate(tmp_path: Path) -> None:
+    """D2: a recorder that raises must be swallowed (fail-open) — the
+    generation call still completes and the recorder was invoked once."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    block = "<editorial_context>\n{}\n</editorial_context>"
+    motor.direct_editorial_context_provider = MagicMock(return_value=block)
+    recorder = MagicMock(side_effect=RuntimeError("boom"))
+    motor.direct_editorial_usage_recorder = recorder
+    motor._ollama_chat = MagicMock(side_effect=lambda **kw: {"message": {"content": "nice reply"}})
+
+    motor._generar_dialogo("host query about the topic", source="direct")  # must not raise
+
+    recorder.assert_called_once_with()

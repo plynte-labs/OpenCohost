@@ -44,6 +44,7 @@ def _fake_motor():
     motor.is_processing = False
     motor.is_speaking = False
     motor.direct_editorial_context_provider = None
+    motor.direct_editorial_usage_recorder = None
     motor.agenda_output_recorder = None
     return motor
 
@@ -68,6 +69,24 @@ def test_engine_host_start_wires_direct_editorial_provider(tmp_path, monkeypatch
         bound = host.editorial_bridge.resolve_direct_context
         assert provider.__func__ is bound.__func__
         assert provider.__self__ is host.editorial_bridge
+    finally:
+        host.stop()
+
+
+def test_engine_host_start_wires_direct_editorial_usage_recorder(tmp_path, monkeypatch):
+    # WU4/D2: after start(), the motor's direct USED trigger is the bridge's
+    # bound commit_direct_injection — the seam the engine fires once after a
+    # successful direct generation that injected a card block.
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, tmp_path / "cards.db")
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        assert host.editorial_bridge is not None
+        recorder = host.motor.direct_editorial_usage_recorder
+        bound = host.editorial_bridge.commit_direct_injection
+        assert recorder.__func__ is bound.__func__
+        assert recorder.__self__ is host.editorial_bridge
     finally:
         host.stop()
 
@@ -121,12 +140,13 @@ def test_engine_host_start_survives_editorial_bridge_wiring_failure(tmp_path, mo
 # WU2 helpers + tests (design test-plan items b, c)
 # ---------------------------------------------------------------------------
 
-def _seed_armed_card(db_path, *, topic, summary, streamer_take, triggers):
+def _seed_armed_card(db_path, *, topic, summary, streamer_take, triggers, single_use: bool = False):
     """Seed one ARMED card into the tmp EDITORIAL_CARDS_DB before start().
 
     Returns (store, refreshed_card). The store is a separate instance from the
     bridge's own — same file, connection-per-call SQLite, so committed writes
-    from the bridge's store are visible here.
+    from the bridge's store are visible here. ``single_use`` opts the seeded
+    card into the retire-on-first-use path (D7 pin); default reusable (D1).
     """
     store = EditorialCardStore(str(db_path))
     card = store.upsert(
@@ -135,6 +155,7 @@ def _seed_armed_card(db_path, *, topic, summary, streamer_take, triggers):
             summary=summary,
             streamer_take=streamer_take,
             triggers=triggers,
+            single_use=single_use,
         )
     )
     store.arm(card.id)
@@ -184,6 +205,7 @@ def test_engine_host_recorder_marks_card_used_after_accepted_output(tmp_path, mo
         summary="La comunidad discute si el juego se volvió más fácil.",
         streamer_take="Quiero llevarlo a diseño y accesibilidad.",
         triggers=["dificultad"],
+        single_use=True,  # D7 pin: only a single_use card retires to USED here
     )
     motor = _fake_motor()
     _base_monkeypatch(monkeypatch, motor, db_path)
@@ -212,5 +234,49 @@ def test_engine_host_recorder_marks_card_used_after_accepted_output(tmp_path, mo
         assert "respuesta aceptada" in controller.last_outputs[-1]
         # ... and the linked card flipped to USED.
         assert store.get(card.id).status is EditorialCardStatus.USED
+    finally:
+        host.stop()
+
+
+def test_engine_host_recorder_keeps_reusable_card_armed_after_accepted_output(tmp_path, monkeypatch):
+    # D3/D7 sibling to (c): a reusable card (single_use=False, the default) run
+    # through the same recorder path stays ARMED with last_injected_at set and
+    # the topic link detached — instead of transitioning to USED.
+    db_path = tmp_path / "cards.db"
+    store, card = _seed_armed_card(
+        db_path,
+        topic="Balance del parche",
+        summary="El parche ajusta balance y progresión.",
+        streamer_take="Quiero compararlo con lo que pedía la comunidad.",
+        triggers=["balance"],
+        # single_use defaults to False -> reusable
+    )
+    motor = _fake_motor()
+    _base_monkeypatch(monkeypatch, motor, db_path)
+    host = engine_host_mod.EngineHost(lock_path=str(tmp_path / "engine.lock"))
+    try:
+        host.start()
+        assert host.agenda is not None
+        host._agenda_driver.stop()
+        controller = host.agenda
+        bridge = host.editorial_bridge
+
+        topic = controller.add_topic("Balance del parche", approved=True)
+        controller.queue_topic(topic.id)
+        assert bridge.link_card_to_topic(topic.id, card.id) is True
+        controller.active_topic = topic
+        topic.editorial_card_consumed = True
+
+        recorder = host.motor.agenda_output_recorder
+        assert callable(recorder)
+        recorder("Respuesta aceptada de Kira")
+
+        assert controller.last_outputs
+        assert "respuesta aceptada" in controller.last_outputs[-1]
+        # Reusable card stays eligible (D1/D3): ARMED, injected, link detached.
+        refreshed = store.get(card.id)
+        assert refreshed.status is EditorialCardStatus.ARMED
+        assert refreshed.last_injected_at is not None
+        assert topic.editorial_card_id is None
     finally:
         host.stop()

@@ -110,6 +110,7 @@ class TestAgentCardsList:
             "origin",
             "expires_at",
             "updated_at",
+            "single_use",
         }
         assert cards[0]["topic"] == "Projection shape topic"
         assert cards[0]["status"] == "draft"
@@ -172,6 +173,53 @@ class TestAgentCardsList:
             resp = client.get("/api/agent/cards", headers=agent_headers)
         assert resp.status_code == 503
         assert resp.json()["detail"] == "editorial_cards_unavailable"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# single_use (D6): POST accepts the flag; GET projection exposes it
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestAgentCardSingleUse:
+    _POST_PAYLOAD = {
+        "agent": "claude-code",
+        "topic": "Single use flag topic",
+        "summary": "A structured summary of the topic.",
+        "streamer_take": "An honest streamer take on it.",
+    }
+
+    def test_post_defaults_single_use_false_when_omitted(self, agent_headers):
+        app = _app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/agent/cards", json=self._POST_PAYLOAD, headers=agent_headers
+            )
+        assert resp.status_code == 200
+        card = _cards_store().get(resp.json()["id"])
+        assert card is not None
+        assert card.single_use is False
+
+    def test_post_single_use_true_is_stored(self, agent_headers):
+        payload = dict(self._POST_PAYLOAD, topic="One shot flag topic", single_use=True)
+        app = _app()
+        with TestClient(app) as client:
+            resp = client.post("/api/agent/cards", json=payload, headers=agent_headers)
+        assert resp.status_code == 200
+        card = _cards_store().get(resp.json()["id"])
+        assert card is not None
+        assert card.single_use is True
+
+    def test_get_list_items_include_single_use_matching_stored_value(self, agent_headers):
+        store = _cards_store()
+        reusable = store.upsert(_new_card("Reusable projection topic", single_use=False))
+        one_shot = store.upsert(_new_card("One shot projection topic", single_use=True))
+        app = _app()
+        with TestClient(app) as client:
+            resp = client.get("/api/agent/cards", headers=agent_headers)
+        assert resp.status_code == 200
+        by_id = {c["id"]: c for c in resp.json()["cards"]}
+        assert by_id[reusable.id]["single_use"] is False
+        assert by_id[one_shot.id]["single_use"] is True
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -2221,6 +2221,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 triggers=body.triggers,
                 expires_at=expires,
                 origin=body.agent,
+                single_use=body.single_use,
             )
         except EditorialCardValidationError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -2265,6 +2266,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     origin=card.origin,
                     expires_at=card.expires_at.isoformat() if card.expires_at else None,
                     updated_at=card.updated_at.isoformat(),
+                    single_use=card.single_use,
                 )
                 for card in cards
             ]

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
+from opencohost.config import settings
 from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
 
@@ -16,6 +18,11 @@ class EditorialAgendaBridge:
     def __init__(self, store: EditorialCardStore, controller: KiraAgendaController) -> None:
         self.store = store
         self.controller = controller
+        # Direct-turn USED trigger (D2): resolve_direct_context records the
+        # matched card id here; commit_direct_injection (the engine's
+        # post-generation hook) reads+clears it. Single engine worker thread is
+        # the only caller, so no lock is needed.
+        self._pending_direct_card_id: str | None = None
 
     def register_provider(self) -> None:
         """Allow Agenda prompt assembly to resolve linked card ids on demand.
@@ -35,8 +42,13 @@ class EditorialAgendaBridge:
         counterpoints: list[str] | None = None,
         discussion_hooks: list[str] | None = None,
         triggers: list[str] | None = None,
+        single_use: bool = False,
     ) -> EditorialCard:
-        """Create or upsert a structured operator-authored cue card."""
+        """Create or upsert a structured operator-authored cue card.
+
+        Cards are reusable by default (D1); pass single_use=True to opt a card
+        into retiring after its first injection.
+        """
 
         return self.store.upsert(
             EditorialCard(
@@ -46,6 +58,7 @@ class EditorialAgendaBridge:
                 counterpoints=counterpoints or [],
                 discussion_hooks=discussion_hooks or [],
                 triggers=triggers or [],
+                single_use=single_use,
             )
         )
 
@@ -83,8 +96,13 @@ class EditorialAgendaBridge:
         ambiguity, or any store/matching error (fail-open).
         """
         try:
+            now = datetime.now(timezone.utc)
+            cooldown_s = settings.EDITORIAL_REUSE_COOLDOWN_SECONDS
             cards = self.store.list_armed()
-            eligible = [c for c in cards if not c.is_expired()]
+            eligible = [
+                c for c in cards
+                if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
+            ]
             from opencohost.core.editorial_matching import match_score, select_card
             text = (topic.title or "") + (" " + topic.angle if topic.angle else "")
             candidates = [c for c in eligible if match_score(text, c) >= 0.8]
@@ -117,29 +135,79 @@ class EditorialAgendaBridge:
     def resolve_direct_context(self, query_text: str) -> str | None:
         """Return an editorial context block for a direct host query, or None.
 
-        NON-CONSUMING: does NOT activate, mark used, or change card status.
-        The card stays ARMED so the agenda path can still attach it.
+        NON-CONSUMING at resolve time: does NOT activate, mark used, or change
+        card status. The card stays ARMED so the agenda path can still attach
+        it. Records the matched card id as pending (D2) so the engine's
+        post-generation hook (commit_direct_injection) can commit the USED /
+        record_injection transition. Clears any stale pending id at entry so a
+        prior turn that never committed cannot leak into this one.
         Fail-open: any store/matching exception logs a warning and returns None.
         """
+        self._pending_direct_card_id = None
         try:
+            now = datetime.now(timezone.utc)
+            cooldown_s = settings.EDITORIAL_REUSE_COOLDOWN_SECONDS
             cards = self.store.list_armed()
-            eligible = [c for c in cards if not c.is_expired()]
+            eligible = [
+                c for c in cards
+                if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
+            ]
             from opencohost.core.editorial_matching import select_card
             card = select_card(query_text, eligible)
             if card is None:
                 return None
+            self._pending_direct_card_id = card.id
             return card.to_prompt_block()
         except Exception as exc:
             log.warning("editorial direct context: store error: %s", exc)
             return None
 
-    def mark_used_after_successful_generation(self) -> bool:
-        """Mark the linked card used once Agenda accepts a generated response."""
+    def commit_direct_injection(self) -> None:
+        """Commit the pending direct-turn injection recorded by resolve_direct_context.
 
+        Invoked by the engine (direct_editorial_usage_recorder) once, right
+        after a successful direct generation (D2). single_use → store.mark_used
+        (→USED); reusable → store.record_injection (stays ARMED, last_injected_at
+        set). Reads+clears the pending id first so a failed generation or a store
+        error can never double-commit on a later turn. Fail-open: store errors
+        are logged, never raised — the engine worker thread is the only caller.
+        """
+        card_id = self._pending_direct_card_id
+        self._pending_direct_card_id = None
+        if not card_id:
+            return
+        try:
+            card = self.store.get(card_id)
+            if card is not None and card.single_use:
+                self.store.mark_used(card_id)
+            else:
+                self.store.record_injection(card_id)
+        except Exception as exc:
+            log.warning("editorial direct commit: store error: %s", exc)
+
+    def mark_used_after_successful_generation(self) -> bool:
+        """Commit the linked card once Agenda accepts a generated response (D3).
+
+        single_use → mark_used (→USED, current behavior). Reusable →
+        record_injection + reset ACTIVE→ARMED so the one-ACTIVE gate frees up,
+        then detach the topic link. Method name/signature unchanged so both host
+        recorders need zero changes.
+        """
         topic: AgendaTopic | None = self.controller.active_topic
         if not topic or not topic.editorial_card_id or not topic.editorial_card_consumed:
             return False
-        if self.store.mark_used(topic.editorial_card_id):
+        card_id = topic.editorial_card_id
+        card = self.store.get(card_id)
+        if card is not None and not card.single_use:
+            # Reusable: record usage and return the card to ARMED (still eligible).
+            if self.store.record_injection(card_id):
+                self.store._set_status(card_id, EditorialCardStatus.ARMED)
+                topic.editorial_card_id = None
+                topic.editorial_card_consumed = False
+                return True
+            return False
+        # single_use (or a card that vanished): retire to USED as before.
+        if self.store.mark_used(card_id):
             topic.editorial_card_id = None
             topic.editorial_card_consumed = False
             return True

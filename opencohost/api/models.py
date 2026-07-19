@@ -942,6 +942,8 @@ class AgentCardRequest(BaseModel):
     discussion_hooks: list[str] = []
     triggers: list[str] = []
     expires_at: str | None = None
+    # Reusable by default (D1/D6); True opts the card into retire-on-first-use.
+    single_use: bool = False
 
 
 class AgentCardResponse(BaseModel):
@@ -970,6 +972,7 @@ class AgentCardListItem(BaseModel):
     origin: str
     expires_at: str | None
     updated_at: str
+    single_use: bool
 
 
 class AgentCardsListResponse(BaseModel):

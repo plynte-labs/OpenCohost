@@ -424,6 +424,10 @@ class MotorVocalIA(threading.Thread):
         self.agenda_output_transformer = None
         self.agenda_controller = None               # Phase 0: metrics access
         self.direct_editorial_context_provider = None  # set externally by app_shell
+        # Direct-turn editorial USED trigger (D2): fired once after a successful
+        # direct generation that injected a card block. Wired to
+        # bridge.commit_direct_injection by the host; stays None otherwise.
+        self.direct_editorial_usage_recorder = None
 
         # Optional chat-activation telemetry seams (measure-first, off-by-default).
         # app_shell sets these ONLY when chat diagnostics are enabled; in production
@@ -1814,6 +1818,17 @@ class MotorVocalIA(threading.Thread):
 
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
+
+            # Editorial direct-mode USED trigger (D2): commit the pending
+            # injection exactly once, only when this turn actually injected a
+            # card block AND produced a non-empty dialogo. Single engine worker
+            # thread is the only caller (no lock needed). Fail-open \u2014 a recorder
+            # error must never break a turn.
+            if editorial_block and dialogo and self.direct_editorial_usage_recorder is not None:
+                try:
+                    self.direct_editorial_usage_recorder()
+                except Exception:
+                    logger.warning("editorial direct usage recorder failed", exc_info=True)
 
             # Layer 4 observability: log prompt-window utilization on every populated
             # response and raise a UI pressure signal when it crosses the high mark.

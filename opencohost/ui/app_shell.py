@@ -284,6 +284,10 @@ class VocalAIApp(ctk.CTk):
         self.editorial_agenda = EditorialAgendaBridge(self.editorial_cards, self.kira_agenda)
         self.editorial_agenda.register_provider()
         self.motor_ia.direct_editorial_context_provider = self.editorial_agenda.resolve_direct_context
+        # D2 parity with engine_host: fire the direct-turn USED trigger. Coverage
+        # gap — no CTK test exercises this seam (track debt: editorial_cards_reusable_20260718,
+        # CTK shell deprioritized per AGENT_HANDOFF.md).
+        self.motor_ia.direct_editorial_usage_recorder = self.editorial_agenda.commit_direct_injection
         self.motor_ia.agenda_output_validator = self.kira_agenda.accept_output
         self.motor_ia.agenda_output_preview_validator = self.kira_agenda.preview_accept_output
         self.motor_ia.agenda_output_recorder = self._record_accepted_kira_agenda_output

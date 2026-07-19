@@ -18,12 +18,19 @@ from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaControl
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_card(store: EditorialCardStore, topic: str, triggers: list[str] | None = None) -> EditorialCard:
+def _make_card(
+    store: EditorialCardStore,
+    topic: str,
+    triggers: list[str] | None = None,
+    *,
+    single_use: bool = False,
+) -> EditorialCard:
     card = store.upsert(EditorialCard(
         topic=topic,
         summary=f"Summary about {topic}.",
         streamer_take=f"My take on {topic}.",
         triggers=triggers or [],
+        single_use=single_use,
     ))
     return card
 
@@ -67,7 +74,8 @@ def test_auto_attach_matching_topic_injects_editorial_context(tmp_path) -> None:
 def test_mark_used_after_generation(tmp_path) -> None:
     store, controller, bridge = _setup(tmp_path)
 
-    card = _make_card(store, "GTA retraso confirmado")
+    # D3/D7 pin: only a single_use card retires to USED via the recorder path.
+    card = _make_card(store, "GTA retraso confirmado", single_use=True)
     store.arm(card.id)
 
     topic = controller.add_topic("El retraso de GTA confirmado noticias", approved=True)
@@ -188,3 +196,28 @@ def test_corrupt_db_agenda_still_works(tmp_path) -> None:
     action = controller.next_action()
     assert action.kind == "enqueue"
     assert "<editorial_context>" not in action.prompt
+
+
+# ---------------------------------------------------------------------------
+# WU2/D4: cooldown filter excludes a recently-injected card from auto-attach
+# ---------------------------------------------------------------------------
+
+def test_auto_attach_skips_card_in_cooldown(tmp_path) -> None:
+    """D4: a reusable card injected within EDITORIAL_REUSE_COOLDOWN_SECONDS is
+    filtered from the auto-attach eligible set, so no editorial context is
+    injected for a matching topic and the card stays ARMED (never activated)."""
+    store, controller, bridge = _setup(tmp_path)
+
+    card = _make_card(store, "GTA retraso confirmado")
+    store.arm(card.id)
+    store.record_injection(card.id)  # last_injected_at = now -> in cooldown
+
+    topic = controller.add_topic("El retraso de GTA confirmado noticias", approved=True)
+    controller.queue_topic(topic.id)
+
+    controller.enable()
+    action = controller.next_action()
+
+    assert action.kind == "enqueue"
+    assert "<editorial_context>" not in action.prompt
+    assert store.get(card.id).status is EditorialCardStatus.ARMED
