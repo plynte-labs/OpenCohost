@@ -1263,11 +1263,22 @@ PREFERENCE (owner runs `monologue`), not a defect.
   min-w-[1180px] → w-full min-w-0. KiraCover responsive-avatar suggestion NOT applied (owner-locked file). Owner runtime
   validation pending at 1280px viewport.*
 
-- [ ] **Track: Chat Commands Wiring + Chat/Comandos/Logs tabs**
+- [~] **Track: Chat Commands Wiring + unified chat tabs**
   *Link: [./tracks/chat_commands_wiring_20260718/](./tracks/chat_commands_wiring_20260718/)*
   *Status 2026-07-18: PROPOSAL. 6 of 7 palette commands already have live endpoints (only /musica partial: transport is
   client-side by design, free-text search has no backend). Logs tab achievable UI-only: GET /api/events is already
   metadata-only detail=null and polled into the client eventStore — privacy-safe by construction; "no endpoint" claim in
-  SettingsPopover was stale. Recommended first tickets: /temas (pure read, zero decisions) + ActionRow submit pipe (the
-  single choke point unblocking 4 commands). 6 OWNER DECISIONS block later WUs (perfil target, acciones preset mapping,
-  sesion button mapping, musica scope, logs option a/b, agenda es-vocab). Next: spec + design after owner picks.*
+  SettingsPopover was stale. 6 owner decisions resolved same day (perfil→cohost profiles explicit, acciones switch→real
+  filter_policy selector with apply-if-connected semantics, sesion toggle, musica library/mood only, logs client-side,
+  agenda closed es-vocab).*
+  *Status 2026-07-19: IMPLEMENTED (spec 36R → design 13D/11WU → 3 apply batches, all 7 commands live) + OWNER LAYOUT
+  CORRECTION mid-track: rejected the two-strip layout and the always-visible palette → ONE unified tablist
+  Todo|Chat|Comandos|Alertas (+Logs when "Mostrar logs" on) and an emergent launcher popover above the composer
+  ("/" or "!", combobox ARIA, keyboard nav). Codex-as-judge: round 1 REJECT (7 findings: same-tick double-submit race,
+  document-global launcher keys, missing combobox ARIA, raw backend codes in user copy + tests cementing it, vocab
+  duplication) → all fixed; round 2 → zero-match combobox state fixed; final verdict REJECT on ONE residual: the child
+  forwards aria-activedescendant to the parent via useEffect, so one committed frame can show a stale option id while
+  narrowing the filter. Fix rounds exhausted → FOLLOW-UP (owner precedent from the backend ABA): lift the highlight
+  state to ConversationPanel so all combobox attrs derive in the same render. Also open: R19 estandar→monologue and
+  R33 "Media" label owner sign-offs (flagged in-source), launcher-select-routes-to-Comandos interpretive call.
+  UI commits 28a753f..a67ac01 (856/856 tests). Owner runtime validation pending.*
