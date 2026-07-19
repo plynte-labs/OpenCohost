@@ -1252,8 +1252,8 @@ PREFERENCE (owner runs `monologue`), not a defect.
   Backend commits 38af63f + ea7d05e + e90881f (LOCAL, unpushed); UI commits eddb2f5 + 5e64d20 (pushed). Codex-as-judge
   ran 3 rounds (receipts 001cea44…, 571445e2…, 385126a9…): all round-1/2 findings fixed and verified; ONE open HIGH —
   theoretical ABA race in stale compensation (release could free a newer activation). Judgment-day fix rounds exhausted;
-  OWNER DECISION pending: accept as follow-up (single engine worker + agenda_lock make it unreachable today; fix shape:
-  expected-updated_at token in the conditional release) or authorize an extra fix round. Backend push held on that call.*
+  OWNER DECISION 2026-07-18: ACCEPTED as follow-up (unreachable today — single engine worker + agenda_lock; fix shape:
+  expected-updated_at token in the conditional release). Backend pushed.*
 
 - [x] **Ticket: Controls UX — sub-collapsibles, textarea heights, 465px chat, horizontal-scroll fix (UI repo)**
   *Status 2026-07-18: DONE and pushed (OpenCohost_UI c05e875 + db8d13f). Codex-as-judge round 1 REJECT (MAJOR: collapsed

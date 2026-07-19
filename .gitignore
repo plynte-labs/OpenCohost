@@ -89,6 +89,7 @@ mudanza.py
 # ── Local tooling dirs ──
 .opencode/
 .agents/
+.orchestrator/
 VoiceAItemp*/
 
 # ── User assets ──
