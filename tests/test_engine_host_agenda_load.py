@@ -119,3 +119,30 @@ def test_engine_host_routes_motor_events_to_agenda(tmp_path, monkeypatch):
         assert topic.turns_spoken >= 1
     finally:
         host.stop()
+
+
+def test_engine_host_speaking_start_wires_prefetch_hook(tmp_path, monkeypatch):
+    # Fase 1 (no-dead-air): speaking_start must spawn a background prefetch of
+    # the next agenda turn while the current one is still playing.
+    motor = _fake_motor()
+    motor.current_speech_source = "kira-agenda"
+    motor.has_pending_priority_before.return_value = False
+    motor.prefetch_agenda.return_value = True
+    host = _start_host(tmp_path, monkeypatch, motor, tmp_path / "cards.db")
+    try:
+        host._agenda_driver.stop()  # drive deterministically
+        agenda = host.agenda
+        topic = agenda.add_topic("Tema uno", approved=True)
+        agenda.queue_topic(topic.id)
+        agenda.enable()
+        with host.agenda_lock:
+            agenda.next_action()  # -> GENERATING, opens the topic
+        assert agenda.state == AgendaState.GENERATING
+
+        host._dispatch_motor_event("speaking_start")  # -> SPEAKING + prefetch hook
+
+        assert agenda.state == AgendaState.SPEAKING
+        assert motor.prefetch_agenda.called, "speaking_start must spawn a background prefetch"
+        assert host._agenda_driver._prefetch is not None
+    finally:
+        host.stop()

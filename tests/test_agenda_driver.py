@@ -12,6 +12,7 @@ import threading
 
 from opencohost.api.agenda_driver import (
     AgendaDriver,
+    PrefetchState,
     enqueue_agenda_action,
     route_motor_event_to_agenda,
 )
@@ -34,6 +35,22 @@ class FakeMotor:
         self.dropped_prefixes = []
         self.interrupted = 0
         self.cleared_prefetch = 0
+        # ── prefetch surface (Fase 1: no-dead-air) ────────────────────────
+        # Deterministic stand-in for the engine prefetch primitives. Tests
+        # toggle these flags to model the worker lifecycle without threads.
+        self.current_speech_source = None
+        self.current_processing_source = ""
+        self.prefetch_calls = []  # dicts: payload/priority/source
+        self.prefetch_started = True  # what prefetch_agenda returns
+        self.draft_ready = False  # wait_prefetched_agenda(0) result
+        self.pending = False  # prefetch_pending() result
+        self.play_result = True  # play_prefetched_agenda() result
+        self.played = 0
+        # Priorities of queued items. Mirrors the real engine, which answers
+        # has_pending_priority_before(p) as any(item_priority < p) — NOT an
+        # exact-key lookup — so a wrong-priority-arg regression is catchable.
+        self.queued_priorities = []
+        self.wait_timeouts = []  # every timeout passed to wait_prefetched_agenda
 
     def enqueue(self, payload, priority=1, source="chat", history_text=None):
         self.enqueued.append(
@@ -45,6 +62,26 @@ class FakeMotor:
 
     def clear_prefetched_agenda(self):
         self.cleared_prefetch += 1
+        self.draft_ready = False
+        self.pending = False
+
+    def prefetch_agenda(self, payload, priority=2, source="kira-agenda"):
+        self.prefetch_calls.append({"payload": payload, "priority": priority, "source": source})
+        return self.prefetch_started
+
+    def wait_prefetched_agenda(self, timeout=0.0):
+        self.wait_timeouts.append(timeout)
+        return self.draft_ready
+
+    def prefetch_pending(self):
+        return self.pending
+
+    def play_prefetched_agenda(self):
+        self.played += 1
+        return self.play_result
+
+    def has_pending_priority_before(self, priority):
+        return any(p < priority for p in self.queued_priorities)
 
     def drop_pending_sources(self, prefixes):
         self.dropped_prefixes.append(prefixes)
@@ -56,6 +93,12 @@ class FakeMotor:
     def reset(self):
         self.enqueued.clear()
         self.replaced.clear()
+        # Establish a clean baseline for prefetch observation counters so tests
+        # measure only the action under test, not opening-tick bookkeeping.
+        self.cleared_prefetch = 0
+        self.played = 0
+        self.prefetch_calls.clear()
+        self.wait_timeouts.clear()
 
 
 class RejectingFakeMotor(FakeMotor):
@@ -479,3 +522,344 @@ def test_soft_stop_terminates_after_rejected_closing():
     driver.tick_once()  # OFF is inert -> no further motor traffic
     assert motor.enqueued == []
     assert motor.replaced == []
+
+
+# ── Fase 1: no-dead-air prefetch wiring ────────────────────────────────────
+
+
+def _arm_prefetch(controller, driver, motor, source="kira-agenda"):
+    """Open a topic, enter SPEAKING, and fire the speaking_start prefetch hook.
+
+    Mirrors what EngineHost does on a real speaking_start: after
+    mark_generation_accepted flips the controller to SPEAKING, the driver
+    previews N+1 and spawns a background generation.
+    """
+    driver.tick_once()  # open topic -> GENERATING, replace_pending turn N
+    route_motor_event_to_agenda(controller, "speaking_start")  # -> SPEAKING
+    motor.current_speech_source = source
+    driver.maybe_start_prefetch(controller, motor)
+
+
+def test_speaking_start_triggers_prefetch_for_agenda_speech():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+
+    _arm_prefetch(controller, driver, motor)
+
+    assert motor.prefetch_calls, "speaking_start should spawn a background prefetch"
+    assert motor.prefetch_calls[-1]["source"].startswith("kira-agenda")
+    assert isinstance(driver._prefetch, PrefetchState)
+    assert driver._prefetch.topic_id == controller.active_topic.id
+
+
+def test_speaking_start_skips_prefetch_for_non_agenda_speech_source():
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    driver.tick_once()
+    route_motor_event_to_agenda(controller, "speaking_start")
+    motor.current_speech_source = "ptt"  # a human owns the mic (#344)
+
+    driver.maybe_start_prefetch(controller, motor)
+
+    assert motor.prefetch_calls == []
+    assert driver._prefetch is None
+
+
+def test_speaking_start_skips_prefetch_when_interactive_pending():
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    motor.queued_priorities = [1]  # a chat item (priority 1) queued ahead of agenda (#338)
+    driver = _driver(controller, motor)
+    driver.tick_once()
+    route_motor_event_to_agenda(controller, "speaking_start")
+    motor.current_speech_source = "kira-agenda"
+
+    driver.maybe_start_prefetch(controller, motor)
+
+    assert motor.prefetch_calls == []
+    assert driver._prefetch is None
+
+
+def test_prefetch_stash_survives_mid_speech_tick():
+    # The 4.5s cadence fires MANY ticks inside a 60s speech window. A tick while
+    # the turn is still SPEAKING must NOT drop or consume the in-flight draft.
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.is_speaking = True  # motor still speaking turn N
+
+    driver.tick_once()
+
+    assert driver._prefetch is not None, "mid-speech tick must not drop the draft"
+    assert motor.played == 0
+    assert motor.cleared_prefetch == 0
+
+
+def test_speaking_end_consumes_ready_draft_without_new_generation():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()  # drop the opening replace_pending
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    driver.tick_once()  # consume BEFORE next_action
+
+    assert motor.played == 1, "the cached draft must be spoken"
+    assert motor.enqueued == [] and motor.replaced == [], "no second LLM generation"
+    assert driver._prefetch is None
+    assert all(t == 0 for t in motor.wait_timeouts), "consume must never block on the lock"
+
+
+def test_valid_draft_is_consumed_before_next_action_can_clobber_it():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")
+    driver.tick_once()
+
+    assert motor.played == 1
+    assert motor.replaced == [] and motor.enqueued == []
+    assert motor.cleared_prefetch == 0, "a consumed draft is never cleared by an enqueue"
+
+
+def test_consume_yields_to_pending_ptt_and_clears_draft():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    motor.queued_priorities = [0]  # a PTT (priority 0) arrived while the draft waited
+
+    driver.tick_once()
+
+    assert motor.played == 0, "interactive work runs first — draft not played"
+    assert driver._prefetch is None
+    assert motor.cleared_prefetch >= 1
+
+
+def test_consume_drops_draft_when_topic_vanished():
+    # active_topic went away before consume (e.g. emergency clear): the topic-None
+    # staleness guard drops the draft and falls back to a normal tick.
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")
+    controller.active_topic = None  # topic vanished before consume
+
+    driver.tick_once()
+
+    assert motor.played == 0
+    assert driver._prefetch is None
+    assert motor.cleared_prefetch >= 1
+
+
+def test_consume_drops_draft_on_topic_id_mismatch():
+    # A DIFFERENT (non-None) topic is active at consume time — the draft was
+    # pinned to the old topic id, so the id-mismatch guard drops it (this is the
+    # branch a topic-None test can't reach).
+    controller, topic1 = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    topic2 = controller.add_topic("Tema dos", "angulo", approved=True)
+    controller.queue_topic(topic2.id)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)  # opens topic1, stash pinned to topic1.id
+    assert driver._prefetch.topic_id == topic1.id
+    motor.reset()
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    controller.active_topic = topic2  # a different topic is active now (id mismatch)
+
+    driver.tick_once()
+
+    assert motor.played == 0, "a draft pinned to the old topic must not be played"
+    assert driver._prefetch is None
+    assert motor.cleared_prefetch >= 1
+
+
+def test_late_draft_requests_short_retick_without_enqueue():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = False  # not ready at speaking_end
+    motor.pending = True  # worker still generating
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    driver.tick_once()
+
+    assert motor.played == 0
+    assert motor.enqueued == [] and motor.replaced == [], "no fallback while draft is in flight"
+    assert driver._prefetch is not None, "draft kept for the re-tick"
+    assert driver._next_wait == 0.25
+
+
+def test_failed_prefetch_falls_back_to_plain_generation():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = False
+    motor.pending = False  # worker finished with nothing (error/reject)
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    driver.tick_once()
+
+    assert motor.played == 0
+    assert driver._prefetch is None
+    assert motor.replaced, "must fall back to a normal generation"
+
+
+def test_play_false_after_start_restores_waiting_signal():
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = True
+    motor.play_result = False  # engine cache raced empty between checks
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    driver.tick_once()
+
+    assert motor.played == 1, "play was attempted"
+    assert controller.state == AgendaState.WAITING_SIGNAL, "state restored after failed play"
+    assert driver._prefetch is None
+
+
+def test_stop_turn_prefetch_full_cycle_no_topic_closing_deadlock():
+    # #468: consuming a kira-agenda-stop prefetch drives the controller through
+    # TOPIC_CLOSING. The speaking_start guard must include TOPIC_CLOSING so the
+    # closing turn completes instead of deadlocking.
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+
+    def consume():
+        motor.draft_ready = True
+        route_motor_event_to_agenda(controller, "speaking_end")
+        driver.tick_once()
+
+    # Turn 1: continue draft prefetched during its speech, then consumed.
+    _arm_prefetch(controller, driver, motor)
+    assert motor.prefetch_calls[-1]["source"] == "kira-agenda"
+    consume()  # adopt+play continue -> GENERATING (turn 2 queued)
+
+    # Turn 2 is the last: its prefetch must be a STOP turn.
+    route_motor_event_to_agenda(controller, "speaking_start")  # GENERATING -> SPEAKING
+    motor.current_speech_source = "kira-agenda"
+    driver.maybe_start_prefetch(controller, motor)
+    assert motor.prefetch_calls[-1]["source"] == "kira-agenda-stop"
+    consume()  # adopt stop -> TOPIC_CLOSING, play
+
+    # The closing turn speaks — TOPIC_CLOSING must reach SPEAKING (the #468 fix).
+    route_motor_event_to_agenda(controller, "speaking_start")
+    assert controller.state == AgendaState.SPEAKING
+    motor.current_speech_source = "kira-agenda"
+    driver.maybe_start_prefetch(controller, motor)
+    assert driver._prefetch is None, "no prefetch after a closing turn (topic CLOSING)"
+    route_motor_event_to_agenda(controller, "speaking_end")
+
+    assert topic.status == TopicStatus.COMPLETED
+    assert controller.active_topic is None
+    assert controller.state in {AgendaState.IDLE, AgendaState.OFF}
+
+
+def test_enqueue_agenda_action_still_clears_on_new_generation():
+    # The other half of the conditional-clear property: a GENUINE new generation
+    # (reached only when no valid draft was consumed) supersedes the engine draft
+    # and drops the driver stash.
+    controller, _ = _controller_with_queued_topic()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    driver._prefetch = PrefetchState(action=object(), topic_id="stale")
+    action = AgendaAction(kind="enqueue", prompt="hola", source="kira-agenda", priority=2)
+
+    enqueue_agenda_action(motor, action, driver=driver)
+
+    assert motor.cleared_prefetch == 1, "a new generation clears the engine draft"
+    assert driver._prefetch is None, "and drops the driver stash"
+
+
+def test_prefetch_never_blocks_under_the_lock():
+    # The lock is held across the whole tick body, so the driver must only SPAWN
+    # (prefetch_agenda) and poll NON-BLOCKING (wait timeout=0); a real ~17s
+    # generation must never be awaited under the lock.
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")
+    driver.tick_once()  # consume
+
+    assert motor.wait_timeouts, "consume polled readiness at least once"
+    assert all(t == 0 for t in motor.wait_timeouts), "every readiness poll was non-blocking"
+
+
+def test_run_honors_next_wait_retick_for_late_draft():
+    # Prove the RUNNING loop honors the short _next_wait re-tick (not the full
+    # cadence) when a draft is still generating at speaking_end. A 30s cadence
+    # would never catch the draft; the 0.25s re-tick must.
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor, tick_seconds=30.0)
+    # Arm deterministically on this thread before the loop starts.
+    driver.tick_once()  # open topic -> GENERATING
+    route_motor_event_to_agenda(controller, "speaking_start")  # -> SPEAKING
+    motor.current_speech_source = "kira-agenda"
+    driver.maybe_start_prefetch(controller, motor)
+    motor.reset()
+    motor.draft_ready = False
+    motor.pending = True  # worker still generating at speaking_end
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+
+    driver.start()
+    try:
+        driver.nudge()  # first tick: late draft -> requests a 0.25s re-tick
+        wait = threading.Event()
+        wait.wait(0.3)  # let a couple of short re-ticks elapse
+        motor.draft_ready = True  # draft lands
+        motor.pending = False
+        for _ in range(200):  # up to ~2s for a re-tick to consume it
+            if motor.played:
+                break
+            wait.wait(0.01)
+        assert motor.played == 1, "the 0.25s re-tick (not the 30s cadence) consumed the draft"
+    finally:
+        driver.stop(timeout=2.0)

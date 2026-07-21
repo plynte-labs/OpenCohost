@@ -698,6 +698,8 @@ class MotorVocalIA(threading.Thread):
             self._apply_model_switch(new_model)
 
         elif tipo == "switch_llm_tier":
+            # A draft generated under the old tier must never be spoken (#344).
+            self.clear_prefetched_agenda()
             self.switch_llm_tier(str(payload))
 
         elif tipo == "set_motor_tts":
@@ -738,6 +740,8 @@ class MotorVocalIA(threading.Thread):
                 )
 
         elif tipo == "set_profile":
+            # A draft generated under the old persona must never be spoken (#344).
+            self.clear_prefetched_agenda()
             prompt_override_active = "prompt" in payload
             self.system_prompt = payload.get("prompt", i18n_active.system_prompt())
             self.use_system_role = payload.get("use_system", False)
@@ -876,6 +880,17 @@ class MotorVocalIA(threading.Thread):
             self._prefetch_done.wait(timeout)
         with self._prefetch_lock:
             return self._prefetched_agenda is not None
+
+    def prefetch_pending(self) -> bool:
+        """True while a prefetch worker is still generating (no draft yet).
+
+        Distinguishes "draft is late, keep waiting" (worker alive, no cache) from
+        "worker finished with nothing — fall back now" (thread dead / no cache).
+        A ready draft returns False (it's no longer pending — consume it).
+        """
+        with self._prefetch_lock:
+            thread = self._prefetch_thread
+            return bool(thread is not None and thread.is_alive() and self._prefetched_agenda is None)
 
     def has_pending_priority_before(self, priority: int) -> bool:
         """Return True when queued work should run before a cached agenda draft."""

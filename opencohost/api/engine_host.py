@@ -518,8 +518,20 @@ class EngineHost:
             return
         driver = self._agenda_driver
         nudge = driver.nudge if driver is not None else None
+        # On speaking_start of an agenda turn, spawn a background prefetch of the
+        # NEXT turn so generation overlaps this turn's TTS (Fase 1: no-dead-air).
+        start_prefetch = (
+            (lambda: driver.maybe_start_prefetch(agenda, self.motor))
+            if driver is not None
+            else None
+        )
         with self.agenda_lock:
-            route_motor_event_to_agenda(agenda, status, on_speech_complete=nudge)
+            route_motor_event_to_agenda(
+                agenda,
+                status,
+                on_speech_complete=nudge,
+                on_agenda_speaking_start=start_prefetch,
+            )
 
     def start(self) -> None:
         self._acquire_lock()
