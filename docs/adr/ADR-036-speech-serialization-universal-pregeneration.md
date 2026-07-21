@@ -292,7 +292,7 @@ Strict TDD, RED before fix, ordered:
    one-line LLM generation (adds a generation call)?
 
 The seams for WU5 are named but not built: `interrupt_speaking()`
-(`llm_engine.py:461`) remains the single cut primitive; an interrupted draft
+(`llm_engine.py:468`) remains the single cut primitive; an interrupted draft
 would be stashed (epoch-frozen) rather than cleared, which under the unified
 cache model is just "leave the cache entry, requeue the interactive item at
 its own priority."

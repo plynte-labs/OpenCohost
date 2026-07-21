@@ -1337,3 +1337,19 @@ PREFERENCE (owner runs `monologue`), not a defect.
   prefetch — concrete shape: queued-item pregeneration (an interactive item sitting in the priority queue while TTS
   plays gets generated in background; played from cache at speech end), unified by mutex option B (queue as the single
   ordering authority) so agenda-agenda and interactive share one structure.*
+  *Owner decisions 2026-07-21 (WU5 UNBLOCKED): D1 cut = PTT-only + position-aware margin (early <25% of speech: defer;
+  mid 25-75%: motor decides by remaining-speech threshold ~20s; late >75%: defer; typed NEVER cuts — WU3 pregen makes
+  deferral cheap). D2 return = by-default with deterministic skips only (topic gone/CLOSING/stopped, epoch invalidated,
+  detour > 2 interactive turns). D3 connector = parameterized pool floor (new i18n slot, "{tema}" param) + opportunistic
+  generated upgrade during the answer's TTS (lowest slot priority, timeout-0 check at return — never adds latency).
+  Full spec + ACs in design-fase2.md WU5 [v3].*
+  *Status 2026-07-21 (WU1 DONE): RED race test landed (tests/test_speech_serialization_race.py, xfail-strict) + 14-line
+  test-only pop-boundary hook in llm_engine.py. Raw red proves occupancy==2 inside _hablar, deterministic (no sleeps,
+  Event-pinned). Judgment-day: Judge A (Fable) BLOCKER — self-contradictory pass condition (overlap assert vs max==1,
+  green-after-WU2 unsatisfiable) + CRITICAL — test pinned the CTK-legacy entry point WU2 keeps; Judge B (Opus) same
+  legacy-path MAJOR + xfail-swallows-harness-breakage + unpinned hook window. Root cause: latent design contradiction
+  (§1 "DELETED" vs §2.1 v2 "NOT deleted") — fixed in design [v3]. Fix round (sonnet): consume now drives the REAL
+  AgendaDriver path (production-faithful AND the true WU2 gate — same assertion flips green), HARNESS-FAILURE
+  RuntimeErrors distinguish broken harness from legitimate red, hook self-verifies its window, teardown hygiene.
+  Re-verified: xfail green, raw red at the occupancy assertion, 3/3 deterministic, 94 no-regression. ADR-037 written
+  (interruption policy) with judge fixes (misquote attribution, stale line refs). Next: WU2.*
