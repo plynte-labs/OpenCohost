@@ -418,6 +418,13 @@ class MotorVocalIA(threading.Thread):
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetched_agenda: Optional[dict] = None
         self._prefetch_epoch: int = 0
+
+        # Test-only seam (agenda_no_dead_air fase 2, design-fase2.md §3 WU1):
+        # fires at the pop->processing boundary in _process_priority_queue,
+        # after the item is popped (pq_lock released) and before _processing
+        # is set True. None/no-op in production; lets a test hold that window
+        # open to pin the speech-overlap race deterministically.
+        self._test_pop_boundary_hook: Optional[Callable[[], None]] = None
         self.agenda_output_validator = None
         self.agenda_output_preview_validator = None
         self.agenda_output_recorder = None
@@ -1112,6 +1119,13 @@ class MotorVocalIA(threading.Thread):
             # 5-tuple (payload, source, history_text) produced by enqueue().
             priority, ts, payload, source, *rest = item
             history_text = rest[0] if rest else None
+
+        # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
+        # popped but _processing is still False here — this is exactly the
+        # window a concurrent consumer (e.g. play_prefetched_agenda) could
+        # observe as "clear to speak". No-op in production.
+        if self._test_pop_boundary_hook is not None:
+            self._test_pop_boundary_hook()
 
         source_label = "PTT" if source == "ptt" else source
         self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
