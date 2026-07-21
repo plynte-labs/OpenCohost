@@ -1282,3 +1282,58 @@ PREFERENCE (owner runs `monologue`), not a defect.
   state to ConversationPanel so all combobox attrs derive in the same render. Also open: R19 estandar→monologue and
   R33 "Media" label owner sign-offs (flagged in-source), launcher-select-routes-to-Comandos interpretive call.
   UI commits 28a753f..a67ac01 (856/856 tests). Owner runtime validation pending.*
+  *Status 2026-07-21: OWNER RUNTIME VALIDATION — /agenda programar OK, /musica OK, /vivo connects. FOLLOW-UPS from
+  owner testing (/acciones CTK-parity gaps, "apuntar, no arreglar" per owner): (1) the "Contrato de entrada / Input
+  Contract (contexto real)" switch cannot be activated — still shows the local-change notice because no filter_policy
+  preset value was ever mapped to it (the pending preset decision from 2026-07-18 was never resolved); (2) rate floor
+  cannot go below the preset steps — owner needs 0.5 msg/s for dead chats (1 msg/10min, 0 viewers); (3) stream-action
+  parameters are preset-only — no free numeric/text input like CTK's advanced panel. Fix shape: map the input-contract
+  switch to a real filter_policy value (needs owner preset decision), replace preset-only rate with a bounded free
+  numeric input (min 0.5), and audit which CTK advanced-panel knobs the endpoint already accepts vs. which need API work.
+  FOLLOW-UP (owner in-code TODO, StreamPanel.tsx 2026-07-20): the "Conectar" button should toggle to "Desconectar" when
+  connected (inherit the disconnect responsibility) and the separate lower Desconectar button should be removed.*
+
+- [~] **Track: Agenda "No Dead Air" — prefetch wiring + interruption connector (API host)**
+  *Link: [./tracks/agenda_no_dead_air_20260719/](./tracks/agenda_no_dead_air_20260719/)*
+  *Status 2026-07-21: PROPOSAL confirmed by runtime log evidence (logs/opencohost_20260721_012124.log): every agenda
+  turn is strictly sequential — "Pipeline TTS completado" → immediately "procesando [kira-agenda]" → 16-19s LLM
+  generation (decode_ms 14.5-17.2s) → next TTS. That gap is the dead air; during each 58-73s speech window the GPU is
+  fully idle. Zero prefetch lines in the log (API host never wired CTK's prefetch primitives — engram #4496). CTK-era
+  gotchas the design must respect: TOPIC_CLOSING deadlock when a kira-agenda-stop prefetch is consumed (engram #468),
+  PTT delayed behind prefetched agenda turns (engram #338), source-blind speaking-event lifecycle + stale prefetch
+  retention (engram #344). Fase 1 design delegated to Fable per owner request.*
+  *Status 2026-07-21: FASE 1 IMPLEMENTED (Opus, strict TDD after Fable hit its usage limit mid-verify; owner
+  approved Opus-leads-Codex fallback but Codex change-mode blocked on bounded-write policy + inspect provider
+  unavailable, so Opus implemented directly). Changes: opencohost/api/agenda_driver.py (+~150: PrefetchState,
+  maybe_start_prefetch, _maybe_consume_prefetch guard chain, consume-before-next_action, _run re-tick),
+  engine_host.py (+8: speaking_start prefetch hook), llm_engine.py (+15: prefetch_pending() + clear_prefetched_agenda
+  in switch_llm_tier/set_profile handlers). 43 focused + 108 regression tests green. Adversarial review: 2 blind
+  Opus judges (Codex judge unavailable — provider down). Verdict: NO blockers/majors — all 8 invariants verified
+  (real #468 cycle, lock order, non-blocking wait, mid-speech no-clobber, staleness). Applied: test honesty +
+  coverage (real topic-id-mismatch test, enqueue-clears, non-block-under-lock, _run re-tick; FakeMotor priority
+  fidelity), design §10 honesty (profile/tier clear is best-effort not "Closed"). FOLLOW-UP (accepted for Fase 1):
+  concurrent _hablar at the turn boundary — play_prefetched_agenda speaks on its own thread while the worker may
+  speak a just-popped interactive/accumulated turn (no _speaking re-entrancy guard, llm_engine.py:3120); µs race,
+  low-probability, CTK-parity, audio-overlap only. Real fix (speaking mutex / route draft through queue) belongs
+  with Fase 2 speech-serialization. Owner runtime validation pending; NOT committed yet.*
+  *Status 2026-07-21 (later): OWNER RUNTIME VALIDATION PASSED + multi-agent analysis (Opus log validator, Sonnet CTK
+  verifier, Sonnet system critic). Log 20260721_131040: 4/4 consume boundaries at 0.34-0.43s dead air (vs 36s avg
+  fallback — ~90x reduction, ~150s dead air removed in a 12-min run). All 5 hypotheses CONFIRMED: slow turn 2 = first
+  prefetch REJECTED by guardrail (contains_internal_leak) → clean fallback; typed-question latency (31.7s floor, ~90s
+  ceiling) = worker synchronous through TTS — IDENTICAL in CTK (verified: CTK does NOT background-generate interactive
+  turns; prefetch is agenda-only by hard source gate; HANDLE_STREAMER/ptt_text is test-only); post-interactive agenda
+  resume pays full gen (39s) by #344 design; margin shrinking (decode throughput HALVED 16→34 ms/tok as prompt grew
+  1500→2900 tok; evictions are the mitigation, not the symptom; tightest margin +22s). Memory-save NOT on the critical
+  path (refuted). FASE 2 PLAN AGREED BY CRITIC: mutex fix = route consumed draft through the priority queue (option b —
+  restores single-dispatch invariant, makes #338 structural, natural substrate for cut/respond/connector/resume), with
+  optional _hablar lock as belt; RED integration test for the race BEFORE the fix. Solidification queue: boundary
+  telemetry line (S), prefetch retry-once on rejection w/ remaining-speech check (S/M — the T2 reject forfeited a 45s
+  retry window), stash-pairing guard (S), prefetch-across-interactive → into Fase 2, decode-growth as own ticket.*
+  *Owner decisions 2026-07-21: (1) guardrail rejections must surface in the FRONTEND logs tab (which guardrail fired,
+  e.g. "prefetch rechazado: contains_internal_leak") — accepted solidification item; turn-2 dead air from the reject is
+  accepted as expected behavior. (2) Interactive latency confirmed as the real pain: the typed answer did NOT generate
+  in background while TTS finished (log: generation started only at speech end, 31s of silence). Fase 2 direction:
+  GENERALIZE the existing prefetch pattern (commit_history=False + commit-at-playback), do NOT build a duplicate API
+  prefetch — concrete shape: queued-item pregeneration (an interactive item sitting in the priority queue while TTS
+  plays gets generated in background; played from cache at speech end), unified by mutex option B (queue as the single
+  ordering authority) so agenda-agenda and interactive share one structure.*

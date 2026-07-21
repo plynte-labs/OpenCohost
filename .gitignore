@@ -90,6 +90,7 @@ mudanza.py
 .opencode/
 .agents/
 .orchestrator/
+.codegraph/
 VoiceAItemp*/
 
 # ── User assets ──
