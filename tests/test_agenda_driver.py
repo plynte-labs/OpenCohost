@@ -44,8 +44,10 @@ class FakeMotor:
         self.prefetch_started = True  # what prefetch_agenda returns
         self.draft_ready = False  # wait_prefetched_agenda(0) result
         self.pending = False  # prefetch_pending() result
-        self.play_result = True  # play_prefetched_agenda() result
-        self.played = 0
+        # WU2: engine pregen-cache model — (payload, source) of the cached draft,
+        # or None. Set by prefetch_agenda, consulted by _clear_prefetch_unless_matches
+        # so the "route the draft's own payload without clearing it" trap is testable.
+        self.cached_draft = None
         # Priorities of queued items. Mirrors the real engine, which answers
         # has_pending_priority_before(p) as any(item_priority < p) — NOT an
         # exact-key lookup — so a wrong-priority-arg regression is catchable.
@@ -64,9 +66,19 @@ class FakeMotor:
         self.cleared_prefetch += 1
         self.draft_ready = False
         self.pending = False
+        self.cached_draft = None
+
+    def _clear_prefetch_unless_matches(self, payload, source):
+        # WU2 match-aware clear: keep the cache when the incoming (payload, source)
+        # IS the cached draft being routed through the queue; clear on any mismatch.
+        if self.cached_draft == (payload, source):
+            return
+        self.clear_prefetched_agenda()
 
     def prefetch_agenda(self, payload, priority=2, source="kira-agenda"):
         self.prefetch_calls.append({"payload": payload, "priority": priority, "source": source})
+        if self.prefetch_started:
+            self.cached_draft = (payload, source)
         return self.prefetch_started
 
     def wait_prefetched_agenda(self, timeout=0.0):
@@ -77,8 +89,13 @@ class FakeMotor:
         return self.pending
 
     def play_prefetched_agenda(self):
-        self.played += 1
-        return self.play_result
+        # WU2: the API-host consume path routes the draft through the queue+worker
+        # (design-fase2.md §2.1 [v3]); it must NEVER call the legacy parallel
+        # speaker. A call here is a regression — fail loudly.
+        raise AssertionError(
+            "play_prefetched_agenda must not be called on the API-host consume "
+            "path after WU2 (the draft is routed through the queue instead)"
+        )
 
     def has_pending_priority_before(self, priority):
         return any(p < priority for p in self.queued_priorities)
@@ -96,7 +113,6 @@ class FakeMotor:
         # Establish a clean baseline for prefetch observation counters so tests
         # measure only the action under test, not opening-tick bookkeeping.
         self.cleared_prefetch = 0
-        self.played = 0
         self.prefetch_calls.clear()
         self.wait_timeouts.clear()
 
@@ -599,7 +615,7 @@ def test_prefetch_stash_survives_mid_speech_tick():
     driver.tick_once()
 
     assert driver._prefetch is not None, "mid-speech tick must not drop the draft"
-    assert motor.played == 0
+    assert motor.replaced == [] and motor.enqueued == [], "a mid-speech tick must not consume"
     assert motor.cleared_prefetch == 0
 
 
@@ -609,14 +625,20 @@ def test_speaking_end_consumes_ready_draft_without_new_generation():
     motor = FakeMotor()
     driver = _driver(controller, motor)
     _arm_prefetch(controller, driver, motor)
+    draft_payload = driver._prefetch.action.prompt  # the draft being routed
     motor.reset()  # drop the opening replace_pending
     motor.draft_ready = True
 
     route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
     driver.tick_once()  # consume BEFORE next_action
 
-    assert motor.played == 1, "the cached draft must be spoken"
-    assert motor.enqueued == [] and motor.replaced == [], "no second LLM generation"
+    # WU2: the draft is ROUTED through the queue (its own payload), not spoken by
+    # a parallel thread — one replace_pending carrying the cached draft's payload.
+    assert len(motor.replaced) == 1, "the cached draft must be routed through the queue"
+    assert motor.replaced[0]["payload"] == draft_payload
+    assert motor.replaced[0]["source"].startswith("kira-agenda")
+    assert motor.enqueued == [], "no fallback enqueue — the draft carried its own payload"
+    assert motor.cleared_prefetch == 0, "routing the draft must NOT clear its own cache (the trap)"
     assert driver._prefetch is None
     assert all(t == 0 for t in motor.wait_timeouts), "consume must never block on the lock"
 
@@ -633,9 +655,10 @@ def test_valid_draft_is_consumed_before_next_action_can_clobber_it():
     route_motor_event_to_agenda(controller, "speaking_end")
     driver.tick_once()
 
-    assert motor.played == 1
-    assert motor.replaced == [] and motor.enqueued == []
-    assert motor.cleared_prefetch == 0, "a consumed draft is never cleared by an enqueue"
+    # Exactly one enqueue — the draft's own routing — so next_action never runs
+    # (consume returns True and short-circuits the tick), i.e. it can't clobber it.
+    assert len(motor.replaced) == 1 and motor.enqueued == []
+    assert motor.cleared_prefetch == 0, "a routed draft is never cleared by its own enqueue"
 
 
 def test_consume_yields_to_pending_ptt_and_clears_draft():
@@ -652,7 +675,8 @@ def test_consume_yields_to_pending_ptt_and_clears_draft():
 
     driver.tick_once()
 
-    assert motor.played == 0, "interactive work runs first — draft not played"
+    # Interactive work runs first — the draft is dropped (yielded), never routed.
+    # (play_prefetched_agenda raising if ever called is the belt-and-braces guard.)
     assert driver._prefetch is None
     assert motor.cleared_prefetch >= 1
 
@@ -673,7 +697,6 @@ def test_consume_drops_draft_when_topic_vanished():
 
     driver.tick_once()
 
-    assert motor.played == 0
     assert driver._prefetch is None
     assert motor.cleared_prefetch >= 1
 
@@ -698,7 +721,7 @@ def test_consume_drops_draft_on_topic_id_mismatch():
 
     driver.tick_once()
 
-    assert motor.played == 0, "a draft pinned to the old topic must not be played"
+    # A draft pinned to the old topic must not be routed — it is dropped as stale.
     assert driver._prefetch is None
     assert motor.cleared_prefetch >= 1
 
@@ -716,7 +739,6 @@ def test_late_draft_requests_short_retick_without_enqueue():
     route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
     driver.tick_once()
 
-    assert motor.played == 0
     assert motor.enqueued == [] and motor.replaced == [], "no fallback while draft is in flight"
     assert driver._prefetch is not None, "draft kept for the re-tick"
     assert driver._next_wait == 0.25
@@ -735,27 +757,16 @@ def test_failed_prefetch_falls_back_to_plain_generation():
     route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
     driver.tick_once()
 
-    assert motor.played == 0
     assert driver._prefetch is None
     assert motor.replaced, "must fall back to a normal generation"
 
 
-def test_play_false_after_start_restores_waiting_signal():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
-    controller.enable()
-    motor = FakeMotor()
-    driver = _driver(controller, motor)
-    _arm_prefetch(controller, driver, motor)
-    motor.reset()
-    motor.draft_ready = True
-    motor.play_result = False  # engine cache raced empty between checks
-
-    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
-    driver.tick_once()
-
-    assert motor.played == 1, "play was attempted"
-    assert controller.state == AgendaState.WAITING_SIGNAL, "state restored after failed play"
-    assert driver._prefetch is None
+# NOTE (WU2): the old `test_play_false_after_start_restores_waiting_signal` was
+# removed. Its driver-side play-False restore branch no longer exists — the
+# consume path now enqueues the draft and a pop-time cache miss (raced clear)
+# falls back to plain generation on the WORKER (design-fase2.md §2.2, edge
+# cases), not on the driver. That worker-side fallback is covered engine-side by
+# test_pregen_pop_cache.py::test_pop_time_miss_falls_back_to_generation.
 
 
 def test_stop_turn_prefetch_full_cycle_no_topic_closing_deadlock():
@@ -857,9 +868,9 @@ def test_run_honors_next_wait_retick_for_late_draft():
         motor.draft_ready = True  # draft lands
         motor.pending = False
         for _ in range(200):  # up to ~2s for a re-tick to consume it
-            if motor.played:
+            if motor.replaced:
                 break
             wait.wait(0.01)
-        assert motor.played == 1, "the 0.25s re-tick (not the 30s cadence) consumed the draft"
+        assert motor.replaced, "the 0.25s re-tick (not the 30s cadence) consumed the draft"
     finally:
         driver.stop(timeout=2.0)

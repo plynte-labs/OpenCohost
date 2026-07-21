@@ -22,23 +22,23 @@ engine's `_prefetched_agenda` cache or calling `play_prefetched_agenda()`
 directly — so it keeps gating the real API-host entry point both before and
 after WU2 lands, instead of pinning a call path WU2 leaves untouched.
 
-This test MUST fail (max simultaneous `_hablar` occupancy reaches 2) until
-WU2 lands — see the `xfail(strict=True)` marker below. WU2 removes the
-marker.
+WU2 has LANDED: the `xfail(strict=True)` marker is removed and this is now the
+plain green serialization gate. Max simultaneous `_hablar` occupancy is 1 (the
+pop-time pregen cache routes the consumed draft through the single worker), and
+the WU2b belt lock never contends in the API host — asserted via `caplog` at the
+bottom (a "hablar contention" log would mean a caller bypassed the queue).
 
 HARNESS-FAILURE audit note: every setup/scaffolding check below raises
 `RuntimeError("HARNESS-FAILURE: ...")` instead of asserting. The ONLY
 `AssertionError` this test can produce is the final occupancy check at the
-bottom. So an xfail whose longrepr is a HARNESS-FAILURE `RuntimeError` means
-the TEST HARNESS is broken, not that the race was reproduced — audit with
-`--runxfail` and check the exception type before trusting a raw-red run.
+bottom, so a failure with a HARNESS-FAILURE `RuntimeError` longrepr means the
+TEST HARNESS is broken, not that the serialization guarantee regressed.
 """
 
+import logging
 import queue
 import threading
 from unittest.mock import MagicMock
-
-import pytest
 
 from opencohost.api.agenda_driver import AgendaDriver, route_motor_event_to_agenda
 from opencohost.core import llm_engine
@@ -96,21 +96,18 @@ def _controller_with_queued_topic(**kwargs):
     return controller, topic
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="WU2 pending: speech serialization — the race is real on Fase 1 code (design-fase2.md §3 WU1)",
-)
-def test_prefetch_speaker_and_worker_never_speak_concurrently(tmp_path, monkeypatch):
+def test_prefetch_speaker_and_worker_never_speak_concurrently(tmp_path, monkeypatch, caplog):
     """Pins Judge A's interleaving through the REAL API-host consume path:
-    a cached agenda draft, consumed via `AgendaDriver.tick_once()` (today
-    calling `play_prefetched_agenda()` under the hood), while the worker is
+    a cached agenda draft, consumed via `AgendaDriver.tick_once()` (post-WU2
+    enqueuing the draft through the single queue+worker), while the worker is
     mid-dispatch on a higher-priority (PTT) item, must never overlap inside
     `_hablar`.
 
-    Correctness assertion: max simultaneous `_hablar` occupancy == 1.
-    MUST FAIL today (occupancy reaches 2) — that IS the red this test
-    proves; WU2 makes it green and removes the xfail marker.
+    Correctness assertion: max simultaneous `_hablar` occupancy == 1 (green
+    since WU2 routes the consumed draft through the single worker), plus the
+    WU2b belt lock never logs contention on the API-host path.
     """
+    caplog.set_level(logging.INFO, logger="OpenCohost")
     ref = tmp_path / "voice.wav"
     ref.write_bytes(b"ref")
     motor = _fast_hablar_motor(ref)
@@ -260,4 +257,13 @@ def test_prefetch_speaker_and_worker_never_speak_concurrently(tmp_path, monkeypa
     assert state["max"] == 1, (
         "expected at most one thread inside _hablar at a time, observed "
         f"max simultaneous occupancy={state['max']}"
+    )
+
+    # WU2b belt lock: on the API-host path the worker is the ONLY _hablar caller,
+    # so the lock must never contend. A "hablar contention" log here would mean a
+    # caller bypassed the single queue+worker (a regression the belt lock caught).
+    contention = [r for r in caplog.records if "hablar contention" in r.getMessage()]
+    assert contention == [], (
+        "WU2b belt lock contended on the API-host path — a caller bypassed the "
+        f"queue+worker: {[r.getMessage() for r in contention]}"
     )

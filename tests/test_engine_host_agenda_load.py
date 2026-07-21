@@ -121,6 +121,45 @@ def test_engine_host_routes_motor_events_to_agenda(tmp_path, monkeypatch):
         host.stop()
 
 
+def test_engine_host_speaking_end_consumes_prefetch_synchronously(tmp_path, monkeypatch):
+    # WU2 (design-fase2.md §2.4): speaking_end of an AGENDA turn must consume the
+    # ready draft synchronously here (worker thread, before the post-turn pop) via
+    # the driver's _maybe_consume_prefetch — not defer it to a later driver tick.
+    motor = _fake_motor()
+    motor.current_speech_source = "kira-agenda"
+    motor.has_pending_priority_before.return_value = False
+    motor.prefetch_agenda.return_value = True
+    host = _start_host(tmp_path, monkeypatch, motor, tmp_path / "cards.db")
+    try:
+        driver = host._agenda_driver
+        driver.stop()  # drive deterministically
+        # Spy on the consume so we assert the WIRING, not the driver internals.
+        consume_calls = []
+        driver._maybe_consume_prefetch = lambda agenda, m: (consume_calls.append((agenda, m)) or True)
+
+        agenda = host.agenda
+        topic = agenda.add_topic("Tema uno", approved=True)
+        agenda.queue_topic(topic.id)
+        agenda.enable()
+        with host.agenda_lock:
+            agenda.next_action()  # -> GENERATING, opens the topic
+        host._dispatch_motor_event("speaking_start")  # -> SPEAKING
+        assert agenda.state == AgendaState.SPEAKING
+
+        host._dispatch_motor_event("speaking_end")  # -> WAITING_SIGNAL + consume
+        assert consume_calls, "speaking_end must consume the prefetch synchronously"
+        assert consume_calls[0] == (host.agenda, host.motor), "consume gets the host agenda+motor"
+
+        # Triangulation: a speaking_end while the controller is NOT agenda-speaking
+        # (mark_speech_complete does not run) must NOT fire the consume.
+        consume_calls.clear()
+        assert agenda.state == AgendaState.WAITING_SIGNAL
+        host._dispatch_motor_event("speaking_end")
+        assert consume_calls == [], "consume must not fire outside an agenda speaking_end"
+    finally:
+        host.stop()
+
+
 def test_engine_host_speaking_start_wires_prefetch_hook(tmp_path, monkeypatch):
     # Fase 1 (no-dead-air): speaking_start must spawn a background prefetch of
     # the next agenda turn while the current one is still playing.

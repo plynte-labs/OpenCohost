@@ -74,12 +74,25 @@ def enqueue_agenda_action(motor, action, *, driver: Optional["AgendaDriver"] = N
         return
     if getattr(action, "kind", None) != "enqueue" or not getattr(action, "prompt", ""):
         return
-    clear = getattr(motor, "clear_prefetched_agenda", None)
-    if callable(clear):
+    # WU2 (design-fase2.md §2.2/§2.3): match-aware clear. On the consume path this
+    # enqueues a ready draft's OWN (prompt, source); clearing the engine cache
+    # here would nuke the draft before the worker's pop can match it. The engine's
+    # _clear_prefetch_unless_matches skips the clear for that self-match and still
+    # supersedes on any genuine new turn. Fall back to the unconditional clear on
+    # a stand-in motor that lacks the match-aware primitive.
+    clear_unless = getattr(motor, "_clear_prefetch_unless_matches", None)
+    if callable(clear_unless):
         try:
-            clear()
+            clear_unless(action.prompt, action.source)
         except Exception:
-            _logger.exception("clear_prefetched_agenda failed during agenda enqueue")
+            _logger.exception("match-aware prefetch clear failed during agenda enqueue")
+    else:
+        clear = getattr(motor, "clear_prefetched_agenda", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                _logger.exception("clear_prefetched_agenda failed during agenda enqueue")
     if driver is not None:
         driver._drop_prefetch_stash()
     if action.source.startswith("kira-agenda") and hasattr(motor, "replace_pending"):
@@ -99,6 +112,7 @@ def route_motor_event_to_agenda(
     *,
     on_speech_complete: Optional[Callable[[], None]] = None,
     on_agenda_speaking_start: Optional[Callable[[], None]] = None,
+    on_agenda_speaking_end: Optional[Callable[[], None]] = None,
 ) -> None:
     """Route a motor status string into agenda-controller feedback.
 
@@ -113,6 +127,12 @@ def route_motor_event_to_agenda(
     actually advanced the controller to SPEAKING — i.e. the turn now playing is
     a controller-generated agenda turn (the #344 source gate). The caller uses
     it to spawn a background prefetch of the NEXT turn while this one plays.
+
+    `on_agenda_speaking_end` fires only after `mark_speech_complete` ran (an
+    agenda turn just finished), BEFORE `on_speech_complete`/nudge. WU2
+    (design-fase2.md §2.4) uses it to consume a ready draft SYNCHRONOUSLY on the
+    worker thread, so the enqueue lands before the worker's post-turn pop — no
+    accumulation-flush race window (the Judge A finding).
 
     Callers MUST already hold `agenda_lock`.
     """
@@ -130,6 +150,10 @@ def route_motor_event_to_agenda(
     elif status == "speaking_end":
         if agenda.state in {AgendaState.SPEAKING, AgendaState.GENERATING}:
             agenda.mark_speech_complete()
+            # Consume BEFORE the nudge so the draft is enqueued before the
+            # worker's post-turn _process_priority_queue runs (§2.4).
+            if on_agenda_speaking_end is not None:
+                on_agenda_speaking_end()
             if on_speech_complete is not None:
                 on_speech_complete()
 
@@ -161,10 +185,15 @@ class AgendaDriver:
         self._wake = threading.Event()
         self._shutdown = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Prefetch stash for the next turn: written/read only under `agenda_lock`
-        # (inside the tick body). `_next_wait` is a one-shot short re-tick request
-        # set under the lock in `_maybe_consume_prefetch` and consumed by `_run`
-        # on the SAME driver thread, so it needs no lock of its own.
+        # Prefetch stash for the next turn: written under `agenda_lock` by BOTH
+        # writers — the driver tick (`_maybe_consume_prefetch`) AND WU2's
+        # consume-at-event, which calls `_maybe_consume_prefetch` from the ENGINE
+        # thread inside `_hablar`'s speaking_end tail (engine_host.py:528-548).
+        # `_next_wait` is a one-shot short re-tick hint: both writers set it while
+        # holding `agenda_lock`; `_run`'s read is intentionally unlocked (a benign
+        # hint). Worst case of a torn read is one ~4.5s cadence wait instead of a
+        # 0.25s re-tick — harmless, because the nudge that follows every consume
+        # wakes the driver anyway, so no re-tick is ever actually lost.
         self._prefetch: Optional[PrefetchState] = None
         self._next_wait: Optional[float] = None
 
@@ -323,23 +352,19 @@ class AgendaDriver:
             # Worker finished with nothing (error/reject) -> fall back.
             self._clear_prefetch(motor)
             return False
-        # Adopt (staleness re-validation) then play the cached text.
+        # Adopt (staleness re-validation) then ROUTE the draft through the single
+        # queue+worker instead of a parallel speaker thread (WU2, design-fase2.md
+        # §2.2/§2.3): enqueue the draft's own (payload, source) via the normal
+        # replace_pending path. The worker pops it and hits the pregen cache
+        # (_take_pregen_if_match), speaking it with no second LLM call — and the
+        # two-mics race is impossible by construction (single dispatch path). A
+        # pop-time cache miss (raced clear) falls back to plain generation on the
+        # worker: same net behavior as the old play-False branch, worker-side.
+        # enqueue_agenda_action drops the driver stash internally (driver=self).
         if not agenda.start_prefetched_action(stash.action):
             self._clear_prefetch(motor)
             return False
-        if not motor.play_prefetched_agenda():
-            # Engine cache raced empty after adoption. Restore the post-speech
-            # state and re-tick so the next pass regenerates cleanly, instead of
-            # leaving the controller stuck in GENERATING (a latent CTK race).
-            # For a stop draft `start_prefetched_action` already flipped the topic
-            # to CLOSING; we leave that as-is — WAITING_SIGNAL + CLOSING self-heals
-            # on the next tick (next_action re-reaches the closing action), which
-            # is safer than restoring a status we did not snapshot.
-            agenda.state = AgendaState.WAITING_SIGNAL
-            self._drop_prefetch_stash()
-            self._next_wait = PREFETCH_RETICK_SECONDS
-            return True
-        self._drop_prefetch_stash()
+        enqueue_agenda_action(motor, stash.action, driver=self)
         return True
 
     def _has_non_agenda_audio_work(self, motor) -> bool:

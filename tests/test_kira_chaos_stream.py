@@ -131,7 +131,13 @@ class TestCT002StaleChatExpiry:
             "Expired chat must NOT enter accumulation buffer"
         motor._ejecutar_inferencia.assert_not_called()
 
-    def test_expired_agenda_also_discarded(self):
+    def test_stale_agenda_is_ttl_exempt_and_still_processed(self):
+        # F2 (judgment-day WU2): kira-agenda* is EXEMPT from TTL expiry. A stale
+        # adopted agenda draft must NOT be silently discarded — expiring it would
+        # strand the turn (never speaks) and its orphaned pregen cache would block
+        # every new prefetch. replace_pending dedup keeps agenda from stacking, so
+        # exemption can't grow the queue. So the stale item survives the sweep and
+        # is processed (inverts the pre-F2 "expired agenda also discarded").
         motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
         motor._pq_ttl_seconds = 0.01
         motor._ejecutar_inferencia = MagicMock()
@@ -143,8 +149,10 @@ class TestCT002StaleChatExpiry:
         motor._speaking = False
         motor._process_priority_queue()
 
+        # Survived the TTL sweep and was processed (not discarded).
         assert motor._priority_queue == []
-        motor._ejecutar_inferencia.assert_not_called()
+        motor._ejecutar_inferencia.assert_called_once()
+        assert motor._ejecutar_inferencia.call_args[0][0] == "old agenda"
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +627,13 @@ class TestChaosStreamIntegration:
         assert len(motor._accumulation_buffer) <= motor._accum_max_items
 
     def test_ptt_never_expires_even_after_long_delay(self):
-        """PTT items must survive TTL checks even with very short TTL."""
+        """PTT items must survive TTL checks even with very short TTL.
+
+        [F2, judgment-day WU2] kira-agenda* is now also TTL-exempt, so the stale
+        agenda item survives too and the iterative drain processes it AFTER the
+        PTT item (priority 0 sorts first). Chat still expires. The PTT guarantee
+        is the point: it survives and is processed first.
+        """
         motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
         motor._pq_ttl_seconds = 0.001  # 1ms - extremely aggressive
         motor._ejecutar_inferencia = MagicMock()
@@ -628,14 +642,14 @@ class TestChaosStreamIntegration:
         motor.enqueue("chat that expires", priority=1, source="chat")
         motor.enqueue("agenda that expires", priority=2, source="kira-agenda")
 
-        time.sleep(0.01)  # Let non-PTT TTL expire
+        time.sleep(0.01)  # Let non-PTT TTL expire (chat only; agenda is exempt)
 
         motor._processing = False
         motor._speaking = False
         motor._process_priority_queue()
 
-        # PTT should have been processed
-        motor._ejecutar_inferencia.assert_called_once()
-        call_args = motor._ejecutar_inferencia.call_args
-        assert call_args[0][0] == "streamer says something"
-        assert call_args[1]["source"] == "ptt"
+        # PTT processed FIRST (priority 0). Chat expired; the TTL-exempt agenda
+        # item is processed after PTT.
+        processed = [c[0][0] for c in motor._ejecutar_inferencia.call_args_list]
+        assert processed == ["streamer says something", "agenda that expires"], processed
+        assert motor._ejecutar_inferencia.call_args_list[0][1]["source"] == "ptt"

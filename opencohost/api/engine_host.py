@@ -525,12 +525,26 @@ class EngineHost:
             if driver is not None
             else None
         )
+        # WU2 (design-fase2.md §2.4): on an agenda speaking_end, consume the ready
+        # draft SYNCHRONOUSLY here — this runs on the ENGINE (worker) thread inside
+        # _hablar's tail, under agenda_lock, so the enqueue lands BEFORE the
+        # worker's post-turn _process_priority_queue. That closes the accumulation-
+        # flush race window and lets the worker's pop find the item (pregen cache
+        # hit). The driver-tick consume remains as the late-draft fallback.
+        # Lock safety: this thread takes agenda_lock (here) THEN motor locks (in
+        # replace_pending) — the SAME order the driver tick uses; no inversion.
+        consume = (
+            (lambda: driver._maybe_consume_prefetch(agenda, self.motor))
+            if driver is not None
+            else None
+        )
         with self.agenda_lock:
             route_motor_event_to_agenda(
                 agenda,
                 status,
                 on_speech_complete=nudge,
                 on_agenda_speaking_start=start_prefetch,
+                on_agenda_speaking_end=consume,
             )
 
     def start(self) -> None:

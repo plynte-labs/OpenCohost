@@ -419,6 +419,14 @@ class MotorVocalIA(threading.Thread):
         self._prefetched_agenda: Optional[dict] = None
         self._prefetch_epoch: int = 0
 
+        # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
+        # serializes _hablar so two callers can never share the TTS/audio
+        # pipeline. After WU2 the engine worker is the ONLY _hablar caller in the
+        # API host, so this never contends there (a contention log = a bypass
+        # regression). In the CTK legacy path (play_prefetched_agenda's speaker
+        # thread) it serializes that thread against the worker — the lock WORKING.
+        self._hablar_lock = threading.Lock()
+
         # Test-only seam (agenda_no_dead_air fase 2, design-fase2.md §3 WU1):
         # fires at the pop->processing boundary in _process_priority_queue,
         # after the item is popped (pq_lock released) and before _processing
@@ -841,7 +849,13 @@ class MotorVocalIA(threading.Thread):
         with self._pq_lock:
             self._priority_queue = [item for item in self._priority_queue if item[3] != source]
         if source.startswith("kira-agenda"):
-            self.clear_prefetched_agenda()
+            # WU2 (design-fase2.md §2.2/§2.3): match-aware clear. The API-host
+            # consume path routes a ready draft by enqueueing its OWN
+            # (payload, source) through replace_pending; clearing here would nuke
+            # the very draft the worker is about to match at pop (the trap). Skip
+            # the clear only when this IS that draft; a genuine new turn (any
+            # mismatch) still supersedes it.
+            self._clear_prefetch_unless_matches(payload, source)
         self.enqueue(payload, priority=priority, source=source)
 
     def prefetch_agenda(self, payload: str, priority: int = 2, source: str = "kira-agenda") -> bool:
@@ -931,6 +945,62 @@ class MotorVocalIA(threading.Thread):
 
         threading.Thread(target=speaker, daemon=True).start()
         return True
+
+    def _take_pregen_if_match(self, payload: str, source: str) -> Optional[dict]:
+        """Pop the cached pregen draft iff it matches this (payload, source).
+
+        WU2 (design-fase2.md §2.2): consulted at the worker's queue-pop boundary.
+        A hit means the popped turn was pregenerated during the prior turn's TTS,
+        so the worker speaks the cache instead of generating. A miss (empty or
+        different cache) leaves the cache untouched and the worker generates
+        normally. Consume-only (no epoch bump — no in-flight worker at pop time),
+        mirroring play_prefetched_agenda's own pop semantics.
+        """
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is None:
+                return None
+            if cached.get("payload") == payload and cached.get("source") == source:
+                self._prefetched_agenda = None
+                self._prefetch_done.clear()
+                return cached
+            return None
+
+    def _clear_prefetch_unless_matches(self, payload: str, source: str) -> None:
+        """Supersede the cached draft UNLESS it IS this exact (payload, source).
+
+        WU2 (design-fase2.md §2.2/§2.3): the consume path enqueues a ready
+        draft's own (payload, source) to route it through the queue. Clearing the
+        cache on that enqueue would nuke the draft before the worker's pop can
+        match it. Skip the clear for that self-match; any mismatch is a genuine
+        supersede and still clears + bumps the invalidation epoch (unchanged).
+        """
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is not None and cached.get("payload") == payload and cached.get("source") == source:
+                return
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+            self._prefetch_epoch += 1
+
+    def _speak_pregenerated(self, cached: dict) -> None:
+        """Speak a pop-time cache hit on the WORKER thread (design-fase2.md §2.2).
+
+        play_prefetched_agenda's speaker body, minus the parallel thread: the
+        worker already owns the turn (single dispatch path), so deferred-commit +
+        emit + _hablar run inline. History commits HERE, at playback, in spoken
+        order (commit-once invariant — the pregen used commit_history=False).
+        """
+        payload = cached["payload"]
+        dialogo = cached["dialogo"]
+        source = cached.get("source", "kira-agenda")
+        self._commit_history(payload, dialogo, source=source)
+        if source.startswith("kira-agenda"):
+            self._record_accepted_agenda_output(dialogo)
+        self._log("Agenda: usando respuesta pregenerada.")
+        self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
+        self._emit_dialogue(dialogo, source)
+        self._hablar(dialogo, source=source)
 
     def drop_pending_sources(self, prefixes: tuple[str, ...]) -> int:
         """Drop pending priority/accumulation items whose source matches prefixes.
@@ -1057,86 +1127,123 @@ class MotorVocalIA(threading.Thread):
             return "\n".join(parts)
 
     def _process_priority_queue(self) -> None:
-        """Process next item from priority queue if motor is idle.
+        """Process priority-queue items while the motor is idle.
 
         Non-PTT items older than _pq_ttl_seconds are discarded before selection
-        to prevent stale reactions after long delays.
+        to prevent stale reactions after long delays (kira-agenda* is exempt —
+        see the F2 note in the sweep). After the queue empties, checks the
+        accumulation buffer and sends compacted messages as a single
+        consultation.
 
-        After processing, checks accumulation buffer and sends compacted
-        messages as a single consultation.
+        Drains ITERATIVELY, one item per loop iteration (F1, judgment-day WU2).
+        WU2's consume-at-event enqueues the next agenda turn INSIDE this turn's
+        _hablar tail (before the per-item finally), so recursing through
+        _complete_processing_cycle -> _process_priority_queue would nest 2 frames
+        per consecutive ready boundary and eventually RecursionError the engine
+        thread (permanent silence). The loop keeps the EXACT per-item cadence —
+        idle callback + _drain_control_commands + _check_pending_model_switch run
+        per item via _complete_processing_cycle(process_queue=False) — with a
+        flat stack.
         """
-        if self._processing or self._speaking:
-            return
-
-        expired_chat_infos: list = []
-        with self._pq_lock:
-            # Expire stale non-PTT items before selecting next work
-            now = time.time()
-            kept = []
-            for item in self._priority_queue:
-                # Slice first 4 — tolerates both the legacy 4-tuple (no
-                # history_text, e.g. tests constructing raw queue items) and
-                # the current 5-tuple produced by enqueue().
-                prio, ts, payload, source = item[:4]
-                if prio > 0 and (now - ts) > self._pq_ttl_seconds:
-                    self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
-                    # Measure-first telemetry seam: record (never alter) chat expiries.
-                    # Captured here, emitted below OUTSIDE _pq_lock.
-                    if source == "chat":
-                        expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
-                else:
-                    kept.append(item)
-            self._priority_queue = kept
-
-        # Emit expiry telemetry OUTSIDE _pq_lock so the queue lock is never held across
-        # the aggregator collector's lock (the two locks stay order-independent). No-op
-        # unless wired (diagnostics enabled); a failing callback never disturbs the queue.
-        if expired_chat_infos and self.on_chat_item_expired is not None:
-            for info in expired_chat_infos:
-                try:
-                    self.on_chat_item_expired(info)
-                except Exception:
-                    pass
-
-        with self._pq_lock:
-            if not self._priority_queue:
-                # No priority items — check accumulation buffer
-                accumulated = self._flush_accumulation()
-                if accumulated:
-                    self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
-                    with self._lock:
-                        self._processing = True
-                        self._current_processing_source = "accumulated"
-                    self.ui_callback("processing")
-                    try:
-                        self._ejecutar_inferencia(accumulated, source="accumulated")
-                    finally:
-                        self._complete_processing_cycle(process_queue=False)
+        while True:
+            if self._processing or self._speaking:
                 return
 
-            item = self._priority_queue.pop(0)
-            # Unpack tolerating both the legacy 4-tuple and the current
-            # 5-tuple (payload, source, history_text) produced by enqueue().
-            priority, ts, payload, source, *rest = item
-            history_text = rest[0] if rest else None
+            expired_chat_infos: list = []
+            with self._pq_lock:
+                # Expire stale non-PTT items before selecting next work
+                now = time.time()
+                kept = []
+                for item in self._priority_queue:
+                    # Slice first 4 — tolerates both the legacy 4-tuple (no
+                    # history_text, e.g. tests constructing raw queue items) and
+                    # the current 5-tuple produced by enqueue().
+                    prio, ts, payload, source = item[:4]
+                    # F2 (judgment-day WU2): kira-agenda* is EXEMPT from TTL
+                    # expiry. Adopted agenda drafts routed through consume-at-event
+                    # are replace_pending-deduped (they never stack), so exemption
+                    # can never grow the queue — but expiring one strands the
+                    # adopted turn (it never speaks) and its orphaned pregen cache
+                    # blocks every new prefetch until a mismatching enqueue clears
+                    # it. Interactive (chat/PTT) items keep the TTL.
+                    if (
+                        prio > 0
+                        and not source.startswith("kira-agenda")
+                        and (now - ts) > self._pq_ttl_seconds
+                    ):
+                        self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
+                        # Measure-first telemetry seam: record (never alter) chat expiries.
+                        # Captured here, emitted below OUTSIDE _pq_lock.
+                        if source == "chat":
+                            expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
+                    else:
+                        kept.append(item)
+                self._priority_queue = kept
 
-        # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
-        # popped but _processing is still False here — this is exactly the
-        # window a concurrent consumer (e.g. play_prefetched_agenda) could
-        # observe as "clear to speak". No-op in production.
-        if self._test_pop_boundary_hook is not None:
-            self._test_pop_boundary_hook()
+            # Emit expiry telemetry OUTSIDE _pq_lock so the queue lock is never held across
+            # the aggregator collector's lock (the two locks stay order-independent). No-op
+            # unless wired (diagnostics enabled); a failing callback never disturbs the queue.
+            if expired_chat_infos and self.on_chat_item_expired is not None:
+                for info in expired_chat_infos:
+                    try:
+                        self.on_chat_item_expired(info)
+                    except Exception:
+                        pass
 
-        source_label = "PTT" if source == "ptt" else source
-        self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
-        with self._lock:
-            self._processing = True
-            self._current_processing_source = source
-        self.ui_callback("processing")
-        try:
-            self._ejecutar_inferencia(payload, source=source, history_text=history_text)
-        finally:
-            self._complete_processing_cycle()
+            with self._pq_lock:
+                if not self._priority_queue:
+                    # No priority items — check accumulation buffer
+                    accumulated = self._flush_accumulation()
+                    if accumulated:
+                        self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
+                        with self._lock:
+                            self._processing = True
+                            self._current_processing_source = "accumulated"
+                        self.ui_callback("processing")
+                        try:
+                            self._ejecutar_inferencia(accumulated, source="accumulated")
+                        finally:
+                            self._complete_processing_cycle(process_queue=False)
+                    return
+
+                item = self._priority_queue.pop(0)
+                # Unpack tolerating both the legacy 4-tuple and the current
+                # 5-tuple (payload, source, history_text) produced by enqueue().
+                priority, ts, payload, source, *rest = item
+                history_text = rest[0] if rest else None
+
+            # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
+            # popped but _processing is still False here — this is exactly the
+            # window a concurrent consumer (e.g. play_prefetched_agenda) could
+            # observe as "clear to speak". No-op in production.
+            if self._test_pop_boundary_hook is not None:
+                self._test_pop_boundary_hook()
+
+            # WU2 (design-fase2.md §2.2): pop-time pregen cache. A hit means this turn
+            # was pregenerated during the prior turn's TTS — speak it on THIS worker
+            # thread (no parallel speaker), skipping generation. A miss keeps the
+            # existing generation path unchanged.
+            cached = self._take_pregen_if_match(payload, source)
+            source_label = "PTT" if source == "ptt" else source
+            if cached is not None:
+                self._log(f"Cola prioritaria: respuesta pregenerada [{source_label}] (prioridad {priority}).")
+            else:
+                self._log(f"Cola prioritaria: procesando [{source_label}] (prioridad {priority})...")
+            with self._lock:
+                self._processing = True
+                self._current_processing_source = source
+            self.ui_callback("processing")
+            try:
+                if cached is not None:
+                    self._speak_pregenerated(cached)
+                else:
+                    self._ejecutar_inferencia(payload, source=source, history_text=history_text)
+            finally:
+                # process_queue=False: the loop (not recursion) drains the next
+                # ready item, keeping the stack flat (F1). The per-item idle
+                # callback + control-command drain + model-switch check still run
+                # here, once per item — the same cadence the old recursion had.
+                self._complete_processing_cycle(process_queue=False)
 
     def _complete_processing_cycle(self, *, process_queue: bool = True) -> None:
         with self._lock:
@@ -1154,10 +1261,10 @@ class MotorVocalIA(threading.Thread):
 
         The engine is single-threaded: run() only reads command_queue when it is
         NOT inside a dispatch, so control commands posted during a continuous
-        priority-queue run (recursive _process_priority_queue) sit unread until
-        the queue empties (the command-starvation bug). This boundary is a true
-        idle point (_processing and _speaking both False), so a leading run of
-        whitelisted commands is applied now, before the next turn dispatches.
+        priority-queue run (the iterative _process_priority_queue drain loop) sit
+        unread until the queue empties (the command-starvation bug). This boundary
+        is a true idle point (_processing and _speaking both False), so a leading
+        run of whitelisted commands is applied now, before the next turn dispatches.
 
         Stops at the first non-whitelisted verb (process_context — dispatches a
         turn and would recurse; check_ollama — network), the None shutdown
@@ -3132,6 +3239,26 @@ class MotorVocalIA(threading.Thread):
         return clean
 
     def _hablar(self, texto_a_generar, source: str = "direct"):
+        """WU2b belt lock (design-fase2.md §2.5): serialize every _hablar caller.
+
+        Thin wrapper around _hablar_impl. After WU2 the engine worker is the ONLY
+        caller in the API host, so the non-blocking acquire always succeeds there
+        and contention is never logged (a contention log is a bypass regression).
+        In the CTK legacy path (play_prefetched_agenda's speaker thread) this lock
+        serializes that thread against the worker — the log then = the lock
+        working. Both call sites are terminal/non-recursive (neither _hablar_impl
+        nor its callbacks re-enter _hablar), so the non-reentrant Lock never
+        self-deadlocks; it is released in finally on every exit path.
+        """
+        if not self._hablar_lock.acquire(blocking=False):
+            self._log("hablar contention (serialized)")
+            self._hablar_lock.acquire()
+        try:
+            return self._hablar_impl(texto_a_generar, source=source)
+        finally:
+            self._hablar_lock.release()
+
+    def _hablar_impl(self, texto_a_generar, source: str = "direct"):
         # Bug B fix: refuse a turn whose source was cancelled during its
         # generation phase (already popped from the priority queue, so
         # drop_pending_sources can't reach it). Checked BEFORE _speaking=True /
