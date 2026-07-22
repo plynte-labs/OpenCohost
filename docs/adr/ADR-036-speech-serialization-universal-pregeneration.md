@@ -1,6 +1,7 @@
 # ADR-036: Speech Serialization via Universal Pregeneration (API Host, Fase 2)
 
-**Status**: Designed — v2 (v1 verdict NEEDS-REWORK; all blocker/major findings amended in v2, see design-fase2.md §7; implementation not yet applied)
+**Status**: Implemented (WU1-WU5 landed in `26c06f5`, `88377c3`, `319d2fd`,
+`7bd4811`, `a25d780`; ADR-038 records the WU5 interruption implementation)
 **Date**: 2026-07-21
 **Track**: [`conductor/tracks/agenda_no_dead_air_20260719/`](../../conductor/tracks/agenda_no_dead_air_20260719/) (`design-fase2.md`, v2)
 **Builds on**: ADR-035 (Fase 1, implemented and runtime-validated: 4/4 consume boundaries at

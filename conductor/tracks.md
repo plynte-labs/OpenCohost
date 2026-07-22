@@ -1440,3 +1440,26 @@ PREFERENCE (owner runs `monologue`), not a defect.
   the pre-existing `_format_agenda_rejection` 50-char snippet reaching the app log
   (`llm_engine.py`, base-only pre-WU4 behavior, flagged for a future privacy sweep that redacts
   or shortens the matched-phrase snippet). Not committed — owner review pending.*
+  *Status 2026-07-22 (WU5 DONE, landed a25d780): PTT position-aware interruption + frozen-stash
+  return via connector, per ADR-037's D1/D2/D3. Cut seam `ptt_interrupt_if_agenda_speaking`
+  (PTT-only via host flag `_ptt_position_cut_enabled`, fired synchronously from
+  `PttController.on_flush_precheck`, fail-open); zone-classified against `_speech_progress`
+  (early/late defer, mid-zone cuts iff remaining estimate exceeds `CUT_THRESHOLD_SECONDS` AND a
+  draft actually froze). Separate one-entry `_frozen_stash` with monotonic freeze stamp;
+  `restore_frozen_stash()` bumps `_prefetch_epoch`; `detour_started()` seam for the driver.
+  Connector floor from new i18n slot `llm.connector_templates` (8 es-AR + 8 EN templates) with a
+  latency-safe opportunistic upgrade (spawn-gated, watchdog-bounded, ownership-token release).
+  Driver return-by-default (`_maybe_return_frozen_stash`) with deterministic skip gates, bounded
+  by `FROZEN_STASH_MAX_HOLD_SECONDS` (90s). Two full blind-judge rounds (Fable + Opus): round-1
+  BLOCKER — return-before-answer (the PTT answer rides the command queue, invisible to the
+  driver's tick-based return gates; fixed with a HOLD-until-`detour_started()` gate) plus
+  criticals (freeze-failure cut, concurrent connector generation, missing EN connector
+  templates); round-2 criticals — unbounded hold (three answer-loss paths could hold the agenda
+  silent forever; fixed with the 90s deadline backstop), auto-resume starvation (the return check
+  could race `PAUSED_NEEDS_OPERATOR`; fixed by yielding to it), one-directional occupancy (the
+  `_llm_generating` claim could be double-released; fixed with an ownership-token check) — all
+  fixed and re-verified. Gates: race test 3x green, 314 focused/regression tests green. ADR-038
+  written (WU5 implementation record); ADR-036 status updated to Implemented. Fase 2 work-unit
+  loop (WU1-WU5) is COMPLETE. Owner runtime validation of the interruption path (PTT zone cuts,
+  connector return, typed-input non-interruption, telemetry lines in a live log) is still
+  pending — see `docs/closeout-20260722-agenda-no-dead-air-phase2.md`.*
