@@ -433,3 +433,75 @@ def test_hablar_single_caller_never_contends(caplog):
     motor._hablar("otra.", source="kira-agenda")
 
     assert not any("hablar contention" in r.getMessage() for r in caplog.records)
+
+
+# ── WU3 AC3.3 (design-fase2.md §3): _commit_history staleness hook ──────────
+
+
+def test_commit_history_invalidates_cached_pregen():
+    # A reply generated against PRE-commit history must never speak: any history
+    # commit clears a cached pregen and bumps the invalidation epoch (strict
+    # staleness — the NEW ENGINE SEAM declared in WU3's diff).
+    motor = _bare_motor()
+    motor._capture_memoria = lambda *a, **kw: None
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    motor._commit_history("otro contexto", "otra respuesta", source="direct")
+
+    assert motor._prefetched_agenda is None, "a history commit clears the now-stale cached pregen"
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+def test_commit_history_invalidates_inflight_pregen_store():
+    # An in-flight pregen (worker still generating) whose history commits under
+    # it must DISCARD its store on the epoch check — never speak stale.
+    motor = _bare_motor()
+    motor._capture_memoria = lambda *a, **kw: None
+    gate = threading.Event()
+    stored = {"late": False}
+
+    def _worker():
+        epoch_at = motor._prefetch_epoch
+        gate.wait(2.0)
+        with motor._prefetch_lock:
+            if motor._prefetch_epoch != epoch_at:
+                return  # invalidated by the commit -> discard
+            motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 1, "source": "chat"}
+            stored["late"] = True
+        motor._prefetch_done.set()
+
+    th = threading.Thread(target=_worker, daemon=True)
+    with motor._prefetch_lock:
+        motor._pregen_inflight = {"payload": "P", "source": "chat", "priority": 1}
+        motor._prefetch_thread = th
+    th.start()
+
+    # Another turn commits history between the pregen start and its store.
+    motor._commit_history("ctx", "resp", source="direct")
+
+    gate.set()
+    th.join(2.0)
+    assert stored["late"] is False, "an in-flight pregen must discard its store after an intervening commit"
+    assert motor._prefetched_agenda is None
+
+
+def test_speak_pregenerated_own_commit_never_drops_its_own_turn():
+    # Ordering audit (design-fase2.md §3 WU3 AC3.3): _take_pregen_if_match pops
+    # the entry at pop BEFORE _speak_pregenerated -> _commit_history runs, so the
+    # turn being spoken is NOT retro-invalidated by its own commit; the commit's
+    # epoch bump only kills OTHER pregens. Uses the REAL _commit_history.
+    motor = _bare_motor()
+    motor._capture_memoria = lambda *a, **kw: None
+    spoke = []
+    motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
+
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "Hola.", "priority": 1, "source": "chat"}
+    motor.enqueue("P", priority=1, source="chat")  # not speaking -> no interactive trigger
+    epoch0 = motor._prefetch_epoch
+
+    motor._process_priority_queue()
+
+    assert spoke == [("Hola.", "chat")], "the turn spoke despite its own commit bumping the epoch"
+    assert motor._prefetch_epoch == epoch0 + 1, "the commit bumped the epoch (would kill any OTHER pregen)"
+    assert motor._prefetched_agenda is None

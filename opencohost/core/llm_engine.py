@@ -247,6 +247,12 @@ class MotorVocalIA(threading.Thread):
         self.is_ready = False
         self._processing = False
         self._speaking = False
+        # WU3 (design-fase2.md §2.3): narrow "Ollama is busy right now" flag,
+        # set/cleared tightly around the actual generation call inside
+        # _generar_dialogo (foreground AND pregen). The interactive pregen
+        # trigger reads it as the GPU-free predicate — distinct from _processing
+        # (which brackets the whole turn, generation + TTS playback).
+        self._llm_generating = False
         self._current_speech_source: Optional[str] = None
         # Speech-cancellation token (guarded by self._lock). Source prefixes for
         # which _hablar() must refuse at entry — kills the Bug B straggler whose
@@ -418,6 +424,12 @@ class MotorVocalIA(threading.Thread):
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetched_agenda: Optional[dict] = None
         self._prefetch_epoch: int = 0
+        # WU3 (design-fase2.md §2.3 [v2] slot eviction / §3 AC3.2): the in-flight
+        # pregen request identity (payload/source/priority) while a worker runs
+        # but has not stored yet — lets pregenerate() compare priorities for
+        # eviction and lets the pop-side wait-or-fallback recognise a worker
+        # generating THIS exact item. Cleared implicitly by the thread dying.
+        self._pregen_inflight: Optional[dict] = None
 
         # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
         # serializes _hablar so two callers can never share the TTS/audio
@@ -462,6 +474,13 @@ class MotorVocalIA(threading.Thread):
     def is_processing(self):
         with self._lock:
             return self._processing
+
+    @property
+    def llm_generating(self) -> bool:
+        """WU3 GPU-free predicate (design-fase2.md §2.3): True only while an
+        Ollama generation call is actually in flight (foreground or pregen)."""
+        with self._lock:
+            return self._llm_generating
 
     @property
     def current_speech_source(self):
@@ -839,6 +858,65 @@ class MotorVocalIA(threading.Thread):
                 dropped = self._priority_queue.pop()
                 self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
                 self.enqueue_accumulation(dropped[2], source=dropped[3])
+            # WU3 (design-fase2.md §2.3): snapshot the HEAD under the lock; the
+            # interactive pregen trigger runs OUTSIDE it so it never blocks the
+            # enqueue caller. F1 [v4]: carry history_text (tuple index 4) so a
+            # reply spoken from the pregen cache commits the HONEST turn text, not
+            # the raw prompt template (the memoria_quality regression).
+            head = self._priority_queue[0] if self._priority_queue else None
+            head_snapshot = (
+                (head[0], head[2], head[3], head[4] if len(head) > 4 else None)
+                if head else None
+            )
+        self._maybe_trigger_interactive_pregen(head_snapshot)
+
+    def _maybe_trigger_interactive_pregen(self, head_snapshot) -> None:
+        """WU3 interactive trigger (design-fase2.md §2.3): pregenerate the queue
+        HEAD in the background while TTS plays, so a typed/PTT reply speaks
+        near-instantly at the turn boundary instead of after a silent generation.
+
+        GPU-free predicate: speaking now AND Ollama not mid-call
+        (`_llm_generating` False — a generation already in flight blocks a second,
+        the single-Ollama rule). Excludes `source="accumulated"` (its payload does
+        not exist until flush). Head-tracking (AC3.5): skip when the head already
+        matches the slot occupant; otherwise `pregenerate()` evicts a strictly-
+        lower-priority occupant, so a higher-priority head landing in front (e.g.
+        a PTT behind a chat pregen) displaces the now-stale one and pregenerates
+        the new head. Spawn-only: `pregenerate()` starts a daemon thread and
+        returns immediately, so the enqueue caller never blocks.
+        """
+        if head_snapshot is None:
+            return
+        priority, payload, source, history_text = head_snapshot
+        if source == "accumulated":
+            return
+        if not (self.is_speaking and not self.llm_generating):
+            return
+        # Already pregenerating / pregenerated exactly this head -> don't re-trigger.
+        # F4 [v4]: occupancy is `_pregen_inflight is not None` (set under the lock
+        # BEFORE the worker spawns), not thread.is_alive() (False in the tiny
+        # assign->start window, which double-spawns).
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is not None:
+                occ_payload, occ_source = cached.get("payload"), cached.get("source")
+            elif self._pregen_inflight is not None:
+                occ_payload = self._pregen_inflight.get("payload")
+                occ_source = self._pregen_inflight.get("source")
+            else:
+                occ_payload = occ_source = None
+        if occ_payload == payload and occ_source == source:
+            return
+        # F6 [v4]: shrink the trigger-vs-pop TOCTOU window — re-check the head is
+        # STILL the queue head right before spawning (the worker may already have
+        # popped it, making this pregen a wasted duplicate). The epoch bump on the
+        # foreground commit remains the backstop for the residual window.
+        with self._pq_lock:
+            cur = self._priority_queue[0] if self._priority_queue else None
+            still_head = cur is not None and (cur[0], cur[2], cur[3]) == (priority, payload, source)
+        if not still_head:
+            return
+        self.pregenerate(payload, priority, source, history_text=history_text)
 
     def replace_pending(self, payload: str, priority: int = 1, source: str = "chat") -> None:
         """Replace stale pending items from the same source and enqueue a fresh one.
@@ -859,35 +937,99 @@ class MotorVocalIA(threading.Thread):
         self.enqueue(payload, priority=priority, source=source)
 
     def prefetch_agenda(self, payload: str, priority: int = 2, source: str = "kira-agenda") -> bool:
-        """Generate agenda text in the background without starting TTS."""
+        """Generate agenda text in the background without starting TTS.
+
+        WU3 (design-fase2.md §2.1): thin alias over the generalized `pregenerate`
+        after the kira-agenda source guard. CTK callers
+        (agenda_audio_controller.py) are untouched — the guard + agenda-vs-agenda
+        equal-priority refusal preserve the exact pre-WU3 behavior.
+        """
         if not payload or not source.startswith("kira-agenda"):
             return False
+        return self.pregenerate(payload, priority, source)
+
+    def pregenerate(
+        self,
+        payload: str,
+        priority: int = 1,
+        source: str = "chat",
+        history_text: Optional[str] = None,
+    ) -> bool:
+        """Generalized background fill (design-fase2.md §2.1 [v2] / §2.3).
+
+        `prefetch_agenda`'s worker body with the source gate REMOVED: any source
+        may pregenerate. Agenda sources (`kira-agenda*`) additionally run the
+        `_preview_accept_agenda_output` guardrail exactly as before; non-agenda
+        (interactive) sources skip that preview because their transform/veto
+        steps (`output_guard` for all sources, the chat repetition guard for
+        chat, `_sanitize_agenda_output` for agenda) already run INSIDE
+        `_generar_dialogo` — so the stored dialogo is byte-equivalent to what the
+        foreground path would have said. History is deferred
+        (`commit_history=False`) and committed at pop in `_speak_pregenerated`;
+        `history_text` (F1 [v4]) rides along so the commit uses the honest turn
+        text, not the raw prompt template.
+
+        Slot occupancy [v4 — F2]: eviction applies to CACHED occupants ONLY. A
+        request with STRICTLY higher priority (lower number) than a cached draft
+        epoch-invalidates it and takes the slot; an equal-or-lower request is
+        refused. While a worker is IN FLIGHT (marker set, nothing stored yet) its
+        Ollama call is uncancellable, so ANY new request is refused — spawning a
+        replacement would leave a zombie worker running concurrently whose finally
+        would poison the replacement's shared bookkeeping.
+        """
+        if not payload:
+            return False
+        is_agenda = source.startswith("kira-agenda")
         with self._prefetch_lock:
-            if self._prefetched_agenda is not None:
+            # F2 [v4]: an in-flight worker (marker set, nothing stored yet) is
+            # uncancellable -> refuse rather than spawn a second concurrent
+            # generation. Once it has stored (cached), the priority eviction below
+            # applies instead.
+            if self._pregen_inflight is not None and self._prefetched_agenda is None:
                 return False
-            if self._prefetch_thread and self._prefetch_thread.is_alive():
-                return False
+            cached = self._prefetched_agenda
+            if cached is not None:
+                occupant_priority = cached.get("priority")
+                if occupant_priority is not None and priority < occupant_priority:
+                    # Evict the strictly-lower-priority CACHED occupant: clear it
+                    # and bump the epoch (defensive — no in-flight worker here).
+                    self._prefetched_agenda = None
+                    self._prefetch_done.clear()
+                    self._prefetch_epoch += 1
+                else:
+                    return False
             self._prefetch_done.clear()
             epoch = self._prefetch_epoch
+            self._pregen_inflight = {"payload": payload, "source": source, "priority": priority}
+
+        log_prefix = "Agenda prefetch" if is_agenda else "Pregen"
 
         def worker() -> None:
             try:
-                dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix="Agenda prefetch")
+                dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix=log_prefix)
                 if dialogo:
-                    if not self._preview_accept_agenda_output(dialogo):
+                    if is_agenda and not self._preview_accept_agenda_output(dialogo):
                         self._log(f"Agenda: prefetch rechazado ({self._format_agenda_rejection()}).", level="warning")
                         return
                     with self._prefetch_lock:
                         if self._prefetch_epoch != epoch:
-                            self._log("Agenda: prefetch descartado (invalidado por clear/stop).", level="warning")
+                            self._log("Pregen descartado (invalidado por clear/stop/commit).", level="warning")
                             return
                         self._prefetched_agenda = {
                             "payload": payload,
                             "dialogo": dialogo,
                             "priority": priority,
                             "source": source,
+                            "history_text": history_text,
                         }
             finally:
+                # F4 [v4]: clear the in-flight marker (occupancy's source of truth)
+                # under the lock BEFORE signalling done, so a pop-side waiter waking
+                # on _prefetch_done never observes a phantom in-flight marker. The
+                # single-worker invariant (F2 refuses while in-flight) makes this
+                # unconditional clear safe.
+                with self._prefetch_lock:
+                    self._pregen_inflight = None
                 self._prefetch_done.set()
 
         thread = threading.Thread(target=worker, daemon=True)
@@ -900,7 +1042,11 @@ class MotorVocalIA(threading.Thread):
         if timeout > 0:
             self._prefetch_done.wait(timeout)
         with self._prefetch_lock:
-            return self._prefetched_agenda is not None
+            cached = self._prefetched_agenda
+            # F5 [v4]: this is the CTK legacy agenda consume path — report ready
+            # ONLY for an agenda-source draft. An interactive (chat/ptt) occupant
+            # is invisible here; it pops through the worker's own queue path.
+            return cached is not None and str(cached.get("source", "")).startswith("kira-agenda")
 
     def prefetch_pending(self) -> bool:
         """True while a prefetch worker is still generating (no draft yet).
@@ -928,10 +1074,13 @@ class MotorVocalIA(threading.Thread):
         """Speak cached agenda text, if available, without another LLM call."""
         with self._prefetch_lock:
             item = self._prefetched_agenda
+            # F5 [v4]: pop ONLY agenda-source drafts. An interactive occupant is
+            # left intact (never spoken as an agenda turn) for its own worker-path
+            # pop — return False without popping.
+            if not item or not str(item.get("source", "")).startswith("kira-agenda"):
+                return False
             self._prefetched_agenda = None
             self._prefetch_done.clear()
-        if not item:
-            return False
 
         def speaker() -> None:
             payload = item["payload"]
@@ -983,6 +1132,21 @@ class MotorVocalIA(threading.Thread):
             self._prefetch_done.clear()
             self._prefetch_epoch += 1
 
+    def _clear_prefetch_if_matches(self, payload: str, source: str) -> None:
+        """F7 [v4]: clear a cached pregen draft matching (payload, source).
+
+        Called when the queue item that would have consumed the draft expires
+        (TTL sweep): leaving the orphaned draft in the single slot would block
+        every new prefetch until an unrelated enqueue happens to clear it. Bumps
+        the epoch so a matching in-flight worker also discards its store.
+        """
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is not None and cached.get("payload") == payload and cached.get("source") == source:
+                self._prefetched_agenda = None
+                self._prefetch_done.clear()
+                self._prefetch_epoch += 1
+
     def _speak_pregenerated(self, cached: dict) -> None:
         """Speak a pop-time cache hit on the WORKER thread (design-fase2.md §2.2).
 
@@ -994,13 +1158,74 @@ class MotorVocalIA(threading.Thread):
         payload = cached["payload"]
         dialogo = cached["dialogo"]
         source = cached.get("source", "kira-agenda")
-        self._commit_history(payload, dialogo, source=source)
+        # F1 [v4]: forward the honest history_text (PTT/direct turns) exactly as
+        # the foreground path does — else the raw prompt template leaks into
+        # historial + memoria capture (the memoria_quality regression).
+        self._commit_history(payload, dialogo, source=source, history_text=cached.get("history_text"))
+        # F7 [v4]: source-aware log line — agenda keeps its historical wording;
+        # interactive sources log their own, never the "Agenda:" prefix.
         if source.startswith("kira-agenda"):
             self._record_accepted_agenda_output(dialogo)
-        self._log("Agenda: usando respuesta pregenerada.")
+            self._log("Agenda: usando respuesta pregenerada.")
+        else:
+            self._log(f"Respuesta pregenerada [{source}] lista.")
         self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
-        self._emit_dialogue(dialogo, source)
+        # WU3 interactive parity (design-fase2.md §3 WU3): mirror the foreground
+        # _ejecutar_inferencia post-generation steps for non-agenda sources — the
+        # emit relabels to "kira" (agenda keeps its own source) and a chat turn
+        # advances the spoken clock. The dialogo already passed every transform/
+        # veto INSIDE _generar_dialogo (sanitizer, output_guard, chat repetition
+        # guard), so nothing is re-applied here.
+        emit_source = source if source.startswith("kira-agenda") else "kira"
+        self._emit_dialogue(dialogo, emit_source)
         self._hablar(dialogo, source=source)
+        if source == "chat" and self.on_chat_turn_spoken is not None:
+            try:
+                self.on_chat_turn_spoken()
+            except Exception:
+                pass
+
+    def _pregen_in_flight_for(self, payload: str, source: str) -> bool:
+        """True when a pregen worker is currently generating THIS exact
+        (payload, source) and has not stored a draft yet (design-fase2.md AC3.2).
+
+        F4 [v4]: occupancy is `_pregen_inflight is not None` (set under the lock
+        before spawn, cleared in the worker's finally under the lock), NOT
+        thread.is_alive() — the same source of truth as every other occupancy check.
+        """
+        with self._prefetch_lock:
+            inflight = self._pregen_inflight
+            return bool(
+                self._prefetched_agenda is None
+                and inflight is not None
+                and inflight.get("payload") == payload
+                and inflight.get("source") == source
+            )
+
+    def _wait_or_invalidate_pregen(self, payload: str, source: str) -> Optional[dict]:
+        """AC3.2 [v4] wait-or-fallback at a pop-time cache miss.
+
+        F3 [v4]: when a pregen worker is generating THIS exact item, starting a
+        foreground generation is strictly worse than waiting — the single Ollama
+        runner would queue the foreground BEHIND the in-flight pregen (and the
+        watchdog could fire and silently drop the turn). So ALWAYS wait on
+        `_prefetch_done`, bounded by the inference watchdog timeout (the max the
+        worker's own Ollama call can run). On wake: take the draft if it landed
+        (epoch-valid), else fall back to foreground — by then the worker has
+        finished (the GPU is free), so a healthy pregen resolves to a cache hit
+        and a doomed one to exactly one foreground generation. The foreground
+        turn's own `_commit_history` epoch bump remains the backstop that discards
+        any late store. (The 2s/estimate cap is gone — it applied only when there
+        was no matching in-flight worker, i.e. never on this path.)
+        """
+        if not self._pregen_in_flight_for(payload, source):
+            return None
+        self._prefetch_done.wait(self._inference_watchdog_timeout)
+        cached = self._take_pregen_if_match(payload, source)
+        if cached is not None:
+            return cached
+        self._log("Pregen en vuelo sin borrador válido; generando en vivo.")
+        return None
 
     def drop_pending_sources(self, prefixes: tuple[str, ...]) -> int:
         """Drop pending priority/accumulation items whose source matches prefixes.
@@ -1150,6 +1375,7 @@ class MotorVocalIA(threading.Thread):
                 return
 
             expired_chat_infos: list = []
+            expired_pregen_keys: list = []
             with self._pq_lock:
                 # Expire stale non-PTT items before selecting next work
                 now = time.time()
@@ -1176,6 +1402,10 @@ class MotorVocalIA(threading.Thread):
                         # Captured here, emitted below OUTSIDE _pq_lock.
                         if source == "chat":
                             expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
+                        # F7 [v4]: record the expired item's (payload, source) so its
+                        # orphaned pregen draft (if any) can be cleared below — a stale
+                        # cache entry must not block the single slot for later prefetches.
+                        expired_pregen_keys.append((payload, source))
                     else:
                         kept.append(item)
                 self._priority_queue = kept
@@ -1189,6 +1419,11 @@ class MotorVocalIA(threading.Thread):
                         self.on_chat_item_expired(info)
                     except Exception:
                         pass
+
+            # F7 [v4]: clear any cached pregen draft matching an expired item, OUTSIDE
+            # _pq_lock (never hold _pq_lock across _prefetch_lock — lock ordering).
+            for exp_payload, exp_source in expired_pregen_keys:
+                self._clear_prefetch_if_matches(exp_payload, exp_source)
 
             with self._pq_lock:
                 if not self._priority_queue:
@@ -1224,6 +1459,11 @@ class MotorVocalIA(threading.Thread):
             # thread (no parallel speaker), skipping generation. A miss keeps the
             # existing generation path unchanged.
             cached = self._take_pregen_if_match(payload, source)
+            if cached is None:
+                # AC3.2 (design-fase2.md §3 WU3): a pregen for THIS exact item may
+                # still be generating. Wait a bounded time for it rather than
+                # starting a second generation (never two generations per item).
+                cached = self._wait_or_invalidate_pregen(payload, source)
             source_label = "PTT" if source == "ptt" else source
             if cached is not None:
                 self._log(f"Cola prioritaria: respuesta pregenerada [{source_label}] (prioridad {priority}).")
@@ -1863,6 +2103,10 @@ class MotorVocalIA(threading.Thread):
             chat_timeout = self._resolve_chat_watchdog_timeout(request_model)
             
             for intento in range(max_intentos):
+                # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
+                # actual generation call, cleared in finally on every exit path.
+                with self._lock:
+                    self._llm_generating = True
                 try:
                     respuesta = self._ollama_chat_with_watchdog(
                         timeout=chat_timeout,
@@ -1901,7 +2145,10 @@ class MotorVocalIA(threading.Thread):
                         exc_info=True,
                     )
                     return ""
-                
+                finally:
+                    with self._lock:
+                        self._llm_generating = False
+
                 msg_obj = respuesta.get('message', {})
                 if isinstance(msg_obj, dict):
                     raw_content = msg_obj.get('content', '')
@@ -2587,6 +2834,19 @@ class MotorVocalIA(threading.Thread):
         source: str = "direct",
         history_text: Optional[str] = None,
     ) -> None:
+        # AC3.3 (design-fase2.md §3 WU3 [v2]): any history commit invalidates an
+        # in-flight/cached pregen — a reply generated against pre-commit history
+        # must never speak. _speak_pregenerated already TOOK its own entry (via
+        # _take_pregen_if_match at pop) BEFORE calling this, so its commit cannot
+        # retro-invalidate the turn being spoken; it only kills OTHER stale
+        # pregens. Bump the epoch (an in-flight worker's store dies on the epoch
+        # check) AND clear a cached draft (the epoch alone does not cover it —
+        # the pop-time take does not re-check the epoch).
+        with self._prefetch_lock:
+            self._prefetch_epoch += 1
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+
         if source.startswith("kira-agenda"):
             safe_context = "[agenda segura: prompt interno omitido]"
         else:

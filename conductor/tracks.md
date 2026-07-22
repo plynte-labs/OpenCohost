@@ -1353,3 +1353,33 @@ PREFERENCE (owner runs `monologue`), not a defect.
   RuntimeErrors distinguish broken harness from legitimate red, hook self-verifies its window, teardown hygiene.
   Re-verified: xfail green, raw red at the occupancy assertion, 3/3 deterministic, 94 no-regression. ADR-037 written
   (interruption policy) with judge fixes (misquote attribution, stale line refs). Next: WU2.*
+  *Status 2026-07-21 (WU2 DONE): pop-time pregen cache landed (Opus impl, strict TDD) — _take_pregen_if_match +
+  _speak_pregenerated on the worker, match-aware clear (_clear_prefetch_unless_matches solves the replace_pending
+  self-nuke trap), consume-at-event (speaking_end enqueues on the worker thread before the post-turn pop — kills the
+  accumulation-flush race), _hablar belt lock (wrapper + _hablar_impl). play_prefetched_agenda untouched (CTK legacy).
+  THE WU1 RACE TEST NOW PASSES (occupancy 1, marker removed — same assertion, now the permanent serialization gate).
+  Judgment-day: Judge B (Opus) zero blockers (state machine verified: adoption→pop window safe, cache-miss regenerates
+  the adopted turn cleanly); Judge A (Fable) CRITICAL — WU2 made a latent unbounded worker recursion DETERMINISTIC
+  (_complete_processing_cycle recursing into _process_priority_queue; consume-at-event guarantees a queued item before
+  every finally → +2 frames/turn → RecursionError at ~480 chained turns ≈ 3-6h continuous agenda → permanent silence)
+  + 30s TTL could strand adopted drafts. Fix round (Opus): ITERATIVE drain (stack flat at depth 3 over 50 chained
+  turns vs +2/turn before; per-item control-command cadence preserved), kira-agenda* TTL exemption (replace_pending
+  dedupes — 2 chaos-stream tests legitimately inverted), _emit_dialogue spy + real-event AC2.4 test. Re-verified: race
+  3x green, 356 focused+regression+blast. WU4d guard inputs recorded (soft-stop stash desync, byte-identical closing
+  prompts). Next: WU3 interactive pregen.*
+  *Status 2026-07-21 (WU3 DONE): interactive pregeneration landed (Opus impl + Opus fix round + 2-round judgment-day).
+  A queued typed/PTT reply now generates DURING the ongoing TTS (pregenerate() generalized, _llm_generating narrow
+  flag, head-only trigger in enqueue, cached-occupant priority eviction, _commit_history staleness epoch hook,
+  same-item always-wait at pop bounded by the watchdog). Round-1 judges: BLOCKER (both, independently) — pregen
+  dropped history_text → a PTT reply from cache committed the RAW PROMPT TEMPLATE to historial+memoria (memoria_quality
+  regression reintroduced; the exact untested case); CRITICAL (Fable) in-flight eviction spawned zombie Ollama workers
+  w/ poisoned shared Event; CRITICAL (Fable) same-item fallback raced its own pregen (foreground queued BEHIND the
+  doomed worker; watchdog could silently drop the turn). Fixes: history_text end-to-end; eviction cached-only +
+  in-flight refusal; same-item ALWAYS waits on _prefetch_done (the wait IS the Ollama queue made explicit); occupancy
+  via _pregen_inflight marker; source-guarded legacy consumers (CTK could speak a stale chat draft as an agenda turn);
+  TOCTOU head re-check; TTL cache clear. Round-2 re-judge (Opus after Fable session-limit): APPROVE-FOR-COMMIT, all
+  closed. FOLLOW-UPS → WU4d: (1) driver _clear_prefetch is source-blind — can clobber an interactive draft when the
+  agenda tick yields (the one-liner: source-guard clear_prefetched_agenda); (2) wait bound is 1x watchdog vs worker's
+  2x retry ceiling; (3) non-committing foreground fallbacks don't bump the epoch (zombie store survives to next
+  commit); (4) TTL-clear value-match TOCTOU; (5) thread.start() raise could stick the inflight marker. 483 tests
+  green, race gate 3x. Next: WU4 solidification.*
