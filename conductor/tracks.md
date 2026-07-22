@@ -1383,3 +1383,60 @@ PREFERENCE (owner runs `monologue`), not a defect.
   2x retry ceiling; (3) non-committing foreground fallbacks don't bump the epoch (zombie store survives to next
   commit); (4) TTL-clear value-match TOCTOU; (5) thread.start() raise could stick the inflight marker. 483 tests
   green, race gate 3x. Next: WU4 solidification.*
+  *Status 2026-07-21 (WU4 DONE, uncommitted): solidification pack (4a-4d) + the 5 WU3 follow-ups landed. Strict TDD,
+  scope respected (llm_engine.py, agenda_driver.py, engine_host.py, settings.py, tests only — no models.py/UI/
+  controller changes). 4a: one greppable `Pregen boundary: draft=used|late|rejected|none|evicted source=<> gap_ms=<>`
+  INFO line per boundary (used/late mutually exclusive per pop — late already reports the boundary, used is
+  suppressed to keep exactly one line); gap_ms derives from a new `_last_speaking_end_monotonic` (used) or the actual
+  wait duration (late). 4b: `on_guardrail_rejected(code)` engine callback (guarded try/except, code-only via new
+  `_agenda_rejection_code()` — never the overlap/phrase snippet `_format_agenda_rejection` carries) wired in
+  engine_host to a direct `event_log.record("kira-agenda", "guardrail:<code>", None)` — EventLogSink's own lock makes
+  it safe from the pregen worker thread. 4c: `speech_remaining_estimate()` derived from `_hablar_impl`'s REAL consumer
+  loop (`chunks_played`/`len(oraciones)`/`start_tts`, tracked in new `_speech_progress`, updated live) — retry-once on
+  reject when `estimate > RETRY_MIN_REMAINING_SECONDS` (settings, 25.0), `_pregen_retried` reset per spawn, refactored
+  worker into a bounded 2-attempt loop. 4d: `_tick_locked` debug-logs a stash/engine desync (never raises) via new
+  `_log_prefetch_desync`. F1: new `clear_prefetched_agenda_only()` (source-aware — CTK's unconditional
+  `clear_prefetched_agenda` untouched), driver's `_clear_prefetch` prefers it with a fallback. F2: new
+  `_pregen_wait_bound()` = `2*_inference_watchdog_timeout+1.0` (the worker's real 2-attempt Ollama retry ceiling, not
+  1x — docstring fixed). F3: new `_invalidate_pregen_epoch()` called at all 7 non-committing foreground fallback
+  returns in `_generar_dialogo` (gated on `commit_history` so the pregen worker's OWN failures don't nuke an unrelated
+  valid draft). F4: `_clear_prefetch_if_matches` skips when a fresh in-flight replacement matches (payload, source).
+  F5: `thread.start()` wrapped in try/except, clears `_pregen_inflight` on raise. Deviation (found during TDD, fixed):
+  the first "late" telemetry test caught real double-logging (late+used both firing for one wait-then-hit pop) —
+  `_speak_pregenerated` gained `already_reported_boundary` to keep exactly one line/boundary. Verification: focused
+  suite (test_interactive_pregen/test_pregen_pop_cache/test_agenda_driver/test_engine_prefetch_invalidation/
+  test_engine_host_agenda_load/test_llm_engine_timeouts/test_speech_serialization_race) 165 passed; race gate 3/3;
+  regression (llm_tiers/model_panel/heavy_model_inference_recovery) 108 passed; blast (dialogue_callback/
+  speech_cancel_token/agenda_audio_shell_characterization/api_agenda/kira_orchestration_gaps/kira_chaos_stream/
+  command_drain/api_stream) 162 passed. 705 total, 0 failures. No commit made (owner review pending). Next: owner
+  review + WU5 (interruption + connector) or runtime validation.*
+  *Status 2026-07-21 (WU4 judgment-day fix round, uncommitted): 2 blind judges (zero
+  blockers/criticals) reconciled into 7 confirmed fixes, applied surgically (llm_engine.py,
+  agenda_driver.py, settings.py, tests). T1: `Pregen boundary:` line gains real `gen_ms`
+  (tracked at store time in the slot dict) + `speech_ms` (previous turn's own
+  speaking_start→end duration); reject-retry-reject now logs exactly ONE INFO line (per-attempt
+  detail moved to DEBUG); the driver's `none` line now routes through `motor._log` (same UI-log
+  surface as every other line); a NEW `none` line covers the previously-invisible plain
+  foreground fallback for an interactive pop with no in-flight pregen at all. T2: retry gate is
+  now design-spec ADAPTIVE (`last_gen_duration * 1.2`, cold-start falls back to
+  RETRY_MIN_REMAINING_SECONDS); `speech_remaining_estimate()` gains `first_play` (monotonic, set
+  at the first fragment's real playback start) so a slow-to-synthesize first fragment no longer
+  inflates the mean. T3: `_pregen_wait_bound()` corrected to 1x the watchdog timeout (was 2x+1.0
+  — docstring overstated the internal retry loop as this wait's own ceiling); on timeout the pop
+  falls back regardless of whether the worker is still alive. T4: `clear_prefetched_agenda_only`
+  now also bumps the epoch for a slot-EMPTY in-flight AGENDA worker (its own store-time epoch
+  check then discards the orphaned draft); interactive in-flight survives untouched. T5:
+  `pregenerate()`'s worker `finally` now clears the marker / signals `_prefetch_done` ONLY when
+  it still holds ITS OWN spawn's marker (identity check) — closes the store-to-finally race where
+  a successor spawn's bookkeeping could be wiped by a stale worker. T6: the retry loop re-checks
+  the spawn's epoch under `_prefetch_lock` immediately before the retry `continue` — a stale
+  epoch abandons the retry instead of paying for a second doomed generation. T7: the real-
+  `_hablar_impl` integration test now also asserts `played > 0` advanced by the REAL consumer
+  loop and a real-derived `speech_remaining_estimate()` while still speaking. design-fase2.md
+  amended [v5] (§3 WU4-4a field list + prefix, `_pregen_wait_bound` rationale, new §8 amendments
+  log). Residuals documented (no code change, follow-up only): the unlocked `rejection_log[-1]`
+  diagnostic read in `_agenda_rejection_code()` (mislabel-risk only — closed vocabulary keeps
+  privacy intact, a future thread-safety pass could snapshot it under the controller's own lock);
+  the pre-existing `_format_agenda_rejection` 50-char snippet reaching the app log
+  (`llm_engine.py`, base-only pre-WU4 behavior, flagged for a future privacy sweep that redacts
+  or shortens the matched-phrase snippet). Not committed — owner review pending.*

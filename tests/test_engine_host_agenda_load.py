@@ -160,6 +160,43 @@ def test_engine_host_speaking_end_consumes_prefetch_synchronously(tmp_path, monk
         host.stop()
 
 
+def test_engine_host_wires_guardrail_rejected_to_event_log(tmp_path, monkeypatch):
+    # WU4 4b (design-fase2.md §3): the engine's optional on_guardrail_rejected
+    # callback must be wired to a direct EventLogSink emission — code only,
+    # never dialogue text.
+    motor = _fake_motor()
+    host = _start_host(tmp_path, monkeypatch, motor, tmp_path / "cards.db")
+    try:
+        assert callable(host.motor.on_guardrail_rejected)
+
+        host.motor.on_guardrail_rejected("contains_internal_leak")
+
+        events = host.event_log.since(0)["events"]
+        assert events[-1]["source"] == "kira-agenda"
+        assert events[-1]["action"] == "guardrail:contains_internal_leak"
+        assert events[-1]["detail"] is None
+    finally:
+        host.stop()
+
+
+def test_guardrail_rejected_callback_is_safe_from_a_non_worker_thread(tmp_path, monkeypatch):
+    # 4b: the callback fires on the PREGEN WORKER THREAD in production —
+    # EventLogSink.record must be safe to call from any thread.
+    import threading
+
+    motor = _fake_motor()
+    host = _start_host(tmp_path, monkeypatch, motor, tmp_path / "cards.db")
+    try:
+        t = threading.Thread(target=host.motor.on_guardrail_rejected, args=("some_code",))
+        t.start()
+        t.join(2.0)
+
+        events = host.event_log.since(0)["events"]
+        assert any(e["action"] == "guardrail:some_code" for e in events)
+    finally:
+        host.stop()
+
+
 def test_engine_host_speaking_start_wires_prefetch_hook(tmp_path, monkeypatch):
     # Fase 1 (no-dead-air): speaking_start must spawn a background prefetch of
     # the next agenda turn while the current one is still playing.

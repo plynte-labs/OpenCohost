@@ -16,6 +16,7 @@ each test assert the dispatch decision (cache hit vs generation) deterministical
 import inspect
 import logging
 import queue
+import re
 import threading
 import time
 
@@ -505,3 +506,591 @@ def test_speak_pregenerated_own_commit_never_drops_its_own_turn():
     assert spoke == [("Hola.", "chat")], "the turn spoke despite its own commit bumping the epoch"
     assert motor._prefetch_epoch == epoch0 + 1, "the commit bumped the epoch (would kill any OTHER pregen)"
     assert motor._prefetched_agenda is None
+
+
+# ── WU4 F1 (WU3 follow-up): source-aware clear ──────────────────────────────
+
+
+def test_clear_prefetched_agenda_only_leaves_non_agenda_draft_intact():
+    motor = _bare_motor()
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    motor.clear_prefetched_agenda_only()
+
+    assert motor._prefetched_agenda is not None, "an interactive occupant must survive"
+    assert motor._prefetch_epoch == epoch0, "no epoch bump when nothing was cleared"
+
+
+def test_clear_prefetched_agenda_only_clears_agenda_draft():
+    motor = _bare_motor()
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda"}
+    epoch0 = motor._prefetch_epoch
+
+    motor.clear_prefetched_agenda_only()
+
+    assert motor._prefetched_agenda is None
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+# ── T4 [v5]: slot-EMPTY drop paths must kill an in-flight agenda store ─────
+
+
+def test_clear_prefetched_agenda_only_slot_empty_agenda_inflight_bumps_epoch():
+    """T4 [v5]: the slot is EMPTY (worker still in flight, nothing stored
+    yet) for an AGENDA request — the driver's deliberate drop must still
+    invalidate the incoming store so an orphaned agenda draft never lands
+    after a drop it was never meant to see.
+    """
+    motor = _bare_motor()
+    motor._prefetched_agenda = None
+    motor._pregen_inflight = {"payload": "AG", "source": "kira-agenda", "priority": 2}
+    epoch0 = motor._prefetch_epoch
+
+    motor.clear_prefetched_agenda_only()
+
+    assert motor._prefetch_epoch == epoch0 + 1, "an in-flight agenda store must be invalidated by the drop"
+
+
+def test_clear_prefetched_agenda_only_slot_empty_interactive_inflight_survives():
+    """T4 [v5]: an in-flight INTERACTIVE worker has nothing to do with the
+    driver's agenda-only drop — it must survive untouched.
+    """
+    motor = _bare_motor()
+    motor._prefetched_agenda = None
+    motor._pregen_inflight = {"payload": "P", "source": "chat", "priority": 1}
+    epoch0 = motor._prefetch_epoch
+
+    motor.clear_prefetched_agenda_only()
+
+    assert motor._prefetch_epoch == epoch0, "an interactive in-flight worker must not be invalidated"
+    assert motor._pregen_inflight is not None
+
+
+def test_clear_prefetched_agenda_only_discards_late_agenda_store_after_drop():
+    """T4 [v5] end-to-end: a genuinely in-flight agenda worker whose slot is
+    dropped while it's still generating must never land its store once it
+    finishes — the epoch bump at drop time is the backstop (the worker's own
+    store-time epoch check discards the orphaned draft).
+    """
+    motor = _bare_motor()
+    release = threading.Event()
+
+    def _slow_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        release.wait(2.0)
+        return "LATE_DRAFT"
+
+    motor._generar_dialogo = _slow_gen
+    motor._preview_accept_agenda_output = lambda d: True
+
+    assert motor.pregenerate("AG", priority=2, source="kira-agenda") is True
+    assert motor._pregen_inflight is not None, "marker is set synchronously before the worker starts"
+
+    # The driver deliberately drops (yield / topic-gone) while the worker is
+    # still generating.
+    motor.clear_prefetched_agenda_only()
+
+    release.set()
+    motor._prefetch_thread.join(2.0)
+
+    assert motor._pregen_inflight is None
+    assert motor._prefetched_agenda is None, "the orphaned late store must never land"
+
+
+# ── T3 [v5]: pop-side wait bound is 1x the watchdog timeout ────────────────
+
+
+def test_pregen_wait_bound_equals_watchdog_timeout():
+    motor = _bare_motor()
+    motor._inference_watchdog_timeout = 42.0
+
+    assert motor._pregen_wait_bound() == 42.0
+
+
+def test_wait_or_invalidate_pregen_falls_back_on_timeout_even_if_worker_still_alive():
+    """T3 [v5]: on timeout the pop falls back to foreground regardless of
+    whether the worker is still alive — the pathological >watchdog worker is
+    the declared transient-overlap class (design-fase2.md §4 [v4]), not a
+    case the pop keeps waiting for.
+    """
+    motor = _bare_motor()
+    motor._commit_history = lambda *a, **kw: None
+    motor._inference_watchdog_timeout = 0.05  # tiny bound for a fast test
+    spoke = []
+    motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
+    fg = []
+
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        fg.append(contexto)
+        return "FOREGROUND"
+
+    motor._generar_dialogo = _gen
+
+    # A pathologically slow worker that outlives the wait bound.
+    release = threading.Event()
+
+    def _worker():
+        release.wait(5.0)  # never set within this test -> still alive past the bound
+        with motor._prefetch_lock:
+            motor._pregen_inflight = None
+        motor._prefetch_done.set()
+
+    th = threading.Thread(target=_worker, daemon=True)
+    with motor._prefetch_lock:
+        motor._pregen_inflight = {"payload": "P", "source": "chat", "priority": 1}
+        motor._prefetch_thread = th
+    th.start()
+
+    with motor._pq_lock:
+        motor._priority_queue = [(1, time.time(), "P", "chat", None)]
+    motor._process_priority_queue()
+
+    assert fg == ["P"], "the pop must fall back to foreground on timeout even though the worker is still alive"
+    assert spoke == [("FOREGROUND", "chat")]
+    assert th.is_alive(), "the pathological worker is still running -- the pop must not wait for it"
+    release.set()
+    th.join(2.0)
+
+
+# ── WU4 F3 (WU3 follow-up): non-committing foreground fallbacks bump epoch ──
+
+
+def test_generar_dialogo_empty_response_invalidates_pending_pregen():
+    # A foreground turn that fails with an empty LLM response never calls
+    # _commit_history — without F3 the epoch-bump backstop never fires, so a
+    # zombie pregen store could still land after this failed turn.
+    motor = _bare_motor()
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = None
+    motor._ollama_chat_with_watchdog = lambda **kw: {"message": {"content": "   "}}
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert dialogo == ""
+    assert motor._prefetched_agenda is None, "a non-committing fallback must clear a stale pregen"
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+def test_generar_dialogo_empty_response_pregen_call_stays_untouched():
+    # Triangulation: the SAME failure inside the pregen worker's OWN call
+    # (commit_history=False) must NOT bump the epoch — it never committed
+    # anything special, and bumping here would nuke an unrelated valid draft.
+    motor = _bare_motor()
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = None
+    motor._ollama_chat_with_watchdog = lambda **kw: {"message": {"content": "   "}}
+    motor._prefetched_agenda = {"payload": "OTHER", "dialogo": "VALID", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    dialogo = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+    assert dialogo == ""
+    assert motor._prefetched_agenda is not None, "an unrelated valid draft must survive"
+    assert motor._prefetch_epoch == epoch0
+
+
+def test_generar_dialogo_guardrail_no_fallback_invalidates_pending_pregen():
+    motor = _bare_motor()
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = None
+    motor._ollama_chat_with_watchdog = lambda **kw: {
+        "message": {"content": "Como modelo de lenguaje, no puedo responder eso."}
+    }
+    # No neutral fallback line configured for this source -> guardrail-no-fallback.
+    motor._guardrail_fallback_line = lambda *a, **kw: ""
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert dialogo == ""
+    assert motor._prefetched_agenda is None
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+def test_generar_dialogo_agenda_reject_invalidates_pending_pregen():
+    motor = _bare_motor()
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = None
+    motor._ollama_chat_with_watchdog = lambda **kw: {"message": {"content": "Buen contenido de agenda."}}
+    motor.agenda_output_validator = lambda dialogo: False
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 1, "source": "chat"}
+    epoch0 = motor._prefetch_epoch
+
+    dialogo = motor._generar_dialogo("ctx", source="kira-agenda", commit_history=True)
+
+    assert dialogo == ""
+    assert motor._prefetched_agenda is None
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+# ── WU4 F4 (WU3 follow-up): TTL-clear TOCTOU vs a fresh in-flight replacement ─
+
+
+def test_clear_prefetch_if_matches_skips_when_fresh_replacement_inflight():
+    motor = _bare_motor()
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 2, "source": "kira-agenda"}
+    motor._pregen_inflight = {"payload": "P", "source": "kira-agenda", "priority": 2}
+    epoch0 = motor._prefetch_epoch
+
+    motor._clear_prefetch_if_matches("P", "kira-agenda")
+
+    assert motor._prefetched_agenda is not None, "a fresh in-flight replacement must not be clobbered"
+    assert motor._prefetch_epoch == epoch0
+
+
+def test_clear_prefetch_if_matches_clears_when_no_inflight_replacement():
+    motor = _bare_motor()
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "STALE", "priority": 2, "source": "kira-agenda"}
+    epoch0 = motor._prefetch_epoch
+
+    motor._clear_prefetch_if_matches("P", "kira-agenda")
+
+    assert motor._prefetched_agenda is None
+    assert motor._prefetch_epoch == epoch0 + 1
+
+
+# ── WU4 F5 (WU3 follow-up): thread.start() raise must not stick the marker ──
+
+
+def test_pregenerate_thread_start_raise_clears_inflight_marker(monkeypatch):
+    motor = _bare_motor()
+    motor._generar_dialogo = lambda *a, **kw: "should never run"
+
+    def _boom(self):
+        raise RuntimeError("can't allocate thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _boom)
+
+    ok = motor.pregenerate("P", priority=1, source="chat")
+
+    assert ok is False
+    assert motor._pregen_inflight is None, "a failed spawn must not stick the in-flight marker"
+
+
+def test_pregenerate_admitted_again_after_a_prior_start_failure(monkeypatch):
+    motor = _bare_motor()
+
+    def _boom(self):
+        raise RuntimeError("can't allocate thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _boom)
+    assert motor.pregenerate("P", priority=1, source="chat") is False
+    assert motor._pregen_inflight is None
+
+    started = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(1))
+
+    ok = motor.pregenerate("P2", priority=1, source="chat")
+
+    assert ok is True, "a prior start failure must not stick the slot refused forever"
+    assert started == [1]
+
+
+# ── WU4 4a: boundary telemetry — "used" (pop-time cache hit) ────────────────
+
+
+def test_boundary_telemetry_used_reports_gap_ms_since_last_speaking_end(caplog):
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    motor._last_speaking_end_monotonic = time.monotonic() - 0.5
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda"}
+    motor.enqueue("P", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "draft=used" in lines[0]
+    assert "source=kira-agenda" in lines[0]
+    m = re.search(r"gap_ms=(-?\d+)", lines[0])
+    assert m is not None
+    assert int(m.group(1)) >= 400, "gap_ms should reflect the ~500ms elapsed"
+
+
+def test_boundary_telemetry_used_gap_ms_minus_one_when_unknown(caplog):
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    assert motor._last_speaking_end_monotonic is None
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda"}
+    motor.enqueue("P", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "gap_ms=-1" in lines[0]
+
+
+# ── WU4 4a: boundary telemetry — "evicted" (slot eviction at spawn) ─────────
+
+
+def test_boundary_telemetry_evicted_logs_the_evicted_occupants_source(caplog):
+    motor = _bare_motor()
+    motor._prefetched_agenda = {"payload": "AG", "dialogo": "AGD", "priority": 2, "source": "kira-agenda"}
+    motor._generar_dialogo = lambda *a, **kw: "CHAT"
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    ok = motor.pregenerate("chatP", priority=1, source="chat")
+
+    assert ok is True
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "draft=evicted" in lines[0]
+    assert "source=kira-agenda" in lines[0], "the evicted occupant's source, not the new request's"
+
+
+# ── T1(a) [v5]: gen_ms / speech_ms fields on the boundary line ─────────────
+
+
+def test_boundary_telemetry_used_reports_gen_ms_and_speech_ms(caplog):
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    motor._last_speaking_end_monotonic = time.monotonic() - 0.5
+    motor._last_speech_duration_ms = 1234
+    motor._prefetched_agenda = {
+        "payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda", "gen_ms": 777,
+    }
+    motor.enqueue("P", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "gen_ms=777" in lines[0], "gen_ms must be the DRAFT's own recorded generation duration"
+    assert "speech_ms=1234" in lines[0], "speech_ms must be the PREVIOUS turn's speech duration"
+
+
+def test_boundary_telemetry_gen_ms_and_speech_ms_default_to_minus_one(caplog):
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    assert motor._last_speech_duration_ms is None
+    # No "gen_ms" key -- a draft stored before this field existed, or an
+    # eviction/rejection with nothing measurable.
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda"}
+    motor.enqueue("P", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "gen_ms=-1" in lines[0]
+    assert "speech_ms=-1" in lines[0]
+
+
+def test_pregen_store_records_real_gen_ms_for_the_stored_draft():
+    """T1(a) [v5]: gen_ms is tracked at STORE time — a real, measured
+    duration, not a placeholder.
+    """
+    motor = _bare_motor()
+    motor._preview_accept_agenda_output = lambda d: True
+
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        time.sleep(0.05)
+        return "DRAFT"
+
+    motor._generar_dialogo = _gen
+
+    assert motor.pregenerate("AG", priority=2, source="kira-agenda") is True
+    motor._prefetch_thread.join(2.0)
+
+    assert motor._prefetched_agenda is not None
+    gen_ms = motor._prefetched_agenda["gen_ms"]
+    assert gen_ms >= 40, "gen_ms must reflect the real measured generation duration"
+
+
+# ── T1(d) [v5]: "none" — the previously-invisible plain foreground fallback ─
+
+
+def test_boundary_telemetry_none_on_interactive_plain_foreground_fallback(caplog):
+    """T1(d) [v5]: the highest-dead-air boundary -- a full foreground
+    generation for an interactive item with NOT EVEN an in-flight pregen to
+    wait for -- used to be entirely invisible.
+    """
+    motor = _bare_motor()
+    motor._commit_history = lambda *a, **kw: None
+    motor._hablar = lambda texto, source="direct": None
+    motor._generar_dialogo = lambda *a, **kw: "REPLY"
+    motor.enqueue("hola", priority=1, source="chat")  # not speaking -> no interactive trigger
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "draft=none" in lines[0]
+    assert "source=chat" in lines[0]
+    assert "gen_ms=-1" in lines[0]
+
+
+def test_boundary_telemetry_none_never_double_reports_for_agenda_plain_foreground(caplog):
+    """Agenda's own 'none' boundary is owned by the driver (reported before
+    the item is even enqueued) -- the worker must not double-report it.
+    """
+    motor = _bare_motor()
+    motor._commit_history = lambda *a, **kw: None
+    motor._hablar = lambda texto, source="direct": None
+    motor._generar_dialogo = lambda *a, **kw: "REPLY"
+    motor.enqueue("agenda prompt", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert lines == [], "agenda's 'none' boundary belongs to the driver, not the worker"
+
+
+# ── WU4 4c seam: speech_remaining_estimate() ─────────────────────────────────
+
+
+def test_speech_remaining_estimate_none_when_not_speaking():
+    motor = _bare_motor()
+    assert motor._speaking is False
+    assert motor.speech_remaining_estimate() is None
+
+
+def test_speech_remaining_estimate_none_before_first_fragment_played():
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._speech_progress = {"total": 5, "played": 0, "start": time.time()}
+    assert motor.speech_remaining_estimate() is None
+
+
+def test_speech_remaining_estimate_ignores_synthesis_warmup_via_first_play():
+    """T2(b) [v5]: a slow-to-synthesize first fragment must not inflate the
+    per-fragment mean. `start` (wall clock) simulates a long synthesis
+    warm-up before playback ever began; `first_play` (monotonic, set when
+    fragment 1's playback actually started) is the honest baseline.
+    """
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._speech_progress = {
+        "total": 5,
+        "played": 1,
+        # 10s "synthesis warm-up" before the first fragment ever started
+        # playing -- the OLD (start-based) baseline would inflate on this.
+        "start": time.time() - 10.0,
+        # The REAL playback duration of fragment 1: ~0.2s.
+        "first_play": time.monotonic() - 0.2,
+    }
+
+    estimate = motor.speech_remaining_estimate()
+
+    assert estimate is not None
+    # Honest mean ~0.2s/fragment * 4 remaining ~= 0.8s -- nowhere near the
+    # ~40s the inflated start-based baseline would have produced.
+    assert estimate < 2.0
+
+
+def test_speech_remaining_estimate_extrapolates_from_played_fragments():
+    motor = _bare_motor()
+    motor._speaking = True
+    # 1 fragment played in ~1.0s, 4 remain -> ~4.0s remaining.
+    motor._speech_progress = {"total": 5, "played": 1, "start": time.time() - 1.0}
+
+    estimate = motor.speech_remaining_estimate()
+
+    assert estimate is not None
+    assert 3.0 <= estimate <= 5.0
+
+
+def test_hablar_impl_drives_speech_progress_from_the_real_consumer_loop(tmp_path, monkeypatch):
+    """WU4 4c seam: speech_remaining_estimate() must reflect the REAL
+    _hablar_impl consumer loop's own progress counters (chunks_played /
+    len(oraciones) / start_tts), not a separate timer. Drives the real
+    heavy-TTS path with a fake requests.post + no-op pygame mixer — same
+    harness convention as test_speech_serialization_race.py's _fast_hablar_motor.
+    """
+    from unittest.mock import MagicMock
+
+    from opencohost.core import llm_engine
+
+    # T7 [v5]: a load-call counter -- the SECOND real chunk's load() call
+    # happens right after fragment 1 has fully finished playing (chunks_played
+    # already bumped to 1) and while _speaking is still True. That is the
+    # seam that proves `played` is advanced by the REAL consumer loop (not a
+    # separate timer) and that speech_remaining_estimate() is real-derived.
+    seen = {"mid": None, "after_first_played": None}
+
+    class _FakeMusic:
+        def __init__(self):
+            self.load_calls = 0
+
+        def load(self, path):
+            self.load_calls += 1
+            if self.load_calls == 2:
+                seen["after_first_played"] = {
+                    "played": motor._speech_progress["played"] if motor._speech_progress else None,
+                    "speaking": motor._speaking,
+                    "estimate": motor.speech_remaining_estimate(),
+                }
+
+        def play(self):
+            pass
+
+        def get_busy(self):
+            return False
+
+        def unload(self):
+            pass
+
+    motor = _bare_motor()
+    motor.motor_tts = "pesado"
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"ref")
+    motor.voz_referencia = str(ref)
+    motor.pygame = MagicMock()
+    motor.pygame.mixer.music = _FakeMusic()
+
+    def fake_post(url, json=None, timeout=None):
+        return MagicMock(status_code=200, content=b"wav")
+
+    monkeypatch.setattr(llm_engine.requests, "post", fake_post)
+
+    # Sample mid-flight progress via the first-chunk log line as a hook: patch
+    # _log to snapshot progress the moment playback of chunk 1 begins.
+    original_log = motor._log
+
+    def _spy_log(msg, level="info"):
+        if "Primer fragmento listo" in msg:
+            seen["mid"] = {
+                "speaking": motor._speaking,
+                "progress": dict(motor._speech_progress) if motor._speech_progress else None,
+            }
+        return original_log(msg, level=level)
+
+    motor._log = _spy_log
+
+    motor._hablar_impl("Frase uno. Frase dos. Frase tres.", source="direct")
+
+    assert seen["mid"] is not None, "speech progress must be tracked mid-playback"
+    assert seen["mid"]["speaking"] is True
+    assert seen["mid"]["progress"] is not None
+    assert seen["mid"]["progress"]["total"] == 3
+    # T7 [v5]: `played` must be advanced by the REAL consumer loop (not a
+    # separate timer), and speech_remaining_estimate() must return a
+    # real-derived value while still speaking.
+    assert seen["after_first_played"] is not None, "must observe state after the real consumer loop advances played"
+    assert seen["after_first_played"]["played"] == 1, "played must be advanced by the REAL consumer loop"
+    assert seen["after_first_played"]["speaking"] is True
+    assert seen["after_first_played"]["estimate"] is not None
+    assert seen["after_first_played"]["estimate"] >= 0
+    # After the pipeline completes, progress + speaking reset and the
+    # speaking-end monotonic clock (WU4 4a gap_ms seam) is recorded.
+    assert motor._speaking is False
+    assert motor._speech_progress is None
+    assert motor._last_speaking_end_monotonic is not None

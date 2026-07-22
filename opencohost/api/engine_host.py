@@ -422,6 +422,11 @@ class EngineHost:
         motor.agenda_output_preview_validator = locked(agenda.preview_accept_output)
         motor.agenda_output_transformer = locked(agenda.enforce_live_safety_cap)
         motor.agenda_controller = agenda
+        # WU4 4b (design-fase2.md §3): surface a preview-guardrail rejection to
+        # the operator. Fires on the PREGEN WORKER THREAD — no lock wrapper
+        # needed here (EventLogSink.record guards its own append with a lock,
+        # safe from any thread; the engine itself guards the callback call).
+        motor.on_guardrail_rejected = self._on_guardrail_rejected
 
         # Register agenda feedback into the extensible router (append, not
         # replace) so the OBS runtime handler keeps receiving events too.
@@ -503,6 +508,18 @@ class EngineHost:
         payload = dict(perfiles[name])
         payload["_profile_name"] = name
         self.motor.command_queue.put(("set_profile", payload))
+
+    def _on_guardrail_rejected(self, code: str) -> None:
+        """WU4 4b (design-fase2.md §3): surface a preview-guardrail rejection.
+
+        Wired as `motor.on_guardrail_rejected`; fires on the PREGEN WORKER
+        THREAD. This is a DIRECT host-side emission (not gated by
+        `_MOTOR_EVENT_WHITELIST`, which only covers `ui_callback` status
+        strings) — `code` is already a closed guardrail identifier (e.g.
+        "contains_internal_leak"), never dialogue text, mirroring the
+        EventLogSink privacy contract. `detail` stays None (schema parity).
+        """
+        self.event_log.record("kira-agenda", f"guardrail:{code}", None)
 
     def _handle_agenda_motor_event(self, status) -> None:
         """Feed a motor status event into the agenda controller (FIX-C).

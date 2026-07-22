@@ -446,6 +446,14 @@ OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
 OLLAMA_CHAT_TIMEOUT = 180    # max seconds to wait for an Ollama chat generation
 HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
 
+# WU4 4c (agenda_no_dead_air fase 2, design-fase2.md §3 WU4): a rejected
+# background pregen retries once only when the remaining speech window
+# comfortably covers another generation. T2(a) [v5]: this is now the
+# COLD-START fallback for MotorVocalIA._pregen_retry_gate_seconds() — the
+# adaptive gate (1.2x the last completed generation's duration) is preferred
+# once a real measurement exists this session. Owner-tunable.
+RETRY_MIN_REMAINING_SECONDS = 25.0
+
 
 # ──────────────────────────────────────────────
 # Model persistence

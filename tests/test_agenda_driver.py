@@ -8,6 +8,7 @@ motor need zero changes, so the fake only has to be a faithful stand-in for
 the two motor methods the driver calls.
 """
 
+import logging
 import threading
 
 from opencohost.api.agenda_driver import (
@@ -53,6 +54,12 @@ class FakeMotor:
         # exact-key lookup — so a wrong-priority-arg regression is catchable.
         self.queued_priorities = []
         self.wait_timeouts = []  # every timeout passed to wait_prefetched_agenda
+        # T1(c) [v5]: records every motor._log(...) call — the surface the
+        # driver's own "Pregen boundary: draft=none" line must reach.
+        self.logged = []  # (msg, level) tuples
+
+    def _log(self, msg, level="info"):
+        self.logged.append((msg, level))
 
     def enqueue(self, payload, priority=1, source="chat", history_text=None):
         self.enqueued.append(
@@ -67,6 +74,12 @@ class FakeMotor:
         self.draft_ready = False
         self.pending = False
         self.cached_draft = None
+
+    def clear_prefetched_agenda_only(self):
+        # WU4 F1: mirror the real engine's source-aware clear — only touches
+        # an AGENDA-sourced occupant; an interactive occupant survives.
+        if self.cached_draft is not None and str(self.cached_draft[1]).startswith("kira-agenda"):
+            self.clear_prefetched_agenda()
 
     def _clear_prefetch_unless_matches(self, payload, source):
         # WU2 match-aware clear: keep the cache when the incoming (payload, source)
@@ -115,6 +128,7 @@ class FakeMotor:
         self.cleared_prefetch = 0
         self.prefetch_calls.clear()
         self.wait_timeouts.clear()
+        self.logged.clear()
 
 
 class RejectingFakeMotor(FakeMotor):
@@ -874,3 +888,116 @@ def test_run_honors_next_wait_retick_for_late_draft():
         assert motor.replaced, "the 0.25s re-tick (not the 30s cadence) consumed the draft"
     finally:
         driver.stop(timeout=2.0)
+
+
+# ── WU4 F1 (WU3 follow-up): driver clear must be source-aware ──────────────
+
+
+def test_clear_prefetch_leaves_interactive_draft_but_clears_agenda_draft():
+    controller, _ = _controller_with_queued_topic()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+
+    # An interactive (chat) draft occupies the engine slot — a driver-side
+    # yield/drop must NOT clobber it (it has nothing to do with the driver).
+    motor.cached_draft = ("chat prompt", "chat")
+
+    driver._clear_prefetch(motor)
+
+    assert motor.cached_draft == ("chat prompt", "chat"), "an interactive occupant must survive"
+    assert motor.cleared_prefetch == 0
+
+    # An agenda draft occupies the slot -> the driver's own clear DOES apply.
+    motor.cached_draft = ("agenda prompt", "kira-agenda")
+
+    driver._clear_prefetch(motor)
+
+    assert motor.cached_draft is None
+    assert motor.cleared_prefetch == 1
+
+
+# ── WU4 4a: boundary telemetry — "none" (driver consume miss, no draft ever) ─
+
+
+def test_none_boundary_telemetry_on_driver_fallback_with_no_draft(caplog):
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = False
+    motor.pending = False  # worker finished with nothing (error/reject)
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    caplog.set_level(logging.DEBUG, logger="opencohost.api.agenda_driver")
+    driver.tick_once()
+
+    assert driver._prefetch is None
+    assert motor.replaced, "must fall back to a normal generation"
+    # T1(c) [v5]: the INFO line reaches the SAME surface as every other
+    # boundary line — routed through motor._log (the UI log_queue + the
+    # motor's own logger), not the driver's own module-level logger.
+    assert len(motor.logged) == 1
+    msg, level = motor.logged[0]
+    assert "Pregen boundary:" in msg
+    assert "draft=none" in msg
+    assert "source=kira-agenda" in msg
+    assert "gap_ms=-1" in msg
+    assert "gen_ms=-1" in msg
+    # The driver's own module logger keeps a DEBUG-level trace only.
+    debug_matches = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "Pregen boundary:" in r.getMessage()
+    ]
+    assert len(debug_matches) == 1
+
+
+# ── WU4 4d: stash/engine pairing structural guard ───────────────────────────
+
+
+def test_tick_debug_logs_when_stash_present_but_engine_has_no_cache_or_pending(caplog):
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    # Force desync: the driver believes a draft is stashed, but the engine
+    # reports neither a ready cache nor an in-flight worker.
+    driver._prefetch = PrefetchState(action=object(), topic_id="stale-topic")
+    motor.draft_ready = False
+    motor.pending = False
+
+    caplog.set_level(logging.DEBUG, logger="opencohost.api.agenda_driver")
+    driver.tick_once()
+
+    assert any("desync" in r.getMessage() for r in caplog.records)
+
+
+def test_tick_debug_logs_when_engine_has_draft_but_driver_forgot_its_stash(caplog):
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    driver.tick_once()  # opens the topic -> GENERATING (agenda-active state)
+    driver._prefetch = None  # driver forgot its own stash
+    motor.draft_ready = True  # but the engine still reports a ready draft
+
+    caplog.set_level(logging.DEBUG, logger="opencohost.api.agenda_driver")
+    driver.tick_once()
+
+    assert any("desync" in r.getMessage() for r in caplog.records)
+
+
+def test_tick_no_desync_log_when_stash_and_engine_agree(caplog):
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)  # stash present, worker spawned
+    motor.pending = True  # honest post-spawn state: worker genuinely in flight
+
+    caplog.set_level(logging.DEBUG, logger="opencohost.api.agenda_driver")
+    driver.tick_once()
+
+    assert not any("desync" in r.getMessage() for r in caplog.records)

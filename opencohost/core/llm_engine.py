@@ -43,6 +43,7 @@ from opencohost.config.settings import (
     MEMORIAS_SUMMARY_MIN_TITLES,
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
+    RETRY_MIN_REMAINING_SECONDS,
 )
 from opencohost.core import context_budget
 from opencohost.core import personalization
@@ -254,6 +255,19 @@ class MotorVocalIA(threading.Thread):
         # (which brackets the whole turn, generation + TTS playback).
         self._llm_generating = False
         self._current_speech_source: Optional[str] = None
+        # WU4 4a (design-fase2.md §3): monotonic timestamp of the last
+        # speaking_end, and the live consumer-loop progress of the CURRENT
+        # utterance (None while not speaking). Both guarded by self._lock.
+        # gap_ms telemetry derives from the former; speech_remaining_estimate
+        # from the latter — the REAL _hablar_impl loop counters, not a timer.
+        self._last_speaking_end_monotonic: Optional[float] = None
+        self._speech_progress: Optional[dict] = None
+        # T1 [v5]: speaking_start->end monotonic pair for the `speech_ms=`
+        # field of a "Pregen boundary:" line — the PREVIOUS turn's own speech
+        # duration (-1/None while unknown, e.g. the first turn of a session).
+        # Guarded by self._lock, same as the fields above.
+        self._speaking_start_monotonic: Optional[float] = None
+        self._last_speech_duration_ms: Optional[int] = None
         # Speech-cancellation token (guarded by self._lock). Source prefixes for
         # which _hablar() must refuse at entry — kills the Bug B straggler whose
         # turn was popped from the priority queue during its GENERATION phase
@@ -430,6 +444,17 @@ class MotorVocalIA(threading.Thread):
         # eviction and lets the pop-side wait-or-fallback recognise a worker
         # generating THIS exact item. Cleared implicitly by the thread dying.
         self._pregen_inflight: Optional[dict] = None
+        # WU4 4c (design-fase2.md §3): one retry-on-reject per pregen spawn.
+        # Reset at the top of pregenerate(); the worker sets it True the
+        # moment it actually retries so a second reject never retries again.
+        self._pregen_retried: bool = False
+        # T2(a) [v5]: seconds of the last COMPLETED generation (foreground or
+        # pregen), set in _generar_dialogo right where elapsed is known. Feeds
+        # the adaptive retry gate (1.2x this value); None on a cold start
+        # (falls back to RETRY_MIN_REMAINING_SECONDS). Simple float — no lock
+        # (atomic assignment under the GIL, single-Ollama-runner invariant
+        # means at most one writer at a time).
+        self._pregen_last_gen_duration: Optional[float] = None
 
         # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
         # serializes _hablar so two callers can never share the TTS/audio
@@ -445,6 +470,12 @@ class MotorVocalIA(threading.Thread):
         # is set True. None/no-op in production; lets a test hold that window
         # open to pin the speech-overlap race deterministically.
         self._test_pop_boundary_hook: Optional[Callable[[], None]] = None
+        # Test-only seam (design-fase2.md §3 WU4-T5 [v5]): fires on the
+        # pregen worker thread right after it stores a draft, before its
+        # `finally` clears the in-flight marker — lets a test pin the real
+        # store-to-finally race window where a successor spawn can take the
+        # slot. None/no-op in production.
+        self._test_store_to_finally_hook: Optional[Callable[[], None]] = None
         self.agenda_output_validator = None
         self.agenda_output_preview_validator = None
         self.agenda_output_recorder = None
@@ -464,6 +495,12 @@ class MotorVocalIA(threading.Thread):
         # lifetime or speech behavior. Gated strictly on source == "chat".
         self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
         self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
+
+        # WU4 4b (design-fase2.md §3): optional operator-visibility hook, fired
+        # on the PREGEN WORKER THREAD with the rejection CODE only (never
+        # dialogue text) when the preview guardrail rejects a background draft.
+        # None = zero behavior change (mirrors the on_chat_* callbacks above).
+        self.on_guardrail_rejected: Optional[Callable[[str], None]] = None
 
     @property
     def is_speaking(self):
@@ -505,6 +542,68 @@ class MotorVocalIA(threading.Thread):
         """
         with self._lock:
             self._speaking = False
+
+    def speech_remaining_estimate(self) -> Optional[float]:
+        """WU4 4c seam (design-fase2.md §3): best-effort remaining-playback
+        estimate, in seconds.
+
+        Derived from the REAL `_hablar_impl` consumer loop's own progress
+        counters (`_speech_progress`: total fragments / fragments played so
+        far / wall-clock start / `first_play`) — the actual seam the TTS
+        pipeline already tracks, not a separate timer. Formula:
+        `remaining_fragments * mean_seconds_per_played_fragment`. Returns
+        None while not speaking, or before the first fragment has finished
+        playing (no rate to extrapolate from yet).
+
+        T2(b) [v5]: the mean is measured from `first_play` (monotonic, set
+        the moment the FIRST fragment's playback actually started) when
+        available, not from `start` (wall-clock, set when synthesis of the
+        WHOLE utterance began). Using `start` inflates the mean by the
+        synthesis wait before playback ever began — a slow-to-synthesize
+        first fragment would otherwise make every later fragment look far
+        slower than its real playback rate. Falls back to the legacy
+        `start`-based measurement when `first_play` is absent (e.g. a
+        test-constructed progress dict), so behavior is unchanged there.
+        """
+        with self._lock:
+            if not self._speaking:
+                return None
+            progress = self._speech_progress
+        if not progress:
+            return None
+        played = progress["played"]
+        if played <= 0:
+            return None
+        first_play = progress.get("first_play")
+        if first_play is not None:
+            elapsed = time.monotonic() - first_play
+        else:
+            elapsed = time.time() - progress["start"]
+        mean_per_fragment = elapsed / played
+        remaining_fragments = max(0, progress["total"] - played)
+        return remaining_fragments * mean_per_fragment
+
+    def _pregen_retry_gate_seconds(self) -> float:
+        """T2(a) [v5]: the adaptive retry-gate threshold for a rejected
+        background pregen — 1.2x the last COMPLETED generation's duration
+        (foreground or pregen), falling back to the flat
+        RETRY_MIN_REMAINING_SECONDS constant on a cold start (no generation
+        measured yet this session). Design-spec adaptive gate, constant as
+        cold-start fallback.
+        """
+        last = self._pregen_last_gen_duration
+        if last is None:
+            return RETRY_MIN_REMAINING_SECONDS
+        return last * 1.2
+
+    def _speech_ms_for_boundary(self) -> int:
+        """T1(a) [v5]: the PREVIOUS turn's speech duration in ms, for the
+        `speech_ms=` field of a "Pregen boundary:" telemetry line. -1 while
+        unknown (no turn has finished speaking yet this session).
+        """
+        with self._lock:
+            duration = self._last_speech_duration_ms
+        return duration if duration is not None else -1
 
     def mark_audio_suspect(self) -> None:
         """Flag the pygame mixer as possibly zombied so the NEXT _hablar()
@@ -980,6 +1079,8 @@ class MotorVocalIA(threading.Thread):
         if not payload:
             return False
         is_agenda = source.startswith("kira-agenda")
+        evicted_source: Optional[str] = None
+        evicted_gen_ms: int = -1
         with self._prefetch_lock:
             # F2 [v4]: an in-flight worker (marker set, nothing stored yet) is
             # uncancellable -> refuse rather than spawn a second concurrent
@@ -993,6 +1094,8 @@ class MotorVocalIA(threading.Thread):
                 if occupant_priority is not None and priority < occupant_priority:
                     # Evict the strictly-lower-priority CACHED occupant: clear it
                     # and bump the epoch (defensive — no in-flight worker here).
+                    evicted_source = str(cached.get("source", ""))
+                    evicted_gen_ms = cached.get("gen_ms", -1)
                     self._prefetched_agenda = None
                     self._prefetch_done.clear()
                     self._prefetch_epoch += 1
@@ -1000,42 +1103,127 @@ class MotorVocalIA(threading.Thread):
                     return False
             self._prefetch_done.clear()
             epoch = self._prefetch_epoch
-            self._pregen_inflight = {"payload": payload, "source": source, "priority": priority}
+            # T5 [v5]: a local reference to THIS spawn's own marker — the
+            # worker's finally compares against it by identity (not just
+            # "is _pregen_inflight set") so a successor spawn's marker is
+            # never wiped by a stale worker finishing in the store-to-finally
+            # window (see the finally block below).
+            inflight_marker = {"payload": payload, "source": source, "priority": priority}
+            self._pregen_inflight = inflight_marker
+            # WU4 4c: one retry-on-reject per spawn (reset here, under the same
+            # lock as the rest of this spawn's bookkeeping).
+            self._pregen_retried = False
+
+        if evicted_source is not None:
+            # WU4 4a boundary telemetry: the EVICTED occupant's own turn will
+            # fall back to plain generation when it eventually pops — record
+            # its source, not the new (winning) request's.
+            self._log(
+                f"Pregen boundary: draft=evicted source={evicted_source} gap_ms=-1 "
+                f"gen_ms={evicted_gen_ms} speech_ms={self._speech_ms_for_boundary()}"
+            )
 
         log_prefix = "Agenda prefetch" if is_agenda else "Pregen"
 
         def worker() -> None:
             try:
-                dialogo = self._generar_dialogo(payload, source=source, commit_history=False, log_prefix=log_prefix)
-                if dialogo:
+                while True:
+                    gen_start = time.monotonic()
+                    dialogo = self._generar_dialogo(
+                        payload, source=source, commit_history=False, log_prefix=log_prefix
+                    )
+                    if not dialogo:
+                        return
                     if is_agenda and not self._preview_accept_agenda_output(dialogo):
                         self._log(f"Agenda: prefetch rechazado ({self._format_agenda_rejection()}).", level="warning")
+                        code = self._agenda_rejection_code()
+                        # T1(b) [v5]: a per-attempt notice at DEBUG only — the
+                        # single INFO "Pregen boundary:" line for this spawn is
+                        # emitted at its TERMINAL outcome (below), never once
+                        # per rejected attempt.
+                        logger.debug("Pregen retry attempt rejected: source=%s", source)
+                        if self.on_guardrail_rejected is not None:
+                            try:
+                                self.on_guardrail_rejected(code)
+                            except Exception:
+                                logger.exception("on_guardrail_rejected callback failed")
+                        # WU4 4c / T2(a) [v5]: retry once when the remaining
+                        # speech window comfortably covers another generation —
+                        # adaptive gate (1.2x the last COMPLETED generation),
+                        # falling back to the flat constant on a cold start.
+                        if not self._pregen_retried:
+                            estimate = self.speech_remaining_estimate()
+                            if estimate is not None and estimate > self._pregen_retry_gate_seconds():
+                                # T6 [v5]: re-check the spawn's epoch is still
+                                # current right before paying for a second
+                                # generation — a stale/superseded spawn
+                                # abandons the retry instead of generating for
+                                # an already-doomed draft.
+                                with self._prefetch_lock:
+                                    still_current = self._prefetch_epoch == epoch
+                                if still_current:
+                                    self._pregen_retried = True
+                                    continue
+                                logger.debug(
+                                    "Pregen retry abandoned: epoch stale (source=%s)", source
+                                )
+                                return
+                        self._log(
+                            f"Pregen boundary: draft=rejected source={source} gap_ms=-1 "
+                            f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
+                        )
                         return
                     with self._prefetch_lock:
                         if self._prefetch_epoch != epoch:
                             self._log("Pregen descartado (invalidado por clear/stop/commit).", level="warning")
                             return
+                        # T1(a) [v5]: the draft's own generation duration,
+                        # recorded at store time — -1 (N/A) for a draft that
+                        # never reaches this point (rejected/discarded).
+                        gen_ms = int((time.monotonic() - gen_start) * 1000)
                         self._prefetched_agenda = {
                             "payload": payload,
                             "dialogo": dialogo,
                             "priority": priority,
                             "source": source,
                             "history_text": history_text,
+                            "gen_ms": gen_ms,
                         }
+                    if self._test_store_to_finally_hook is not None:
+                        self._test_store_to_finally_hook()
+                    return
             finally:
-                # F4 [v4]: clear the in-flight marker (occupancy's source of truth)
-                # under the lock BEFORE signalling done, so a pop-side waiter waking
-                # on _prefetch_done never observes a phantom in-flight marker. The
-                # single-worker invariant (F2 refuses while in-flight) makes this
-                # unconditional clear safe.
+                # F4 [v4] / T5 [v5]: clear the in-flight marker (occupancy's
+                # source of truth) under the lock BEFORE signalling done, so a
+                # pop-side waiter waking on _prefetch_done never observes a
+                # phantom in-flight marker — but ONLY when the marker is still
+                # THIS spawn's own (identity check). Between this worker's
+                # store above and this finally, a higher-priority request can
+                # evict the just-stored draft and spawn a successor (F2 only
+                # refuses while nothing is stored yet — once cached, priority
+                # eviction applies), replacing _pregen_inflight with the
+                # successor's OWN marker. Without this check, a stale worker's
+                # unconditional clear+set here would wipe that successor's
+                # marker and falsely signal _prefetch_done before the
+                # successor has actually finished.
                 with self._prefetch_lock:
-                    self._pregen_inflight = None
-                self._prefetch_done.set()
+                    if self._pregen_inflight is inflight_marker:
+                        self._pregen_inflight = None
+                        self._prefetch_done.set()
 
         thread = threading.Thread(target=worker, daemon=True)
         with self._prefetch_lock:
             self._prefetch_thread = thread
-        thread.start()
+        # WU4 F5 (WU3 follow-up): a raising thread.start() must not leave the
+        # in-flight marker stuck — that would refuse every future pregenerate()
+        # forever. Clear it under the lock and report failure instead.
+        try:
+            thread.start()
+        except Exception:
+            logger.exception("Pregen worker thread failed to start")
+            with self._prefetch_lock:
+                self._pregen_inflight = None
+            return False
         return True
 
     def wait_prefetched_agenda(self, timeout: float = 0.0) -> bool:
@@ -1069,6 +1257,39 @@ class MotorVocalIA(threading.Thread):
             self._prefetched_agenda = None
             self._prefetch_done.clear()
             self._prefetch_epoch += 1
+
+    def clear_prefetched_agenda_only(self) -> None:
+        """WU4 F1 (WU3 follow-up): source-aware clear for the driver's
+        yield/drop paths (design-fase2.md §3 WU4-4d).
+
+        `AgendaDriver._clear_prefetch` used to call the unconditional
+        `clear_prefetched_agenda`, which could clobber a live INTERACTIVE
+        (chat/PTT) pregen the driver has nothing to do with. This clears the
+        slot ONLY when it currently holds an agenda draft; an interactive
+        occupant survives untouched. `clear_prefetched_agenda` itself stays
+        unconditional — the CTK legacy consume path depends on it as-is.
+
+        T4 [v5]: also covers the slot-EMPTY case — an agenda worker still IN
+        FLIGHT (marker set, nothing stored yet) whose eventual store would
+        land into a slot the driver just deliberately dropped. Bumping the
+        epoch here invalidates that incoming store (the worker's own
+        store-time epoch check in `pregenerate()`'s worker discards it), so
+        an orphaned agenda draft never survives a drop it was never meant to
+        see. An interactive in-flight worker is untouched either way — it has
+        nothing to do with the driver's agenda-only drop.
+        """
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is not None:
+                if not str(cached.get("source", "")).startswith("kira-agenda"):
+                    return
+                self._prefetched_agenda = None
+                self._prefetch_done.clear()
+                self._prefetch_epoch += 1
+                return
+            inflight = self._pregen_inflight
+            if inflight is not None and str(inflight.get("source", "")).startswith("kira-agenda"):
+                self._prefetch_epoch += 1
 
     def play_prefetched_agenda(self) -> bool:
         """Speak cached agenda text, if available, without another LLM call."""
@@ -1139,21 +1360,55 @@ class MotorVocalIA(threading.Thread):
         (TTL sweep): leaving the orphaned draft in the single slot would block
         every new prefetch until an unrelated enqueue happens to clear it. Bumps
         the epoch so a matching in-flight worker also discards its store.
+
+        WU4 F4 (WU3 follow-up, TOCTOU): skip the clear entirely when a pregen
+        worker is currently IN FLIGHT for this exact (payload, source) — a
+        fresh replacement generation already superseding the stale entry.
+        Clearing (and bumping the epoch) here would invalidate that fresh
+        worker's imminent store for no reason; let it land naturally instead.
         """
         with self._prefetch_lock:
+            inflight = self._pregen_inflight
+            if (
+                inflight is not None
+                and inflight.get("payload") == payload
+                and inflight.get("source") == source
+            ):
+                return
             cached = self._prefetched_agenda
             if cached is not None and cached.get("payload") == payload and cached.get("source") == source:
                 self._prefetched_agenda = None
                 self._prefetch_done.clear()
                 self._prefetch_epoch += 1
 
-    def _speak_pregenerated(self, cached: dict) -> None:
+    def _invalidate_pregen_epoch(self) -> None:
+        """WU4 F3 (WU3 follow-up): unconditional epoch bump + slot clear.
+
+        Called at every non-committing FOREGROUND fallback return in
+        `_generar_dialogo` (watchdog timeout, transport error, empty dialogo,
+        guardrail-no-fallback, chat-repetition fallback, agenda reject, the
+        outer exception handler). Those returns skip `_commit_history` — the
+        usual epoch-bump backstop (AC3.3) — so without this, a pregen worker
+        that started before this failed turn could still land a stale store
+        after it, silently surviving into the next pop.
+        """
+        with self._prefetch_lock:
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+            self._prefetch_epoch += 1
+
+    def _speak_pregenerated(self, cached: dict, *, already_reported_boundary: bool = False) -> None:
         """Speak a pop-time cache hit on the WORKER thread (design-fase2.md §2.2).
 
         play_prefetched_agenda's speaker body, minus the parallel thread: the
         worker already owns the turn (single dispatch path), so deferred-commit +
         emit + _hablar run inline. History commits HERE, at playback, in spoken
         order (commit-once invariant — the pregen used commit_history=False).
+
+        `already_reported_boundary` (WU4 4a): True when the caller already
+        emitted this pop's "Pregen boundary:" line (the "late" wait-then-hit
+        path) — skips the "used" line here so exactly one boundary line is
+        logged per turn boundary.
         """
         payload = cached["payload"]
         dialogo = cached["dialogo"]
@@ -1178,6 +1433,21 @@ class MotorVocalIA(threading.Thread):
         # guard), so nothing is re-applied here.
         emit_source = source if source.startswith("kira-agenda") else "kira"
         self._emit_dialogue(dialogo, emit_source)
+        if not already_reported_boundary:
+            # WU4 4a boundary telemetry: an immediate pop-time cache hit is a
+            # "used" draft. gap_ms = ms since the PREVIOUS turn's speaking_end;
+            # -1 if unknown (e.g. the very first turn of the session). gen_ms
+            # is this draft's own recorded generation duration (T1(a) [v5],
+            # tracked in the slot dict at store time); speech_ms is the
+            # previous turn's own speech duration.
+            with self._lock:
+                last_end = self._last_speaking_end_monotonic
+            gap_ms = int((time.monotonic() - last_end) * 1000) if last_end is not None else -1
+            gen_ms = cached.get("gen_ms", -1)
+            self._log(
+                f"Pregen boundary: draft=used source={source} gap_ms={gap_ms} "
+                f"gen_ms={gen_ms} speech_ms={self._speech_ms_for_boundary()}"
+            )
         self._hablar(dialogo, source=source)
         if source == "chat" and self.on_chat_turn_spoken is not None:
             try:
@@ -1202,6 +1472,26 @@ class MotorVocalIA(threading.Thread):
                 and inflight.get("source") == source
             )
 
+    def _pregen_wait_bound(self) -> float:
+        """T3 [v5]: the pop-side wait ceiling for a same-item in-flight
+        pregen — `_inference_watchdog_timeout` itself (1x), not a multiple.
+
+        On timeout the pop falls back to foreground regardless of whether the
+        worker is still alive: a worker outliving the watchdog is already the
+        declared transient-overlap class (design-fase2.md §4 [v4] — the rare
+        watchdog-timeout window where a foreground turn may transiently
+        overlap an unrelated in-flight pregen's Ollama call, bounded and
+        self-healing via the epoch-bump backstop). In the API host the
+        `_generar_dialogo` retry loop cannot legitimately still be running
+        past this bound for THIS item's pop-side wait: `_speaking` is False
+        while the pop is waiting here (no turn is being spoken), so nothing
+        can race a second generation for the same item behind this wait — the
+        pathological >watchdog worker is a stuck/hung Ollama call, not the
+        loop's own internal (`max_intentos = 2`) retry, which the previous
+        (`2x + 1.0`) docstring overstated as this wait's own ceiling.
+        """
+        return self._inference_watchdog_timeout
+
     def _wait_or_invalidate_pregen(self, payload: str, source: str) -> Optional[dict]:
         """AC3.2 [v4] wait-or-fallback at a pop-time cache miss.
 
@@ -1209,20 +1499,30 @@ class MotorVocalIA(threading.Thread):
         foreground generation is strictly worse than waiting — the single Ollama
         runner would queue the foreground BEHIND the in-flight pregen (and the
         watchdog could fire and silently drop the turn). So ALWAYS wait on
-        `_prefetch_done`, bounded by the inference watchdog timeout (the max the
-        worker's own Ollama call can run). On wake: take the draft if it landed
-        (epoch-valid), else fall back to foreground — by then the worker has
-        finished (the GPU is free), so a healthy pregen resolves to a cache hit
-        and a doomed one to exactly one foreground generation. The foreground
-        turn's own `_commit_history` epoch bump remains the backstop that discards
-        any late store. (The 2s/estimate cap is gone — it applied only when there
-        was no matching in-flight worker, i.e. never on this path.)
+        `_prefetch_done`, bounded by `_pregen_wait_bound()` — T3 [v5]:
+        `_inference_watchdog_timeout` itself (see `_pregen_wait_bound`'s
+        docstring for why 1x is honest here). On wake: take the draft if it
+        landed (epoch-valid), else fall back to foreground regardless of
+        whether the worker is still alive — by then either the worker has
+        finished (the GPU is free, a healthy pregen resolves to a cache hit)
+        or it is the declared pathological transient-overlap class, and the
+        foreground turn's own `_commit_history` epoch bump remains the
+        backstop that discards any late store either way.
         """
         if not self._pregen_in_flight_for(payload, source):
             return None
-        self._prefetch_done.wait(self._inference_watchdog_timeout)
+        wait_start = time.monotonic()
+        self._prefetch_done.wait(self._pregen_wait_bound())
         cached = self._take_pregen_if_match(payload, source)
         if cached is not None:
+            # WU4 4a boundary telemetry: the pop WAITED on an in-flight pregen
+            # and it landed — "late" (gap_ms is the actual wait duration).
+            wait_ms = int((time.monotonic() - wait_start) * 1000)
+            gen_ms = cached.get("gen_ms", -1)
+            self._log(
+                f"Pregen boundary: draft=late source={source} gap_ms={wait_ms} "
+                f"gen_ms={gen_ms} speech_ms={self._speech_ms_for_boundary()}"
+            )
             return cached
         self._log("Pregen en vuelo sin borrador válido; generando en vivo.")
         return None
@@ -1459,11 +1759,17 @@ class MotorVocalIA(threading.Thread):
             # thread (no parallel speaker), skipping generation. A miss keeps the
             # existing generation path unchanged.
             cached = self._take_pregen_if_match(payload, source)
+            # WU4 4a: "late" (below) already reports the boundary telemetry
+            # for a wait-then-hit resolution — _speak_pregenerated must not
+            # also log "used" for the SAME pop ("a single INFO log line...
+            # per turn boundary").
+            already_reported_boundary = False
             if cached is None:
                 # AC3.2 (design-fase2.md §3 WU3): a pregen for THIS exact item may
                 # still be generating. Wait a bounded time for it rather than
                 # starting a second generation (never two generations per item).
                 cached = self._wait_or_invalidate_pregen(payload, source)
+                already_reported_boundary = cached is not None
             source_label = "PTT" if source == "ptt" else source
             if cached is not None:
                 self._log(f"Cola prioritaria: respuesta pregenerada [{source_label}] (prioridad {priority}).")
@@ -1475,8 +1781,21 @@ class MotorVocalIA(threading.Thread):
             self.ui_callback("processing")
             try:
                 if cached is not None:
-                    self._speak_pregenerated(cached)
+                    self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
                 else:
+                    # T1(d) [v5]: the worker's PLAIN foreground fallback for an
+                    # INTERACTIVE item — no cache hit, not even an in-flight
+                    # pregen to wait for. This is the highest-dead-air
+                    # boundary and used to be entirely invisible. Agenda's own
+                    # "none" boundary is already reported by the driver before
+                    # the item is ever enqueued (AgendaDriver._maybe_consume_
+                    # prefetch), so this is gated to non-agenda sources to
+                    # avoid a double report for the same turn.
+                    if not source.startswith("kira-agenda"):
+                        self._log(
+                            f"Pregen boundary: draft=none source={source} gap_ms=-1 "
+                            f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
+                        )
                     self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
                 # process_queue=False: the loop (not recursion) drains the next
@@ -2122,6 +2441,8 @@ class MotorVocalIA(threading.Thread):
                             source=source,
                             timeout=chat_timeout,
                         )
+                        if commit_history:
+                            self._invalidate_pregen_epoch()
                         return ""
                     if not self._is_ollama_transport_error(e):
                         raise
@@ -2144,6 +2465,8 @@ class MotorVocalIA(threading.Thread):
                         max_intentos,
                         exc_info=True,
                     )
+                    if commit_history:
+                        self._invalidate_pregen_epoch()
                     return ""
                 finally:
                     with self._lock:
@@ -2201,6 +2524,12 @@ class MotorVocalIA(threading.Thread):
 
             dialogo = raw_content.strip().strip('\x00\ufeff')
             elapsed = time.time() - start_llm
+            # T2(a) [v5]: last COMPLETED generation's duration (foreground or
+            # pregen, this is the shared _generar_dialogo body both use),
+            # feeding the adaptive retry gate (_pregen_retry_gate_seconds).
+            # Single Ollama runner -> at most one writer at a time; plain
+            # assignment is safe (atomic under the GIL).
+            self._pregen_last_gen_duration = elapsed
 
             # Editorial direct-mode USED trigger (D2): commit the pending
             # injection exactly once, only when this turn actually injected a
@@ -2264,6 +2593,8 @@ class MotorVocalIA(threading.Thread):
             if not dialogo:
                 self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
+                if commit_history:
+                    self._invalidate_pregen_epoch()
                 return ""
 
             self._mark_model_generation_success(request_model)
@@ -2287,6 +2618,11 @@ class MotorVocalIA(threading.Thread):
                             contexto, fallback, source=source, history_text=history_text,
                         )
                     return fallback
+                # WU4 F3 (WU3 follow-up): guardrail-no-fallback is a
+                # non-committing foreground return — bump the pregen epoch so
+                # a late zombie store cannot survive into the next pop.
+                if commit_history:
+                    self._invalidate_pregen_epoch()
                 return ""
 
             self._last_llm_failure = None
@@ -2309,10 +2645,13 @@ class MotorVocalIA(threading.Thread):
                         f"usando línea neutral sin LLM.",
                         level="warning",
                     )
+                    if commit_history:
+                        self._invalidate_pregen_epoch()
                     return self._guardrail_fallback_line(source) or ""
 
             if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
                 self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
+                self._invalidate_pregen_epoch()
                 return ""
 
             if commit_history:
@@ -2331,6 +2670,8 @@ class MotorVocalIA(threading.Thread):
         except Exception as e:
             self._log(f"ERROR Ollama: {e}", level="error")
             logger.exception("Error en inferencia LLM")
+            if commit_history:
+                self._invalidate_pregen_epoch()
             return ""
 
     def _create_ollama_chat_client(self, ollama_module):
@@ -2816,6 +3157,20 @@ class MotorVocalIA(threading.Thread):
         if phrase:
             return f"{grd} (\"{phrase[:50]}...\")"
         return str(grd)
+
+    def _agenda_rejection_code(self) -> str:
+        """WU4 4b: the rejection CODE only (e.g. "contains_internal_leak").
+
+        Unlike `_format_agenda_rejection` (the human log line), this NEVER
+        includes the overlap percentage or matched-phrase snippet — those can
+        carry a fragment of generated dialogue. Safe to ride an event's
+        `action` string.
+        """
+        ctl = getattr(self, "agenda_controller", None)
+        if ctl is None or not ctl.rejection_log:
+            return "unknown"
+        last = ctl.rejection_log[-1]
+        return str(last.get("guardrail", last.get("error", "unknown")))
 
     def _record_accepted_agenda_output(self, dialogo: str) -> None:
         recorder = getattr(self, "agenda_output_recorder", None)
@@ -3534,6 +3889,10 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             self._speaking = True
             self._current_speech_source = source
+            # T1(a) [v5]: monotonic start of THIS turn's speech, paired with
+            # the speaking_end sites below to record the previous turn's own
+            # speech duration for the `speech_ms=` boundary telemetry field.
+            self._speaking_start_monotonic = time.monotonic()
         try:
             self.ui_callback("speaking_start")
         except Exception:
@@ -3578,11 +3937,27 @@ class MotorVocalIA(threading.Thread):
             with self._lock:
                 self._speaking = False
                 self._current_speech_source = None
+                now = time.monotonic()
+                self._last_speaking_end_monotonic = now
+                # T1(a) [v5]: record THIS turn's own speech duration (here:
+                # ~0, nothing was ever synthesized) as the "previous turn"
+                # value for the NEXT boundary's speech_ms field.
+                if self._speaking_start_monotonic is not None:
+                    self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
+                self._speaking_start_monotonic = None
             self.ui_callback("speaking_end")
             return
 
         self._log(f"Sintetizando {len(oraciones)} fragmento(s) con pipeline...")
         start_tts = time.time()
+        # WU4 4c seam (design-fase2.md §3): live progress counters for
+        # speech_remaining_estimate() — updated as each fragment finishes
+        # playing (below), cleared at speaking_end. `first_play` (T2(b)
+        # [v5]) is set at the FIRST fragment's actual playback start, below.
+        with self._lock:
+            self._speech_progress = {
+                "total": len(oraciones), "played": 0, "start": start_tts, "first_play": None,
+            }
 
         cola_audios = queue.Queue(maxsize=3)
         error_count = 0
@@ -3845,6 +4220,14 @@ class MotorVocalIA(threading.Thread):
                     if chunks_played == 0:
                         elapsed_first = time.time() - start_tts
                         self._log(f"🔊 Primer fragmento listo en {elapsed_first:.2f}s. Reproduciendo...")
+                        # T2(b) [v5]: mark the FIRST fragment's real playback
+                        # start (monotonic) — speech_remaining_estimate uses
+                        # this as its baseline instead of `start` (set before
+                        # synthesis even began) so a slow-to-synthesize first
+                        # fragment never inflates the per-fragment mean.
+                        with self._lock:
+                            if self._speech_progress is not None:
+                                self._speech_progress["first_play"] = time.monotonic()
 
                     self.pygame.mixer.music.load(archivo_chunk)
                     self.pygame.mixer.music.play()
@@ -3868,6 +4251,9 @@ class MotorVocalIA(threading.Thread):
 
                     self.pygame.mixer.music.unload()
                     chunks_played += 1
+                    with self._lock:
+                        if self._speech_progress is not None:
+                            self._speech_progress["played"] = chunks_played
 
                     if interrupted:
                         break
@@ -3930,6 +4316,14 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             self._speaking = False
             self._current_speech_source = None
+            self._speech_progress = None
+            now = time.monotonic()
+            self._last_speaking_end_monotonic = now
+            # T1(a) [v5]: this turn's own speech duration, recorded as the
+            # "previous turn" value the NEXT boundary's speech_ms reads.
+            if self._speaking_start_monotonic is not None:
+                self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
+            self._speaking_start_monotonic = None
         self.ui_callback("speaking_end")
 
     def _emit_dialogue(self, text: str, source: str) -> None:

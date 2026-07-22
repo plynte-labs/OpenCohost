@@ -19,9 +19,12 @@ loop driven synchronously via `_process_priority_queue()`. Background pregen wor
 runs on the real daemon thread `pregenerate` spawns; `_wait_until` polls for it.
 """
 
+import logging
 import queue
+import re
 import threading
 import time
+from types import SimpleNamespace
 
 from opencohost.core.llm_engine import MotorVocalIA
 
@@ -551,3 +554,421 @@ def test_prefetch_agenda_alias_still_pregenerates_agenda():
     assert _wait_until(lambda: motor._prefetched_agenda is not None)
     assert motor._prefetched_agenda["source"] == "kira-agenda"
     assert motor._prefetched_agenda["dialogo"] == "Texto de agenda."
+
+
+# ── WU4 4a boundary telemetry: "late" (pop waits on an in-flight pregen) ────
+
+
+def test_boundary_telemetry_late_reports_the_actual_wait_ms(caplog):
+    motor = _bare_motor()
+    motor._commit_history = lambda *a, **kw: None
+    motor._hablar = lambda texto, source="direct": None
+
+    def _worker():
+        try:
+            time.sleep(0.2)
+            with motor._prefetch_lock:
+                motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 1, "source": "chat"}
+        finally:
+            with motor._prefetch_lock:
+                motor._pregen_inflight = None
+            motor._prefetch_done.set()
+
+    th = threading.Thread(target=_worker, daemon=True)
+    with motor._prefetch_lock:
+        motor._pregen_inflight = {"payload": "P", "source": "chat", "priority": 1}
+        motor._prefetch_thread = th
+    th.start()
+
+    _seed_queue(motor, [(1, time.time(), "P", "chat", None)])
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+    th.join(2.0)
+
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "draft=late" in lines[0]
+    assert "source=chat" in lines[0]
+    m = re.search(r"gap_ms=(-?\d+)", lines[0])
+    assert m is not None
+    assert int(m.group(1)) >= 150, "gap_ms should reflect the ~200ms wait"
+
+
+# ── WU4 4a boundary telemetry: "rejected" (preview guardrail reject) ────────
+
+
+def test_boundary_telemetry_rejected_fires_at_the_preview_reject_site(caplog):
+    motor = _bare_motor()
+    motor._speaking = False  # no retry noise (estimate is None while idle)
+    motor._preview_accept_agenda_output = lambda d: False
+    motor._generar_dialogo = lambda *a, **kw: "borrador de agenda"
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "draft=rejected" in lines[0]
+    assert "source=kira-agenda" in lines[0]
+
+
+def test_boundary_telemetry_one_line_per_boundary_under_reject_retry_reject(caplog):
+    """T1(b) [v5]: a reject -> retry -> reject spawn (two generations, both
+    rejected) must still emit exactly ONE INFO "Pregen boundary:" line — the
+    retry loop must not re-emit `draft=rejected` per attempt.
+    """
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._speech_progress = {"total": 100, "played": 1, "start": time.time() - 1.0}
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or f"draft-{len(gen_calls)}"
+    motor._preview_accept_agenda_output = lambda d: False  # always rejected
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 2, "exactly one retry"
+    lines = [r.getMessage() for r in caplog.records if "Pregen boundary:" in r.getMessage()]
+    assert len(lines) == 1, "one INFO boundary line for the whole spawn, not one per attempt"
+    assert "draft=rejected" in lines[0]
+
+
+# ── WU4 4b: guardrail rejection visibility (backend half) ───────────────────
+
+
+def test_4b_guardrail_rejected_callback_fires_with_code_only():
+    motor = _bare_motor()
+    motor._speaking = False
+    motor.agenda_controller = SimpleNamespace(
+        rejection_log=[{"guardrail": "contains_internal_leak", "matched_phrase": "SECRET DIALOGO TEXT"}]
+    )
+    motor._preview_accept_agenda_output = lambda d: False
+    motor._generar_dialogo = lambda *a, **kw: "SECRET DIALOGO TEXT"
+    received = []
+    motor.on_guardrail_rejected = lambda code: received.append(code)
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert received == ["contains_internal_leak"]
+    assert not any("SECRET DIALOGO TEXT" in str(c) for c in received), "never dialogue text"
+
+
+def test_4b_guardrail_rejected_callback_missing_rejection_log_reports_unknown():
+    motor = _bare_motor()
+    motor._speaking = False
+    motor._preview_accept_agenda_output = lambda d: False
+    motor._generar_dialogo = lambda *a, **kw: "x"
+    received = []
+    motor.on_guardrail_rejected = lambda code: received.append(code)
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert received == ["unknown"]
+
+
+def test_4b_guardrail_rejected_callback_raising_does_not_disturb_worker():
+    motor = _bare_motor()
+    motor._speaking = False
+    motor._preview_accept_agenda_output = lambda d: False
+    motor._generar_dialogo = lambda *a, **kw: "x"
+
+    def _boom(code):
+        raise RuntimeError("boom")
+
+    motor.on_guardrail_rejected = _boom
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None), (
+        "the worker must finish despite the raising callback"
+    )
+    assert motor._prefetched_agenda is None
+
+
+def test_4b_no_callback_configured_is_a_silent_noop():
+    # Default (None) must not raise — mirrors on_chat_turn_spoken/on_chat_item_expired.
+    motor = _bare_motor()
+    motor._speaking = False
+    motor._preview_accept_agenda_output = lambda d: False
+    motor._generar_dialogo = lambda *a, **kw: "x"
+    assert motor.on_guardrail_rejected is None
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert motor._prefetched_agenda is None
+
+
+# ── WU4 4c: retry-once on guardrail rejection ────────────────────────────────
+
+
+def test_4c_retry_once_succeeds_and_stores_the_retried_draft():
+    motor = _bare_motor()
+    motor._commit_history = lambda *a, **kw: None
+    motor._hablar = lambda texto, source="direct": None
+    motor._speaking = True
+    # ~1.0s elapsed, 1 fragment played -> ~99 * 1.0s remaining, comfortably
+    # above RETRY_MIN_REMAINING_SECONDS (25.0).
+    motor._speech_progress = {"total": 100, "played": 1, "start": time.time() - 1.0}
+
+    gen_calls = []
+
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        gen_calls.append(1)
+        return f"draft-{len(gen_calls)}"
+
+    motor._generar_dialogo = _gen
+
+    preview_calls = []
+
+    def _preview(dialogo):
+        preview_calls.append(dialogo)
+        return len(preview_calls) >= 2  # reject the first attempt, accept the retry
+
+    motor._preview_accept_agenda_output = _preview
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._prefetched_agenda is not None)
+    assert len(gen_calls) == 2, "exactly one retry — never zero, never two"
+    assert len(preview_calls) == 2
+    assert motor._prefetched_agenda["dialogo"] == "draft-2"
+    assert motor._pregen_retried is True
+
+    # The retried draft is a normal cache hit at pop — consumed, not regenerated.
+    motor._speaking = False  # the prior speech has ended; the worker is now idle
+    motor.enqueue("AG", priority=2, source="kira-agenda")
+    spoke = []
+    motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
+    motor._process_priority_queue()
+    assert spoke == [("draft-2", "kira-agenda")]
+    assert len(gen_calls) == 2, "the pop must not trigger a third generation"
+
+
+def test_4c_no_retry_when_second_attempt_also_rejected():
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._speech_progress = {"total": 100, "played": 1, "start": time.time() - 1.0}
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or f"draft-{len(gen_calls)}"
+    motor._preview_accept_agenda_output = lambda d: False  # always rejected
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 2, "exactly one retry, never a second retry"
+    assert motor._prefetched_agenda is None
+
+
+def test_4c_no_retry_when_not_speaking_estimate_is_none():
+    motor = _bare_motor()
+    motor._speaking = False  # speech_remaining_estimate() -> None
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or "x"
+    motor._preview_accept_agenda_output = lambda d: False
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 1, "no retry when the remaining-speech estimate is unknown"
+    assert motor._prefetched_agenda is None
+
+
+def test_4c_no_retry_when_window_too_small():
+    motor = _bare_motor()
+    motor._speaking = True
+    # 1 fragment played in ~1.0s, only 2 remain -> ~2.0s remaining, well under
+    # RETRY_MIN_REMAINING_SECONDS (25.0).
+    motor._speech_progress = {"total": 3, "played": 1, "start": time.time() - 1.0}
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or "x"
+    motor._preview_accept_agenda_output = lambda d: False
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 1, "no retry when the remaining window is too small"
+    assert motor._prefetched_agenda is None
+
+
+# ── T2(a) [v5]: adaptive retry gate ──────────────────────────────────────────
+
+
+def test_pregen_retry_gate_cold_start_falls_back_to_constant():
+    from opencohost.config.settings import RETRY_MIN_REMAINING_SECONDS
+
+    motor = _bare_motor()
+    assert motor._pregen_last_gen_duration is None
+    assert motor._pregen_retry_gate_seconds() == RETRY_MIN_REMAINING_SECONDS
+
+
+def test_pregen_retry_gate_adaptive_after_a_measured_generation():
+    motor = _bare_motor()
+    motor._pregen_last_gen_duration = 10.0
+    assert motor._pregen_retry_gate_seconds() == 12.0
+
+
+def test_4c_adaptive_gate_blocks_a_retry_the_flat_constant_would_allow():
+    """T2(a) [v5]: the retry gate is adaptive (1.2x the last COMPLETED
+    generation), not the flat RETRY_MIN_REMAINING_SECONDS constant. A 28s
+    estimate is ABOVE the flat 25s constant (would retry under the old code)
+    but BELOW the adaptive gate (30.0 * 1.2 = 36.0) -- proving the gate is
+    genuinely adaptive.
+    """
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._pregen_last_gen_duration = 30.0  # adaptive gate = 36.0s
+    motor.speech_remaining_estimate = lambda: 28.0
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or "x"
+    motor._preview_accept_agenda_output = lambda d: False
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 1, "the adaptive gate must block a retry the flat 25s constant would have allowed"
+
+
+def test_4c_adaptive_gate_allows_a_retry_within_its_own_margin():
+    """Mirror case: the same 28s estimate, but a SHORT last generation (10s ->
+    gate 12s) — 28 > 12, so the adaptive gate allows the retry.
+    """
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._pregen_last_gen_duration = 10.0  # adaptive gate = 12.0s
+    motor.speech_remaining_estimate = lambda: 28.0
+
+    gen_calls = []
+    motor._generar_dialogo = lambda *a, **kw: gen_calls.append(1) or f"draft-{len(gen_calls)}"
+    motor._preview_accept_agenda_output = lambda d: False
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 2, "the adaptive gate must allow the retry when the estimate clears it"
+
+
+# ── T6 [v5]: retry epoch pre-check — abandon a stale spawn ──────────────────
+
+
+def test_retry_epoch_pre_check_abandons_a_stale_spawn_without_a_second_generation():
+    """T6 [v5]: before the retry `continue`, the spawn's epoch must still be
+    current under `_prefetch_lock` — a stale (superseded) epoch abandons the
+    retry instead of paying for a second generation for an already-doomed
+    draft.
+    """
+    motor = _bare_motor()
+    motor._speaking = True
+    motor._speech_progress = {"total": 100, "played": 1, "start": time.time() - 1.0}
+
+    gen_calls = []
+
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        gen_calls.append(1)
+        if len(gen_calls) == 1:
+            # Simulate an intervening commit/eviction that supersedes this
+            # spawn's epoch WHILE its own (rejected) generation was running.
+            with motor._prefetch_lock:
+                motor._prefetch_epoch += 1
+        return f"draft-{len(gen_calls)}"
+
+    motor._generar_dialogo = _gen
+    motor._preview_accept_agenda_output = lambda d: False  # always rejected
+
+    ok = motor.pregenerate("AG", priority=2, source="kira-agenda")
+
+    assert ok is True
+    assert _wait_until(lambda: motor._pregen_inflight is None)
+    assert len(gen_calls) == 1, "a stale epoch must abandon the retry -- no second generation for a doomed draft"
+    assert motor._prefetched_agenda is None
+
+
+# ── T5 [v5]: finally-block marker ownership survives a successor takeover ──
+
+
+def test_finally_marker_ownership_survives_a_successor_takeover_in_the_store_to_finally_window():
+    """T5 [v5]: between a worker's STORE and its FINALLY there is a real
+    window where a higher-priority request can evict the just-stored draft
+    and spawn a NEW (successor) worker. The OLD worker's finally must not
+    wipe the successor's `_pregen_inflight` marker nor falsely signal
+    `_prefetch_done` for a generation that hasn't finished yet.
+    """
+    motor = _bare_motor()
+    release = threading.Event()
+    successor_marker_seen = {}
+
+    def _old_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        return "OLD_DRAFT"
+
+    def _successor_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+        release.wait(2.0)
+        return "NEW_DRAFT"
+
+    gen_dispatch_calls = {"n": 0}
+
+    def _gen_dispatch(contexto, **kw):
+        gen_dispatch_calls["n"] += 1
+        if gen_dispatch_calls["n"] == 1:
+            return _old_gen(contexto, **kw)
+        return _successor_gen(contexto, **kw)
+
+    motor._generar_dialogo = _gen_dispatch
+    motor._preview_accept_agenda_output = lambda d: True
+
+    def _take_over_mid_window():
+        # Self-disarm FIRST: the successor's own worker will also reach this
+        # hook when IT stores "NEW_DRAFT" — without disarming, that second
+        # firing would re-enter here and spawn a THIRD generation.
+        motor._test_store_to_finally_hook = None
+        # OLD worker's own thread, right after its store, before its
+        # finally: a higher-priority interactive request evicts the
+        # just-stored draft and spawns a successor worker (still in flight,
+        # blocked on `release`).
+        ok = motor.pregenerate("SUCCESSOR", priority=1, source="chat")
+        assert ok is True, "the successor spawn must succeed (evicting the cached draft)"
+        successor_marker_seen["marker"] = motor._pregen_inflight
+
+    motor._test_store_to_finally_hook = _take_over_mid_window
+
+    assert motor.pregenerate("OLD", priority=2, source="kira-agenda") is True
+    old_worker = motor._prefetch_thread
+    old_worker.join(2.0)
+
+    # OLD's finally has now run. The successor must still be in flight, its
+    # marker intact -- the buggy (pre-fix) version wipes it to None here.
+    assert motor._pregen_inflight is not None, "the OLD worker's finally must not clear a SUCCESSOR's marker"
+    assert motor._pregen_inflight is successor_marker_seen["marker"]
+    assert not motor._prefetch_done.is_set(), (
+        "the OLD worker's finally must not falsely signal completion for the still-running successor"
+    )
+
+    release.set()
+    successor_worker = motor._prefetch_thread
+    successor_worker.join(2.0)
+
+    assert motor._pregen_inflight is None
+    assert motor._prefetched_agenda is not None
+    assert motor._prefetched_agenda["dialogo"] == "NEW_DRAFT"
+    assert motor._prefetched_agenda["source"] == "chat"
