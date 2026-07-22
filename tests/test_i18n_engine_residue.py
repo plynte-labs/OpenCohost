@@ -199,6 +199,46 @@ def test_agenda_sanitizer_fallback_missing_slot_returns_legacy():
 
 
 # ---------------------------------------------------------------------------
+# 4b. connector_templates() (WU5 D3 — F4 EN parity)
+# ---------------------------------------------------------------------------
+
+
+def test_connector_templates_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.connector_templates() == active.LEGACY_CONNECTOR_TEMPLATES
+
+
+def test_connector_templates_en_is_english(official):
+    _activate("en", official)
+    templates = active.connector_templates()
+    # F4: the EN locale must ship its OWN slot, not fall back to the es legacy
+    # tuple (which would leak Spanish into English-mode output).
+    assert templates != active.LEGACY_CONNECTOR_TEMPLATES, "EN must not fall back to the es pool"
+    for t in templates:
+        assert not any(ch in t for ch in "¿¡óáéúñ"), f"connector template not English: {t}"
+        assert t not in active.LEGACY_CONNECTOR_TEMPLATES
+        assert "{tema}" in t, "every EN template keeps the {tema} placeholder"
+
+
+def test_connector_templates_en_matches_es_length(official):
+    # Both official locales ship the same number of floor templates.
+    _activate("es", official)
+    es_len = len(active.connector_templates())
+    _activate("en", official)
+    assert len(active.connector_templates()) == es_len, "es/en connector pools must be parallel"
+
+
+def test_connector_templates_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.connector_templates() == active.LEGACY_CONNECTOR_TEMPLATES
+
+
+def test_connector_templates_returns_tuple(official):
+    _activate("en", official)
+    assert isinstance(active.connector_templates(), tuple)
+
+
+# ---------------------------------------------------------------------------
 # 5. ptt_wrapper() / live_voice_wrapper() / ptt_history_wrapper()
 # ---------------------------------------------------------------------------
 

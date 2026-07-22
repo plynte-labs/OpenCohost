@@ -72,6 +72,19 @@ LEGACY_AGENDA_SANITIZER_FALLBACK = (
     "Me quedo con una idea: esto da para mirarlo con más matices, "
     "porque no es tan simple como parece a primera vista."
 )
+# WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector FLOOR
+# pool — the always-available es-AR transitions Kira prepends when returning to
+# a stashed agenda beat after a PTT interruption. Each carries a {tema} slot.
+LEGACY_CONNECTOR_TEMPLATES: tuple[str, ...] = (
+    "Bueno, volviendo a {tema},",
+    "Che, como te venía diciendo de {tema},",
+    "Retomando lo de {tema},",
+    "Ahora sí, sigo con {tema}:",
+    "En fin, lo de {tema}:",
+    "Volviendo a lo nuestro sobre {tema},",
+    "Dale, seguimos con {tema}:",
+    "Como decía de {tema},",
+)
 # voice_control.py:225,240 (PTT flush, both busy/idle branches) — one slot,
 # two identical call sites.
 LEGACY_PTT_WRAPPER = "El streamer acaba de decir (PTT): {text}"
@@ -385,6 +398,13 @@ def ledger_kira_label() -> str:
 def agenda_sanitizer_fallback() -> str:
     """Spoken fallback line when the agenda LLM produces an artificial close."""
     return _slot("llm.agenda_sanitizer_fallback", LEGACY_AGENDA_SANITIZER_FALLBACK)
+
+
+def connector_templates() -> tuple[str, ...]:
+    """WU5 (design-fase2.md §3 WU5 / D3): the connector FLOOR pool for the active
+    locale (es legacy tuple on any failure). Each template carries a ``{tema}``
+    slot filled with the live topic title at return time."""
+    return _slot_list("llm.connector_templates", LEGACY_CONNECTOR_TEMPLATES)
 
 
 def ptt_wrapper() -> str:

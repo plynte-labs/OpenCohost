@@ -74,6 +74,22 @@ llm:
     - "Let's leave it there. Should we move on to something else?"
     - "My memories are getting tangled, ask me again in a bit."
   agenda_sanitizer_fallback: "I'll leave it at this: it's worth looking at with more nuance, because it's not as simple as it seems."
+
+  # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector FLOOR
+  # pool — English equivalents of the es-AR transitions Kira prepends when
+  # returning to a stashed agenda beat after a PTT interruption. Always-available
+  # zero-latency floor (an opportunistic generated upgrade replaces it when ready
+  # and guardrail-clean at return time). Each carries a {tema} slot filled with the
+  # live topic title; rotated without immediate repetition by the engine.
+  connector_templates:
+    - "Anyway, back to {tema},"
+    - "So, like I was saying about {tema},"
+    - "Picking up on {tema},"
+    - "Right, back to {tema}:"
+    - "Anyway, on {tema}:"
+    - "Getting back to what we were on about {tema},"
+    - "Okay, continuing with {tema}:"
+    - "As I was saying about {tema},"
   scaffolding:
     accumulation_ptt: "The streamer said (accumulated): {messages}"
     accumulation_chat: "While you were processing, these chat messages arrived: {messages}"

@@ -808,6 +808,15 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 on_listening=getattr(
                     getattr(host, "motor", None), "play_ptt_cue", None
                 ),
+                # WU5 (agenda interruption, ADR-037): position-aware PTT cut.
+                # Fires SYNCHRONOUSLY at flush so it can interrupt agenda
+                # speech mid-turn (the queued command path can't — the engine
+                # thread is inside _hablar). Same guarded bound-method idiom.
+                on_flush_precheck=getattr(
+                    getattr(host, "motor", None),
+                    "ptt_interrupt_if_agenda_speaking",
+                    None,
+                ),
             )
             yield
         finally:

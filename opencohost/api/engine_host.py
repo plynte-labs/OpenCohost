@@ -422,6 +422,13 @@ class EngineHost:
         motor.agenda_output_preview_validator = locked(agenda.preview_accept_output)
         motor.agenda_output_transformer = locked(agenda.enforce_live_safety_cap)
         motor.agenda_controller = agenda
+        # WU5 D1 (design-fase2.md §3 WU5): install the position-aware PTT cut
+        # policy (default OFF on the engine). This is the "host-installed flag" —
+        # the CTK app never constructs an EngineHost, so it keeps its unchanged
+        # no-cut behavior. The cut is TRIGGERED synchronously from the PTT flush
+        # precheck (main.py wires PttController.on_flush_precheck ->
+        # motor.ptt_interrupt_if_agenda_speaking); this flag gates it.
+        motor._ptt_position_cut_enabled = True
         # WU4 4b (design-fase2.md §3): surface a preview-guardrail rejection to
         # the operator. Fires on the PREGEN WORKER THREAD — no lock wrapper
         # needed here (EventLogSink.record guards its own append with a lock,
@@ -563,6 +570,20 @@ class EngineHost:
                 on_agenda_speaking_start=start_prefetch,
                 on_agenda_speaking_end=consume,
             )
+        # WU5 (design-fase2.md §3 WU5): after ANY turn's speaking_end, if an
+        # interruption-return is pending, nudge the driver so the resume fires at
+        # the next boundary instead of waiting out the ~4.5s cadence. The
+        # interruption answer (a direct/PTT turn) does not advance agenda state,
+        # so route_motor_event_to_agenda's own nudge (agenda-turn-only) never
+        # fires for it — this covers that gap.
+        if status == "speaking_end" and driver is not None:
+            has_frozen = getattr(self.motor, "has_frozen_stash", None)
+            if callable(has_frozen):
+                try:
+                    if has_frozen():
+                        driver.nudge()
+                except Exception:
+                    _logger.exception("frozen-return nudge check failed")
 
     def start(self) -> None:
         self._acquire_lock()

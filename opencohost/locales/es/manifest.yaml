@@ -67,6 +67,22 @@ llm:
     - "Mmm, mejor lo dejo ahí. ¿Seguimos con otra cosa?"
     - "Se me mezclan los recuerdos, preguntame en un rato."
   agenda_sanitizer_fallback: "Me quedo con una idea: esto da para mirarlo con más matices, porque no es tan simple como parece a primera vista."
+
+  # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector
+  # FLOOR pool. After a PTT interruption Kira returns to the stashed agenda beat
+  # with a one-line transition prepended. This es-AR pool is the always-available
+  # zero-latency floor (an opportunistic generated upgrade replaces it when it is
+  # ready and guardrail-clean at return time). Each carries a {tema} slot filled
+  # with the live topic title; rotated without immediate repetition by the engine.
+  connector_templates:
+    - "Bueno, volviendo a {tema},"
+    - "Che, como te venía diciendo de {tema},"
+    - "Retomando lo de {tema},"
+    - "Ahora sí, sigo con {tema}:"
+    - "En fin, lo de {tema}:"
+    - "Volviendo a lo nuestro sobre {tema},"
+    - "Dale, seguimos con {tema}:"
+    - "Como decía de {tema},"
   scaffolding:
     accumulation_ptt: "El streamer dijo (acumulado): {messages}"
     accumulation_chat: "Mientras procesabas, llegaron estos mensajes del chat: {messages}"

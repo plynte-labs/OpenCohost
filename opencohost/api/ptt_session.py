@@ -388,6 +388,7 @@ class PttController:
         session_factory=PttSession,
         on_audio_suspect: Optional[Callable[[], None]] = None,
         on_listening: Optional[Callable[[], None]] = None,
+        on_flush_precheck: Optional[Callable[[], None]] = None,
         **session_kwargs,
     ):
         self._ws_uri = ws_uri
@@ -406,6 +407,14 @@ class PttController:
         # with the app window unfocused. Optional so tests / minimal host
         # doubles need not supply it.
         self._on_listening = on_listening
+        # WU5 D1 cut precheck (agenda_no_dead_air fase 2, design-fase2.md §3 WU5):
+        # the smallest possible surface into the engine — a bound
+        # ``motor.ptt_interrupt_if_agenda_speaking`` fired SYNCHRONOUSLY on the WS
+        # flush thread BEFORE the turn is dispatched. This is the only path that
+        # can cut DURING an agenda turn's speech (the dispatch/command-queue path
+        # runs at boundaries). Optional so CTK / minimal host doubles never cut;
+        # a raising precheck never blocks the turn.
+        self._on_flush_precheck = on_flush_precheck
         self._lock = threading.Lock()
         self._session: Optional[PttSession] = None
         # Survives after the session frees the slot so GET /api/ptt/state can
@@ -419,6 +428,15 @@ class PttController:
         self._event_log.record("ptt", action, None)
 
     def _dispatch(self, text: str) -> None:
+        # WU5 D1 (design-fase2.md §3 WU5): the position-aware cut precheck fires
+        # FIRST, synchronously on this WS flush thread, so it can interrupt an
+        # in-flight agenda turn BEFORE the answer is dispatched. Fail-open: a
+        # raising/absent precheck never blocks the turn from being spoken.
+        if self._on_flush_precheck is not None:
+            try:
+                self._on_flush_precheck()
+            except Exception:
+                logger.exception("PTT flush precheck failed")
         # Honest history_text (memoria_quality_20260717 A1): the motor commits
         # "El streamer dijo (PTT): ..." to historial instead of the raw
         # "acaba de decir (PTT)" prompt wrapper, so PTT-derived memorias no

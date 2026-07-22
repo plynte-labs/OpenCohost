@@ -455,6 +455,38 @@ HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
 RETRY_MIN_REMAINING_SECONDS = 25.0
 
 
+# WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5, D1/D2/D3): PTT-only
+# position-aware interruption ("1B con margen") + return-by-default. All four
+# are owner-tunable. A PTT arriving while an AGENDA turn speaks maps its
+# progress (played/total fragments) onto three zones: early (< CUT_ZONE_EARLY)
+# and late (> CUT_ZONE_LATE) DEFER (never cut — the answer pregenerates and
+# plays at the boundary); the mid band cuts only when the remaining-speech
+# estimate exceeds CUT_THRESHOLD_SECONDS (else the turn ends soon anyway).
+CUT_ZONE_EARLY = 0.25          # progress fraction below this -> defer
+CUT_ZONE_LATE = 0.75           # progress fraction above this -> defer
+CUT_THRESHOLD_SECONDS = 20.0   # mid zone: cut iff remaining estimate exceeds this
+# After the interruption answer(s), Kira returns to the stashed next-turn agenda
+# draft UNLESS more than this many interactive turns chained since the cut (a
+# real conversation started — forcing a return would be robotic).
+RETURN_MAX_DETOUR_TURNS = 2
+# Deadline backstop for a frozen return that never releases (R1): the F1 HOLD
+# gate keeps the tick from generating a fresh turn until the interruption answer
+# commits a detour turn. If that answer is lost (dropped by the is_ready gate,
+# TTL-swept before its pop, or lost when dispatch raised after the cut froze the
+# stash), the hold would last forever and the agenda would stay silent. Once the
+# stash has been held this long with no detour, the driver discards it and falls
+# through to a fresh turn. Owner-tunable.
+FROZEN_STASH_MAX_HOLD_SECONDS = 90.0
+# Bounds for the cosmetic connector-upgrade worker (R3). The upgrade is optional
+# (the parameterized pool floor is a complete connector on its own), so it must
+# never outlive the interruption answer's playback and start a second concurrent
+# Ollama call behind the real turn. Only spawn when the remaining-playback
+# estimate comfortably covers a bounded generation, and hard-bound the generation
+# so a heavy/stalling model abandons the upgrade instead of racing the real turn.
+CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS = 12.0
+CONNECTOR_UPGRADE_TIMEOUT_SECONDS = 10.0
+
+
 # ──────────────────────────────────────────────
 # Model persistence
 # ──────────────────────────────────────────────

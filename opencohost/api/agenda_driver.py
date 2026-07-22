@@ -26,6 +26,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from opencohost.config.settings import FROZEN_STASH_MAX_HOLD_SECONDS
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState
 
 _logger = logging.getLogger(__name__)
@@ -249,6 +250,11 @@ class AgendaDriver:
         if agenda is None or motor is None:
             return
         self._log_prefetch_desync(agenda, motor)
+        # WU5 (design-fase2.md §3 WU5): a pending interruption-return takes
+        # priority over normal scheduling — resume the stashed beat (or skip it
+        # deterministically) before next_action can generate a fresh turn.
+        if self._maybe_return_frozen_stash(agenda, motor):
+            return
         state = agenda.state
         if state in _INERT_STATES:
             # A parked/stopped agenda can never speak a stashed draft.
@@ -297,7 +303,12 @@ class AgendaDriver:
         try:
             has_cache = bool(motor.wait_prefetched_agenda(0))
             pending = getattr(motor, "prefetch_pending", None)
-            has_cache_or_pending = has_cache or bool(callable(pending) and pending())
+            # WU5: a frozen interruption-return holds the draft outside the active
+            # slot — the driver's mirror stash is intentionally present with no
+            # engine cache/pending, so exempt it from the desync warning.
+            has_frozen = getattr(motor, "has_frozen_stash", None)
+            frozen = bool(callable(has_frozen) and has_frozen())
+            has_cache_or_pending = has_cache or bool(callable(pending) and pending()) or frozen
             stash_present = self._prefetch is not None
             if stash_present and not has_cache_or_pending:
                 _logger.debug(
@@ -352,6 +363,13 @@ class AgendaDriver:
         the draft or requested a short re-tick for a late one); False when there
         is nothing to consume and the normal tick should proceed.
         """
+        # WU5: while an interruption-return is pending the engine holds the
+        # stashed draft in its detour-proof frozen slot; the return path
+        # (_maybe_return_frozen_stash) owns it. Consuming/clearing here would
+        # drop the driver's mirror stash and strand the return.
+        has_frozen = getattr(motor, "has_frozen_stash", None)
+        if callable(has_frozen) and has_frozen():
+            return False
         stash = self._prefetch
         if stash is None:
             return False
@@ -424,6 +442,126 @@ class AgendaDriver:
             return False
         enqueue_agenda_action(motor, stash.action, driver=self)
         return True
+
+    def _maybe_return_frozen_stash(self, agenda, motor) -> bool:
+        """WU5 D2/D3 (design-fase2.md §3 WU5): resume a stashed agenda beat after
+        a PTT interruption, or skip it deterministically.
+
+        Caller holds `agenda_lock`. Returns True when it HANDLED the tick (resumed
+        the beat OR held for an ongoing detour), False when there is no pending
+        frozen return and the normal tick should proceed.
+
+        The engine parked the next-turn agenda draft in a detour-proof frozen slot
+        at the cut; the driver kept its own `_prefetch` mirror (topic_id). The
+        return fires at a clean post-speech boundary once the interactive detour
+        is done, restoring the frozen draft into the engine's active slot (with a
+        connector resolved) and routing it through the normal consume+pop path.
+
+        D2 skips (fall through to normal next_action): the topic changed/closed,
+        the agenda went inert/stopped, or too many interactive turns chained
+        (`detour_exceeded`). Profile/model switch and session-stop invalidate the
+        engine's frozen stash directly, so `has_frozen_stash()` is already False.
+        """
+        has_frozen = getattr(motor, "has_frozen_stash", None)
+        if not (callable(has_frozen) and has_frozen()):
+            return False
+        stash = self._prefetch
+        topic = getattr(agenda, "active_topic", None)
+        state = agenda.state
+        # R2: yield to health auto-recovery. PAUSED_NEEDS_OPERATOR is neither inert
+        # nor WAITING_SIGNAL, so every gate below would HOLD forever and the normal
+        # tick's can_auto_resume branch (app_shell parity) would be unreachable — a
+        # health pause after a PTT cut could never auto-recover. Keep the stash
+        # FROZEN (do not discard): it survives recovery and returns at the next
+        # clean boundary (the deadline backstop below bounds a stash that never does).
+        if state == AgendaState.PAUSED_NEEDS_OPERATOR:
+            return False
+        # D2 topic/state skip: topic gone/swapped, closing, or inert.
+        if (
+            stash is None
+            or topic is None
+            or getattr(topic, "id", None) != stash.topic_id
+            or state in _INERT_STATES
+            or state == AgendaState.TOPIC_CLOSING
+        ):
+            self._discard_frozen(motor)
+            return False
+        # D2 detour-count skip (the engine owns the counter).
+        detour_exceeded = getattr(motor, "detour_exceeded", None)
+        if callable(detour_exceeded) and detour_exceeded():
+            self._discard_frozen(motor)
+            return False
+        # F1: HOLD the return until at least one interactive turn has completed
+        # since the cut. The interruption answer rides the command queue (dispatched
+        # as a process_context command — invisible to every gate here), so a
+        # speaking_end from the cut itself must NOT fire the connector return before
+        # the answer speaks. The engine's detour counter increments as the answer
+        # turn is selected; until then, hold the tick so no fresh turn generates.
+        detour_started = getattr(motor, "detour_started", None)
+        if callable(detour_started) and not detour_started():
+            # R1 deadline backstop: the engine increments the detour counter as the
+            # interruption answer is selected to speak. If that answer never reaches
+            # a _note_detour_turn site (dropped by the is_ready gate, TTL-swept
+            # before its pop, or lost when dispatch raised after the cut froze the
+            # stash), this hold would last forever and the agenda would stay silent.
+            # Bound it: once the stash has been held past FROZEN_STASH_MAX_HOLD_SECONDS
+            # with no detour, discard it (the discard path resets counters/mirrors)
+            # and fall through to a fresh turn. Code-only telemetry, never dialogue.
+            age_fn = getattr(motor, "frozen_stash_age_seconds", None)
+            age = age_fn() if callable(age_fn) else None
+            if age is not None and age > FROZEN_STASH_MAX_HOLD_SECONDS:
+                _logger.info("Frozen stash: hold_timeout")
+                self._discard_frozen(motor)
+                return False
+            return True
+        # Not yet at a clean post-speech boundary, or the detour is still
+        # ongoing (interactive work speaking/queued ahead) -> HOLD: handle the
+        # tick so next_action never generates a fresh turn over the pending
+        # return, but do not requeue yet.
+        if state != AgendaState.WAITING_SIGNAL or self._has_non_agenda_audio_work(motor):
+            return True
+        has_pending = getattr(motor, "has_pending_priority_before", None)
+        priority = getattr(stash.action, "priority", 2)
+        if callable(has_pending) and has_pending(priority):
+            return True
+        # RETURN: adopt first, then restore. F7: only consume the frozen stash AFTER
+        # adoption succeeds, so a failed adoption leaves the draft frozen (a later
+        # nudge retries; the deterministic skips discard it) instead of orphaning it
+        # in the active slot with no owner. Adoption is side-effect-free on failure.
+        if not agenda.start_prefetched_action(stash.action):
+            return True
+        # Adoption succeeded — restore the frozen draft into the engine's active slot
+        # (connector resolved from the ready upgrade or the pool floor) and route it
+        # through the queue exactly like the normal consume path — the worker pops
+        # it, hits the cache, and speaks the connector + stashed dialogo as ONE turn.
+        # enqueue_agenda_action drops the driver mirror stash internally.
+        restore = getattr(motor, "restore_frozen_stash", None)
+        key = restore(getattr(topic, "title", "") or "") if callable(restore) else None
+        if key is None:
+            # R5: a concurrent _invalidate_frozen_stash (set_profile / switch_llm_tier
+            # / drop_pending_sources — none hold agenda_lock) landed between the top
+            # has_frozen_stash() check and here, AFTER adoption already advanced the
+            # controller to GENERATING. restore() lost the draft, so next_action would
+            # return none() for GENERATING and the agenda would stall with no turn
+            # enqueued. Enqueue a FRESH turn for the adopted action instead — the beat
+            # regenerates from scratch (slower, never stuck). Code-only telemetry.
+            _logger.info("Frozen stash: restore_lost_fallback")
+        # Whether restore succeeded (draft back in the active slot, worker pops the
+        # cache) or was lost to a concurrent invalidation (fresh regeneration), route
+        # the adopted action through the queue so the GENERATING controller always
+        # gets a turn. enqueue_agenda_action drops the driver mirror stash internally.
+        enqueue_agenda_action(motor, stash.action, driver=self)
+        return True
+
+    def _discard_frozen(self, motor) -> None:
+        """Drop the engine's frozen stash AND the driver mirror (D2 skip)."""
+        discard = getattr(motor, "discard_frozen_stash", None)
+        if callable(discard):
+            try:
+                discard()
+            except Exception:
+                _logger.exception("discard_frozen_stash failed during return skip")
+        self._prefetch = None
 
     def _has_non_agenda_audio_work(self, motor) -> bool:
         """Mirror of agenda_audio_controller.kira_agenda_has_non_agenda_audio_work."""

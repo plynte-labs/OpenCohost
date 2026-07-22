@@ -10,6 +10,7 @@ the two motor methods the driver calls.
 
 import logging
 import threading
+from types import SimpleNamespace
 
 from opencohost.api.agenda_driver import (
     AgendaDriver,
@@ -57,6 +58,50 @@ class FakeMotor:
         # T1(c) [v5]: records every motor._log(...) call — the surface the
         # driver's own "Pregen boundary: draft=none" line must reach.
         self.logged = []  # (msg, level) tuples
+        # WU5 (design-fase2.md §3 WU5): frozen interruption-return surface. The
+        # driver queries these to mirror the engine's frozen stash and drive the
+        # return. Defaults model "no interruption pending" so every pre-WU5 test
+        # sees unchanged behavior.
+        self.has_frozen = False
+        self.frozen_key = None       # (payload, source, priority) returned by restore
+        self.restored_tema = None    # captures the {tema} the driver passes at restore
+        self.discarded = False
+        self.detour_over = False     # detour_exceeded() result
+        # F1: detour_started() — True once the interruption answer turn has
+        # committed since the cut. Defaults False (honest post-cut state: the
+        # answer rides the command queue and has not spoken yet), so the return
+        # HOLDS until a test flips it True.
+        self.detour_has_started = False
+        # R1: frozen_stash_age_seconds() — seconds since the stash was frozen, or
+        # None when no stash is pending. Defaults None (no clock) so the deadline
+        # backstop never fires unless a test sets a concrete age.
+        self.frozen_age = None
+
+    def has_frozen_stash(self):
+        return self.has_frozen
+
+    def frozen_stash_age_seconds(self):
+        return self.frozen_age
+
+    def detour_started(self):
+        return self.detour_has_started
+
+    def restore_frozen_stash(self, tema=""):
+        self.restored_tema = tema
+        self.has_frozen = False
+        key = self.frozen_key
+        if key is not None:
+            # Mirror the real engine: the restored draft is back in the active
+            # slot, so the match-aware clear keeps it when routed through the queue.
+            self.cached_draft = (key[0], key[1])
+        return key
+
+    def discard_frozen_stash(self):
+        self.discarded = True
+        self.has_frozen = False
+
+    def detour_exceeded(self):
+        return self.detour_over
 
     def _log(self, msg, level="info"):
         self.logged.append((msg, level))
@@ -376,6 +421,45 @@ def test_paused_stays_when_cooldown_not_ready():
     assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
     assert motor.replaced == []
     assert motor.enqueued == []
+
+
+def test_paused_auto_resume_reachable_with_frozen_stash_pending():
+    """R2: a pending frozen interruption-return must not make the
+    PAUSED_NEEDS_OPERATOR auto-resume branch unreachable. With a stash mirrored and
+    the engine reporting a frozen stash, the tick still reaches can_auto_resume, and
+    the stash survives recovery (never discarded). Without R2 the return would HOLD
+    every tick and the agenda could never auto-recover after a PTT cut."""
+    controller, topic = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    driver.tick_once()  # open the topic -> active_topic set
+    assert controller.active_topic is not None
+    motor.reset()
+
+    # A prior PTT cut froze the next-turn draft; the driver mirrors it. A health
+    # pause (guardrail failures) then lands with the return still pending.
+    driver._prefetch = PrefetchState(
+        action=SimpleNamespace(
+            kind="enqueue", prompt="AG2", source="kira-agenda", priority=2, history_text=None
+        ),
+        topic_id=topic.id,
+    )
+    motor.has_frozen = True
+    motor.detour_has_started = False
+    motor.frozen_age = None  # no deadline pressure from the R1 backstop
+    controller.state = AgendaState.PAUSED_NEEDS_OPERATOR
+    controller.recovery._failures = 5
+    controller.recovery._retry_attempt = 0
+    controller.recovery._last_failure_time = 0.0
+
+    driver.tick_once()
+
+    assert controller.state != AgendaState.PAUSED_NEEDS_OPERATOR, (
+        "auto-resume ran — unreachable before R2 (the frozen return held every tick)"
+    )
+    assert motor.has_frozen is True, "the frozen stash survives recovery (not discarded)"
+    assert motor.discarded is False
 
 
 # ── thread lifecycle ──────────────────────────────────────────────────────

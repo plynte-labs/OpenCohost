@@ -44,6 +44,8 @@ from opencohost.config.settings import (
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
     RETRY_MIN_REMAINING_SECONDS,
+    CUT_ZONE_EARLY, CUT_ZONE_LATE, CUT_THRESHOLD_SECONDS, RETURN_MAX_DETOUR_TURNS,
+    CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS, CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
 )
 from opencohost.core import context_budget
 from opencohost.core import personalization
@@ -456,6 +458,28 @@ class MotorVocalIA(threading.Thread):
         # means at most one writer at a time).
         self._pregen_last_gen_duration: Optional[float] = None
 
+        # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5, D1/D2/D3):
+        # interruption + connector-based return. All guarded by _prefetch_lock.
+        # _frozen_stash holds the NEXT-turn agenda draft moved OUT of the active
+        # _prefetched_agenda slot at a PTT cut, so it survives the interactive
+        # detour (exempt from the _commit_history epoch bump and interactive-pregen
+        # eviction, which only touch _prefetched_agenda) and the answer's own
+        # pregen can use the freed slot. {payload, dialogo, source, priority,
+        # gen_ms, connector}. _detour_turns counts interactive turns spoken
+        # since the cut (D2 skip when it exceeds RETURN_MAX_DETOUR_TURNS).
+        # _connector_last_idx rotates the D3 floor pool without immediate repeats.
+        self._frozen_stash: Optional[dict] = None
+        self._detour_turns: int = 0
+        # R1 deadline backstop: monotonic timestamp of the last freeze, so the
+        # driver can bound how long a return may HOLD when the interruption answer
+        # never reaches a _note_detour_turn site. None when no stash is frozen.
+        self._frozen_stash_at: Optional[float] = None
+        self._connector_last_idx: Optional[int] = None
+        # D1 host flag (default OFF): the position-aware PTT cut is API-host
+        # product behavior. EngineHost sets this True; the CTK app never
+        # constructs EngineHost, so CTK keeps its unchanged no-cut behavior.
+        self._ptt_position_cut_enabled: bool = False
+
         # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
         # serializes _hablar so two callers can never share the TTS/audio
         # pipeline. After WU2 the engine worker is the ONLY _hablar caller in the
@@ -529,6 +553,12 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             return self._current_processing_source
 
+    @property
+    def ptt_position_cut_enabled(self) -> bool:
+        """WU5 D1 host flag: True only when the API host installed the
+        position-aware PTT cut policy. Default False (CTK-unchanged)."""
+        return self._ptt_position_cut_enabled
+
     def interrupt_speaking(self) -> None:
         """Public interrupt: stop the in-flight speech consumer immediately.
 
@@ -582,6 +612,260 @@ class MotorVocalIA(threading.Thread):
         mean_per_fragment = elapsed / played
         remaining_fragments = max(0, progress["total"] - played)
         return remaining_fragments * mean_per_fragment
+
+    # ── WU5 (design-fase2.md §3 WU5): interruption + connector-based return ──
+
+    def ptt_interrupt_if_agenda_speaking(self) -> str:
+        """D1 cut seam (design-fase2.md §3 WU5): a PTT arrived — decide cut vs
+        defer by position over the CURRENT agenda speech. Returns:
+          - "off"   the policy is disabled (host flag off), or the current speech
+                    is not an agenda turn (typed/chat answers are never cut).
+          - "defer" the zones say don't cut (early/late) or the mid-band margin
+                    rule says the turn ends soon anyway — the PTT answer
+                    pregenerates and plays at the boundary.
+          - "cut"   a mid-band turn with a long remaining window: the next-turn
+                    agenda draft is frozen and the current speech is interrupted.
+
+        The engine-level seam self-gates on `kira-agenda*` current_speech_source
+        and the host flag, so a typed/chat source can never trigger a cut and CTK
+        (which never installs the flag) never cuts. Called synchronously from the
+        PTT flush thread (ptt_session's precheck hook), the only path that can cut
+        DURING an agenda turn's speech (the queue path runs at boundaries).
+        """
+        if not self._ptt_position_cut_enabled:
+            return "off"
+        with self._lock:
+            speaking = self._speaking
+            source = self._current_speech_source
+            progress = dict(self._speech_progress) if self._speech_progress else None
+        if not speaking or not (isinstance(source, str) and source.startswith("kira-agenda")):
+            return "off"
+        frac = None
+        if progress:
+            total = progress.get("total") or 0
+            played = progress.get("played") or 0
+            if total > 0:
+                frac = played / total
+        # Unknown progress, early zone, or late zone -> defer (never cut).
+        if frac is None or frac < CUT_ZONE_EARLY or frac > CUT_ZONE_LATE:
+            return "defer"
+        # Mid zone: deterministic margin rule (no LLM).
+        remaining = self.speech_remaining_estimate()
+        if remaining is not None and remaining > CUT_THRESHOLD_SECONDS:
+            # F2: only cut when there is a next-turn draft to freeze — cutting with
+            # nothing to return to would lose the beat forever. No draft -> defer
+            # (the answer plays at the boundary, the current turn finishes).
+            if not self._freeze_agenda_stash():
+                return "defer"
+            self.interrupt_speaking()
+            return "cut"
+        return "defer"
+
+    def _freeze_agenda_stash(self) -> bool:
+        """WU5 D2: move the cached NEXT-turn agenda draft out of the active pregen
+        slot into `_frozen_stash`, so the interruption answer can use the freed
+        slot (WU3 pregen) and the agenda draft survives the detour to be resumed.
+        No epoch bump — freezing is not invalidation (there is no in-flight worker
+        for an already-cached draft). Resets the detour counter. Returns True iff
+        a draft was frozen (nothing to return to otherwise — normal flow resumes).
+        """
+        with self._prefetch_lock:
+            cached = self._prefetched_agenda
+            if cached is None or not str(cached.get("source", "")).startswith("kira-agenda"):
+                return False
+            frozen = dict(cached)
+            frozen["connector"] = None
+            self._frozen_stash = frozen
+            # R1: stamp the freeze time so the driver can bound the hold.
+            self._frozen_stash_at = time.monotonic()
+            self._prefetched_agenda = None
+            self._prefetch_done.clear()
+            self._detour_turns = 0
+        return True
+
+    def has_frozen_stash(self) -> bool:
+        with self._prefetch_lock:
+            return self._frozen_stash is not None
+
+    def frozen_stash_age_seconds(self) -> Optional[float]:
+        """R1 seam: seconds since the current stash was frozen, or None when no
+        stash is pending (or no freeze time was recorded). The driver reads this
+        instead of the engine internals to enforce the FROZEN_STASH_MAX_HOLD
+        deadline backstop."""
+        with self._prefetch_lock:
+            if self._frozen_stash is None or self._frozen_stash_at is None:
+                return None
+            return time.monotonic() - self._frozen_stash_at
+
+    def detour_exceeded(self) -> bool:
+        """D2 skip: more than RETURN_MAX_DETOUR_TURNS interactive turns chained
+        since the cut — a real conversation started, so skip the return."""
+        with self._prefetch_lock:
+            return self._detour_turns > RETURN_MAX_DETOUR_TURNS
+
+    def detour_started(self) -> bool:
+        """F1: True once at least one interactive turn has been noted since the
+        cut. The return must HOLD until then — the interruption answer rides the
+        command queue (invisible to the driver's return gates), so a speaking_end
+        from the cut itself must never fire the connector return BEFORE the answer
+        speaks. The detour counter increments as the answer turn is selected."""
+        with self._prefetch_lock:
+            return self._detour_turns > 0
+
+    def discard_frozen_stash(self) -> None:
+        """D2 skip (driver-side): drop the frozen stash and reset the detour
+        counter so the return is suppressed and normal next_action resumes."""
+        with self._prefetch_lock:
+            self._frozen_stash = None
+            self._frozen_stash_at = None
+            self._detour_turns = 0
+
+    def _invalidate_frozen_stash(self) -> None:
+        """D2 epoch skip: a profile/model switch or a session stop invalidates a
+        pending return (a stashed draft built under the old persona/history must
+        never be resumed). Called from set_profile, switch_llm_tier, and the
+        agenda drop path (drop_pending_sources)."""
+        with self._prefetch_lock:
+            self._frozen_stash = None
+            self._frozen_stash_at = None
+            self._detour_turns = 0
+
+    def restore_frozen_stash(self, tema: str = "") -> Optional[tuple]:
+        """WU5 D2/D3 RETURN: move the frozen agenda draft back into the active
+        pregen slot (marked `resumed`, connector resolved) so the normal
+        consume+pop+speak path resumes it. The connector is the ready generated
+        upgrade if one landed during the answer's TTS, else the parameterized
+        pool floor (D3). Returns (payload, source, priority) for the driver to
+        requeue, or None when there is no frozen stash (a skip fired)."""
+        with self._prefetch_lock:
+            stash = self._frozen_stash
+            upgrade = stash.get("connector") if stash is not None else None
+        connector = upgrade if upgrade else self._pick_connector_floor(tema)
+        with self._prefetch_lock:
+            stash = self._frozen_stash
+            if stash is None:
+                return None
+            restored = dict(stash)
+            restored["connector"] = connector
+            restored["resumed"] = True
+            # F5: bump the pregen epoch as the stash re-enters the active slot (same
+            # pattern as _commit_history) so any in-flight generation keyed to the
+            # pre-restore epoch is invalidated — it must never overwrite the resumed
+            # draft. The restored draft is placed directly (not via a worker store),
+            # so the bump kills only OTHER stale workers, never this draft.
+            self._prefetch_epoch += 1
+            self._prefetched_agenda = restored
+            self._frozen_stash = None
+            self._frozen_stash_at = None
+            self._detour_turns = 0
+            self._prefetch_done.set()
+        return (restored["payload"], restored.get("source", "kira-agenda"), restored.get("priority", 2))
+
+    def _pick_connector_floor(self, tema: str) -> str:
+        """D3 floor: the next es-AR connector template, rotated without immediate
+        repetition, parameterized with the live topic title."""
+        templates = i18n_active.connector_templates()
+        if not templates:
+            return ""
+        with self._prefetch_lock:
+            last = self._connector_last_idx
+            idx = 0 if last is None else (last + 1) % len(templates)
+            self._connector_last_idx = idx
+        try:
+            return templates[idx].format(tema=tema or "eso")
+        except (KeyError, IndexError):
+            return templates[idx]
+
+    def _note_detour_turn(self, source: str) -> None:
+        """WU5 D2: count an interactive turn toward the detour budget when a
+        return is pending. No-op when no return is pending or for an agenda-source
+        turn (the resume turn itself never counts). Called as the turn is selected
+        to speak — the connector UPGRADE is triggered separately, at speaking_start
+        (during TTS playback), so it never races the turn's own generation."""
+        if not source or source.startswith("kira-agenda"):
+            return
+        with self._prefetch_lock:
+            if self._frozen_stash is None:
+                return
+            self._detour_turns += 1
+
+    def _maybe_generate_connector_upgrade(self) -> None:
+        """D3 upgrade: while the interruption answer's TTS plays (GPU free),
+        generate a one-line contextual connector into `_frozen_stash['connector']`.
+        LOWEST priority by construction: it writes to a SEPARATE field (never the
+        `_prefetched_agenda` slot), and refuses to even spawn while a real pregen
+        occupies or is in flight for that slot — so it can never evict or delay a
+        real interactive/agenda pregen (AC5.6). Best-effort: a late/rejected/absent
+        upgrade just falls back to the pool floor at the return (timeout-0 read).
+        """
+        # R3 spawn gate: the upgrade is cosmetic (the pool floor is a complete
+        # connector). Only spawn when the remaining-playback estimate comfortably
+        # covers a bounded generation — otherwise the upgrade could outlive the
+        # answer's playback and start a second concurrent Ollama call behind the
+        # real turn (heavy/stalling models). An unknown/short estimate -> skip; the
+        # floor stands. (At speaking_start the answer's own progress is not yet
+        # measurable, so this commonly skips and the floor is used — by design.)
+        remaining = self.speech_remaining_estimate()
+        if remaining is None or remaining <= CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS:
+            return
+        with self._prefetch_lock:
+            stash = self._frozen_stash
+            if stash is None or stash.get("connector") is not None:
+                return
+            # Yield to any real pregen — never compete for the single Ollama runner.
+            if self._prefetched_agenda is not None or self._pregen_inflight is not None:
+                return
+
+        def worker() -> None:
+            # F3: claim single-Ollama occupancy ATOMICALLY before generating. The
+            # spawn-time yield checks above are racy (a foreground/pregen generation
+            # can start after them), so gate on `_llm_generating` under the same lock
+            # the generation path uses; if a generation is already in flight, skip —
+            # the pool floor is an acceptable connector, never queue or retry.
+            with self._lock:
+                if self._llm_generating:
+                    return
+                self._llm_generating = True
+            # R4 ownership token: _generar_dialogo self-brackets `_llm_generating`
+            # (sets it, clears it in its own finally), so once it runs it is the SOLE
+            # releaser of THIS claim. The outer finally must clear the flag ONLY on an
+            # early error/skip BEFORE _generar_dialogo ran — clearing after it returned
+            # would clobber a THIRD party's fresh claim taken in the release window
+            # (making `_llm_generating` read False during a live Ollama call, so the
+            # WU3 GPU-free predicate misfires).
+            generation_started = False
+            try:
+                prompt = (
+                    "Generá UNA sola línea muy corta de transición para retomar "
+                    "lo que venías diciendo antes de que te interrumpieran. Natural, "
+                    "sin anunciar estructura, sin saludar, sin cerrar."
+                )
+                generation_started = True
+                # R3: hard-bound the generation so a heavy/stalling model abandons
+                # the cosmetic upgrade (watchdog_timeout suppresses the heavyweight
+                # stall recovery too) instead of racing the real turn.
+                line = self._generar_dialogo(
+                    prompt, source="kira-agenda", commit_history=False,
+                    log_prefix="Connector", watchdog_timeout=CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
+                )
+                if not line:
+                    return
+                if not self._preview_accept_agenda_output(line):
+                    return
+                # F6: only land the connector on the SAME stash this worker was
+                # spawned for. A discard+new-freeze between spawn and completion
+                # must not stamp this now-stale connector onto a fresh stash.
+                with self._prefetch_lock:
+                    if self._frozen_stash is stash and stash.get("connector") is None:
+                        stash["connector"] = line
+            except Exception:
+                logger.exception("connector upgrade generation failed")
+            finally:
+                if not generation_started:
+                    with self._lock:
+                        self._llm_generating = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _pregen_retry_gate_seconds(self) -> float:
         """T2(a) [v5]: the adaptive retry-gate threshold for a rejected
@@ -784,6 +1068,10 @@ class MotorVocalIA(threading.Thread):
 
         elif tipo == "process_context":
             if not self.is_ready:
+                # R1: an interruption answer dropped here never reaches a
+                # _note_detour_turn site, so a frozen return would HOLD forever.
+                # The driver's FROZEN_STASH_MAX_HOLD_SECONDS deadline backstop
+                # (agenda_driver._maybe_return_frozen_stash) covers this lost answer.
                 self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
                 self.ui_callback("ollama_unavailable")
                 return
@@ -796,6 +1084,11 @@ class MotorVocalIA(threading.Thread):
                 self._processing = True
                 self._current_processing_source = "direct"
             self.ui_callback("processing")
+            # WU5: the PTT/typed interruption answer taken on the foreground path
+            # (idle at command-read time) still counts as a detour turn (no-op
+            # unless a frozen return is pending). The connector upgrade fires at
+            # speaking_start so it never races this turn's own generation.
+            self._note_detour_turn("direct")
             try:
                 self._ejecutar_inferencia(payload, source="direct", history_text=history_text)
             finally:
@@ -833,6 +1126,7 @@ class MotorVocalIA(threading.Thread):
         elif tipo == "switch_llm_tier":
             # A draft generated under the old tier must never be spoken (#344).
             self.clear_prefetched_agenda()
+            self._invalidate_frozen_stash()  # WU5 D2: a stashed return under the old tier is stale
             self.switch_llm_tier(str(payload))
 
         elif tipo == "set_motor_tts":
@@ -875,6 +1169,7 @@ class MotorVocalIA(threading.Thread):
         elif tipo == "set_profile":
             # A draft generated under the old persona must never be spoken (#344).
             self.clear_prefetched_agenda()
+            self._invalidate_frozen_stash()  # WU5 D2: a stashed return under the old persona is stale
             prompt_override_active = "prompt" in payload
             self.system_prompt = payload.get("prompt", i18n_active.system_prompt())
             self.use_system_role = payload.get("use_system", False)
@@ -1413,6 +1708,12 @@ class MotorVocalIA(threading.Thread):
         payload = cached["payload"]
         dialogo = cached["dialogo"]
         source = cached.get("source", "kira-agenda")
+        # WU5 D3 (design-fase2.md §3 WU5): a RESUMED agenda draft carries a
+        # connector — prepend it so the connector + stashed dialogo are spoken
+        # AND committed as ONE turn (the connector is part of the spoken turn).
+        connector = cached.get("connector")
+        if connector:
+            dialogo = f"{connector} {dialogo}".strip()
         # F1 [v4]: forward the honest history_text (PTT/direct turns) exactly as
         # the foreground path does — else the raw prompt template leaks into
         # historial + memoria capture (the memoria_quality regression).
@@ -1444,8 +1745,10 @@ class MotorVocalIA(threading.Thread):
                 last_end = self._last_speaking_end_monotonic
             gap_ms = int((time.monotonic() - last_end) * 1000) if last_end is not None else -1
             gen_ms = cached.get("gen_ms", -1)
+            # WU5: a resumed frozen draft is labelled draft=resumed (else used).
+            draft_label = "resumed" if cached.get("resumed") else "used"
             self._log(
-                f"Pregen boundary: draft=used source={source} gap_ms={gap_ms} "
+                f"Pregen boundary: draft={draft_label} source={source} gap_ms={gap_ms} "
                 f"gen_ms={gen_ms} speech_ms={self._speech_ms_for_boundary()}"
             )
         self._hablar(dialogo, source=source)
@@ -1557,6 +1860,9 @@ class MotorVocalIA(threading.Thread):
 
         if any("kira-agenda".startswith(prefix) or prefix.startswith("kira-agenda") for prefix in prefixes):
             self.clear_prefetched_agenda()
+            # WU5 D2: a session/emergency stop that drops pending agenda must also
+            # drop a pending interruption-return (the stashed beat is now stale).
+            self._invalidate_frozen_stash()
 
         if removed:
             self._log(f"Cola: descartados {removed} pendientes de {', '.join(prefixes)}.")
@@ -1779,6 +2085,11 @@ class MotorVocalIA(threading.Thread):
                 self._processing = True
                 self._current_processing_source = source
             self.ui_callback("processing")
+            # WU5 (design-fase2.md §3 WU5): an interactive turn spoken during an
+            # interruption detour counts toward the return-skip budget (no-op
+            # unless a frozen stash is pending; skips agenda sources). The
+            # connector upgrade is triggered later, at speaking_start.
+            self._note_detour_turn(source)
             try:
                 if cached is not None:
                     self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
@@ -2239,6 +2550,7 @@ class MotorVocalIA(threading.Thread):
         commit_history: bool = True,
         log_prefix: str = "LLM",
         history_text: Optional[str] = None,
+        watchdog_timeout: Optional[float] = None,
     ) -> str:
         request_model = self.current_model
         self._log(f"Analizando contexto con {request_model}...")
@@ -2419,7 +2731,13 @@ class MotorVocalIA(threading.Thread):
             max_intentos = 2
             raw_content = ""
             respuesta = None
-            chat_timeout = self._resolve_chat_watchdog_timeout(request_model)
+            # R3: a bounded connector-upgrade call passes its own short watchdog
+            # timeout; every other caller keeps the resolved chat timeout.
+            chat_timeout = (
+                watchdog_timeout
+                if watchdog_timeout is not None
+                else self._resolve_chat_watchdog_timeout(request_model)
+            )
             
             for intento in range(max_intentos):
                 # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
@@ -2436,13 +2754,19 @@ class MotorVocalIA(threading.Thread):
                     )
                 except Exception as e:
                     if self._is_watchdog_timeout_error(e):
-                        self._recover_from_stalled_inference(
-                            request_model=request_model,
-                            source=source,
-                            timeout=chat_timeout,
-                        )
-                        if commit_history:
-                            self._invalidate_pregen_epoch()
+                        # R3: a bounded connector-upgrade call (watchdog_timeout set)
+                        # abandons SILENTLY on timeout — it is cosmetic, so it must
+                        # never trigger the heavyweight stall recovery (model rollback
+                        # / UI signal) a real turn's timeout does. Just return "" so
+                        # the pool floor stands.
+                        if watchdog_timeout is None:
+                            self._recover_from_stalled_inference(
+                                request_model=request_model,
+                                source=source,
+                                timeout=chat_timeout,
+                            )
+                            if commit_history:
+                                self._invalidate_pregen_epoch()
                         return ""
                     if not self._is_ollama_transport_error(e):
                         raise
@@ -3901,6 +4225,14 @@ class MotorVocalIA(threading.Thread):
                 self._current_speech_source = None
             logger.exception("UI callback failed during speaking_start")
             raise
+
+        # WU5 D3 (design-fase2.md §3 WU5): while an interruption ANSWER's TTS
+        # plays (GPU free — generation already finished), opportunistically
+        # generate the return connector. Placed HERE, at playback start, so it
+        # never races the turn's own generation (single-Ollama rule). No-op
+        # unless a frozen return is pending and this is a non-agenda turn.
+        if not source.startswith("kira-agenda"):
+            self._maybe_generate_connector_upgrade()
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
