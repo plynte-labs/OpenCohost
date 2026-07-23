@@ -1293,7 +1293,7 @@ PREFERENCE (owner runs `monologue`), not a defect.
   FOLLOW-UP (owner in-code TODO, StreamPanel.tsx 2026-07-20): the "Conectar" button should toggle to "Desconectar" when
   connected (inherit the disconnect responsibility) and the separate lower Desconectar button should be removed.*
 
-- [~] **Track: Agenda "No Dead Air" — prefetch wiring + interruption connector (API host)**
+- [x] **Track: Agenda "No Dead Air" — prefetch wiring + interruption connector (API host)**
   *Link: [./tracks/agenda_no_dead_air_20260719/](./tracks/agenda_no_dead_air_20260719/)*
   *Status 2026-07-21: PROPOSAL confirmed by runtime log evidence (logs/opencohost_20260721_012124.log): every agenda
   turn is strictly sequential — "Pipeline TTS completado" → immediately "procesando [kira-agenda]" → 16-19s LLM
@@ -1463,3 +1463,13 @@ PREFERENCE (owner runs `monologue`), not a defect.
   loop (WU1-WU5) is COMPLETE. Owner runtime validation of the interruption path (PTT zone cuts,
   connector return, typed-input non-interruption, telemetry lines in a live log) is still
   pending — see `docs/closeout-20260722-agenda-no-dead-air-phase2.md`.*
+  *Status 2026-07-22 (OWNER RUNTIME VALIDATION PASSED — track closed): owner live session confirmed
+  the Fase 2 behavior end-to-end: PTT interruptions answered mid-agenda, connector return visible
+  ("Bueno, volviendo a {tema}…" leading straight into the frozen beat), guardrail rejection surfaced
+  as a code-only chip in the UI Logs tab (`skeleton_repetition`), typed input never cut speech, and
+  a mid-session model switch (`gemma4:e2b`) did not disturb the agenda flow. Owner verdict: "según el
+  último log funciona". Residual observations stay as documented in ADR-038 (ordering glitch on
+  pre-cut queued chat; floor-first connector). OWNER FEEDBACK captured for future tracks (not this
+  one): multi-provider LLM APIs, config persistence on close, arbitrary turns-per-topic, LiveAudio
+  port override UI, TTS alternatives discussion, context-overflow/RAM hardening, i18n proposal,
+  August launch-readiness proposal.*
