@@ -346,6 +346,25 @@ def test_ptt_history_wrapper_en_formats_without_keyerror(official):
     assert value.format(text="hi") == "The streamer said (PTT): hi"
 
 
+def test_typed_history_wrapper_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.typed_history_wrapper() == active.LEGACY_TYPED_HISTORY_WRAPPER
+    assert active.typed_history_wrapper().format(text="hola") == "El streamer escribió: hola"
+
+
+def test_typed_history_wrapper_differs_from_ptt_history_wrapper(official):
+    """B1 (turn provenance): a typed turn must not claim it came through PTT."""
+    _activate("es", official)
+    assert active.typed_history_wrapper() != active.ptt_history_wrapper()
+
+
+def test_typed_history_wrapper_en_formats_without_keyerror(official):
+    _activate("en", official)
+    value = active.typed_history_wrapper()
+    assert "escribió" not in value
+    assert value.format(text="hi") == "The streamer typed: hi"
+
+
 def test_ptt_wrapper_missing_slot_returns_legacy():
     active.set_active_bundle(_bare_bundle())
     assert active.ptt_wrapper() == active.LEGACY_PTT_WRAPPER
@@ -359,6 +378,11 @@ def test_live_voice_wrapper_missing_slot_returns_legacy():
 def test_ptt_history_wrapper_missing_slot_returns_legacy():
     active.set_active_bundle(_bare_bundle())
     assert active.ptt_history_wrapper() == active.LEGACY_PTT_HISTORY_WRAPPER
+
+
+def test_typed_history_wrapper_missing_slot_returns_legacy():
+    active.set_active_bundle(_bare_bundle())
+    assert active.typed_history_wrapper() == active.LEGACY_TYPED_HISTORY_WRAPPER
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +737,7 @@ def test_es_manifest_has_wrapper_slots():
     assert "{text}" in resolve(es, "llm.scaffolding.ptt_wrapper")
     assert "{text}" in resolve(es, "llm.scaffolding.live_voice_wrapper")
     assert "{text}" in resolve(es, "llm.scaffolding.ptt_history_wrapper")
+    assert "{text}" in resolve(es, "llm.scaffolding.typed_history_wrapper")
 
 
 def test_en_manifest_has_wrapper_slots():
@@ -720,3 +745,4 @@ def test_en_manifest_has_wrapper_slots():
     assert "{text}" in resolve(en, "llm.scaffolding.ptt_wrapper")
     assert "{text}" in resolve(en, "llm.scaffolding.live_voice_wrapper")
     assert "{text}" in resolve(en, "llm.scaffolding.ptt_history_wrapper")
+    assert "{text}" in resolve(en, "llm.scaffolding.typed_history_wrapper")

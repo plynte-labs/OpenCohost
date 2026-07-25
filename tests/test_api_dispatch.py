@@ -225,6 +225,52 @@ def test_dispatch_optional_history_text_produces_3tuple_hash_ignores_it():
     assert q.qsize() == 0  # no second enqueue — history_text is not part of identity
 
 
+def test_dispatch_optional_source_rides_as_4th_element_and_is_not_identity():
+    # B2 (turn provenance): dispatch() gains an OPTIONAL source that rides as a
+    # 4th tuple element, exactly the way history_text rides as the 3rd — the
+    # engine hardcoded source="direct" for every dispatched turn, so a PTT turn
+    # logged/telemetered as "direct". Omitted -> the tuple shape is unchanged for
+    # every existing caller. Like history_text it is NEVER part of the
+    # idempotency hash/cache key (identity is (command, payload) only).
+    q = Queue()
+    d = Dispatcher(q)
+
+    r1 = d.dispatch(
+        "process_context",
+        "El streamer acaba de decir (PTT): hola",
+        history_text="El streamer dijo (PTT): hola",
+        source="ptt",
+    )
+    assert r1.state == "accepted"
+    assert q.get_nowait() == (
+        "process_context",
+        "El streamer acaba de decir (PTT): hola",
+        "El streamer dijo (PTT): hola",
+        "ptt",
+    )
+
+    # source without history_text still lands in slot 4 (history_text None) —
+    # the engine's tolerant unpack reads position, not presence.
+    r2 = d.dispatch("process_context", "hola", source="ptt")
+    assert r2.state == "accepted"
+    assert q.get_nowait() == ("process_context", "hola", None, "ptt")
+
+    # Omitted -> 2-tuple, byte-identical to every pre-existing caller.
+    r3 = d.dispatch("set_profile", _payload())
+    assert r3.state == "accepted"
+    assert q.get_nowait() == ("set_profile", _payload())
+
+    # Identity ignores source: same key+command+payload with a DIFFERENT source
+    # still replays (no conflict, no re-enqueue).
+    first = d.dispatch("process_context", "hola", key="k1", source="ptt")
+    assert first.state == "accepted"
+    assert q.get_nowait() == ("process_context", "hola", None, "ptt")
+    replay = d.dispatch("process_context", "hola", key="k1", source="direct")
+    assert replay.state == "replay"
+    assert replay.command_id == first.command_id
+    assert q.qsize() == 0
+
+
 def test_hash_payload_is_key_order_independent():
     # Pins sort_keys=True in _hash_payload — must fail if removed, since a
     # dict re-serialized in a different key order would otherwise hash

@@ -131,6 +131,7 @@ llm:
     ptt_wrapper: "The streamer just said (PTT): {text}"
     live_voice_wrapper: "The streamer just said: {text}"
     ptt_history_wrapper: "The streamer said (PTT): {text}"
+    typed_history_wrapper: "The streamer typed: {text}"
 
   # Agenda prompt scaffolding added in P3a (kira_bilingual_e2e), DATA ONLY --
   # no controller wiring yet (P3b). Newly authored, not a translation; mirrors

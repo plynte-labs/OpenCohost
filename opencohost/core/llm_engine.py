@@ -88,8 +88,9 @@ _DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
 # kira_personalization_onboarding_20260705 — sources that qualify for the
 # <perfil_streamer> injection. Deliberately its OWN gate (not nested inside
 # `source == "direct"` below): ptt gains this block too — a deliberate,
-# test-covered behavioral change (design §2), unlike the remaining
-# direct-only enrichments (digest/editorial), which stay direct-only.
+# test-covered behavioral change (design §2). The digest/editorial enrichments
+# were direct-only when this landed; F1 moved them onto the same direct+ptt
+# footing (see _DIGEST_INJECT_SOURCES / _EDITORIAL_INJECT_SOURCES below).
 _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
 
 # memoria_rag_followups_20260716 candidate 1 — sources that qualify for the
@@ -99,6 +100,21 @@ _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
 # gate has THREE sites: the profile-id snapshot, the injection call, and the
 # prompt prepend — all must use this frozenset or the ptt path stays dead.
 _MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt"})
+
+# F1 (turn provenance follow-up) — sources that qualify for the L1
+# <memoria_de_fondo> digest block and for the ARMED editorial cue-card block.
+# These were exact-literal `source == "direct"` compares, which was harmless
+# only while the dispatcher hardcoded source="direct" for EVERY process_context
+# turn. The moment it started threading the real source, both enrichments went
+# voice-blind: an F10 PTT question about an armed card got none of the card's
+# facts (defeating the point of arming it), and a PTT "what were we talking
+# about a while ago" got no digest at all — while the SAME question typed still
+# got both. ptt is already in _DIGEST_CAPTURE_SOURCES, so voice turns FEED the
+# digest; they must be able to READ it. Same precedent as the two frozensets
+# above. NOT widened beyond direct+ptt: chat/accumulated/agenda stay excluded
+# (the digest may hold host-turn text and the card is host-editorial context).
+_DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt"})
+_EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt"})
 
 # W2a (memoria_recall_20260718): max captured titles retained per session for
 # the mechanical session summary. Bounds the RAM held between summaries; the
@@ -1072,12 +1088,23 @@ class MotorVocalIA(threading.Thread):
         3-tuple (command, payload, history_text). Mirrors the priority-queue
         4->5-tuple precedent in _process_priority_queue
         (prio, ts, payload, source, *rest).
+
+        B2 (turn provenance): an OPTIONAL 4th element carries the real source
+        ((command, payload, history_text, source)) — see _dispatch_command. A
+        shorter tuple keeps the "direct" default, so no existing caller changes.
         """
         tipo, payload, *rest = comando
         history_text = rest[0] if rest else None
-        self._dispatch_command(tipo, payload, history_text=history_text)
+        source = rest[1] if len(rest) > 1 and rest[1] else "direct"
+        self._dispatch_command(tipo, payload, history_text=history_text, source=source)
 
-    def _dispatch_command(self, tipo: str, payload, history_text: Optional[str] = None) -> None:
+    def _dispatch_command(
+        self,
+        tipo: str,
+        payload,
+        history_text: Optional[str] = None,
+        source: str = "direct",
+    ) -> None:
         """Dispatch a command tuple. Extracted from run() for testability.
 
         history_text (A1, memoria_quality_20260717), when present, is the honest
@@ -1086,13 +1113,22 @@ class MotorVocalIA(threading.Thread):
         keeps the pre-existing behavior (payload committed as-is) for every
         chat/control caller.
 
-        NOTE (source honesty, deferred — see design.md): the process_context
-        branch hardcodes source="direct" for BOTH the idle and busy re-enqueue
-        paths, so F10 PTT and legacy LiveVoice turns log/telemeter as "direct".
-        This is an observability inaccuracy only — "direct" and "ptt" are both
-        allowlisted for capture+injection, so behavior is unaffected. Threading a
-        real source through the Dispatcher is a candidate follow-up, not this
-        track's scope."""
+        source (B2, turn provenance) is the honest origin of a process_context
+        turn, threaded from the Dispatcher (api/dispatch.py) via _consume_command.
+        It replaces the hardcoded "direct" this branch used on BOTH the idle and
+        busy re-enqueue paths, which made every F10 PTT turn log/telemeter as
+        "direct". "direct" stays the default, so every existing caller (app_shell
+        chat, control verbs, the boundary drain) is unchanged.
+
+        NOTE (F1): threading the real source must not cost a voice turn any
+        prompt enrichment. "direct" and "ptt" are both allowlisted for digest
+        capture, personalization, memorias injection AND — since F1 —
+        _DIGEST_INJECT_SOURCES / _EDITORIAL_INJECT_SOURCES, so an F10 PTT turn
+        now behaves like the legacy voice_control PTT path (which has always
+        dispatched source="ptt") with every enrichment a typed turn gets. The
+        one remaining direct-only gate is the read-only memory inspector's
+        user-content dump (memory_inspector_snapshot), which is a privacy
+        display gate, not a prompt gate."""
         if tipo == "set_voice":
             self.voz_referencia = payload
             if isinstance(payload, tuple):
@@ -1114,19 +1150,19 @@ class MotorVocalIA(threading.Thread):
             if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                self.enqueue(payload, priority=1, source="direct", history_text=history_text)
+                self.enqueue(payload, priority=1, source=source, history_text=history_text)
                 return
             with self._lock:
                 self._processing = True
-                self._current_processing_source = "direct"
+                self._current_processing_source = source
             self.ui_callback("processing")
             # WU5: the PTT/typed interruption answer taken on the foreground path
             # (idle at command-read time) still counts as a detour turn (no-op
             # unless a frozen return is pending). The connector upgrade fires at
             # speaking_start so it never races this turn's own generation.
-            self._note_detour_turn("direct")
+            self._note_detour_turn(source)
             try:
-                self._ejecutar_inferencia(payload, source="direct", history_text=history_text)
+                self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
                 self._complete_processing_cycle()
 
@@ -2202,7 +2238,13 @@ class MotorVocalIA(threading.Thread):
                 if comando is None or comando[0] not in _DRAIN_SAFE_COMMANDS:
                     break
                 self.command_queue.queue.popleft()
-            tipo, payload = comando
+            # F3: tolerant unpack, mirroring _consume_command. The queue item has
+            # grown twice already (history_text, then source); a strict 2-unpack
+            # here raises ValueError inside _complete_processing_cycle, which
+            # run() does NOT guard — that kills the worker thread for good and
+            # Kira goes permanently mute. Drain-safe commands are plain setters
+            # that read neither extra slot, so discarding them is correct.
+            tipo, payload, *_extra = comando
             self._dispatch_command(tipo, payload)
             applied += 1
         if applied > 0:
@@ -2739,7 +2781,7 @@ class MotorVocalIA(threading.Thread):
             if self.use_system_role:
                 messages.append({'role': 'system', 'content': system_content})
 
-            # Take a consistent snapshot of historial and (for direct-path) the
+            # Take a consistent snapshot of historial and (for host-turn paths) the
             # digest block under _history_lock so that a concurrent _commit_history
             # call from the agenda speaker daemon cannot mutate the deque while we
             # are iterating it (RuntimeError: deque mutated during iteration).
@@ -2747,7 +2789,7 @@ class MotorVocalIA(threading.Thread):
             # it is released before any I/O or the Ollama call.
             with self._history_lock:
                 history_snapshot = list(self.historial)
-                if source == "direct":
+                if source in _DIGEST_INJECT_SOURCES:
                     digest_block = self._memory_digest.build_block(
                         sanitize_fn=self._sanitize_history_context,
                         line_format=i18n_active.digest_line_format(),
@@ -2783,11 +2825,13 @@ class MotorVocalIA(threading.Thread):
             if source in _MEMORIA_INJECT_SOURCES and MEMORIAS_ENABLED and memorias_profile_id:
                 memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
 
-            # Editorial direct-mode enrichment: inject matching ARMED card context for
-            # host-direct queries. NON-CONSUMING — card stays ARMED for the agenda path.
+            # Editorial host-turn enrichment: inject matching ARMED card context for
+            # host queries, typed OR spoken (F1 — the operator arms a card and then
+            # asks about it by voice just as often as by keyboard).
+            # NON-CONSUMING — card stays ARMED for the agenda path.
             # Never inject for chat/aggregator-driven sources.
             editorial_block = ""
-            if source == "direct":
+            if source in _EDITORIAL_INJECT_SOURCES:
                 provider = self.direct_editorial_context_provider
                 if provider is not None:
                     try:
@@ -2805,11 +2849,12 @@ class MotorVocalIA(threading.Thread):
             else:
                 enriched = contexto
 
-            # D3 — digest injection: only for direct-path prompts, never agenda.
-            # digest_block was already computed under _history_lock above.
-            # E3b: Wrap in explicit read-only delimiter so the LLM cannot mistake
-            # ledger lines for instructions (structural isolation, language-agnostic).
-            if source == "direct":
+            # D3 — digest injection: only for host-turn prompts (typed or spoken),
+            # never chat/agenda. digest_block was already computed under
+            # _history_lock above. E3b: Wrap in explicit read-only delimiter so the
+            # LLM cannot mistake ledger lines for instructions (structural
+            # isolation, language-agnostic).
+            if source in _DIGEST_INJECT_SOURCES:
                 if digest_block:
                     wrapped_digest = (
                         i18n_active.memory_block_open() + "\n"
@@ -3084,6 +3129,13 @@ class MotorVocalIA(threading.Thread):
             # card block AND produced a non-empty dialogo. Single engine worker
             # thread is the only caller (no lock needed). Fail-open \u2014 a recorder
             # error must never break a turn.
+            #
+            # NO SOURCE GATE, deliberately-but-unratified: since F1 widened
+            # _EDITORIAL_INJECT_SOURCES to direct+ptt, a VOICE turn also consumes
+            # a single_use card. Pinned by
+            # test_editorial_direct_context.py::test_ptt_turn_consumes_single_use_armed_card
+            # \u2014 read that test before adding a gate here; it is an owner decision,
+            # not a bug.
             if editorial_block and dialogo and self.direct_editorial_usage_recorder is not None:
                 try:
                     self.direct_editorial_usage_recorder()

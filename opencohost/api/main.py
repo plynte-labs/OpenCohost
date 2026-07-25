@@ -2163,7 +2163,17 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(status_code=422, content={"detail": rejection})
         key = request.headers.get("Idempotency-Key") or body.idempotency_key
         dispatcher = request.app.state.dispatcher
-        result = dispatcher.dispatch("process_context", body.text, key)
+        # B1 (turn provenance): a typed turn used to commit to historial BARE, so
+        # the model could not tell WHO spoke and guessed (it referred to "the
+        # viewer before" with no chat platform connected at all). history_text
+        # gives it the same speaker frame PTT already had; the prompt payload
+        # stays the raw text, so generation behavior is unchanged.
+        result = dispatcher.dispatch(
+            "process_context",
+            body.text,
+            key,
+            history_text=i18n_active.typed_history_wrapper().format(text=body.text),
+        )
         if result.state in ("accepted", "replay"):
             return {
                 "accepted": True,

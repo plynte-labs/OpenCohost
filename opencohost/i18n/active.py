@@ -123,6 +123,12 @@ LEGACY_LIVE_VOICE_WRAPPER = "El streamer acaba de decir: {text}"
 # that assumption false, so the byte-identical pillar wins over the literal
 # "share the slot" instruction (same resolution shape as the P1b deviation).
 LEGACY_PTT_HISTORY_WRAPPER = "El streamer dijo (PTT): {text}"
+# B1 (turn provenance): the typed-turn twin of ptt_history_wrapper. A NEW slot
+# with no pre-i18n literal to preserve (typed turns committed BARE), but it still
+# carries the es text as its default: a bundle that omits it must degrade to the
+# Spanish frame, never back to an unattributed turn — an unframed typed turn is
+# exactly what let the model guess a speaker it never had.
+LEGACY_TYPED_HISTORY_WRAPPER = "El streamer escribió: {text}"
 
 # Agenda prompt scaffolding (P3a, kira_bilingual_e2e). DATA + ACCESSORS ONLY —
 # no consumer wires these yet (`kira_agenda_controller.py`'s `_build_prompt`,
@@ -494,6 +500,15 @@ def ptt_history_wrapper() -> str:
     voice_control's ("acaba de decir") and a pre-existing test pins the
     controller's exact wording — see the LEGACY_PTT_HISTORY_WRAPPER note."""
     return _slot("llm.scaffolding.ptt_history_wrapper", LEGACY_PTT_HISTORY_WRAPPER)
+
+
+def typed_history_wrapper() -> str:
+    """Wrapper for a TYPED turn's honest ``history_text``. Placeholder: ``{text}``.
+
+    B1 (turn provenance): the typed twin of :func:`ptt_history_wrapper`. Its own
+    slot, not a reuse: a typed turn tagged "(PTT)" would be a second provenance
+    lie. Consumed by POST /api/chat/turn (api/main.py)."""
+    return _slot("llm.scaffolding.typed_history_wrapper", LEGACY_TYPED_HISTORY_WRAPPER)
 
 
 # ── Agenda prompt scaffolding (P3a) — data + accessors only, no wiring yet ──

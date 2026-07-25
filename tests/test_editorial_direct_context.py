@@ -506,3 +506,75 @@ def test_usage_recorder_exception_does_not_propagate(tmp_path: Path) -> None:
     motor._generar_dialogo("host query about the topic", source="direct")  # must not raise
 
     recorder.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# F1 regression pin: a voice (ptt) turn must get the SAME prompt enrichments
+# as a typed turn — the armed editorial card AND the L1 memory digest.
+# ---------------------------------------------------------------------------
+
+def test_ptt_source_receives_editorial_and_digest_blocks(tmp_path: Path) -> None:
+    """Threading the real source through the dispatcher must not silently drop
+    enrichments: an F10 PTT turn asking about an ARMED cue card needs its facts,
+    and a PTT turn asking "what were we talking about" needs <memoria_de_fondo>.
+    ptt already FEEDS the digest (_DIGEST_CAPTURE_SOURCES) — it must READ it too.
+    """
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+
+    block = "<editorial_context>\n{\"topic\":\"test\"}\n</editorial_context>"
+    provider = MagicMock(return_value=block)
+    motor.direct_editorial_context_provider = provider
+    motor._memory_digest.append("contexto: el parche de bloodborne → Kira: salio ayer.")
+
+    captured_messages: list = []
+
+    def fake_ollama_chat_fn(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return {"message": {"content": "nice"}}
+
+    motor._ollama_chat = MagicMock(side_effect=fake_ollama_chat_fn)
+
+    motor._generar_dialogo("host query about the topic", source="ptt")
+
+    provider.assert_called_once_with("host query about the topic")
+    all_content = " ".join(m.get("content", "") for m in captured_messages)
+    assert "<editorial_context>" in all_content
+    assert i18n_active.memory_block_open() in all_content
+    assert "el parche de bloodborne" in all_content
+
+
+def test_ptt_turn_consumes_single_use_armed_card(tmp_path: Path) -> None:
+    """RECORDED CONSEQUENCE OF F1 — NOT YET SIGNED OFF BY THE OWNER.
+
+    Widening _EDITORIAL_INJECT_SOURCES to include "ptt" gave voice turns the
+    armed card's facts (test above). It also made them CONSUME the card: the
+    usage-recorder hook at llm_engine.py fires on `editorial_block and dialogo`
+    with no source gate, so a single_use card answered by voice goes ARMED→USED
+    and is gone from the agenda. Before F1 the voice turn got nothing and the
+    card stayed armed.
+
+    This is symmetric with typed turns — a card that was answered has been used,
+    whichever way the question arrived — but it was a side effect, not a decision
+    anyone made. This test PINS the current behavior so it cannot silently flip.
+    If you are here to change it, you are changing an unratified decision, not
+    fixing a bug: get the owner's call first.
+    """
+    store, bridge = _make_bridge(tmp_path)
+    card = store.upsert(EditorialCard(
+        topic="Look Outside review",
+        summary="Summary for Look Outside.",
+        streamer_take="Streamer take on Look Outside.",
+        triggers=["look outside"],
+        single_use=True,
+    ))
+    store.arm(card.id)
+
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    motor.direct_editorial_context_provider = bridge.resolve_direct_context
+    motor.direct_editorial_usage_recorder = bridge.commit_direct_injection
+    motor._ollama_chat = MagicMock(side_effect=lambda **kw: {"message": {"content": "nice"}})
+
+    motor._generar_dialogo("kira que sabes de look outside", source="ptt")
+
+    assert store.get(card.id).status is EditorialCardStatus.USED
+    assert store.list_armed() == []

@@ -136,7 +136,10 @@ def test_run_tolerant_unpacks_2tuple_and_3tuple_commands(monkeypatch):
     monkeypatch.setattr(
         motor,
         "_dispatch_command",
-        lambda tipo, payload, history_text=None: captured.append((tipo, payload, history_text)),
+        # source (B2) is asserted by the 4-tuple test below; ignored here.
+        lambda tipo, payload, history_text=None, source="direct": captured.append(
+            (tipo, payload, history_text)
+        ),
     )
 
     motor._consume_command(("process_context", "hola"))  # legacy 2-tuple
@@ -156,6 +159,73 @@ def test_run_tolerant_unpacks_2tuple_and_3tuple_commands(monkeypatch):
             "El streamer dijo (PTT): hola",
         ),
     ]
+
+
+def test_run_tolerant_unpacks_4tuple_command_with_source(monkeypatch):
+    # B2 (turn provenance): the queue item grows an OPTIONAL 4th element, the real
+    # source, riding exactly the way history_text rides as the 3rd. Legacy 2- and
+    # 3-tuples still reach _dispatch_command with source="direct", so every
+    # pre-existing caller is unchanged.
+    motor, _ = _make_motor()
+    captured: list = []
+    monkeypatch.setattr(
+        motor,
+        "_dispatch_command",
+        lambda tipo, payload, history_text=None, source="direct": captured.append(
+            (tipo, payload, history_text, source)
+        ),
+    )
+
+    motor._consume_command(("process_context", "hola"))  # legacy 2-tuple
+    motor._consume_command(("process_context", "wrapped", "honest"))  # 3-tuple
+    motor._consume_command(("process_context", "wrapped", "honest", "ptt"))  # 4-tuple
+
+    assert captured == [
+        ("process_context", "hola", None, "direct"),
+        ("process_context", "wrapped", "honest", "direct"),
+        ("process_context", "wrapped", "honest", "ptt"),
+    ]
+
+
+def test_dispatch_command_process_context_forwards_source_idle_and_busy(monkeypatch):
+    # B2: the real source must reach BOTH process_context branches — idle ->
+    # _ejecutar_inferencia + _current_processing_source, busy -> enqueue — so a
+    # PTT turn stops logging/telemetering as "direct".
+
+    # Idle branch.
+    motor, _ = _make_motor()
+    infer_calls: list = []
+    seen_processing_source: list = []
+
+    def _fake_infer(payload, source="direct", history_text=None):
+        infer_calls.append((payload, source, history_text))
+        seen_processing_source.append(motor._current_processing_source)
+
+    monkeypatch.setattr(motor, "_ejecutar_inferencia", _fake_infer)
+    monkeypatch.setattr(motor, "_complete_processing_cycle", lambda *a, **k: None)
+    motor._processing = False
+    motor._speaking = False
+    motor._dispatch_command(
+        "process_context", "ptt-wrapped", history_text="El streamer dijo (PTT): x", source="ptt"
+    )
+    assert infer_calls == [("ptt-wrapped", "ptt", "El streamer dijo (PTT): x")]
+    assert seen_processing_source == ["ptt"]
+
+    # Busy branch re-enqueues with the same honest source (priority unchanged).
+    motor2, _ = _make_motor()
+    enqueue_calls: list = []
+    monkeypatch.setattr(
+        motor2,
+        "enqueue",
+        lambda payload, priority=1, source="chat", history_text=None: enqueue_calls.append(
+            (payload, priority, source, history_text)
+        ),
+    )
+    motor2._processing = True
+    motor2._dispatch_command(
+        "process_context", "ptt-wrapped", history_text="El streamer dijo (PTT): x", source="ptt"
+    )
+    assert enqueue_calls == [("ptt-wrapped", 1, "ptt", "El streamer dijo (PTT): x")]
 
 
 def test_dispatch_command_process_context_forwards_history_text_idle_and_busy(monkeypatch):
@@ -208,3 +278,28 @@ def test_drain_emits_motor_event(monkeypatch):
     motor._process_priority_queue()
 
     assert "commands_drained" in events
+
+
+def test_drain_survives_command_carrying_extra_tuple_elements(monkeypatch):
+    # F3: _drain_control_commands unpacked the queue item with a STRICT
+    # `tipo, payload = comando`, while the queue's item shape has grown twice
+    # (history_text, then source). The first drain-safe command ever dispatched
+    # with either extra slot raised ValueError inside _process_priority_queue —
+    # and run() guards only command_queue.get(), not _consume_command — killing
+    # the engine worker thread permanently (Kira mute, no recovery). The drain
+    # must tolerate the extra elements and still apply the command.
+    motor, _ = _make_motor()
+    applied: list = []
+
+    monkeypatch.setattr(motor, "_ejecutar_inferencia", lambda *a, **k: None)
+    motor._piper = types.SimpleNamespace(set_length_scale=applied.append)
+    monkeypatch.setattr(llm_engine, "save_tts_speed", lambda *_a, **_k: None)
+
+    motor._priority_queue = [_agenda_item("t1")]
+    # 4-tuple drain-safe command: (tipo, payload, history_text, source)
+    motor.command_queue.put(("set_tts_speed", 1.30, None, "ptt"))
+
+    motor._process_priority_queue()
+
+    assert applied == [1.30]
+    assert motor.command_queue.empty()

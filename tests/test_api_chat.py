@@ -19,6 +19,7 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
+from opencohost.i18n import active as i18n_active
 from tests.test_api_phase1 import FakeHost
 
 COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
@@ -52,8 +53,35 @@ def test_valid_text_accepted_and_enqueued_as_process_context():
         assert body["state_version"] == 1
 
         queued = app.state.host.motor.command_queue.get_nowait()
-        assert queued == ("process_context", "hola Kira, como estas?")
+        # B1 (turn provenance): the prompt payload is still the raw text; the
+        # honest speaker frame rides as the 3rd element (history_text).
+        assert queued == (
+            "process_context",
+            "hola Kira, como estas?",
+            i18n_active.typed_history_wrapper().format(text="hola Kira, como estas?"),
+        )
         assert app.state.dispatcher.state_version == 1
+
+
+def test_typed_turn_commits_history_text_naming_the_speaker():
+    # B1 (turn provenance batch 1): a typed operator turn used to commit BARE,
+    # so in the history the model reads it was indistinguishable from any other
+    # voice — with no chat platform connected at all Kira still referred to "the
+    # viewer before". PTT already commits wrapped (ptt_history_wrapper); typed
+    # now mirrors that shape and locale handling with its OWN slot (a typed turn
+    # must never claim it arrived through PTT).
+    app = _app()
+    with TestClient(app) as client:
+        text = "que opinas del parche nuevo"
+        resp = client.post("/api/chat/turn", json={"text": text})
+        assert resp.status_code == 200
+
+        command, payload, history_text = app.state.host.motor.command_queue.get_nowait()
+        assert command == "process_context"
+        assert payload == text  # prompt unchanged — generation behavior untouched
+        assert history_text == i18n_active.typed_history_wrapper().format(text=text)
+        assert text in history_text
+        assert history_text != i18n_active.ptt_history_wrapper().format(text=text)
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t  \n"])

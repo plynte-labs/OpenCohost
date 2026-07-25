@@ -465,10 +465,16 @@ class PttController:
         # longer bury the streamer's real words under boilerplate. Runs in
         # parallel to the legacy voice_control.py idle path — the two PTT
         # sources stay distinct and are never merged (project safety rule).
+        # Honest source (B2, turn provenance): this controller is the only place
+        # that KNOWS the turn arrived through PTT — the engine used to hardcode
+        # source="direct" for every dispatched turn, so PTT turns logged and
+        # telemetered as direct. Rides as the 4th tuple element, like history_text
+        # rides as the 3rd.
         self._dispatcher.dispatch(
             "process_context",
             i18n_active.ptt_wrapper().format(text=text),
             history_text=i18n_active.ptt_history_wrapper().format(text=text),
+            source="ptt",
         )
 
     def start(self) -> str:

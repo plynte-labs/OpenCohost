@@ -144,6 +144,10 @@ llm:
     ptt_wrapper: "El streamer acaba de decir (PTT): {text}"
     live_voice_wrapper: "El streamer acaba de decir: {text}"
     ptt_history_wrapper: "El streamer dijo (PTT): {text}"
+    # B1 (turn provenance): the typed-turn twin. A FOURTH distinct slot for the
+    # same reason as the three above — a typed turn framed as "(PTT)" would just
+    # trade one provenance lie for another.
+    typed_history_wrapper: "El streamer escribió: {text}"
 
   # Agenda prompt scaffolding migrated in P3a (kira_bilingual_e2e), DATA ONLY --
   # no controller wiring yet (P3b, same file as P1b so lands after it). es

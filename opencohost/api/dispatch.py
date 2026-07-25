@@ -52,6 +52,7 @@ class Dispatcher:
         payload: dict,
         key: Optional[str] = None,
         history_text: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> DispatchResult:
         with self._lock:
             now = time.time()
@@ -72,7 +73,14 @@ class Dispatcher:
             # commits it to historial. Omitted -> a 2-tuple, unchanged for every
             # other caller. It is deliberately NOT part of the idempotency
             # hash/cache key (identity is (command, payload) only).
-            if history_text is not None:
+            # source (B2, turn provenance) rides the same way as an OPTIONAL 4th
+            # element: the engine used to hardcode source="direct" for every
+            # dispatched turn, so a PTT turn logged/telemetered as "direct".
+            # Omitted -> the tuple shape is unchanged for every other caller.
+            # Also deliberately NOT part of the idempotency hash/cache key.
+            if source is not None:
+                self._queue.put_nowait((command, payload, history_text, source))
+            elif history_text is not None:
                 self._queue.put_nowait((command, payload, history_text))
             else:
                 self._queue.put_nowait((command, payload))

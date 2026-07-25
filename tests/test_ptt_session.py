@@ -434,10 +434,29 @@ class _RecordingDispatcher:
     def __init__(self):
         self.calls = []
 
-    def dispatch(self, command, payload, key=None, history_text=None):
+    def dispatch(self, command, payload, key=None, history_text=None, source=None):
         self.calls.append(
-            {"command": command, "payload": payload, "key": key, "history_text": history_text}
+            {
+                "command": command,
+                "payload": payload,
+                "key": key,
+                "history_text": history_text,
+                "source": source,
+            }
         )
+
+
+def test_dispatch_declares_ptt_source():
+    # B2 (turn provenance): the engine hardcoded source="direct" for every
+    # dispatched turn, so an F10 PTT turn logged/telemetered as "direct" and the
+    # real origin was lost before it ever reached the engine. The controller is
+    # the only place that KNOWS this turn came through PTT, so it declares it.
+    disp = _RecordingDispatcher()
+    controller = PttController("ws://test/whisperlive", disp, MagicMock())
+
+    controller._dispatch("hola mundo esto es una prueba")
+
+    assert disp.calls[0]["source"] == "ptt"
 
 
 def test_dispatch_sends_ptt_wrapper_prompt_and_ptt_history_wrapper_history_text():
