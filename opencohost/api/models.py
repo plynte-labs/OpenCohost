@@ -728,6 +728,13 @@ class MemoriaListItem(BaseModel):
     # externally-imported row, so the UI can render the "importada" badge
     # next to pinned/private/inactive. Metadata-only; no content exposure.
     imported: bool
+    # memoria_draft_visibility_20260725: True when status='draft' — an
+    # auto-captured row with no operator confirmation, FIFO-prunable, and
+    # promoted to 'curated' only by an explicit pin/private/edit action. Lets
+    # the UI mark it provisional instead of showing it with the same
+    # authority as a curated/imported/summary row. Metadata-only, mirrors
+    # `imported`'s derivation shape exactly.
+    draft: bool
 
 
 class MemoriaListResponse(BaseModel):
@@ -754,6 +761,10 @@ class MemoriaRowResponse(BaseModel):
     pinned: bool
     private: bool
     inactive: bool
+    # memoria_draft_visibility_20260725: mirrors MemoriaListItem.draft — the
+    # single-row store.get() SELECT * already reads `status`, so this is a
+    # free derivation, same shape as the list projection.
+    draft: bool
 
 
 class MemoriaFlagsRequest(BaseModel):

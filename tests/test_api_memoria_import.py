@@ -448,3 +448,7 @@ def test_list_exposes_imported_flag_per_row(tmp_path, monkeypatch):
     by_id = {item["id"]: item for item in resp.json()["items"]}
     assert by_id["mem_imported"]["imported"] is True
     assert by_id["mem_draft"]["imported"] is False
+    # memoria_draft_visibility_20260725: draft is the mirror-image signal —
+    # true only for the genuine draft row, false for the imported one.
+    assert by_id["mem_imported"]["draft"] is False
+    assert by_id["mem_draft"]["draft"] is True

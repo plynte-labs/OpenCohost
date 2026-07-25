@@ -1370,6 +1370,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     private=bool(row["private"]),
                     inactive=bool(row["inactive"]),
                     imported=bool(row["status"] == "imported"),
+                    draft=bool(row["status"] == "draft"),
                 )
                 for row in rows
             ]
@@ -1405,6 +1406,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             pinned=bool(row["pinned"]),
             private=bool(row["private"]),
             inactive=bool(row["inactive"]),
+            draft=bool(row["status"] == "draft"),
         )
 
     @app.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)

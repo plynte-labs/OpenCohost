@@ -102,6 +102,8 @@ def test_get_memoria_row_happy_path(tmp_path, monkeypatch):
             "pinned": True,
             "private": False,
             "inactive": False,
+            # memoria_draft_visibility_20260725: seeded status='draft' above.
+            "draft": True,
         }
 
 
