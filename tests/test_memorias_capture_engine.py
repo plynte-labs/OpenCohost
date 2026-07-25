@@ -347,6 +347,46 @@ def test_content_uses_24word_user_budget_ledger_stays_8():
     assert "palabra09" not in ledger  # ledger stays on the 8-word budget
 
 
+# ---------------------------------------------------------------------------
+# G3 — history-wrapper frame never taxes a content builder's word budget
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "wrapper",
+    (i18n_active.typed_history_wrapper, i18n_active.ptt_history_wrapper),
+    ids=("typed", "ptt"),
+)
+def test_wrapped_turn_spends_the_whole_word_budget_on_operator_words(wrapper):
+    """Both content builders strip the history-wrapper frame before counting words.
+
+    Judge trace: the operator types "el cargador de config sigue crasheando
+    cuando cambio de perfil"; _commit_history stores the WRAPPED text, so the
+    8-word ledger line spent 3 words on "El streamer escribió:" and dropped
+    "crasheando cuando cambio de perfil" — the entire symptom — from the block
+    later injected as <memoria_de_fondo>. The PTT frame is 4 words, so its
+    version of the same loss is worse. The frame is provenance METADATA that the
+    "contexto: ... → Kira: ..." format already encodes, and stable_key / title /
+    signature are ALL derived from stripped text (memoria_store
+    _significant_tokens), so leaving it in the body also made the row internally
+    inconsistent: honest title, taxed content.
+    """
+    motor, _, _ = _make_motor()
+    user = " ".join(f"palabra{i:02d}" for i in range(1, 26))  # 25 words
+    wrapped = wrapper().format(text=user)
+    asst = "Eso suena tremendo problema de configuracion. Fin."
+    frame = wrapper().split("{text}")[0].strip()
+
+    ledger = motor._build_ledger_line(wrapped, asst)
+    assert "palabra08" in ledger        # full 8-word budget spent on the operator
+    assert "palabra09" not in ledger
+    assert frame not in ledger
+
+    content = motor._build_memoria_content(wrapped, asst)
+    assert "palabra24" in content       # full 24-word budget spent on the operator
+    assert "palabra25" not in content
+    assert frame not in content
+
+
 def test_kira_side_is_first_contentful_sentence_strips_tic_list():
     """Kira side = first sentence with >=3 significant tokens, AFTER stripping a
     leading tic from the closed list {Mirá vos, / Mirá, / Che, / Posta,}."""

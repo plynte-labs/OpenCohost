@@ -81,6 +81,9 @@ from opencohost.config.settings import (
 # of truth on purpose (editorial_matching owns the normalizer; do not add a
 # second copy here).
 from opencohost.core.editorial_matching import _strip_accents, normalize_tokens
+# History-wrapper templates (see strip_history_wrapper below). Import-safe:
+# i18n.active resolves its bundle lazily on first accessor call, never at import.
+from opencohost.i18n import active as i18n_active
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +114,59 @@ _MEMORIA_DOMAIN_STOPWORDS: frozenset[str] = frozenset({
     # signatures at scoring time, since select_top_k stopword-filters the topic
     # side. Do not expand/shrink without updating the RC-1/RC-7 tests in lockstep.
     "acaba", "decir", "dijo", "ptt", "contexto",
+    # NOTE (F2): the typed-turn wrapper's verbs ("escribio"/"typed") were briefly
+    # added here and then removed — blacklisting content words to cancel template
+    # boilerplate is the wrong layer. It shifted stable_key for turns using those
+    # words as real content (dupe rows), shaved the >=3 capture minimum, and
+    # still missed "said" under the `en` bundle. strip_history_wrapper below
+    # removes the frame STRUCTURALLY instead. Do not re-add wrapper words here;
+    # if a new wrapper appears, give it an i18n slot with a "{text}" placeholder
+    # and it is covered for free, in every locale.
 })
+
+
+# ---------------------------------------------------------------------------
+# History-wrapper strip (F2) — the derivation boundary's only frame remover
+# ---------------------------------------------------------------------------
+
+# Every history wrapper is an i18n template that frames an operator turn with
+# its provenance, with the turn itself in a "{text}" placeholder:
+#   "El streamer dijo (PTT): {text}" / "The streamer typed: {text}" / ...
+# So the prefix is derivable from the template at runtime — no per-locale,
+# per-wrapper word list. accumulation_ptt() is deliberately absent: it uses a
+# "{messages}" placeholder and its "accumulated" source is not in the engine's
+# capture allowlist, so it never reaches derivation.
+_HISTORY_WRAPPER_ACCESSORS = (
+    i18n_active.ptt_wrapper,
+    i18n_active.ptt_history_wrapper,
+    i18n_active.typed_history_wrapper,
+    i18n_active.live_voice_wrapper,
+)
+_WRAPPER_TEXT_PLACEHOLDER = "{text}"
+
+
+def strip_history_wrapper(text: str) -> str:
+    """Remove a leading history-wrapper frame from *text*, if it carries one.
+
+    The frame is provenance METADATA, not content: leaving it in shifts the
+    tokens stable_key is built from (so the upsert stops recognising the same
+    exchange and inserts a competing row), consumes one of the >=3 significant
+    tokens a capture needs, and keeps the filler gate's remainder non-empty so a
+    wrapped pure greeting survives as a memoria.
+
+    Resolves the prefixes from the ACTIVE locale's templates — the same
+    accessors that produced the text — and strips the longest match. Text with
+    no wrapper (chat, agenda, a bare typed turn) is returned unchanged.
+    """
+    raw = text or ""
+    longest = ""
+    for accessor in _HISTORY_WRAPPER_ACCESSORS:
+        # _slot-backed accessors swallow every failure and fall back to their
+        # legacy es literal, so this cannot raise.
+        prefix = accessor().split(_WRAPPER_TEXT_PLACEHOLDER)[0]
+        if prefix and len(prefix) > len(longest) and raw.startswith(prefix):
+            longest = prefix
+    return raw[len(longest):].lstrip() if longest else raw
 
 
 class MemoriaValidationError(ValueError):
@@ -219,7 +274,14 @@ def _significant_tokens(text: str) -> list[str]:
     (e.g. "hola" alone) is left alone: the existing >=2/>=3 count gates
     already reject it on their own, and zeroing single tokens here would
     conflate this shape-check with a second stopword list.
+
+    F2: the history-wrapper frame comes off FIRST, once, so both the token list
+    and the filler check below see the operator's actual words. This is the
+    single derivation boundary — is_capturable, derive_stable_key,
+    derive_import_key, build_title, build_signature and significant_token_count
+    all route through here, so the strip cannot be bypassed by a caller.
     """
+    text = strip_history_wrapper(text)
     tokens = _raw_significant_tokens(text)
     if len(tokens) >= 2 and _is_pure_filler(text):
         return []

@@ -61,7 +61,7 @@ from opencohost.core.memory_digest import MemoryDigest
 from opencohost.core.memoria_store import (
     MemoriaStore, derive_stable_key, build_title, build_signature,
     build_injection_lines, build_recency_lines, is_meta_recall_query,
-    pinned_injection_counter, significant_token_count,
+    pinned_injection_counter, significant_token_count, strip_history_wrapper,
 )
 from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
 from opencohost.config.logger import get_logger, _debug_enabled
@@ -4563,8 +4563,15 @@ class MotorVocalIA(threading.Thread):
         MemoryDigest.build_block() so the counter always reflects distance-from-now.
 
         Format: contexto: <first words> → Kira: <first sentence>
+
+        G3: the history-wrapper frame comes off before the 8-word budget is
+        spent. historial stores the WRAPPED turn on purpose (the frame is the
+        model's provenance cue), but "El streamer escribió: " is 3 words and
+        "El streamer dijo (PTT): " is 4 — enough to drop the operator's whole
+        symptom from the digest block, while the "contexto: ... → Kira: ..."
+        format already says who said what.
         """
-        user_summary = cls._first_words(user_text)
+        user_summary = cls._first_words(strip_history_wrapper(user_text))
         kira_summary = cls._first_sentence(asst_text)
         ctx_label = i18n_active.ledger_context_label()
         kira_label = i18n_active.ledger_kira_label()
@@ -4604,8 +4611,24 @@ class MotorVocalIA(threading.Thread):
         user side = first 24 words (digest keeps 8 — decoupled). Kira side =
         first CONTENTFUL sentence (see _contentful_kira_sentence). Capped at 300
         chars, preserving the pre-C1 content-length invariant.
+
+        G3: the history-wrapper frame comes off here too, not only off the
+        ledger line. It reads like useful provenance in the "Memoria de Kira"
+        panel, but it is not: _DIGEST_CAPTURE_SOURCES is {"direct", "ptt"}, so
+        every memoria's user side is the operator by construction (viewer chat
+        is structurally barred), and "contexto:" already labels the side. All it
+        actually does is spend 3-4 of the 24 words, then spend those same chars
+        AGAIN inside build_injection_lines' recall budget when the row is
+        re-injected. It also left the row self-inconsistent: stable_key, title
+        and signature are all derived from STRIPPED text (memoria_store
+        _significant_tokens), so only the body carried the tax. Modality
+        (typed vs voice) belongs in a column if the operator ever needs it, not
+        in a prose prefix that survives only by accident of which wrapper the
+        caller happened to apply.
         """
-        user_summary = cls._first_words(user_text, cls._MEMORIA_CONTENT_USER_WORDS)
+        user_summary = cls._first_words(
+            strip_history_wrapper(user_text), cls._MEMORIA_CONTENT_USER_WORDS
+        )
         kira_summary = cls._contentful_kira_sentence(asst_text)
         ctx_label = i18n_active.ledger_context_label()
         # FIX3 (memoria_quality_20260717): append the "→ Kira: ..." segment ONLY

@@ -690,6 +690,97 @@ def test_greeting_plus_real_content_still_captured(text: str) -> None:
     assert derive_stable_key("profile-1", text) is not None
 
 
+# ---------------------------------------------------------------------------
+# F2 — history-wrapper frames are stripped STRUCTURALLY at the derivation
+# boundary (from the i18n template's own "{text}" split), not blacklisted
+# word-by-word. Locale-parametrized on purpose: a per-locale, per-wrapper
+# stopword list is what this replaces, so every case must hold under BOTH
+# official bundles.
+# ---------------------------------------------------------------------------
+
+def _activate_locale(code: str) -> None:
+    from opencohost.i18n import active as i18n_active
+    from opencohost.i18n.registry import discover_bundles, official_locales_dir
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    i18n_active.set_active_bundle(
+        resolve_active_bundle(
+            locale=code,
+            registry=discover_bundles(official_locales_dir(), "official"),
+        )
+    )
+
+
+@pytest.fixture
+def reset_locale():
+    from opencohost.i18n import active as i18n_active
+
+    i18n_active.reset_active_bundle()
+    yield
+    i18n_active.reset_active_bundle()
+
+
+@pytest.mark.parametrize("locale,wrapped,bare", [
+    # Typed-turn wrapper (B1) and PTT history wrapper (A1), both locales. The
+    # frame is provenance metadata, not content: it must not shift the tokens
+    # the dedup key is built from, or the ON CONFLICT(profile_id, stable_key)
+    # upsert stops recognising the same exchange and inserts a competing row.
+    ("es", "El streamer escribió: el cargador de config sigue crasheando",
+           "el cargador de config sigue crasheando"),
+    ("en", "The streamer typed: the config loader keeps crashing",
+           "the config loader keeps crashing"),
+    ("es", "El streamer dijo (PTT): el cargador de config sigue crasheando",
+           "el cargador de config sigue crasheando"),
+    ("en", "The streamer said (PTT): the config loader keeps crashing",
+           "the config loader keeps crashing"),
+])
+def test_wrapped_turn_derives_same_key_and_title_as_bare_turn(
+    reset_locale, locale: str, wrapped: str, bare: str
+) -> None:
+    _activate_locale(locale)
+    assert derive_stable_key("profile-1", wrapped) == derive_stable_key("profile-1", bare)
+    assert derive_stable_key("profile-1", bare) is not None
+    assert build_title(wrapped) == build_title(bare)
+
+
+@pytest.mark.parametrize("locale,text", [
+    # Defect (c): "said" was never in the stopword list, so under `en` a wrapped
+    # PURE greeting still cleared the filler gate and was stored as a memoria.
+    # Any community bundle re-opened the same hole with its own verb.
+    ("es", "El streamer escribió: hola, que tal"),
+    ("en", "The streamer typed: hi, how is it going"),
+    ("es", "El streamer dijo (PTT): hola, que tal"),
+    ("en", "The streamer said (PTT): hi, how is it going"),
+    ("es", "El streamer acaba de decir (PTT): hola, que tal"),
+    ("en", "The streamer just said (PTT): hi, how is it going"),
+])
+def test_wrapped_pure_greeting_still_rejected(reset_locale, locale: str, text: str) -> None:
+    from opencohost.core.memoria_store import significant_token_count
+
+    _activate_locale(locale)
+    assert significant_token_count(text) == 0
+    assert is_capturable(text) is False
+
+
+@pytest.mark.parametrize("locale,text,token", [
+    # Defect (b): blacklisting the wrapper verbs globally ate a real content
+    # word. A 3-significant-token turn whose third token IS that verb dropped to
+    # 2 and failed the >=3 capture minimum — a genuine memoria silently lost.
+    ("es", "escribió el parche de bloodborne", "escribio"),
+    ("en", "typed the config loader", "typed"),
+])
+def test_wrapper_verb_as_real_content_stays_capturable(
+    reset_locale, locale: str, text: str, token: str
+) -> None:
+    _activate_locale(locale)
+    assert is_capturable(text) is True
+    key = derive_stable_key("profile-1", text)
+    assert key is not None
+    # Defect (a): the token must still reach the key, or every row stored before
+    # the stopword change stops colliding with its own re-derivation.
+    assert token in key
+
+
 def test_filler_word_mixed_with_content_is_not_stripped_per_token() -> None:
     """'hoy' is part of the greeting-shape vocabulary but must NOT be
     blacklisted as a standalone stopword -- when it rides along with real
