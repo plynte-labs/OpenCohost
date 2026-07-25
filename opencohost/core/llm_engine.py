@@ -2754,7 +2754,7 @@ class MotorVocalIA(threading.Thread):
             #
             # WHY HERE and not in the persona slot: `set_profile` replaces
             # self.system_prompt wholesale with the profile's own prompt
-            # (`payload.get("prompt", ...)`, llm_engine.py:1210). All six shipped
+            # (`payload.get("prompt", ...)` in the set_profile handler). All six shipped
             # profiles carry a full prompt of their own, and profiles are
             # persisted to the user's PROFILES_FILE on first run — so a rule
             # written into the locale persona (or into default_profiles.json)
