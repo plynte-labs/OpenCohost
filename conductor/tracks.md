@@ -1594,3 +1594,20 @@ PREFERENCE (owner runs `monologue`), not a defect.
   one): multi-provider LLM APIs, config persistence on close, arbitrary turns-per-topic, LiveAudio
   port override UI, TTS alternatives discussion, context-overflow/RAM hardening, i18n proposal,
   August launch-readiness proposal.*
+
+- [ ] **Track: Lote 1 Open Questions — staged for owner decision (2026-07-25)**
+  *Twenty-five questions surfaced by Lote 1 (seven small fixes) and two adversarial opus judging
+  rounds. None implemented — each was deliberately left open rather than guessed. Local proposal at
+  `conductor/tracks/lote1_open_questions_20260725/proposal.md` (track folders are gitignored by
+  convention; only this index is committed). Grouped as: (A) provenance semantics now that `source`
+  is honest for the first time — should typed turns get their own `source="typed"`, is the
+  `priority=1` PTT busy re-enqueue at `llm_engine.py:1135` a real bug against its own docstring at
+  `:1293`, the double accumulation frame at `:1308`/`:2006-2007`, and **whether a typed turn's LIVE
+  payload should carry a speaker frame like PTT's `ptt_wrapper` does** (the most consequential — it
+  changes generation input on every typed turn and can shift Kira's register); (B) feed ordering
+  residuals — the agenda channel still stamps `Date.now()` at `agenda.ts:~340`, and closing the last
+  inversion window needs a `flushed_at` field on `GET /api/ptt/state` (a time, not text, so the
+  raw-speech privacy rule is unaffected); (C) memoria derivation — confirm Lote 2's LLM-judged
+  promotion is the approved real fix so `_FILLER_PHRASE_PATTERNS` stops growing (`vas` escaped the
+  list within a day, the `en` locale's "said" escaped it too); (D) pre-existing backlog. Recommended
+  order and the tradeoff for each is in the proposal.*
