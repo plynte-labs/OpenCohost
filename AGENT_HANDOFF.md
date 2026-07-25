@@ -32,7 +32,25 @@ Deferred, explicitly NOT relevant yet per owner (2026-07-16): heavy-model recove
 (`heavy_model_inference_recovery` — the session ran a light model, so that gate remains
 unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, not now.
 
-## LATEST SNAPSHOT — 2026-07-10 (FINAL AGENT DAY: LiveAudio PTT landed, release prep)
+## LATEST SNAPSHOT — 2026-07-23/24 (multi-provider cloud LLM + model-switch continuity SHIPPED; ALL UNCOMMITTED)
+
+**Read conductor/tracks.md entries for the four *_2026072{3,4} tracks — they carry the full detail.**
+Engram trail: sdd/{model_switch_memory_continuity,multi_provider_llm}_20260723/*, sdd/multi_provider_ui_20260724/apply-progress, sdd/kira_topic_suggestions_20260724/{proposal,design}, runtime/cloud-dead-turns-20260724 (incident+decisions), sdd/design-plan-20260723/* (orchestrator checkpoints).
+
+**SHIPPED (uncommitted: Python repo ~30 files on codex/ui-ux-audit-proposal-20260709; OpenCohost_UI ~10 files same branch):**
+1. **model_switch_memory_continuity** — seamless historial across model switch (both clear sites deleted), meta-recall regex two-pattern shape. Verify PASS; OWNER RUNTIME-VALIDATED LIVE 2026-07-24 (continuity + recall proven; 1B incoherence = documented D5 degrade, not a bug).
+2. **multi_provider_llm (5 phases, dual-judged per batch, verify PASS 719/0)** — per-provider profiles + per-profile keys (OAuthStore atomic, Windows ACL DELETE-right bug FIXED: (R,W)→(R,W,D)+self-heal), is_local posture-snapshot seam, pregen gate over ALL speculative gen (chat/agenda/connector/scout), fallback machine (auto: warm+spoken notice — PROVEN LIVE; manual: silent+feed per owner), CLOUD_MAX_TOKENS=16384, empty-200→fallback, provider-aware health + /api/models, delete_profile semantics (switch+delete one PUT), i18n slot llm.provider_fallback_notice es/en.
+3. **ProviderCard (Tauri, 942/942)** — full provider config UI: profiles/presets/custom ids, write-only key (scrubbed from MutationCache), draft-vs-activation honest 422s, Eliminar/Duplicar, design-system Alerts, cloud_llm_error feed label, panel opens-when-profiles.
+4. **Guardrail R3 split + retry** (owner: "afinar+reintento") — discourse markers need same-sentence 2nd-person outcome; one retry-with-nudge before canned line; validation logger FIXED (logs/opencohost_validation.log). Negation handling = follow-up.
+5. **Test hygiene**: conftest autouse isolation for LLM_PROVIDER_CONFIG_FILE/LLM_KEYS_FILE (tests were making REAL NVIDIA calls with the owner's key); stale __new__ helpers reconciled. .gitignore `config/` ANCHORED to `/config/` (was swallowing opencohost/config/llm_provider.py — a commit would have shipped broken).
+
+**OWNER MUST: RESTART THE BACKEND** (running process predates the key-store fix; first save self-heals the file ACL). Then: provider stress-testing (add/duplicate/delete providers, keys from the card, kill provider → feed error / spoken fallback).
+
+**PENDING OWNER DECISIONS (the ledger):** commit/PR shaping for everything above (chain strategy; multi_provider phase 1 = 586 lines needs size:exception or split); memoria track GO (direction DECIDED: model-invoked tool-calling commands, NOT regex; UX DECIDED: direct narration mini-show; hybrid fallback for small local models); kira_topic_suggestions tasks GO (proposal+design+gate DONE: Scout→inbox→inline chat-feed card Aceptar/Descartar; 4 conservative defaults await confirmation); gate GET /api/llm/provider?; always-enforced auth for the provider PUT?; cloud-reachability health probe?; R3 negation; other handler-less opencohost.* loggers; task-adaptive cloud token cap; ObsCard password MutationCache retention (same pattern as the fixed key one); cloud model= never logged.
+
+**PARKED (intact):** i18n_completion_20260723 + launch_readiness_20260723 proposals (owner cut scope to the two built tracks).
+
+
 
 **liveaudio_ptt_tauri_20260710 — DONE, VERIFY PASS-WITH-WARNINGS (0 critical).** Real hold-to-talk in the
 Tauri app. Backend 8e08151 + ce3f304: NEW opencohost/api/ptt_session.py — headless PttSession, a RECV-ONLY

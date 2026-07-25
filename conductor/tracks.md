@@ -4,6 +4,45 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: Multi-Provider UI — 2026-07-24 (cloud provider config card in the Tauri Controles)**
+  *Link: backend contract in [./tracks/multi_provider_llm_20260723/](./tracks/multi_provider_llm_20260723/) (design.md GET/PUT schema)*
+  *Status 2026-07-24 IMPLEMENTED + JUDGED + FIXED (OpenCohost_UI repo, NOT committed): ProviderCard
+  mounted in "Perfil y modelo" after ModelCard + hand-typed llmProvider.ts client + MSW handlers
+  mirroring the real backend validation ladder. Full UI suite 919/919 green, tsc clean, zero new deps.
+  Judges opus+sonnet: 1 CRITICAL fixed (raw api_key was retained in TanStack MutationCache
+  mutation.state.variables — now scrubbed onSettled, leak test sweeps ALL cache structures; NOTE:
+  ObsCard password has the same pre-existing retention pattern = follow-up) + 6 fixes (real label
+  associations via aria-labelledby, load-vs-save error copy, Guardar gated on id validation, preset
+  prefill no longer defeated by explicit empty model — backend prefill engages, globals disabled
+  during in-flight PUTs, 503/500 component tests). Key never in DOM/query-cache/mutation-cache/
+  toasts (test-pinned).
+  ROUND 2 (2026-07-24, post live-testing): key-store Windows ACL bug FIXED (the (R,W) restriction
+  lacked the DELETE right → os.replace failed on every save/delete after the first; grant now
+  (R,W,D) + self-heal retry + 503s log tracebacks — root cause reproduced verbatim in a scratch
+  Modify-only dir); backend delete_profile semantics (switch+delete in one PUT; key-first ordering
+  so config never orphans); UI: Eliminar proveedor (danger ConfirmFooter, ergonomic active-delete),
+  Duplicar perfil (multiple profiles per provider, suggested free ids, key never copied),
+  design-system Alert component replacing bare error <p>s, cloud_llm_error feed label, delete-key
+  copy actionable, invalid-id reason adjacent + one-click suggestion, 422 clears on edit.
+  UI suite 938/938, tsc clean; backend focused suites green. BACKEND RESTART REQUIRED to pick up
+  the key-store fix (running process holds old code; first save self-heals the existing file's ACL).
+  OWNER RUNTIME GATE: restart backend → Controles → key save/delete/edit now works, add/duplicate/
+  delete providers, cloud session, kill provider (visible feed error in manual, spoken fallback in
+  auto), pregen dark, tune CLOUD_CHAT_TIMEOUT.*
+
+- [~] **Track: Kira Topic Suggestions — 2026-07-24 (Scout → human gate → agenda, inline in the chat feed)**
+  *Link: [./tracks/kira_topic_suggestions_20260724/](./tracks/kira_topic_suggestions_20260724/)*
+  *Status 2026-07-24 DESIGN DONE (fable), gate PASS (7/7 spot-checks exact; accept path verified to
+  hard-require APPROVED status before QUEUED — no gate bypass exists; privacy idiom verified precise):
+  ScoutInboxBridge daemon in EngineHost feeds
+  scout_digest() titles into the existing human-gated TopicInboxStore (source="kira-scout"); detail-free
+  whitelisted topic_suggested event → Tauri fetches new ungated GET /api/topics/inbox → inline chat-feed
+  card; Aceptar/Descartar route through the existing TopicInboxBridge.approve machinery (operator token,
+  no gate bypass). SCOUT_ENABLED flips only in final phase P4, gated on the owed realenv adjacency
+  validation (owner-run). Owner decisions pending: no TTL v1 (cap 3 pending bounds it); external-agent
+  proposals share the same inline surface (default yes); scout cap = 3; P4 gate. Scout stays dark on
+  cloud unless pregen enabled (billable rule).*
+
 - [~] **Track: Model Switch Memory Continuity — 2026-07-23 (seamless mid-session LLM switch keeps conversation history)**
   *Link: [./tracks/model_switch_memory_continuity_20260723/](./tracks/model_switch_memory_continuity_20260723/)*
   *Status 2026-07-23 DESIGN IN PROGRESS: proposal approved with owner decision = SEAMLESS full
