@@ -7,6 +7,7 @@ Preserves all 8 test cases:
   RF4.4 — Chat writes disabled, Twitch placeholder
 """
 
+import json
 import os
 
 import pytest
@@ -49,6 +50,64 @@ class TestOAuthStore:
         assert store.has_token("youtube")
         loaded = store.load("youtube")
         assert loaded["access_token"] == "secret"
+
+    def test_token_store_save_is_atomic_no_leftover_tmp_file(self, temp_dir):
+        """F4: save() must write via temp-file+os.replace, never leaving a
+        torn/leftover .tmp file in the token directory, and the final file
+        must always be valid, complete JSON (never truncated)."""
+        token_path = os.path.join(temp_dir, "tokens.json")
+        store = OAuthStore(token_path)
+        store.save("youtube", {"access_token": "secret", "expires_at": 9999999999})
+
+        assert os.listdir(temp_dir) == ["tokens.json"]
+        with open(token_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["youtube"]["access_token"] == "secret"
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows NTFS ACL delete semantics")
+    def test_save_over_owner_restricted_target_in_modify_only_dir(self, tmp_path):
+        """Regression: on Windows a prior save restricts the token file to owner
+        (R,W) -- no DELETE. In a config dir that grants only Modify (no
+        FILE_DELETE_CHILD), os.replace() cannot delete that target, so EVERY
+        save/delete after the first raised PermissionError -> API 503
+        key_store_write_failed. The store must self-heal and persist.
+
+        Deterministic: the dir ACL is pinned to Modify-only and the file is
+        forced into the exact owner-(R,W) state the owner's live file is in,
+        so this fails on the pre-fix code and passes on the fixed code.
+        """
+        import subprocess
+
+        username = os.environ.get("USERNAME", "")
+        if not username:
+            pytest.skip("no USERNAME in environment")
+
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        # Mimic the real config dir: owner has Modify only (no delete-child).
+        subprocess.run(
+            ["icacls", str(cfg), "/inheritance:r", "/grant:r", f"{username}:(OI)(CI)(M)"],
+            capture_output=True,
+        )
+        token_path = str(cfg / "llm_keys.json")
+        store = OAuthStore(token_path)
+        store.save("p1", {"api_key": "K1"})
+
+        # Force yesterday's build's exact output: owner-only (R,W), no DELETE.
+        subprocess.run(
+            ["icacls", token_path, "/inheritance:r", "/grant:r", f"{username}:(R,W)"],
+            capture_output=True,
+        )
+
+        # Pre-fix this raised PermissionError -> 503 on every save.
+        store.save("p2", {"api_key": "K2"})
+        assert store.load("p1")["api_key"] == "K1"
+        assert store.load("p2")["api_key"] == "K2"
+
+        # delete rewrites via the same _write_all path and must also succeed.
+        store.delete("p1")
+        assert store.load("p1") is None
+        assert store.load("p2")["api_key"] == "K2"
 
 
 class TestAdminManager:
