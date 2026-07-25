@@ -126,8 +126,73 @@ class MemoriaValidationError(ValueError):
 # Pure helpers — stable_key / title derivation (RC-1, RC-7)
 # ---------------------------------------------------------------------------
 
-def _significant_tokens(text: str) -> list[str]:
-    """normalize_tokens(text) minus domain stopwords, deduped, first-occurrence order."""
+# memoria_quality gate fix (2026-07): tracks.md's design intent for C1 states
+# the "user-side >=2-token capture gate kills greetings" -- it did not,
+# because significant_token_count was a bare COUNT, not a salience judgement.
+# "Buenas, como vamos el dia de hoy" reduces to 5 distinct tokens (buenas,
+# como, vamos, dia, hoy), none of which are in _MEMORIA_DOMAIN_STOPWORDS or
+# editorial_matching's generic stopwords, so it cleared both the >=2 gate
+# (llm_engine.py) and the >=3 is_capturable/derive_stable_key gate here.
+#
+# Widening the stopword lists was rejected: "como", "dia", "hoy" etc. are too
+# generic to blacklist token-by-token (they appear in real content too --
+# "que dia juega el equipo?"). Instead this is a closed set of
+# greeting/farewell/acknowledgement PHRASE SHAPES (Spanish + English, the
+# project is bilingual). A turn is filler-only when substituting every shape
+# out of it leaves nothing significant behind -- an ALL-OR-NOTHING turn
+# classification, not a per-token stopword: a turn that opens with a
+# greeting but goes on to say something real is untouched (RC-1 "greeting +
+# content" case), because the leftover real tokens keep the check honest.
+_FILLER_PHRASE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p) for p in (
+        # Spanish greetings / "how's it going" openers
+        r"\bbuen(?:as|os|a)(?:\s+(?:dias|tardes|noches))?\b",
+        r"\bholas?\b",
+        r"\bque\s+tal\b",
+        r"\bque\s+onda\b",
+        r"\bcomo\s+(?:vamos|estas|estan|va|andas)\b",
+        r"\bel\s+dia\s+de\s+hoy\b",
+        r"\bhoy\b",
+        # Spanish farewells / acknowledgements
+        r"\bnos\s+vemos\b",
+        r"\bhasta\s+(?:luego|pronto|manana)\b",
+        r"\badios\b",
+        r"\bchau\b",
+        r"\bgracias\b",
+        r"\bvale\b",
+        r"\bdale\b",
+        r"\bperfecto\b",
+        # English greetings
+        r"\bhi\b",
+        r"\bhello\b",
+        r"\bhey\b",
+        r"\bgood\s+(?:morning|afternoon|evening)\b",
+        r"\bhow(?:'s|\s+is)\s+it\s+going\b",
+        r"\bhow\s+are\s+you\b",
+        r"\bwhat'?s\s+up\b",
+        r"\btoday\b",
+        # English farewells / acknowledgements
+        r"\bbye\b",
+        r"\bgoodbye\b",
+        r"\bsee\s+you\b",
+        # "thank you" must be tried before the bare "thanks?" below, or the
+        # bare pattern eats "thank" first and strands a lone "you".
+        r"\bthank\s+you\b",
+        r"\bthanks?\b",
+        r"\bok(?:ay)?\b",
+        r"\balright\b",
+        r"\bsounds?\s+good\b",
+    )
+)
+
+
+def _raw_significant_tokens(text: str) -> list[str]:
+    """normalize_tokens(text) minus domain stopwords, deduped, first-occurrence order.
+
+    The pre-filler-gate helper: no greeting/farewell shape check. Kept
+    separate so the filler check below can test its OWN leftover text
+    without recursing into itself.
+    """
     seen: set[str] = set()
     result: list[str] = []
     for token in normalize_tokens(text or ""):
@@ -136,6 +201,29 @@ def _significant_tokens(text: str) -> list[str]:
         seen.add(token)
         result.append(token)
     return result
+
+
+def _is_pure_filler(text: str) -> bool:
+    """True when *text*, with every greeting/farewell/ack phrase shape
+    substituted out, has no significant tokens left over."""
+    remainder = _strip_accents((text or "").lower())
+    for pattern in _FILLER_PHRASE_PATTERNS:
+        remainder = pattern.sub(" ", remainder)
+    return not _raw_significant_tokens(remainder)
+
+
+def _significant_tokens(text: str) -> list[str]:
+    """normalize_tokens(text) minus domain stopwords, deduped, first-occurrence
+    order -- then, IF there are 2+ tokens AND the whole text is nothing but
+    greeting/farewell/ack phrase shapes, reports none. A single bare token
+    (e.g. "hola" alone) is left alone: the existing >=2/>=3 count gates
+    already reject it on their own, and zeroing single tokens here would
+    conflate this shape-check with a second stopword list.
+    """
+    tokens = _raw_significant_tokens(text)
+    if len(tokens) >= 2 and _is_pure_filler(text):
+        return []
+    return tokens
 
 
 def significant_token_count(text: str) -> int:

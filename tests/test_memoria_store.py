@@ -607,6 +607,98 @@ def test_all_generic_vocabulary_text_produces_no_stable_key() -> None:
     assert derive_stable_key("profile-1", text) is None
 
 
+# ---------------------------------------------------------------------------
+# Greeting/farewell/acknowledgement filler gate (memoria capture quality fix)
+#
+# tracks.md's design intent for the C1 content-shaping gates states the
+# "user-side >=2-token capture gate kills greetings" (memoria_quality_20260717).
+# It did not: significant_token_count is a bare COUNT, not a salience
+# judgement, so a multi-word greeting like the owner's exact
+# "Buenas, como vamos el dia de hoy" (5 distinct tokens, none in the domain
+# or generic stopword lists) sailed through both the >=2 gate (llm_engine.py)
+# and the >=3 derive_stable_key/is_capturable gate here, getting captured as
+# a memoria like any real fact.
+#
+# Fix: _significant_tokens now recognizes closed greeting/farewell/
+# acknowledgement PHRASE SHAPES (bilingual, ES+EN) and, ONLY when the ENTIRE
+# text reduces to nothing but those shapes, reports zero significant tokens.
+# A turn that mixes filler with real content is untouched -- the filler
+# words are NOT stripped token-by-token (that would be a stopword-list
+# treadmill and risks eating meaningful short words like "hoy"/"today" used
+# for real content). This is an all-or-nothing turn classification, not a
+# per-token stopword.
+# ---------------------------------------------------------------------------
+
+def test_owner_exact_greeting_now_rejected_by_capture_gate() -> None:
+    from opencohost.core.memoria_store import significant_token_count
+
+    text = "Buenas, como vamos el dia de hoy"
+    # Pre-fix this was 5 (buenas, como, vamos, dia, hoy) -- comfortably above
+    # both the llm_engine.py >=2 gate and the >=3 is_capturable gate.
+    assert significant_token_count(text) == 0
+    assert is_capturable(text) is False
+    assert derive_stable_key("profile-1", text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Hola, ¿qué tal?",
+    "Nos vemos, hasta luego",
+    "Vale, gracias",
+    "Chau, gracias",
+    "Buenos dias",
+])
+def test_spanish_greetings_and_farewells_rejected(text: str) -> None:
+    from opencohost.core.memoria_store import significant_token_count
+
+    assert significant_token_count(text) < 2
+
+
+@pytest.mark.parametrize("text", [
+    "Hi, how is it going today",
+    "Bye, thank you",
+    "Ok, sounds good",
+    "Hello, good morning",
+])
+def test_english_greetings_and_farewells_rejected(text: str) -> None:
+    from opencohost.core.memoria_store import significant_token_count
+
+    assert significant_token_count(text) < 2
+
+
+@pytest.mark.parametrize("text", [
+    "Prefiero rap sobre pop",
+    "Odio los lunes de invierno",
+    "Mi juego favorito es Bloodborne",
+    "My favorite game is Elden Ring",
+    "I hate Mondays",
+])
+def test_substantive_short_turns_still_capturable(text: str) -> None:
+    # Deliberately short, real content -- the honest boundary this filter
+    # must respect: reject filler, never reject an actual short statement.
+    assert is_capturable(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    # Greeting/filler word PLUS real content in the same turn: the filler
+    # shape must not swallow the turn just because it opens with one.
+    "Buenas, tengo una duda sobre el juego",
+    "Good morning, I need to talk about the patch",
+    "Hola, quiero hablar del nuevo parche de bloodborne",
+])
+def test_greeting_plus_real_content_still_captured(text: str) -> None:
+    assert is_capturable(text) is True
+    assert derive_stable_key("profile-1", text) is not None
+
+
+def test_filler_word_mixed_with_content_is_not_stripped_per_token() -> None:
+    """'hoy' is part of the greeting-shape vocabulary but must NOT be
+    blacklisted as a standalone stopword -- when it rides along with real
+    content the whole turn (including 'hoy') is preserved untouched."""
+    from opencohost.core.memoria_store import significant_token_count
+
+    assert significant_token_count("Quiero jugar shooter hoy") == 4
+
+
 def test_stable_key_revision_count_metric_logs_id_only_never_content(tmp_path, caplog) -> None:
     caplog.set_level(logging.DEBUG)
     store = MemoriaStore(tmp_path / "memorias.db")
