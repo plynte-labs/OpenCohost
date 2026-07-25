@@ -219,6 +219,118 @@ def test_models_cloud_active_provider_absent_from_profiles_degrades(monkeypatch)
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# GET /api/status — provider-aware current_model (display-bug fix)
+#
+# Bug: get_status() reported host.motor.current_model unconditionally, even
+# when a cloud provider was active — so the UI kept showing the stale local
+# model name (e.g. "gemma4:e4b") while the engine was actually generating
+# with the cloud profile's model (e.g. "GLM 5.2"). get_models() already had
+# the correct active_provider branch; this shares that same logic via
+# `_display_model` so /api/status and /api/models can never drift again.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_status_local_provider_reports_engine_model_unchanged(monkeypatch):
+    """Local provider active (default/explicit): /api/status keeps reporting
+    the engine's own current_model — behavior must not change."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod, "load_provider_config", lambda: {"active_provider": "local", "profiles": {}}
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["current_model"] == "qwen3:8b"
+
+
+def test_status_cloud_active_reports_active_profile_model(monkeypatch):
+    """Cloud active: /api/status must report the ACTIVE profile's own model,
+    never the engine's stale local current_model bookkeeping attr."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {
+            "active_provider": "glm",
+            "profiles": {
+                "glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"},
+            },
+        },
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["current_model"] == "glm-5.2"
+        assert body["current_model"] != "qwen3:8b"
+
+
+def test_status_cloud_active_provider_absent_from_profiles_degrades(monkeypatch):
+    """Cloud active but the active_provider has no entry in `profiles`
+    (misconfig/deleted profile): current_model degrades to null, same as
+    /api/models — never a stale local model, never a 500."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {"active_provider": "glm", "profiles": {}},
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["current_model"] is None
+
+
+def test_status_cloud_active_profile_empty_model_degrades(monkeypatch):
+    """Cloud active, profile present but its `model` field is blank: same
+    graceful null degradation as /api/models."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {"active_provider": "glm", "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": ""}}},
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["current_model"] is None
+
+
+def test_models_and_status_agree_on_display_model_cloud(monkeypatch):
+    """Regression guard for the reported bug: the same active provider must
+    yield the SAME current_model on both endpoints — they can never drift
+    apart again, since both route through the shared helper."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {
+            "active_provider": "glm",
+            "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"}},
+        },
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        status_model = client.get("/api/status").json()["current_model"]
+        models_model = client.get("/api/models").json()["current_model"]
+        assert status_model == models_model == "glm-5.2"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # GET /api/tts/config
 # ──────────────────────────────────────────────────────────────────────────
 

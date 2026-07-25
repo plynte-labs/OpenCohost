@@ -703,6 +703,26 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
     )
 
 
+def _display_model(host, provider_cfg: dict) -> Optional[str]:
+    """Resolve the model name to REPORT to clients (display bug fix).
+
+    Mirrors the active provider so `/api/status` and `/api/models` can never
+    drift apart again: cloud active -> the active profile's OWN `model`
+    (never another profile's, never the engine's stale local bookkeeping
+    attr); local active (or no provider config) -> the engine's own
+    `current_model`. Degrades to None if the active cloud profile is
+    missing or its `model` is blank — same graceful degradation
+    `/api/models` already had.
+    """
+    active_provider = provider_cfg.get("active_provider", "local")
+    if active_provider != "local":
+        active_model = str(
+            provider_cfg.get("profiles", {}).get(active_provider, {}).get("model") or ""
+        )
+        return active_model or None
+    return host.motor.current_model
+
+
 def _llm_provider_response(cfg: dict, key_store: OAuthStore) -> LlmProviderResponse:
     """Build the never-echoes-a-key response (multi_provider_llm_20260723).
 
@@ -960,6 +980,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.get("/api/status", response_model=StatusResponse)
     def get_status(request: Request) -> StatusResponse:
         host = request.app.state.host
+        provider_cfg = load_provider_config()
         is_ready = host.motor.is_ready
         is_speaking = host.motor.is_speaking
         is_processing = host.motor.is_processing
@@ -985,7 +1006,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 obs_connected = None
         return StatusResponse(
             is_ready=is_ready,
-            current_model=host.motor.current_model,
+            current_model=_display_model(host, provider_cfg),
             is_speaking=is_speaking,
             is_processing=is_processing,
             active_profile=host.motor._current_profile_name,
@@ -1234,14 +1255,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             # `ollama.list` discovery, no download/install catalog (VRAM
             # tiers are a local-only concept) — only the ACTIVE profile's
             # own model, read from `profiles[active_provider]`, never
-            # another profile's.
-            active_model = str(
-                provider_cfg.get("profiles", {}).get(active_provider, {}).get("model") or ""
-            )
+            # another profile's. Shared with /api/status via _display_model
+            # so the two endpoints can never report different models again.
+            active_model = _display_model(host, provider_cfg)
             return ModelsResponse(
                 catalog={},
                 discovered=[active_model] if active_model else [],
-                current_model=active_model or None,
+                current_model=active_model,
                 tiers={},
                 active_tier="cloud",
             )
@@ -1259,7 +1279,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         return ModelsResponse(
             catalog=MODELS_CATALOG,
             discovered=discovered,
-            current_model=host.motor.current_model,
+            current_model=_display_model(host, provider_cfg),
             tiers=tiers,
             active_tier=host.motor.active_llm_tier,
         )
