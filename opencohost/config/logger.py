@@ -24,7 +24,11 @@ class SensitiveDataFilter(logging.Filter):
         re.compile(r"1//[A-Za-z0-9._\-]+"),
         re.compile(r"GOCSPX-[A-Za-z0-9_\-]+"),
         re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
-        re.compile(r"(?i)(access_token|refresh_token|client_secret|id_token)\s*[:=]\s*['\"]?[^'\",}\s]+"),
+        # multi_provider_llm_20260723: cloud API key in raw key=value form
+        # (outside the Bearer-header form already covered above). Optional
+        # closing quote before the separator also matches dict-repr/JSON
+        # forms ('api_key': '...', "api_key": "...").
+        re.compile(r"(?i)(access_token|refresh_token|client_secret|id_token|api_key)['\"]?\s*[:=]\s*['\"]?[^'\",}\s]+"),
         re.compile(r"(?i)(liveChatId|live_chat_id|channelId|author_channel_id)\s*[:=]\s*['\"]?[^'\",}\s]+"),
     ]
 

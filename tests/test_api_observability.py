@@ -90,6 +90,53 @@ def test_setup_api_logging_redacts_bearer_token_through_propagation(
     assert "abc123token" not in content
 
 
+def test_setup_api_logging_redacts_api_key_kv_form(tmp_path, monkeypatch, clean_api_logger):
+    """multi_provider_llm_20260723 Phase 1: a cloud API key logged in raw
+    ``api_key=...``/``api_key: ...`` key-value form (outside Bearer-header
+    form, already covered by the Bearer pattern above) must also be
+    redacted -- mirrors the existing access_token/client_secret rule."""
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path))
+
+    observability.setup_api_logging()
+
+    child_logger = logging.getLogger("opencohost.api.engine_host")
+    child_logger.error("cloud provider config: api_key=sk-secret-cloud-key-1234")
+
+    for handler in clean_api_logger.handlers:
+        handler.flush()
+
+    log_path = tmp_path / "opencohost_api.log"
+    content = log_path.read_text(encoding="utf-8")
+    assert "sk-secret-cloud-key-1234" not in content
+    assert "api_key=<redacted>" in content
+
+
+def test_setup_api_logging_redacts_api_key_quoted_forms(tmp_path, monkeypatch, clean_api_logger):
+    """F5 (Judge A): the quoted key forms ``'api_key': '...'`` (dict-repr) and
+    ``"api_key": "..."`` (JSON) were missed by the unquoted ``api_key=...``
+    pattern -- an optional closing quote before the separator must also be
+    redacted, without breaking the existing unquoted k=v form."""
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path))
+
+    observability.setup_api_logging()
+
+    child_logger = logging.getLogger("opencohost.api.engine_host")
+    child_logger.error("dict repr: {'api_key': 'sk-secret-cloud-key-1234'}")
+    child_logger.error('json body: {"api_key": "sk-secret-cloud-key-5678"}')
+
+    for handler in clean_api_logger.handlers:
+        handler.flush()
+
+    log_path = tmp_path / "opencohost_api.log"
+    content = log_path.read_text(encoding="utf-8")
+    assert "sk-secret-cloud-key-1234" not in content
+    assert "sk-secret-cloud-key-5678" not in content
+
+
 def test_setup_api_logging_sets_info_level_on_api_logger_tree(clean_api_logger):
     """The shared ``opencohost.api`` logger must be raised to INFO so lifecycle
     lines from every child (ptt_session, engine_host, agenda_driver, ...)

@@ -235,6 +235,35 @@ def _isolate_last_profile_and_model_files(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_llm_provider_and_keys_files(tmp_path, monkeypatch):
+    """Keep the LLM provider config / API keys out of the developer's real
+    config/ directory.
+
+    ``config/llm_provider.json`` and ``config/llm_keys.json`` are real,
+    live files on this machine (the owner's actual cloud posture + a real
+    API key -- multi_provider_llm_20260723 incident, 2026-07-24).
+    ``opencohost/config/llm_provider.py`` binds ``LLM_PROVIDER_CONFIG_FILE``
+    via a from-import at module load time (same pattern as
+    ``PERSONALIZATION_FILE`` above), so the module attribute itself must be
+    patched -- patching ``settings.LLM_PROVIDER_CONFIG_FILE`` would have no
+    effect. ``LLM_KEYS_FILE`` is imported by name into
+    ``opencohost/api/main.py`` and must be patched there for the same
+    reason. Absent files resolve to the fail-open local-only default
+    (spec B) -- no directory needs creating, and any test that sets its own
+    tmp path afterwards (e.g. test_llm_provider_config.py) simply overwrites
+    this one, since both point at nonexistent per-test paths either way.
+    """
+    import opencohost.api.main as api_main_mod
+    import opencohost.config.llm_provider as llm_provider_mod
+
+    keys_file = str(tmp_path / "llm_keys.json")
+    monkeypatch.setattr(
+        llm_provider_mod, "LLM_PROVIDER_CONFIG_FILE", str(tmp_path / "llm_provider.json")
+    )
+    monkeypatch.setattr(api_main_mod, "LLM_KEYS_FILE", keys_file)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_api_log_dir(tmp_path, monkeypatch):
     """Keep API-tree logging out of the developer's real ``logs/`` directory.
 

@@ -88,6 +88,37 @@ LLM_TIER_EFFECTIVE_CTX_CAPS = {
     "fast": 6144,
 }
 
+# Multi-provider LLM (multi_provider_llm_20260723) — built-in, editable
+# presets for the OpenAI-compatible cloud path (design 'Editable presets').
+# `models` is a curated pick list; the operator may override base_url/model
+# manually within a profile instead of using a preset.
+LLM_PROVIDER_PRESETS: dict[str, dict] = {
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "models": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    },
+    "nvidia_nim": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "models": ["meta/llama-3.1-70b-instruct", "deepseek-ai/deepseek-r1"],
+    },
+}
+# Cloud provider HTTP chat timeout (seconds) — distinct from OLLAMA_CHAT_TIMEOUT
+# and the local watchdog timeouts (llm_engine.py); wired at the chat call
+# sites in Phase 4. 90s placeholder per design's Open Questions — tune
+# against real NVIDIA NIM latency during phase-4 runtime validation.
+CLOUD_CHAT_TIMEOUT = 90
+# Cloud output-token cap (2026-07-24 cloud incident item 3, owner decision):
+# the LOCAL 768-token cap (LLM_MAX_TOKENS) was starving cloud/reasoning
+# models of budget. High ceiling so reasoning models never starve; providers
+# reject/clamp above their own model max -- a 400 there surfaces as an
+# ordinary transport error and the operator lowers it later. Task-adaptive
+# capping is a registered follow-up, NOT built now.
+CLOUD_MAX_TOKENS = 16384
+# Proactive context budget for cloud requests (context_budget.apply_char_budget),
+# replacing the reactive prompt_eval_count/eval_duration trim that OpenAI-
+# compatible responses don't expose; wired in Phase 3.
+CLOUD_CTX_BUDGET: int = 32768
+
 # Catálogo curado de modelos recomendados para esta tarea
 MODELS_CATALOG = {
     "qwen3:4b": {
@@ -284,6 +315,11 @@ LAST_MODEL_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_model.json")
 # operator's last choice instead of leaving it unset until the first switch.
 LAST_PROFILE_FILE = os.path.join(str(USER_DATA_DIR), "config", "last_profile.json")
 LLM_TIERS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_tiers.json")
+# Multi-provider LLM (multi_provider_llm_20260723 Phase 1) — provider/profile
+# config (non-secret) and per-profile API keys (OAuthStore-backed, one key
+# per profile id, separate file so config/llm_provider.json stays safe to log).
+LLM_PROVIDER_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_provider.json")
+LLM_KEYS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_keys.json")
 TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
 PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")

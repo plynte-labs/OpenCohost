@@ -5,7 +5,7 @@ Field names on `StatusResponse` are pinned to the `is_`-prefixed forms
 shortened `ready`/`speaking`/`processing` forms.
 """
 
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, StringConstraints
 
@@ -476,6 +476,56 @@ class ObsTestResponse(BaseModel):
 
     ok: bool
     error: Optional[str] = None
+
+
+class LlmProviderProfileOut(BaseModel):
+    """One entry of `LlmProviderResponse.profiles` — never carries a key."""
+
+    base_url: str
+    model: str
+    preset: Optional[str] = None
+    api_key_set: bool
+
+
+class LlmProviderResponse(BaseModel):
+    """GET/PUT /api/llm/provider response (Tier C, multi_provider_llm_20260723).
+
+    Never echoes any key — only `api_key_set` per profile, mirroring
+    `ObsConfigResponse.password_set`.
+    """
+
+    active_provider: str
+    fallback_mode: str
+    pregen_enabled: bool
+    profiles: dict[str, LlmProviderProfileOut]
+
+
+class LlmProviderRequest(BaseModel):
+    """PUT /api/llm/provider body — a partial update.
+
+    Global fields (`active_provider`/`fallback_mode`/`pregen_enabled`) apply
+    unconditionally. Profile-scoped fields (`base_url`/`model`/`preset`/
+    `api_key`) REQUIRE `profile_id` and merge into ONLY that one profile —
+    never another provider's saved entry (design 'never overwrites another
+    provider'). `api_key` is write-only: a non-empty value stores it, `""`
+    clears ONLY that profile's key, omitting it leaves the stored key
+    untouched.
+
+    `delete_profile` is a write-only ACTION field naming the profile id to
+    remove (config entry + stored key). Mutually exclusive with the
+    profile-scoped edit fields above in the same PUT; global fields (e.g.
+    `active_provider`) MAY combine with it in one call (switch-then-delete).
+    """
+
+    active_provider: Optional[str] = None
+    fallback_mode: Optional[Literal["auto", "manual"]] = None
+    pregen_enabled: Optional[bool] = None
+    profile_id: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    preset: Optional[str] = None
+    api_key: Optional[str] = None
+    delete_profile: Optional[str] = None
 
 
 class AvatarConfigResponse(BaseModel):
