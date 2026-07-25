@@ -269,6 +269,27 @@ def _isolate_llm_provider_and_keys_files(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ptt_config_file(tmp_path, monkeypatch):
+    """Keep ``config/ptt_settings.json`` out of the developer's real config/
+    directory.
+
+    That file is SHARED state: the legacy CTK ``PTTManager`` owns the
+    ``hotkey`` key and PUT /api/ptt/config owns ``stt_ws_uri``
+    (liveaudio_ws_uri_config_20260724). ``load_ptt_ws_uri``/``save_ptt_ws_uri``
+    resolve ``settings.PTT_CONFIG_FILE`` at call time (same lazy-read pattern
+    as ``LAST_PROFILE_FILE`` above), so patching the module attribute is
+    enough to keep any test that hits the PUT from rewriting the operator's
+    real hotkey + LiveAudio URL. An absent file resolves to the ``WS_URI``
+    default, so nothing needs creating here.
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "PTT_CONFIG_FILE", str(tmp_path / "ptt_settings.json")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_api_log_dir(tmp_path, monkeypatch):
     """Keep API-tree logging out of the developer's real ``logs/`` directory.
 

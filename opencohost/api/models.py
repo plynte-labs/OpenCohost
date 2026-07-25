@@ -1136,3 +1136,36 @@ class PttStateResponse(BaseModel):
     buffered_chars: int = 0
     last_error: Optional[str] = None
     stt_ws_url: Optional[str] = None
+
+
+class PttConfigRequest(BaseModel):
+    """PUT /api/ptt/config body. ``stt_ws_uri`` is optional — an omitted field
+    means "no change", so the PUT doubles as a read of the effective config
+    (there is no dedicated GET; the UI reads GET /api/ptt/state)."""
+
+    stt_ws_uri: Optional[str] = None
+
+
+class PttConfigResponse(BaseModel):
+    """The EFFECTIVE LiveAudio/WhisperLive URL after the write."""
+
+    stt_ws_uri: str
+
+
+class PttTestRequest(BaseModel):
+    """POST /api/ptt/test body. ``stt_ws_uri`` is optional — omitted means
+    "probe whatever is configured right now"."""
+
+    stt_ws_uri: Optional[str] = None
+
+
+class PttTestResponse(BaseModel):
+    """A failed probe is a RESULT, not an HTTP error: this always rides a 200.
+
+    ``detail`` is a short fixed literal (connected | invalid_scheme | timeout |
+    unreachable) — never the raw exception text, which can carry bytes echoed
+    from an untrusted remote straight into the operator's UI.
+    """
+
+    ok: bool
+    detail: str

@@ -13,6 +13,7 @@ allowed destination — the R8 process_context path) and is absent from every
 """
 
 import json
+import os
 import time
 
 import pytest
@@ -22,7 +23,7 @@ from opencohost.config import settings
 from opencohost.api.ptt_session import PttController, PttUnreachable, SessionActive
 import opencohost.api.ptt_session as ptt_session_mod
 from tests.test_api_phase1 import FakeHost
-from tests.test_ptt_session import _FakeWS, _patch_connect
+from tests.test_ptt_session import _FakeConnect, _FakeWS, _patch_connect
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
 
@@ -304,9 +305,19 @@ def test_keepalive_not_rate_limited():
 
 
 def _install_real_controller(app, ws, monkeypatch):
-    _patch_connect(monkeypatch, ws=ws)
+    # Real websockets.connect() never returns the same connection twice, so
+    # a probe dialed against a DIFFERENT uri (POST /api/ptt/test) must not
+    # share — and must not be able to close — the live session's socket.
+    # Only the session's own configured uri reuses the shared `ws` so other
+    # tests can keep pushing transcript frames into it via ws.feed_text(...).
+    session_uri = "ws://test/whisperlive"
+
+    def _connect(uri, **kwargs):
+        return _FakeConnect(ws=ws if uri == session_uri else _FakeWS())
+
+    monkeypatch.setattr(ptt_session_mod.websockets, "connect", _connect)
     controller = PttController(
-        "ws://test/whisperlive",
+        session_uri,
         app.state.dispatcher,
         app.state.host.event_log,
         grace=0.15,
@@ -527,6 +538,398 @@ def test_concurrent_start_rejected_409(monkeypatch):
                 time.sleep(0.03)
     finally:
         client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PUT /api/ptt/config — repoint LiveAudio without restarting the backend
+# (liveaudio_ws_uri_config_20260724)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _real_controller(app, uri="ws://old-host:8765"):
+    controller = PttController(uri, app.state.dispatcher, app.state.host.event_log)
+    app.state.ptt_controller = controller
+    return controller
+
+
+def test_put_ptt_config_persists_and_returns_the_effective_config():
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 200
+        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765"}
+        # Persisted, not just held in memory.
+        assert settings.load_ptt_ws_uri() == "ws://10.0.0.5:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_accepts_wss_and_a_remote_host():
+    """Dual-PC setups are legitimate: LiveAudio may run on the capture machine,
+    exactly like the OBS config accepting any host. No loopback restriction."""
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "wss://capture-pc.lan:8765"})
+        assert resp.status_code == 200
+        assert resp.json()["stt_ws_uri"] == "wss://capture-pc.lan:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "bad_uri",
+    ["http://127.0.0.1:8765", "https://evil.example", "127.0.0.1:8765", "ws://", ""],
+)
+def test_put_ptt_config_rejects_a_non_ws_uri_with_422(bad_uri):
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": bad_uri})
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "stt_ws_uri must start with ws:// or wss://"
+        # Nothing persisted on the rejection path.
+        assert settings.load_ptt_ws_uri() == settings.WS_URI
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_with_no_field_returns_current_and_writes_nothing():
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.put("/api/ptt/config", json={})
+        assert resp.status_code == 200
+        assert resp.json() == {"stt_ws_uri": settings.WS_URI}
+        assert not os.path.exists(settings.PTT_CONFIG_FILE)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_live_applies_to_the_controller():
+    """The whole point: the NEXT hold uses the new socket, with no restart.
+    GET /api/ptt/state is the read surface (no dedicated GET was added)."""
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        controller = _real_controller(app)
+        assert client.get("/api/ptt/state").json()["stt_ws_url"] == "ws://old-host:8765"
+
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 200
+
+        assert controller.state()["stt_ws_url"] == "ws://10.0.0.5:8765"
+        assert client.get("/api/ptt/state").json()["stt_ws_url"] == "ws://10.0.0.5:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_live_apply_failure_never_fails_the_write():
+    """Best-effort live-apply, same contract as _apply_avatar_runtime: a
+    controller that cannot be repointed (minimal test double / absent state)
+    must not turn a successful save into a 500."""
+    fake = _FakeController()  # deliberately has no set_ws_uri
+    app, client = _client_with_fake(fake)
+    try:
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 200
+        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765"}
+        assert settings.load_ptt_ws_uri() == "ws://10.0.0.5:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_returns_503_when_the_write_fails(monkeypatch):
+    """A failed save must never be reported as success, and must never
+    live-apply a URL that is not on disk (the restart would silently revert)."""
+    import opencohost.api.main as main_mod
+
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        controller = _real_controller(app)
+
+        def _boom(uri, config_file=None):
+            raise OSError("disk on fire")
+
+        monkeypatch.setattr(main_mod, "save_ptt_ws_uri", _boom)
+
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 503
+        assert resp.json() == {"detail": "config_write_failed"}
+        # Never live-applied.
+        assert controller.state()["stt_ws_url"] == "ws://old-host:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_ptt_config_requires_operator_token_when_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "API_AUTH_ENFORCED", True)
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 401
+        assert not os.path.exists(settings.PTT_CONFIG_FILE)  # never reached the write
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_persisted_uri_seeds_the_controller_at_boot():
+    """Persistence is pointless if boot ignores it: a fresh app must build its
+    PttController from the saved URL, not the WS_URI module constant."""
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765")
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        assert client.get("/api/ptt/state").json()["stt_ws_url"] == "ws://10.0.0.5:8765"
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/ptt/test — probe LiveAudio before going live
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _record_connect(monkeypatch, ws=None, fail=False):
+    """Patch websockets.connect and capture every URI it was called with."""
+    seen = []
+
+    def _connect(uri, **kwargs):
+        seen.append(uri)
+        return _FakeConnect(ws=ws, fail=fail)
+
+    monkeypatch.setattr(ptt_session_mod.websockets, "connect", _connect)
+    return seen
+
+
+def test_post_ptt_test_ok_true_on_a_successful_probe(monkeypatch):
+    seen = _record_connect(monkeypatch, ws=_FakeWS())
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.post("/api/ptt/test", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "detail": "connected"}
+        assert seen == ["ws://10.0.0.5:8765"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_failure_is_a_result_not_an_http_error(monkeypatch):
+    _record_connect(monkeypatch, fail=True)
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.post("/api/ptt/test", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 200  # a failed probe is a RESULT, never a 5xx
+        assert resp.json() == {"ok": False, "detail": "unreachable"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_rejects_a_non_ws_scheme_without_probing(monkeypatch):
+    seen = _record_connect(monkeypatch, ws=_FakeWS())
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.post("/api/ptt/test", json={"stt_ws_uri": "http://evil.example"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": False, "detail": "invalid_scheme"}
+        assert seen == []  # never opened anything
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_falls_back_to_the_configured_uri(monkeypatch):
+    seen = _record_connect(monkeypatch, ws=_FakeWS())
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _real_controller(app, uri="ws://configured-host:8765")
+        resp = client.post("/api/ptt/test", json={})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "detail": "connected"}
+        assert seen == ["ws://configured-host:8765"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_with_no_body_at_all(monkeypatch):
+    seen = _record_connect(monkeypatch, ws=_FakeWS())
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        _real_controller(app, uri="ws://configured-host:8765")
+        resp = client.post("/api/ptt/test")
+        assert resp.status_code == 200
+        assert seen == ["ws://configured-host:8765"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_never_touches_the_live_session_slot(monkeypatch):
+    """The probe is a bare connect/close: it must not build a PttSession, must
+    not take the single slot, must not dispatch, and must not log an event —
+    so it stays safe to run mid-hold."""
+    ws = _FakeWS()
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        controller = _install_real_controller(app, ws, monkeypatch)
+        start = client.post("/api/ptt/start", json={})
+        assert start.status_code == 200
+        sid = start.json()["session_id"]
+
+        resp = client.post("/api/ptt/test", json={"stt_ws_uri": "ws://some-other-host:9999"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        # The live hold is untouched: same session, still listening.
+        state = client.get("/api/ptt/state").json()
+        assert state["session_id"] == sid
+        assert state["state"] == "listening"
+        # No probe event polluted the lifecycle log.
+        actions = [e["action"] for e in client.get("/api/events").json()["events"]
+                   if e["source"] == "ptt"]
+        assert actions == ["started"]
+        assert _drain_dispatch_queue(app) == []
+    finally:
+        client.post("/api/ptt/stop", json={})
+        end = time.time() + 3.0
+        while time.time() < end and client.get("/api/ptt/state").json()["state"] != "idle":
+            time.sleep(0.03)
+        client.__exit__(None, None, None)
+
+
+def test_post_ptt_test_requires_operator_token_when_enforced(monkeypatch):
+    monkeypatch.setattr(settings, "API_AUTH_ENFORCED", True)
+    seen = _record_connect(monkeypatch, ws=_FakeWS())
+    app = _app()
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        resp = client.post("/api/ptt/test", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
+        assert resp.status_code == 401
+        assert seen == []  # never reached the probe
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_probe_is_bounded_and_never_blocks_on_a_hung_server(monkeypatch):
+    """A WhisperLive that accepts the TCP connection and then stalls must not
+    pin the request thread — same backstop contract as
+    _test_obs_connection_bounded (and the same non-joining shutdown)."""
+    import opencohost.api.main as main_mod
+
+    def _hang(uri, open_timeout=None):
+        time.sleep(30)
+
+    monkeypatch.setattr(main_mod, "probe_stt_ws", _hang)
+    started = time.time()
+    ok, detail = main_mod._test_stt_connection_bounded("ws://hung-host:8765", timeout=0.2)
+    assert (ok, detail) == (False, "timeout")
+    assert time.time() - started < 5.0  # returned on the bound, did not join
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Persistence — config/ptt_settings.json is SHARED with the legacy CTK
+# PTTManager hotkey store (liveaudio_ws_uri_config_20260724)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_load_ptt_ws_uri_defaults_when_file_absent(tmp_path):
+    assert settings.load_ptt_ws_uri(str(tmp_path / "absent.json")) == settings.WS_URI
+
+
+def test_load_ptt_ws_uri_falls_back_on_corrupt_file(tmp_path):
+    path = tmp_path / "ptt_settings.json"
+    path.write_text("{ this is not json", encoding="utf-8")
+    assert settings.load_ptt_ws_uri(str(path)) == settings.WS_URI
+
+
+def test_load_ptt_ws_uri_ignores_a_persisted_non_ws_scheme(tmp_path):
+    """A hand-edited or hostile file must not repoint the recv-only bridge at
+    an arbitrary scheme — the read side enforces the SAME guard as the PUT, so
+    the validation cannot be bypassed by writing the file directly."""
+    path = tmp_path / "ptt_settings.json"
+    path.write_text(json.dumps({"stt_ws_uri": "http://evil.example"}), encoding="utf-8")
+    assert settings.load_ptt_ws_uri(str(path)) == settings.WS_URI
+
+
+def test_save_ptt_ws_uri_round_trips(tmp_path):
+    path = str(tmp_path / "ptt_settings.json")
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", path)
+    assert settings.load_ptt_ws_uri(path) == "ws://10.0.0.5:8765"
+
+
+def test_save_ptt_ws_uri_merges_and_never_clobbers_the_ctk_hotkey(tmp_path):
+    path = tmp_path / "ptt_settings.json"
+    path.write_text(json.dumps({"hotkey": "F8"}), encoding="utf-8")
+
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", str(path))
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["hotkey"] == "F8"  # legacy CTK key survived
+    assert data["stt_ws_uri"] == "ws://10.0.0.5:8765"
+
+
+def test_save_ptt_ws_uri_survives_a_corrupt_existing_file(tmp_path):
+    """A merge that cannot read the old file must still persist the new key
+    rather than raising — the operator's reconnect is the point of the
+    feature, and the only thing lost is an already-unreadable hotkey."""
+    path = tmp_path / "ptt_settings.json"
+    path.write_text("{ garbage", encoding="utf-8")
+
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", str(path))
+
+    assert settings.load_ptt_ws_uri(str(path)) == "ws://10.0.0.5:8765"
+
+
+def test_ctk_ptt_manager_still_reads_its_hotkey_after_an_api_write(tmp_path):
+    """The legacy CTK consumer (opencohost/ui/ptt_manager.py) must keep
+    working untouched across an API config write — it is the OTHER owner of
+    this file."""
+    from opencohost.ui.ptt_manager import PTTManager
+
+    path = str(tmp_path / "ptt_settings.json")
+    PTTManager(config_file=path).save_config("F8")
+
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", path)
+
+    assert PTTManager(config_file=path).get_hotkey() == "F8"
+    assert settings.load_ptt_ws_uri(path) == "ws://10.0.0.5:8765"
+
+
+def test_ctk_hotkey_write_preserves_the_api_stt_ws_uri(tmp_path):
+    """The reverse direction of the same shared-file hazard: remapping the
+    hotkey in the legacy CTK UI must not silently reset the operator's
+    LiveAudio URL back to the default."""
+    from opencohost.ui.ptt_manager import PTTManager
+
+    path = str(tmp_path / "ptt_settings.json")
+    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", path)
+
+    PTTManager(config_file=path).save_config("F8")
+
+    assert settings.load_ptt_ws_uri(path) == "ws://10.0.0.5:8765"
+    assert PTTManager(config_file=path).get_hotkey() == "F8"
 
 
 def test_stt_unreachable_returns_503_and_frees_slot(monkeypatch):

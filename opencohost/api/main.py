@@ -59,7 +59,12 @@ from opencohost.api.auth import (
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost, EventLogSink
 from opencohost.api.observability import audit_middleware, setup_api_logging
-from opencohost.api.ptt_session import PttController, PttUnreachable, SessionActive
+from opencohost.api.ptt_session import (
+    PttController,
+    PttUnreachable,
+    SessionActive,
+    probe_stt_ws,
+)
 from opencohost.api.models import (
     AgendaMetrics,
     AgendaResponse,
@@ -133,12 +138,16 @@ from opencohost.api.models import (
     ProfileDetailResponse,
     ProfileUpdateRequest,
     ProfilesListResponse,
+    PttConfigRequest,
+    PttConfigResponse,
     PttKeepaliveRequest,
     PttKeepaliveResponse,
     PttStartResponse,
     PttStateResponse,
     PttStopRequest,
     PttStopResponse,
+    PttTestRequest,
+    PttTestResponse,
     StatusResponse,
     StreamChatLiveResponse,
     StreamConnectRequest,
@@ -171,14 +180,16 @@ from opencohost.config.settings import (
     PERSONALIZATION_OCCUPATION_MAX,
     _canonical_model_tag,
     default_piper_voice_for_locale,
+    is_valid_stt_ws_uri,
     load_memorias_notice_dismissed,
     load_piper_voice,
+    load_ptt_ws_uri,
     load_tts_local_only,
     save_last_profile,
     save_memorias_notice_dismissed,
+    save_ptt_ws_uri,
     load_tts_speed,
     resolve_llm_tiers,
-    WS_URI,
 )
 from opencohost.core.agent_notices import (
     AgentNoticeCapError,
@@ -629,6 +640,59 @@ def _test_obs_connection_bounded(client: OBSClient, timeout: float = _OBS_TEST_T
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+# POST /api/ptt/test bound — same shape and the same reasoning as
+# _OBS_TEST_TIMEOUT_SECONDS above. `probe_stt_ws` self-bounds via the WS
+# open_timeout, so this executor is only a backstop for what that cannot cover
+# (a server that completes the TCP/WS handshake and then stalls). It must NOT
+# join a stuck worker: shutdown(wait=False, cancel_futures=True), never a
+# `with` block, whose shutdown(wait=True) would re-block on the very thread we
+# just timed out on.
+_PTT_TEST_TIMEOUT_SECONDS = 5.0
+
+# Serializes writes to ptt_settings.json (shared with the legacy CTK
+# PTTManager hotkey store), mirroring _config_lock / _llm_provider_lock.
+_ptt_config_lock = threading.Lock()
+
+
+def _test_stt_connection_bounded(uri: str, timeout: float = _PTT_TEST_TIMEOUT_SECONDS):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(probe_stt_ws, uri, open_timeout=timeout)
+        future.result(timeout=timeout + 1.0)  # WS self-bounds; +1s backstop
+        return True, "connected"
+    except concurrent.futures.TimeoutError:
+        return False, "timeout"
+    except Exception:
+        # Fixed literal, never the raw exception text: a probe failure message
+        # can carry bytes echoed from an untrusted remote straight into the
+        # operator's UI.
+        return False, "unreachable"
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _apply_ptt_ws_uri(request: Request, uri: str) -> None:
+    """Push the just-saved WhisperLive URL to the live PttController.
+
+    Same best-effort, doubly-guarded contract as ``_apply_avatar_runtime``
+    below: called ONLY after a successful save, OUTSIDE the config lock, and
+    guarded twice (getattr for the missing attribute, try/except for a runtime
+    error) so a controller that cannot be repointed — a minimal test double,
+    or app state without one — never turns a good write into a 500.
+
+    Only the NEXT hold picks the new socket up; an in-flight session keeps the
+    URI it was built with (see ``PttController.set_ws_uri``).
+    """
+    controller = getattr(request.app.state, "ptt_controller", None)
+    setter = getattr(controller, "set_ws_uri", None)
+    if setter is None:
+        return
+    try:
+        setter(uri)
+    except Exception:
+        pass
+
+
 def _obs_config_response(cfg) -> ObsConfigResponse:
     return ObsConfigResponse(
         enabled=cfg.obs.enabled,
@@ -822,15 +886,19 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             app.state.host = host
             app.state.dispatcher = Dispatcher(host.motor.command_queue)
             # PTT single-slot controller: recv-only WhisperLive bridge. ws_uri
-            # comes from settings.WS_URI (nothing hardcodes 8765/8770 here — the
-            # API's own uvicorn port is separate). Dispatches flushes through the
-            # SAME process_context path as /api/chat/turn; records lifecycle
-            # events (detail=None) on the host event log.
+            # comes from the operator's persisted choice, falling back to
+            # settings.WS_URI when nothing was ever saved (nothing hardcodes
+            # 8765/8770 here — the API's own uvicorn port is separate). Reading
+            # it here is what makes PUT /api/ptt/config survive a restart; the
+            # same PUT also live-applies it to this instance, so a reconnect
+            # never needs a process kill. Dispatches flushes through the SAME
+            # process_context path as /api/chat/turn; records lifecycle events
+            # (detail=None) on the host event log.
             # getattr fallback mirrors the obs_runtime resiliency in get_status:
             # a real EngineHost always has event_log, but minimal host doubles
             # (health/status test fakes) may not — never break app startup.
             app.state.ptt_controller = PttController(
-                WS_URI,
+                load_ptt_ws_uri(),
                 app.state.dispatcher,
                 getattr(host, "event_log", None) or EventLogSink(),
                 # Recovery hook (2026-07-15 PTT voice-death fix): smallest
@@ -2133,7 +2201,64 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.get("/api/ptt/state", response_model=PttStateResponse)
     def get_ptt_state(request: Request) -> PttStateResponse:
         # buffered_chars is an int count, NEVER text. GET stays open (rule 3).
+        # This is ALSO the read surface for the configured stt_ws_url — no
+        # dedicated GET /api/ptt/config exists, deliberately.
         return PttStateResponse(**request.app.state.ptt_controller.state())
+
+    @app.put("/api/ptt/config", response_model=PttConfigResponse)
+    def put_ptt_config(request: Request, body: PttConfigRequest):
+        # Repoint the PTT bridge at a different LiveAudio/WhisperLive server
+        # WITHOUT restarting the backend: the operator regularly launches
+        # OpenCohost before LiveAudio, and killing the process to recover is
+        # the pain this closes (liveaudio_ws_uri_config_20260724).
+        #
+        # SECURITY: WhisperLive is recv-only and its text flows straight into
+        # `process_context` — the SAME path as a real operator turn (privacy
+        # header, opencohost/api/ptt_session.py:1-21). A URL pointed at an
+        # arbitrary WS server is therefore a prompt-injection channel
+        # impersonating the operator. Scheme validation (mirroring the
+        # base_url gate on /api/llm/provider) is the guard we ship; the read
+        # side in settings.load_ptt_ws_uri enforces the SAME predicate so a
+        # hand-edited file cannot bypass it. A loopback-only restriction was
+        # deliberately NOT applied (owner decision): LiveAudio on a second
+        # capture PC is a legitimate dual-PC setup, exactly like OBS accepting
+        # any host.
+        if body.stt_ws_uri is None:
+            return PttConfigResponse(stt_ws_uri=load_ptt_ws_uri())
+        if not is_valid_stt_ws_uri(body.stt_ws_uri):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "stt_ws_uri must start with ws:// or wss://"},
+            )
+        with _ptt_config_lock:
+            try:
+                save_ptt_ws_uri(body.stt_ws_uri)
+            except (OSError, RuntimeError, ValueError):
+                return JSONResponse(
+                    status_code=503, content={"detail": "config_write_failed"}
+                )
+        # Live-apply AFTER a successful save and OUTSIDE the write lock (same
+        # ordering as _apply_avatar_runtime on PUT /api/obs/config), so a URL
+        # is never applied to the runtime unless it also survives a restart.
+        _apply_ptt_ws_uri(request, body.stt_ws_uri)
+        return PttConfigResponse(stt_ws_uri=body.stt_ws_uri)
+
+    @app.post("/api/ptt/test", response_model=PttTestResponse)
+    def post_ptt_test(request: Request, body: Optional[PttTestRequest] = None):
+        # Bare connect + immediate close. Builds NO PttSession, never claims
+        # the single slot, never dispatches, never logs a lifecycle event — so
+        # it is safe to run mid-hold and cannot be used to inject a turn.
+        # ALWAYS 200: a failed probe is a result the operator asked for, not
+        # an HTTP error.
+        uri = body.stt_ws_uri if body is not None else None
+        if uri is None:
+            controller = getattr(request.app.state, "ptt_controller", None)
+            state = controller.state() if controller is not None else {}
+            uri = state.get("stt_ws_url") or load_ptt_ws_uri()
+        if not is_valid_stt_ws_uri(uri):
+            return PttTestResponse(ok=False, detail="invalid_scheme")
+        ok, detail = _test_stt_connection_bounded(uri)
+        return PttTestResponse(ok=ok, detail=detail)
 
     @app.get("/api/chat/last-reply", response_model=ChatLastReplyResponse)
     def get_chat_last_reply(request: Request) -> ChatLastReplyResponse:
