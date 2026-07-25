@@ -239,6 +239,60 @@ def test_connector_templates_returns_tuple(official):
 
 
 # ---------------------------------------------------------------------------
+# 4c. grounding_rules() / editorial_card_instruction()
+#     (grounding_authority_temporal_humility)
+#
+# grounding_rules carries a LEGACY es default like every other llm.* slot:
+# a total i18n failure must degrade to the Spanish rule, never to silence.
+# editorial_card_instruction deliberately has NO legacy here — its fallback
+# lives next to the renderer (EditorialCard.DEFAULT_PROMPT_INSTRUCTION), so
+# the accessor returns "" and the caller keeps the card-local default.
+# ---------------------------------------------------------------------------
+
+
+def test_grounding_rules_es_matches_legacy(official):
+    _activate("es", official)
+    assert active.grounding_rules() == active.LEGACY_GROUNDING_RULES
+
+
+def test_grounding_rules_en_is_english(official):
+    _activate("en", official)
+    rules = active.grounding_rules()
+    assert rules != active.LEGACY_GROUNDING_RULES, "EN must not fall back to the es rules"
+    assert not any(ch in rules for ch in "¿¡óáéúíñ")
+    assert "cutoff" in rules
+
+
+def test_grounding_rules_missing_slot_returns_legacy():
+    # Fail-soft: a community bundle without the slot still gets the es rule
+    # rather than losing the grounding guard entirely.
+    active.set_active_bundle(_bare_bundle())
+    assert active.grounding_rules() == active.LEGACY_GROUNDING_RULES
+
+
+def test_editorial_card_instruction_es_matches_card_default(official):
+    # Anti-drift: the es slot is the canonical text the renderer falls back to
+    # (same lockstep trick test_i18n_persona uses for settings.SYSTEM_PROMPT).
+    from opencohost.core.editorial_cards import EditorialCard
+
+    _activate("es", official)
+    assert active.editorial_card_instruction() == EditorialCard.DEFAULT_PROMPT_INSTRUCTION
+
+
+def test_editorial_card_instruction_en_is_english(official):
+    _activate("en", official)
+    instruction = active.editorial_card_instruction()
+    assert instruction
+    assert not any(ch in instruction for ch in "¿¡óáéúíñ")
+
+
+def test_editorial_card_instruction_missing_slot_returns_empty(official):
+    # "" is the documented signal for "no locale text — keep the card default".
+    active.set_active_bundle(_bare_bundle())
+    assert active.editorial_card_instruction() == ""
+
+
+# ---------------------------------------------------------------------------
 # 5. ptt_wrapper() / live_voice_wrapper() / ptt_history_wrapper()
 # ---------------------------------------------------------------------------
 

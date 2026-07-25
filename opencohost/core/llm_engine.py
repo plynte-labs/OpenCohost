@@ -2705,11 +2705,36 @@ class MotorVocalIA(threading.Thread):
                     )
                 except Exception:
                     personalization_block = ""
-            system_content = (
-                f"{self.system_prompt}\n\n{personalization_block}"
-                if personalization_block
-                else self.system_prompt
-            )
+            # grounding_authority_temporal_humility: the grounding-authority +
+            # temporal-humility rules ride at the SYSTEM position on EVERY
+            # generation, appended by the engine rather than authored into
+            # llm.system_prompt.
+            #
+            # WHY HERE and not in the persona slot: `set_profile` replaces
+            # self.system_prompt wholesale with the profile's own prompt
+            # (`payload.get("prompt", ...)`, llm_engine.py:1210). All six shipped
+            # profiles carry a full prompt of their own, and profiles are
+            # persisted to the user's PROFILES_FILE on first run — so a rule
+            # written into the locale persona (or into default_profiles.json)
+            # would be dead text for every existing install. This single site is
+            # the funnel all three _generar_dialogo callers route through.
+            #
+            # Unconditional by source: the "that doesn't exist" failure is not
+            # direct-only (chat and agenda turns assert facts too), unlike the
+            # <editorial_context> block below which stays gated on source.
+            #
+            # Position: persona -> rules -> personalization. The rules are a
+            # constant, so keeping them in the stable prefix ahead of the
+            # per-session personalization block preserves KV-cache reuse.
+            # Fail-open by construction: grounding_rules() is _slot-backed and
+            # cannot raise; "" simply appends nothing.
+            grounding_block = i18n_active.grounding_rules()
+            system_parts = [self.system_prompt]
+            if grounding_block:
+                system_parts.append(grounding_block)
+            if personalization_block:
+                system_parts.append(personalization_block)
+            system_content = "\n\n".join(system_parts)
 
             if self.use_system_role:
                 messages.append({'role': 'system', 'content': system_content})

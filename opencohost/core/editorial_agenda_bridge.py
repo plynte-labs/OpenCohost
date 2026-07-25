@@ -8,9 +8,20 @@ from datetime import datetime, timezone
 
 from opencohost.config import settings
 from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
+from opencohost.i18n import active as i18n_active
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
 
 log = logging.getLogger(__name__)
+
+
+def _render_block(card: EditorialCard) -> str:
+    """Render *card* with the active locale's instruction text.
+
+    The bridge is the only runtime renderer (agenda path + direct path), so this
+    is where locale awareness belongs — ``editorial_cards`` stays a plain data
+    module. An empty accessor result falls through to the card's own es default.
+    """
+    return card.to_prompt_block(instruction=i18n_active.editorial_card_instruction())
 
 
 class EditorialAgendaBridge:
@@ -88,7 +99,7 @@ class EditorialAgendaBridge:
         card = self.store.get(card_id)
         if card is None or card.status is not EditorialCardStatus.ACTIVE or card.is_expired():
             return None
-        return card.to_prompt_block()
+        return _render_block(card)
 
     def auto_attach(self, topic: "AgendaTopic") -> bool:
         """Try to match an armed editorial card to *topic* using token-overlap scoring.
@@ -158,7 +169,7 @@ class EditorialAgendaBridge:
             if card is None:
                 return None
             self._pending_direct_card_id = card.id
-            return card.to_prompt_block()
+            return _render_block(card)
         except Exception as exc:
             log.warning("editorial direct context: store error: %s", exc)
             return None

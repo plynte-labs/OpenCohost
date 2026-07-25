@@ -39,6 +39,7 @@ from opencohost.core.memoria_store import (
     pinned_injection_counter,
     select_top_k,
 )
+from opencohost.i18n import active as i18n_active
 
 
 @pytest.fixture(autouse=True)
@@ -549,7 +550,14 @@ def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch
     # Sanity ceiling: combined stacking (memorias ~700 + digest ~600 +
     # editorial + contexto) does not blow up unbounded. Bumped from 3000 for the
     # D1 announce rule (~93 chars added to the always-present system prompt).
-    assert len(final_content) < 3200
+    #
+    # grounding_authority_temporal_humility added a second always-present system
+    # section (~728 chars, es). Rather than hardcoding a new number — which would
+    # silently absorb future injection bloat too — the ceiling stays 3200 for
+    # everything this test actually stacks, plus exactly the measured length of
+    # the new system block. A regression in memorias/digest/editorial sizing still
+    # trips it.
+    assert len(final_content) < 3200 + len(i18n_active.grounding_rules())
 
 
 # ---------------------------------------------------------------------------

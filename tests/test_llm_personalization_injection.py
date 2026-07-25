@@ -162,6 +162,21 @@ def test_injection_absent_for_non_qualifying_sources(monkeypatch, tmp_path, sour
 # ---------------------------------------------------------------------------
 
 
+def _expected_prompt_without_personalization(motor) -> str:
+    """The exact prompt when the personalization block contributes NOTHING.
+
+    Still a full-string equality (the point of these two tests is that the gate
+    adds zero bytes when off). The baseline gained the always-present
+    grounding_rules section in grounding_authority_temporal_humility: the engine
+    appends it at the SYSTEM position on every turn, so it belongs in the
+    expected value — it is not personalization output.
+    """
+    return (
+        f"{motor.system_prompt}\n\n{i18n_active.grounding_rules()}"
+        f"\n\n[{i18n_active.user_message_label()}]: hablemos de musica"
+    )
+
+
 @pytest.mark.parametrize("source", ["direct", "ptt"])
 def test_settings_kill_switch_off_produces_byte_identical_prompt(monkeypatch, tmp_path, source):
     motor, _, _ = _make_motor()
@@ -172,10 +187,7 @@ def test_settings_kill_switch_off_produces_byte_identical_prompt(monkeypatch, tm
 
     messages = _capture_messages(motor, "hablemos de musica", source=source)
 
-    expected = (
-        f"{motor.system_prompt}\n\n[{i18n_active.user_message_label()}]: hablemos de musica"
-    )
-    assert messages[-1]["content"] == expected
+    assert messages[-1]["content"] == _expected_prompt_without_personalization(motor)
 
 
 @pytest.mark.parametrize("source", ["direct", "ptt"])
@@ -188,10 +200,7 @@ def test_empty_store_produces_byte_identical_prompt(monkeypatch, tmp_path, sourc
 
     messages = _capture_messages(motor, "hablemos de musica", source=source)
 
-    expected = (
-        f"{motor.system_prompt}\n\n[{i18n_active.user_message_label()}]: hablemos de musica"
-    )
-    assert messages[-1]["content"] == expected
+    assert messages[-1]["content"] == _expected_prompt_without_personalization(motor)
 
 
 # ---------------------------------------------------------------------------

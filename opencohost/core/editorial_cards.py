@@ -102,6 +102,21 @@ class EditorialCard:
     MAX_ITEMS = 8
     ORIGIN_MAX_CHARS = 80
 
+    # grounding_authority_temporal_humility: es fallback for the block's
+    # `instruction` field. The AUTHORITY clause comes first because the model
+    # overriding this block with its own recollection is the failure this exists
+    # to stop (a live cue card was read correctly for the developer, then
+    # contradicted on the release date with an invented engine).
+    # This module stays i18n-free — a locale-aware caller passes `instruction=`
+    # into to_prompt_block (same contract as memory_digest.build_block). Pinned
+    # byte-identical to the es manifest slot by test_i18n_engine_residue.
+    DEFAULT_PROMPT_INSTRUCTION = (
+        "Datos verificados por el streamer: MANDAN sobre cualquier recuerdo "
+        "propio; no agregar fechas, versiones, nombres ni números que no estén "
+        "en este bloque. Usá este contexto una sola vez; priorizá claridad "
+        "sobre chistes y no anuncies la estructura."
+    )
+
     def __post_init__(self) -> None:
         if self.raw_chat or self.raw_page:
             raise EditorialCardValidationError("Editorial cards cannot store raw chat or raw copied pages")
@@ -167,17 +182,30 @@ class EditorialCard:
             return False
         return (now - self.last_injected_at).total_seconds() < cooldown_s
 
-    def to_prompt_block(self, *, max_chars: int = 1200) -> str:
-        """Render a bounded structured prompt block for one-turn use."""
+    def to_prompt_block(self, *, max_chars: int = 1200, instruction: str | None = None) -> str:
+        """Render a bounded structured prompt block for one-turn use.
+
+        ``instruction`` overrides :attr:`DEFAULT_PROMPT_INSTRUCTION` so a caller
+        that knows the active locale (the bridge, via
+        ``i18n_active.editorial_card_instruction()``) can supply translated text
+        without this data module importing i18n. An empty string or ``None``
+        keeps the default — a bundle missing the slot must never render an
+        instruction-less block.
+
+        ``instruction`` is the FIRST key on purpose: the over-budget branch below
+        ends in a hard ``block[:max_chars]`` slice, so a trailing instruction
+        would be the first thing amputated on exactly the long cards that most
+        need the "do not invent specifics" guard.
+        """
 
         payload = {
+            "instruction": instruction or self.DEFAULT_PROMPT_INSTRUCTION,
             "topic": self.topic,
             "summary": self.summary,
             "streamer_take": self.streamer_take,
             "counterpoints": self.counterpoints,
             "discussion_hooks": self.discussion_hooks,
             "triggers": self.triggers,
-            "instruction": "Usá este contexto una sola vez; priorizá claridad sobre chistes y no anuncies la estructura.",
         }
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         block = f"<editorial_context>\n{body}\n</editorial_context>"

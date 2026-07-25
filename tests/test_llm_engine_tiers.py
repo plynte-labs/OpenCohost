@@ -5,6 +5,7 @@ from unittest.mock import patch
 from opencohost.config.settings import LLM_TIER_EFFECTIVE_CTX_CAPS
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.llm_tiers import LLMTierConfig
+from opencohost.i18n import active as i18n_active
 
 
 def _ready_motor():
@@ -115,8 +116,14 @@ def test_tier_switch_preserves_profile_prompt_and_conversation_memory():
 
     messages = motor.ollama.chat.call_args.kwargs["messages"]
     assert dialogo == "nueva respuesta"
+    # The profile prompt survives the tier switch verbatim and stays FIRST in the
+    # system message. grounding_authority_temporal_humility appends the engine's
+    # always-present grounding rules after it (llm_engine._generar_dialogo), so
+    # the expected system content is composed rather than a bare literal — still
+    # an exact equality, no substring softening.
+    expected_system = f"Prompt de Kira\n\n{i18n_active.grounding_rules()}"
     assert messages[:3] == [
-        {"role": "system", "content": "Prompt de Kira"},
+        {"role": "system", "content": expected_system},
         {"role": "user", "content": "recuerdo previo"},
         {"role": "assistant", "content": "respuesta previa"},
     ]

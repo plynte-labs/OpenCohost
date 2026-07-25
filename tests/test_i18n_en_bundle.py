@@ -104,3 +104,76 @@ def test_set_active_en_makes_provider_fallback_notice_accessor_english(official)
     assert active.provider_fallback_notice() == resolve(
         build_chain("en", official), "llm.provider_fallback_notice"
     )
+
+
+# ---------------------------------------------------------------------------
+# grounding_authority_temporal_humility: llm.grounding_rules and
+# llm.editorial_card_instruction must ship in BOTH official locales, authored
+# per-locale (never a copy-paste of the other language).
+#
+# These assert PRESENCE and STRUCTURE of the injected text, not model
+# behavior. Whether Kira actually stops saying "that doesn't exist" is a
+# runtime property only the owner's live validation can confirm.
+# ---------------------------------------------------------------------------
+
+GROUNDING_SLOTS = ("llm.grounding_rules", "llm.editorial_card_instruction")
+
+
+@pytest.mark.parametrize("slot", GROUNDING_SLOTS)
+def test_grounding_slots_present_in_both_locales(official, slot):
+    es_text = resolve(build_chain("es", official), slot)
+    en_text = resolve(build_chain("en", official), slot)
+    assert es_text and isinstance(es_text, str)
+    assert en_text and isinstance(en_text, str)
+    assert es_text != en_text, f"{slot} must be authored per locale, not copied"
+
+
+@pytest.mark.parametrize("slot", GROUNDING_SLOTS)
+def test_grounding_slots_en_carries_no_spanish_diacritics(official, slot):
+    # Same discriminator the connector-pool parity tests use: an English slot
+    # that still carries es diacritics is an un-translated copy.
+    en_text = resolve(build_chain("en", official), slot)
+    assert not any(ch in en_text for ch in "¿¡óáéúíñ"), f"{slot} not translated: {en_text}"
+
+
+def test_grounding_rules_name_no_block_tag(official):
+    # These rules ship on EVERY turn, but <editorial_context> only exists on a
+    # turn where a card matched. Naming an absent block invites the model to
+    # reference one it cannot see — so the card-specific authority framing lives
+    # inside the block (editorial_card_instruction) instead.
+    for code in ("es", "en"):
+        rules = resolve(build_chain(code, official), "llm.grounding_rules")
+        for tag in ("<editorial_context>", "<memoria_de_fondo", "<background_memory", "<memorias_guardadas"):
+            assert tag not in rules, f"{code} grounding_rules must not name {tag}"
+
+
+def test_editorial_card_instruction_carries_the_authority_framing(official):
+    # Incident 1's fix: authority + no-invention sit WITH the card data.
+    es = resolve(build_chain("es", official), "llm.editorial_card_instruction")
+    assert "MANDAN" in es
+    assert "fechas" in es and "versiones" in es
+    en = resolve(build_chain("en", official), "llm.editorial_card_instruction")
+    assert "OUTRANK" in en
+    assert "dates" in en and "versions" in en
+
+
+def test_grounding_rules_carry_temporal_humility_in_both_locales(official):
+    # Incident 2: Kira asserted that shipped models "do not exist". The rule
+    # must state the cutoff posture AND explicitly ban the denial phrasing.
+    es_rules = resolve(build_chain("es", official), "llm.grounding_rules")
+    assert "corte" in es_rules
+    assert "no existe" in es_rules
+    en_rules = resolve(build_chain("en", official), "llm.grounding_rules")
+    assert "cutoff" in en_rules
+    assert "doesn't exist" in en_rules
+
+
+def test_grounding_rules_preserve_pushback_and_ban_disclaimer_spam(official):
+    # The two properties the humility must NOT destroy, pinned as text:
+    # (1) she still calls false things false, (2) she does not hedge every line.
+    es_rules = resolve(build_chain("es", official), "llm.grounding_rules")
+    assert "lo falso sigue siendo falso" in es_rules
+    assert "no en cada frase" in es_rules
+    en_rules = resolve(build_chain("en", official), "llm.grounding_rules")
+    assert "false is still false" in en_rules
+    assert "not in every sentence" in en_rules

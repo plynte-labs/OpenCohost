@@ -64,6 +64,27 @@ LEGACY_GUARDRAIL_FALLBACK_LINES: tuple[str, ...] = (
     # neutral — must never itself re-trigger output_guard.
     "Se me mezclan los recuerdos, preguntame en un rato.",
 )
+# grounding_authority_temporal_humility: appended by the engine at the SYSTEM
+# position on every generation. Unlike the other LEGACY constants this one has no
+# pre-i18n literal to preserve (the slot is new), but it still carries the es text
+# as its default: a bundle that omits the slot must degrade to the Spanish
+# grounding rule, never to silence — losing it re-opens both incidents (a cue card
+# overridden by the model's recollection, and shipped models declared nonexistent).
+# Kept in lockstep with the es manifest by test_grounding_rules_es_matches_legacy.
+LEGACY_GROUNDING_RULES = (
+    "REGLAS DE TERRENO FIRME:\n"
+    "- Lo que el streamer aporta como dato verificado MANDA sobre cualquier "
+    "recuerdo propio; si la memoria dice otra cosa, la memoria está vieja. Nada "
+    "de agregar fechas, versiones, nombres ni números que no estén en el "
+    "contexto recibido.\n"
+    "- El conocimiento propio tiene fecha de corte y el stream es de hoy: pueden "
+    "existir modelos, juegos, parches o noticias posteriores. Ante algo "
+    "desconocido va \"no lo tengo\" o \"puede ser posterior a mi corte\" — NUNCA "
+    "\"no existe\", \"es un rumor\" ni \"suena inventado\".\n"
+    "- Esto no quita filo: lo falso sigue siendo falso y una idea pésima sigue "
+    "siendo pésima. La duda aplica solo a qué existe y cuándo salió, no a las "
+    "opiniones, y se aclara cuando hace falta, no en cada frase."
+)
 LEGACY_ACCUMULATION_PTT = "El streamer dijo (acumulado): {messages}"
 LEGACY_ACCUMULATION_CHAT = "Mientras procesabas, llegaron estos mensajes del chat: {messages}"
 LEGACY_LEDGER_CONTEXT_LABEL = "contexto"
@@ -413,6 +434,34 @@ def provider_fallback_notice() -> str:
     locale config can never crash cloud-failure handling.
     """
     return resolve(get_active_bundle(), "llm.provider_fallback_notice")
+
+
+def grounding_rules() -> str:
+    """Grounding-authority + temporal-humility rules for the active locale.
+
+    Appended by ``_generar_dialogo`` at the SYSTEM position on every generation,
+    AFTER the persona and BEFORE the personalization block. It is deliberately
+    NOT part of ``llm.system_prompt``: ``set_profile`` replaces
+    ``self.system_prompt`` wholesale with the active profile's own prompt, so a
+    rule living inside the persona slot never reaches a profile user.
+
+    Falls back to the es rule on any i18n failure (``_slot`` semantics) — a
+    broken bundle must degrade to the Spanish guard, never drop it.
+    """
+    return _slot("llm.grounding_rules", LEGACY_GROUNDING_RULES)
+
+
+def editorial_card_instruction() -> str:
+    """Instruction rendered inside the ``<editorial_context>`` block.
+
+    Returns ``""`` when the active bundle has no such slot. That empty string is
+    the documented "no locale text" signal: the caller passes it straight to
+    :meth:`EditorialCard.to_prompt_block`, which then keeps its own
+    ``DEFAULT_PROMPT_INSTRUCTION``. The canonical text therefore lives next to
+    the renderer, NOT duplicated as a LEGACY constant here — ``editorial_cards``
+    is a plain data module and must stay i18n-free.
+    """
+    return _slot("llm.editorial_card_instruction", "")
 
 
 def connector_templates() -> tuple[str, ...]:

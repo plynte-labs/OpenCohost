@@ -25,6 +25,7 @@ import pytest
 
 from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.i18n import active as i18n_active
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
 
@@ -420,6 +421,76 @@ def test_usage_recorder_not_fired_when_dialogo_empty(tmp_path: Path) -> None:
     motor._generar_dialogo("host query about the topic", source="direct")
 
     recorder.assert_not_called()
+
+
+def test_grounding_rules_reach_the_system_content(tmp_path: Path) -> None:
+    """grounding_authority_temporal_humility: the grounding/humility rules are
+    appended at the SYSTEM position on every generation."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    motor.use_system_role = True
+    captured: list = []
+    motor._ollama_chat = MagicMock(
+        side_effect=lambda **kw: (captured.extend(kw.get("messages", [])), {"message": {"content": "ok"}})[1]
+    )
+
+    motor._generar_dialogo("hablemos de algo", source="direct")
+
+    assert captured[0]["role"] == "system"
+    assert i18n_active.grounding_rules() in captured[0]["content"]
+
+
+def test_grounding_rules_survive_a_profile_prompt_override(tmp_path: Path) -> None:
+    """ROOT CAUSE GUARD: set_profile REPLACES self.system_prompt with the
+    profile's own prompt (llm_engine.py `payload.get("prompt", ...)`), so every
+    shipped profile (Akira, Comunidad, Show...) bypasses llm.system_prompt
+    entirely. The rules must be appended by the engine, never live only inside
+    the locale persona — otherwise they are dead text for every profile user."""
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    motor.use_system_role = True
+    motor.system_prompt = "AKIRA_PROFILE_PROMPT sin reglas propias"
+    captured: list = []
+    motor._ollama_chat = MagicMock(
+        side_effect=lambda **kw: (captured.extend(kw.get("messages", [])), {"message": {"content": "ok"}})[1]
+    )
+
+    motor._generar_dialogo("hablemos de algo", source="direct")
+
+    system_content = captured[0]["content"]
+    assert "AKIRA_PROFILE_PROMPT" in system_content
+    assert i18n_active.grounding_rules() in system_content
+    # Persona first, rules after it — never the other way around.
+    assert system_content.index("AKIRA_PROFILE_PROMPT") < system_content.index(
+        i18n_active.grounding_rules()
+    )
+
+
+def test_grounding_rules_present_for_chat_and_agenda_sources(tmp_path: Path) -> None:
+    """Incident 2 (denying that shipped models exist) is not direct-only, so the
+    humility rule is unconditional — unlike the editorial block, which stays
+    gated on source == 'direct'."""
+    for source in ("chat", "ptt", "agenda"):
+        motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+        motor.use_system_role = True
+        captured: list = []
+        motor._ollama_chat = MagicMock(
+            side_effect=lambda **kw: (captured.extend(kw.get("messages", [])), {"message": {"content": "ok"}})[1]
+        )
+
+        motor._generar_dialogo("algo", source=source)
+
+        assert i18n_active.grounding_rules() in captured[0]["content"], source
+
+
+def test_bridge_rendered_block_carries_active_locale_authority(tmp_path: Path) -> None:
+    """The bridge (the real runtime renderer for both the direct and agenda
+    paths) supplies the active locale's card instruction."""
+    store, bridge = _make_bridge(tmp_path)
+    _arm_card(store, "Look Outside", triggers=["look outside"])
+
+    block = bridge.resolve_direct_context("kira que sabes de look outside")
+
+    assert block is not None
+    assert i18n_active.editorial_card_instruction() in block
 
 
 def test_usage_recorder_exception_does_not_propagate(tmp_path: Path) -> None:

@@ -92,6 +92,25 @@ def test_es_persona_announces_memorias_guardadas_block(official):
     assert "<memorias_guardadas>" in settings.SYSTEM_PROMPT
 
 
+def test_grounding_rules_live_outside_the_persona_slot(official):
+    """grounding_authority_temporal_humility: the grounding/humility rules must
+    NOT be folded into llm.system_prompt.
+
+    Two reasons, both load-bearing:
+      1. ``set_profile`` replaces ``self.system_prompt`` with the profile's own
+         prompt, so anything inside the persona slot is bypassed by every
+         shipped profile. The engine appends the rules instead.
+      2. es ``llm.system_prompt`` is pinned byte-identical to
+         ``settings.SYSTEM_PROMPT`` by the characterization tests above;
+         growing it would force an edit to the legacy anchor too.
+    """
+    for code in ("es", "en"):
+        bundle = build_chain(code, official)
+        persona = resolve(bundle, "llm.system_prompt")
+        rules = resolve(bundle, "llm.grounding_rules")
+        assert rules not in persona
+
+
 def test_active_persona_falls_back_to_legacy_when_slot_missing():
     active.set_active_bundle(
         LocaleBundle(code="xx", tier=TIER_OFFICIAL, data={"meta": {"code": "xx"}})

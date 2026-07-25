@@ -129,6 +129,68 @@ def test_prompt_block_is_bounded_structured_and_has_no_raw_fields() -> None:
     assert len(block) <= 900
 
 
+# ---------------------------------------------------------------------------
+# grounding_authority_temporal_humility — incident 1: the card WAS injected and
+# Kira still overrode its release date and invented an engine that was never in
+# it. The rendered block must frame itself as operator-verified fact that
+# outranks recollection, and must forbid inventing specifics.
+#
+# PRESENCE/STRUCTURE only: this pins what reaches the model, not what the model
+# does with it.
+# ---------------------------------------------------------------------------
+
+
+def _authority_card() -> EditorialCard:
+    return EditorialCard(
+        topic="Look Outside",
+        summary="Juego de terror hecho con RPG Maker por un solo desarrollador.",
+        streamer_take="Quiero hablar del arte y del ritmo.",
+    )
+
+
+def test_prompt_block_frames_card_as_authoritative_over_recollection() -> None:
+    block = _authority_card().to_prompt_block()
+
+    # Authority framing: operator-supplied, outranks the model's own memory.
+    assert "MANDAN sobre cualquier recuerdo propio" in block
+    # No-invention rule, naming the exact classes of specific that went wrong.
+    assert "fechas" in block
+    assert "versiones" in block
+    # The pre-existing one-turn/clarity instruction is preserved, not replaced.
+    assert "priorizá claridad" in block
+
+
+def test_prompt_block_instruction_is_locale_injectable() -> None:
+    # The renderer stays i18n-free (it is a data class); the caller supplies the
+    # active locale's text, mirroring memory_digest.build_block's contract.
+    block = _authority_card().to_prompt_block(instruction="EN_MARKER outranks recollection")
+
+    assert "EN_MARKER outranks recollection" in block
+    assert EditorialCard.DEFAULT_PROMPT_INSTRUCTION not in block
+
+
+def test_prompt_block_falls_back_to_default_instruction_on_empty() -> None:
+    # An empty/absent locale slot must never render an instruction-less block.
+    block = _authority_card().to_prompt_block(instruction="")
+
+    assert EditorialCard.DEFAULT_PROMPT_INSTRUCTION in block
+
+
+def test_authority_framing_survives_truncation() -> None:
+    # The truncation path trims card CONTENT; the authority instruction is the
+    # one field that must never be the thing that gets dropped.
+    card = EditorialCard(
+        topic="Look Outside",
+        summary="x" * 1100,
+        streamer_take="y" * 700,
+    )
+
+    block = card.to_prompt_block(max_chars=600)
+
+    assert len(block) <= 600
+    assert "MANDAN sobre cualquier recuerdo propio" in block
+
+
 def test_rating_records_store_utility_without_raw_chat(tmp_path) -> None:
     store = EditorialCardStore(tmp_path / "cards.db")
     card = store.upsert(
