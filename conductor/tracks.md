@@ -19,6 +19,73 @@ This file tracks all major tracks for the project. Each track has its own detail
   honored. NOT committed (owner-gated). OWNER RUNTIME GATE: switch model mid-conversation → Kira
   continues seamlessly; "lo último de tu memoria" returns recency; "mi memoria RAM" stays topical.*
 
+- [~] **Track: Multi-Provider LLM — 2026-07-23 (local Ollama + OpenAI-compatible cloud behind one global switch)**
+  *Link: [./tracks/multi_provider_llm_20260723/](./tracks/multi_provider_llm_20260723/)*
+  *Status 2026-07-23 SPEC+DESIGN IN PROGRESS: proposal approved — global provider switch v1, hybrid
+  seam with is_local gating, Ollama path byte-identical when local, auto-fallback-to-local default,
+  oauth_store.py key pattern. Owner confirmed 2026-07-23: editable presets ship (OpenAI + NVIDIA NIM),
+  pregen OFF by default on cloud, token cost log-only in v1. SPEC + DESIGN DONE 2026-07-23: spec
+  (sonnet, Given/When/Then on is_local boundary, key handling, fallback state machine, no-Ollama health
+  profile, GET/PUT /api/llm/provider shape); design (fable) — first gate FAILED on 2 concrete gaps
+  (pregen cloud gate not concrete; provider API schema incomplete), corrective re-run fixed both,
+  gate2 PASS (8/8 file:line spot-checks accurate). Owner review pending before tasks: pregen gate sits
+  in pregenerate() so cloud+OFF also disables agenda prefetch; empty api_key on PUT clears the stored
+  key; cloud config requires an effective model (422); new config/llm_provider.json module.
+  AMENDED 2026-07-23 (owner order): per-provider persisted PROFILES — profiles map + active_provider
+  selector, one key per profile in OAuthStore-backed config/llm_keys.json, profile-scoped PUT merge,
+  draft saves allowed with activation-time completeness (422 only when activating an incomplete cloud
+  profile). Amendment gate: 15+ file:line claims verified, 1 must-fix (OAuthTokenStore → OAuthStore
+  class-name hallucination) corrected same day. All owner review items CONFIRMED (pregen OFF-but-
+  activatable, keys never leave machine, risks accepted-known).
+  APPLY PROGRESS 2026-07-23: Phase 1 (config+keys+redaction, 586 lines — size flagged, PR shape in
+  doubts ledger) + Phase 2 (cloud client, 322 lines) IMPLEMENTED, judged (P1: fable+opus, 0 critical,
+  0 key-leak paths, 8 fixes incl. atomic llm_keys.json write, config-before-key ordering, activation-
+  requires-key spec conformance; P2: opus+sonnet, 0 critical, 3 fixes incl. HTTPError sanitized so the
+  Bearer key is unreachable from the exception object graph — gotcha: `raise X from None` inside an
+  except block does NOT clear __context__), all fixes green: provider/observability/stream_admin 56
+  passed, cloud client 15 passed, regression trio 108 passed.
+  ALL 5 PHASES IMPLEMENTED 2026-07-23, VERIFY PASS-WITH-WARNINGS (719 passed / 0 failed across
+  25 suites). Phase 3 (is_local gating): judges fable+opus found 3 CRITICALs (connector-upgrade
+  bypassed the pregen gate; no posture snapshot → torn turns + cross-provider key-send risk;
+  cloud responses poisoned the local reasoning cache) — all fixed (posture snapshot threaded,
+  gates on connector/scout, cache write local-only) + re-validated CONFIRMED-ALL. Phase 4
+  (fallback+i18n): judges opus+sonnet found 2 CRITICALs (transport errors — 401/DNS/5xx — never
+  triggered fallback; warm result ignored → false success spoken + flag latched on dead local) —
+  fixed (fallback on both branches; notice only on warm success, flag reverts + cloud_llm_error
+  surfaced; flag clears only on real provider change; event whitelisted in engine_host for Tauri).
+  Phase 5 (health+models API): approved, only pins added. VERIFY CRITICAL fixed same day:
+  .gitignore's unanchored `config/` swallowed opencohost/config/llm_provider.py — anchored to
+  /config/ (root tokens still ignored, module now visible to git). NOT committed (owner-gated).
+  OWNER RUNTIME GATE: real cloud session (NVIDIA NIM/OpenAI) — configure profile+key from API,
+  swap providers, kill the cloud mid-session (auto-fallback warms local + speaks notice), verify
+  pregen stays dark on cloud, tune CLOUD_CHAT_TIMEOUT (90s placeholder).
+  POST-INCIDENT FIXES 2026-07-24 (first live cloud session forensics — root cause: guardrail
+  never_promise blocked 2 good paid 200s + real NIM 503 outage under fallback_mode=manual with
+  the cloud_llm_error event unrendered client-side = total silence; stack itself worked, auto
+  mode proven live at 02:55): CLOUD_MAX_TOKENS=16384 replaces the local 768 cap on cloud
+  (reasoning-starvation prevention); final empty-200 on cloud now fires cloud_llm_error +
+  _handle_cloud_failure; UI renders cloud_llm_error in the feed; ProviderCard UX fixes
+  (delete-active-key copy actionable, invalid-id reason adjacent to Guardar + one-click z_ai
+  suggestion, 422 clears on edit); tests/conftest.py autouse fixture isolates
+  LLM_PROVIDER_CONFIG_FILE/LLM_KEYS_FILE (real cloud config was leaking into tests →
+  REAL network calls with the owner's key; 29 fails → 346/0).
+  UX ROUND 2026-07-24 (owner interview): guardrail DECIDED "afinar + reintento" and IMPLEMENTED —
+  R3 split (hard-commitment verbs block standalone; discourse markers "sin duda/seguro que/
+  asegurado/for sure" require same-sentence 2nd-person outcome co-occurrence: "sin duda vas a
+  ganar" blocks, "sin duda es buen juego" passes, "tu paquete está asegurado" passes) + one
+  retry-with-nudge before the canned line (trailing system note, never spoken; exactly 1 extra
+  generation) + validation logger FIXED (opencohost.config.validation → rotating
+  logs/opencohost_validation.log with SensitiveDataFilter; block previews now persist; several
+  other handler-less opencohost.* loggers noted as follow-up). Manual-mode silence CONFIRMED
+  as-is; mini-show UX = direct narration (spec'd for the memoria tool-calling track, go pending);
+  provider panel opens when profiles exist. Stale __new__-bypass helpers in
+  test_context_overflow_guardrail + test_reasoning_token_budget reconciled (watchdog-lambda
+  signature + _lock; 32 pre-existing fails → 0). Suites: validation/fallback/gating/timeouts/
+  i18n-guardrails 207/0, helpers 44/0, UI 942/942. R3 negation handling = registered follow-up.
+  NOTE: stale
+  openspec/changes/multi-provider-llm-selector/ (full LlmProvider interface + streaming) marked
+  SUPERSEDED with banner 2026-07-23; unique nugget (candidate cloud model names) preserved in it.*
+
 - [x] **Track: Knowledge Cards Upload — 2026-07-18 (operator creates and arms editorial cards from the UI)**
   *Link: [./tracks/knowledge_cards_upload_20260718/](./tracks/knowledge_cards_upload_20260718/)*
   *Status 2026-07-18 IMPLEMENTED: WU1 4fe41f2 backend (GET /api/agent/cards light projection +

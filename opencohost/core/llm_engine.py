@@ -111,6 +111,18 @@ _SESSION_MEMORIA_TITLES_CAP = 40
 # write can never push app close past the budget (R4: flush never blocks close).
 _MEMORIA_SUMMARY_WRITE_BUDGET_SECONDS = 1.1
 
+# guardrail_tuning_20260724 (owner decision "afinar + reintento"): appended as
+# a trailing system message for the ONE extra generation attempt after an
+# output_guard block. Never spoken/sent to TTS itself -- only the model sees
+# it. Spanish, in-character-neutral (a correction to the model, not a Kira
+# line): no promises, no guarantees, no absolute certainty about outcomes.
+_GUARDRAIL_RETRY_NUDGE = (
+    "Nota interna: tu respuesta anterior prometía, garantizaba o daba por "
+    "seguro un resultado, premio o acción para la audiencia. Respondé de "
+    "nuevo sin prometer ni garantizar nada y sin afirmar con certeza "
+    "absoluta lo que va a pasar; mantené el resto del tono."
+)
+
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
 
@@ -2576,6 +2588,57 @@ class MotorVocalIA(threading.Thread):
         self._guardrail_fallback_idx = idx + 1
         return generic[idx % len(generic)]
 
+    def _retry_after_guard_block(
+        self,
+        *,
+        messages: list,
+        opciones_llm: dict,
+        request_model: str,
+        chat_timeout: float,
+        provider_cfg: dict,
+        is_local: bool,
+    ) -> str:
+        """ONE extra generation after an output_guard block (owner decision
+        "afinar + reintento", guardrail_tuning_20260724): same prompt +
+        `_GUARDRAIL_RETRY_NUDGE` appended as a trailing system message.
+
+        A single standalone call to `_ollama_chat_with_watchdog` -- NEVER
+        wrapped in the caller's `max_intentos` transport-retry loop, so it
+        never consumes that separate budget. Posture (`provider_cfg`/
+        `is_local`) is the caller's F2 entry snapshot, never re-read live.
+
+        Returns the stripped content, or "" on any failure (transport error,
+        timeout, empty response) so the caller falls through to the existing
+        canned-line fallback unchanged.
+        """
+        retry_messages = messages + [
+            {"role": "system", "content": _GUARDRAIL_RETRY_NUDGE}
+        ]
+        with self._lock:
+            self._llm_generating = True
+        try:
+            respuesta = self._ollama_chat_with_watchdog(
+                timeout=chat_timeout,
+                model=request_model,
+                messages=retry_messages,
+                keep_alive=LLM_KEEP_ALIVE,
+                options=opciones_llm,
+                provider_cfg=provider_cfg,
+                is_local=is_local,
+            )
+            msg_obj = respuesta.get('message', {})
+            if isinstance(msg_obj, dict):
+                content = msg_obj.get('content', '')
+            else:
+                content = getattr(msg_obj, 'content', '')
+            return (content or "").strip().strip('\x00\ufeff')
+        except Exception:
+            logger.warning("Guardrail retry generation failed", exc_info=True)
+            return ""
+        finally:
+            with self._lock:
+                self._llm_generating = False
+
     def _maybe_notify_piper_locale_mismatch(self) -> None:
         """One-shot ui_callback notice fired the first time Piper actually
         engages as the TTS fallback while its voice language disagrees with
@@ -3074,6 +3137,36 @@ class MotorVocalIA(threading.Thread):
             allowed, guard_reason = output_guard(dialogo, source=source)
             if not allowed:
                 self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
+                # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
+                # ONE extra generation, same prompt + a corrective system nudge,
+                # before falling back to the canned line. A SEPARATE call outside
+                # the max_intentos transport-retry loop above — never consumes
+                # that budget. Posture (provider_cfg/is_local) stays the F2
+                # snapshot; no live re-read.
+                retry_content = self._retry_after_guard_block(
+                    messages=messages,
+                    opciones_llm=opciones_llm,
+                    request_model=request_model,
+                    chat_timeout=chat_timeout,
+                    provider_cfg=provider_cfg,
+                    is_local=is_local,
+                )
+                if retry_content and source.startswith("kira-agenda"):
+                    retry_content = self._sanitize_agenda_output(retry_content)
+                    transformer = getattr(self, "agenda_output_transformer", None)
+                    if transformer is not None:
+                        try:
+                            retry_content = transformer(retry_content)
+                        except Exception:
+                            logger.exception("Agenda output transformer failed (guardrail retry)")
+                if retry_content:
+                    retry_allowed, _ = output_guard(retry_content, source=source)
+                    if retry_allowed:
+                        self._log("Guardrail retry: respuesta corregida aceptada tras un intento adicional.")
+                        dialogo = retry_content
+                        allowed = True
+
+            if not allowed:
                 fallback = self._guardrail_fallback_line(source, guard_reason)
                 if fallback:
                     self._log("Guardrail fallback: usando línea neutral sin LLM.")

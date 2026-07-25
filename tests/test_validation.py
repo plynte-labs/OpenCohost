@@ -3,6 +3,8 @@
 Covers spec scenarios: T11, T12, T13.
 """
 
+import logging.handlers
+
 import pytest
 
 from opencohost.config.presets import default_config
@@ -519,3 +521,161 @@ class TestOutputGuardSourceScoping:
             source="direct",
         )
         assert allowed is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# R3 split: hard commitments (unchanged, standalone) vs discourse-certainty
+# markers (co-occurrence-gated) — guardrail_tuning_20260724.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPromiseRuleHardCommitments:
+    """Rare, always-dangerous commitment verbs — block standalone, no outcome
+    context required. These must stay green exactly as before the split."""
+
+    def test_te_prometo_blocked(self):
+        allowed, reason = output_guard("Te prometo que esto va a salir bien.")
+        assert allowed is False
+        assert "never_promise" in reason
+
+    def test_te_garantizo_blocked(self):
+        allowed, _ = output_guard("Te garantizo que va a funcionar.")
+        assert allowed is False
+
+    def test_garantizado_blocked(self):
+        allowed, _ = output_guard("Está garantizado.")
+        assert allowed is False
+
+    def test_i_promise_blocked(self):
+        allowed, _ = output_guard("I promise this will work out.")
+        assert allowed is False
+
+    def test_guaranteed_blocked(self):
+        allowed, _ = output_guard("This is guaranteed to work.")
+        assert allowed is False
+
+
+class TestPromiseRuleDiscourseMarkers:
+    """Common benign filler ("sin duda", "te aseguro", ...) only blocks when
+    it co-occurs, in the same sentence, with an outcome/audience object."""
+
+    # ── benign: marker alone, no outcome — must be ALLOWED ──────────────────
+
+    def test_sin_duda_alone_allowed(self):
+        allowed, reason = output_guard("Sin duda es un buen juego.")
+        assert allowed is True, f"False positive: {reason}"
+
+    def test_te_aseguro_alone_allowed(self):
+        allowed, reason = output_guard("Te aseguro que lo tengo registrado.")
+        assert allowed is True, f"False positive: {reason}"
+
+    def test_100_seguro_alone_allowed(self):
+        allowed, reason = output_guard("100% seguro que me gusta este juego.")
+        assert allowed is True, f"False positive: {reason}"
+
+    def test_for_sure_alone_allowed(self):
+        allowed, reason = output_guard("For sure this game is great.")
+        assert allowed is True, f"False positive: {reason}"
+
+    def test_without_a_doubt_alone_allowed(self):
+        allowed, reason = output_guard("Without a doubt, this is fun.")
+        assert allowed is True, f"False positive: {reason}"
+
+    def test_bare_asegurado_unrelated_sense_allowed(self):
+        """'asegurado' outside a promise context (insurance/'secured' sense)
+        must not false-positive — it needs the outcome co-occurrence too."""
+        allowed, reason = output_guard("Tu paquete está asegurado.")
+        assert allowed is True, f"False positive: {reason}"
+
+    # ── dangerous: marker + outcome/audience object, same sentence — BLOCKED ─
+
+    def test_sin_duda_vas_a_ganar_blocked(self):
+        allowed, reason = output_guard("Sin duda vas a ganar.")
+        assert allowed is False
+        assert "never_promise" in reason
+
+    def test_te_aseguro_te_llega_el_premio_blocked(self):
+        allowed, reason = output_guard("Te aseguro que te llega el premio.")
+        assert allowed is False
+        assert "never_promise" in reason
+
+    def test_100_seguro_van_a_ganar_blocked(self):
+        allowed, _ = output_guard("100% seguro que van a ganar.")
+        assert allowed is False
+
+    def test_for_sure_you_will_win_blocked(self):
+        allowed, _ = output_guard("For sure you'll win this.")
+        assert allowed is False
+
+    def test_certainly_will_with_outcome_blocked(self):
+        allowed, _ = output_guard(
+            "Certainly will happen, you'll get the prize for sure."
+        )
+        assert allowed is False
+
+    # ── cross-sentence: marker and outcome word in DIFFERENT sentences ──────
+
+    def test_marker_and_outcome_in_different_sentences_allowed(self):
+        """The co-occurrence window is the SENTENCE, not the whole response —
+        a marker earlier and an unrelated outcome-shaped word later must not
+        combine into a false block."""
+        allowed, reason = output_guard(
+            "Sin duda es un gran juego. Y en el sorteo, vas a ganar seguro."
+        )
+        assert allowed is True, f"False positive: {reason}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Validation logger persistence — guardrail_tuning_20260724 item 0.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def clean_validation_logger():
+    """Isolate the module logger so tests don't leak handlers between runs —
+    mirrors tests/test_api_observability.py::clean_api_logger."""
+    logger = logging.getLogger("opencohost.config.validation")
+    saved_handlers = list(logger.handlers)
+    logger.handlers = []
+    yield logger
+    for handler in logger.handlers:
+        handler.close()
+    logger.handlers = saved_handlers
+
+
+class TestValidationLogging:
+    def test_setup_is_idempotent(self, tmp_path, monkeypatch, clean_validation_logger):
+        from opencohost.config import settings, validation
+
+        monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path))
+        validation.setup_validation_logging()
+        validation.setup_validation_logging()
+
+        file_handlers = [
+            h for h in clean_validation_logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        assert len(file_handlers) == 1
+
+    def test_block_preview_persists_redacted_through_real_handler(
+        self, tmp_path, monkeypatch, clean_validation_logger
+    ):
+        """A guardrail block's preview must land, redacted, in a REAL file
+        handler -- not fall through to logging.lastResort (item 0)."""
+        from opencohost.config import settings, validation
+
+        monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path))
+        validation.setup_validation_logging()
+
+        validation.log_non_negotiable_block(
+            "never_promise", "output_guard", preview="Bearer abc123token"
+        )
+        for handler in clean_validation_logger.handlers:
+            handler.flush()
+
+        log_path = tmp_path / "opencohost_validation.log"
+        assert log_path.exists()
+        content = log_path.read_text(encoding="utf-8")
+        assert "never_promise" in content
+        assert "<redacted>" in content
+        assert "abc123token" not in content

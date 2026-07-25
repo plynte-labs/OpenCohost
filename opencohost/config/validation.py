@@ -14,9 +14,13 @@ dataclass field checks for config).
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import os
 import re
 from typing import Any
 
+from opencohost.config import settings
+from opencohost.config.logger import SensitiveDataFilter, log_formatter
 from opencohost.config.schema import (
     ActionPolicy,
     ChatEvent,
@@ -25,6 +29,42 @@ from opencohost.config.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+_VALIDATION_FILE_HANDLER_NAME = "opencohost-config-validation-file"
+
+
+def setup_validation_logging() -> None:
+    """Idempotently attach persistence + redaction to this module's logger.
+
+    ``logging.getLogger(__name__)`` above resolves to
+    ``opencohost.config.validation`` -- a DIFFERENT tree from the configured
+    ``OpenCohost`` engine logger (opencohost/config/logger.py) and from the
+    ``opencohost.api`` tree ``api/observability.py::setup_api_logging()``
+    covers. With no handler attached, every ``logger.warning(...)`` call in
+    this module -- notably ``log_non_negotiable_block``'s redacted block
+    preview -- falls through to ``logging.lastResort``: stderr-only,
+    unpersisted, and UNREDACTED. Mirrors ``setup_api_logging()``'s idempotent
+    named-handler guard; called once below at import time, since this module
+    has no app-startup hook of its own (llm_engine.py imports ``output_guard``
+    directly, independent of API lifespan).
+    """
+    if any(getattr(h, "name", None) == _VALIDATION_FILE_HANDLER_NAME for h in logger.handlers):
+        return
+    os.makedirs(settings.LOG_DIR, exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(settings.LOG_DIR, "opencohost_validation.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        delay=True,
+        encoding="utf-8",
+    )
+    file_handler.name = _VALIDATION_FILE_HANDLER_NAME
+    file_handler.setFormatter(log_formatter)
+    file_handler.addFilter(SensitiveDataFilter())
+    logger.addHandler(file_handler)
+
+
+setup_validation_logging()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -78,19 +118,69 @@ _LINK_PATTERN: re.Pattern = re.compile(
     re.IGNORECASE,
 )
 
-# R3: Kira never promises for streamer — promise/certainty phrases
-_PROMISE_PATTERNS: list[re.Pattern] = [
+# R3: Kira never promises for streamer — promise/certainty phrases.
+#
+# guardrail_tuning_20260724 (owner decision "afinar + reintento"): split the
+# original single pattern list, which conflated two very different things:
+#   - HARD commitment verbs — rare, always dangerous, block standalone.
+#   - discourse-certainty markers — frequent benign filler ("sin duda es buen
+#     juego") that only becomes a real promise when paired, in the SAME
+#     sentence, with an outcome/audience object (rule intent: Kira must never
+#     promise OUTCOMES/GIFTS/ACTIONS to the audience, not "never sound sure").
+_PROMISE_HARD_PATTERNS: list[re.Pattern] = [
     re.compile(
-        r"\b(?:te\s+prometo|prometo\s+que|garantizado|asegurado|seguro\s+que|"
-        r"sin\s+duda|100%\s+seguro|te\s+aseguro|te\s+garantizo)\b",
+        r"\b(?:te\s+prometo|prometo\s+que|te\s+garantizo|garantizado)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:i\s+promise|guaranteed|certainly\s+will|definitely\s+will|"
-        r"for\s+sure|without\s+a\s+doubt)\b",
+        r"\b(?:i\s+promise|guaranteed)\b",
         re.IGNORECASE,
     ),
 ]
+
+# Discourse-certainty markers — benign on their own ("te aseguro que lo tengo
+# registrado", "sin duda es buen juego"). "asegurado" bare also has unrelated
+# senses (insurance, "secured") — folding it in here (instead of the hard set)
+# means it too now requires the outcome co-occurrence below before blocking.
+_PROMISE_DISCOURSE_PATTERNS: list[re.Pattern] = [
+    re.compile(
+        r"\b(?:seguro\s+que|sin\s+duda|100%\s+seguro|te\s+aseguro|asegurado)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:for\s+sure|without\s+a\s+doubt|certainly\s+will|definitely\s+will)\b",
+        re.IGNORECASE,
+    ),
+]
+
+# Outcome/audience object — Kira asserting the AUDIENCE will get/win/receive
+# something, or that something is on its way to them. Third-person outcomes
+# ("el equipo va a ganar") deliberately do NOT match: those aren't a promise
+# TO the audience.
+_PROMISE_OUTCOME_PATTERNS: list[re.Pattern] = [
+    re.compile(
+        r"\b(?:vas|van)\s+a\s+(?:ganar|recibir|conseguir|llevarte)\b"
+        r"|\bte\s+(?:va\s+a\s+llegar|llega|llegar[aá])\b"
+        r"|\b(?:gan[aá]s|ganan|recib[ií]s|reciben|consegu[ií]s)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\byou(?:'ll|\s+will)\s+(?:win|get|receive)\b",
+        re.IGNORECASE,
+    ),
+]
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?\n])\s+")
+
+
+def _promise_sentences(text: str) -> list[str]:
+    """R3 discourse-marker co-occurrence window: a naive sentence split.
+
+    ponytail: sentence-boundary proxy, not a real clause parser — good
+    enough for short TTS responses. Widen to a fixed word-distance window
+    if cross-sentence false negatives ever show up in practice.
+    """
+    return _SENTENCE_BOUNDARY_RE.split(text)
 
 # R4: Kira never invents confirmations
 _CONFIRMATION_PATTERNS: list[re.Pattern] = [
@@ -405,12 +495,29 @@ def output_guard(response: str, source: str = "chat") -> tuple[bool, str]:
                 )
                 return False, reason
 
-    # R3: Never promise
-    for pat in _PROMISE_PATTERNS:
+    # R3: Never promise — hard commitments always block, standalone.
+    for pat in _PROMISE_HARD_PATTERNS:
         if pat.search(response):
             reason = (
                 f"Non-negotiable violation [never_promise]: "
                 f"response contains a promise or guarantee"
+            )
+            log_non_negotiable_block(
+                "never_promise", "output_guard",
+                preview=response[:120],
+            )
+            return False, reason
+
+    # R3: discourse-certainty markers only block when they co-occur, in the
+    # same sentence, with an outcome/audience object (see _PROMISE_DISCOURSE_
+    # PATTERNS docstring above).
+    for sentence in _promise_sentences(response):
+        if not any(pat.search(sentence) for pat in _PROMISE_DISCOURSE_PATTERNS):
+            continue
+        if any(pat.search(sentence) for pat in _PROMISE_OUTCOME_PATTERNS):
+            reason = (
+                f"Non-negotiable violation [never_promise]: "
+                f"response asserts certainty about an outcome for the audience"
             )
             log_non_negotiable_block(
                 "never_promise", "output_guard",
