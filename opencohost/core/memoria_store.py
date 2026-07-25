@@ -205,7 +205,11 @@ _FILLER_PHRASE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bholas?\b",
         r"\bque\s+tal\b",
         r"\bque\s+onda\b",
-        r"\bcomo\s+(?:vamos|estas|estan|va|andas)\b",
+        # "vas" escaped the original alternation within a day of it shipping
+        # ("como vas?" still persisted as a memoria). BAND-AID: a closed filler
+        # list does not scale — the real fix is LLM-judged promotion at session
+        # close, tracked separately.
+        r"\bcomo\s+(?:vamos|vas|estas|estan|va|andas)\b",
         r"\bel\s+dia\s+de\s+hoy\b",
         r"\bhoy\b",
         # Spanish farewells / acknowledgements

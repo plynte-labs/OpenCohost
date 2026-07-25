@@ -690,6 +690,26 @@ def test_greeting_plus_real_content_still_captured(text: str) -> None:
     assert derive_stable_key("profile-1", text) is not None
 
 
+def test_como_vas_greeting_rejected() -> None:
+    # B3 (turn provenance batch 1): "vas" was missing from the
+    # "como (vamos|estas|estan|va|andas)" alternation, so the owner's real
+    # "como vas?" still persisted as a memoria. BAND-AID, not the fix: a closed
+    # filler list provably does not scale (this one escaped within a day of the
+    # list shipping) — the real fix is LLM-judged promotion at session close.
+    from opencohost.core.memoria_store import significant_token_count
+
+    assert significant_token_count("Como vas?") == 0
+    assert is_capturable("Como vas?") is False
+    assert derive_stable_key("profile-1", "Como vas?") is None
+
+
+def test_como_vas_with_real_content_still_captured() -> None:
+    # The all-or-nothing boundary holds: the added shape must not swallow a turn
+    # that opens with it and then says something real.
+    assert is_capturable("Como vas con el parche de bloodborne") is True
+    assert derive_stable_key("profile-1", "Como vas con el parche de bloodborne") is not None
+
+
 # ---------------------------------------------------------------------------
 # F2 — history-wrapper frames are stripped STRUCTURALLY at the derivation
 # boundary (from the i18n template's own "{text}" split), not blacklisted
