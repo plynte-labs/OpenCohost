@@ -426,8 +426,18 @@ _META_RECALL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p i
     # "sesión/charla/stream/conversación pasada|anterior|previa", both orders.
     r"\b(sesion|charla|stream|conversacion)\w*\s+(pasad|anterior|previ)\w*",
     r"\b(pasad|anterior|previ)\w*\s+(sesion|charla|stream|conversacion)\w*",
-    # "en base a mis/tus memorias" — explicit reference to the memoria store.
+    # "en base a mis/tus memorias" — explicit plural reference to the memoria
+    # store (D6, model_switch_memory_continuity_20260723).
     r"\b(mis|tus)\s+memorias\b",
+    # "en base a mi/tu memoria" (singular) — but ONLY phrase-final (end of
+    # string or followed by punctuation), never followed by another noun.
+    # jd-fix-agent correction (finding 1): the plain `(mi|tu)\s+memorias?`
+    # shape over-triggered on topical hardware mentions ("mi memoria RAM",
+    # "tu memoria USB se llenó", "...mi memoria del teléfono"), wrongly
+    # routing them to recency. The negative lookahead excludes "memoria"
+    # immediately followed by another word, while still matching phrase-final
+    # forms like "lo último de tu memoria" / "¿qué hay en tu memoria?".
+    r"\b(mi|tu)\s+memoria\b(?!\s+\w)",
 ))
 
 

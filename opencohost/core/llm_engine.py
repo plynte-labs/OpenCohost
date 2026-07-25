@@ -2192,7 +2192,9 @@ class MotorVocalIA(threading.Thread):
 
     def _switch_and_prepare_model(self, new_model: str) -> None:
         previous_model = self.current_model
-        self.historial.clear()
+        # D1 (model_switch_memory_continuity_20260723): no historial.clear()
+        # here — owner-chosen SEAMLESS continuity, conversation carries over
+        # verbatim across a model switch.
 
         if not self._prepare_model(new_model):
             raise RuntimeError("target_model_unavailable")
@@ -2477,7 +2479,9 @@ class MotorVocalIA(threading.Thread):
                     if status_str and status_str != last_pct:
                         self.log_queue.put(f"[Descarga] {model_tag}: {status_str}")
 
-            self.historial.clear()
+            # D2 (model_switch_memory_continuity_20260723): no historial.clear()
+            # here either — same "model changed mid-session" event family as
+            # switch_model, same seamless-continuity contract.
             self.current_model = model_tag
             self._desired_model = model_tag
             self._loaded_model = model_tag

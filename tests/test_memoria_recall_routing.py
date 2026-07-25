@@ -140,6 +140,11 @@ _META_QUERIES = [
     "contame de la charla anterior",
     "de qué se habló en la charla pasada",
     "en la sesión anterior, ¿de qué se habló?",
+    # D6 (model_switch_memory_continuity_20260723): singular "tu/mi memoria"
+    # phrasing — the owner's real "lo último de tu memoria" wording.
+    "¿qué es lo último de tu memoria?",
+    "que hay en tu memoria",
+    "en base a mi memoria",
 ]
 
 # Full negative set: topical turns that share surface stems with recall verbs
@@ -162,6 +167,17 @@ _TOPICAL_QUERIES = [
     "subí el volumen del micrófono",
     "contame un chiste",
     "",
+    # D6 negative guards: "memoria" alone (no mi/tu possessive) must never
+    # over-trigger recency routing.
+    "memoria RAM",
+    "se me fue la memoria",
+    "hablamos de la memoria del juego",
+    # jd-fix-agent (model_switch_memory_continuity_20260723, finding 1):
+    # possessive + "memoria" + another noun is a topical hardware mention, not
+    # a recall phrase — the singular arm must not over-trigger here.
+    "mi memoria RAM",
+    "tu memoria USB se llenó",
+    "se llenó mi memoria del teléfono",
 ]
 
 

@@ -528,10 +528,12 @@ class TestDigestSurvival:
     def test_digest_survives_switch_and_prepare_model(self):
         motor, _, _ = _make_motor()
         self._populate_digest(motor)
+        motor._commit_history("hola, ¿cómo estás?", "todo bien, seguimos con el stream", source="direct")
+        historial_before = list(motor.historial)
         with patch.object(motor, "_prepare_model", return_value=True):
             motor._switch_and_prepare_model("new-model")
-        # historial cleared, digest survives
-        assert list(motor.historial) == []
+        # D1 (seamless continuity): historial carries over verbatim, digest survives
+        assert list(motor.historial) == historial_before
         assert len(motor._memory_digest.lines) == 3
 
     def test_digest_survives_watchdog_rollback_path(self):
@@ -577,7 +579,9 @@ class TestDigestSurvival:
 
     def test_digest_not_cleared_on_model_switch_event(self):
         """_dispatch_command('switch_model') goes through _apply_model_switch
-        → _switch_and_prepare_model which clears historial but NOT digest."""
+        → _switch_and_prepare_model, which no longer clears historial either
+        (seamless continuity, D1) — this test pins that the digest is left
+        untouched by the switch command path regardless."""
         motor, _, _ = _make_motor()
         self._populate_digest(motor)
         motor._processing = False
@@ -591,10 +595,12 @@ class TestDigestSurvival:
 
     def test_digest_survives_download_model_path(self):
         """D2: the digest must survive the download_model path.
-        _download_model_worker clears historial on implicit model change
-        but must NOT clear the digest."""
+        _download_model_worker no longer clears historial either (seamless
+        continuity, D2) — both must survive the implicit model change."""
         motor, _, _ = _make_motor()
         self._populate_digest(motor)
+        motor._commit_history("probemos el nuevo modelo", "dale, vamos", source="direct")
+        historial_before = list(motor.historial)
 
         # Simulate the download_model_worker succeeding without real ollama I/O
         fake_progress = MagicMock()
@@ -606,8 +612,8 @@ class TestDigestSurvival:
         with patch("opencohost.core.llm_engine.save_last_model"):
             motor._download_model_worker("new-model:latest")
 
-        # historial cleared by download path
-        assert list(motor.historial) == []
+        # historial preserved by download path (D2)
+        assert list(motor.historial) == historial_before
         # digest must survive
         assert len(motor._memory_digest.lines) == 3, (
             f"Digest was cleared by download_model path: {motor._memory_digest.lines}"

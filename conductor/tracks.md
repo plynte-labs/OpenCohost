@@ -4,6 +4,21 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [~] **Track: Model Switch Memory Continuity — 2026-07-23 (seamless mid-session LLM switch keeps conversation history)**
+  *Link: [./tracks/model_switch_memory_continuity_20260723/](./tracks/model_switch_memory_continuity_20260723/)*
+  *Status 2026-07-23 DESIGN IN PROGRESS: proposal approved with owner decision = SEAMLESS full
+  continuity (drop the unconditional historial.clear() in _switch_and_prepare_model; the owner-decision
+  addendum supersedes the earlier flush-bridge Approach section). Meta-recall regex widening in scope;
+  failed-switch history restore bundled; no new UI signal on switch; TestDigestSurvival contract
+  unchanged. Spec skipped — proposal success criteria already testable. IMPLEMENTED 2026-07-23,
+  VERIFY PASS-WITH-WARNINGS (0 critical): both historial.clear() sites deleted (switch +
+  download-activate), no replacement flush, meta-recall regex final shape = plural pattern +
+  tightened singular `\b(mi|tu)\s+memoria\b(?!\s+\w)` after dual judges (opus+sonnet) caught the
+  first-pass form over-triggering on "mi memoria RAM" (fix RED-first, 3 possessive-noun negatives
+  added). Suites: WU regression 196/196, focused model suite 108/108. All owner decisions D1-D7
+  honored. NOT committed (owner-gated). OWNER RUNTIME GATE: switch model mid-conversation → Kira
+  continues seamlessly; "lo último de tu memoria" returns recency; "mi memoria RAM" stays topical.*
+
 - [x] **Track: Knowledge Cards Upload — 2026-07-18 (operator creates and arms editorial cards from the UI)**
   *Link: [./tracks/knowledge_cards_upload_20260718/](./tracks/knowledge_cards_upload_20260718/)*
   *Status 2026-07-18 IMPLEMENTED: WU1 4fe41f2 backend (GET /api/agent/cards light projection +
