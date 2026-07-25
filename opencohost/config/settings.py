@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
-from opencohost.config.storage import STORAGE_PATHS, USER_DATA_DIR
+from opencohost.config.storage import STORAGE_PATHS, USER_DATA_DIR, atomic_write_text
 
 # ──────────────────────────────────────────────
 # Configuración global
@@ -798,6 +798,89 @@ def save_memorias_notice_dismissed(value: bool, config_file: Optional[str] = Non
         os.replace(tmp, path)
     except Exception:
         pass
+
+
+# ──────────────────────────────────────────────
+# LiveAudio / WhisperLive socket (liveaudio_ws_uri_config_20260724)
+# ──────────────────────────────────────────────
+# The operator routinely starts OpenCohost before LiveAudio, or runs LiveAudio
+# on a second capture PC. Persisting the address here (instead of only the
+# WS_URI module constant) lets PUT /api/ptt/config repoint the PTT bridge and
+# survive a restart, with no code edit and no process kill.
+#
+# The key lives in PTT_CONFIG_FILE, which is SHARED with the legacy CTK
+# PTTManager (opencohost/ui/ptt_manager.py owns "hotkey"). Both writers MERGE.
+#
+# SECURITY: WhisperLive is recv-only and every segment it emits flows straight
+# into ``process_context`` — the SAME path as a real operator turn (see the
+# privacy header at the top of opencohost/api/ptt_session.py). A URL pointed at
+# an arbitrary WS server is therefore a prompt-injection channel impersonating
+# the operator. Scheme validation is the guard we ship, and it is enforced on
+# BOTH the write side (the PUT handler) and the read side below, so
+# hand-editing ptt_settings.json cannot smuggle a foreign scheme past it.
+# A loopback-only restriction was deliberately NOT applied (owner decision):
+# LiveAudio on a capture machine is a legitimate dual-PC setup, exactly like
+# the OBS config accepting any host.
+PTT_WS_URI_KEY = "stt_ws_uri"
+STT_WS_SCHEMES = ("ws://", "wss://")
+
+
+def is_valid_stt_ws_uri(uri) -> bool:
+    """True when *uri* is an acceptable WhisperLive address.
+
+    Mirrors the ``base_url.startswith(("http://", "https://"))`` gate on the
+    LLM provider config, plus a non-empty authority so a bare ``"ws://"``
+    (which would only fail later, at connect time) is rejected up front.
+    """
+    if not isinstance(uri, str):
+        return False
+    return any(
+        uri.startswith(scheme) and uri[len(scheme):].strip()
+        for scheme in STT_WS_SCHEMES
+    )
+
+
+def _read_ptt_config(path: str) -> dict:
+    """Read PTT_CONFIG_FILE as a dict. Absent, unreadable, corrupt, or
+    non-object content all resolve to ``{}`` — never raises."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_ptt_ws_uri(config_file: Optional[str] = None, default: Optional[str] = None) -> str:
+    """Load the persisted WhisperLive URL, defaulting to ``WS_URI``.
+
+    Absent, unreadable, corrupt, or invalid-scheme content all resolve to the
+    default — a broken config is byte-identical to the pre-track behavior and
+    never blocks startup.
+    """
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    fallback = WS_URI if default is None else default
+    uri = _read_ptt_config(path).get(PTT_WS_URI_KEY)
+    return uri if is_valid_stt_ws_uri(uri) else fallback
+
+
+def save_ptt_ws_uri(uri: str, config_file: Optional[str] = None) -> None:
+    """Persist the WhisperLive URL atomically, MERGING into the existing file.
+
+    Unlike the other ``save_*`` helpers here this one RAISES on write failure
+    (``atomic_write_text`` semantics) so PUT /api/ptt/config can answer 503
+    instead of claiming a save that never landed, and so the live-apply only
+    ever runs after the value is genuinely on disk.
+
+    The read-modify-write preserves every key it does not own — above all the
+    legacy CTK ``hotkey``. An unreadable existing file degrades to a fresh
+    dict: the reconnect the operator asked for still lands, and the only thing
+    lost is a hotkey that was already unreadable.
+    """
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    data = _read_ptt_config(path)
+    data[PTT_WS_URI_KEY] = uri
+    atomic_write_text(path, json.dumps(data, indent=2))
 
 
 def piper_voice_path(voice_key: str) -> str:

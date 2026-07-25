@@ -67,6 +67,28 @@ class SessionActive(Exception):
     (listening OR flushing). One operator, one mic, one session -> 409."""
 
 
+def probe_stt_ws(uri: str, open_timeout: float = 2.0) -> None:
+    """Open a bare WS connection to *uri*, then close it immediately.
+
+    Backs POST /api/ptt/test so the operator can confirm LiveAudio is up
+    BEFORE going live, instead of discovering it with a dead F10 hold.
+
+    Deliberately NOT a :class:`PttSession`: no buffer, no flush, no event, no
+    single-slot claim, no dispatcher reference. Nothing reachable from here can
+    put text on the ``process_context`` path, which is why probing an arbitrary
+    URL is inert — the injection surface is the CONFIGURED url, gated by
+    ``settings.is_valid_stt_ws_uri``. Safe to run mid-hold.
+
+    Raises whatever the connect raises; the caller decides how to report it.
+    """
+
+    async def _open_and_close() -> None:
+        async with websockets.connect(uri, open_timeout=open_timeout, close_timeout=2):
+            return
+
+    asyncio.run(_open_and_close())
+
+
 class PttSession:
     """One recv-only WhisperLive WS connection with buffer + grace + watchdog.
 
@@ -516,6 +538,21 @@ class PttController:
                 "last_error": session.last_error,
                 "stt_ws_url": self._ws_uri,
             }
+
+    def set_ws_uri(self, ws_uri: str) -> None:
+        """Repoint the controller at a different LiveAudio/WhisperLive socket.
+
+        The operator regularly launches OpenCohost before LiveAudio (or moves
+        LiveAudio to a capture PC), and killing the backend to fix that is
+        unacceptable. Only the NEXT ``start()`` picks this up: an in-flight
+        PttSession captured its own ``_ws_uri`` at construction (see
+        ``PttSession.__init__``) and is deliberately never repointed mid-hold —
+        a live socket swap under a running recv loop would silently drop the
+        buffered turn. Guarded by the same lock as ``state()``/``start()`` so
+        an HTTP handler thread can call it while a hold is running.
+        """
+        with self._lock:
+            self._ws_uri = ws_uri
 
     def _notify_listening(self) -> None:
         """Fire the optional listening hook (the PTT audio cue) once the

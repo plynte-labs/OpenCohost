@@ -460,6 +460,100 @@ def test_dispatch_sends_ptt_wrapper_prompt_and_ptt_history_wrapper_history_text(
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# PttController.set_ws_uri — live LiveAudio reconnect without a restart
+# (liveaudio_ws_uri_config_20260724)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeSession:
+    """Minimal PttSession stand-in that captures the ws_uri it was BUILT with
+    and never opens a socket. Mirrors the real read surface (state /
+    buffered_chars / last_error) as plain attributes."""
+
+    def __init__(self, ws_uri, on_flush=None, on_event=None, on_close=None, **kwargs):
+        self.ws_uri = ws_uri
+        self._on_close = on_close
+        self.session_id = f"ptt_fake_{id(self):x}"
+        self.state = "idle"
+        self.buffered_chars = 0
+        self.last_error = None
+
+    def start(self):
+        self.state = "listening"
+
+    def keepalive(self):
+        pass
+
+    def stop(self):
+        self.state = "idle"
+        if self._on_close is not None:
+            self._on_close(None)
+
+
+def _controller_with_fake_sessions(uri):
+    created = []
+
+    def factory(ws_uri, **kwargs):
+        session = _FakeSession(ws_uri, **kwargs)
+        created.append(session)
+        return session
+
+    controller = PttController(
+        uri, _RecordingDispatcher(), MagicMock(), session_factory=factory
+    )
+    return controller, created
+
+
+def test_set_ws_uri_applies_to_the_next_session_only():
+    """The operator can repoint OpenCohost at a freshly-launched LiveAudio
+    without restarting the backend: set_ws_uri swaps the controller's URI and
+    the NEXT hold builds its session against it. An in-flight session captured
+    its own ws_uri at construction (ptt_session.py __init__) and must be
+    completely unaffected — no mid-hold socket swap, ever."""
+    controller, created = _controller_with_fake_sessions("ws://old-host:8765")
+
+    controller.start()
+    assert created[0].ws_uri == "ws://old-host:8765"
+
+    controller.set_ws_uri("ws://new-host:9999")
+
+    # In-flight session keeps the URI it was built with.
+    assert created[0].ws_uri == "ws://old-host:8765"
+
+    controller.stop()  # fake session frees the slot through on_close
+    controller.start()
+
+    assert len(created) == 2
+    assert created[1].ws_uri == "ws://new-host:9999"
+
+
+def test_set_ws_uri_is_reflected_in_state_immediately():
+    """GET /api/ptt/state is the ONLY read surface for the configured URL (no
+    dedicated GET endpoint exists), so the swap must be visible there as soon
+    as it is applied — including while idle."""
+    controller, _created = _controller_with_fake_sessions("ws://old-host:8765")
+
+    assert controller.state()["stt_ws_url"] == "ws://old-host:8765"
+    controller.set_ws_uri("ws://new-host:9999")
+    assert controller.state()["stt_ws_url"] == "ws://new-host:9999"
+
+
+def test_set_ws_uri_during_active_session_reports_new_uri_but_keeps_session():
+    """A swap DURING a hold is legal: state() reports the new configured URL
+    while the live session keeps streaming from the old one until it ends."""
+    controller, created = _controller_with_fake_sessions("ws://old-host:8765")
+
+    session_id = controller.start()
+    controller.set_ws_uri("ws://new-host:9999")
+
+    state = controller.state()
+    assert state["session_id"] == session_id  # session untouched
+    assert state["state"] == "listening"
+    assert state["stt_ws_url"] == "ws://new-host:9999"
+    assert created[0].ws_uri == "ws://old-host:8765"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # PRIVACY — transcript must not reach any log sink
 # ──────────────────────────────────────────────────────────────────────────
 

@@ -577,8 +577,22 @@ class PTTManager:
         with self._config_lock:
             try:
                 os.makedirs(os.path.dirname(self._config_file), exist_ok=True)
+                # MERGE, never clobber: ptt_settings.json is SHARED state. This
+                # manager owns "hotkey"; PUT /api/ptt/config owns "stt_ws_uri"
+                # (liveaudio_ws_uri_config_20260724). A plain overwrite here
+                # would silently reset the operator's LiveAudio URL back to the
+                # default every time they remapped the key.
+                data = {}
+                try:
+                    with open(self._config_file, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except Exception:
+                    data = {}
+                data["hotkey"] = hotkey
                 with open(self._config_file, "w", encoding="utf-8") as f:
-                    json.dump({"hotkey": hotkey}, f, indent=2)
+                    json.dump(data, f, indent=2)
                 return True
             except Exception as e:
                 self._log(f"No se pudo guardar config PTT: {e}")
