@@ -81,3 +81,26 @@ def test_set_active_en_makes_accessor_speak_english(official):
     # End-to-end: the accessor the engines call now returns the English voice.
     active.set_active_bundle(resolve_active_bundle(locale="en", registry=official))
     assert active.edge_voice() == EN_EXPECTED_VOICE
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 (multi_provider_llm_20260723): llm.provider_fallback_notice present
+# in BOTH official locales, and genuinely translated (not a copy-paste).
+# ---------------------------------------------------------------------------
+
+
+def test_provider_fallback_notice_present_in_both_locales(official):
+    en_bundle = build_chain("en", official)
+    es_bundle = build_chain("es", official)
+    en_notice = resolve(en_bundle, "llm.provider_fallback_notice")
+    es_notice = resolve(es_bundle, "llm.provider_fallback_notice")
+    assert en_notice
+    assert es_notice
+    assert en_notice != es_notice
+
+
+def test_set_active_en_makes_provider_fallback_notice_accessor_english(official):
+    active.set_active_bundle(resolve_active_bundle(locale="en", registry=official))
+    assert active.provider_fallback_notice() == resolve(
+        build_chain("en", official), "llm.provider_fallback_notice"
+    )

@@ -68,6 +68,13 @@ llm:
     - "Se me mezclan los recuerdos, preguntame en un rato."
   agenda_sanitizer_fallback: "Me quedo con una idea: esto da para mirarlo con más matices, porque no es tan simple como parece a primera vista."
 
+  # Phase 4 (multi_provider_llm_20260723): spoken once when a cloud LLM
+  # failure auto-degrades this session to the local model (fallback_mode=auto).
+  # NO_FALLBACK slot (i18n/contract.py NO_FALLBACK_SLOTS) — a missing
+  # translation fails closed (SlotNotFound) rather than silently borrowing the
+  # other locale's line.
+  provider_fallback_notice: "Se me cortó la nube un segundo, así que sigo con el modelo local. Dame un respiro."
+
   # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector
   # FLOOR pool. After a PTT interruption Kira returns to the stashed agenda beat
   # with a one-line transition prepended. This es-AR pool is the always-available

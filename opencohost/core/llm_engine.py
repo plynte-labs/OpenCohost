@@ -46,9 +46,13 @@ from opencohost.config.settings import (
     RETRY_MIN_REMAINING_SECONDS,
     CUT_ZONE_EARLY, CUT_ZONE_LATE, CUT_THRESHOLD_SECONDS, RETURN_MAX_DETOUR_TURNS,
     CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS, CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
+    CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, CLOUD_MAX_TOKENS, LLM_KEYS_FILE,
 )
 from opencohost.core import context_budget
+from opencohost.core import cloud_llm_client
 from opencohost.core import personalization
+from opencohost.config.llm_provider import load_provider_config
+from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import coherence as i18n_coherence
 from opencohost.core.tts_piper import PiperEngine
@@ -245,6 +249,19 @@ class MotorVocalIA(threading.Thread):
         self.command_queue = queue.Queue()
         self._reasoning_model_cache: dict[str, bool] = {}
         self._model_ctx_limit: dict[str, int] = {}
+        # multi_provider_llm_20260723 Phase 3: the persisted provider config
+        # drives `_is_local` gating. Loaded once here (defaults to local-only
+        # when absent/corrupt); PUT /api/llm/provider live-swaps it via
+        # `set_provider_config` (attribute swap under `_lock`, next-call effective).
+        self._provider_config: dict = load_provider_config()
+        # Phase 4 (multi_provider_llm_20260723): runtime-only cloud->local
+        # fallback flag (design 'Fallback switch semantics'). NEVER persisted
+        # and NEVER mutates `self._provider_config['active_provider']` — a
+        # restart (fresh __init__, defaults False) or an operator
+        # `set_provider_config` call (also resets it) returns to the owner's
+        # chosen provider. Read by `_cfg_is_local` so a posture snapshot taken
+        # AFTER `_handle_cloud_failure` engages resolves to local.
+        self._cloud_fallback_active: bool = False
 
         self.voz_referencia = None
         self.is_ready = False
@@ -798,6 +815,13 @@ class MotorVocalIA(threading.Thread):
         real interactive/agenda pregen (AC5.6). Best-effort: a late/rejected/absent
         upgrade just falls back to the pool floor at the return (timeout-0 read).
         """
+        # F1 Pregen Cloud Gate (multi_provider_llm_20260723): the connector
+        # upgrade is speculative generation — it calls _generar_dialogo directly,
+        # bypassing pregenerate()'s gate. OFF by default on cloud (billable
+        # tokens); local short-circuits so all existing behavior is byte-identical.
+        # Same two-condition idiom as the pregenerate gate.
+        if not self._is_local and not self._provider_config.get("pregen_enabled", False):
+            return
         # R3 spawn gate: the upgrade is cosmetic (the pool floor is a complete
         # connector). Only spawn when the remaining-playback estimate comfortably
         # covers a bounded generation — otherwise the upgrade could outlive the
@@ -1371,6 +1395,12 @@ class MotorVocalIA(threading.Thread):
         replacement would leave a zombie worker running concurrently whose finally
         would poison the replacement's shared bookkeeping.
         """
+        # Pregen Cloud Gate (multi_provider_llm_20260723): speculative
+        # generation is OFF by default on cloud (billable tokens). Local
+        # short-circuits (`_is_local` True), so all existing behavior is
+        # byte-identical; only an explicit PUT {"pregen_enabled": true} opts in.
+        if not self._is_local and not self._provider_config.get("pregen_enabled", False):
+            return False
         if not payload:
             return False
         is_agenda = source.startswith("kira-agenda")
@@ -2168,6 +2198,11 @@ class MotorVocalIA(threading.Thread):
             self.ui_callback("commands_drained")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
+        if not self._is_local:
+            # Cloud provider active: no local Ollama service to probe or warm.
+            # Cloud reachability is the health monitor's concern (Phase 5).
+            self.is_ready = True
+            return True
         try:
             self.ollama.list()
         except Exception as e:
@@ -2199,7 +2234,7 @@ class MotorVocalIA(threading.Thread):
         if not self._prepare_model(new_model):
             raise RuntimeError("target_model_unavailable")
 
-        if previous_model != new_model:
+        if self._is_local and previous_model != new_model:
             self._log(f"Liberando memoria del modelo: {previous_model}...")
             try:
                 self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
@@ -2284,7 +2319,7 @@ class MotorVocalIA(threading.Thread):
                 if self._warmed_model == target_model
                 else self._loaded_model
             )
-            if previous_model != target_model:
+            if self._is_local and previous_model != target_model:
                 try:
                     self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
                 except Exception as e:
@@ -2390,6 +2425,11 @@ class MotorVocalIA(threading.Thread):
 
     def _prepare_model(self, model: str) -> bool:
         """Warm the selected Ollama model so first real response is not a cold load."""
+        if not self._is_local:
+            # Cloud provider active: no local model to warm. Report "ready" so
+            # switch/tier machinery stays non-crashing; the cloud request path
+            # never depends on a warmed local model.
+            return True
         if not self.is_ready or not model or self._warmed_model == model:
             return self._warmed_model == model
 
@@ -2452,6 +2492,16 @@ class MotorVocalIA(threading.Thread):
         return result["released"]
 
     def _download_model_worker(self, model_tag):
+        if not self._is_local:
+            # F6: cloud provider active — no local ollama.pull. Surface the
+            # refusal so the operator gets feedback (download_error, the same
+            # signal the failure path emits) instead of a silent no-op.
+            self._log(
+                "Descarga de modelos no disponible con un proveedor cloud activo.",
+                level="warning",
+            )
+            self.ui_callback("download_error")
+            return
         self._downloading = True
         self.ui_callback("download_start")
         self._log(f"📥 Descargando modelo '{model_tag}'... Esto puede tardar varios minutos.")
@@ -2557,6 +2607,19 @@ class MotorVocalIA(threading.Thread):
         watchdog_timeout: Optional[float] = None,
     ) -> str:
         request_model = self.current_model
+        # F2 posture snapshot (multi_provider_llm_20260723): read the provider
+        # config AND the runtime fallback flag ONCE here, collapse them into the
+        # EFFECTIVE posture `is_local`, and thread that bool through this whole
+        # generation + dispatch. The config dict is swapped wholesale by
+        # set_provider_config (never mutated in place) and the flag is read
+        # exactly once at this snapshot instant, so neither a racing PUT nor a
+        # mid-turn `_cloud_fallback_active` flip can tear this generation between
+        # local/cloud — it is pinned to `provider_cfg`/`is_local`; only the NEXT
+        # call sees the change. INVARIANT: every mid-generation posture read
+        # below uses this `is_local` bool, never the live `self._is_local`
+        # property and never a re-derivation from `provider_cfg`.
+        provider_cfg = self._provider_config
+        is_local = self._cfg_is_local(provider_cfg) or self._cloud_fallback_active
         self._log(f"Analizando contexto con {request_model}...")
         try:
             messages = []
@@ -2690,9 +2753,17 @@ class MotorVocalIA(threading.Thread):
             # after first call — also covers the name-heuristic short-circuit gap)
             # but budget against OpenCohost's effective runtime cap so large
             # native windows do not disable prompt eviction or over-allocate KV.
-            self._discover_model_ctx(request_model)
-            _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
-            _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
+            if is_local:
+                self._discover_model_ctx(request_model)
+                _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+                _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
+            else:
+                # Cloud: no ollama.show telemetry (prompt_eval_count/eval_duration
+                # are absent from OpenAI-compatible responses). Apply the
+                # provider-aware budget proactively (design 'Cloud context budget'),
+                # replacing the reactive trim.
+                _native_ctx = CLOUD_CTX_BUDGET
+                _effective_ctx = CLOUD_CTX_BUDGET
             messages, _ctx_evicted = context_budget.apply_char_budget(
                 messages,
                 ctx_limit=_effective_ctx,
@@ -2706,18 +2777,25 @@ class MotorVocalIA(threading.Thread):
                     level="warning",
                 )
 
+            # Cloud item 3 (2026-07-24 incident): the LOCAL 768-token cap
+            # (LLM_MAX_TOKENS) was starving cloud/reasoning models. Cloud uses
+            # the high CLOUD_MAX_TOKENS ceiling instead -- gated on the
+            # snapshotted `is_local`, never a live re-read (F2 invariant above).
             opciones_llm = {
                 'temperature': LLM_TEMPERATURE,
                 'top_p': LLM_TOP_P,
-                'num_predict': LLM_MAX_TOKENS,
+                'num_predict': LLM_MAX_TOKENS if is_local else CLOUD_MAX_TOKENS,
                 'num_ctx': _effective_ctx,
             }
 
-            if "gemma" in request_model.lower():
+            if is_local and "gemma" in request_model.lower():
                 opciones_llm.pop('num_ctx', None)
                 opciones_llm['temperature'] = 0.7
 
-            if self._resolve_reasoning_classification(request_model):
+            # Reasoning-capability discovery is an ollama.show probe (local-only);
+            # for cloud, num_predict maps to max_tokens and the provider owns any
+            # reasoning-token behavior. gemma temperature override is local-only too.
+            if is_local and self._resolve_reasoning_classification(request_model):
                 opciones_llm.pop('num_predict', None)
                 self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
 
@@ -2740,7 +2818,9 @@ class MotorVocalIA(threading.Thread):
             chat_timeout = (
                 watchdog_timeout
                 if watchdog_timeout is not None
-                else self._resolve_chat_watchdog_timeout(request_model)
+                else self._resolve_chat_watchdog_timeout(
+                    request_model, provider_cfg=provider_cfg, is_local=is_local
+                )
             )
             
             for intento in range(max_intentos):
@@ -2754,7 +2834,9 @@ class MotorVocalIA(threading.Thread):
                         model=request_model,
                         messages=messages,
                         keep_alive=LLM_KEEP_ALIVE,
-                        options=opciones_llm
+                        options=opciones_llm,
+                        provider_cfg=provider_cfg,
+                        is_local=is_local,
                     )
                 except Exception as e:
                     if self._is_watchdog_timeout_error(e):
@@ -2764,23 +2846,49 @@ class MotorVocalIA(threading.Thread):
                         # / UI signal) a real turn's timeout does. Just return "" so
                         # the pool floor stands.
                         if watchdog_timeout is None:
-                            self._recover_from_stalled_inference(
-                                request_model=request_model,
-                                source=source,
-                                timeout=chat_timeout,
-                            )
+                            # A cloud stall must NOT roll back a local model
+                            # (spec B): gate the heavyweight model-rollback
+                            # recovery on `is_local`. Cloud instead routes to
+                            # `_handle_cloud_failure` (Phase 4: fallback state
+                            # machine); the max_intentos retry + existing
+                            # failure contract still apply either way.
+                            if is_local:
+                                self._recover_from_stalled_inference(
+                                    request_model=request_model,
+                                    source=source,
+                                    timeout=chat_timeout,
+                                )
+                            else:
+                                self._handle_cloud_failure(source)
                             if commit_history:
                                 self._invalidate_pregen_epoch()
                         return ""
                     if not self._is_ollama_transport_error(e):
                         raise
-                    self._last_llm_failure = {
-                        "model": self.current_model,
-                        "source": source,
-                        "attempt": intento + 1,
-                        "reason": type(e).__name__,
-                        "message": str(e),
-                    }
+                    # F7b: attribute a CLOUD failure to the cloud profile model +
+                    # provider id (the local current_model tag would make a cloud
+                    # 401 look like a local fault). The LOCAL branch stays
+                    # byte-identical (no "provider" key) so existing exact-match
+                    # assertions keep passing. Full MODEL_TRACE attribution is
+                    # deferred (residual).
+                    if is_local:
+                        self._last_llm_failure = {
+                            "model": self.current_model,
+                            "source": source,
+                            "attempt": intento + 1,
+                            "reason": type(e).__name__,
+                            "message": str(e),
+                        }
+                    else:
+                        _fail_profile = self._cfg_active_profile(provider_cfg) or {}
+                        self._last_llm_failure = {
+                            "model": _fail_profile.get("model") or self.current_model,
+                            "provider": provider_cfg.get("active_provider"),
+                            "source": source,
+                            "attempt": intento + 1,
+                            "reason": type(e).__name__,
+                            "message": str(e),
+                        }
                     self._log(
                         f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}: {e}",
                         level="error",
@@ -2793,6 +2901,16 @@ class MotorVocalIA(threading.Thread):
                         max_intentos,
                         exc_info=True,
                     )
+                    # F1 (multi_provider_llm_20260723): a CLOUD transport error
+                    # surviving retry (401 bad key, DNS, 5xx via
+                    # CloudLLMResponseError/ConnectionError/RequestException) must
+                    # engage the SAME fallback state machine as a cloud timeout
+                    # (spec C: fallback on "cloud timeout OR a non-2xx/connection
+                    # error surviving retry/backoff"). The LOCAL transport path
+                    # stays byte-identical (spec B: a local fault never routes to
+                    # cloud fallback / never rolls back here).
+                    if not is_local:
+                        self._handle_cloud_failure(source)
                     if commit_history:
                         self._invalidate_pregen_epoch()
                     return ""
@@ -2808,6 +2926,14 @@ class MotorVocalIA(threading.Thread):
                     raw_content = getattr(msg_obj, 'content', '')
                     thinking = getattr(msg_obj, 'thinking', '')
 
+                # Cloud usage.* is recorded to logs only (spec E) — the local
+                # ctx_utilization block below reads Ollama-only telemetry
+                # (prompt_eval_count/eval_duration) absent from cloud responses.
+                if not is_local and isinstance(respuesta, dict):
+                    _usage = respuesta.get('usage')
+                    if _usage:
+                        logger.info("cloud_llm_usage: %s source=%s", _usage, source)
+
                 if thinking:
                     logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
 
@@ -2819,7 +2945,7 @@ class MotorVocalIA(threading.Thread):
                 # the int-threshold comparison to context_budget.is_overflow_signal.
                 _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
                 _ctx_limit_now = _effective_ctx
-                if intento == 0 and context_budget.is_overflow_signal(
+                if is_local and intento == 0 and context_budget.is_overflow_signal(
                     raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
                 ):
                     _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
@@ -2836,7 +2962,13 @@ class MotorVocalIA(threading.Thread):
                 # Drop the cap, remember the classification, and retry uncapped.
                 if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
                     opciones_llm.pop('num_predict', None)
-                    self._reasoning_model_cache[request_model] = True
+                    if is_local:
+                        # F3: never write the LOCAL reasoning cache from a CLOUD
+                        # response. On cloud request_model is the local
+                        # current_model tag, so caching True here would uncap the
+                        # local model for the rest of the session once we return
+                        # to local. The uncapped cloud retry itself may stay.
+                        self._reasoning_model_cache[request_model] = True
                     self._log(
                         f"Auto-corrección: {request_model} devolvió contenido vacío con "
                         f"pensamiento interno; removiendo límite de tokens y reintentando.",
@@ -2921,11 +3053,24 @@ class MotorVocalIA(threading.Thread):
             if not dialogo:
                 self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
                 logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
+                # Item 4 (2026-07-24 incident): this is the FINAL empty return
+                # (max_intentos + Layer-2 self-heal already exhausted) -- on
+                # cloud that used to be silent dead air (no callback, no
+                # fallback). Surface it the same way a transport failure does
+                # (F1): fire the existing whitelisted status, then route to
+                # the fallback state machine. Local stays byte-identical.
+                if not is_local:
+                    self.ui_callback("cloud_llm_error")
+                    self._handle_cloud_failure(source)
                 if commit_history:
                     self._invalidate_pregen_epoch()
                 return ""
 
-            self._mark_model_generation_success(request_model)
+            if is_local:
+                # F5: a cloud success must not set an unvalidated LOCAL model as
+                # the rollback/fallback target (request_model is the local tag on
+                # cloud) nor clear _awaiting_first_success_after_switch.
+                self._mark_model_generation_success(request_model)
             allowed, guard_reason = output_guard(dialogo, source=source)
             if not allowed:
                 self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
@@ -3028,11 +3173,192 @@ class MotorVocalIA(threading.Thread):
             self._log(f"Ollama Client no soporta timeout de scout; usando cliente por defecto: {e}", level="warning")
             return None
 
-    def _ollama_chat(self, **kwargs):
+    # ── Provider gating (multi_provider_llm_20260723 Phase 3) ───────────────
+    @staticmethod
+    def _cfg_is_local(cfg: dict) -> bool:
+        """Posture of a SPECIFIC provider-config snapshot (local Ollama or absent).
+
+        PURE over `cfg` ONLY — it does NOT consult the runtime
+        `_cloud_fallback_active` flag (F2, multi_provider_llm_20260723). The
+        EFFECTIVE posture (`_cfg_is_local(cfg) or _cloud_fallback_active`) is
+        computed ONCE at `_generar_dialogo` entry and threaded through the whole
+        generation + dispatch, so a flag flip (or PUT) landing mid-turn can never
+        tear a running generation between local/cloud. Non-generation call sites
+        read the effective posture live via the `_is_local` property.
+        """
+        return (cfg.get("active_provider") or "local") == "local"
+
+    def _cfg_active_profile(self, cfg: dict) -> Optional[dict]:
+        """Active cloud profile dict for a SPECIFIC config snapshot, or None when local."""
+        if self._cfg_is_local(cfg):
+            return None
+        provider = cfg.get("active_provider")
+        profiles = cfg.get("profiles") or {}
+        profile = profiles.get(provider)
+        return profile if isinstance(profile, dict) else None
+
+    @property
+    def _is_local(self) -> bool:
+        """True when local Ollama is the EFFECTIVE backend (spec B) — the active
+        provider is local/absent OR an auto-fallback has engaged.
+
+        The single gate for all local-only machinery at NON-generation call
+        sites (command guards on download/switch, connector/scout/pregen gates,
+        etc.), so it reads the runtime `_cloud_fallback_active` flag LIVE. A
+        generation instead snapshots the EFFECTIVE posture ONCE at
+        `_generar_dialogo` entry (`_cfg_is_local(cfg) or _cloud_fallback_active`)
+        and threads that bool through its whole body + dispatch, so a
+        `set_provider_config` swap or a flag flip racing an in-flight generation
+        only takes effect on the NEXT call — the running call is pinned to its
+        snapshot.
+        """
+        return self._cfg_is_local(self._provider_config) or self._cloud_fallback_active
+
+    def _active_profile(self) -> Optional[dict]:
+        """The active cloud profile dict (`base_url`/`model`/`preset`), or None when local."""
+        return self._cfg_active_profile(self._provider_config)
+
+    def set_provider_config(self, cfg: dict) -> None:
+        """Live-swap the provider config (PUT /api/llm/provider, no restart).
+
+        Attribute swap under `_lock`: the swap is a single atomic rebind, so a
+        racing in-flight generation finishes on its original provider and only
+        the next call observes the change (design 'Provider Config Surface').
+        """
+        if not isinstance(cfg, dict):
+            return
+        with self._lock:
+            # F5 (multi_provider_llm_20260723): clear the runtime fallback flag
+            # ONLY when the PUT actually CHANGES active_provider — an explicit
+            # provider change is the operator's intent to retry a (possibly
+            # different) backend. An unrelated PUT (e.g. a pregen toggle that
+            # keeps the same active_provider) must NOT silently un-fallback into
+            # a still-dead cloud. Compare BEFORE the swap, normalizing absent ->
+            # "local" like `_cfg_is_local`.
+            previous_provider = (self._provider_config.get("active_provider") or "local")
+            incoming_provider = (cfg.get("active_provider") or "local")
+            self._provider_config = cfg
+            if incoming_provider != previous_provider:
+                self._cloud_fallback_active = False
+
+    def _handle_cloud_failure(self, source: str) -> None:
+        """Cloud-only failure response (spec C / design 'Cloud Failure Flow').
+
+        Invoked from the cloud branch of a watchdog-timeout failure — the
+        branch where `_recover_from_stalled_inference` (local model rollback)
+        is deliberately skipped for cloud (spec B: a cloud stall must never
+        roll back a local model). `fallback_mode=manual` only surfaces the
+        error and keeps routing to cloud — the caller's existing `""` failure
+        contract is unchanged either way. `fallback_mode=auto` (default)
+        degrades THIS PROCESS to local for every SUBSEQUENT generation via the
+        runtime-only `_cloud_fallback_active` flag; the persisted
+        `active_provider` selector is left untouched (design 'Fallback switch
+        semantics'). Warm + speak run on a background daemon thread (mirrors
+        `play_prefetched_agenda`'s `speaker()` closure) so a slow local warm-up
+        (~10-20s, spec C) never blocks the caller or this already-failed turn.
+        """
+        provider_cfg = self._provider_config
+        fallback_mode = provider_cfg.get("fallback_mode", "auto")
+        if fallback_mode == "manual":
+            self._log(
+                f"Cloud LLM failure (source={source}); fallback_mode=manual, staying on cloud.",
+                level="error",
+            )
+            self.ui_callback("cloud_llm_error")
+            return
+
+        # Set the flag OPTIMISTICALLY so a generation racing the warm-up already
+        # routes local; the worker CLEARS it again if the local backend turns out
+        # to be unavailable (F3).
+        self._cloud_fallback_active = True
+        self._log(
+            f"Cloud LLM failure (source={source}); auto-falling back to local Ollama.",
+            level="warning",
+        )
+        fallback_model = self._last_known_good_model or self.current_model
+
+        def worker() -> None:
+            # F3: _prepare_model never raises (it returns False on failure), so
+            # its RESULT is the only signal that local actually warmed. On a
+            # cloud-only box without Ollama it returns False — clearing the
+            # optimistic flag, suppressing the false "switching to local" notice,
+            # and surfacing the double-failure to the operator instead.
+            try:
+                warmed = self._prepare_model(fallback_model)
+            except Exception:
+                logger.exception("Cloud fallback: local model warm-up failed")
+                warmed = False
+            if not warmed:
+                self._cloud_fallback_active = False
+                self._log(
+                    f"Cloud fallback (source={source}): local warm-up failed; "
+                    "neither cloud nor local is usable.",
+                    level="warning",
+                )
+                self.ui_callback("cloud_llm_error")
+                return
+            try:
+                self._hablar(i18n_active.provider_fallback_notice(), source=source)
+            except Exception:
+                logger.exception("Cloud fallback: could not speak provider_fallback_notice")
+
+        threading.Thread(target=worker, name="CloudFallbackWarm", daemon=True).start()
+
+    def _cloud_api_key(self, profile_id) -> str:
+        """Read the per-profile cloud key from the OAuthStore (LLM_KEYS_FILE)."""
+        token = OAuthStore(LLM_KEYS_FILE).load(profile_id)
+        if isinstance(token, dict):
+            return str(token.get("api_key") or "")
+        return ""
+
+    def _cloud_chat(self, *, provider_cfg=None, model=None, messages, options=None, is_local=None, **_ignored):
+        """Dispatch a chat request to the OpenAI-compatible cloud client.
+
+        Resolves profile + provider_id + key from a SINGLE provider-config
+        snapshot (`provider_cfg`, threaded from `_generar_dialogo`'s entry) so a
+        mid-generation `set_provider_config` swap can never pair provider A's
+        base_url/model with provider B's key (F2). Falls back to live config for
+        stand-alone (non-generation) callers. Uses the ACTIVE profile's
+        `base_url`/`model`/key — never the local `current_model` the call site
+        passes. Ollama-only kwargs (`keep_alive`) are ignored here.
+        """
+        cfg = provider_cfg if provider_cfg is not None else self._provider_config
+        profile = self._cfg_active_profile(cfg)
+        if profile is None:
+            # F7: degrade like every other cloud failure. A RequestException
+            # subclass is caught by the transport-error contract and returns ''
+            # instead of propagating out through the noisy outer catch-all.
+            raise cloud_llm_client.CloudLLMResponseError(
+                "cloud provider active but no profile configured"
+            )
+        provider_id = cfg.get("active_provider")
+        return cloud_llm_client.send_chat_completion(
+            base_url=str(profile.get("base_url") or ""),
+            api_key=self._cloud_api_key(provider_id),
+            model=str(profile.get("model") or ""),
+            messages=messages,
+            options=options or {},
+            timeout=self._resolve_chat_watchdog_timeout(model, provider_cfg=cfg, is_local=is_local),
+        )
+
+    def _ollama_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
+        cfg = provider_cfg if provider_cfg is not None else self._provider_config
+        # F2: honor the EFFECTIVE posture threaded from `_generar_dialogo`'s
+        # entry snapshot; only stand-alone callers (is_local=None) re-derive it
+        # live (config OR active fallback).
+        if is_local is None:
+            is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
+        if not is_local:
+            return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
         client = self._ollama_chat_client or self.ollama
         return client.chat(**kwargs)
 
-    def _ollama_scout_chat(self, **kwargs):
+    def _ollama_scout_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
+        cfg = provider_cfg if provider_cfg is not None else self._provider_config
+        if is_local is None:
+            is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
+        if not is_local:
+            return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
         client = self._ollama_scout_client or self.ollama
         return client.chat(**kwargs)
 
@@ -3061,7 +3387,14 @@ class MotorVocalIA(threading.Thread):
             raise result["error"]
         return result.get("response")
 
-    def _resolve_chat_watchdog_timeout(self, request_model: str) -> float:
+    def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
+        cfg = provider_cfg if provider_cfg is not None else self._provider_config
+        # F2: honor the threaded entry posture; stand-alone callers re-derive.
+        if is_local is None:
+            is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
+        if not is_local:
+            # Cloud latency, not local GPU stall detection (spec C).
+            return CLOUD_CHAT_TIMEOUT
         if self._awaiting_first_success_after_switch and request_model == self.current_model:
             return self._post_switch_watchdog_timeout
         return self._inference_watchdog_timeout
@@ -3161,6 +3494,12 @@ class MotorVocalIA(threading.Thread):
         """
         try:
             if not SCOUT_ENABLED:
+                return []
+            # F4 Pregen Cloud Gate (multi_provider_llm_20260723): the scout is
+            # speculative generation and pregen-OFF covers ALL speculative spend,
+            # so skip the dispatch on cloud unless explicitly opted in. Local
+            # short-circuits (byte-identical). Same idiom as the pregenerate gate.
+            if not self._is_local and not self._provider_config.get("pregen_enabled", False):
                 return []
             # Gate 3: no model resident, or a switch pending/in-flight -> skip
             # (never cold-load; use the RESIDENT model, not the desired one).
@@ -3397,6 +3736,12 @@ class MotorVocalIA(threading.Thread):
         ``_check_capabilities_reasoning`` (capabilities) so a single RPC serves
         both. The raw response is cached in ``self._ctx_show_cache``.
         """
+        if not self._is_local:
+            # Cloud provider active: no local Ollama to introspect. Return an
+            # empty response so `_discover_model_ctx` degrades to the fallback
+            # ctx and `_check_capabilities_reasoning` reads no capabilities —
+            # the sole ollama.show call site, so this gate covers both callers.
+            return {}
         cache = getattr(self, "_ctx_show_cache", None)
         if cache is None:
             cache = {}

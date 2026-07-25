@@ -35,6 +35,15 @@ SLOT_DOMAINS = ("meta", "tts", "llm", "guardrails", "nlp", "ui")
 # must gate the official tier), never "silently borrow the fallback locale's".
 NO_FALLBACK_DOMAINS = ("guardrails",)
 
+# Phase 4 (multi_provider_llm_20260723): a handful of individual slots outside
+# a security domain must ALSO fail closed (missing translation -> SlotNotFound,
+# never a silent cross-locale borrow) without making their WHOLE domain
+# no-fallback. `llm` is documented (i18n/active.py) as fallback-ALLOWED for its
+# other ~40 scaffolding slots — broadening NO_FALLBACK_DOMAINS to cover "llm"
+# would fail those closed too for any future partial community-tier locale.
+# Slot-exact governance, checked alongside the domain list in `resolve()`.
+NO_FALLBACK_SLOTS = frozenset({"llm.provider_fallback_notice"})
+
 
 class SlotNotFound(KeyError):
     """A slot is absent from a bundle and no fallback resolves it."""
@@ -87,7 +96,7 @@ def resolve(bundle: LocaleBundle, slot: str, default: Any = _UNSET) -> Any:
     Returns ``default`` if provided and nothing resolves; otherwise raises
     :class:`SlotNotFound`.
     """
-    allow_fallback = _domain_of(slot) not in NO_FALLBACK_DOMAINS
+    allow_fallback = _domain_of(slot) not in NO_FALLBACK_DOMAINS and slot not in NO_FALLBACK_SLOTS
     current: LocaleBundle | None = bundle
     while current is not None:
         try:

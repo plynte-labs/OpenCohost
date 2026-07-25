@@ -75,6 +75,13 @@ llm:
     - "My memories are getting tangled, ask me again in a bit."
   agenda_sanitizer_fallback: "I'll leave it at this: it's worth looking at with more nuance, because it's not as simple as it seems."
 
+  # Phase 4 (multi_provider_llm_20260723): spoken once when a cloud LLM
+  # failure auto-degrades this session to the local model (fallback_mode=auto).
+  # NO_FALLBACK slot (i18n/contract.py NO_FALLBACK_SLOTS) — a missing
+  # translation fails closed (SlotNotFound) rather than silently borrowing the
+  # other locale's line.
+  provider_fallback_notice: "The cloud dropped on me for a second, so I'm switching to the local model. Give me a moment."
+
   # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector FLOOR
   # pool — English equivalents of the es-AR transitions Kira prepends when
   # returning to a stashed agenda beat after a PTT interruption. Always-available

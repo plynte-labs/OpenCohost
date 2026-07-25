@@ -81,6 +81,14 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         "download_error",
         "ctx_pressure_high",
         "piper_voice_locale_mismatch",
+        # multi_provider_llm_20260723 F4: cloud LLM failure surfaced to the
+        # operator (manual-mode failure, or an auto-fallback whose local warm-up
+        # also failed). Server-side whitelist entry so the event persists into
+        # GET /api/events -> the Tauri client. Detail stays None (whitelist
+        # contract). NOT added to the CTK ui/motor_event_handlers dispatch table
+        # (that surface is out of scope per owner decision); the Tauri client's
+        # own status subset is a separate UI-repo change.
+        "cloud_llm_error",
         # E1 (memoria_quality_20260717): fresh-memoria notice for the Tauri
         # chat-panel feed. Detail stays None (whitelist contract) — the event
         # only says "a memoria was saved", never which one. Not added to the

@@ -11,6 +11,7 @@ import pytest
 from opencohost.i18n.contract import (
     LocaleBundle,
     NO_FALLBACK_DOMAINS,
+    NO_FALLBACK_SLOTS,
     SlotNotFound,
     TIER_OFFICIAL,
     resolve,
@@ -75,3 +76,50 @@ def test_security_slot_resolves_when_present_in_bundle():
 
 def test_guardrails_is_a_no_fallback_domain():
     assert "guardrails" in NO_FALLBACK_DOMAINS
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 (multi_provider_llm_20260723): llm.provider_fallback_notice is a
+# NO_FALLBACK slot (slot-exact governance, not the whole `llm` domain).
+# ---------------------------------------------------------------------------
+
+def test_provider_fallback_notice_is_a_no_fallback_slot():
+    assert "llm.provider_fallback_notice" in NO_FALLBACK_SLOTS
+
+
+def test_provider_fallback_notice_never_falls_back():
+    # en lacks the slot; it must NOT borrow es's -- missing = raise, never a
+    # silently-wrong-language spoken line.
+    es = LocaleBundle(
+        code="es", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_notice": "aviso es"}},
+    )
+    en = LocaleBundle(
+        code="en", tier=TIER_OFFICIAL, data={"meta": {"code": "en"}}, fallback=es,
+    )
+    with pytest.raises(SlotNotFound):
+        resolve(en, "llm.provider_fallback_notice")
+
+
+def test_provider_fallback_notice_resolves_when_present_in_bundle():
+    es = LocaleBundle(
+        code="es", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_notice": "aviso es"}},
+    )
+    en = LocaleBundle(
+        code="en", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_notice": "notice en"}}, fallback=es,
+    )
+    assert resolve(en, "llm.provider_fallback_notice") == "notice en"
+
+
+def test_other_llm_slots_still_fall_back():
+    # The new NO_FALLBACK_SLOTS entry must NOT broaden to the whole `llm`
+    # domain -- every other llm.* slot stays fallback-allowed (i18n/active.py's
+    # own documented invariant: "`llm` domain is fallback-allowed").
+    es = LocaleBundle(
+        code="es", tier=TIER_OFFICIAL,
+        data={"llm": {"digest_line_format": "[hace {n} {unit}]"}},
+    )
+    en = LocaleBundle(code="en", tier=TIER_OFFICIAL, data={"meta": {"code": "en"}}, fallback=es)
+    assert resolve(en, "llm.digest_line_format") == "[hace {n} {unit}]"

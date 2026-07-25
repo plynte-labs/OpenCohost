@@ -400,6 +400,21 @@ def agenda_sanitizer_fallback() -> str:
     return _slot("llm.agenda_sanitizer_fallback", LEGACY_AGENDA_SANITIZER_FALLBACK)
 
 
+def provider_fallback_notice() -> str:
+    """Canned spoken line for an auto cloud->local LLM fallback (Phase 4,
+    multi_provider_llm_20260723).
+
+    Unlike every other accessor in this module, this one carries NO legacy
+    default — the slot postdates the pre-i18n hard-coded era, so there is no
+    es literal to fall back to. It is a NO_FALLBACK slot (contract.py
+    NO_FALLBACK_SLOTS): a locale bundle that omits it raises SlotNotFound
+    (propagates to the caller) rather than silently speaking the wrong
+    language. `_handle_cloud_failure` guards this call so a broken/incomplete
+    locale config can never crash cloud-failure handling.
+    """
+    return resolve(get_active_bundle(), "llm.provider_fallback_notice")
+
+
 def connector_templates() -> tuple[str, ...]:
     """WU5 (design-fase2.md §3 WU5 / D3): the connector FLOOR pool for the active
     locale (es legacy tuple on any failure). Each template carries a ``{tema}``

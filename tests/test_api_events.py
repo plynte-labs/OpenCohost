@@ -171,6 +171,22 @@ def test_memoria_captured_reaches_event_log_with_none_detail():
     assert events[0]["detail"] is None
 
 
+def test_cloud_llm_error_reaches_event_log_with_none_detail():
+    """multi_provider_llm_20260723 phase 4: manual-mode cloud failures emit
+    ui_callback("cloud_llm_error"). It must be whitelisted so the Tauri app
+    can surface the visible error the spec requires -- detail stays None
+    (whitelist contract; the event says "cloud failed", never why in free text)."""
+    stub = SimpleNamespace(event_log=engine_host_mod.EventLogSink())
+
+    engine_host_mod.EngineHost._record_motor_event(stub, "cloud_llm_error")
+
+    events = stub.event_log.since(0)["events"]
+    assert len(events) == 1
+    assert events[0]["source"] == "motor"
+    assert events[0]["action"] == "cloud_llm_error"
+    assert events[0]["detail"] is None
+
+
 def test_engine_host_dispatch_motor_event_wires_into_event_log(tmp_path, monkeypatch):
     """End-to-end through the real router: EngineHost() (constructor only,
     no start()) already registers _record_motor_event -- mirrors

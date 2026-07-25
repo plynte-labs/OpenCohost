@@ -24,6 +24,8 @@ def _make_motor(model="gemma4:12b"):
     """A MotorVocalIA with __init__ bypassed and only the attributes _generar_dialogo
     touches on the source='chat', commit_history=False path."""
     m = MotorVocalIA.__new__(MotorVocalIA)
+    m._provider_config = {"active_provider": "local", "profiles": {}}
+    m._cloud_fallback_active = False
     m._reasoning_model_cache = {}
     m.current_model = model
     m._desired_model = model
@@ -32,11 +34,12 @@ def _make_motor(model="gemma4:12b"):
     m.use_system_role = True
     m.system_prompt = "sys"
     m._history_lock = threading.RLock()
+    m._lock = threading.Lock()
     m.historial = []
     m._last_llm_failure = None
     m._log = lambda *a, **k: None
     m._mark_model_generation_success = lambda *a, **k: None
-    m._resolve_chat_watchdog_timeout = lambda model: 30.0
+    m._resolve_chat_watchdog_timeout = lambda model, provider_cfg=None, is_local=None: 30.0
     return m
 
 

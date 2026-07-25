@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from opencohost.core import llm_engine
-from opencohost.config.settings import TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
+from opencohost.config.settings import CLOUD_CHAT_TIMEOUT, TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 from opencohost.i18n import active as i18n_active
 
 
@@ -326,6 +326,33 @@ def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
     assert any("ERROR Ollama chat (TimeoutError)" in item for item in list(motor.log_queue.queue))
     assert any("Ollama chat transport failure" in record.message for record in caplog.records)
     assert list(motor.historial) == []
+
+
+def test_cloud_watchdog_timeout_routes_to_fallback_not_rollback():
+    """Phase 4 (multi_provider_llm_20260723): a cloud watchdog timeout must
+    route to `_handle_cloud_failure`, NEVER `_recover_from_stalled_inference`
+    (spec B — a cloud stall must never roll back a local model). The cloud
+    watchdog timeout resolves independently of the local watchdog timeouts."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._provider_config = {
+        "active_provider": "openai",
+        "fallback_mode": "auto",
+        "profiles": {"openai": {"base_url": "https://api.example.com/v1", "model": "gpt-cloud"}},
+    }
+    motor._recover_from_stalled_inference = MagicMock()
+    motor._handle_cloud_failure = MagicMock()
+    motor._ollama_chat_with_watchdog = MagicMock(
+        side_effect=TimeoutError(f"watchdog_timeout:{CLOUD_CHAT_TIMEOUT:.2f}s")
+    )
+
+    result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+    assert result == ""
+    motor._recover_from_stalled_inference.assert_not_called()
+    motor._handle_cloud_failure.assert_called_once_with("direct")
+    assert motor._resolve_chat_watchdog_timeout("anything") == CLOUD_CHAT_TIMEOUT
+    assert CLOUD_CHAT_TIMEOUT != motor._inference_watchdog_timeout
+    assert CLOUD_CHAT_TIMEOUT != motor._post_switch_watchdog_timeout
 
 
 def test_ollama_chat_connection_error_is_logged_and_returns_empty(caplog):
