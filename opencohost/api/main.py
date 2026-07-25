@@ -1159,6 +1159,24 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.get("/api/models", response_model=ModelsResponse)
     def get_models(request: Request) -> ModelsResponse:
         host = request.app.state.host
+        provider_cfg = load_provider_config()
+        active_provider = provider_cfg.get("active_provider", "local")
+        if active_provider != "local":
+            # Cloud active (multi_provider_llm_20260723 Phase 5, spec D): no
+            # `ollama.list` discovery, no download/install catalog (VRAM
+            # tiers are a local-only concept) — only the ACTIVE profile's
+            # own model, read from `profiles[active_provider]`, never
+            # another profile's.
+            active_model = str(
+                provider_cfg.get("profiles", {}).get(active_provider, {}).get("model") or ""
+            )
+            return ModelsResponse(
+                catalog={},
+                discovered=[active_model] if active_model else [],
+                current_model=active_model or None,
+                tiers={},
+                active_tier="cloud",
+            )
         try:
             discovered = _discover_ollama_models()
         except Exception:

@@ -26,6 +26,7 @@ from typing import Optional
 
 import requests
 
+from opencohost.config.llm_provider import load_provider_config
 from opencohost.config.storage import resolve_xtts_python
 from opencohost.config.settings import (
     HEALTH_POLL_INTERVAL,
@@ -565,6 +566,21 @@ class HealthMonitor(threading.Thread):
             return "unhealthy"  # we spawned it and it died — real failure
         return "unavailable"  # never started / not attached — not in use (Piper/Edge session)
 
+    def _is_cloud_active(self) -> bool:
+        """Provider-aware aggregation (multi_provider_llm_20260723 Phase 5).
+
+        Read fresh per poll — a cheap local JSON read, no caching — so a
+        live provider switch (PUT /api/llm/provider) is reflected on the
+        very next health poll without an engine restart. Any read failure
+        defaults to local (byte-identical pre-track behavior; load_provider_
+        config() already fails open on a missing/corrupt file, this is a
+        second guard against an unexpected raise).
+        """
+        try:
+            return load_provider_config().get("active_provider", "local") != "local"
+        except Exception:
+            return False
+
     def _compute_overall(self, qwen_status: Optional[str] = None) -> str:
         """Compute overall health: green, yellow, or red."""
         vram = self._vram.status
@@ -576,7 +592,10 @@ class HealthMonitor(threading.Thread):
         # RED conditions: any single critical factor
         if vram == "critical":
             return "red"
-        if ollama == "down":
+        # OllamaWatchdog stays informational-only when cloud active (spec D)
+        # — a stopped Ollama must not mark a pure-cloud profile unhealthy.
+        # `ollama_status` itself is untouched (still visible in MonitorState).
+        if ollama == "down" and not self._is_cloud_active():
             return "red"
         if qwen_status not in ("healthy", "unavailable"):
             return "red"

@@ -670,6 +670,91 @@ class TestHealthMonitor:
         state = monitor.state
         assert state.overall_status == "red"
 
+    # ── Provider-aware aggregation (multi_provider_llm_20260723 Phase 5) ──
+
+    def test_overall_status_cloud_active_ollama_down_not_degraded(self):
+        """OllamaWatchdog is informational-only when a cloud provider is
+        active: a stopped/no-GPU-laptop Ollama must not turn overall red in
+        a pure-cloud profile (spec D)."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "down"
+        with patch(
+            "opencohost.core.health_monitor.load_provider_config",
+            return_value={"active_provider": "openai", "profiles": {}},
+        ):
+            monitor._poll_all()
+        state = monitor.state
+        assert state.ollama_status == "down"  # still visible — informational only
+        assert state.overall_status != "red"
+
+    def test_overall_status_local_active_ollama_down_still_red(self):
+        """Regression pin: local mode fault semantics stay unchanged."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "down"
+        with patch(
+            "opencohost.core.health_monitor.load_provider_config",
+            return_value={"active_provider": "local", "profiles": {}},
+        ):
+            monitor._poll_all()
+        state = monitor.state
+        assert state.overall_status == "red"
+
+    def test_overall_status_provider_config_read_failure_defaults_local(self):
+        """A broken/unreadable provider config must never mask a real local
+        Ollama outage — degrades to the pre-track local-only behavior."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "down"
+        with patch(
+            "opencohost.core.health_monitor.load_provider_config",
+            side_effect=Exception("boom"),
+        ):
+            monitor._poll_all()
+        state = monitor.state
+        assert state.overall_status == "red"
+
+    def test_overall_status_cloud_active_other_red_conditions_still_apply(self):
+        """Cloud active only exempts the Ollama-down condition — VRAM
+        critical and an unhealthy Qwen process still turn overall red."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "critical"
+        monitor._vram._free_mb = 500.0
+        monitor._ollama._status = "down"
+        with patch(
+            "opencohost.core.health_monitor.load_provider_config",
+            return_value={"active_provider": "openai", "profiles": {}},
+        ):
+            monitor._poll_all()
+        state = monitor.state
+        assert state.overall_status == "red"
+
+    def test_overall_status_follows_provider_flips_across_successive_polls(self):
+        """`_is_cloud_active` is read fresh per poll (no caching). On ONE
+        monitor with Ollama down, a local->cloud->local provider sequence must
+        flip overall red->not-red->red on the very next poll each time — the
+        aggregation follows the config in BOTH directions, no restart."""
+        monitor = self._make_monitor()
+        monitor._vram._status = "normal"
+        monitor._vram._free_mb = 5000.0
+        monitor._ollama._status = "down"
+
+        def poll_with(active_provider: str) -> str:
+            with patch(
+                "opencohost.core.health_monitor.load_provider_config",
+                return_value={"active_provider": active_provider, "profiles": {}},
+            ):
+                monitor._poll_all()
+            return monitor.state.overall_status
+
+        assert poll_with("local") == "red"
+        assert poll_with("openai") != "red"
+        assert poll_with("local") == "red"
+
     def test_qwen_alive_but_unhealthy_is_not_green(self):
         """Alive Qwen process without loaded model must not publish fake green."""
         monitor = self._make_monitor()

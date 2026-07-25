@@ -88,6 +88,137 @@ def test_models_discovery_error_degrades_never_500(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# GET /api/models — provider-aware (multi_provider_llm_20260723 Phase 5)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_models_cloud_active_returns_active_profile_model_and_no_catalog(monkeypatch):
+    """Cloud active: current_model/discovered come from the ACTIVE profile
+    only, and no download/install catalog is exposed (spec D)."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {
+            "active_provider": "openai",
+            "profiles": {
+                "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+                "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
+            },
+        },
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["current_model"] == "gpt-4o-mini"
+        assert body["discovered"] == ["gpt-4o-mini"]
+        assert body["catalog"] == {}  # no download/install affordance on cloud
+        assert body["tiers"] == {}
+
+
+def test_models_cloud_active_skips_ollama_discovery(monkeypatch):
+    """No `ollama.list` discovery call on cloud (spec D)."""
+    import opencohost.api.main as main_mod
+
+    calls = []
+
+    def _track_discover(*a, **kw):
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(main_mod, "_discover_ollama_models", _track_discover)
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {
+            "active_provider": "openai",
+            "profiles": {"openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"}},
+        },
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert calls == []
+
+
+def test_models_cloud_active_never_leaks_other_profile_model(monkeypatch):
+    """Profile isolation: the active profile's model is used, never a
+    differently-configured profile's."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {
+            "active_provider": "nvidia_nim",
+            "profiles": {
+                "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+                "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
+            },
+        },
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["current_model"] == "deepseek-r1"
+        assert "gpt-4o-mini" not in body["discovered"]
+
+
+def test_models_explicit_local_provider_byte_identical(monkeypatch):
+    """An explicit `active_provider: local` config keeps the exact
+    pre-track shape — still calls Ollama discovery, still exposes the full
+    catalog (byte-identical local-path guarantee)."""
+    import opencohost.api.main as main_mod
+    from opencohost.config.settings import MODELS_CATALOG
+
+    monkeypatch.setattr(
+        main_mod, "load_provider_config", lambda: {"active_provider": "local", "profiles": {}}
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body["catalog"].keys()) == set(MODELS_CATALOG.keys())
+        assert body["current_model"] == "qwen3:8b"
+        assert body["active_tier"] == "balanced"
+
+
+def test_models_cloud_active_provider_absent_from_profiles_degrades(monkeypatch):
+    """Cloud active but the active_provider has NO entry in `profiles`
+    (misconfig / deleted profile): the read must still 200 with an empty
+    catalog/discovered and a null current_model — never a 500/crash."""
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_provider_config",
+        lambda: {"active_provider": "openai", "profiles": {}},
+    )
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["catalog"] == {}
+        assert body["discovered"] == []
+        assert body["current_model"] is None
+        assert body["tiers"] == {}
+        assert body["active_tier"] == "cloud"
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # GET /api/tts/config
 # ──────────────────────────────────────────────────────────────────────────
 
