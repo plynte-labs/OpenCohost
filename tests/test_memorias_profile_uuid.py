@@ -680,7 +680,18 @@ class TestLaunchCoverage:
                 on_log=MagicMock(),
             )
             panel.set_profiles(perfiles)
-            with patch("opencohost.ui.profile_panel.ctk", mock_ctk):
+            # personalization_panel has its OWN module-level `ctk` and is
+            # mounted from inside ProfilePanel.build() (profile_panel.py:145),
+            # so patching only profile_panel let a REAL CTkButton through —
+            # which made CustomTkinter walk the MagicMock parent chain forever
+            # (16 GB RSS, no RecursionError, it is a while loop). Both modules
+            # must be patched for this test's "without a real Tk root" contract
+            # to hold. conftest's _neutralize_ctk_appearance_tracker is the
+            # session-wide backstop for the same class of hang.
+            with (
+                patch("opencohost.ui.profile_panel.ctk", mock_ctk),
+                patch("opencohost.ui.personalization_panel.ctk", mock_ctk),
+            ):
                 panel.build()
 
             # Startup dispatch (app_shell.py:228 -> _aplicar_perfil_actual).

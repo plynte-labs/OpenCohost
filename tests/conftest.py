@@ -1,5 +1,6 @@
 """Shared pytest fixtures for VoiceAI tests."""
 
+import faulthandler
 import logging
 import os
 import sys
@@ -11,6 +12,83 @@ import pytest
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+
+# Per-test wall-clock ceiling, in seconds. Deliberately generous: this is a
+# runaway backstop, not a performance budget. Override with
+# OPENCOHOST_TEST_TIMEOUT=0 to disable (e.g. when attaching a debugger).
+HUNG_TEST_TIMEOUT_S = float(os.environ.get("OPENCOHOST_TEST_TIMEOUT", "90"))
+
+
+@pytest.fixture(autouse=True)
+def _kill_hung_test():
+    """Hard ceiling on a single test, so a runaway can never take the machine.
+
+    OWNER RULE 2026-07-24: "la suite de test no hay que fundir la pc."
+
+    ``pytest.ini``'s own ``faulthandler_timeout`` is NOT a safety net — it only
+    PRINTS the tracebacks and lets the test keep running. That was proven the
+    hard way: test_memorias_profile_uuid.py's launch-coverage test spun in an
+    unbounded CustomTkinter loop and reached 16 GB RSS (99% of 31 GB) with
+    ``faulthandler_timeout=25`` active the whole time.
+
+    ``dump_traceback_later(..., exit=True)`` is the version that actually
+    stops it: it dumps every thread's stack (so you still learn WHICH test and
+    WHERE) and then hard-exits the process. Losing the rest of the run is the
+    correct trade against losing the machine — a hang is a bug either way.
+
+    Stdlib only; deliberately not pytest-timeout, which would add a dependency
+    to do what faulthandler already does.
+    """
+    if HUNG_TEST_TIMEOUT_S <= 0:
+        yield
+        return
+    faulthandler.dump_traceback_later(HUNG_TEST_TIMEOUT_S, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _neutralize_ctk_appearance_tracker():
+    """Stop CustomTkinter from walking a mock widget's parent chain forever.
+
+    Every real CTk widget registers with ``AppearanceModeTracker.add()``, which
+    resolves the Tk root like this::
+
+        while isinstance(current_widget, tkinter.Tk) is False:
+            current_widget = current_widget.master
+
+    Hand it a ``MagicMock`` parent — what every headless UI test does — and the
+    loop never terminates: a MagicMock is never a ``tkinter.Tk``, and each
+    ``.master`` access CREATES a fresh child mock that the parent then caches
+    (``m.master is m.master`` -> True). It is a while loop, not recursion, so
+    there is no RecursionError to rescue it; RSS just climbs until the machine
+    dies.
+
+    Light/dark appearance tracking has no meaning in a headless suite, so we
+    no-op the registration for the whole session. This kills the entire CLASS
+    of hang rather than one test: any future panel nested inside another
+    (exactly how this surfaced — personalization_panel mounted from
+    profile_panel.build) is covered without anyone remembering to widen a
+    patch. Best-effort by design: if customtkinter is absent or its internals
+    move, tests must still run.
+    """
+    try:
+        from customtkinter.windows.widgets.appearance_mode import (
+            appearance_mode_tracker as _tracker_mod,
+        )
+    except Exception:
+        yield
+        return
+
+    tracker = _tracker_mod.AppearanceModeTracker
+    with (
+        patch.object(tracker, "add", classmethod(lambda cls, *a, **k: None)),
+        patch.object(tracker, "remove", classmethod(lambda cls, *a, **k: None)),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
