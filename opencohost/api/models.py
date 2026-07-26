@@ -735,6 +735,12 @@ class MemoriaListItem(BaseModel):
     # authority as a curated/imported/summary row. Metadata-only, mirrors
     # `imported`'s derivation shape exactly.
     draft: bool
+    # memory_promotion_20260725: True when status='promoted' — a draft an LLM
+    # archivist judged, rewrote and kept. Durable like `curated` but labelled
+    # honestly: without this flag a promoted row reads draft=False,
+    # imported=False, i.e. indistinguishable from an operator edit on every
+    # surface. Metadata-only, mirrors `imported`'s derivation shape exactly.
+    promoted: bool
 
 
 class MemoriaListResponse(BaseModel):
@@ -765,6 +771,8 @@ class MemoriaRowResponse(BaseModel):
     # single-row store.get() SELECT * already reads `status`, so this is a
     # free derivation, same shape as the list projection.
     draft: bool
+    # memory_promotion_20260725: mirrors MemoriaListItem.promoted.
+    promoted: bool
 
 
 class MemoriaFlagsRequest(BaseModel):

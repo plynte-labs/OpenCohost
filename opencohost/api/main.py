@@ -1371,6 +1371,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     inactive=bool(row["inactive"]),
                     imported=bool(row["status"] == "imported"),
                     draft=bool(row["status"] == "draft"),
+                    promoted=bool(row["status"] == "promoted"),
                 )
                 for row in rows
             ]
@@ -1407,6 +1408,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             private=bool(row["private"]),
             inactive=bool(row["inactive"]),
             draft=bool(row["status"] == "draft"),
+            promoted=bool(row["status"] == "promoted"),
         )
 
     @app.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)

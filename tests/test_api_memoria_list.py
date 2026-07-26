@@ -98,6 +98,7 @@ def test_memoria_list_shape_includes_title_but_not_content(tmp_path, monkeypatch
                 "inactive",
                 "imported",
                 "draft",
+                "promoted",
             }
         # memoria_import_20260718 (WU3): a non-imported (draft/curated) row
         # carries imported=False; the imported=True case is covered in
@@ -123,6 +124,44 @@ def test_memoria_list_shape_includes_title_but_not_content(tmp_path, monkeypatch
         assert by_id["mem_b"]["revision"] == 2
         assert by_id["mem_b"]["private"] is True
         assert by_id["mem_b"]["title"] == "secret title b"
+
+
+def test_memoria_list_distinguishes_promoted_from_draft_and_curated(tmp_path, monkeypatch):
+    """memory_promotion_20260725: a machine-JUDGED row must not be reported as
+    something the operator touched. Without its own flag a promoted row reads
+    draft=False, imported=False — indistinguishable from a curated edit, which is
+    exactly the misreported provenance insert_summary's rule exists to prevent,
+    and it would silently strip the meaning from the `draft` badge."""
+    import opencohost.api.main as main_mod
+
+    db_path = tmp_path / "memorias.db"
+    _seed_memorias_db(db_path)
+    conn = sqlite3.connect(db_path)
+    for row_id, status in (("mem_p", "promoted"), ("mem_c", "curated")):
+        conn.execute(
+            "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+            "status, pinned, private, inactive, created_at, updated_at) VALUES "
+            f"('{row_id}', 'default', 'k_{row_id}', 1, 't', 'c', '{status}', 0, 0, 0, "
+            "'2026-01-04T00:00:00+00:00', '2026-01-04T00:00:00+00:00')"
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main_mod, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(main_mod, "MEMORIAS_DB", str(db_path))
+
+    app = _app()
+    with TestClient(app) as client:
+        by_id = {i["id"]: i for i in client.get(
+            "/api/memoria/list", params={"profile_id": "default"}
+        ).json()["items"]}
+
+    assert (by_id["mem_p"]["promoted"], by_id["mem_p"]["draft"], by_id["mem_p"]["imported"]) == (
+        True, False, False)
+    assert (by_id["mem_c"]["promoted"], by_id["mem_c"]["draft"], by_id["mem_c"]["imported"]) == (
+        False, False, False)
+    assert (by_id["mem_a"]["promoted"], by_id["mem_a"]["draft"], by_id["mem_a"]["imported"]) == (
+        False, True, False)
 
 
 def test_memoria_list_includes_inactive_field(tmp_path, monkeypatch):

@@ -104,7 +104,24 @@ def test_get_memoria_row_happy_path(tmp_path, monkeypatch):
             "inactive": False,
             # memoria_draft_visibility_20260725: seeded status='draft' above.
             "draft": True,
+            # memory_promotion_20260725: machine-judged rows are labelled
+            # honestly instead of borrowing the operator's `curated`.
+            "promoted": False,
         }
+
+
+def test_get_memoria_row_reports_a_promoted_row_as_promoted_not_draft(tmp_path, monkeypatch):
+    db_path = tmp_path / "memorias.db"
+    _seed_memorias_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE memorias SET status = 'promoted' WHERE id = 'mem_a'")
+    _enable(monkeypatch, db_path)
+
+    with TestClient(_app()) as client:
+        body = client.get("/api/memoria/row/mem_a", params={"profile_id": "default"}).json()
+
+    assert body["promoted"] is True
+    assert body["draft"] is False
 
 
 def test_get_memoria_row_wrong_profile_id_404(tmp_path, monkeypatch):
