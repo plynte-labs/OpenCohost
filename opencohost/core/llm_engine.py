@@ -1,7 +1,9 @@
 import os
 import re
 import hashlib
+import json
 import socket
+import sqlite3
 import threading
 import queue
 import time
@@ -40,6 +42,7 @@ from opencohost.config.settings import (
     PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
     MEMORIAS_ENABLED, MEMORIAS_DB,
+    MEMORIAS_PROFILE_CAP,
     MEMORIAS_SUMMARY_MIN_TITLES,
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
@@ -138,6 +141,153 @@ _GUARDRAIL_RETRY_NUDGE = (
     "nuevo sin prometer ni garantizar nada y sin afirmar con certeza "
     "absoluta lo que va a pasar; mantené el resto del tono."
 )
+
+
+# ── memoria draft promotion (memory_promotion_20260725) ─────────────────────
+# Per-turn capture is deliberately cheap, permissive and LLM-free; nothing ever
+# filtered afterward, so the store filled with vague half-memories Kira then
+# recited ("hubo una corrección… algo técnico, no me acuerdo del detalle"). This
+# is the missing step: ONE LLM call per launch judges the oldest unjudged
+# drafts, rewrites the survivors so they stand alone, and promotes them.
+
+_PROMOTION_DRAFT_BATCH = 40          # ~12,000 chars — the volume owner decision 1 approved
+_PROMOTION_NUM_PREDICT = 1200        # omitted entirely on reasoning models (D2)
+_PROMOTION_TEXT_MAX_CHARS = 220
+
+# Adaptive judge budget (owner decision 5). A fixed 30s/90s would be a per-model
+# assumption in disguise, contradicting the model-agnostic decision. Derived
+# instead from `_pregen_last_gen_duration` — the SAME measurement
+# `_pregen_retry_gate_seconds` already ships, with the SAME cold-start fallback
+# (RETRY_MIN_REMAINING_SECONDS). No second measurement scheme.
+_JUDGE_BUDGET_FACTOR = 2.0            # a judge reply is longer than a turn's
+_JUDGE_REASONING_COLD_FACTOR = 3.0    # cold start on a thinking model (no num_predict cap, D2)
+_JUDGE_BUDGET_FLOOR_SECONDS = 20.0
+_JUDGE_BUDGET_CEILING_SECONDS = 90.0
+
+# Reject reasons the judge itself may return. Anything else (including the
+# parser-owned `not_self_contained`) collapses to "unspecified" so the counter
+# can never be poisoned by an invented label.
+_PROMOTION_JUDGE_REASONS = frozenset({
+    "vague", "speculative", "trivial", "transient", "not_attributable",
+})
+
+# NOT an i18n slot, deliberately: this string never reaches a user, it instructs
+# its own output language inline, and a slot would cost two manifest edits plus
+# churn in the i18n contract tests for zero user-visible benefit.
+# `{draft_block}` is substituted with str.replace, NOT str.format — the JSON
+# example below is full of literal braces, and doubling every one of them is a
+# silent-corruption trap for the next editor.
+_PROMOTION_JUDGE_PROMPT = """You are a memory archivist for a streaming co-host. You do NOT talk to anyone.
+You only decide which of the numbered exchanges below are worth remembering
+permanently, and rewrite each keeper as ONE standalone sentence.
+
+KEEP an item only if ALL SIX hold:
+1. EXPLICIT — the operator stated it. Anything only the assistant speculated,
+   guessed, joked about or inferred is not a fact. Reject it.
+2. SELF-CONTAINED — your rewrite must be fully understandable a month from now
+   by someone who never saw this conversation. No "this", "that", "the game",
+   "the question", "the bug", "the fix", no unnamed pronouns, no unresolved
+   references. If you cannot name the actual subject from the text you were
+   given, REJECT. A vague rewrite is WORSE than no memory at all.
+3. SPECIFIC — a concrete fact, preference, name, decision or number. Not a
+   mood, not a greeting, not small talk.
+4. REUSABLE — useful in a DIFFERENT future conversation, not only as a recap
+   of this one.
+5. DURABLE — still true next month. Reject anything about the current moment.
+6. ATTRIBUTABLE — it is clear whose fact it is.
+
+NAMES: never invent, normalise, translate or "correct" a proper noun. Game
+titles, model names, tools and people usually appear only ONCE — that is
+normal and is NOT a reason to reject. Copy the operator's own spelling
+verbatim. If you are not confident you transcribed a name correctly, still
+KEEP the item and set "uncertain": true.
+
+Write each rewrite in the SAME LANGUAGE the operator used, in at most 30 words.
+
+CANDIDATES:
+{draft_block}
+
+Reply with JSON only, no prose, no markdown fence:
+{"decisions":[{"i":1,"keep":true,"text":"<standalone sentence>"},
+              {"i":2,"keep":true,"text":"<sentence>","uncertain":true},
+              {"i":3,"keep":false,"reason":"vague"}]}
+
+Field contract:
+  i          int, 1..N, exactly one object per candidate number
+  keep       bool, required
+  text       string, required when keep is true, <=220 characters
+  uncertain  bool, optional, only meaningful when keep is true
+  reason     string, only when keep is false; one of:
+             vague, speculative, trivial, transient, not_attributable
+
+If unsure whether to keep an item, use keep:false."""
+
+_PROMOTION_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+def _parse_promotion_decisions(text, batch_len: int) -> list[tuple[int, str | None, bool, str]]:
+    """Parse the judge's reply into applied decisions. PURE — no I/O, no engine.
+
+    Returns ``(index, text_or_None, uncertain, reason)`` per usable entry:
+    a keep is ``(i, sentence, uncertain, "")``; a reject is ``(i, None, False,
+    reason)``. NEVER raises: every unusable shape (empty, prose, a truncated
+    reasoning-model reply, a fence full of apologies) collapses to ``[]``, which
+    is what makes the sweep's fail-silent contract real — nothing applied means
+    nothing marked judged, so the next launch retries.
+
+    A ``keep`` whose text is missing, blank or over the char cap is demoted to a
+    reject with reason ``not_self_contained`` rather than treated as an error: a
+    judge that cannot produce a standalone sentence has answered criterion 2 in
+    the negative.
+    """
+    if not text or not isinstance(text, str):
+        return []
+    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("decisions")
+    if not isinstance(entries, list):
+        return []
+
+    results: list[tuple[int, str | None, bool, str]] = []
+    seen: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("i")
+        # bool is an int subclass — True would otherwise pass as index 1.
+        if not isinstance(index, int) or isinstance(index, bool):
+            continue
+        if not 1 <= index <= batch_len or index in seen:
+            continue
+        keep = entry.get("keep")
+        if not isinstance(keep, bool):
+            continue
+        seen.add(index)
+        if not keep:
+            reason = entry.get("reason")
+            # isinstance FIRST: a list/dict `reason` is unhashable, and a bare
+            # `in frozenset(...)` would raise TypeError straight through the
+            # "NEVER raises" contract into the sweep's outer catch-all —
+            # discarding every OTHER valid decision in the same batch.
+            results.append((
+                index, None, False,
+                reason if isinstance(reason, str) and reason in _PROMOTION_JUDGE_REASONS
+                else "unspecified",
+            ))
+            continue
+        judged = entry.get("text")
+        judged = " ".join(judged.split()) if isinstance(judged, str) else ""
+        if not judged or len(judged) > _PROMOTION_TEXT_MAX_CHARS:
+            results.append((index, None, False, "not_self_contained"))
+            continue
+        results.append((index, judged, entry.get("uncertain") is True, ""))
+    return results
+
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Walk the exception cause chain; return True only for network-offline errors.
@@ -351,6 +501,18 @@ class MotorVocalIA(threading.Thread):
         # timeout closes the socket so Ollama cancels the generation and frees the
         # single runner slot. Lazily created in scout_digest if run() did not.
         self._ollama_scout_client = None
+        # memory_promotion_20260725: same shape as the scout client, but built
+        # per sweep with the adaptive judge budget (_judge_timeout_seconds).
+        self._ollama_judge_client = None
+        # One-shot latch for the STARTUP promotion sweep (owner decision 7): the
+        # first time run()'s idle branch is reached the process is guaranteed
+        # idle and the stream has not begun. NOT a recurring tick — the
+        # unvalidated "30 consecutive idle seconds" threshold is deliberately
+        # absent, not deferred.
+        self._promotion_swept: bool = False
+        # Last gate name reported by _promotion_gate, so a permanently inert
+        # sweep logs once per CHANGED state instead of once per idle tick.
+        self._promotion_last_gate: str = ""
         self._scout_last_input_hash: Optional[str] = None
         self._last_llm_failure: Optional[dict] = None
         self._last_known_good_model: Optional[str] = _startup_model
@@ -1070,6 +1232,29 @@ class MotorVocalIA(threading.Thread):
                 # Check priority queue and accumulation buffer when idle
                 self._process_priority_queue()
                 self._check_pending_model_switch()
+                # memory_promotion_20260725 (owner decision 7): the FIRST idle
+                # tick of the process is the guaranteed-idle, pre-stream moment
+                # the draft-promotion sweep needs. Both surfaces (GUI app_shell
+                # and the API engine_host) drive this same run(), so there is no
+                # call site to add in either — and unlike a hasattr-guarded call
+                # in a constructor that has not run yet, deleting this line makes
+                # its test fail.
+                # Latch on the OUTCOME, never on the attempt: on the API surface
+                # `_seed_startup_profile` (the only setter of
+                # `_current_profile_id`) runs AFTER `motor.start()` and after the
+                # health monitor, agenda and music library are built, so this
+                # tick routinely fires first with no profile; on the GUI one
+                # Ollama may not be up yet. Arming here would disable promotion
+                # for the whole process on a transient not-ready first tick.
+                if not self._promotion_swept:
+                    try:
+                        if not self.promote_pending_drafts().get("skipped"):
+                            self._promotion_swept = True
+                    except Exception as exc:
+                        self._promotion_swept = True  # a raising sweep is an attempt
+                        logger.warning(
+                            "memoria promotion sweep escaped isolation: %s", type(exc).__name__
+                        )
                 continue
 
             if comando is None:
@@ -3327,18 +3512,25 @@ class MotorVocalIA(threading.Thread):
             self._log(f"Ollama Client no soporta timeout de chat; usando cliente por defecto: {e}", level="warning")
             return None
 
-    def _create_ollama_scout_client(self, ollama_module):
-        """Dedicated short-timeout client for the Topic Scout.
+    def _create_ollama_scout_client(self, ollama_module, *, timeout: float = LLM_SCOUT_TIMEOUT):
+        """Dedicated short-timeout client for auxiliary, non-persona generations.
 
         Built with ``LLM_SCOUT_TIMEOUT`` (not the 180s chat timeout) so that when
         the HTTP timeout expires the socket closes and Ollama cancels the
-        generation, releasing the single runner slot in ~LLM_SCOUT_TIMEOUT.
+        generation, releasing the single runner slot in ~LLM_SCOUT_TIMEOUT. That
+        socket-level cancel is the ONLY real abort path: the watchdog's worker is
+        a plain daemon thread with no cancellation, so without an HTTP timeout a
+        timed-out call keeps the single runner busy.
+
+        *timeout* (memory_promotion_20260725) generalises it for the draft-
+        promotion judge, whose budget is adaptive (``_judge_timeout_seconds``).
+        The default keeps the Topic Scout's caller byte-identical.
         """
         client_factory = getattr(ollama_module, "Client", None)
         if client_factory is None:
             return None
         try:
-            return client_factory(timeout=LLM_SCOUT_TIMEOUT)
+            return client_factory(timeout=timeout)
         except TypeError as e:
             self._log(f"Ollama Client no soporta timeout de scout; usando cliente por defecto: {e}", level="warning")
             return None
@@ -3532,6 +3724,22 @@ class MotorVocalIA(threading.Thread):
         client = self._ollama_scout_client or self.ollama
         return client.chat(**kwargs)
 
+    def _ollama_judge_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
+        """Transport for the memoria promotion judge — mirrors _ollama_scout_chat.
+
+        Provider-agnostic by owner decision 2: whatever backend is active runs
+        the judge. Locally it uses the dedicated short-timeout client built with
+        the adaptive budget, so a timed-out judgment actually releases the single
+        Ollama runner instead of leaving it generating into a closed watchdog.
+        """
+        cfg = provider_cfg if provider_cfg is not None else self._provider_config
+        if is_local is None:
+            is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
+        if not is_local:
+            return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
+        client = self._ollama_judge_client or self.ollama
+        return client.chat(**kwargs)
+
     def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
         result = {}
         done = threading.Event()
@@ -3609,14 +3817,19 @@ class MotorVocalIA(threading.Thread):
         text = re.sub(r"@\w+", "", text)
         return _strip_injection_markers(text)
 
-    def _scout_extract_text(self, response) -> str:
-        """Pull the assistant content out of a chat response (dict or object)."""
+    def _scout_extract_text(self, response, *, field: str = "content") -> str:
+        """Pull the assistant content out of a chat response (dict or object).
+
+        *field* selects which message field. The memoria judge's empty-content
+        self-heal needs ``thinking``, and this already handles both response
+        shapes — a second extractor would only duplicate that.
+        """
         if response is None:
             return ""
         msg = response["message"] if isinstance(response, dict) else getattr(response, "message", None)
         if msg is None:
             return ""
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+        content = msg.get(field) if isinstance(msg, dict) else getattr(msg, field, "")
         return content or ""
 
     def _scout_parse_titles(self, text: str, input_block: str) -> list[dict]:
@@ -3720,6 +3933,351 @@ class MotorVocalIA(threading.Thread):
         except Exception:
             # Total internal isolation — a scout failure must never escape.
             return []
+
+    # ── memoria draft promotion (memory_promotion_20260725) ─────────────────
+    def _judge_model(self) -> str:
+        """The model name the judge will ACTUALLY run on, whatever the provider.
+
+        Locally that is the resident model (never the desired one — the sweep
+        must not cold-load). On cloud there is no resident local model at all
+        (``_prepare_model`` returns before assigning ``_loaded_model``), so it is
+        the ACTIVE PROFILE's model — the same one ``_cloud_chat`` resolves for
+        itself and sends. Always a str: ``_resolve_reasoning_classification``
+        lowercases it, so a None here would raise straight into the sweep's
+        catch-all and silently disable the feature on cloud.
+        """
+        if self._is_local:
+            return self._loaded_model or ""
+        profile = self._cfg_active_profile(self._provider_config) or {}
+        return str(profile.get("model") or "")
+
+    def _judge_timeout_seconds(self) -> float:
+        """The judge's adaptive time budget (owner decision 5).
+
+        Reuses ``_pregen_last_gen_duration`` — the SAME measurement
+        ``_pregen_retry_gate_seconds`` already ships — instead of introducing a
+        second latency-measurement scheme or a fixed constant (a constant would
+        be a per-model assumption in disguise, contradicting the model-agnostic
+        decision 2).
+
+        Stated honestly: at the STARTUP trigger no generation has happened yet,
+        so ``last`` is None and this returns the cold-start value — the identical
+        contract ``_pregen_retry_gate_seconds`` already has. The reasoning branch
+        rides the capability probe D2 needs anyway (cached ``ollama.show``), so it
+        is a per-model MEASUREMENT, not a per-model assumption.
+
+        On CLOUD the budget is ``CLOUD_CHAT_TIMEOUT`` — the codebase's own cloud
+        chat budget, which ``_cloud_chat`` enforces at the socket regardless of
+        what this returns. Deriving a shorter one from local-generation latency
+        would only make the watchdog fire BEFORE the socket, aborting every cloud
+        judgment mid-flight with nothing written: the same permanent no-op the
+        resident-model gate used to cause, one layer down. No new constant.
+        """
+        if not self._is_local:
+            return float(CLOUD_CHAT_TIMEOUT)
+        last = self._pregen_last_gen_duration
+        if last is None:
+            base = RETRY_MIN_REMAINING_SECONDS * (
+                _JUDGE_REASONING_COLD_FACTOR
+                if self._resolve_reasoning_classification(self._judge_model()) else 1.0
+            )
+        else:
+            base = last * _JUDGE_BUDGET_FACTOR
+        return max(_JUDGE_BUDGET_FLOOR_SECONDS, min(_JUDGE_BUDGET_CEILING_SECONDS, base))
+
+    def _run_promotion_judge(self, batch: list, *, chat_callable=None) -> list[tuple]:
+        """ONE chat completion over *batch*, parsed. Raises on transport failure.
+
+        The reasoning branch (D2): ``scout_digest``'s sixth gate skips thinking
+        models entirely because they burn a 64-token budget inside ``<think>``
+        and return empty ``content``. Adopting it here would mean ZERO promotions
+        forever on the owner's Qwen3-class models, so this reaches the same
+        conclusion ``_generar_dialogo``'s self-heal already does instead: OMIT
+        ``num_predict`` on a reasoning-capable model. The capability answer is
+        cached, so this costs no extra RPC.
+
+        Detection goes through ``_resolve_reasoning_classification`` — the SAME
+        resolver ``_generar_dialogo`` already trusts — not the narrow
+        ``_check_capabilities_reasoning`` probe alone. That probe degrades to
+        False on any Ollama build whose ``show`` response lacks ``capabilities``
+        (and returns {} outright on cloud), which would leave the cap on a
+        Qwen3-class model, burn it inside <think>, return empty content, and
+        re-pay the identical inference every launch with zero promotions.
+        """
+        draft_block = "\n".join(
+            f"{i}. {row['content']}" for i, row in enumerate(batch, start=1)
+        )
+        # str.replace, not str.format: the prompt's JSON example is full of
+        # literal braces and doubling every one of them is a corruption trap.
+        prompt = _PROMOTION_JUDGE_PROMPT.replace("{draft_block}", draft_block)
+        budget = self._judge_timeout_seconds()
+        # Reuses the established auxiliary-generation temperature rather than
+        # inventing a second knob; a format-drifted reply is already handled
+        # (the parser returns [] and nothing is marked judged).
+        options = {"temperature": LLM_SCOUT_TEMPERATURE}
+        judge_model = self._judge_model()
+        if not self._resolve_reasoning_classification(judge_model):
+            # Local-sized caps do not transfer to cloud. A 40-draft batch that
+            # keeps ~20 needs ~1700 output tokens (a keep is ~60-67: the index,
+            # the flags and up to 220 chars of rewritten text), so a flat 1200
+            # truncates the reply mid-object -- the parser then returns [],
+            # nothing is marked judged, and the SAME batch is re-sent and
+            # re-paid on the next launch, forever. `_generar_dialogo` already
+            # makes exactly this distinction at its own call site.
+            options["num_predict"] = (
+                _PROMOTION_NUM_PREDICT if self._is_local else CLOUD_MAX_TOKENS
+            )
+        if chat_callable is None and self._is_local:
+            # Rebuilt per sweep because the budget is adaptive; the sweep runs
+            # once per launch, so this costs nothing. Local only — on cloud
+            # `_ollama_judge_chat` never touches the client, and a cloud-only
+            # process has no reason to reach for `self.ollama` at all.
+            self._ollama_judge_client = self._create_ollama_scout_client(
+                self.ollama, timeout=budget,
+            )
+        call = chat_callable or self._ollama_judge_chat
+        messages = [{"role": "user", "content": prompt}]
+        deadline = time.monotonic() + budget + 2
+        response = self._ollama_chat_with_watchdog(
+            timeout=budget + 2,  # the socket abort must fire first (scout precedent)
+            chat_callable=call,
+            model=judge_model,
+            messages=messages,
+            options=options,
+            keep_alive=LLM_KEEP_ALIVE,
+        )
+        text = self._scout_extract_text(response)
+        # `_generar_dialogo`'s Layer-2 self-heal, verbatim in shape: empty visible
+        # content + internal thinking + a cap in the options means the model spent
+        # the budget inside <think>. Drop the cap and re-issue ONCE.
+        #
+        # This is the only thing that makes the judge work on a thinking-capable
+        # CLOUD model. Detection cannot: the name heuristic knows a handful of
+        # markers and `_fetch_show` returns {} outright when `not self._is_local`,
+        # so glm-5.2 is classified "not reasoning", gets num_predict (sent as
+        # max_tokens), returns empty content — and the sweep promotes nothing,
+        # every launch, forever, paying a full cloud inference each time. The
+        # response IS the evidence, so no detection is involved and this covers
+        # cloud and local, known and unknown model names alike.
+        #
+        # One shot, never a loop, and inside the FIRST call's deadline: the retry
+        # gets what is LEFT of it, so the self-heal cannot double the operator's
+        # worst-case wait. A non-positive remainder is already handled — the
+        # watchdog floors its wait at 0.1s and raises, which the sweep's isolation
+        # turns into "nothing written, next launch retries".
+        if not text.strip() and self._scout_extract_text(response, field="thinking") \
+                and "num_predict" in options:
+            options.pop("num_predict", None)
+            logger.warning(
+                "memoria judge returned empty content with internal thinking; "
+                "dropping the token cap and retrying once",
+            )
+            response = self._ollama_chat_with_watchdog(
+                timeout=deadline - time.monotonic(),
+                chat_callable=call,
+                model=judge_model,
+                messages=messages,
+                options=options,
+                keep_alive=LLM_KEEP_ALIVE,
+            )
+            text = self._scout_extract_text(response)
+        return _parse_promotion_decisions(text, len(batch))
+
+    def _promotion_gate(self) -> str:
+        """Name of the gate blocking a sweep right now, or "" when clear.
+
+        The resident-model check is LOCAL-ONLY, deliberately. ``_loaded_model``
+        is assigned exclusively on the local warm path — ``_check_ollama_service``
+        returns at ``if not self._is_local`` and never reaches ``_prepare_model``,
+        which itself returns without assigning it — so on a CLOUD provider it is
+        None for the entire process. Gating on it unconditionally made the whole
+        feature a permanent, silent no-op on the owner's actual configuration
+        (GLM-5.2 via NVIDIA NIM), contradicting owner decision 2: the judge runs
+        on whatever provider is active. Cloud needs no resident model at all —
+        ``_cloud_chat`` resolves base_url/model/key from the active profile.
+        """
+        if not MEMORIAS_ENABLED:
+            return "memorias_disabled"
+        if self._is_local and self._loaded_model is None:
+            return "no_resident_model"   # never cold-load: the RESIDENT model, not the desired one
+        if self._pending_model_switch or self._awaiting_first_success_after_switch:
+            return "model_switch_pending"
+        if self._current_profile_id is None:
+            return "no_profile"
+        return ""
+
+    def promote_pending_drafts(self, *, chat_callable=None) -> dict:
+        """ONE LLM call: judge, rewrite and promote this profile's oldest
+        unjudged drafts (memory_promotion_20260725).
+
+        Per-turn capture is cheap, permissive and LLM-free; nothing ever filtered
+        afterward, so the store fills with vague half-memories Kira then recites.
+        This is the missing step.
+
+        Synchronous, on the engine thread, and FULLY isolated (``scout_digest``
+        precedent): every internal failure — timeout, malformed JSON, provider
+        offline, sqlite lock — returns counts-only and leaves every draft
+        untouched and UNJUDGED, so the next launch simply retries. A failed
+        promotion can never lose a memory: this method never deletes and never
+        demotes.
+
+        *chat_callable* is the test seam, threaded straight into
+        ``_ollama_chat_with_watchdog`` (the same boundary the Topic Scout tests
+        fake). Returns counts ONLY — RC-8: no memory text ever reaches a log.
+
+        ``counts["skipped"]`` names the gate that blocked a NOT-ATTEMPTED sweep
+        and is "" whenever the sweep genuinely reached the store. The one-shot
+        latch in ``run()`` reads it: arming on the attempt instead of the outcome
+        meant a single transient not-ready first idle tick (the profile is seeded
+        AFTER ``motor.start()`` on the API surface; Ollama may not be up yet on
+        the GUI one) disabled promotion for the whole process, silently.
+        """
+        reasons: Counter = Counter()
+        counts = {
+            "considered": 0, "kept": 0, "rejected": 0, "stale": 0,
+            "unjudged_remaining": 0, "reasons": reasons, "skipped": "",
+        }
+        try:
+            # scout_digest's gates MINUS its reasoning value gate (see D2).
+            gate = self._promotion_gate()
+            if gate:
+                counts["skipped"] = gate
+                # Once per CHANGED gate state, so a permanently inert sweep is
+                # observable (owner decision 8) without a log line every second.
+                if gate != self._promotion_last_gate:
+                    self._promotion_last_gate = gate
+                    logger.info("memoria promotion sweep gated: %s", gate)
+                return counts
+            self._promotion_last_gate = ""
+            profile_id = self._current_profile_id
+
+            store = self._get_memoria_store()
+            drafts = store.list_unjudged_drafts(profile_id, limit=_PROMOTION_DRAFT_BATCH)
+            if not drafts:
+                return counts  # the common no-op: zero tokens, no call at all
+            counts["considered"] = len(drafts)
+
+            # No dedup step, deliberately: the design's "drop any draft whose
+            # stable_key is already durable" can never fire. UNIQUE(profile_id,
+            # stable_key) is a TABLE constraint, so that state is unreachable —
+            # a re-capture of an already-durable exchange resolves upsert_draft
+            # to a no-op and inserts nothing. Re-judging a promoted row is
+            # equally impossible (list_unjudged_drafts filters status='draft'
+            # AND judged_at=''). Both would have been dead code behind a test
+            # that only passes on a hand-forged database.
+            batch = drafts
+
+            if batch:
+                kept: list[tuple[str, int]] = []
+                rejected: list[tuple[str, int]] = []
+                for index, judged_text, uncertain, reason in self._run_promotion_judge(
+                    batch, chat_callable=chat_callable,
+                ):
+                    row = batch[index - 1]
+                    if judged_text is None:
+                        reasons[reason] += 1
+                        rejected.append((row["id"], row["revision"]))
+                        continue
+                    # Two optimistic-concurrency tokens, because the operator has
+                    # two ways to touch a row while the model is thinking.
+                    # `if_revision` catches a re-CAPTURE (upsert_draft bumps it);
+                    # `if_status` catches a hand EDIT, which goes through
+                    # update_row and sets status='curated' WITHOUT bumping
+                    # revision — without it the judge's rewrite of the now-stale
+                    # text would overwrite the operator's own words and demote
+                    # curated (operator intent) to promoted (machine).
+                    # `touch_updated_at=False` keeps the row's place in the
+                    # recency ranking build_recency_lines uses; the judgment
+                    # rewrites text about an OLD conversation.
+                    # An UNCERTAIN keep gets its rewritten text but stays `draft`
+                    # (owner decision 4: keep and MARK) — the shipped `draft`
+                    # badge already means "provisional, not operator-confirmed".
+                    # `status=` must be passed explicitly: update_row's default
+                    # is 'curated' (the F5 operator-edit contract), a provenance
+                    # lie either way.
+                    try:
+                        written = store.update_row(
+                            row["id"],
+                            title=build_title(judged_text),
+                            content=judged_text,
+                            signature=build_signature(judged_text),
+                            if_revision=row["revision"],
+                            if_status="draft",
+                            status="draft" if uncertain else "promoted",
+                            touch_updated_at=False,
+                            raising=True,
+                        )
+                    except sqlite3.Error:
+                        # raising=True is what makes a plain False mean ONLY
+                        # rowcount==0, so `stale` keeps its documented meaning
+                        # ("the operator was speaking on this topic") instead of
+                        # silently absorbing every locked-database write.
+                        reasons["write_failed"] += 1
+                        continue
+                    if not written:
+                        reasons["stale"] += 1
+                        counts["stale"] += 1
+                        continue
+                    if uncertain:
+                        reasons["uncertain_entity"] += 1
+                    kept.append((row["id"], row["revision"]))
+
+                # mark_judged, never set_flags: set_flags bumps updated_at, and
+                # _prune_profile keeps the newest drafts by updated_at — routing
+                # a rejection through it would evict a newer unjudged draft.
+                # Keeps are counted from the writes that ALREADY landed on disk:
+                # a failed bookkeeping stamp must never report kept=0 on a launch
+                # that genuinely promoted rows (owner decision 8).
+                if kept:
+                    counts["kept"] = len(kept)
+                    try:
+                        stamped = store.mark_judged(kept, raising=True)
+                    except sqlite3.Error:
+                        reasons["write_failed"] += len(kept)
+                    else:
+                        # The text is already on disk; only the stamp is missing,
+                        # so the row is simply re-judged next launch.
+                        if stamped < len(kept):
+                            reasons["unstamped"] += len(kept) - stamped
+                if rejected:
+                    try:
+                        # `if_status="draft"` ONLY here. A reject performs no
+                        # earlier guarded write, so this call carries BOTH of its
+                        # race checks: `revision` catches a re-CAPTURE, `status`
+                        # catches an operator EDIT or PIN (which write 'curated'
+                        # WITHOUT bumping revision) — otherwise a memory he just
+                        # curated is hidden on a judgment of the text he replaced,
+                        # permanently, since upsert_draft's un-hiding CASE only
+                        # fires on rows still in draft. It must NOT be passed on
+                        # the keep call above: `update_row` has already written
+                        # 'promoted' by then, so the same guard would leave every
+                        # confident keep unstamped and re-judged every launch.
+                        stamped = store.mark_judged(
+                            rejected, inactive=True, if_status="draft", raising=True,
+                        )
+                    except sqlite3.Error:
+                        reasons["write_failed"] += len(rejected)
+                    else:
+                        counts["rejected"] = stamped
+                        lost = len(rejected) - stamped
+                        if lost:
+                            reasons["stale"] += lost
+                            counts["stale"] += lost
+
+            counts["unjudged_remaining"] = len(
+                store.list_unjudged_drafts(profile_id, limit=MEMORIAS_PROFILE_CAP)
+            )
+            logger.info(
+                "memoria promotion sweep: considered=%d kept=%d rejected=%d stale=%d "
+                "remaining=%d reasons=%s",
+                counts["considered"], counts["kept"], counts["rejected"],
+                counts["stale"], counts["unjudged_remaining"], dict(reasons),
+            )
+        except Exception as exc:
+            # Total isolation: nothing was marked judged, so the next launch
+            # retries. Type only — never a message that could carry row text.
+            logger.warning("memoria promotion sweep failed (fail-open): %s", type(exc).__name__)
+        return counts
 
     def memory_inspector_snapshot(self) -> dict:
         """Read-only, privacy-gated snapshot of session memory for the
