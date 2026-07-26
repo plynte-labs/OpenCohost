@@ -16,20 +16,24 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
     engine never rewrites an operator-touched row. `inactive` is the ONLY
     pure visibility flag (soft mute, not a content judgment) and never
     changes status.
-  - Provenance tiers (memoria_recall_20260718 + memoria_import_20260718): rows
-    carry FOUR statuses —
+  - Provenance tiers (memoria_recall_20260718 + memoria_import_20260718 +
+    memory_promotion_20260725): rows carry FIVE statuses —
       'draft'    — auto-captured, expendable (the prunable pool);
       'curated'  — operator-touched (F5 above), durable;
       'summary'  — machine-authored session summaries (insert_summary), durable;
       'imported' — machine-parsed external-AI export rows (insert_imported),
-                   durable.
-    'summary' and 'imported' are deliberately DISTINCT from 'curated' so a
-    machine-authored/parsed row is never misreported as operator intent on any
-    surface; both inherit curated's prune- and upsert-immunity for free via the
-    same status!='draft' guards (_prune_profile / upsert_draft). 'summary' is
-    capped separately by _prune_summaries; 'imported' has NO pruner (its cap is
-    enforced at the route via count_imported — silent deletion of deliberate
-    imports is dishonest).
+                   durable;
+      'promoted' — machine-JUDGED drafts an LLM archivist rewrote and kept
+                   (llm_engine.promote_pending_drafts), durable.
+    'summary', 'imported' and 'promoted' are deliberately DISTINCT from
+    'curated' so a machine-authored/parsed/judged row is never misreported as
+    operator intent on any surface; all three inherit curated's prune- and
+    upsert-immunity for free via the same status!='draft' guards
+    (_prune_profile / upsert_draft). 'summary' is capped separately by
+    _prune_summaries; 'imported' has NO pruner (its cap is enforced at the route
+    via count_imported — silent deletion of deliberate imports is dishonest);
+    'promoted' has no pruner either (a judged keeper is the durable output the
+    whole sweep exists to produce).
   - stable_key namespace (CANONICAL — the marker constants below point back
     here): a 'draft'/'curated' row has a PLAIN key
     ("{profile_id}|{sorted-tokens}", no ':' after the '|'); a 'summary' row
@@ -737,6 +741,15 @@ class MemoriaStore:
         for a genuine fresh INSERT (revision==1), False for a refresh/no-op.
         Off by default so the ~50 existing callers keep the bare-id contract —
         only the engine's memoria.captured notice needs the flag.
+
+        D3b (memory_promotion_20260725): the DO UPDATE clause also CLEARS
+        ``judged_at`` on a revision bump — a judgment is about a SPECIFIC
+        capture, so changed content earns a re-judge at the next sweep. The
+        ``inactive`` CASE un-hides ONLY rows the JUDGE hid (``judged_at != ''``);
+        a row the OPERATOR muted via set_flags (which never touches status, so
+        it still matches this draft-only conflict clause) stays hidden. Both
+        expressions read the PRE-update row, so the ``judged_at = ''`` assignment
+        above does not affect the CASE.
         """
         profile_id = (profile_id or "").strip()
         stable_key = (stable_key or "").strip()
@@ -763,7 +776,10 @@ class MemoriaStore:
                         title = excluded.title,
                         signature = excluded.signature,
                         revision = memorias.revision + 1,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        judged_at = '',
+                        inactive = CASE WHEN memorias.judged_at != ''
+                                        THEN 0 ELSE memorias.inactive END
                     WHERE memorias.status = 'draft'
                     RETURNING id, revision
                     """,
@@ -783,7 +799,11 @@ class MemoriaStore:
         if revision == 1:
             self._prune_profile(profile_id)
         else:
-            logger.debug("memoria upsert conflict stable_key=%s revision=%s", stable_key, revision)
+            # RC-8: the row id, never the stable_key. `derive_stable_key` builds
+            # the key from the exchange's own significant tokens, so logging it
+            # puts memory CONTENT in a log line — the one thing the store's
+            # logging contract forbids. The id identifies the row just as well.
+            logger.debug("memoria upsert conflict id=%s revision=%s", written_id, revision)
         return (written_id, revision == 1) if return_created else written_id
 
     def insert_summary(
@@ -917,7 +937,12 @@ class MemoriaStore:
         self._clear_warn()
         return "created" if created else "duplicate"
 
-    def update_row(self, memoria_id: str, *, title: str | None = None, content: str | None = None, raising: bool = False) -> bool:
+    def update_row(
+        self, memoria_id: str, *, title: str | None = None, content: str | None = None,
+        signature: str | None = None, if_revision: int | None = None,
+        if_status: str | None = None, status: str | None = None,
+        touch_updated_at: bool = True, raising: bool = False,
+    ) -> bool:
         """Operator edit: promotes status to curated in the same statement (F5).
 
         Returns False if the write failed (e.g. lock contention) — the row
@@ -926,18 +951,149 @@ class MemoriaStore:
         6/7) MUST check the return value and surface a False to the
         operator; silently ignoring it would let the next auto-capture on
         the same stable_key overwrite content the operator believed frozen.
+
+        Three OPT-IN widenings (memory_promotion_20260725 D6), in the same idiom
+        as upsert_draft's *return_created* — omitting all three leaves the ~50
+        existing callers byte-identical:
+
+        *signature* rewrites the retrieval signature. update_row historically
+        wrote only status/updated_at/title/content, so a promotion without it
+        would leave a DURABLE row indexed on the speculative words of the
+        original capture pair (``_build_memoria_draft`` derives the signature
+        from ``f"{user} {assistant}"``). The judge passes
+        ``build_signature(judged_text)``.
+
+        *if_revision* appends ``AND revision = ?`` — optimistic concurrency
+        against the read-inference-write race. The sweep reads drafts, spends up
+        to its budget in inference, then writes; if the operator speaks on the
+        same topic in that window upsert_draft bumps ``revision``, this write
+        matches zero rows and returns False, and the caller leaves the draft
+        UNJUDGED for the next launch instead of freezing a judgment of stale
+        text into a durable row.
+
+        *if_status* appends ``AND status = ?``. ``if_revision`` alone is NOT
+        enough to detect an operator EDIT racing the sweep: an edit goes through
+        this very method, which sets ``status='curated'`` but never bumps
+        ``revision``, so the sweep's guard would still match and would overwrite
+        the operator's own words with a judgment of the text he just replaced —
+        and demote the row from ``curated`` (operator intent) to ``promoted``
+        (machine), the exact inversion of F5. The sweep passes
+        ``if_status="draft"``; a row that stopped being a draft between read and
+        write is left alone and counted stale.
+
+        *status* overrides the hardcoded ``'curated'``. Promotion writes
+        ``'promoted'``: machine-judged rows labelled curated "would misreport
+        provenance on every surface" (insert_summary's own rule), and the
+        operator-facing `draft` badge would silently lose its meaning.
+
+        *touch_updated_at* False keeps ``updated_at`` byte-identical — the same
+        prune/recency neutrality ``mark_judged`` has. ``build_recency_lines``
+        ranks the meta-recall block by ``updated_at DESC``, so a promotion write
+        that bumped it would stamp weeks-old memories with launch time and evict
+        genuinely recent ones from "what did we talk about last session"; the
+        judgment rewrites text about an OLD conversation, so the capture
+        timestamp stays the honest recency signal. Operator edits keep the
+        default: an edit IS a fresh touch.
         """
-        set_clauses = ["status = 'curated'", "updated_at = ?"]
-        params: list[object] = [_now_text()]
+        # Parameterised, never interpolated: *status* is internal today, but a
+        # bound value costs nothing and keeps it that way.
+        set_clauses = ["status = ?"]
+        params: list[object] = [status or "curated"]
+        if touch_updated_at:
+            set_clauses.append("updated_at = ?")
+            params.append(_now_text())
         if title is not None:
             set_clauses.append("title = ?")
             params.append(" ".join(title.split()))
         if content is not None:
             set_clauses.append("content = ?")
             params.append(" ".join(content.split()))
+        if signature is not None:
+            set_clauses.append("signature = ?")
+            params.append(" ".join(signature.split()))
+        where = "id = ?"
         params.append(memoria_id)
-        sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE id = ?"
+        if if_revision is not None:
+            where += " AND revision = ?"
+            params.append(int(if_revision))
+        if if_status is not None:
+            where += " AND status = ?"
+            params.append(if_status)
+        sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE {where}"
         return self._execute_write(sql, params, error_label="update", raising=raising)
+
+    def mark_judged(
+        self, judged: list[tuple[str, int]], *, inactive: bool = False,
+        if_status: str | None = None, raising: bool = False,
+    ) -> int:
+        """Stamp ``judged_at`` on ``(id, observed_revision)`` pairs — the ONLY
+        judgment bookkeeping verb. Returns the number of rows actually stamped.
+
+        NEVER touches ``updated_at`` and NEVER touches ``status``. That is the
+        whole point (memory_promotion_20260725 D3a): ``set_flags`` bumps
+        ``updated_at`` unconditionally, and ``_prune_profile`` keeps the newest
+        MEMORIAS_PROFILE_CAP unpinned drafts ``ORDER BY updated_at DESC`` — so
+        routing a rejection through set_flags would push the REJECTED row into
+        the keep-window and evict a newer, still-unjudged draft. Promotion must
+        never call set_flags.
+
+        *inactive* additionally hides the row (the rejection path):
+        ``list_injection_candidates`` filters ``inactive = 0``, so a rejected
+        vague memory stops being injected while staying visible — and
+        un-hideable — in the operator's own management UI. Nothing is deleted.
+
+        Each pair carries the ``revision`` the sweep OBSERVED when it read the
+        row, and the write matches on it. The reject path has no other guard —
+        it performs no ``update_row`` — so without this a draft the operator
+        refreshed with BETTER content mid-sweep would be hidden on the strength
+        of a judgment of text it no longer holds. A row that moved matches zero
+        times, stays unjudged, and is re-judged next launch, which is what the
+        design's failure-mode table promises for both write paths.
+
+        *if_status* (opt-in) appends ``AND status = ?`` to every pair term — the
+        mirror of ``update_row``'s guard, and for the same reason: ``revision``
+        alone cannot see an operator EDIT (``update_row``) or PIN (``set_flags``),
+        both of which write ``status='curated'`` WITHOUT bumping it. Without it a
+        memory the operator curated during the sweep window is stamped judged and
+        HIDDEN on the strength of a judgment of the text he replaced — and unlike
+        the keep path nothing ever recovers it, because ``upsert_draft``'s
+        un-hiding CASE only fires on rows that are still drafts. The sweep passes
+        ``if_status="draft"`` on the REJECT call ONLY: by the time it stamps a
+        KEEP, ``update_row`` has already written ``status='promoted'`` for every
+        confident one, so the same guard there would leave them unstamped and
+        re-judged — a full inference re-paid every launch.
+
+        Returns the COUNT of rows stamped, not a bool: the caller's `kept` /
+        `rejected` counters are the owner's only feedback loop on the judge's
+        criteria, so "the judge rejected nothing" and "N rows lost the race"
+        must never collapse into the same number. 0 on an empty list. A write
+        error is fail-open (0) by default; *raising* propagates ``sqlite3.Error``
+        so the caller can count a lock separately from a lost race.
+        """
+        pairs = [(i, r) for i, r in judged if i]
+        if not pairs:
+            return 0
+        set_clauses = ["judged_at = ?"]
+        params: list[object] = [_now_text()]
+        if inactive:
+            set_clauses.append("inactive = 1")
+        term = "(id = ? AND revision = ?)" if if_status is None else "(id = ? AND revision = ? AND status = ?)"
+        where = " OR ".join(term for _ in pairs)
+        for row_id, revision in pairs:
+            params.extend((row_id, int(revision)))
+            if if_status is not None:
+                params.append(if_status)
+        sql = f"UPDATE memorias SET {', '.join(set_clauses)} WHERE {where}"
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                stamped = conn.execute(sql, params).rowcount
+        except sqlite3.Error as exc:
+            if raising:
+                raise
+            self._warn_once(f"memoria store mark_judged failed (fail-open): {type(exc).__name__}")
+            return 0
+        self._clear_warn()
+        return max(stamped, 0)
 
     def set_flags(
         self,
@@ -955,6 +1111,18 @@ class MemoriaStore:
         must never overwrite again. Un-pinning/un-marking-private never
         demotes a curated row back to draft (one-way). `inactive` is a pure
         visibility flag and never touches status.
+
+        MUTING (``inactive=True``) additionally CLEARS ``judged_at``, which is
+        what makes the operator's mute self-identifying (memory_promotion
+        _20260725). An UNCERTAIN keep is left status='draft' WITH a stamp, so
+        when the operator mutes that row ``upsert_draft``'s ``inactive = CASE
+        WHEN memorias.judged_at != '' THEN 0`` would read the stamp as "the JUDGE
+        hid this" and silently un-hide it on the next capture of that topic. An
+        empty stamp is exactly the signal that CASE tests for. The row still
+        never reaches the judge — ``list_unjudged_drafts`` filters
+        ``inactive = 0``. UN-hiding deliberately does NOT clear it: a re-exposed
+        reject would go straight back to the judge and be re-rejected and
+        re-hidden, undoing the operator and paying an inference for it.
 
         Returns False if the write failed (e.g. lock contention) — the row
         was NOT curated and remains auto-capture-eligible. Callers that
@@ -977,6 +1145,8 @@ class MemoriaStore:
         if inactive is not None:
             set_clauses.append("inactive = ?")
             params.append(1 if inactive else 0)
+            if inactive:
+                set_clauses.append("judged_at = ''")
         if promotes:
             set_clauses.append("status = 'curated'")
         params.append(memoria_id)
@@ -1136,6 +1306,48 @@ class MemoriaStore:
             self._warn_once(f"memoria store injection-candidate list failed (fail-open): {type(exc).__name__}")
             return []
 
+    def list_unjudged_drafts(self, profile_id: str, *, limit: int) -> list[sqlite3.Row]:
+        """The judge's candidate batch: OLDEST-first unjudged drafts (D7).
+
+        Oldest-first because those are the rows closest to prune death — the
+        FIFO evicts by ``updated_at DESC``, so the oldest unjudged draft is the
+        one that disappears if the sweep never reaches it.
+
+        ``private = 0`` is redundant today (``_build_memoria_draft`` refuses to
+        capture anything whose private tag is not False) but it is cheap and
+        fail-closed: a private row must never reach a judge, least of all a
+        cloud one. Bounded read, fail-open to [] (mirrors list_for_profile).
+
+        ``inactive = 0`` is load-bearing on BOTH halves. A row the operator muted
+        by hand is content he explicitly hid, so it must not be shipped to the
+        active (possibly cloud) provider; and if it WERE judged, the resulting
+        ``judged_at`` stamp would make upsert_draft's ``inactive = CASE WHEN
+        memorias.judged_at != '' THEN 0 ...`` read the OPERATOR's mute as a
+        JUDGE's mute and silently un-hide the row on the next capture, defeating
+        the one guard that CASE exists to provide.
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                return conn.execute(
+                    "SELECT * FROM memorias WHERE profile_id = ? AND status = 'draft' "
+                    "AND judged_at = '' AND private = 0 AND inactive = 0 "
+                    "ORDER BY updated_at ASC, id ASC LIMIT ?",
+                    (profile_id, limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria unjudged-draft list failed (fail-open): {type(exc).__name__}")
+            return []
+
+    # NOTE (memory_promotion_20260725): the design's `list_durable_keys` +
+    # "arithmetic dedup" step is NOT implemented, because the state it looks for
+    # is unreachable. UNIQUE(profile_id, stable_key) is a TABLE constraint, so a
+    # draft and a durable row in one profile can never share a stable_key at all;
+    # a re-capture of something already durable resolves the upsert to a no-op
+    # and inserts nothing (see test_promoted_row_is_upsert_immune, which pins the
+    # row count). Re-judging an already-promoted row is likewise impossible:
+    # list_unjudged_drafts filters status='draft' AND judged_at=''. Both guards
+    # would have been permanently dead code behind a green test.
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -1247,6 +1459,22 @@ class MemoriaStore:
                 logger.info(
                     "memorias.db migrated to schema v2 (prior user_version=%d, backfilled=%d rows)",
                     prior_version, backfilled,
+                )
+            # v2 -> v3 (memory_promotion_20260725): the judge's per-row stamp.
+            # Same idempotent, duplicate-column-tolerant shape as v1->v2 above
+            # (DDL commits immediately, so a kill before the PRAGMA bump must be
+            # resumable). NO backfill: every existing row starts unjudged, which
+            # is exactly right — none of them has been judged. Downgrade stays
+            # safe because upsert_draft/insert_* name their INSERT columns.
+            if prior_version < 3:
+                try:
+                    conn.execute("ALTER TABLE memorias ADD COLUMN judged_at TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise  # genuinely broken db: keep the construction-raises contract
+                conn.execute("PRAGMA user_version = 3")
+                logger.info(
+                    "memorias.db migrated to schema v3 (prior user_version=%d)", prior_version,
                 )
 
     def _connect(self, timeout: float) -> sqlite3.Connection:

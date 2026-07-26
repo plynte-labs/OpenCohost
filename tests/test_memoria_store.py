@@ -95,7 +95,7 @@ def _seed_row(
 # Schema (2.1)
 # ---------------------------------------------------------------------------
 
-def test_memorias_db_created_at_user_data_dir_with_user_version_2(tmp_path) -> None:
+def test_memorias_db_created_at_user_data_dir_with_user_version_3(tmp_path) -> None:
     from opencohost.config.settings import MEMORIAS_DB
     from opencohost.config.storage import USER_DATA_DIR
 
@@ -108,12 +108,14 @@ def test_memorias_db_created_at_user_data_dir_with_user_version_2(tmp_path) -> N
     MemoriaStore(db_path)
     assert db_path.exists()
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert cols == {
         "id", "profile_id", "stable_key", "revision", "title", "content",
         "status", "pinned", "private", "inactive", "created_at", "updated_at",
         "signature",
+        # memory_promotion_20260725 (v3): the judge's per-row stamp.
+        "judged_at",
     }
 
 
@@ -179,7 +181,7 @@ def test_legacy_v1_db_migrates_signature_column_and_backfills(tmp_path) -> None:
 
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
         assert "signature" in cols
         row = conn.execute("SELECT * FROM memorias WHERE id = 'mem_legacy_1'").fetchone()
@@ -206,7 +208,7 @@ def test_migration_is_idempotent_on_second_construction(tmp_path) -> None:
     MemoriaStore(db_path)  # must not raise (no duplicate-column error)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     assert sig == "marker-must-survive"  # backfill did not rerun
 
@@ -232,7 +234,7 @@ def test_interrupted_migration_column_present_version_stale_self_heals(tmp_path)
     MemoriaStore(db_path)  # must NOT raise duplicate-column
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     expected = build_signature("musica synthwave calma contexto: streamer prefiere musica synthwave calma nocturna")
     assert sig == expected  # backfill still ran on the resumed migration
@@ -264,7 +266,7 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         done = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_done'").fetchone()[0]
         pending = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_pending'").fetchone()[0]
     assert done == "already-backfilled-marker"  # resume never rewrites filled rows
@@ -273,13 +275,13 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     )
 
 
-def test_fresh_db_lands_directly_at_user_version_2_with_signature_column(tmp_path) -> None:
+def test_fresh_db_lands_directly_at_user_version_3_with_signature_column(tmp_path) -> None:
     db_path = tmp_path / "fresh" / "memorias.db"
 
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert "signature" in cols  # no user ever sees a version-1 schema
 
@@ -811,17 +813,25 @@ def test_filler_word_mixed_with_content_is_not_stripped_per_token() -> None:
 
 
 def test_stable_key_revision_count_metric_logs_id_only_never_content(tmp_path, caplog) -> None:
+    """The key is DERIVED here, not synthetic. `derive_stable_key` builds it from
+    the exchange's own significant tokens, so logging the stable_key logs memory
+    CONTENT — which is what RC-8 (and this test's own name) forbids. A synthetic
+    'profile-1|alpha-beta-gamma' key can never carry a sentinel, which is why the
+    old assertion could demand the key in the log and still read as a privacy test."""
     caplog.set_level(logging.DEBUG)
     store = MemoriaStore(tmp_path / "memorias.db")
-    key = "profile-1|alpha-beta-gamma"
+    key = derive_stable_key("profile-1", "contenido secreto beta gamma delta epsilon")
+    assert "secreto" in key
     store.upsert_draft("profile-1", key, "titulo secreto alpha", "contenido secreto beta gamma")
 
     caplog.clear()
     row_id = store.upsert_draft("profile-1", key, "titulo nuevo delta", "contenido nuevo epsilon zeta")
 
     assert row_id is not None
-    assert key in caplog.text
-    assert "2" in caplog.text  # revision bumped to 2
+    assert row_id in caplog.text
+    assert "revision=2" in caplog.text
+    assert key not in caplog.text
+    assert "secreto" not in caplog.text
     assert "titulo nuevo delta" not in caplog.text
     assert "contenido nuevo epsilon zeta" not in caplog.text
 
@@ -1506,3 +1516,432 @@ def test_recency_pinned_import_rides_carve_out_first(tmp_path) -> None:
     lines = build_recency_lines(rows)
 
     assert lines[0] == "import fijado clave"
+
+
+# ---------------------------------------------------------------------------
+# Schema v3 + draft promotion verbs (memory_promotion_20260725, WU1)
+# ---------------------------------------------------------------------------
+
+def _seed_judged_row(db_path, profile_id, row_id, *, status="draft", judged_at="",
+                     inactive=0, private=0, updated_at="2026-01-01T00:00:00+00:00",
+                     stable_key=None, content=None, signature=""):
+    """Insert one row with explicit judged_at/status/private control (v3)."""
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+            "status, pinned, private, inactive, created_at, updated_at, signature, judged_at) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            (row_id, profile_id, stable_key or f"{profile_id}|{row_id}", f"t {row_id}",
+             content or f"contenido {row_id}", status, private, inactive,
+             updated_at, updated_at, signature, judged_at),
+        )
+
+
+def _row(db_path, row_id):
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM memorias WHERE id = ?", (row_id,)).fetchone()
+
+
+def test_fresh_db_reports_user_version_3_with_judged_at_column(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
+    assert "judged_at" in cols
+
+
+def test_v3_migration_is_idempotent_across_two_constructions(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    MemoriaStore(db_path)  # must not raise
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_v3_migration_tolerates_preadded_column_after_interrupted_run(tmp_path) -> None:
+    """ALTER commits immediately; a kill before the PRAGMA bump must be resumable."""
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("PRAGMA user_version = 2")
+    MemoriaStore(db_path)  # column already present, version behind -> must not raise
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_v2_db_with_rows_migrates_with_every_row_unjudged(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE memorias DROP COLUMN judged_at")
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+            "status, pinned, private, inactive, created_at, updated_at, signature) "
+            "VALUES ('legacy', 'p', 'p|k', 1, 't', 'c', 'draft', 0, 0, 0, 'x', 'x', 's')"
+        )
+    MemoriaStore(db_path)
+    assert _row(db_path, "legacy")["judged_at"] == ""
+
+
+def test_list_unjudged_drafts_oldest_first_excludes_judged_nondraft_private(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d-new", updated_at="2026-01-03T00:00:00+00:00")
+    _seed_judged_row(db_path, "p", "d-old", updated_at="2026-01-01T00:00:00+00:00")
+    _seed_judged_row(db_path, "p", "d-mid", updated_at="2026-01-02T00:00:00+00:00")
+    _seed_judged_row(db_path, "p", "already", judged_at="2026-01-02T00:00:00+00:00")
+    _seed_judged_row(db_path, "p", "curated-row", status="curated")
+    _seed_judged_row(db_path, "p", "private-row", private=1)
+    _seed_judged_row(db_path, "other", "other-row")
+
+    store = MemoriaStore(db_path)
+    ids = [r["id"] for r in store.list_unjudged_drafts("p", limit=10)]
+    assert ids == ["d-old", "d-mid", "d-new"]
+    assert [r["id"] for r in store.list_unjudged_drafts("p", limit=2)] == ["d-old", "d-mid"]
+
+
+def test_list_unjudged_drafts_fails_open_to_empty_list(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "_connect", boom)
+    assert store.list_unjudged_drafts("p", limit=10) == []
+
+
+def test_mark_judged_stamps_without_touching_updated_at_or_status(tmp_path) -> None:
+    """The prune-order guard: _prune_profile keeps newest-by-updated_at, so a
+    judgment must never push a rejected row into the keep-window."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1")
+    before = _row(db_path, "d1")
+
+    store = MemoriaStore(db_path)
+    assert store.mark_judged([("d1", 1)]) == 1
+
+    after = _row(db_path, "d1")
+    assert after["judged_at"] != ""
+    assert after["updated_at"] == before["updated_at"]
+    assert after["status"] == "draft"
+    assert after["inactive"] == 0
+
+
+def test_mark_judged_inactive_hides_row_and_still_leaves_updated_at(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1")
+    before = _row(db_path, "d1")
+
+    assert MemoriaStore(db_path).mark_judged([("d1", 1)], inactive=True) == 1
+
+    after = _row(db_path, "d1")
+    assert after["inactive"] == 1
+    assert after["judged_at"] != ""
+    assert after["updated_at"] == before["updated_at"]
+    assert after["status"] == "draft"
+
+
+def test_mark_judged_empty_id_list_is_a_no_op(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    assert MemoriaStore(db_path).mark_judged([]) == 0
+
+
+def test_update_row_rewrites_signature_when_given(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", signature="firma vieja")
+    assert MemoriaStore(db_path).update_row("d1", signature="firma nueva") is True
+    assert _row(db_path, "d1")["signature"] == "firma nueva"
+
+
+def test_update_row_if_revision_guard_refuses_a_stale_write(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", content="contenido original")
+    store = MemoriaStore(db_path)
+
+    assert store.update_row("d1", content="texto juzgado", if_revision=2) is False
+    stale = _row(db_path, "d1")
+    assert stale["content"] == "contenido original"
+    assert stale["status"] == "draft"
+
+    assert store.update_row("d1", content="texto juzgado", if_revision=1) is True
+    assert _row(db_path, "d1")["content"] == "texto juzgado"
+
+
+def test_update_row_status_kwarg_writes_promoted(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1")
+    assert MemoriaStore(db_path).update_row("d1", content="c", status="promoted") is True
+    assert _row(db_path, "d1")["status"] == "promoted"
+
+
+def test_update_row_without_new_kwargs_keeps_the_legacy_curated_contract(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", signature="firma original")
+    assert MemoriaStore(db_path).update_row("d1", title="t", content="c") is True
+    row = _row(db_path, "d1")
+    assert row["status"] == "curated"
+    assert row["signature"] == "firma original"
+
+
+def test_judged_draft_reupserted_with_new_content_is_unjudged_and_unhidden(tmp_path) -> None:
+    """D3b: a judgment is about a specific capture; changed content earns a re-judge."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", judged_at="2026-01-02T00:00:00+00:00",
+                     inactive=1, stable_key="p|shared-key")
+
+    store = MemoriaStore(db_path)
+    store.upsert_draft("p", "p|shared-key", "titulo nuevo", "contenido nuevo")
+
+    row = _row(db_path, "d1")
+    assert row["judged_at"] == ""
+    assert row["inactive"] == 0
+    assert row["revision"] == 2
+    assert row["content"] == "contenido nuevo"
+
+
+def test_operator_hidden_draft_reupserted_stays_hidden(tmp_path) -> None:
+    """The CASE guard: only rows the JUDGE hid are un-hidden by a revision bump."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", stable_key="p|shared-key")
+
+    store = MemoriaStore(db_path)
+    assert store.set_flags("d1", inactive=True) is True
+    assert _row(db_path, "d1")["judged_at"] == ""
+
+    store.upsert_draft("p", "p|shared-key", "titulo nuevo", "contenido nuevo")
+
+    row = _row(db_path, "d1")
+    assert row["inactive"] == 1
+    assert row["content"] == "contenido nuevo"
+
+
+def test_promoted_row_is_upsert_immune(tmp_path) -> None:
+    """Also the evidence that the promotion sweep needs no stable_key dedup step:
+    UNIQUE(profile_id, stable_key) is a TABLE constraint and the conflict resolves
+    to a no-op, so a draft that RESTATES a durable row is never inserted at all —
+    there is no "draft colliding with a durable key" state to filter out."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "pr", status="promoted", stable_key="p|shared-key",
+                     content="memoria promovida")
+
+    assert MemoriaStore(db_path).upsert_draft("p", "p|shared-key", "t", "contenido nuevo") is None
+    row = _row(db_path, "pr")
+    assert row["content"] == "memoria promovida"
+    assert row["status"] == "promoted"
+    assert row["revision"] == 1
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memorias").fetchone()[0] == 1
+
+
+def test_promoted_row_survives_the_draft_growth_prune(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    monkeypatch.setattr("opencohost.core.memoria_store.MEMORIAS_PROFILE_CAP", 3)
+    _seed_judged_row(db_path, "p", "pr", status="promoted", stable_key="p|promoted-key",
+                     updated_at="2026-01-01T00:00:00+00:00")
+    store = MemoriaStore(db_path)
+    for i in range(6):
+        store.upsert_draft("p", f"p|k{i}", f"t{i}", f"contenido {i}")
+
+    assert _row(db_path, "pr") is not None
+
+
+# ---------------------------------------------------------------------------
+# Lote-2 judge findings: operator-muted rows, and the two write-path races
+# ---------------------------------------------------------------------------
+
+def test_list_unjudged_drafts_excludes_operator_muted_rows(tmp_path) -> None:
+    """A draft the OPERATOR muted by hand must never reach the judge.
+
+    Two halves at once. (a) Privacy: the owner approved shipping the draft
+    batch to the active CLOUD provider, but not rows he had explicitly hidden.
+    (b) Correctness: judging a muted row stamps `judged_at`, and upsert_draft's
+    `inactive = CASE WHEN memorias.judged_at != '' THEN 0 ...` then treats the
+    OPERATOR's mute as a JUDGE's mute and un-hides it on the next capture —
+    defeating the very guard that CASE exists to provide.
+    """
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "visible", updated_at="2026-01-01T00:00:00+00:00")
+    _seed_judged_row(db_path, "p", "muted", inactive=1, updated_at="2026-01-02T00:00:00+00:00")
+
+    ids = [r["id"] for r in MemoriaStore(db_path).list_unjudged_drafts("p", limit=10)]
+    assert ids == ["visible"]
+
+
+def test_operator_muted_draft_stays_hidden_after_a_judgment_it_never_received(tmp_path) -> None:
+    """The full sequence the CASE guard is supposed to survive: mute, sweep,
+    re-capture. With the row excluded from the batch its judged_at stays '',
+    so the CASE reads "the operator hid this" and leaves it hidden."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "muted", inactive=1, stable_key="p|shared-key")
+    store = MemoriaStore(db_path)
+
+    assert store.list_unjudged_drafts("p", limit=10) == []
+    store.upsert_draft("p", "p|shared-key", "titulo nuevo", "contenido nuevo del operador")
+
+    row = _row(db_path, "muted")
+    assert row["revision"] == 2
+    assert row["content"] == "contenido nuevo del operador"
+    assert row["inactive"] == 1
+
+
+def test_update_row_if_status_guard_refuses_a_write_to_a_row_that_left_draft(tmp_path) -> None:
+    """The operator-edit race. An operator edit sets status='curated' but does
+    NOT bump `revision`, so `if_revision` alone cannot see it: the judge's
+    rewrite of stale text would overwrite the operator's own words AND demote
+    the row from curated (operator intent) to promoted (machine)."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", content="contenido original")
+    store = MemoriaStore(db_path)
+
+    # The operator edits mid-sweep: status -> curated, revision untouched.
+    assert store.update_row("d1", title="titulo del operador", content="texto del operador") is True
+    assert _row(db_path, "d1")["revision"] == 1
+
+    # The sweep's write still matches on revision, and must be refused on status.
+    assert store.update_row(
+        "d1", title="t", content="texto del juez", if_revision=1,
+        if_status="draft", status="promoted",
+    ) is False
+
+    row = _row(db_path, "d1")
+    assert row["content"] == "texto del operador"
+    assert row["status"] == "curated"
+
+
+def test_update_row_can_leave_updated_at_untouched(tmp_path) -> None:
+    """`build_recency_lines` ranks the meta-recall block by updated_at DESC, so
+    a promotion write that bumps it stamps three-week-old memories with launch
+    time and evicts genuinely recent ones from "what did we talk about last
+    session". Same prune/recency neutrality mark_judged already has."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", updated_at="2026-01-01T00:00:00+00:00")
+    before = _row(db_path, "d1")
+
+    assert MemoriaStore(db_path).update_row(
+        "d1", content="texto juzgado", status="promoted", touch_updated_at=False,
+    ) is True
+
+    row = _row(db_path, "d1")
+    assert row["content"] == "texto juzgado"
+    assert row["status"] == "promoted"
+    assert row["updated_at"] == before["updated_at"]
+
+
+def test_mark_judged_revision_guard_skips_rows_that_moved_and_returns_the_count(tmp_path) -> None:
+    """The REJECT path's optimistic-concurrency token. A draft refreshed with
+    better content mid-sweep must not be hidden on the strength of a judgment
+    of text it no longer holds; it stays unjudged and is re-judged next launch."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "still", stable_key="p|still")
+    _seed_judged_row(db_path, "p", "moved", stable_key="p|moved")
+    store = MemoriaStore(db_path)
+    store.upsert_draft("p", "p|moved", "titulo fresco", "contenido fresco del operador")
+    assert _row(db_path, "moved")["revision"] == 2
+
+    # Both were observed at revision 1 when the sweep read them.
+    assert store.mark_judged([("still", 1), ("moved", 1)], inactive=True) == 1
+
+    assert _row(db_path, "still")["judged_at"] != ""
+    assert _row(db_path, "still")["inactive"] == 1
+    moved = _row(db_path, "moved")
+    assert moved["judged_at"] == ""
+    assert moved["inactive"] == 0
+    assert moved["content"] == "contenido fresco del operador"
+
+
+def test_mark_judged_raising_propagates_a_write_error(tmp_path) -> None:
+    """So the sweep can tell "the row moved" (0 stamped) apart from "the db was
+    locked" — the two must never collapse into the same counter."""
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1")
+    store = MemoriaStore(db_path)
+
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    store._connect = boom
+    assert store.mark_judged([("d1", 1)]) == 0
+    with pytest.raises(sqlite3.OperationalError):
+        store.mark_judged([("d1", 1)], raising=True)
+
+
+# ---------------------------------------------------------------------------
+# Lote-2 round 3: the reject path's status guard, and the self-identifying mute
+# ---------------------------------------------------------------------------
+
+def test_mark_judged_if_status_guard_skips_a_row_the_operator_curated(tmp_path) -> None:
+    """The REJECT path's SECOND race token — the mirror of `update_row`'s.
+
+    An operator EDIT (`update_row`) or PIN (`set_flags`) sets status='curated'
+    WITHOUT bumping `revision`, so the (id, revision) match alone still hits: a
+    memory the operator just curated during the sweep window would be stamped
+    judged and HIDDEN on the strength of a judgment of the text he replaced.
+    Unlike the keep path there is no earlier guarded write to catch it, and
+    nothing ever un-hides it — `upsert_draft`'s CASE only fires on a re-capture
+    of a row that is still a draft. Permanent, silent data loss.
+    """
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "curated-mid-sweep")
+    _seed_judged_row(db_path, "p", "still-draft")
+    store = MemoriaStore(db_path)
+
+    # The operator curates mid-sweep: status -> curated, revision untouched.
+    assert store.update_row("curated-mid-sweep", content="texto del operador") is True
+    assert _row(db_path, "curated-mid-sweep")["revision"] == 1
+
+    assert store.mark_judged(
+        [("curated-mid-sweep", 1), ("still-draft", 1)], inactive=True, if_status="draft",
+    ) == 1
+
+    curated = _row(db_path, "curated-mid-sweep")
+    assert curated["judged_at"] == ""
+    assert curated["inactive"] == 0
+    assert curated["status"] == "curated"
+    assert curated["content"] == "texto del operador"
+    assert _row(db_path, "still-draft")["inactive"] == 1
+
+
+def test_operator_muting_a_judged_draft_clears_the_judge_stamp(tmp_path) -> None:
+    """An operator mute applied AFTER a judgment must survive the next capture.
+
+    `list_unjudged_drafts` closes the case where the mute PRECEDES the judgment.
+    An UNCERTAIN keep is the reverse case by construction: it stays
+    status='draft' WITH a `judged_at` stamp. When the operator then mutes it,
+    `upsert_draft`'s ``inactive = CASE WHEN memorias.judged_at != '' THEN 0``
+    reads that stamp as "the JUDGE hid this", clears it, and the row becomes
+    injectable again with no notification. Clearing the stamp on the way in
+    makes the mute self-identifying, which is exactly what the CASE tests for.
+    """
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", judged_at="2026-01-02T00:00:00+00:00",
+                     stable_key="p|shared-key")
+    store = MemoriaStore(db_path)
+
+    assert store.set_flags("d1", inactive=True) is True
+    assert _row(db_path, "d1")["judged_at"] == ""
+
+    store.upsert_draft("p", "p|shared-key", "titulo nuevo", "contenido nuevo")
+
+    row = _row(db_path, "d1")
+    assert row["inactive"] == 1
+    assert row["content"] == "contenido nuevo"
+
+
+def test_operator_unhiding_a_row_keeps_the_judge_stamp(tmp_path) -> None:
+    """Only a MUTE is self-identifying. Clearing the stamp on un-hide would send
+    a rejected row straight back to the judge (`list_unjudged_drafts` filters
+    `judged_at = ''` AND `inactive = 0`), which would re-reject and re-hide it
+    immediately — undoing the operator's un-hide and paying an inference for it.
+    """
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "d1", judged_at="2026-01-02T00:00:00+00:00", inactive=1)
+    store = MemoriaStore(db_path)
+
+    assert store.set_flags("d1", inactive=False) is True
+
+    assert _row(db_path, "d1")["judged_at"] == "2026-01-02T00:00:00+00:00"
+    assert store.list_unjudged_drafts("p", limit=10) == []
