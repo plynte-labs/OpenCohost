@@ -10,6 +10,7 @@ All Ollama I/O is mocked; no real model or network call is made.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -80,6 +81,40 @@ def test_capabilities_missing_key_returns_false(monkeypatch):
     monkeypatch.setattr("ollama.show", lambda model: {"modelfile": "..."})
     m = _make_motor()
     assert m._check_capabilities_reasoning("gemma4:12b") is False
+
+
+def test_hanging_ollama_show_cannot_park_the_turn(monkeypatch):
+    """A stalled daemon must not block the turn thread indefinitely.
+
+    ollama-python builds its default client with timeout=None, and its own
+    docstring says so — in httpx that means wait forever. This probe sits on the
+    foreground turn path BEFORE the inference watchdog is armed, so without a
+    bound of its own a busy daemon parks the turn with no recovery: not a loop,
+    a block that ends only when Ollama answers or the process dies.
+
+    An exception was already handled (see the test above); a hang is not an
+    exception, which is why try/except was never enough.
+    """
+    import opencohost.core.llm_engine as le
+
+    entered = threading.Event()
+
+    def hanging_show(model):
+        entered.set()
+        time.sleep(4.0)
+        return {"capabilities": ["thinking"]}
+
+    monkeypatch.setattr("ollama.show", hanging_show)
+    monkeypatch.setattr(le, "OLLAMA_REQUEST_TIMEOUT", 0.3)
+
+    m = _make_motor()
+    started = time.monotonic()
+    # Degrades to False, the same safe direction as any other probe failure.
+    assert m._check_capabilities_reasoning("gemma4:12b") is False
+    elapsed = time.monotonic() - started
+
+    assert entered.is_set(), "the probe never reached ollama.show"
+    assert elapsed < 2.5, f"the probe parked the caller for {elapsed:.2f}s"
 
 
 # ── Layer 3: per-model cache ────────────────────────────────────────────────

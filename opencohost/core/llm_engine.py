@@ -26,7 +26,7 @@ from opencohost.config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
     LLM_TOP_P, LLM_MAX_TOKENS, LLM_KEEP_ALIVE, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
-    OLLAMA_CHAT_TIMEOUT,
+    OLLAMA_CHAT_TIMEOUT, OLLAMA_REQUEST_TIMEOUT,
     SCOUT_ENABLED, LLM_SCOUT_TIMEOUT, LLM_SCOUT_NUM_PREDICT,
     LLM_SCOUT_TEMPERATURE, LLM_SCOUT_MIN_DIGEST_LINES,
     LLM_SCOUT_HISTORY_MSGS, SCOUT_QUEUE_FLOOR,
@@ -3786,10 +3786,17 @@ class MotorVocalIA(threading.Thread):
         client = self._ollama_judge_client or self.ollama
         return client.chat(**kwargs)
 
-    def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
+    def _call_with_watchdog(self, call, *, timeout: float, label: str = "OllamaChatWatchdog", **kwargs):
+        """Run *call* on a daemon thread and stop waiting on it after *timeout*.
+
+        Deliberately separate from ``_ollama_chat_with_watchdog``: the chat
+        transport gets swapped — by the cloud fallback and by tests — and
+        swapping it must NOT also swap the ``ollama.show`` metadata probe, which
+        is a different call with a different budget. Sharing one seam for both
+        made the probe return chat-shaped responses.
+        """
         result = {}
         done = threading.Event()
-        call = chat_callable or self._ollama_chat
 
         def worker() -> None:
             try:
@@ -3801,7 +3808,7 @@ class MotorVocalIA(threading.Thread):
 
         thread = threading.Thread(
             target=worker,
-            name=f"OllamaChatWatchdog-{uuid.uuid4().hex[:8]}",
+            name=f"{label}-{uuid.uuid4().hex[:8]}",
             daemon=True,
         )
         thread.start()
@@ -3810,6 +3817,11 @@ class MotorVocalIA(threading.Thread):
         if "error" in result:
             raise result["error"]
         return result.get("response")
+
+    def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
+        return self._call_with_watchdog(
+            chat_callable or self._ollama_chat, timeout=timeout, **kwargs
+        )
 
     def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
@@ -4523,7 +4535,24 @@ class MotorVocalIA(threading.Thread):
         if model in cache:
             return cache[model]
         import ollama
-        resp = ollama.show(model)
+        # Bounded by the SAME watchdog the chat call uses. ollama-python builds
+        # its default client with timeout=None — its own docstring says so, and in
+        # httpx that means wait forever — and `ollama.show(model)` takes no
+        # timeout argument, so there is nowhere to pass one. This probe runs on
+        # the foreground turn path BEFORE the inference watchdog is armed, so
+        # without a bound of its own a busy daemon parks the turn with no
+        # recovery. A hang raises nothing, which is why the callers' try/except
+        # never covered it. Timeout is the metadata budget (/api/tags class),
+        # not the 180s generation budget.
+        # ponytail: a stall costs 2x this, because _check_capabilities_reasoning
+        # calls _discover_model_ctx and then _fetch_show, and a failure is not
+        # cached here. Bounded and once-per-model, so not worth restructuring.
+        resp = self._call_with_watchdog(
+            ollama.show,
+            timeout=OLLAMA_REQUEST_TIMEOUT,
+            label="OllamaShowProbe",
+            model=model,
+        )
         cache[model] = resp
         return resp
 
