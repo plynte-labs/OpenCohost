@@ -6,6 +6,28 @@ This file tracks all major tracks for the project. Each track has its own detail
 > invisible to `git grep` / ripgrep and to any git-aware audit. **This index is the only reliable
 > way to discover them** — a track that is not listed here is effectively unfindable. Open
 > decisions are indexed in [`./pending-decisions-20260729.md`](./pending-decisions-20260729.md).
+>
+> **NOTE (2026-07-30):** The owner's runtime-validation checklist lives at
+> [`../docs/runtime-validation-20260730.md`](../docs/runtime-validation-20260730.md) — read it
+> before any release-adjacent session.
+
+---
+
+- [ ] **Track: Runtime Findings Follow-up — 2026-07-30** (proposal only)
+  *Link: [./tracks/runtime_findings_followup_20260730/](./tracks/runtime_findings_followup_20260730/)*
+  *Bundles items that are ready but were deliberately held from the 2026-07-29/30 session: U1
+  inoculate `scout_digest` (llm_engine.py:3960) to route through `_resolve_reasoning_classification`
+  before `SCOUT_ENABLED` is ever flipped — blocker on that flag; U2 give `tests/realenv/` a reason
+  to run (fold into the runtime-validation checklist, no CI exists here to build a pipeline on); U3
+  `test_topic_scout_realenv.py::test_scout_digest_real_generation_returns_adjacent_titles` is
+  PRE-EXISTING red, proven against commit `1a1c3f2`; U4 `config/logger.py`'s plain `FileHandler` →
+  `RotatingFileHandler` (match the 5MB×3 already used by `validation.py`/`observability.py`), held
+  until the owner's live validation completes (retention policy stays a separate owner decision,
+  `log_privacy_hygiene_20260729`); U5 the `_check_capabilities_reasoning` 2x-timeout probe cost —
+  recommend NOT fixing, bounded and unmeasured; U6 the `conductor/tracks/` gitignore tradeoff,
+  owner's call. Explicitly excludes (refused/out of scope, not deferred): intent detection and
+  semantic similarity in the clause sanitizer (ADR-040 cat. 3), and all viewer/Twitch-chat work
+  (owner surface-priority ruling, `pending-decisions-20260729.md` §5b).*
 
 ---
 
@@ -21,9 +43,17 @@ This file tracks all major tracks for the project. Each track has its own detail
   ***RUNTIME VALIDATION PENDING — this is the release gate, not the suite.*** *Owner must report
   `[CLAUSE_SANITIZER]` verdict counts and `[TURN_LATENCY]` medians from a real session.*
 
-- [ ] **Track: Residual Cleanup Loop — 2026-07-29** (R1–R4 safe, R5 blocked on one decision)
+- [x] **Track: Residual Cleanup Loop — 2026-07-29** (DONE — R1–R5 closed, R6 not taken)
   *Link: [./tracks/residual_cleanup_20260729/](./tracks/residual_cleanup_20260729/) — contains the
   paste-ready loop prompt and a binding live-validation safety gate*
+  *Status 2026-07-30: R1–R4 CLOSED same day (commits `f82a260`, `777ffa7`, `aa7f0a8`, `768670c`).
+  R5 (the stale `test_legacy_profiles_preserved` assertion) was blocked on one owner decision —
+  ANSWERED 2026-07-29 (`pending-decisions-20260729.md` §2.4): owner confirmed the profile renames
+  were deliberate, test deleted (`48207ac`), suite fully green. R6 (property-based test refactor)
+  NOT taken — its own precondition was "only if R1–R5 land clean", and it also rewrites a suite
+  that is green, the worst trade while the owner was mid live-validation. Full suite 4907 passed.
+  Two findings surfaced by R4 but out of this loop's scope, recorded not fixed, now tracked in
+  `runtime_findings_followup_20260730` (U1 `scout_digest` inoculation, U5 the 2x probe cost).*
 
 - [ ] **Track: Log Privacy + Retention Hygiene — 2026-07-29** (proposal only)
   *Link: [./tracks/log_privacy_hygiene_20260729/](./tracks/log_privacy_hygiene_20260729/)*
@@ -781,6 +811,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [x] **Track: Heavy Model Inference Recovery - Watchdog, Cancel Path, and Rollback**
   *Link: [./tracks/heavy_model_inference_recovery_20260609/](./tracks/heavy_model_inference_recovery_20260609/)*
+  *Gate status 2026-07-30: CLOSED on log evidence (`pending-decisions-20260729.md` §0.1). The
+  `[x]` above is correct — `CLAUDE.md` and the 2026-07-16 handoff entry calling this unexercised
+  were STALE. `logs/opencohost_20260617_175453.log` (20,100 bytes) records a real inference
+  timeout: heavy model `qwopus` warmed 23.5s, hung on first inference, watchdog fired at 45.00s,
+  automatic rollback to `gemma4:e2b`, queue processing continued without a restart. AC1/AC2/AC3/AC5
+  satisfied; corroborates engram #2214. Lesson recorded: recency does not beat a log file — an
+  unexercised-gate claim must cite a log or be treated as stale.*
 
 ---
 
