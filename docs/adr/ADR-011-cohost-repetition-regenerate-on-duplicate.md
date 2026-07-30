@@ -144,6 +144,12 @@ tokenization); the boundary regexes recognize only Western punctuation followed
 by whitespace, so CJK text is a total no-op. Full record:
 [ADR-039](./ADR-039-intra-speech-clause-repetition-sanitizer.md).
 
+Those last two boundaries are **pinned by tests**, not just asserted here:
+`test_abbreviation_false_split_hides_the_repeat_from_both_tiers` and
+`test_cjk_delimiters_are_a_total_noop` in `tests/test_clause_sanitizer.py` go red
+if either no-op is "fixed" without a design decision, and their docstrings say
+where to reopen the question. A promise nothing enforces is a wish.
+
 **Bounded-retry count — answered.** Zero new budget. A tier-2 rejection reuses
 the ladder's existing `recovery.failure_count` path, so the total call ceiling
 for a degenerate agenda turn stays exactly where this ADR left it: one initial

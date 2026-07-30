@@ -46,7 +46,11 @@ unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, 
 | `pytest.ini` | new `live_cloud` marker |
 | tests | `test_clause_sanitizer.py` (33) · `_seam.py` (26) · `_e2e.py` (3) · `tests/live_cloud/` (3, gated/skipped) |
 
-### FULL SUITE, 2026-07-29: **4899 passed · 1 failed · 14 skipped** (4914 collected, 3m54s)
+### FULL SUITE after the residual loop, 2026-07-29: **4906 passed · 1 failed · 14 skipped** (4m41s)
+
+Baseline before the loop was 4899 passed. The delta is exactly **+7** — 4 from R1's parametrized
+privacy guard, 3 from R2's pinning tests. **Zero regressions.** The single failure is unchanged
+and is R5, which is blocked on one owner decision (§2.4).
 
 The single failure is **`test_profile_tone.py::TestProfileExistence::test_legacy_profiles_preserved`,
 and it is PRE-EXISTING** — proven by stashing the three production files and reproducing it
