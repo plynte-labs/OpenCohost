@@ -10,6 +10,78 @@ Do not start new feature work by default. The near-term goal is release readines
 validate the existing prototypes, reconcile documentation with reality, and reduce
 runtime uncertainty before packaging or broad product polish.
 
+---
+
+# ⇢ SESSION CLOSE 2026-07-30 — START HERE
+
+**Everything is committed. Working tree clean. Suite 4907 passed · 0 failed · 14 skipped.**
+Branch `codex/ui-ux-audit-proposal-20260709`, **22 commits** this session (`34a6df6..HEAD`),
+**nothing pushed** — push/branch shaping is still an open owner decision (§3.1).
+
+> **Before running the validation gate: `$env:OPENCOHOST_DEBUG="1"` must be set BEFORE launching
+> the app.** The sanitizer's telemetry emits at DEBUG and the log level is fixed at process start.
+> Without it you get `[TURN_LATENCY]` lines and **zero** `[CLAUSE_SANITIZER]` lines, which reads
+> exactly like "the tier never fired". Details in `docs/runtime-validation-20260730.md` §0.
+
+## The one thing blocking the release
+
+**The owner runs the runtime validation. It is their task, by hand, with no mocks.** Checklist:
+`docs/runtime-validation-20260730.md` — agenda, PTT, direct chat. Viewer/Twitch chat is **out of
+scope**, not pending (see the surface-priority ruling below).
+
+Nothing else is blocked on runtime any more. The heavy-model gate turned out to have been closed
+since 2026-06-17 on log evidence, so **roadmap #1 in `CLAUDE.md` was blocking new tracks on a gate
+that had already passed.** Corrected.
+
+## What shipped
+
+| Thing | Where the reasoning lives |
+|---|---|
+| **Clause sanitizer V1** — repairs a clause repeated inside ONE sentence, before TTS. Armed for agenda only; PTT/direct/chat ship disarmed | `ADR-039` |
+| **The `ollama.show` probe is bounded** — it could park a turn forever; `ollama-python` defaults its client to `timeout=None` | `ADR-014`, 2026-07-30 addendum |
+| **Residual loop R1–R5 closed** | `conductor/tracks/residual_cleanup_20260729/proposal.md` |
+| **Why residuals became proposals instead of code** | `ADR-040` — eight-category taxonomy, with "refused" separated from "deferred" |
+| **The verification rules this session cost us** | `ADR-041` |
+| **Every open decision, indexed** | `conductor/pending-decisions-20260729.md` |
+| **What is staged for next session** | `conductor/tracks/runtime_findings_followup_20260730/proposal.md` |
+
+## Two rulings that change what future work should target
+
+**Surface priority (owner, 2026-07-29).** Effort goes only to **agenda, PTT and direct** — what the
+owner running OpenCohost actually exercises. Viewer/Twitch chat works only in the CustomTkinter
+shell, is unmigrated in Tauri, and is another track's job. A finding on a viewer-chat path gets
+filed against that track and dropped: no tests, no hardening, no place in a cleanup loop.
+**Severity does not override surface priority when the surface does not run.**
+
+**Verification discipline (`ADR-041`).** Nine load-bearing claims turned out false in one session,
+most of them mine. The rules are in the ADR; the two with the widest reach:
+- **An unexercised-gate claim must cite a log or be treated as stale.** Recency does not beat a log
+  file — that is how a passing gate blocked new tracks for six weeks.
+- **`try/except` proves error handling, never liveness.** A hang raises nothing.
+
+## The one trap worth knowing before touching anything
+
+`tests/realenv/` is opt-in behind `OPENCOHOST_REALENV_TESTS=1`, so a default run **skips** it
+instead of failing. The only test exercising `MotorVocalIA` against a real `ollama.show` sat **red
+for 25 days** underneath a green suite number — and it failed *looking like a real negative*,
+because a missing attribute raised `AttributeError` straight into an `except Exception: return
+False`. Fixed. **2 of 9 realenv tests were red; 1 remains (topic scout, pre-existing).**
+So: a green suite number here does not mean the real Ollama contract holds. Run the realenv suite
+explicitly.
+
+## Next session, in order
+
+1. **Read the owner's runtime-validation report.** Their findings outrank everything staged below.
+2. If the sanitizer validates clean → close the ADR-039 gate and the release gate with it.
+3. Then `runtime_findings_followup_20260730` U1–U6. **U1 is a blocker on ever setting
+   `SCOUT_ENABLED = True`**, not a nice-to-have: `scout_digest` bypasses the probe memo and would
+   re-probe every dispatch, which IS unbounded thread accumulation.
+4. Owner decisions still open: §0.2 (`conductor/tracks/` gitignored), §0.3 (ADR-010 gap), §3 (the
+   standing backlog — push/branch shaping, auth flip, memoria GO, lote-1), §5 (three possibly-stale
+   items needing one word each).
+
+---
+
 ## Start-of-session checklist
 
 1. Read `AGENTS.md` for repo rules.
