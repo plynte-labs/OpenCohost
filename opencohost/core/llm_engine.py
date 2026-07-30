@@ -50,6 +50,7 @@ from opencohost.config.settings import (
     CUT_ZONE_EARLY, CUT_ZONE_LATE, CUT_THRESHOLD_SECONDS, RETURN_MAX_DETOUR_TURNS,
     CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS, CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
     CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, CLOUD_MAX_TOKENS, LLM_KEYS_FILE,
+    CLAUSE_SANITIZER_SOURCES,
 )
 from opencohost.core import context_budget
 from opencohost.core import cloud_llm_client
@@ -66,7 +67,11 @@ from opencohost.core.memoria_store import (
     build_injection_lines, build_recency_lines, is_meta_recall_query,
     pinned_injection_counter, significant_token_count, strip_history_wrapper,
 )
-from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG as REPETITION_CONFIG
+from opencohost.core.repetition_guard import (
+    detect_repetition,
+    sanitize_clause_repetition,
+    DEFAULT_CONFIG as REPETITION_CONFIG,
+)
 from opencohost.config.logger import get_logger, _debug_enabled
 from opencohost.config.validation import output_guard
 
@@ -1977,6 +1982,17 @@ class MotorVocalIA(threading.Thread):
         connector = cached.get("connector")
         if connector:
             dialogo = f"{connector} {dialogo}".strip()
+            # clause_sanitizer V1: the guardrails ran INSIDE _generar_dialogo,
+            # before this concatenation, and nothing is re-applied here (see the
+            # comment below) — so the connector/draft junction is the one place a
+            # clause can duplicate after the seam. Repair-only: there is no
+            # regeneration machinery at playback, so a reject verdict here could
+            # only stall the turn.
+            if source in CLAUSE_SANITIZER_SOURCES:
+                san = sanitize_clause_repetition(dialogo)
+                if san.verdict != "clean":
+                    self._log_clause_sanitizer(san, source, stage="pregen_connector")
+                dialogo = san.text
         # F1 [v4]: forward the honest history_text (PTT/direct turns) exactly as
         # the foreground path does — else the raw prompt template leaks into
         # historial + memoria capture (the memoria_quality regression).
@@ -3396,6 +3412,36 @@ class MotorVocalIA(threading.Thread):
                 # the rollback/fallback target (request_model is the local tag on
                 # cloud) nor clear _awaiting_first_success_after_switch.
                 self._mark_model_generation_success(request_model)
+            # clause_sanitizer V1: intra-sentence clause repetition. Placed here,
+            # before output_guard, so it is provider-agnostic by construction —
+            # there is no is_local gate between this point and the return.
+            if source in CLAUSE_SANITIZER_SOURCES:
+                san = sanitize_clause_repetition(dialogo)
+                if san.verdict != "clean":
+                    # A pregen/connector-upgrade worker generates on its own
+                    # thread and interleaves into the same log, so the stage must
+                    # say which one this was — otherwise the tuning pass cannot
+                    # tell a spoken foreground turn from a speculative draft that
+                    # may never be spoken at all.
+                    self._log_clause_sanitizer(
+                        san, source,
+                        stage="generate" if commit_history else "pregen_draft",
+                    )
+                # Tier 2 (reject -> regenerate) needs an owner for the
+                # regeneration, and only agenda has one: the ADR-011 ladder,
+                # reached by returning "" — the same idiom the ladder reject
+                # below already uses. Elsewhere this is repair-only; the verdict
+                # is still recorded so evidence for arming tier 2 accrues.
+                if san.verdict == "rejected" and source.startswith("kira-agenda"):
+                    self._log(
+                        f"Salida descartada por repetición de cláusulas "
+                        f"(removed={san.removed_fragments} distinct={san.distinct_looping}).",
+                        level="warning",
+                    )
+                    if commit_history:
+                        self._invalidate_pregen_epoch()
+                    return ""
+                dialogo = san.text
             allowed, guard_reason = output_guard(dialogo, source=source)
             if not allowed:
                 self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
@@ -5207,8 +5253,21 @@ class MotorVocalIA(threading.Thread):
         return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:800]
 
     def _ejecutar_inferencia(self, contexto, source: str = "direct", *, history_text: Optional[str] = None):
+        # §7 instrument: the request -> TTS-receives-text span. A LOCAL, not an
+        # instance slot: _hablar has four callers and two of them run on
+        # background threads (play_prefetched_agenda's detached speaker at :1883
+        # and the CloudFallbackWarm worker at :3715), so a shared slot read
+        # inside _hablar could be consumed by a turn that never opened it. This
+        # is the only path that generates and speaks on one thread, and the only
+        # one where the span means anything — a pregenerated draft is spoken much
+        # later by design (that overlap IS the feature).
+        request_start = time.monotonic()
         dialogo = self._generar_dialogo(contexto, source=source, commit_history=True, history_text=history_text)
         if dialogo:
+            logger.info(
+                "[TURN_LATENCY] source=%s request_to_tts_ms=%d",
+                source, int((time.monotonic() - request_start) * 1000),
+            )
             # FIX-B2: single emit chokepoint for every spoken live line — the
             # main reply AND the guardrail/repetition fallbacks all arrive here
             # as a non-empty `dialogo` and are spoken below, so last-reply stays
@@ -5276,6 +5335,22 @@ class MotorVocalIA(threading.Thread):
             self._log("Agenda: salida con cierre artificial detectada; usando fallback natural.", level="warning")
             return i18n_active.agenda_sanitizer_fallback()
         return clean
+
+    def _log_clause_sanitizer(self, result, source: str, *, stage: str = "generate") -> None:
+        """Metadata-only telemetry for the clause sanitizer.
+
+        Owner rule: never log previews, raw dialogue, or the removed content —
+        not even at DEBUG. Counts, ratios, source, stage and verdict only. These
+        records are the evidence input for the threshold tuning pass and for any
+        later decision to arm a non-agenda source.
+        """
+        logger.debug(
+            "[CLAUSE_SANITIZER] stage=%s source=%s verdict=%s removed=%d distinct=%d "
+            "max_occ=%d orig_len=%d remaining_len=%d removed_pct=%.3f",
+            stage, source, result.verdict, result.removed_fragments,
+            result.distinct_looping, result.max_occurrences,
+            result.original_len, result.remaining_len, result.removed_pct,
+        )
 
     def _hablar(self, texto_a_generar, source: str = "direct"):
         """WU2b belt lock (design-fase2.md §2.5): serialize every _hablar caller.

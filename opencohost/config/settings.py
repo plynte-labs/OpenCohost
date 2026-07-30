@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 from datetime import datetime
@@ -118,6 +119,46 @@ CLOUD_MAX_TOKENS = 16384
 # replacing the reactive prompt_eval_count/eval_duration trim that OpenAI-
 # compatible responses don't expose; wired in Phase 3.
 CLOUD_CTX_BUDGET: int = 32768
+
+# Intra-sentence clause sanitizer (clause_sanitizer V1, 2026-07-29) — which
+# dialogue sources run repetition_guard.sanitize_clause_repetition() at the
+# shared llm_engine seam.
+#
+# Armed for the agenda sources ONLY. The single confirmed incident is an agenda
+# response, and absence of a guard on the other sources describes the code, not
+# a defect. Arming the operator-facing sources would also buy a real false
+# positive: an operator can ask Kira to repeat a line three times, and the
+# sanitizer would silently collapse it. Config is kept per-source so any source
+# can be armed later on real evidence — see
+# docs/deferred-20260729-clause-sanitizer-scope.md.
+CLAUSE_SANITIZER_KNOWN_SOURCES = frozenset({
+    "kira-agenda", "kira-agenda-stop", "chat", "direct", "ptt", "accumulated",
+})
+CLAUSE_SANITIZER_DEFAULT_SOURCES = frozenset({"kira-agenda", "kira-agenda-stop"})
+
+
+def _parse_clause_sanitizer_sources(raw: Optional[str]) -> frozenset:
+    """Resolve CLAUSE_SANITIZER_SOURCES from an env override.
+
+    ``None`` keeps the default (agenda only); an empty string disarms every
+    source. Unknown tokens are dropped with one warning naming them, so a typo
+    fails loudly instead of silently disarming a source.
+    """
+    if raw is None:
+        return CLAUSE_SANITIZER_DEFAULT_SOURCES
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    unknown = [t for t in tokens if t not in CLAUSE_SANITIZER_KNOWN_SOURCES]
+    if unknown:
+        logging.getLogger("OpenCohost").warning(
+            "Ignoring unknown OPENCOHOST_CLAUSE_SANITIZER_SOURCES token(s): %s",
+            ", ".join(unknown),
+        )
+    return frozenset(t for t in tokens if t in CLAUSE_SANITIZER_KNOWN_SOURCES)
+
+
+CLAUSE_SANITIZER_SOURCES = _parse_clause_sanitizer_sources(
+    os.environ.get("OPENCOHOST_CLAUSE_SANITIZER_SOURCES")
+)
 
 # Catálogo curado de modelos recomendados para esta tarea
 MODELS_CATALOG = {
