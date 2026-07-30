@@ -30,7 +30,15 @@ from opencohost.core.llm_engine import MotorVocalIA
 
 
 def _bare_motor() -> MotorVocalIA:
-    return MotorVocalIA(queue.Queue(), lambda event: None)
+    # Hermetic like _chat_motor (test_dialogue_callback.py). Pin the model and
+    # seed the reasoning cache so _generar_dialogo takes the cache hit in
+    # _resolve_reasoning_classification instead of the live ollama.show RPC in
+    # _fetch_show — that RPC is watchdog-unbounded, and a busy daemon stalls it
+    # past the 2s Event budget these tests wait on, which flakes them.
+    motor = MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor._reasoning_model_cache["llama3"] = False
+    return motor
 
 
 def _wait_until(pred, timeout: float = 2.0, interval: float = 0.005) -> bool:
