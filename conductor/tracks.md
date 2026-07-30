@@ -2,6 +2,40 @@
 
 This file tracks all major tracks for the project. Each track has its own detailed plan in its respective folder.
 
+> **NOTE (2026-07-29):** `conductor/tracks/` is gitignored (`.gitignore:78`), so track folders are
+> invisible to `git grep` / ripgrep and to any git-aware audit. **This index is the only reliable
+> way to discover them** — a track that is not listed here is effectively unfindable. Open
+> decisions are indexed in [`./pending-decisions-20260729.md`](./pending-decisions-20260729.md).
+
+---
+
+- [x] **Track: Clause Sanitizer V1 — intra-speech clause repetition — 2026-07-29**
+  *ADRs: [ADR-039](../docs/adr/ADR-039-intra-speech-clause-repetition-sanitizer.md) (the tier),
+  [ADR-040](../docs/adr/ADR-040-deferral-policy-clause-sanitizer-residuals.md) (why the residuals
+  became proposals). Deferred scope: `../docs/deferred-20260729-clause-sanitizer-scope.md`*
+  *Status: IMPLEMENTED, full suite 4899 passed / 1 pre-existing failure / 14 skipped (2026-07-29),
+  UNCOMMITTED. A real ~16-min agenda session spoke a clause repeated 3x inside ONE sentence; every
+  existing guard compares across utterances, so nothing owned the inside of a sentence. Deterministic
+  intra-sentence repair at the shared `_generar_dialogo` seam, agenda-armed only, tier-2 reject
+  agenda-only by construction. No intent detection, no semantic model — refused, see ADR-040 cat. 3.*
+  ***RUNTIME VALIDATION PENDING — this is the release gate, not the suite.*** *Owner must report
+  `[CLAUSE_SANITIZER]` verdict counts and `[TURN_LATENCY]` medians from a real session.*
+
+- [ ] **Track: Residual Cleanup Loop — 2026-07-29** (R1–R4 safe, R5 blocked on one decision)
+  *Link: [./tracks/residual_cleanup_20260729/](./tracks/residual_cleanup_20260729/) — contains the
+  paste-ready loop prompt and a binding live-validation safety gate*
+
+- [ ] **Track: Log Privacy + Retention Hygiene — 2026-07-29** (proposal only)
+  *Link: [./tracks/log_privacy_hygiene_20260729/](./tracks/log_privacy_hygiene_20260729/)*
+  *Key finding: nothing ships logs off the machine (NOT FOUND) — all leaks are local-disk-only.
+  The one worth doing is a viewer-chat preview in dead code, cheapest to fix while dead.*
+
+- [ ] **Track: Sanitizer Language Scope + Test Strategy — 2026-07-29** (proposal only)
+  *Link: [./tracks/sanitizer_language_scope_20260729/](./tracks/sanitizer_language_scope_20260729/)*
+  *Key finding: the dedup mechanism IS language-agnostic; the regexes are not. No corruption in any
+  language — every gap is a false negative or a no-op. Recommends 6 property invariants instead of
+  per-language fixtures.*
+
 ---
 
 - [~] **Track: Multi-Provider UI — 2026-07-24 (cloud provider config card in the Tauri Controles)**

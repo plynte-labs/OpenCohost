@@ -32,6 +32,220 @@ Deferred, explicitly NOT relevant yet per owner (2026-07-16): heavy-model recove
 (`heavy_model_inference_recovery` — the session ran a light model, so that gate remains
 unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, not now.
 
+## LATEST SNAPSHOT — 2026-07-29 (clause_sanitizer V1 IMPLEMENTED, suites green, UNCOMMITTED)
+
+**Owner approved the plan on 2026-07-29 and it is now implemented. Nothing committed.**
+
+### What landed
+| File | State |
+|---|---|
+| `opencohost/core/repetition_guard.py` | `sanitize_clause_repetition()` + `ClauseSanitizeResult` + 6 `SANITIZE_*` constants. `detect_repetition` untouched |
+| `opencohost/config/settings.py` | `CLAUSE_SANITIZER_SOURCES` (agenda only) + `_parse_clause_sanitizer_sources()` + unknown-token WARNING |
+| `opencohost/core/llm_engine.py` | seam before `output_guard`; repair-only re-pass at the pregen connector junction; `_log_clause_sanitizer()`; `[TURN_LATENCY]` span |
+| `docs/adr/ADR-011-…md` | Addendum 2026-07-29 — intra-speech tier below D1; bounded-retry question ANSWERED (zero new budget) |
+| `pytest.ini` | new `live_cloud` marker |
+| tests | `test_clause_sanitizer.py` (33) · `_seam.py` (26) · `_e2e.py` (3) · `tests/live_cloud/` (3, gated/skipped) |
+
+### FULL SUITE, 2026-07-29: **4899 passed · 1 failed · 14 skipped** (4914 collected, 3m54s)
+
+The single failure is **`test_profile_tone.py::TestProfileExistence::test_legacy_profiles_preserved`,
+and it is PRE-EXISTING** — proven by stashing the three production files and reproducing it
+identically. Diagnosis: the test asserts profiles `Hagg` and `Akira (Uncensored)` exist, and they
+are in **neither** the owner's `perfiles.json` **nor** the shipped
+`opencohost/config/default_profiles.json` (`Akira`, `Akira (Learn)`, `Calmado`, `Comunidad`,
+`Show`, `Técnico`). So it fails everywhere including CI, and it reads the owner's **gitignored**
+user state (`perfiles.json`, `.gitignore:104`) as its primary source — a contract test cannot
+depend on mutable user data. Needs one owner decision; see the pending-decisions file.
+
+**Correction to an earlier note in this snapshot:**
+`test_interactive_pregen.py::test_llm_generating_flag_brackets_the_ollama_call` **fails in
+isolation but PASSES in a full run** — it is *order-dependent*, not simply stale. `_bare_motor()`
+never sets `is_ready`/`pygame` and another test leaves the state behind. Fix is to make the helper
+self-sufficient like `_chat_motor()` in `tests/test_dialogue_callback.py:26-34`.
+
+### Documentation written this session — read these before re-deciding anything
+| Artifact | What it holds |
+|---|---|
+| `docs/adr/ADR-039-intra-speech-clause-repetition-sanitizer.md` | The tier: 10 decisions **with their justifications**, two verified mermaid pipeline traces, the audit results, the consequences including the pregen cost, and the runtime validation gate |
+| `docs/adr/ADR-040-deferral-policy-clause-sanitizer-residuals.md` | **Why each residual became a proposal instead of code** — an eight-category deferral taxonomy, each with its own re-entry rule. Read this before reopening any deferred item |
+| `conductor/pending-decisions-20260729.md` | **Consolidated INDEX of every open decision** (~26 items, grouped by what kind of answer they need). Starts with three record defects, including one real contradiction about the heavy-model gate |
+| `conductor/tracks/residual_cleanup_20260729/proposal.md` | The safe cleanup loop **with a paste-ready prompt** and a binding live-validation safety gate |
+| `conductor/tracks/log_privacy_hygiene_20260729/proposal.md` | Log leak inventory. **Nothing ships logs off the machine — NOT FOUND** |
+| `conductor/tracks/sanitizer_language_scope_20260729/proposal.md` | Multilingual audit + 6 property invariants replacing per-language fixtures |
+
+Also fixed: **ADR-011's status line** read "Proposed — not yet implemented" for five weeks while
+its own update log recorded the ladder shipped and validated. Corrected.
+
+### NEXT ITERATION — the order
+1. **Owner: run a real agenda session.** This is the gate. Report `[CLAUSE_SANITIZER]` verdict
+   counts, `[TURN_LATENCY]` medians split by verdict, and whether any `repaired` turn removed
+   something it should not have. Nothing else closes ADR-039 for runtime.
+2. **In parallel, the residual loop** — R1→R4 from `residual_cleanup_20260729`, one unit per cycle,
+   design/fable → apply/sonnet → verify/sonnet → trace/sonnet. The safety gate is binding: **no
+   unit may modify a code path that executes during a live agenda session.**
+3. Answer §0 of the pending-decisions file (three cheap record fixes, one real contradiction).
+4. Then, and only then, threshold tuning — on the telemetry from step 1, never on intuition.
+
+### Still open on this unit
+- Threshold tuning needs `[CLAUSE_SANITIZER]` telemetry from a **real agenda session** (owner runtime).
+- Live NIM tests are written but never run: `OPENCOHOST_LIVE_CLOUD_TESTS=1 pytest tests/live_cloud -s`.
+- Dead-air risk stays **NOT RESOLVED** until `[TURN_LATENCY]` produces real NIM numbers.
+- Two adjacent defects found by the pipeline trace, **registered not fixed**: the chat-repetition
+  discard (`llm_engine.py:3516-3524`) speaks a fallback line and updates last-reply but **never
+  calls `_commit_history`** — the sibling guardrail path four lines earlier does, and its comment
+  names that as the D4 `memoria_quality_20260717` fix for exactly this bug class. And a pregenerated
+  draft never passes `_accept_agenda_output` (the gate at `:3526` requires `commit_history`); its
+  only validation is the *different* `_preview_accept_agenda_output` (`:1700`).
+
+---
+
+**Original plan section, kept as the scope contract:**
+
+### Read these two, in order, before touching anything
+1. `temp/plan_v1_corrected.md` — the approved plan. Authoritative.
+2. `docs/deferred-20260729-clause-sanitizer-scope.md` — what is out of scope and why, with citations.
+   Several rows are **BLOCKED-BY-EVIDENCE**; do not pick them up.
+
+Superseded, keep only as history: `temp/revised_plan.md`, `temp/evidence_package.md`.
+Engram: `architecture/clause-sanitizer-v1-scope` (the decision), `architecture/clause-sanitizer-evidence-package`
+(the audit), `architecture/clause-sanitizer-intra-speech` (the original design).
+
+### The defect
+A real ~16-min agenda session emitted, inside ONE sentence:
+`"No había roadmap, no había monetización, no había roadmap, no había roadmap."`
+A comma-delimited clause repeated 3×, one repetition non-contiguous. Every existing guard is
+structurally blind to it: `has_looping_lines` splits on `[.!?¡¿]+` and filters ≤24 chars;
+`detect_repetition` compares whole candidates across turns; `trim_trailing_repeated_sentences`
+compares only against `recent_texts`; TTS comma-chunking runs after all guards.
+
+### V1 scope (owner-decided 2026-07-29 — do not widen)
+- Implemented **once**, in the shared backend. `opencohost/ui/` is read-only legacy reference.
+- Armed by default **ONLY** for `kira-agenda` + `kira-agenda-stop`.
+- Disarmed for `chat`, `direct`, `ptt`, `accumulated` — config preserved so they can be armed later
+  on real evidence. **The earlier "all sources" justification was a fallacy** (absence of a guard
+  ≠ a defect) and there is a real false positive on operator-facing sources: an instructed
+  repetition (`"repetí tres veces …"`) would be silently collapsed.
+- **No** history comparison. **No** intent detection — no regex, no phrase list, no LLM call.
+- Exact normalized clause equality **within a single sentence** only.
+- **Tier 2 (reject → regenerate) is agenda-only BY CONSTRUCTION, not by config**: it needs an owner
+  for the regeneration and only agenda has one (the ADR-011 ladder via `_accept_agenda_output("")`,
+  `llm_engine.py:5240`). Elsewhere the sanitizer is repair-only even when armed; the verdict is still
+  logged so evidence accrues.
+
+### Where the code goes
+| File | Change | ~Lines |
+|---|---|---|
+| `opencohost/core/repetition_guard.py` | `_SENT_SPLIT_RE`, `_CLAUSE_SPLIT_RE`, 6 `SANITIZE_*` constants, frozen `ClauseSanitizeResult`, pure `sanitize_clause_repetition()` reusing existing `_norm` (`:73-76`) + `_tokens`/`_WORD_RE` (`:79-80`, `:46`). `detect_repetition` untouched | +65 |
+| `opencohost/config/settings.py` | `_parse_clause_sanitizer_sources()` + `CLAUSE_SANITIZER_SOURCES` defaulting to the two agenda sources + unknown-token WARNING | +12 |
+| `opencohost/core/llm_engine.py` | ~10-line seam block **immediately before `:3399`** (the `output_guard` call); repair-only re-pass after `:1979`; `_log_clause_sanitizer()`; 2 instrumentation lines | +22 |
+| tests | `tests/test_clause_sanitizer.py`, `_seam.py`, `_e2e.py`, `tests/live_cloud/` (gated) | ~430 |
+| `docs/adr/ADR-011-…md` | addendum: intra-speech tier below D1, agenda-only V1 scoping, retry-count question answered | +18 |
+
+**Untouched:** `kira_agenda_controller.py`, all of `opencohost/ui/`, `_retry_after_guard_block`,
+`_accept_agenda_output`, `_ejecutar_inferencia`, `output_guard` internals, `detect_repetition`.
+Production ≈ 99 lines. Zero new modules.
+
+### The seam (verbatim shape)
+```python
+if source in CLAUSE_SANITIZER_SOURCES:
+    san = sanitize_clause_repetition(dialogo)
+    if san.verdict != "clean":
+        self._log_clause_sanitizer(san, source)
+    if san.verdict == "rejected" and source.startswith("kira-agenda"):
+        if commit_history:
+            self._invalidate_pregen_epoch()
+        return ""
+    dialogo = san.text
+```
+
+### Thresholds (all `SANITIZE_*` in repetition_guard.py)
+`FRAGMENTS=5` (always) · `DISTINCT=2` (keys with ≥2 drops) · `REMOVED_PCT=0.30` (gated:
+`drops>=3` AND `original_len>=300`) · `MIN_REMAINING_CHARS=100` (gated: `original_len>=300`) ·
+`SHORT_EXPR_MAX_CHARS=12` (eligibility) · `LENGTH_AXES_FLOOR=300`.
+
+```
+rejected = drops>=5 or distinct>=2
+         or (drops>=3 and original_len>=300 and removed_pct>=0.30)
+         or (original_len>=300 and remaining_len<100)
+```
+The gates exist because an earlier draft's own thresholds **rejected its own acceptance case**;
+three independent review lenses proved it. The incident above must classify **`repaired`** →
+`"No había roadmap, no había monetización."` (40 chars from 76; drops=2, distinct=1,
+max_occurrences=3). Assert that arithmetic in a test.
+
+### The three real destinations (there is NO transcript, and NO STT in this repo)
+`_commit_history` `:3494` (history/context — `self.historial` deque `:567`, in-memory) ·
+`_emit_dialogue` `:5219` (last-reply sink → `ChatReplySink` `api/engine_host.py:150-176` →
+`GET /api/chat/last-reply`; **no-op in the CTk path**, `dialogue_callback` defaults to `None` `:426`) ·
+`_hablar` `:5221` (TTS boundary — a thin `_hablar_lock` wrapper at `:5280-5298`, so it IS the
+str-receiving seam; mock it like `tests/test_dialogue_callback.py:40`, **no real audio**).
+All three read the SAME `dialogo` local — verified in the pregen path too (`:1983`/`:1999`/`:2017`).
+
+### Two paths, not one — the requested single flow does not exist
+Foreground has **no** connector concatenation. The pregen path is the only one with a connector,
+and there concatenation (`_speak_pregenerated:1979`) happens **AFTER** the guardrails, with history
+at `:1983`, last-reply `:1999`, TTS `:2017` — and guardrails do **not** re-run after concatenating
+(`:1994-1997`, pre-existing). Hence the repair-only re-pass after `:1979`: no regeneration
+machinery exists there, so a reject could only stall playback.
+
+### Execution order
+1. Sanitizer + config + telemetry + seam + repair-only re-pass, with the plan §8 tests.
+2. Run, with `E:/Miniconda/envs/flux_env/python.exe` and
+   `-q -p no:cacheprovider --basetemp=E:/VoiceAI/temp/pytest-piper-clean`:
+   the new files → then `test_repetition_guard.py test_chat_repetition_guard.py
+   test_kira_agenda_controller.py test_cohost_repetition_ladder.py test_kira_orchestration_gaps.py
+   test_validation.py test_dialogue_callback.py test_pregen_pop_cache.py test_interactive_pregen.py`
+   → then the CLAUDE.md focused suite (`test_llm_tiers.py test_model_panel.py
+   test_heavy_model_inference_recovery.py`).
+3. Report, including telemetry samples from a real agenda session for the tuning pass.
+4. Interruption state machine design (4 sources). 5. Stream/Tauri migration.
+
+### Traps verified this session — do not re-litigate
+- **`max_intentos = 2` is NOT a transport retry.** Both exception branches `return ""` on the FIRST
+  failure (`:3160-3183` watchdog, `:3184-3234` transport); neither has `continue`. Two comments
+  claim otherwise (`:3405`, and `:3211` logs an attempt that never happens).
+- **`output_guard` has ZERO repetition rules** — all 9 (`validation.py:456-577`) are content-safety;
+  `STREAMER_SOURCES` gates only R10/R11. 68 tests in `test_validation.py`, none about repetition.
+- **Do NOT add `record_success()` at `kira_agenda_controller.py:966`.** It makes `failure_count`
+  oscillate 0→1→2→0 in CLOSING so the force-complete at `:958` (`>=3`) is unreachable and the topic
+  never closes — the exact "20+ LLM calls in a row" cascade `:954-957` records as fixed. Also breaks
+  the pinned assertion at `tests/test_kira_orchestration_gaps.py:742`. See deferred doc §1.1.
+- **NIM has ZERO latency measurement.** `settings.py:105-108` calls `CLOUD_CHAT_TIMEOUT=90` a
+  placeholder. Never transfer the Ollama RTX-3060 figures (`ADR-013:59-67`) to NIM.
+- **Front provider config is live:** `active_provider=nvidia_nim`, `base_url=https://integrate.api.nvidia.com/v1`,
+  model `z-ai/glm-5.2`, key present in `config/llm_keys.json` (field `api_key`, read via
+  `OAuthStore(LLM_KEYS_FILE)`, `llm_engine.py:3669-3674`). `tests/conftest.py:238-268` is autouse and
+  redirects that path to `tmp_path` for every test — a live test must opt out. **Never log the value.**
+
+### Adjacent defects registered, NOT to be fixed here
+`tests/test_interactive_pregen.py::test_llm_generating_flag_brackets_the_ollama_call` fails on
+pristine code: `_bare_motor()` never sets `is_ready`/`pygame`, so `_generar_dialogo` bails before
+the stubbed `_ollama_chat_with_watchdog` ever runs. Stale harness, not a production defect — but it
+means the `llm_generating` bracket is currently UNVERIFIED. ·
+**Raw-text log inventory (audited 2026-07-29, corrected).** Off-machine shipping: **NOT FOUND** —
+`ui/crash_reporting.py` lists log *filenames* only, never contents; the only `requests.post` targets
+are YouTube chat, the cloud LLM provider, and localhost TTS. Every leak below is **local disk only**.
+Ranked by the project rule ("never expose raw *chat*"), which targets VIEWER text, not Kira's own:
+1. **`validation.py:397,405,414,423`** — `preview=text[:100]` of VIEWER chat at WARNING, ungated, in
+   `runtime_check()`. **Dead code today** (only its own test calls it) — a landmine, not a live leak.
+   One call site away from violating the rule. Fix: `chars=len(text)`. THE one worth doing.
+2. **`ui/voice_control.py:216`** — 30 raw chars of PTT-transcribed OPERATOR speech at INFO, ungated
+   (`:239` logs it untruncated at DEBUG). Real, live. In `opencohost/ui/` → out of bounds for the
+   sanitizer unit; own micro-unit.
+3. `validation.py:465-575` (9 sites, `preview=response[:120]`) and `llm_engine.py:3542`
+   (`dialogo[:200]`, gated on `OPENCOHOST_DEBUG=1`) are **Kira's OWN output** — the category the rule
+   explicitly permits (R8 forbids raw viewer chat). Consistency cleanup, NOT a privacy violation.
+4. Retention hygiene: `config/logger.py` uses a plain `FileHandler` — the engine log never rotates
+   and is never pruned (`temp_file_cleanup.py` only cleans TTS audio). `validation.log` and
+   `api.log` DO rotate (5MB×3). Same for the `server_qwen_*`/`ollama_startup_*` subprocess logs.
+`SensitiveDataFilter` (`logger.py:21-41`) redacts credentials/tokens/chat-ids — **never dialogue**.
+Memoria and `_log_clause_sanitizer` logging is metadata-only by explicit design; the rest of the
+codebase is disciplined. ·
+`voice_control.py:244-250` mistags legacy PTT as `direct` ·
+`llm_engine.py:1338` hardcodes `priority=1` · `pygame.mixer.init()` at `:1217` has no headless
+fallback and its `except` kills the whole engine thread · `_regen_retry_count` is dead telemetry ·
+ADR-011's status line contradicts its own update log. All detailed in the deferred doc §6.
+
 ## LATEST SNAPSHOT — 2026-07-23/24 (multi-provider cloud LLM + model-switch continuity SHIPPED; ALL UNCOMMITTED)
 
 **Read conductor/tracks.md entries for the four *_2026072{3,4} tracks — they carry the full detail.**
