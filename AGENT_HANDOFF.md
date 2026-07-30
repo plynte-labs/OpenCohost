@@ -67,7 +67,9 @@ the callers' `try/except Exception` never covered it.
 
 **The fix is not what I first told the owner.** I said "pass a timeout to the client, same idiom
 the rest uses". Wrong twice: `ollama.show(model)` accepts **no timeout argument**, and switching
-to a `Client` would move the seam that **37 test sites across 9 files** monkeypatch. Instead it
+to a `Client` would move the seam that **19 patch sites across 2 files** monkeypatch (I first wrote
+37 across 9 — that counted comments, docstrings and assert messages, and four of those files are
+`tests/realenv/`, which patch nothing at all; corrected 2026-07-30). Instead it
 reuses the engine's own generic watchdog, so `ollama.show` stays the call target and all 37
 patches keep working. Budget is `OLLAMA_REQUEST_TIMEOUT` (5 s, the `/api/tags` metadata class),
 not the 180 s generation budget.

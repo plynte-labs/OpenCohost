@@ -169,8 +169,29 @@ while you validate.
 
 | # | Finding | Evidence | Why it was not fixed |
 |---|---|---|---|
-| ~~6.1~~ | **FIXED — owner authorized 2026-07-30.** `_fetch_show` is now bounded by the same watchdog mechanism the chat call uses, at the metadata budget (`OLLAMA_REQUEST_TIMEOUT`, 5 s) rather than the 180 s generation budget | The fix could not be "pass a timeout to the client" as I first told the owner: `ollama.show(model)` takes **no timeout argument**, and moving to a `Client` would have moved the seam that **37 test sites across 9 files** monkeypatch. Reused the engine's own generic watchdog instead — `ollama.show` stays the call target, so every one of those 37 patches still works | Worst case is now **2× the timeout** (~10 s), because `_check_capabilities_reasoning` calls `_discover_model_ctx` and then `_fetch_show`, and a failure is not cached. Bounded and once-per-model, so not worth restructuring — noted in a `ponytail:` comment |
+| ~~6.1~~ | **FIXED — owner authorized 2026-07-30.** `_fetch_show` is now bounded by the same watchdog mechanism the chat call uses, at the metadata budget (`OLLAMA_REQUEST_TIMEOUT`, 5 s) rather than the 180 s generation budget | The fix could not be "pass a timeout to the client" as I first told the owner: `ollama.show(model)` takes **no timeout argument**, and moving to a `Client` would have moved the seam that **19 patch sites across 2 files** monkeypatch. Reused the engine's own generic watchdog instead — `ollama.show` stays the call target, so all 19 patches still work | Worst case is now **2× the timeout** (~10 s), because `_check_capabilities_reasoning` calls `_discover_model_ctx` and then `_fetch_show`, and a failure is not cached. Bounded and once-per-model, so not worth restructuring — noted in a `ponytail:` comment |
 | ~~6.2~~ | **FIXED.** All three `_bare_motor` helpers are now genuinely hermetic — **0 live RPCs**, measured with the same spy that found them | The seed needed **two** caches, not one: `_generar_dialogo` reaches `_fetch_show` through `_discover_model_ctx` (context limit) *and* `_resolve_reasoning_classification` (capabilities). Seeding only the second left 4 RPCs alive in `test_pregen_pop_cache.py` | — |
+
+## §7 — From the 2026-07-30 opus audit of the watchdog fix
+
+The reviewer's mechanism claim was right and their severity was wrong: the abandoned probe thread
+is real but bounded at **2 per model tag per process, 0 per additional turn** (measured; full
+figures in the ADR-014 addendum). Semaphore, extra negative cache, dedicated metadata client and
+a transport-timeout migration were all **rejected** — each bounds something the existing
+memoisation already bounds.
+
+Two things it surfaced that are recorded rather than fixed:
+
+| # | Finding | Why not fixed |
+|---|---|---|
+| 7.1 | **`scout_digest` calls `_check_capabilities_reasoning` DIRECTLY**, bypassing the `_resolve_reasoning_classification` memo — so it would re-probe on every dispatch. **That is exactly the unbounded accumulation the reviewer described**, and it is inert only because `SCOUT_ENABLED = False` with no production writer. **If that flag is ever turned on, the reviewer wins retroactively.** A one-line swap to `_resolve_reasoning_classification` inoculates it | It changes scout gating semantics, and it is production code on the turn path during the clause-sanitizer validation freeze. **Do this before ever enabling the scout** |
+| 7.2 | `tests/realenv/test_topic_scout_realenv.py::test_scout_digest_real_generation_returns_adjacent_titles` fails — "real scout produced no adjacent titles" | **PRE-EXISTING**, proven by running it against the pre-fix engine at `1a1c3f2`, where it fails identically. Unrelated to this work, and the scout is disabled |
+
+**A process lesson worth more than either finding:** `tests/realenv/` is opt-in behind
+`OPENCOHOST_REALENV_TESTS=1`, so a default run **skips** it rather than failing. The capability-probe
+integration test had been red since 2026-07-24 and no green suite number would ever have revealed
+it. **A test that only runs behind an env var needs something to give it a reason to run** — right
+now nothing does, and 2 of 9 realenv tests are red.
 
 ---
 

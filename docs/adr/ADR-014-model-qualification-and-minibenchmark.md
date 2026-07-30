@@ -94,7 +94,7 @@ recovers a genuine reasoning model that is misclassified this way.
 **Two constraints shaped the mechanism, both discovered rather than assumed:**
 
 1. **Not an HTTP timeout.** `ollama.show(model)` accepts no timeout argument, and switching to a
-   `Client` would move the seam that **37 test sites across 9 files** monkeypatch. So `ollama.show`
+   `Client` would move the seam that **19 patch sites across 2 files** monkeypatch. So `ollama.show`
    stays the call target and the bound comes from the watchdog thread.
 2. **Not the chat watchdog.** Routing the probe through `_ollama_chat_with_watchdog` broke three
    self-heal tests, because the chat transport gets swapped — by the cloud fallback and by tests —
@@ -109,6 +109,40 @@ not cached. Bounded and once-per-model, so it is documented rather than restruct
 **Not covered by the heavy-model gate.** That gate's validated recovery wraps the *chat* call,
 later in the turn. This probe was earlier and entirely uncovered — a genuine gap next to a passing
 gate, not a regression in it.
+
+### Audited 2026-07-30 — the abandoned thread is bounded, and by how much
+
+A reviewer correctly observed that a daemon thread abandoned on timeout does **not** cancel the
+underlying socket, and asked whether zombie threads accumulate. **The mechanism claim is right;
+the severity is not.** Measured with a harness that blocks `ollama.show` forever:
+
+| Scenario | Blocked probe threads |
+|---|---|
+| 1 model tag, 31 consecutive turns | **2** |
+| 1 tag matching the name heuristic, 25 turns | 1 |
+| 10 distinct non-heuristic tags | 20 |
+| cloud posture, 25 turns | 0 |
+
+**Two per model tag, per process. Zero per additional turn.** It stops because the negative result
+is already cached at two layers: `_discover_model_ctx` assigns its fallback **outside** its
+`try/except`, and `_resolve_reasoning_classification` caches the `False` that
+`_check_capabilities_reasoning` returns. Verified repo-wide that **nothing clears those caches** —
+not a model switch, a provider switch, a profile change, or a cloud-fallback flip.
+
+Ceiling on the development rig: **22** threads (13 installed models, 4 short-circuited by the name
+heuristic), against an httpx pool of 100, and reachable only by selecting every model in turn while
+Ollama stalls on `/api/show` alone. Consequently **a Semaphore and an extra negative cache were
+both rejected**: they bound a quantity the memoisation already bounds.
+
+**The "runner" concern does not transfer.** `_create_ollama_scout_client`'s docstring warns that a
+timed-out call keeps the single generation runner busy. Measured: `ollama.show` on a **non-resident**
+model returns in 16 ms and leaves `ollama.ps()` unchanged — `POST /api/show` allocates no generation
+slot. An abandoned probe holds one pooled HTTP connection and nothing else.
+
+**No safe zero-radius transport timeout exists.** `ollama._client._client.timeout` is mutable in
+place and honoured by `build_request`, but that singleton also serves `ollama.chat`/`generate`, so
+bounding it globally would cap **generation** at the metadata budget, and mutate-and-restore races
+the scout and judge threads. The watchdog remains the correct mechanism.
 
 ---
 
