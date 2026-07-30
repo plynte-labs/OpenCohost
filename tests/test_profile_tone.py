@@ -120,14 +120,12 @@ class TestProfileExistence:
         for name in ["Comunidad", "Calmado", "Técnico", "Show"]:
             assert name in profiles, f"Missing profile: {name}"
 
-    @pytest.mark.skipif(
-        not os.path.isfile(PERFILES_FILE),
-        reason="legacy preservation only applies to an existing user perfiles.json",
-    )
-    def test_legacy_profiles_preserved(self):
-        profiles = _load_profiles()
-        for name in ["Akira", "Akira (Learn)", "Gemma", "Hagg", "Vacio", "Akira (Uncensored)"]:
-            assert name in profiles, f"Legacy profile lost: {name}"
+    # There is deliberately no legacy-profile assertion here. One existed and
+    # listed Hagg and Akira (Uncensored) — real tracked profiles until 924ea5a
+    # untracked perfiles.json as runtime user state. The owner has since renamed
+    # and removed profiles, which is now a supported thing to do, so pinning any
+    # list is asserting that the user has not used the feature. The shipped set
+    # is covered by test_new_profiles_exist against default_profiles.json.
 
     def test_all_profiles_have_prompt(self):
         profiles = _load_profiles()
