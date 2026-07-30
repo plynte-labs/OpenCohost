@@ -50,12 +50,28 @@ unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, 
 
 The single failure is **`test_profile_tone.py::TestProfileExistence::test_legacy_profiles_preserved`,
 and it is PRE-EXISTING** — proven by stashing the three production files and reproducing it
-identically. Diagnosis: the test asserts profiles `Hagg` and `Akira (Uncensored)` exist, and they
-are in **neither** the owner's `perfiles.json` **nor** the shipped
-`opencohost/config/default_profiles.json` (`Akira`, `Akira (Learn)`, `Calmado`, `Comunidad`,
-`Show`, `Técnico`). So it fails everywhere including CI, and it reads the owner's **gitignored**
-user state (`perfiles.json`, `.gitignore:104`) as its primary source — a contract test cannot
-depend on mutable user data. Needs one owner decision; see the pending-decisions file.
+identically.
+
+**Two claims in the first version of this diagnosis were wrong. Corrected 2026-07-29 after
+verifying against source and history:**
+
+- It does **NOT** fail on CI. `test_legacy_profiles_preserved` carries a `skipif` on
+  `os.path.isfile(PERFILES_FILE)`, so on a clean checkout it **skips**. It fails only on a
+  machine that has a `perfiles.json` — i.e. only the owner's.
+- The names are **not** phantoms. `git show 924ea5a^:perfiles.json` lists `Hagg` and
+  `Akira (Uncensored)` as real, tracked profiles. Commit `924ea5a` untracked the file as
+  runtime user state; the owner's copy has since diverged — `Akira (Uncensored)` appears to
+  have been **renamed to `Akira (Unchained)`** and `Hagg` removed, with `Chat` and
+  `Default EN` added. The test is a stale snapshot of one machine, not a broken contract.
+- The earlier recommendation — "switch the test to read `default_profiles.json` only" —
+  **would also fail**. That file has no `Gemma` and no `Vacio`, both of which the assertion
+  requires. Do not apply it.
+
+Real state: asserted list is `["Akira", "Akira (Learn)", "Gemma", "Hagg", "Vacio",
+"Akira (Uncensored)"]`; the owner's file is missing exactly `Hagg` and `Akira (Uncensored)`.
+The test reads the owner's **gitignored** user state (`perfiles.json`) as its primary source,
+so it can never be a stable contract test whatever list it asserts. Needs one owner decision;
+see the pending-decisions file.
 
 **Correction to an earlier note in this snapshot:**
 `test_interactive_pregen.py::test_llm_generating_flag_brackets_the_ollama_call` **fails in
