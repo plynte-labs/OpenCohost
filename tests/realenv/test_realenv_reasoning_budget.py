@@ -35,6 +35,11 @@ def _new_motor():
     from opencohost.core.llm_engine import MotorVocalIA
 
     m = MotorVocalIA.__new__(MotorVocalIA)
+    # _fetch_show gates on the _is_local PROPERTY, which reads both of these.
+    # Without them the gate raises AttributeError, and _check_capabilities_reasoning
+    # swallows it as False — a red test that reads exactly like a real negative.
+    m._provider_config = {"active_provider": "local", "profiles": {}}
+    m._cloud_fallback_active = False
     m._model_ctx_limit = {}
     m._ctx_show_cache = {}
     m._reasoning_model_cache = {}
