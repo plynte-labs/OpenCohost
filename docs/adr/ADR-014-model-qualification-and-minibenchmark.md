@@ -72,6 +72,46 @@ D1 was empirically confirmed by the small-model mini-benchmark (ADR-013): with t
 
 ---
 
+## Addendum 2026-07-30 — the capabilities probe was unbounded on the turn path
+
+The `ollama.show` probe this ADR introduced ran with **no time limit**, on the foreground turn
+path, *before* the inference watchdog is armed. `ollama-python` builds its default client with
+`timeout=None` and its own docstring says so; in httpx that means wait indefinitely. A busy or
+stalling daemon therefore parked the turn with no recovery — not a loop, a block ending only when
+Ollama answered or the process died. `_check_capabilities_reasoning`'s `try/except Exception`
+looked like coverage but is not: **a hang raises nothing.**
+
+Found sideways, while fixing a flaky test that waits on a 2-second event. The test broke; a live
+turn would not break, it would wait — which the operator hears as dead air. Worth noting because
+the ADR's "consumed as optional info, the system keeps working without it" consequence was true
+for *errors* and false for *stalls*.
+
+**Decision.** Bound it with the engine's own watchdog at the metadata budget
+(`OLLAMA_REQUEST_TIMEOUT`, 5 s) rather than the 180 s generation budget. A timeout degrades to
+`False`, the same safe direction as every other probe failure, and the self-heal in D1 already
+recovers a genuine reasoning model that is misclassified this way.
+
+**Two constraints shaped the mechanism, both discovered rather than assumed:**
+
+1. **Not an HTTP timeout.** `ollama.show(model)` accepts no timeout argument, and switching to a
+   `Client` would move the seam that **37 test sites across 9 files** monkeypatch. So `ollama.show`
+   stays the call target and the bound comes from the watchdog thread.
+2. **Not the chat watchdog.** Routing the probe through `_ollama_chat_with_watchdog` broke three
+   self-heal tests, because the chat transport gets swapped — by the cloud fallback and by tests —
+   and swapping chat must not also swap a metadata probe. The mechanism now lives in
+   `_call_with_watchdog`, which the chat wrapper delegates to. **Two call classes with different
+   budgets must not share one seam**, which is the reusable lesson here.
+
+**Known cost, accepted.** A stall now costs 2× the timeout (~10 s), because
+`_check_capabilities_reasoning` calls `_discover_model_ctx` and then `_fetch_show` and a failure is
+not cached. Bounded and once-per-model, so it is documented rather than restructured.
+
+**Not covered by the heavy-model gate.** That gate's validated recovery wraps the *chat* call,
+later in the turn. This probe was earlier and entirely uncovered — a genuine gap next to a passing
+gate, not a regression in it.
+
+---
+
 ## Related ADRs
 - [ADR-011](./ADR-011-cohost-repetition-regenerate-on-duplicate.md) — D4 (model is the lever); this ADR makes that lever practical.
 - [ADR-013](./ADR-013-model-latency-vs-repetition-benchmark-rtx3060.md) — the hardware benchmark this qualification turns into a per-user, per-model check.

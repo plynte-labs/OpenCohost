@@ -25,7 +25,12 @@ Product direction: **OpenCohost** (`opencohost_launch_readiness_20260605` track)
 - Goal is runtime validation and release readiness for OpenCohost launch.
 - Active local checkpoints (NOT yet merged):
   - `dynamic_model_management_20260608` — Phase 1 + 2 done locally, 154 passed
-  - `heavy_model_inference_recovery_20260609` — implemented, needs real runtime validation (159 passed)
+  - `heavy_model_inference_recovery_20260609` — implemented AND **runtime-validated
+    2026-06-17** against a real stalling model. Evidence: `logs/opencohost_20260617_175453.log`
+    at 18:05:24 — `qwopus` hung, the inference watchdog fired at 45.00s, automatic rollback to
+    `gemma4:e2b`, queue processing continued without restart. This line previously read "needs
+    real runtime validation" for six weeks after the log existed; do not reintroduce that claim
+    without citing a log that contradicts this one.
 - Deferred (do not touch): knowledge cards, packaging, hardening suite, first-run wizard
 
 Always read `AGENT_HANDOFF.md` first. It holds the latest operating mode and gate status.
@@ -54,7 +59,12 @@ These aliases map to Agent tool `model` param values.
 
 Priority order for the next sessions:
 
-1. **Runtime validation** — user must validate `heavy_model_inference_recovery` against a real heavy/stalling model before any new track starts. This is a release gate.
+1. ~~**Runtime validation** — validate `heavy_model_inference_recovery` against a real
+   heavy/stalling model.~~ **SATISFIED 2026-06-17** — see the checkpoint note above for the log
+   evidence. It is no longer a release gate and no longer blocks starting a track. The open
+   runtime gate is now the **clause sanitizer** (ADR-039): the owner must run a real agenda
+   session and report `[CLAUSE_SANITIZER]` verdict counts and `[TURN_LATENCY]` medians split by
+   verdict.
 2. **UI rendering track** — `ui_rendering_optimization_20260609` is the active branch (`audit/ui-rendering-analysis`). ADR-006 and ADR-007 are already written.
 3. **OpenCohost launch readiness** — reconcile docs, validate all runtime claims, confirm smoke harness passes.
 4. **Packaging** — only after runtime gates pass. Track exists at `conductor/tracks/packaging_deploy_20260510/`.

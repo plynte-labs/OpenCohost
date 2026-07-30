@@ -16,7 +16,36 @@
 These are not feature decisions. They are places where the repo's own record contradicts
 itself, which makes every downstream decision unreliable.
 
-### 0.1 — The heavy-model recovery gate: is it closed or open? **DECISION NEEDED**
+### 0.1 — The heavy-model recovery gate — **RESOLVED 2026-07-29: it is CLOSED**
+
+**The `[x]` at `conductor/tracks.md:748` is CORRECT. `CLAUDE.md` and the 2026-07-16 handoff entry
+were STALE and are now fixed.**
+
+I left this open earlier because I only had inference. There is evidence.
+`logs/opencohost_20260617_175453.log` exists on disk (20,100 bytes) and contains, at 18:05:24:
+
+```
+[ERROR]   Motor: Timeout de inferencia con qwopus tras 45.00s. Iniciando recuperación...
+[WARNING] Inference watchdog timeout: model=qwopus source=direct timeout=45.00s
+[WARNING] Motor: Recuperación: rollback automático de qwopus a gemma4:e2b.
+```
+
+Heavy model `qwopus` warmed 23.5 s, the first real inference hung, the watchdog fired at 45.00 s,
+automatic rollback to last-known-good `gemma4:e2b`, and queue processing continued **without a
+restart**. AC1/AC2/AC3/AC5 satisfied. Corroborates engram #2214.
+
+**Why I got this wrong the first time, worth keeping:** I ranked the July sources above the June
+ones purely because they were newer and more direct. The June entries cited a filename; the July
+entries cited nothing. **Recency does not beat a log file.** An unexercised-gate claim must cite
+a log or be treated as stale.
+
+**Consequence:** roadmap #1 as written is satisfied, so the documentation fix — not a runtime
+validation — was the only thing blocking new tracks. The remaining open runtime gate is the
+clause sanitizer.
+
+<details><summary>Original row, kept for the record</summary>
+
+#### The heavy-model recovery gate: is it closed or open? (superseded)
 
 The record disagrees with itself, and this one matters because **it is roadmap item #1 and it
 blocks starting any new track.**
@@ -33,6 +62,8 @@ the working assumption is **OPEN**. But this needs your word, not my inference.
 **I did not flip the `[x]` at `tracks.md:748` myself** — that is your status marker and the
 newer evidence could equally mean the gate was re-opened for a different reason. One sentence
 from you closes this.
+
+</details>
 
 ### 0.2 — `conductor/tracks/` is gitignored (`.gitignore:78`)
 
@@ -138,8 +169,8 @@ while you validate.
 
 | # | Finding | Evidence | Why it was not fixed |
 |---|---|---|---|
-| 6.1 | **`ollama.show` in `_fetch_show` has no watchdog on the foreground turn path.** A busy or stalling daemon blocks a live turn there for an unbounded time. This is **adjacent to roadmap #1** — the `heavy_model_inference_recovery` gate is precisely about a stalling model — and the ladder's recovery does not cover this call | Measured: the RPC fires from `_generar_dialogo` via `_resolve_reasoning_classification` → `_check_capabilities_reasoning` → `_fetch_show`. It flaked a test with a 2s budget, which is the same failure mode a live turn would see as dead air | Production code on the live agenda path. Frozen by the loop safety gate. **Needs your decision** — it may belong to the heavy-model gate rather than a new track |
-| 6.2 | The sibling `_bare_motor` copies in `tests/test_pregen_pop_cache.py` and `tests/test_interruption_connector.py` still fire **4 live `ollama.show` RPCs** between them — same latent flake class R4 just fixed | Measured with a pytest-level spy on `ollama.show`: 4 calls across the two files | Widening is a hard stop condition in this loop. Cheap to fix (same 2-line seed), but it is a separate unit |
+| ~~6.1~~ | **FIXED — owner authorized 2026-07-30.** `_fetch_show` is now bounded by the same watchdog mechanism the chat call uses, at the metadata budget (`OLLAMA_REQUEST_TIMEOUT`, 5 s) rather than the 180 s generation budget | The fix could not be "pass a timeout to the client" as I first told the owner: `ollama.show(model)` takes **no timeout argument**, and moving to a `Client` would have moved the seam that **37 test sites across 9 files** monkeypatch. Reused the engine's own generic watchdog instead — `ollama.show` stays the call target, so every one of those 37 patches still works | Worst case is now **2× the timeout** (~10 s), because `_check_capabilities_reasoning` calls `_discover_model_ctx` and then `_fetch_show`, and a failure is not cached. Bounded and once-per-model, so not worth restructuring — noted in a `ponytail:` comment |
+| ~~6.2~~ | **FIXED.** All three `_bare_motor` helpers are now genuinely hermetic — **0 live RPCs**, measured with the same spy that found them | The seed needed **two** caches, not one: `_generar_dialogo` reaches `_fetch_show` through `_discover_model_ctx` (context limit) *and* `_resolve_reasoning_classification` (capabilities). Seeding only the second left 4 RPCs alive in `test_pregen_pop_cache.py` | — |
 
 ---
 

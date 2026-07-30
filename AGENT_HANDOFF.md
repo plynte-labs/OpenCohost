@@ -53,6 +53,49 @@ R1's parametrized privacy guard, 3 from R2's pinning tests — with **zero regre
 one long-standing failure is gone: R5 removed the legacy-profile assertion after the owner
 confirmed the renames were deliberate. **The suite is fully green.**
 
+### 2026-07-30 — the unbounded `ollama.show` is FIXED, and the heavy-model gate is CLOSED
+
+Owner authorized both after the loop closed. **Full suite: 4907 passed · 0 failed · 14 skipped**
+(+1, the new hang test; zero regressions).
+
+**1. `_fetch_show` is bounded.** It called the module-level `ollama.show(model)`, and
+`ollama-python` builds its default client with `timeout=None` — its own docstring says so, and in
+httpx that means **wait forever**. The probe runs on the foreground turn path *before* the
+inference watchdog is armed, so a busy daemon parked the turn with no recovery. Not a loop — a
+block that ends only when Ollama answers or the process dies. A hang raises nothing, which is why
+the callers' `try/except Exception` never covered it.
+
+**The fix is not what I first told the owner.** I said "pass a timeout to the client, same idiom
+the rest uses". Wrong twice: `ollama.show(model)` accepts **no timeout argument**, and switching
+to a `Client` would move the seam that **37 test sites across 9 files** monkeypatch. Instead it
+reuses the engine's own generic watchdog, so `ollama.show` stays the call target and all 37
+patches keep working. Budget is `OLLAMA_REQUEST_TIMEOUT` (5 s, the `/api/tags` metadata class),
+not the 180 s generation budget.
+
+That extraction was itself forced by evidence: routing the probe through
+`_ollama_chat_with_watchdog` broke 3 self-heal tests, because they swap the chat transport — and
+swapping chat must not also swap the metadata probe. `_call_with_watchdog` now holds the
+mechanism and `_ollama_chat_with_watchdog` delegates to it. Chat behaviour is byte-identical.
+
+Worst case is now **2× the timeout** (~10 s), since `_check_capabilities_reasoning` calls
+`_discover_model_ctx` and then `_fetch_show` and a failure is not cached. Bounded and
+once-per-model; noted in a `ponytail:` comment rather than restructured.
+
+**2. All three `_bare_motor` test helpers are genuinely hermetic — 0 live RPCs**, measured. The
+seed needs **two** caches, not one: the turn reaches `_fetch_show` through `_discover_model_ctx`
+*and* `_resolve_reasoning_classification`. Seeding only the second left 4 RPCs alive.
+
+**3. The heavy-model recovery gate is CLOSED — `tracks.md:748`'s `[x]` was right all along.**
+`logs/opencohost_20260617_175453.log` at 18:05:24 shows `qwopus` hanging, the watchdog firing at
+45.00 s, automatic rollback to `gemma4:e2b`, and the queue continuing without a restart.
+`CLAUDE.md` claimed "needs real runtime validation" for six weeks after that log existed; both it
+and roadmap #1 are corrected. **I had ranked the July sources above the June ones purely because
+they were newer — the June ones cited a filename and the July ones cited nothing. Recency does
+not beat a log file.** An unexercised-gate claim must cite a log or be treated as stale.
+
+Consequence: **nothing runtime-related blocks starting a track any more.** The one open runtime
+gate is the clause sanitizer (ADR-039).
+
 ### Owner priority ruling, 2026-07-29 — read before planning any unit
 
 > Effort goes only to **agenda, PTT and direct** — what the owner running OpenCohost actually
