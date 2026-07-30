@@ -46,11 +46,26 @@ unexercised) and Gate 3 (kill-mid-hold watchdog proof). Revisit before release, 
 | `pytest.ini` | new `live_cloud` marker |
 | tests | `test_clause_sanitizer.py` (33) · `_seam.py` (26) · `_e2e.py` (3) · `tests/live_cloud/` (3, gated/skipped) |
 
-### FULL SUITE after the residual loop, 2026-07-29: **4906 passed · 1 failed · 14 skipped** (4m41s)
+### FULL SUITE after the residual loop, 2026-07-29: **4906 passed · 0 failed · 14 skipped** (3m52s)
 
-Baseline before the loop was 4899 passed. The delta is exactly **+7** — 4 from R1's parametrized
-privacy guard, 3 from R2's pinning tests. **Zero regressions.** The single failure is unchanged
-and is R5, which is blocked on one owner decision (§2.4).
+Baseline before the loop was 4899 passed **and 1 failed**. The delta is exactly **+7** — 4 from
+R1's parametrized privacy guard, 3 from R2's pinning tests — with **zero regressions**, and the
+one long-standing failure is gone: R5 removed the legacy-profile assertion after the owner
+confirmed the renames were deliberate. **The suite is fully green.**
+
+### Owner priority ruling, 2026-07-29 — read before planning any unit
+
+> Effort goes only to **agenda, PTT and direct** — what the owner running OpenCohost actually
+> exercises. **Viewer/Twitch chat is NOT a priority**: it works only in the CustomTkinter shell,
+> is not properly migrated to Tauri, and belongs to another track. Testing or hardening it today
+> is wasted effort.
+
+This retroactively makes **unit R1 the wrong surface**. R1 removed a viewer-chat log leak from
+`runtime_check()` — dead code, on a deprioritized path. Cheap and harmless; not reverted, because
+reverting costs more attention than the four lines are worth. Recorded so it does not repeat: a
+finding on a viewer-chat path gets filed against the unmigrated-chat track and dropped. No tests,
+no hardening, no place in a cleanup loop. Severity does not override surface priority when the
+surface does not run.
 
 The single failure is **`test_profile_tone.py::TestProfileExistence::test_legacy_profiles_preserved`,
 and it is PRE-EXISTING** — proven by stashing the three production files and reproducing it

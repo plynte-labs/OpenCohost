@@ -73,7 +73,8 @@ validated. Corrected.
 | 2.1 | Run the residual cleanup loop (R1–R4) while you validate live | `tracks/residual_cleanup_20260729/proposal.md` | **Yes.** Four units, three touch only tests/docs, all behind a live-validation safety gate |
 | 2.2 | Viewer-chat preview in `runtime_check()` → metadata | `tracks/log_privacy_hygiene_20260729/` U1 | **Do it now, precisely because it is dead code.** Cheaper than after it goes live |
 | 2.3 | Pin the abbreviation + CJK no-ops as intentional; document what the tier promises | `tracks/sanitizer_language_scope_20260729/` U1+U3 | Yes — converts latent limitations into visible ones |
-| 2.4 | **Is `test_legacy_profiles_preserved` worth keeping at all?** It asserts six profile names; your `perfiles.json` is missing exactly `Hagg` and `Akira (Uncensored)`. Both were **real tracked profiles** until `924ea5a` untracked `perfiles.json` as user state — history at `924ea5a^` proves it. Your copy has since diverged: `Akira (Uncensored)` looks **renamed to `Akira (Unchained)`**, `Hagg` removed, `Chat` + `Default EN` added | `tracks/residual_cleanup_20260729/` R5 | **Delete the test.** It is a snapshot of one machine's mutable, gitignored state, so no list makes it stable — and the test above it already covers the shipped set. Confirm you renamed/removed those two yourself and it is not the seeder eating profiles |
+| ~~2.4~~ | **ANSWERED 2026-07-29 — test deleted (`48207ac`).** Owner confirmed the renames were deliberate, so the assertion was claiming the user had not used a supported feature. Suite now fully green. Original row kept below for the record | — | — |
+| ~~2.4~~ | **Is `test_legacy_profiles_preserved` worth keeping at all?** It asserts six profile names; your `perfiles.json` is missing exactly `Hagg` and `Akira (Uncensored)`. Both were **real tracked profiles** until `924ea5a` untracked `perfiles.json` as user state — history at `924ea5a^` proves it. Your copy has since diverged: `Akira (Uncensored)` looks **renamed to `Akira (Unchained)`**, `Hagg` removed, `Chat` + `Default EN` added | `tracks/residual_cleanup_20260729/` R5 | **Delete the test.** It is a snapshot of one machine's mutable, gitignored state, so no list makes it stable — and the test above it already covers the shipped set. Confirm you renamed/removed those two yourself and it is not the seeder eating profiles |
 
 ## §3 — Waiting on you, no work possible until answered
 
@@ -115,6 +116,19 @@ Each of these was raised once and never mentioned again. Say "dead" and I delete
 | 5.1 | UI pivot to a "music-player" concept (album cover / now-playing bar), marked AWAITING OWNER | `AGENT_HANDOFF.md:481-482` | Every later UI description (ProviderCard, ModelCard, ConversationPanel, StreamPanel) uses conventional panel language. Looks superseded in practice, but nothing says so on the record |
 | 5.2 | Agenda turn semantics — `turn_batch_size=2` vs the UI "turns" slider counting half-blocks | `AGENT_HANDOFF.md:266,285-287` (07-09/10) | The UI has been substantially rebuilt since |
 | 5.3 | Cohost STYLE profiles are es-authored with no locale-coherence check | `AGENT_HANDOFF.md:422-423` (07-08) | Predates the whole bilingual/i18n effort; not re-raised |
+
+## §5b — Owner priority ruling 2026-07-29: viewer chat is out of scope
+
+> Only **agenda, PTT and direct** get effort — what the owner running OpenCohost exercises.
+> Viewer/Twitch chat works only in CTK, is not properly migrated to Tauri, and is another track's
+> job. Testing or hardening it today is wasted effort.
+
+**This closes several rows by making them out of scope rather than deferred.** Anything in this
+file whose only surface is viewer-chat ingest is now filed against the unmigrated-chat track, not
+pending. It also means unit R1 of the residual loop targeted the wrong surface — recorded in
+`AGENT_HANDOFF.md`, not reverted.
+
+**Severity does not override surface priority when the surface does not run.**
 
 ## §6 — Found during the residual-cleanup loop (2026-07-29), recorded not fixed
 
