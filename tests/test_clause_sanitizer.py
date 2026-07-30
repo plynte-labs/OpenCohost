@@ -342,3 +342,46 @@ def test_no_intent_detection_exists():
         assert banned not in body.lower().replace("repetition", "").replace(
             "repeated", ""
         ).replace("repeat", ""), banned
+
+
+# ---------------------------------------------------------------------------
+# Pinned limitations — ADR-039 D10 / sanitizer_language_scope_20260729
+# ---------------------------------------------------------------------------
+
+
+def test_abbreviation_false_split_hides_the_repeat_from_both_tiers():
+    """An abbreviation's '.' is a sentence boundary here, so this x3 repeat
+    shreds into internally-clean pseudo-sentences — invisible to this tier AND
+    to the agenda ladder (the shredded fragment is 23 chars, under its >24
+    floor). Intentional: every candidate heuristic also merges legitimate short
+    sentences ("Si. Vamos.") and drags the tier into cross-sentence scope. If
+    this goes red, reopen conductor/tracks/sanitizer_language_scope_20260729 —
+    do not "fix" the split. The fixture is load-bearing verbatim: a longer
+    surname pushes the fragment past 24 and silently flips the ladder half.
+    """
+    text = "We spoke with Dr. Smith, we spoke with Dr. Smith, we spoke with Dr. Smith."
+    result = sanitize_clause_repetition(text)
+
+    assert result.text == text
+    assert result.verdict == "clean"
+    assert result.removed_fragments == 0
+    assert KiraAgendaController.has_looping_lines(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "サーバーがまだ応答しません、サーバーがまだ応答しません、サーバーがまだ応答しません。",
+    "服务器到现在还是没有任何响应，服务器到现在还是没有任何响应，服务器到现在还是没有任何响应。",
+])
+def test_cjk_delimiters_are_a_total_noop(text):
+    """、，。 are not delimiters and CJK carries no whitespace, so an
+    unsupported script gets a byte-identical no-op — never a mutation. Product
+    locales are es/en. Both clauses sit ABOVE the 12-char key floor on purpose,
+    so adding CJK delimiters must flip this red instead of hiding under the
+    floor. If it goes red, reopen the language-scope track and re-prove rebuild
+    idempotency for CJK before accepting the widening.
+    """
+    result = sanitize_clause_repetition(text)
+
+    assert result.text == text
+    assert result.verdict == "clean"
+    assert result.removed_fragments == 0
