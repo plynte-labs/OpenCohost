@@ -340,6 +340,26 @@ Not closable from a test suite. The owner must run a real agenda session and rep
 `repaired` turn removed something it should not have. Until then this ADR is Accepted for
 **design**, not for **runtime**.
 
+> ### ⚠ `OPENCOHOST_DEBUG=1` MUST be set BEFORE launch, or this gate silently reports a false negative
+>
+> Added 2026-07-30, found while writing the owner's checklist — a gap in this section as first
+> written. `_log_clause_sanitizer` emits at **`logger.debug`**, while `[TURN_LATENCY]` emits at
+> **`logger.info`**. `opencohost/config/logger.py` runs
+> `logger.setLevel(logging.DEBUG if _debug_enabled() else logging.INFO)` at **module scope**, so the
+> level is fixed once at process start and `OPENCOHOST_DEBUG` set *after* launch does nothing.
+>
+> Consequence if it is missed: the log shows `[TURN_LATENCY]` lines and **zero**
+> `[CLAUSE_SANITIZER]` lines — which reads exactly like *"the tier never fired"* rather than
+> *"the tier's telemetry was below the log level"*. A whole validation session would be spent
+> concluding the opposite of the truth.
+>
+> This is the same failure shape as the realenv test that sat red for 25 days looking like a real
+> negative (see [ADR-041](./ADR-041-verification-discipline-for-inherited-claims.md) R6): **absence
+> of a signal is not evidence of absence unless you proved the signal could have appeared.**
+>
+> The checklist at `docs/runtime-validation-20260730.md` opens with this as a blocking
+> precondition. Do not run the gate without it.
+
 ---
 
 ## Related ADRs
