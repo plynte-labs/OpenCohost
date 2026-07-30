@@ -38,7 +38,14 @@ from opencohost.core.llm_engine import MotorVocalIA
 
 
 def _bare_motor() -> MotorVocalIA:
-    return MotorVocalIA(queue.Queue(), lambda event: None)
+    # Hermetic: _generar_dialogo reaches the live ollama.show probe in _fetch_show
+    # via TWO callers — _discover_model_ctx and _resolve_reasoning_classification —
+    # so both caches are seeded. Bounded now, but still a network call.
+    motor = MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor._reasoning_model_cache["llama3"] = False
+    motor._model_ctx_limit = {"llama3": 8192}
+    return motor
 
 
 def _wait_until(pred, timeout: float = 2.0, interval: float = 0.005) -> bool:

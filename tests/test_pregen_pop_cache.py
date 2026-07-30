@@ -24,8 +24,19 @@ from opencohost.core.llm_engine import MotorVocalIA
 
 
 def _bare_motor() -> MotorVocalIA:
-    """A constructed-but-unstarted motor with a no-op UI callback."""
-    return MotorVocalIA(queue.Queue(), lambda event: None)
+    """A constructed-but-unstarted motor with a no-op UI callback.
+
+    Hermetic: _generar_dialogo reaches _fetch_show through TWO callers —
+    _discover_model_ctx for the context limit and _resolve_reasoning_classification
+    for the capabilities probe — so both caches are seeded. That probe is bounded
+    now, but a bounded network call is still a network call, and these tests wait
+    on 2s Event budgets.
+    """
+    motor = MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor._reasoning_model_cache["llama3"] = False
+    motor._model_ctx_limit = {"llama3": 8192}
+    return motor
 
 
 # ── §2.2 pop-time cache hit ────────────────────────────────────────────────

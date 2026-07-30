@@ -38,6 +38,7 @@ def _bare_motor() -> MotorVocalIA:
     motor = MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor._reasoning_model_cache["llama3"] = False
+    motor._model_ctx_limit = {"llama3": 8192}
     return motor
 
 
