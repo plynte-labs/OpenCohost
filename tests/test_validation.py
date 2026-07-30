@@ -226,6 +226,25 @@ class TestRuntimeCheck:
         msg = {"user": "viewer1", "text": "¿cuándo es el próximo torneo?"}
         assert runtime_check(msg) is True
 
+    @pytest.mark.parametrize("text", [
+        "Mi número es 555-123-4567",        # no_doxxing (phone)
+        "mira esto https://evil.com/hack",  # no_suspicious_links
+        "eres un pendejo",                  # no_hate_speech
+        "mi IP es 192.168.1.100",           # no_personal_viewer_data (IP)
+    ])
+    def test_blocked_message_logs_metadata_not_viewer_text(self, text, caplog):
+        """A block on viewer chat may log counts, never the chat itself.
+
+        One case per branch in runtime_check, because the previous code leaked
+        at all four and a single-case guard would let three of them regress
+        silently. Project rule: never expose raw chat in logs or persistence.
+        """
+        with caplog.at_level(logging.WARNING, logger="opencohost.config.validation"):
+            assert runtime_check({"user": "viewer1", "text": text}) is False
+        logged = "".join(r.getMessage() for r in caplog.records)
+        assert text not in logged
+        assert f"chars={len(text)}" in logged
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Layer 3: Output guard

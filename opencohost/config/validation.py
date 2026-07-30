@@ -394,7 +394,7 @@ def runtime_check(message: dict[str, Any]) -> bool:
         if pat.search(text):
             log_non_negotiable_block(
                 "no_doxxing", "runtime",
-                preview=text[:100],
+                preview=f"chars={len(text)}",
             )
             return False
 
@@ -402,7 +402,7 @@ def runtime_check(message: dict[str, Any]) -> bool:
     if _LINK_PATTERN.search(text):
         log_non_negotiable_block(
             "no_suspicious_links", "runtime",
-            preview=text[:100],
+            preview=f"chars={len(text)}",
         )
         return False
 
@@ -411,7 +411,7 @@ def runtime_check(message: dict[str, Any]) -> bool:
         if pat.search(text):
             log_non_negotiable_block(
                 "no_hate_speech", "runtime",
-                preview=text[:100],
+                preview=f"chars={len(text)}",
             )
             return False
 
@@ -420,7 +420,7 @@ def runtime_check(message: dict[str, Any]) -> bool:
         if pat.search(text):
             log_non_negotiable_block(
                 "no_personal_viewer_data", "runtime",
-                preview=text[:100],
+                preview=f"chars={len(text)}",
             )
             return False
 
