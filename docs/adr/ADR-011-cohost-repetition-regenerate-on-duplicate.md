@@ -1,8 +1,12 @@
 # ADR-011: Cohost Repetition Handling — Detect → Trim → Regenerate, with In-Character Recovery
 
 **Date**: 2026-06-21
-**Status**: Proposed — investigation complete, not yet implemented
-**Branch**: Investigation only (throwaway harnesses under `temp/`; no implementation branch yet)
+**Status**: **Accepted and implemented** — ladder shipped 2026-06-22 (commit `28f9755`, controller-only)
+and stress-validated the same day; see the Update log. An intra-speech tier was added 2026-07-29
+([ADR-039](./ADR-039-intra-speech-clause-repetition-sanitizer.md)); see the Addendum below.
+*(This line read "Proposed — not yet implemented" until 2026-07-29, contradicting its own update log
+for five weeks. Corrected here.)*
+**Branch**: Investigation under `temp/`; ladder implemented on the cohost branch, commit `28f9755`
 **Author**: Claude Code orchestrator + adversarial workflow (stress test + card-causation judge)
 **Scope (future implementation)**: `opencohost/smart_aggregator/kira_agenda_controller.py` (guardrail gate: `accept_output` → `register_failure` → re-tick), `opencohost/core/llm_engine.py` (output transformer alongside `enforce_live_safety_cap`). New track `cohost_repetition_regenerate_20260621`. Sibling tracks (own scope): editorial matcher recall, input-sanitizer gaming-word false positives.
 
@@ -99,7 +103,7 @@ This is exactly the failure mode adversarial review exists to catch: a real, cor
 ## Open Questions (owner decisions pending)
 
 - **Acknowledge vs. cover.** When Kira catches herself repeating, should she **acknowledge it in character** (a charming *"uy, ya dije eso, dame otra"* — human but visible) or **cover it seamlessly** (a transition the audience never registers as a glitch)? This decides the wording and the tolerable frequency of the recovery line.
-- **Bounded-retry count.** How many regeneration attempts before the graceful exit, and what is the exit (skip the beat / clean topic transition / fallback line)?
+- **Bounded-retry count.** How many regeneration attempts before the graceful exit, and what is the exit (skip the beat / clean topic transition / fallback line)? — **ANSWERED for the intra-speech tier, 2026-07-29; see the Addendum below.**
 - **Prompt-uniformity mitigation.** Worth reducing card/prompt uniformity to help small models, or simply mandate a larger model and leave the prompt as-is?
 
 ---
@@ -110,6 +114,48 @@ This is exactly the failure mode adversarial review exists to catch: a real, cor
 - **Reversible / low-blast-radius**: the recovery ladder lives in the existing guardrail gate and the output-transformer seam; no change to the agenda contract, which already held end-to-end (10/10 topics, no derailment).
 - **Deferred**: editorial matcher recall (no stemming → plural queries miss cards; single-use + one-active-card lock) and the input-sanitizer false positive on gaming words (`drop`) are **out of scope** here — own tracks, now decided in **[ADR-012](./ADR-012-editorial-matcher-sanitizer-and-card-lifecycle.md)**.
 - **Validation gate**: re-run the cohost stress test (a) on the production-target model and (b) after wiring the regenerate-on-duplicate path, targeting a duplicate-cluster rate near zero and **no** stale duplicate ever surfaced. Do not declare cohost mode stream-ready on gemma4:e2b.
+
+---
+
+## Addendum 2026-07-29 — an intra-speech tier below D1
+
+**The blind spot.** Every defense in this ADR compares one utterance against
+*other* utterances. A real ~16-minute agenda session emitted a clause repeated
+three times *inside a single sentence* — one repetition non-contiguous — and it
+was spoken. `has_looping_lines` splits on `[.!?¡¿]+` and filters out anything
+≤24 chars; `detect_repetition` compares whole candidates across turns;
+`trim_trailing_repeated_sentences` compares only against `recent_texts`; the TTS
+comma-chunker runs after all of them. Nothing owns the inside of a sentence.
+
+**Decision.** A new tier sits *below* D1 (trim-first), in the shared
+`llm_engine` seam immediately before `output_guard`: exact normalized clause
+equality **within one sentence**, no history comparison, no intent detection.
+Tier 1 repairs (drop the duplicate clauses, promote the terminator); tier 2
+rejects a severe case by returning `""`, which is the same idiom the ladder
+reject already uses.
+
+**Bounded-retry count — answered.** Zero new budget. A tier-2 rejection reuses
+the ladder's existing `recovery.failure_count` path, so the total call ceiling
+for a degenerate agenda turn stays exactly where this ADR left it: one initial
+generation plus at most one regeneration. The exit is unchanged (the ladder's
+own graceful bounded exit).
+
+**Scope — agenda only, and tier 2 agenda-only by construction.** Armed for
+`kira-agenda` / `kira-agenda-stop`; `chat`/`direct`/`ptt`/`accumulated` ship
+disarmed. Absence of a guard on those paths describes the code, not a defect —
+the only confirmed incident is agenda — and arming them buys a real false
+positive: an operator can legitimately ask Kira to repeat a line, and the
+sanitizer would collapse it silently. Tier 2 additionally *cannot* apply
+elsewhere: it needs an owner for the regeneration and only agenda has one (this
+ladder). Elsewhere the tier is repair-only even when armed. Full deferral
+register: `docs/deferred-20260729-clause-sanitizer-scope.md`.
+
+**Known cost.** A tier-2 rejection empties the pregen slot, which reverts that
+agenda boundary from the ADR-035 measured 0.34–0.43 s back to the 16.3–18.5 s
+regime. Accepted: a rejection is rare and the alternative is speaking the
+degenerate text. NIM has **zero** latency measurement of any kind, so the
+`request → TTS-receives-text` span is now instrumented (`[TURN_LATENCY]`) rather
+than argued about.
 
 ---
 
