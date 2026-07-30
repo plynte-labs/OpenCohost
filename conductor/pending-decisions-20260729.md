@@ -116,6 +116,17 @@ Each of these was raised once and never mentioned again. Say "dead" and I delete
 | 5.2 | Agenda turn semantics — `turn_batch_size=2` vs the UI "turns" slider counting half-blocks | `AGENT_HANDOFF.md:266,285-287` (07-09/10) | The UI has been substantially rebuilt since |
 | 5.3 | Cohost STYLE profiles are es-authored with no locale-coherence check | `AGENT_HANDOFF.md:422-423` (07-08) | Predates the whole bilingual/i18n effort; not re-raised |
 
+## §6 — Found during the residual-cleanup loop (2026-07-29), recorded not fixed
+
+Both were surfaced by R4 and both were left alone deliberately: the loop forbids widening, and
+the second one is production code on the live agenda path, which the loop's safety gate freezes
+while you validate.
+
+| # | Finding | Evidence | Why it was not fixed |
+|---|---|---|---|
+| 6.1 | **`ollama.show` in `_fetch_show` has no watchdog on the foreground turn path.** A busy or stalling daemon blocks a live turn there for an unbounded time. This is **adjacent to roadmap #1** — the `heavy_model_inference_recovery` gate is precisely about a stalling model — and the ladder's recovery does not cover this call | Measured: the RPC fires from `_generar_dialogo` via `_resolve_reasoning_classification` → `_check_capabilities_reasoning` → `_fetch_show`. It flaked a test with a 2s budget, which is the same failure mode a live turn would see as dead air | Production code on the live agenda path. Frozen by the loop safety gate. **Needs your decision** — it may belong to the heavy-model gate rather than a new track |
+| 6.2 | The sibling `_bare_motor` copies in `tests/test_pregen_pop_cache.py` and `tests/test_interruption_connector.py` still fire **4 live `ollama.show` RPCs** between them — same latent flake class R4 just fixed | Measured with a pytest-level spy on `ollama.show`: 4 calls across the two files | Widening is a hard stop condition in this loop. Cheap to fix (same 2-line seed), but it is a separate unit |
+
 ---
 
 ## How to use this file

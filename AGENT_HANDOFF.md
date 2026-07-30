@@ -73,11 +73,27 @@ The test reads the owner's **gitignored** user state (`perfiles.json`) as its pr
 so it can never be a stable contract test whatever list it asserts. Needs one owner decision;
 see the pending-decisions file.
 
-**Correction to an earlier note in this snapshot:**
-`test_interactive_pregen.py::test_llm_generating_flag_brackets_the_ollama_call` **fails in
-isolation but PASSES in a full run** — it is *order-dependent*, not simply stale. `_bare_motor()`
-never sets `is_ready`/`pygame` and another test leaves the state behind. Fix is to make the helper
-self-sufficient like `_chat_motor()` in `tests/test_dialogue_callback.py:26-34`.
+**`test_llm_generating_flag_brackets_the_ollama_call` — diagnosed wrong TWICE, now FIXED
+(commit `768670c`, unit R4).** Both earlier diagnoses in this snapshot were false and are
+struck: it is neither "stale, always fails" nor "order-dependent, another test leaks
+`is_ready`/`pygame`". `is_ready` is per-instance and `self.pygame` only exists after `run()`,
+which no test starts, so nothing could leak — and the exercised path reads neither.
+
+**The real mechanism, measured with a pytest-level spy on `ollama.show`:** `_generar_dialogo`
+resolves a reasoning classification, misses the per-instance cache and the name heuristic, and
+lands in `_fetch_show`, which makes a **live, watchdog-unbounded `ollama.show` RPC** — sitting
+between `t.start()` and `assert entered.wait(2.0)`. A busy daemon stalls it past the budget. One
+call before the fix, zero after. Fixed by pinning the model and seeding the reasoning cache.
+
+**The lesson worth keeping:** *"fails in isolation, passes in a full run"* is also the signature
+of a **timing flake**, not only of order dependence. It passes in isolation three times in a row
+today, which is exactly why the second diagnosis looked confirmed. Distinguish the two by
+measuring, not by re-running.
+
+**Probe gotcha:** `_fetch_show` short-circuits on `not self._is_local`. Outside pytest the
+owner's real config is CLOUD, so the RPC never fires and the bug is invisible. Only the
+conftest's provider isolation makes the engine resolve LOCAL. Any probe of this class must run
+**inside** pytest.
 
 ### Documentation written this session — read these before re-deciding anything
 | Artifact | What it holds |
