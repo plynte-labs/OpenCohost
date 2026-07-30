@@ -17,6 +17,17 @@ non-function-word token to ``#`` regardless of length, collapses consecutive
 masks, and compares the resulting skeleton SEQUENCES by equality. A scalar
 similarity threshold cannot both accept a rotating-noun template and reject a
 merely-similar pair, so equality + a ``min_slots`` rail is used instead.
+
+The module also hosts ``sanitize_clause_repetition`` — clause_sanitizer V1,
+full record in docs/adr/ADR-039-intra-speech-clause-repetition-sanitizer.md.
+It detects exact normalized clause equality confined to ONE sentence. The
+clause key recognizes normalized textual duplication and does not comprehend
+meaning or contextual function — a recapitulation or an emphasis restated in
+different words is invisible to it, by design: no semantic similarity, no
+near-duplicate resolution, no cross-sentence comparison, no history, no intent
+detection. The dedup mechanism is language-agnostic (Unicode tokens); the
+boundary regexes recognize only Western punctuation followed by whitespace, so
+CJK text is a no-op.
 """
 from __future__ import annotations
 

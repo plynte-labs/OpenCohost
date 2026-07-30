@@ -134,6 +134,16 @@ Tier 1 repairs (drop the duplicate clauses, promote the terminator); tier 2
 rejects a severe case by returning `""`, which is the same idiom the ladder
 reject already uses.
 
+**What the tier promises.** Exact normalized clause equality, confined to one
+sentence — the clause key recognizes normalized textual duplication and does
+not comprehend meaning or contextual function. A recapitulation or an editorial
+emphasis restated in different words is invisible to it, by design: no semantic
+similarity, no near-duplicate resolution, no cross-sentence comparison, no
+history, no intent detection. The dedup mechanism is language-agnostic (Unicode
+tokenization); the boundary regexes recognize only Western punctuation followed
+by whitespace, so CJK text is a total no-op. Full record:
+[ADR-039](./ADR-039-intra-speech-clause-repetition-sanitizer.md).
+
 **Bounded-retry count — answered.** Zero new budget. A tier-2 rejection reuses
 the ladder's existing `recovery.failure_count` path, so the total call ceiling
 for a degenerate agenda turn stays exactly where this ADR left it: one initial
