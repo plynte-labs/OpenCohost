@@ -65,6 +65,7 @@ from opencohost.core import cloud_llm_client
 from opencohost.core import personalization
 from opencohost.core.turn_stamp import TurnStamp
 from opencohost.core.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
+from opencohost.core.ctx_telemetry import CtxTelemetryRing
 from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
@@ -812,7 +813,7 @@ class MotorVocalIA(threading.Thread):
         # nobody has spoken yet. Each entry is built entirely from one call's
         # own locals and deque.append is atomic under the GIL, so no extra
         # lock is needed for the append itself.
-        self._ctx_telemetry_ring: "deque[dict]" = deque(maxlen=CTX_TELEMETRY_RING_MAXLEN)
+        self._ctx_telemetry_ring = CtxTelemetryRing(maxlen=CTX_TELEMETRY_RING_MAXLEN)
         # Optional numeric-only payload hook for ctx_pressure_high, mirroring
         # on_guardrail_rejected above. NOT a second positional argument on
         # ui_callback: CTK's concrete callback (app_shell.py's
@@ -3984,26 +3985,17 @@ class MotorVocalIA(threading.Thread):
     def ctx_telemetry_snapshot(self, sources: Optional[tuple] = None) -> dict:
         """Unit 2.3 (runtime_findings_batch_20260731 F10): read-only view of the
         per-request context telemetry ring for API/status consumers (unit 2.5).
+        Thin delegate to CtxTelemetryRing.snapshot() (Phase C3, core/ctx_telemetry.py)
+        -- see that method's docstring for the full "latest"/"ring" contract.
 
-        "latest" is honestly defined as the most recently APPENDED entry
-        regardless of source -- a background pregen generation can be
-        "latest" even while a different (previous) turn is still being
-        spoken. Pass `sources` (e.g. ("direct", "kira-agenda")) to restrict
-        "latest" to entries whose `source` matches, letting a caller pick the
-        latest FOREGROUND entry instead. `ring` is always the full unfiltered
-        history, oldest first, so a caller wanting a filtered ring can filter
-        the list itself.
-
-        Returns ``{"latest": <entry dict or None>, "ring": [<entry dict>, ...]}``.
+        getattr-guarded: several existing tests build a MotorVocalIA via
+        `__new__` (bypassing __init__) and never set `_ctx_telemetry_ring`;
+        this must still degrade to an empty snapshot instead of raising.
         """
-        ring = list(getattr(self, "_ctx_telemetry_ring", ()) or ())
-        latest = None
-        candidates = ring
-        if sources is not None:
-            candidates = [entry for entry in ring if entry.get("source") in sources]
-        if candidates:
-            latest = candidates[-1]
-        return {"latest": latest, "ring": ring}
+        ring = getattr(self, "_ctx_telemetry_ring", None)
+        if ring is None:
+            return {"latest": None, "ring": []}
+        return ring.snapshot(sources)
 
     def _create_ollama_chat_client(self, ollama_module):
         client_factory = getattr(ollama_module, "Client", None)
