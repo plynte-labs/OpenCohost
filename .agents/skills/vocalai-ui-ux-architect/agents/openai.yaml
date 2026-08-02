@@ -1,6 +1,0 @@
-interface:
-  display_name: "VocalAI UI/UX Architect"
-  short_description: "UI/UX refactor skill for VocalAI/Kira desktop and Tauri interfaces."
-  brand_color: "#2563EB"
-policy:
-  allow_implicit_invocation: false

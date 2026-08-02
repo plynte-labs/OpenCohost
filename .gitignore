@@ -75,7 +75,7 @@ Desktop.ini
 .atl/
 openspec/
 sdd/
-conductor/tracks/
+conductor/
 
 # ── Session notes and drafts ──
 session-*.md
@@ -91,6 +91,7 @@ mudanza.py
 .agents/
 .orchestrator/
 .codegraph/
+.claude/
 VoiceAItemp*/
 
 # ── User assets ──
@@ -124,3 +125,35 @@ OpenCohost_UI/
 # opencohost/config/ package (new source files there became invisible to git).
 /config/
 .pnpm-store/
+
+# ── Internal development records (owner ruling 2026-08-02) ──
+AGENT_HANDOFF.md
+docs/sesiondanger/
+docs/audit_snapshots/
+docs/HANDOFF_RF*.md
+docs/AGENT_*_INSTRUCTIONS.md
+docs/*technical_session*.md
+
+# ── Hygiene ──
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.hypothesis/
+/models/
+/checkpoints/
+/weights/
+*.safetensors
+*.ckpt
+*.gguf
+*.ggml
+*.onnx
+*.pt
+*.pth
+*.key
+*.pem
+*.p12
+*.pfx
+.cache/
+*.bak
+*.orig
