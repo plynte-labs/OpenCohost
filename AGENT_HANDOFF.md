@@ -2,7 +2,24 @@
 
 This is the first file an AI agent should read when starting work in this repo.
 
-> **⇢ LATEST (2026-08-01 evening): §8 RUNTIME-VALIDATED same day + owner rulings APPLIED, UNCOMMITTED.**
+> **⇢ LATEST (2026-08-02): the accumulated batch is COMMITTED — backend `d73f4a9`, front `911a766` (branch `codex/ui-ux-audit-proposal-20260709`, not pushed).**
+> Owner-requested commit. A bounded 4R review ran first and its resilience lens found
+> **1 CRITICAL, fixed pre-commit**: `parse_retry_after_seconds` accepted negative
+> `Retry-After` values, so a malformed `-1` header reached `time.sleep(-1)` in the in-turn
+> rate-limited retry — the ValueError was swallowed by the outer generic handler into a
+> silent empty turn with NO fallback engagement. Fixed at the shared parser (negative →
+> `None` → callers use their defaults), red/green tested
+> (`test_parse_retry_after_seconds_negative_is_malformed`,
+> `test_rate_limited_negative_retry_after_uses_default_wait`). 3 backend WARNINGs + 1 front
+> WARNING kept as follow-ups: stale `turn_batch_size` figures in
+> `docs/long-session-readiness-20260730.md` §C3 and ADR-042 §5 (the same commit deletes
+> that knob — corrected figure is the handoff's ~210), the duplicated optional-kwargs
+> forward idiom across ~7 `llm_engine.py` call sites, weakened `_handle_cloud_failure`
+> kwargs assertions in two timeout/fallback tests, and `formatQueueWaitLabel`'s untested
+> minutes branch in the front. Final suites: **backend 5105 passed / 14 skipped · front
+> 1044 passed, tsc clean**. "UNCOMMITTED" claims in every pointer below are historical.
+
+> **⇢ PREVIOUS (2026-08-01 evening): §8 RUNTIME-VALIDATED same day + owner rulings APPLIED, UNCOMMITTED.**
 > The owner ran a 4h33m real agenda session that hit FOUR real bare NIM 429s: §8.1/§8.2 pass
 > (4 manual probe POSTs in the API audit; failed-manual→120 s reseed proven second-exact; no
 > machine-gun), §8.3 cadence proven (two pure-auto restores at 2642 s vs 2640 s theoretical,
