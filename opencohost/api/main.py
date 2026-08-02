@@ -32,6 +32,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
@@ -97,12 +98,14 @@ from opencohost.api.models import (
     CohostProfileSelectResponse,
     CohostProfilesResponse,
     CommandRequest,
+    CtxTelemetryOut,
     EventLogResponse,
     HealthResponse,
     HealthState,
     I18nSetLocaleRequest,
     I18nStateResponse,
     LlmProviderProfileOut,
+    LlmProviderProbeResponse,
     LlmProviderRequest,
     LlmProviderResponse,
     MemoriaDeleteRequest,
@@ -703,7 +706,7 @@ def _obs_config_response(cfg) -> ObsConfigResponse:
     )
 
 
-def _display_model(host, provider_cfg: dict) -> Optional[str]:
+def _display_model(host, provider_state: Optional[dict] = None) -> Optional[str]:
     """Resolve the model name to REPORT to clients (display bug fix).
 
     Mirrors the active provider so `/api/status` and `/api/models` can never
@@ -713,14 +716,73 @@ def _display_model(host, provider_cfg: dict) -> Optional[str]:
     `current_model`. Degrades to None if the active cloud profile is
     missing or its `model` is blank — same graceful degradation
     `/api/models` already had.
+
+    F4 fix (runtime_findings_batch_20260731 1.3): reads the engine's LIVE
+    effective posture via `MotorVocalIA.provider_runtime_state()` — never the
+    persisted `llm_provider.json`. That disk read is exactly what kept this
+    function reporting the stale cloud model name through an active
+    `_cloud_fallback_active` fallback. `provider_state` lets a caller that
+    already computed it (get_status) pass it through instead of a second call.
     """
-    active_provider = provider_cfg.get("active_provider", "local")
-    if active_provider != "local":
-        active_model = str(
-            provider_cfg.get("profiles", {}).get(active_provider, {}).get("model") or ""
+    state = provider_state if provider_state is not None else host.motor.provider_runtime_state()
+    return state["generation_model"]
+
+
+def _derive_session_mode(
+    agenda_off: bool,
+    is_speaking: bool,
+    is_processing: bool,
+    llm_generating: bool,
+    pending_commands_count: int,
+) -> str:
+    """Unit 2.5 (runtime_findings_batch_20260731 F13): a session-level mode
+    ABOVE `AgendaState.OFF`. Owner ruling: "agenda finalizada" (OFF) already
+    means exactly what it says and stays; what's missing is the verdict on
+    whether KIRA is still doing anything after it. DERIVED here, every call —
+    never a stored field, or it would drift from the booleans it summarises
+    (the exact failure class F4's `_display_model` bug already was).
+
+    ponytail: accepted risks (plan's 2.5 table), not fixed here:
+      - Queue.qsize() is documented racy under concurrency; a display
+        refreshed every 1.5-2s tolerates one stale tick, it is not a scheduler.
+      - agenda state (1500ms poll) and this status (2000ms poll) are read on
+        the front from two different cadences, so they can briefly disagree —
+        at most a one-tick post-agenda/inactiva flicker.
+      - background pregen workers never touch command_queue — llm_generating
+        is what covers that gap, which is why it is required below, not optional.
+      - a queued-but-never-executed item (drained/cancelled/epoch-invalidated)
+        still reads as busy — failing toward "not idle" is the safe direction:
+        a late `inactiva` is only slow, a false one is a lie.
+    """
+    if not agenda_off:
+        return "agenda"
+    if is_speaking or is_processing or llm_generating or pending_commands_count > 0:
+        return "post-agenda"
+    return "inactiva"
+
+
+def _ctx_telemetry_out(motor) -> Optional[CtxTelemetryOut]:
+    """Unit 2.5: `motor.ctx_telemetry_snapshot()["latest"]` (unit 2.3), narrowed
+    to the wire shape. Defensively typed (not a bare `**latest`) so a test
+    double / older motor without a real ring degrades to None instead of a 500.
+    """
+    snapshot_fn = getattr(motor, "ctx_telemetry_snapshot", None)
+    if not callable(snapshot_fn):
+        return None
+    snapshot = snapshot_fn()
+    latest = snapshot.get("latest") if isinstance(snapshot, dict) else None
+    if not isinstance(latest, dict):
+        return None
+    try:
+        return CtxTelemetryOut(
+            ratio=latest["ratio"],
+            effective_ctx=latest["effective_ctx"],
+            native_ctx=latest["native_ctx"],
+            evicted_pairs=latest["evicted_pairs"],
+            source=latest["source"],
         )
-        return active_model or None
-    return host.motor.current_model
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _llm_provider_response(cfg: dict, key_store: OAuthStore) -> LlmProviderResponse:
@@ -980,7 +1042,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @app.get("/api/status", response_model=StatusResponse)
     def get_status(request: Request) -> StatusResponse:
         host = request.app.state.host
-        provider_cfg = load_provider_config()
+        # F4 (runtime_findings_batch_20260731 1.3): the engine's LIVE
+        # effective posture, never `load_provider_config()` — that disk read
+        # is exactly what let this endpoint keep reporting a stale cloud
+        # provider/model through an active `_cloud_fallback_active` fallback.
+        provider_state = host.motor.provider_runtime_state()
         is_ready = host.motor.is_ready
         is_speaking = host.motor.is_speaking
         is_processing = host.motor.is_processing
@@ -1004,9 +1070,25 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 obs_connected = bool(runtime.is_connected)
             except Exception:
                 obs_connected = None
+        # Unit 2.5 (F13): session_mode is DERIVED here, every call — see
+        # _derive_session_mode's docstring for the rule and its accepted
+        # risks. `agenda is None` (no headless controller wired) counts as
+        # OFF: there is no agenda to be "active", so it falls through to the
+        # post-agenda/inactiva read on the booleans below, same as a real OFF.
+        agenda = getattr(host, "agenda", None)
+        agenda_off = agenda is None or agenda.state == AgendaState.OFF
+        llm_generating = bool(getattr(host.motor, "llm_generating", False))
+        pending_commands_count = host.motor.command_queue.qsize()
+        session_mode = _derive_session_mode(
+            agenda_off=agenda_off,
+            is_speaking=is_speaking,
+            is_processing=is_processing,
+            llm_generating=llm_generating,
+            pending_commands_count=pending_commands_count,
+        )
         return StatusResponse(
             is_ready=is_ready,
-            current_model=_display_model(host, provider_cfg),
+            current_model=_display_model(host, provider_state),
             is_speaking=is_speaking,
             is_processing=is_processing,
             active_profile=host.motor._current_profile_name,
@@ -1014,7 +1096,16 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             health=HealthState(**dataclasses.asdict(host.monitor.state)),
             state_version=request.app.state.dispatcher.state_version,
             ollama_warming=getattr(host, "ollama_warming", False),
+            session_mode=session_mode,
+            llm_generating=llm_generating,
+            pending_commands_count=pending_commands_count,
             avatar_state=avatar_state,
+            provider=provider_state["provider"],
+            transport=provider_state["transport"],
+            fallback_active=provider_state["fallback_active"],
+            fallback_reason=provider_state.get("fallback_reason"),
+            next_cloud_probe_in_seconds=provider_state.get("next_cloud_probe_in_seconds"),
+            ctx_telemetry=_ctx_telemetry_out(host.motor),
             obs_connected=obs_connected,
         )
 
@@ -1257,7 +1348,12 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             # own model, read from `profiles[active_provider]`, never
             # another profile's. Shared with /api/status via _display_model
             # so the two endpoints can never report different models again.
-            active_model = _display_model(host, provider_cfg)
+            # NOTE: _display_model now reads the engine's LIVE provider state
+            # (1.3), not this `provider_cfg` disk read — the two can disagree
+            # during an active `_cloud_fallback_active` fallback; the branch
+            # selection above (whether to skip Ollama discovery) is still the
+            # persisted config's call, deliberately unchanged by this unit.
+            active_model = _display_model(host)
             return ModelsResponse(
                 catalog={},
                 discovered=[active_model] if active_model else [],
@@ -1279,7 +1375,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         return ModelsResponse(
             catalog=MODELS_CATALOG,
             discovered=discovered,
-            current_model=_display_model(host, provider_cfg),
+            current_model=_display_model(host),
             tiers=tiers,
             active_tier=host.motor.active_llm_tier,
         )
@@ -2167,16 +2263,31 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             return JSONResponse(status_code=422, content={"detail": rejection})
         key = request.headers.get("Idempotency-Key") or body.idempotency_key
         dispatcher = request.app.state.dispatcher
+        host = request.app.state.host
         # B1 (turn provenance): a typed turn used to commit to historial BARE, so
         # the model could not tell WHO spoke and guessed (it referred to "the
         # viewer before" with no chat platform connected at all). history_text
         # gives it the same speaker frame PTT already had; the prompt payload
         # stays the raw text, so generation behavior is unchanged.
+        # Unit 4.1 (runtime_findings_batch_20260731, F5): stamp submitted_at HERE
+        # — the earliest backend receipt of a typed direct question — so
+        # queue_wait_ms can later report the FULL wait (queue time was
+        # invisible to TURN_LATENCY before this unit). source="direct" made
+        # explicit alongside it (was previously left to _consume_command's
+        # default).
+        # Unit 4.2 (F12 closure): tag the item with the provider posture in
+        # effect AT SUBMIT time (unit 1.3's provider_runtime_state — the same
+        # live truth /api/status reports), so a fallback/return that happens
+        # while this item sits queued can be disclosed on the reply instead of
+        # silently answering under a different provider with no note.
         result = dispatcher.dispatch(
             "process_context",
             body.text,
             key,
             history_text=i18n_active.typed_history_wrapper().format(text=body.text),
+            source="direct",
+            submitted_at=time.monotonic(),
+            submitted_under_provider=host.motor.provider_runtime_state()["provider"],
         )
         if result.state in ("accepted", "replay"):
             return {
@@ -2570,6 +2681,22 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 motor.set_provider_config(cfg)
 
             return _llm_provider_response(cfg, key_store)
+
+    @app.post("/api/llm/provider/probe", response_model=LlmProviderProbeResponse)
+    def post_llm_provider_probe(request: Request) -> LlmProviderProbeResponse:
+        """WU2 (cloud_rearm_20260801): manual cloud re-arm trigger. Same tier
+        as PUT /api/llm/provider right above -- synchronous direct call onto
+        the running motor, no dispatcher, no config-file write. Auth is
+        inherited automatically (auth.py rule 2, mutating /api/* path
+        prefix) -- no allowlist entry needed. `armed:false` is a benign
+        no-op (not_in_fallback / no_cloud_profile), so it is still a 200;
+        only a motor build predating trigger_cloud_probe_now is a 503.
+        """
+        motor = getattr(getattr(request.app.state, "host", None), "motor", None)
+        if motor is None or not hasattr(motor, "trigger_cloud_probe_now"):
+            return JSONResponse(status_code=503, content={"detail": "motor_unavailable"})
+        result = motor.trigger_cloud_probe_now()
+        return LlmProviderProbeResponse(**result)
 
     # ── Agent gateway (agent_context_gateway Phase 2) ────────────────────
     # Token gating lives in auth_middleware rule 1: everything under

@@ -1,5 +1,7 @@
 """Tests for Kira Co-host Agenda Mode controller."""
 
+import logging
+
 import pytest
 
 from opencohost.smart_aggregator.kira_agenda_controller import (
@@ -223,7 +225,7 @@ def test_session_settings_drive_prompt_not_topic_length_metadata():
 
 
 def test_turn_limit_clamps_and_controller_uses_global_max_turns():
-    controller = KiraAgendaController(max_turns_per_topic=99, turn_batch_size=1)
+    controller = KiraAgendaController(max_turns_per_topic=99)
     topic = controller.add_topic("Tema global", approved=True)
 
     assert controller.max_turns_per_topic == 20
@@ -241,28 +243,221 @@ def test_turn_limit_clamps_and_controller_uses_global_max_turns():
     assert topic.status == TopicStatus.CLOSING
 
 
-def test_agenda_blocks_count_multiple_beats_without_exceeding_global_turns():
-    controller = KiraAgendaController(max_turns_per_topic=3, turn_batch_size=2)
-    topic = controller.add_topic("Tema por bloques", approved=True)
+def test_one_accepted_generation_debits_one_attempt():
+    """D1 (2026-07-31) rewrite of the test that pinned the F6 defect: one
+    accepted generation debits exactly one attempt, so a topic configured for
+    N attempts yields exactly N generations, then the closing."""
+    controller = KiraAgendaController(max_turns_per_topic=3)
+    topic = controller.add_topic("Tema por intentos", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
 
     first = controller.next_action()
-    assert "representa 2 beat(s)" in first.prompt
+    assert "representa 1 beat(s)" in first.prompt
     controller.mark_generation_accepted()
     controller.mark_speech_complete()
-    assert topic.turns_spoken == 2
+    assert topic.turns_spoken == 1
 
     second = controller.next_action()
     assert "representa 1 beat(s)" in second.prompt
     controller.mark_generation_accepted()
     controller.mark_speech_complete()
+    assert topic.turns_spoken == 2
+
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
     assert topic.turns_spoken == 3
+
     assert controller.next_action().source == "kira-agenda-stop"
 
 
+def test_closing_completion_does_not_debit_attempt():
+    """Contract B (D1): the kira-agenda-stop closing never consumes an
+    attempt, whether it fires early via soft_stop() or on the normal
+    budget-exhausted path."""
+    # Early closing: soft_stop() fires while budget still has room.
+    controller = KiraAgendaController(max_turns_per_topic=5)
+    topic = controller.add_topic("Tema con cierre anticipado", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+    controller.next_action()
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+    assert topic.turns_spoken == 1
+
+    closing = controller.soft_stop()
+    assert closing.source == "kira-agenda-stop"
+    assert topic.status == TopicStatus.CLOSING
+    controller.mark_generation_accepted()
+    controller.mark_speech_complete()
+
+    assert topic.status == TopicStatus.COMPLETED
+    assert topic.turns_spoken == 1
+
+    # Normal-path closing: budget is already spent by the time it fires.
+    controller2 = KiraAgendaController(max_turns_per_topic=2)
+    topic2 = controller2.add_topic("Tema con cierre normal", approved=True)
+    controller2.queue_topic(topic2.id)
+    controller2.enable()
+    for _ in range(2):
+        controller2.next_action()
+        controller2.mark_generation_accepted()
+        controller2.mark_speech_complete()
+    assert topic2.turns_spoken == 2
+
+    action = controller2.next_action()
+    assert action.source == "kira-agenda-stop"
+    controller2.mark_generation_accepted()
+    controller2.mark_speech_complete()
+    assert topic2.turns_spoken == 2
+
+
+def test_rejected_generation_debits_exactly_one_attempt():
+    """D1+D2: a rejected live generation debits one attempt, and the
+    engine's trailing accept_output("") for the same turn must not double
+    it (the dedup guard, F7's double-count hazard)."""
+    controller = KiraAgendaController(max_turns_per_topic=20)
+    topic = controller.add_topic("Tema con rechazo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    dup = "kira comenta el tema de prueba"
+    controller.record_accepted_output(dup)
+
+    controller.next_action()
+
+    assert controller.accept_output(dup) is False
+    assert topic.turns_spoken == 1
+    assert controller.failure_count == 1
+
+    # Engine's trailing empty signal for the same rejected generation.
+    assert controller.accept_output("") is False
+    assert topic.turns_spoken == 1
+    assert controller.failure_count == 1
+    assert controller.state == AgendaState.REGENERATING_SAFE
+
+
+def test_ladder_runs_before_force_kill():
+    """D2: content-error rejections run the recovery ladder (negative
+    guidance, then degrade at failure 3) instead of force-killing the topic
+    on the first rejection."""
+    controller = KiraAgendaController(max_turns_per_topic=20)
+    topic = controller.add_topic("Tema repetitivo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    dup = "kira comenta el tema de prueba"
+    controller.record_accepted_output(dup)
+
+    for rejection_count in range(1, 4):
+        controller.next_action()
+        assert controller.accept_output(dup) is False
+        assert topic.turns_spoken == rejection_count
+        assert controller.state == AgendaState.REGENERATING_SAFE
+
+    # After the first rejection the anti-repetition block reaches the prompt.
+    next_prompt = controller.next_action().prompt
+    assert dup[:60] in next_prompt
+
+    # After the third rejection response_length degraded to "corta"; the
+    # topic is still alive (no force-kill on content errors).
+    assert controller.response_length == "corta"
+    assert topic.status != TopicStatus.COMPLETED
+    assert controller.active_topic is not None
+
+
+def test_content_then_empty_does_not_trigger_valve():
+    """D2 finding 2: the valve must count CONSECUTIVE model-health failures,
+    not the shared failure_count. One content rejection followed by one
+    empty generation reaches failure_count==2 but the model-health streak is
+    only 1 — the valve must NOT fire (it must not spend the whole budget)."""
+    controller = KiraAgendaController(max_turns_per_topic=20)
+    topic = controller.add_topic("Tema mixto", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    dup = "kira comenta el tema de prueba"
+    controller.record_accepted_output(dup)
+
+    controller.next_action()
+    assert controller.accept_output(dup) is False  # content rejection (LOOPING)
+    assert controller.failure_count == 1
+    assert controller.recovery.consecutive_model_health_failures == 0
+
+    controller.next_action()
+    assert controller.accept_output("") is False  # model-health rejection (EMPTY)
+    assert controller.failure_count == 2
+    assert controller.recovery.consecutive_model_health_failures == 1
+
+    # The valve requires 2 CONSECUTIVE model-health failures; it must not
+    # fire here even though the shared failure_count already reached 2.
+    assert controller.active_topic is not None
+    assert controller.active_topic.turns_spoken == 2
+    assert controller.state == AgendaState.REGENERATING_SAFE
+
+
+def test_empty_then_empty_still_triggers_valve():
+    """D2 finding 2 companion: TWO CONSECUTIVE model-health failures (both
+    GUARDRAIL_EMPTY) still trip the valve exactly as before — the fix only
+    changes mixed-class sequences, never the same-class case."""
+    controller = KiraAgendaController(max_turns_per_topic=20)
+    topic = controller.add_topic("Tema vacio", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    controller.next_action()
+    assert controller.accept_output("") is False
+    assert controller.recovery.consecutive_model_health_failures == 1
+    assert controller.state == AgendaState.REGENERATING_SAFE
+
+    controller.next_action()
+    assert controller.accept_output("") is False
+    assert controller.recovery.consecutive_model_health_failures == 2
+
+    # Valve fires: spends the whole remaining budget and settles WAITING_SIGNAL.
+    assert topic.turns_spoken == controller.max_turns_per_topic
+    assert controller.state == AgendaState.WAITING_SIGNAL
+
+
+def test_alternating_content_and_empty_never_valve_kills_but_budget_terminates():
+    """D2 finding 2: alternating content/model-health failures reset the
+    consecutive-model-health counter on every content error, so the valve
+    (which needs 2 CONSECUTIVE model-health failures) never fires no matter
+    how many total failures accumulate. The topic still terminates normally
+    once its attempts budget (D1) is exhausted."""
+    controller = KiraAgendaController(max_turns_per_topic=4)
+    topic = controller.add_topic("Tema alternado", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    dup = "kira comenta el tema de prueba"
+    controller.record_accepted_output(dup)
+
+    controller.next_action()
+    assert controller.accept_output(dup) is False  # content: LOOPING
+
+    controller.next_action()
+    assert controller.accept_output("") is False  # model-health: EMPTY (streak 1)
+
+    controller.next_action()
+    assert controller.accept_output(dup) is False  # content resets the streak
+
+    controller.next_action()
+    assert controller.accept_output("") is False  # model-health again (streak 1, not 2)
+
+    # No valve kill anywhere in that sequence: the topic is still alive and
+    # exactly at its budget, reached one debit at a time.
+    assert controller.active_topic is not None
+    assert topic.turns_spoken == controller.max_turns_per_topic
+
+    # Budget exhausted -> normal closing, not a valve force-kill.
+    action = controller.next_action()
+    assert action.source == "kira-agenda-stop"
+
+
 def test_prefetch_action_preview_does_not_mutate_speaking_state():
-    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=2)
+    controller = KiraAgendaController(max_turns_per_topic=5)
     topic = controller.add_topic("Tema con prefetch", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -273,14 +468,14 @@ def test_prefetch_action_preview_does_not_mutate_speaking_state():
 
     assert action.kind == "enqueue"
     assert action.source == "kira-agenda"
-    assert action.turns == 2
+    assert action.turns == 1
     assert "bloque fluido" in action.prompt
     assert controller.state == AgendaState.SPEAKING
     assert topic.turns_spoken == 0
 
 
 def test_prefetch_preview_can_prepare_closing_after_current_speech():
-    controller = KiraAgendaController(max_turns_per_topic=2, turn_batch_size=2)
+    controller = KiraAgendaController(max_turns_per_topic=1)
     topic = controller.add_topic("Tema casi cerrado", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -295,7 +490,7 @@ def test_prefetch_preview_can_prepare_closing_after_current_speech():
 
 
 def test_start_prefetched_action_adopts_cached_turn_metadata():
-    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=2)
+    controller = KiraAgendaController(max_turns_per_topic=5)
     topic = controller.add_topic("Tema cacheado", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -308,14 +503,14 @@ def test_start_prefetched_action_adopts_cached_turn_metadata():
     controller.mark_generation_accepted()
     controller.mark_speech_complete()
 
-    assert topic.turns_spoken == 4
+    assert topic.turns_spoken == 2
 
 
 def test_prefetch_preview_returns_none_while_closing_speech_plays():
     """Regression: prefetching while the closing line itself is playing must
     not generate a second closing for the same topic (heard on stream as the
     same goodbye spoken twice with different wording)."""
-    controller = KiraAgendaController(max_turns_per_topic=2, turn_batch_size=2)
+    controller = KiraAgendaController(max_turns_per_topic=1)
     topic = controller.add_topic("Tema que cierra", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -336,7 +531,7 @@ def test_prefetch_preview_returns_none_while_closing_speech_plays():
 def test_start_prefetched_action_reports_adoption():
     """start_prefetched_action returns True only when the controller adopts
     the cached action; False lets the caller discard stale prefetched audio."""
-    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=2)
+    controller = KiraAgendaController(max_turns_per_topic=5)
     topic = controller.add_topic("Tema adoptable", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -545,7 +740,7 @@ def test_compact_chat_via_next_action_reaches_the_same_build_prompt_call():
 
 
 def test_chat_signal_due_only_when_waiting_and_cadence_allows_it():
-    controller = KiraAgendaController(turn_batch_size=1, chat_cadence_blocks=2)
+    controller = KiraAgendaController(chat_cadence_blocks=2)
     topic = controller.add_topic("Tema de fondo", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -564,7 +759,7 @@ def test_chat_signal_due_only_when_waiting_and_cadence_allows_it():
 
 
 def test_compact_chat_is_not_checked_every_agenda_block_by_default():
-    controller = KiraAgendaController(turn_batch_size=1, chat_cadence_blocks=2)
+    controller = KiraAgendaController(chat_cadence_blocks=2)
     topic = controller.add_topic("Tema de fondo", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -614,6 +809,40 @@ def test_emergency_stop_turns_mode_off_without_deleting_queue():
     assert controller.state == AgendaState.OFF
     assert controller.active_topic is None
     assert topic.status == TopicStatus.QUEUED
+
+
+# ---------------------------------------------------------------------------
+# Numeric/enum-only text-log observability (runtime_findings forensics,
+# 2026-08-01): soft_stop/emergency_stop previously left zero text-log
+# footprint -- the only trace in a real session log was an unrelated queue
+# line. Both commands route through this controller regardless of caller
+# (HTTP endpoint or CTK UI), so logging here covers every path in one place.
+# ---------------------------------------------------------------------------
+
+def test_soft_stop_logs_mode_soft(caplog):
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema activo", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        controller.soft_stop()
+
+    lines = [m for m in caplog.messages if m.startswith("Agenda stop:")]
+    assert lines == ["Agenda stop: mode=soft"]
+
+
+def test_emergency_stop_logs_mode_emergency(caplog):
+    controller = KiraAgendaController()
+    topic = controller.add_topic("Tema futuro", approved=True)
+    controller.queue_topic(topic.id)
+    controller.enable()
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        controller.emergency_stop()
+
+    lines = [m for m in caplog.messages if m.startswith("Agenda stop:")]
+    assert lines == ["Agenda stop: mode=emergency"]
 
 
 def test_output_sanitizer_rejects_internal_leaks_and_repetition():
@@ -797,7 +1026,7 @@ def test_recovery_policy_auto_retry():
 
 def test_regenerating_safe_transitions_to_waiting_signal():
     """REGENERATING_SAFE → WAITING_SIGNAL so the next tick retries."""
-    controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=1)
+    controller = KiraAgendaController(max_turns_per_topic=5)
     topic = controller.add_topic("Tema", approved=True)
     controller.queue_topic(topic.id)
     controller.enable()
@@ -1145,7 +1374,7 @@ class TestChatSpikeDoesNotFreezeController:
         WAITING_SIGNAL, and the next tick should be able to CONTINUE_TOPIC
         or CLOSE."""
         controller = KiraAgendaController(
-            max_turns_per_topic=4, turn_batch_size=1, chat_cadence_blocks=1,
+            max_turns_per_topic=4, chat_cadence_blocks=1,
         )
         topic = controller.add_topic("Tema de prueba", approved=True)
         controller.queue_topic(topic.id)
@@ -1201,7 +1430,7 @@ class TestChatSpikeDoesNotFreezeController:
         the speech-complete of the agenda turn must still be called (the
         motor source is "kira-agenda" in that case — but the test verifies
         the state-based check works)."""
-        controller = KiraAgendaController(max_turns_per_topic=3, turn_batch_size=1)
+        controller = KiraAgendaController(max_turns_per_topic=3)
         topic = controller.add_topic("Tema", approved=True)
         controller.queue_topic(topic.id)
         controller.enable()
@@ -1225,7 +1454,7 @@ class TestChatSpikeDoesNotFreezeController:
     def test_multiple_chat_spikes_without_corruption(self):
         """Several consecutive chat spikes must not corrupt state."""
         controller = KiraAgendaController(
-            max_turns_per_topic=5, turn_batch_size=1, chat_cadence_blocks=1,
+            max_turns_per_topic=5, chat_cadence_blocks=1,
         )
         topic = controller.add_topic("Tema largo", approved=True)
         controller.queue_topic(topic.id)
@@ -1253,7 +1482,7 @@ class TestChatSpikeDoesNotFreezeController:
     def test_ptt_via_controller_transitions_correctly(self):
         """PTT injected via next_action(ptt_text=...) must also receive
         mark_speech_complete so the state machine doesn't freeze."""
-        controller = KiraAgendaController(max_turns_per_topic=5, turn_batch_size=1)
+        controller = KiraAgendaController(max_turns_per_topic=5)
         topic = controller.add_topic("Tema con PTT", approved=True)
         controller.queue_topic(topic.id)
         controller.enable()
@@ -1570,8 +1799,11 @@ class TestCharacterRecoveryFlow:
             "Expected repair flag to be set after character break."
         )
 
-    def test_second_character_break_closes_topic(self):
-        """After 2 character break rejections, topic is force-closed."""
+    def test_second_character_break_debits_but_does_not_force_kill(self):
+        """D2 (2026-07-31): BREAKS_CHARACTER is a content error, not a
+        model-health error — it debits an attempt and keeps the ladder
+        running instead of force-killing the topic (that valve is now
+        reserved for {EMPTY, LLM_TIMEOUT, OLLAMA_DOWN})."""
         controller = KiraAgendaController(max_turns_per_topic=4, max_failures=3)
         topic = controller.add_topic(
             "Test topic", angle="test angle", approved=True,
@@ -1582,6 +1814,7 @@ class TestCharacterRecoveryFlow:
         controller.next_action(motor_busy=False, kira_speaking=False)
         controller.mark_generation_accepted()
         controller.mark_speech_complete()
+        assert topic.turns_spoken == 1
 
         # First break
         controller.register_failure(
@@ -1589,6 +1822,7 @@ class TestCharacterRecoveryFlow:
             reason="First character break",
         )
         assert controller.state == AgendaState.REGENERATING_SAFE
+        assert topic.turns_spoken == 2
 
         # Advance state so second rejection can be registered
         controller.state = AgendaState.WAITING_SIGNAL
@@ -1599,11 +1833,13 @@ class TestCharacterRecoveryFlow:
             reason="Second character break",
         )
 
-        # Topic should be force-closed: turns_spoken reaches max_turns
-        assert topic.turns_spoken >= controller.max_turns_per_topic, (
-            f"Expected topic force-closed (turns_spoken >= {controller.max_turns_per_topic}), "
-            f"got turns_spoken={topic.turns_spoken}"
-        )
+        # Each break debits one attempt; the topic is NOT force-closed —
+        # content errors burn their own budget instead of being killed.
+        assert topic.turns_spoken == 3
+        assert topic.turns_spoken < controller.max_turns_per_topic
+        assert topic.status != TopicStatus.COMPLETED
+        assert controller.active_topic is not None
+        assert controller._character_repair_needed is True
 
 
 # ── T1.5: Feature flag off test ───────────────────────────────────────
@@ -1643,14 +1879,14 @@ def test_trailing_empty_signal_after_force_complete_keeps_idle():
     """WU1: the trailing empty re-signal must not resurrect the None-loop.
 
     A rejected agenda turn is two guardrail signals: the rejected generation
-    (llm_engine.py:1573) and a trailing empty (llm_engine.py:2461). When a
+    (llm_engine.py:3526) and a trailing empty (llm_engine.py:5328). When a
     CLOSING topic hits the >=3 force-complete gate on the first signal,
     active_topic becomes None. The second (empty) signal then runs with no
     active topic and, on the buggy code, falls through to REGENERATING_SAFE —
     a state that never returns to IDLE, so the queue never advances. After the
     fix it must settle on IDLE and let the next topic be selected.
     """
-    controller = KiraAgendaController(max_turns_per_topic=2, turn_batch_size=1)
+    controller = KiraAgendaController(max_turns_per_topic=2)
     t1 = controller.add_topic("Tema uno", "angulo", approved=True)
     t2 = controller.add_topic("Tema dos", "angulo", approved=True)
     controller.queue_topic(t1.id)

@@ -18,6 +18,7 @@ import pytest
 from opencohost.core.health_monitor import (
     HealthMonitor,
     MonitorState,
+    OllamaResidencyProbe,
     OllamaWatchdog,
     QwenProcessManager,
     RTFTracker,
@@ -55,6 +56,38 @@ class TestVRAMGuard:
         guard = VRAMGuard()
         guard.poll()
         assert isinstance(guard.free_mb, float)
+
+    def test_total_and_used_mb_captured_from_same_nvml_call(self):
+        """F9: total/used come from the same nvmlDeviceGetMemoryInfo() object
+        as free — previously read and discarded."""
+        guard = VRAMGuard()
+        guard._pynvml_available = True
+        guard._pynvml = MagicMock()
+        guard._pynvml.nvmlDeviceGetMemoryInfo.return_value = MagicMock(
+            free=2 * 1024 * 1024, total=8 * 1024 * 1024, used=6 * 1024 * 1024
+        )
+        guard.poll()
+        assert guard.free_mb == 2.0
+        assert guard.total_mb == 8.0
+        assert guard.used_mb == 6.0
+
+    def test_total_and_used_mb_zero_when_pynvml_unavailable(self):
+        guard = VRAMGuard()
+        guard._pynvml_available = False
+        guard.poll()
+        assert guard.total_mb == 0.0
+        assert guard.used_mb == 0.0
+
+    def test_total_and_used_mb_cleared_on_poll_failure(self):
+        guard = VRAMGuard()
+        guard._pynvml_available = True
+        guard._pynvml = MagicMock()
+        guard._pynvml.nvmlDeviceGetMemoryInfo.side_effect = Exception("nvml gone")
+        guard._total_mb = 8.0
+        guard._used_mb = 6.0
+        guard.poll()
+        assert guard.total_mb == 0.0
+        assert guard.used_mb == 0.0
 
 
 # ──────────────────────────────────────────────
@@ -123,6 +156,115 @@ class TestOllamaWatchdog:
 
         assert wd.status == "down"
         assert wd.lifecycle_state == "degraded"
+
+
+# ──────────────────────────────────────────────
+# OllamaResidencyProbe Tests (F9 — estimates only, never process RSS)
+# ──────────────────────────────────────────────
+
+class _FakeProcessModel:
+    def __init__(self, size=None, size_vram=None, processor=None):
+        self.size = size
+        self.size_vram = size_vram
+        self.processor = processor
+
+
+class _FakeProcessResponse:
+    def __init__(self, models):
+        self.models = models
+
+
+class _FakeOllamaModule:
+    """Mirrors the module-level `ollama.*` monkeypatch seam used elsewhere
+    in this repo (see test_llm_engine_timeouts.py's FakeOllamaModule) —
+    `Client(**kwargs)` records the kwargs it was created with."""
+
+    def __init__(self, response, created=None):
+        self._response = response
+        self._created = created if created is not None else {}
+
+    def Client(self, **kwargs):
+        self._created.update(kwargs)
+        return MagicMock(ps=MagicMock(return_value=self._response))
+
+
+class TestOllamaResidencyProbe:
+    def test_skips_probe_when_ollama_not_up(self):
+        """No network call at all while Ollama is down — matches the
+        contract: skip the probe, don't just fail it."""
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = MagicMock()
+        probe.poll(ollama_up=False)
+        probe._ollama_module.Client.assert_not_called()
+        assert probe.resident_mb is None
+        assert probe.processor_split is None
+
+    def test_no_model_loaded_clears_fields(self):
+        fake = _FakeOllamaModule(_FakeProcessResponse(models=[]))
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = fake
+        probe.poll(ollama_up=True)
+        assert probe.resident_mb is None
+        assert probe.vram_mb is None
+        assert probe.spill_mb is None
+        assert probe.processor_split is None
+
+    def test_computes_estimates_and_bounds_the_client_timeout(self):
+        """Also pins F9's bounded-call requirement: the client is created
+        with an explicit timeout, never the package's default timeout=None."""
+        from opencohost.core.health_monitor import OLLAMA_REQUEST_TIMEOUT
+
+        model = _FakeProcessModel(size=8 * 1024 * 1024, size_vram=6 * 1024 * 1024)
+        created = {}
+        fake = _FakeOllamaModule(_FakeProcessResponse(models=[model]), created=created)
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = fake
+        probe.poll(ollama_up=True)
+
+        assert created == {"timeout": OLLAMA_REQUEST_TIMEOUT}
+        assert probe.resident_mb == 8.0
+        assert probe.vram_mb == 6.0
+        assert probe.spill_mb == 2.0
+        assert probe.processor_split == "75% GPU / 25% CPU"
+
+    def test_spill_floors_at_zero_when_vram_exceeds_size(self):
+        """Defensive floor — size_vram should never exceed size, but a
+        bogus/rounded response must not report a negative spill."""
+        model = _FakeProcessModel(size=4 * 1024 * 1024, size_vram=5 * 1024 * 1024)
+        fake = _FakeOllamaModule(_FakeProcessResponse(models=[model]))
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = fake
+        probe.poll(ollama_up=True)
+        assert probe.spill_mb == 0.0
+
+    def test_prefers_a_processor_field_if_the_response_ever_carries_one(self):
+        model = _FakeProcessModel(size=8 * 1024 * 1024, size_vram=6 * 1024 * 1024, processor="100% GPU")
+        fake = _FakeOllamaModule(_FakeProcessResponse(models=[model]))
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = fake
+        probe.poll(ollama_up=True)
+        assert probe.processor_split == "100% GPU"
+
+    def test_poll_failure_clears_rather_than_leaves_stale(self):
+        model = _FakeProcessModel(size=8 * 1024 * 1024, size_vram=6 * 1024 * 1024)
+        fake = _FakeOllamaModule(_FakeProcessResponse(models=[model]))
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = fake
+        probe.poll(ollama_up=True)
+        assert probe.resident_mb == 8.0
+
+        broken = MagicMock()
+        broken.Client.side_effect = ConnectionError("ollama unreachable")
+        probe._ollama_module = broken
+        probe.poll(ollama_up=True)
+        assert probe.resident_mb is None
+        assert probe.processor_split is None
+
+    def test_ollama_module_unavailable_never_raises(self):
+        probe = OllamaResidencyProbe()
+        probe._ollama_module = None
+        probe.poll(ollama_up=True)  # should not raise
+        assert probe.resident_mb is None
 
 
 # ──────────────────────────────────────────────
@@ -428,6 +570,9 @@ class TestHealthMonitor:
         # _poll_all() overwriting them with real (unavailable) values.
         monitor._vram.poll = MagicMock()
         monitor._ollama.poll = MagicMock()
+        # Keeps the ollama.ps() probe from making a real (if harmless/fast)
+        # network attempt in every unrelated HealthMonitor test.
+        monitor._ollama_residency.poll = MagicMock()
         return monitor
 
     def test_state_snapshot(self):
@@ -445,6 +590,40 @@ class TestHealthMonitor:
         s1 = monitor.state
         s2 = monitor.state
         assert s1 is not s2
+
+    def test_poll_all_gates_residency_probe_on_ollama_watchdog_status(self):
+        """_poll_all only probes residency while OllamaWatchdog says healthy —
+        no separate/new flag, no new timer."""
+        monitor = self._make_monitor()
+        monitor._ollama._status = "down"
+        monitor._poll_all()
+        monitor._ollama_residency.poll.assert_called_once_with(ollama_up=False)
+
+        monitor._ollama_residency.poll.reset_mock()
+        monitor._ollama._status = "healthy"
+        monitor._poll_all()
+        monitor._ollama_residency.poll.assert_called_once_with(ollama_up=True)
+
+    def test_poll_all_carries_residency_and_vram_split_into_monitor_state(self):
+        """The new MonitorState fields are wired end to end, not just added
+        to the dataclass."""
+        monitor = self._make_monitor()
+        monitor._vram._total_mb = 8192.0
+        monitor._vram._used_mb = 4096.0
+        monitor._ollama_residency._resident_mb = 6300.0
+        monitor._ollama_residency._vram_mb = 4200.0
+        monitor._ollama_residency._spill_mb = 2100.0
+        monitor._ollama_residency._processor_split = "67% GPU / 33% CPU"
+
+        monitor._poll_all()
+        state = monitor.state
+
+        assert state.total_vram_mb == 8192.0
+        assert state.used_vram_mb == 4096.0
+        assert state.model_resident_mb_est == 6300.0
+        assert state.model_vram_mb_est == 4200.0
+        assert state.model_ram_spill_mb_est == 2100.0
+        assert state.model_processor_split == "67% GPU / 33% CPU"
 
     def test_run_logs_poll_exception_and_continues(self, caplog):
         """Unexpected poll exceptions are logged and do not kill the loop."""
@@ -854,6 +1033,12 @@ class TestMonitorState:
         assert state.free_vram_mb == 0.0
         assert state.rtf_rolling_avg is None
         assert state.last_updated == 0.0
+        assert state.total_vram_mb == 0.0
+        assert state.used_vram_mb == 0.0
+        assert state.model_resident_mb_est is None
+        assert state.model_vram_mb_est is None
+        assert state.model_ram_spill_mb_est is None
+        assert state.model_processor_split is None
 
     def test_custom_values(self):
         """Fields accept custom values."""

@@ -1,7 +1,9 @@
 # ADR-039: Intra-Speech Clause Repetition — a Deterministic Sanitizer Below the Ladder
 
 **Date**: 2026-07-29
-**Status**: Accepted (implemented, suites green) — **live runtime validation PENDING**
+**Status**: Accepted — **runtime gate PARTIALLY CLOSED 2026-08-01** (owner ruling: harmless in
+production across 2 real sessions; the repair path itself remains runtime-unexercised — see
+"Gate ruling" under Validation gate)
 **Branch**: `codex/ui-ux-audit-proposal-20260709` (uncommitted)
 **Author**: Claude Code, with owner review across three approval rounds and three parallel audits
 **Scope**: `opencohost/core/repetition_guard.py` (the tier), `opencohost/config/settings.py`
@@ -360,6 +362,31 @@ Not closable from a test suite. The owner must run a real agenda session and rep
 > The checklist at `docs/runtime-validation-20260730.md` opens with this as a blocking
 > precondition. Do not run the gate without it.
 
+### Gate ruling 2026-08-01 — PARTIALLY CLOSED (owner)
+
+Evidence, two consecutive real agenda sessions with the DEBUG precondition **verified met**
+(the "OpenCohost" logger demonstrably wrote `[DEBUG]` records to the file both runs):
+
+- **2026-07-31** (3h12m, ~174 blocks): 0 `[CLAUSE_SANITIZER]` lines, 0 tier-2 rejects.
+- **2026-08-01** (4h33m, ~275 eligible generations): 0 and 0 again — under real repetition
+  pressure (23 prefetch rejections, 5 salida-rechazada, 4 non-negotiable blocks, all handled
+  by the upstream guards). Latency cost of the armed tier: zero (`[TURN_LATENCY]` medians:
+  agenda 17.3 s, split 11.5 s cloud-era / 18.5 s local-era — all samples are clean-verdict,
+  so the requested per-verdict split is trivially the overall split).
+
+What this closes: the gate's actual questions — "does the armed tier harm healthy
+sessions?" (no) and "did any `repaired` turn remove something it should not have?" (vacuously
+no — zero repairs). What it does NOT close: the repair/reject path has never fired outside
+the lab; its runtime behavior remains unobserved. The ruling accepts that residual risk
+(bounded by ~449 clean generations) rather than blocking release on evidence that may never
+arrive.
+
+**Spun off, NOT this ADR's scope** — the 2026-08-01 editorial review of the session
+transcript found the dominant real-world repetition is **conceptual and rhetorical**
+(same thesis re-argued with new analogies; recurring verbal openers), which the literal
+guardrails and this clause tier cannot see by design. Registered as parked research:
+`conductor/tracks/editorial_direction_research_20260801/proposal.md`.
+
 ---
 
 ## Related ADRs
@@ -380,3 +407,7 @@ Not closable from a test suite. The owner must run a real agenda session and rep
   full-suite run recorded in `AGENT_HANDOFF.md`. One pre-existing failure
   (`test_interactive_pregen.py::test_llm_generating_flag_brackets_the_ollama_call`) proven
   unrelated by stashing the three production files and reproducing it on pristine code.
+- **2026-08-01**: Runtime gate PARTIALLY CLOSED by owner ruling — see "Gate ruling" above.
+  Two clean sessions (n≈449 generations, 0 non-clean verdicts, zero latency cost); repair
+  path still lab-only; conceptual/rhetorical repetition spun off to the editorial-direction
+  research proposal.

@@ -349,7 +349,8 @@ def test_cloud_watchdog_timeout_routes_to_fallback_not_rollback():
 
     assert result == ""
     motor._recover_from_stalled_inference.assert_not_called()
-    motor._handle_cloud_failure.assert_called_once_with("direct")
+    motor._handle_cloud_failure.assert_called_once()
+    assert motor._handle_cloud_failure.call_args.args == ("direct",)
     assert motor._resolve_chat_watchdog_timeout("anything") == CLOUD_CHAT_TIMEOUT
     assert CLOUD_CHAT_TIMEOUT != motor._inference_watchdog_timeout
     assert CLOUD_CHAT_TIMEOUT != motor._post_switch_watchdog_timeout

@@ -38,6 +38,30 @@ class HealthState(BaseModel):
     free_vram_mb: float
     rtf_rolling_avg: Optional[float]
     last_updated: float
+    # F9/2.4 (runtime_findings_batch_20260731): same nvmlDeviceGetMemoryInfo
+    # call as free_vram_mb — total/used were being read and discarded.
+    total_vram_mb: float = 0.0
+    used_vram_mb: float = 0.0
+    # Ollama residency ESTIMATES from ollama.ps() (size/size_vram) — NOT
+    # process RSS. None while no model is loaded or Ollama is unreachable.
+    model_resident_mb_est: Optional[float] = None
+    model_vram_mb_est: Optional[float] = None
+    model_ram_spill_mb_est: Optional[float] = None
+    model_processor_split: Optional[str] = None
+
+
+class CtxTelemetryOut(BaseModel):
+    """Unit 2.5: the four numbers `StatusRail`'s "Contexto (KV)" section
+    renders — mirrors `MotorVocalIA.ctx_telemetry_snapshot()`'s "latest" entry
+    (llm_engine.py), never re-derived. `ratio`/`native_ctx`/`effective_ctx`
+    are per-REQUEST (F10 fix): a background pregen worker can produce its own
+    "latest" entry independent of whichever turn is still being spoken."""
+
+    ratio: float
+    effective_ctx: int
+    native_ctx: int
+    evicted_pairs: int
+    source: str
 
 
 class StatusResponse(BaseModel):
@@ -57,6 +81,20 @@ class StatusResponse(BaseModel):
     # S4 (P2): eager-wake warming visibility — True while the daemon-thread
     # `EngineHost._wake_ollama_eager` wake is still waiting on Ollama.
     ollama_warming: bool = False
+    # Unit 2.5 (runtime_findings_batch_20260731 F13): session-level mode ABOVE
+    # AgendaState.OFF — DERIVED in the /api/status route from the agenda state
+    # + the booleans below, never a second stored source of truth (a stored
+    # copy would drift from what it claims to summarise, same failure class
+    # as F4's `_display_model`). "agenda" | "post-agenda" | "inactiva" — see
+    # get_status's derivation for the exact rule and its accepted risks.
+    session_mode: str = "inactiva"
+    # WU3 (design-fase2.md §2.3): mirrors MotorVocalIA.llm_generating — True
+    # only while an Ollama generation call is actually in flight (foreground
+    # or pregen). Existed as a property, never surfaced until this unit.
+    llm_generating: bool = False
+    # Unit 2.5: mirrors motor.command_queue.qsize() — a cheap, KNOWINGLY racy
+    # depth read (see get_status's ponytail comment for the accepted risks).
+    pending_commands_count: int = 0
     # F4: coarse avatar/pipeline state for the FE avatar view. The motor
     # (MotorVocalIA) does NOT expose the UI-layer AvatarStateBridge, so this
     # is DERIVED from is_speaking/is_processing/is_ready in the /api/status
@@ -68,6 +106,27 @@ class StatusResponse(BaseModel):
     # ObsRuntime. None when no runtime exists (construction failed, or a test
     # host double without one) — the FE treats None as "unknown", not "down".
     obs_connected: Optional[bool] = None
+    # Provider truth (runtime_findings_batch_20260731 F4/1.3): populated from
+    # MotorVocalIA.provider_runtime_state() — the engine's LIVE effective
+    # posture, never the persisted llm_provider.json. Before this, a
+    # `_cloud_fallback_active` fallback kept reporting the stale cloud
+    # provider/model for the rest of the process. Defaults mirror the
+    # local/no-fallback byte-identical case for old callers.
+    provider: str = "local"
+    transport: str = "local"
+    fallback_active: bool = False
+    # Unit 2.2 (runtime_findings_batch_20260731 F3/F12): WHY the fallback
+    # engaged (the 1.1 taxonomy class), and a countdown to the next automatic
+    # return probe. Both populated from MotorVocalIA.provider_runtime_state();
+    # None outside an active fallback, and next_cloud_probe_in_seconds is also
+    # None for a non-probeable class (ambiguous_429/bad_key -- manual re-arm
+    # only, via a provider PUT).
+    fallback_reason: Optional[str] = None
+    next_cloud_probe_in_seconds: Optional[float] = None
+    # Unit 2.3 (runtime_findings_batch_20260731 F10): compact view of
+    # motor.ctx_telemetry_snapshot()["latest"] — None before the first
+    # generation of the process (nothing has been measured yet).
+    ctx_telemetry: Optional[CtxTelemetryOut] = None
 
 
 class ProfilesListResponse(BaseModel):
@@ -237,30 +296,49 @@ class ChatLastReplyResponse(BaseModel):
     `ChatReplySink` privacy contract in engine_host.py. This is NOT the
     viewer/operator chat that triggered the reply; that text never crosses
     HTTP (R8). Before any turn: `{text: null, source: null, turn_id: 0,
-    ts: null}`.
+    ts: null, queue_wait_ms: null}`.
     """
 
     text: Optional[str]
     source: Optional[str]
     turn_id: int
     ts: Optional[float]
+    # Unit 4.1 (runtime_findings_batch_20260731, F5): how long a front-originated
+    # (direct/chat/ptt) turn sat in the queue before the engine dequeued it, in
+    # ms. Null for a turn with no submitted_at stamp (agenda, accumulated) —
+    # never a fake 0. Consumed by 4.2 (bounded-wait UX for source=direct).
+    queue_wait_ms: Optional[int] = None
+    # Unit 4.2 (runtime_findings_batch_20260731, D3b/F12): the ANSWERING
+    # provider/transport, captured at generation time (not live global
+    # state) — and the provider posture the item was DISPATCHED under, so
+    # the front can disclose a fallback/return that happened while the item
+    # sat queued. All null for a turn with no submitted_under_provider tag
+    # (agenda, accumulated, or any reply recorded before this unit).
+    answered_by_provider: Optional[str] = None
+    answered_by_transport: Optional[str] = None
+    submitted_under_provider: Optional[str] = None
+    provider_changed_while_queued: Optional[bool] = None
 
 
 class EventOut(BaseModel):
     """One entry in GET /api/events?since=cursor (item B).
 
     PRIVACY: `source`/`action` are drawn from EngineHost's closed
-    `_MOTOR_EVENT_WHITELIST` (engine_host.py) -- never free text. `detail`
-    is reserved for schema parity with the client-side event bus (item A,
-    appEvents.ts) but is always null today; it must never carry dialogue,
-    chat, or request/response bodies if a future caller populates it.
+    `_MOTOR_EVENT_WHITELIST` (engine_host.py) -- `detail` is null for every
+    whitelisted status EXCEPT `ctx_pressure_high` (unit 2.3/2.5,
+    runtime_findings_batch_20260731 F10), which carries a small numeric-only
+    dict (`ratio`/`effective_ctx`/`native_ctx`/`evicted_pairs`) built by
+    `EngineHost._on_ctx_pressure_high`'s own whitelist+numeric-type gate.
+    `detail` must NEVER carry dialogue, chat, or request/response bodies --
+    a future numeric-detail action stays inside this same str|numeric-dict
+    shape, never `Any`.
     """
 
     seq: int
     ts: float
     source: str
     action: str
-    detail: Optional[str] = None
+    detail: str | dict[str, int | float] | None = None
 
 
 class EventLogResponse(BaseModel):
@@ -498,6 +576,17 @@ class LlmProviderResponse(BaseModel):
     fallback_mode: str
     pregen_enabled: bool
     profiles: dict[str, LlmProviderProfileOut]
+
+
+class LlmProviderProbeResponse(BaseModel):
+    """POST /api/llm/provider/probe response (WU2, cloud_rearm_20260801).
+
+    `armed=False` is a benign no-op (not_in_fallback / no_cloud_profile),
+    never an error -- always 200. See MotorVocalIA.trigger_cloud_probe_now.
+    """
+
+    armed: bool
+    reason: Optional[str] = None
 
 
 class LlmProviderRequest(BaseModel):

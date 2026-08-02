@@ -11,6 +11,7 @@ re-derived — see opencohost/core/llm_engine.py).
 import pytest
 from fastapi.testclient import TestClient
 
+from opencohost.core.health_monitor import MonitorState
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
@@ -94,23 +95,26 @@ def test_models_discovery_error_degrades_never_500(monkeypatch):
 
 def test_models_cloud_active_returns_active_profile_model_and_no_catalog(monkeypatch):
     """Cloud active: current_model/discovered come from the ACTIVE profile
-    only, and no download/install catalog is exposed (spec D)."""
+    only, and no download/install catalog is exposed (spec D).
+
+    F4 (1.3): `_display_model` now reads the ENGINE's live provider state,
+    not this disk-backed `load_provider_config()` — so the fake motor's
+    `_provider_config` must agree with it (the normal non-fallback case:
+    engine config mirrors disk)."""
     import opencohost.api.main as main_mod
 
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {
-            "active_provider": "openai",
-            "profiles": {
-                "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-                "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
-            },
+    cfg = {
+        "active_provider": "openai",
+        "profiles": {
+            "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+            "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
         },
-    )
+    }
+    monkeypatch.setattr(main_mod, "load_provider_config", lambda: cfg)
 
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = cfg
         resp = client.get("/api/models")
         assert resp.status_code == 200
         body = resp.json()
@@ -152,20 +156,18 @@ def test_models_cloud_active_never_leaks_other_profile_model(monkeypatch):
     differently-configured profile's."""
     import opencohost.api.main as main_mod
 
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {
-            "active_provider": "nvidia_nim",
-            "profiles": {
-                "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-                "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
-            },
+    cfg = {
+        "active_provider": "nvidia_nim",
+        "profiles": {
+            "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+            "nvidia_nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "deepseek-r1"},
         },
-    )
+    }
+    monkeypatch.setattr(main_mod, "load_provider_config", lambda: cfg)
 
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = cfg
         resp = client.get("/api/models")
         assert resp.status_code == 200
         body = resp.json()
@@ -200,14 +202,12 @@ def test_models_cloud_active_provider_absent_from_profiles_degrades(monkeypatch)
     catalog/discovered and a null current_model — never a 500/crash."""
     import opencohost.api.main as main_mod
 
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {"active_provider": "openai", "profiles": {}},
-    )
+    cfg = {"active_provider": "openai", "profiles": {}}
+    monkeypatch.setattr(main_mod, "load_provider_config", lambda: cfg)
 
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = cfg
         resp = client.get("/api/models")
         assert resp.status_code == 200
         body = resp.json()
@@ -227,85 +227,175 @@ def test_models_cloud_active_provider_absent_from_profiles_degrades(monkeypatch)
 # with the cloud profile's model (e.g. "GLM 5.2"). get_models() already had
 # the correct active_provider branch; this shares that same logic via
 # `_display_model` so /api/status and /api/models can never drift again.
+#
+# F4 (runtime_findings_batch_20260731 1.3): `_display_model`/get_status now
+# read `host.motor.provider_runtime_state()` — the engine's LIVE effective
+# posture — instead of `load_provider_config()` (disk). Tests below set the
+# fake motor's `_provider_config`/`_cloud_fallback_active` directly (same
+# pattern as `app.state.host.motor._current_profile_name = ...` elsewhere in
+# this suite) rather than monkeypatching the now-unused disk read.
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_status_local_provider_reports_engine_model_unchanged(monkeypatch):
+def test_status_local_provider_reports_engine_model_unchanged():
     """Local provider active (default/explicit): /api/status keeps reporting
     the engine's own current_model — behavior must not change."""
-    import opencohost.api.main as main_mod
-
-    monkeypatch.setattr(
-        main_mod, "load_provider_config", lambda: {"active_provider": "local", "profiles": {}}
-    )
-
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = {"active_provider": "local", "profiles": {}}
         resp = client.get("/api/status")
         assert resp.status_code == 200
-        assert resp.json()["current_model"] == "qwen3:8b"
+        body = resp.json()
+        assert body["current_model"] == "qwen3:8b"
+        assert body["provider"] == "local"
+        assert body["transport"] == "local"
+        assert body["fallback_active"] is False
 
 
-def test_status_cloud_active_reports_active_profile_model(monkeypatch):
+def test_status_cloud_active_reports_active_profile_model():
     """Cloud active: /api/status must report the ACTIVE profile's own model,
     never the engine's stale local current_model bookkeeping attr."""
-    import opencohost.api.main as main_mod
-
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._provider_config = {
             "active_provider": "glm",
             "profiles": {
                 "glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"},
             },
-        },
-    )
-
-    app = _app()
-    with TestClient(app) as client:
+        }
         resp = client.get("/api/status")
         assert resp.status_code == 200
         body = resp.json()
         assert body["current_model"] == "glm-5.2"
         assert body["current_model"] != "qwen3:8b"
+        assert body["provider"] == "glm"
+        assert body["transport"] == "cloud"
+        assert body["fallback_active"] is False
 
 
-def test_status_cloud_active_provider_absent_from_profiles_degrades(monkeypatch):
+def test_status_cloud_active_provider_absent_from_profiles_degrades():
     """Cloud active but the active_provider has no entry in `profiles`
     (misconfig/deleted profile): current_model degrades to null, same as
     /api/models — never a stale local model, never a 500."""
-    import opencohost.api.main as main_mod
-
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {"active_provider": "glm", "profiles": {}},
-    )
-
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = {"active_provider": "glm", "profiles": {}}
         resp = client.get("/api/status")
         assert resp.status_code == 200
         assert resp.json()["current_model"] is None
 
 
-def test_status_cloud_active_profile_empty_model_degrades(monkeypatch):
+def test_status_cloud_active_profile_empty_model_degrades():
     """Cloud active, profile present but its `model` field is blank: same
     graceful null degradation as /api/models."""
-    import opencohost.api.main as main_mod
-
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {"active_provider": "glm", "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": ""}}},
-    )
-
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = {
+            "active_provider": "glm",
+            "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": ""}},
+        }
         resp = client.get("/api/status")
         assert resp.status_code == 200
         assert resp.json()["current_model"] is None
+
+
+def test_status_fallback_active_reports_local_transport_despite_cloud_config(monkeypatch):
+    """The exact F4 defect: disk (and the engine's persisted `active_provider`)
+    still say cloud, but `_cloud_fallback_active` is set — /api/status must
+    report the LIVE effective posture (local, fallback_active=True), never
+    the stale cloud provider/model `_display_model` used to keep reporting
+    for the rest of the process."""
+    import opencohost.api.main as main_mod
+
+    cloud_cfg = {
+        "active_provider": "glm",
+        "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"}},
+    }
+    # Disk stays on cloud — the stale-file trap this unit removes as a source
+    # of truth for /api/status.
+    monkeypatch.setattr(main_mod, "load_provider_config", lambda: cloud_cfg)
+
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._provider_config = cloud_cfg
+        app.state.host.motor._cloud_fallback_active = True
+
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["transport"] == "local"
+        assert body["fallback_active"] is True
+        assert body["provider"] == "local"
+        # The two-lies bug: display must say the engine's real local model,
+        # never the disk-configured cloud model.
+        assert body["current_model"] == app.state.host.motor.current_model
+        assert body["current_model"] != "glm-5.2"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/status — resource numbers (F9/F14, 2.4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_status_health_carries_vram_split_and_ollama_residency_estimates():
+    """The new HealthState fields flow through MonitorState -> HealthState
+    (HealthState(**dataclasses.asdict(...)) in main.py) with no route code
+    needed beyond the model/dataclass field additions."""
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.monitor.state = MonitorState(
+            vram_status="normal",
+            rtf_status="normal",
+            ollama_status="healthy",
+            qwen_status="healthy",
+            overall_status="green",
+            ollama_lifecycle="ready",
+            qwen_lifecycle="ready",
+            free_vram_mb=3892.0,
+            rtf_rolling_avg=0.4,
+            last_updated=123.0,
+            total_vram_mb=8192.0,
+            used_vram_mb=4300.0,
+            model_resident_mb_est=6300.0,
+            model_vram_mb_est=4200.0,
+            model_ram_spill_mb_est=2100.0,
+            model_processor_split="67% GPU / 33% CPU",
+        )
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        health = resp.json()["health"]
+        assert health["total_vram_mb"] == 8192.0
+        assert health["used_vram_mb"] == 4300.0
+        assert health["model_resident_mb_est"] == 6300.0
+        assert health["model_vram_mb_est"] == 4200.0
+        assert health["model_ram_spill_mb_est"] == 2100.0
+        assert health["model_processor_split"] == "67% GPU / 33% CPU"
+
+
+def test_status_health_residency_absent_when_no_model_loaded():
+    """No model loaded / Ollama unreachable: residency fields are None, not
+    stale — never a fabricated non-zero number."""
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.monitor.state = MonitorState(
+            vram_status="normal",
+            rtf_status="normal",
+            ollama_status="down",
+            qwen_status="healthy",
+            overall_status="yellow",
+            ollama_lifecycle="degraded",
+            qwen_lifecycle="ready",
+            free_vram_mb=3892.0,
+            rtf_rolling_avg=0.4,
+            last_updated=123.0,
+        )
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        health = resp.json()["health"]
+        assert health["model_resident_mb_est"] is None
+        assert health["model_vram_mb_est"] is None
+        assert health["model_ram_spill_mb_est"] is None
+        assert health["model_processor_split"] is None
 
 
 def test_models_and_status_agree_on_display_model_cloud(monkeypatch):
@@ -314,17 +404,15 @@ def test_models_and_status_agree_on_display_model_cloud(monkeypatch):
     apart again, since both route through the shared helper."""
     import opencohost.api.main as main_mod
 
-    monkeypatch.setattr(
-        main_mod,
-        "load_provider_config",
-        lambda: {
-            "active_provider": "glm",
-            "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"}},
-        },
-    )
+    cfg = {
+        "active_provider": "glm",
+        "profiles": {"glm": {"base_url": "https://api.z.ai/v1", "model": "glm-5.2"}},
+    }
+    monkeypatch.setattr(main_mod, "load_provider_config", lambda: cfg)
 
     app = _app()
     with TestClient(app) as client:
+        app.state.host.motor._provider_config = cfg
         status_model = client.get("/api/status").json()["current_model"]
         models_model = client.get("/api/models").json()["current_model"]
         assert status_model == models_model == "glm-5.2"

@@ -369,7 +369,8 @@ class TestCloudFinalEmptyResponse:
 
         assert result == ""
         assert "cloud_llm_error" in ui_events
-        motor._handle_cloud_failure.assert_called_once_with("direct")
+        motor._handle_cloud_failure.assert_called_once()
+        assert motor._handle_cloud_failure.call_args.args == ("direct",)
 
     def test_empty_then_recovered_does_not_fire(self, tmp_path):
         motor, _, ui_events = _make_motor(tmp_path, provider_config=_cloud_config())

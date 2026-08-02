@@ -235,10 +235,9 @@ class TestCT004JoyitaSelection:
 class TestCT005SevenTopicAgendaStress:
     """7 approved topics must advance without repetition, stall, or invalid state."""
 
-    def _build_controller_with_7_topics(self, turns=2, batch=1):
+    def _build_controller_with_7_topics(self, turns=2):
         controller = KiraAgendaController(
             max_turns_per_topic=turns,
-            turn_batch_size=batch,
             response_length="normal",
         )
         topic_ids = []
@@ -250,7 +249,7 @@ class TestCT005SevenTopicAgendaStress:
         return controller, topic_ids
 
     def test_all_7_topics_complete_without_stall(self):
-        controller, topic_ids = self._build_controller_with_7_topics(turns=1, batch=1)
+        controller, topic_ids = self._build_controller_with_7_topics(turns=1)
 
         completed_topics = []
         for _round in range(50):  # safety limit
@@ -272,7 +271,7 @@ class TestCT005SevenTopicAgendaStress:
         assert len(completed_topics) == 7, f"Expected 7 completed, got {len(completed_topics)}"
 
     def test_no_exact_repeat_in_accept_output(self):
-        controller, _ = self._build_controller_with_7_topics(turns=3, batch=1)
+        controller, _ = self._build_controller_with_7_topics(turns=3)
 
         outputs = []
         unique_outputs = set()
@@ -309,7 +308,7 @@ class TestCT005SevenTopicAgendaStress:
             "Near-repeat must be rejected even across different topics"
 
     def test_turn_counters_advance_correctly_through_7_topics(self):
-        controller, topic_ids = self._build_controller_with_7_topics(turns=2, batch=1)
+        controller, topic_ids = self._build_controller_with_7_topics(turns=2)
         topic_turns = {}
 
         for _round in range(100):
@@ -333,7 +332,7 @@ class TestCT005SevenTopicAgendaStress:
                 f"Topic {tid} should have 2 turns, got {topic_turns.get(tid, 0)}"
 
     def test_agenda_ends_in_valid_state(self):
-        controller, _ = self._build_controller_with_7_topics(turns=1, batch=1)
+        controller, _ = self._build_controller_with_7_topics(turns=1)
 
         for _round in range(100):
             action = controller.next_action()
@@ -409,7 +408,7 @@ class TestCT006RepeatedInterruptions:
         is that turns_spoken never exceeds max_turns_per_topic and state
         remains valid after each PTT cycle.
         """
-        controller = KiraAgendaController(max_turns_per_topic=10, turn_batch_size=1)
+        controller = KiraAgendaController(max_turns_per_topic=10)
         topic = controller.add_topic("Tema bajo fuego", approved=True)
         controller.queue_topic(topic.id)
         controller.enable()
@@ -584,7 +583,6 @@ class TestChaosStreamIntegration:
 
         controller = KiraAgendaController(
             max_turns_per_topic=2,
-            turn_batch_size=1,
         )
 
         # Add 7 agenda topics

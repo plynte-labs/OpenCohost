@@ -163,20 +163,98 @@ class TestLadderControllerIntegration:
         assert "ANTI-REPETICIÓN FORZADA" not in prompt
 
     def test_ladder_bounded_failure_count_exhausts_topic(self):
-        """After 2 failures the existing failure_count>=2 guard exhausts the topic.
-        The ladder never loops unbounded."""
+        """D2 (2026-07-31): a repeating rejection (content error) debits one
+        attempt per failure instead of being force-killed at failure_count>=2
+        (that valve is now reserved for model-health errors: EMPTY/
+        LLM_TIMEOUT/OLLAMA_DOWN). The ladder still never loops unbounded —
+        turns_spoken never exceeds max_turns_per_topic no matter how many
+        rejections land.
+
+        Finding 1 (2026-07-31): five consecutive content-error rejections
+        pause the session (should_pause) but never clear active_topic — the
+        topic is left ACTIVE, not COMPLETED/None. Auto-resume must re-enter
+        that SAME topic (continue or close per its own budget) instead of
+        stranding it in IDLE forever or overwriting it with a queued one."""
+        from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, TopicStatus
+
         ctrl = _make_controller(max_turns_per_topic=3)
         dup_text = "La latencia del modelo depende del hardware disponible siempre."
         ctrl.record_accepted_output(dup_text)
-        # First failure
+
+        # First failure debits one attempt; the topic is NOT exhausted yet.
         ctrl.accept_output(dup_text)
-        first_failure_count = ctrl.failure_count
-        assert first_failure_count >= 1
-        # Second failure — after 2 failures the controller exhausts the topic
-        ctrl.accept_output(dup_text)
-        # After 2 failures the active_topic turns_spoken should equal max_turns_per_topic
-        # (existing register_failure behaviour at failure_count >= 2)
-        assert ctrl.active_topic is None or ctrl.active_topic.turns_spoken >= ctrl.max_turns_per_topic
+        assert ctrl.failure_count == 1
+        assert ctrl.active_topic.turns_spoken == 1
+
+        # More rejections than the budget — turns_spoken must cap at max,
+        # never overshoot, and the topic must never vanish from repeated
+        # content rejections alone.
+        for _ in range(4):
+            ctrl.accept_output(dup_text)
+
+        assert ctrl.active_topic is not None
+        assert ctrl.active_topic.turns_spoken == ctrl.max_turns_per_topic
+
+        # The 5th consecutive rejection pauses the session — but the topic
+        # is stranded ACTIVE, not gone.
+        assert ctrl.state == AgendaState.PAUSED_NEEDS_OPERATOR
+        stranded_topic = ctrl.active_topic
+        assert stranded_topic is not None
+        assert stranded_topic.status == TopicStatus.ACTIVE
+
+        # Resuming (operator or cooldown-elapsed auto-retry) must re-enter
+        # the SAME topic object, never a different/queued one, and never
+        # strand it silently in IDLE.
+        ctrl.resume()
+        assert ctrl.state == AgendaState.IDLE
+
+        action = ctrl.next_action()
+        assert ctrl.active_topic is stranded_topic, (
+            "resume must re-enter the existing ACTIVE topic, not overwrite it"
+        )
+        assert action.kind == "enqueue"
+        # Budget was already fully spent before the pause -> closing is next.
+        assert action.source == "kira-agenda-stop"
+
+        ctrl.mark_generation_accepted()
+        ctrl.mark_speech_complete()
+        assert stranded_topic.status == TopicStatus.COMPLETED
+        assert ctrl.active_topic is None
+        assert stranded_topic.turns_spoken == ctrl.max_turns_per_topic  # closing never debits
+
+        # No queued topics left: IDLE + active_topic None mirrors the
+        # driver/CTK auto-exit precondition (both flip to OFF from here).
+        assert ctrl.next_action().kind == "none"
+        assert ctrl.state == AgendaState.IDLE
+
+    def test_ladder_resume_reenters_active_topic_not_a_queued_one(self):
+        """Finding 1 variant: a queued topic must never preempt the still-
+        ACTIVE paused topic on resume — the stranding bug's alternate
+        failure mode (silently overwriting instead of getting stuck)."""
+        from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, TopicStatus
+
+        ctrl = _make_controller(max_turns_per_topic=20)
+        active_topic = ctrl.active_topic
+        queued = ctrl.add_topic("Tema en cola", approved=True)
+        ctrl.queue_topic(queued.id)
+
+        dup_text = "La latencia del modelo depende del hardware disponible siempre."
+        ctrl.record_accepted_output(dup_text)
+        for _ in range(5):
+            ctrl.accept_output(dup_text)
+
+        assert ctrl.state == AgendaState.PAUSED_NEEDS_OPERATOR
+        assert ctrl.active_topic is active_topic
+
+        ctrl.resume()
+        action = ctrl.next_action()
+
+        assert ctrl.active_topic is active_topic, (
+            "a queued topic must never preempt the still-ACTIVE paused topic"
+        )
+        assert action.kind == "enqueue"
+        assert action.source == "kira-agenda"  # continue, not a fresh topic_open
+        assert queued.status == TopicStatus.QUEUED
 
     def test_ladder_resets_on_success(self):
         """After a successful (non-dup) output, ladder state is reset to clean slate."""
@@ -572,8 +650,12 @@ class TestLadderStateCleanAtAllTopicEndExits:
     # ------------------------------------------------------------------
 
     def test_register_failure_non_terminal_preserves_ladder(self):
-        """The failure_count >= 2 → WAITING_SIGNAL path keeps the topic alive;
-        it must NOT reset the ladder (the topic is still active and regen is needed)."""
+        """The failure_count >= 2 → WAITING_SIGNAL path (D2 2026-07-31: the
+        model-health safety valve, gated to {EMPTY, LLM_TIMEOUT, OLLAMA_DOWN})
+        keeps the topic alive; it must NOT reset the ladder (the topic is
+        still active and regen is needed). GUARDRAIL_LOOPING no longer hits
+        this branch at all — content errors debit and fall through to the
+        degrade/pause ladder instead, which is exercised elsewhere."""
         from opencohost.smart_aggregator.kira_agenda_controller import (
             AgendaState,
             ErrorCode,
@@ -588,9 +670,10 @@ class TestLadderStateCleanAtAllTopicEndExits:
         ctrl._regen_retry_count = 1
 
         # First failure (failure_count becomes 1, non-terminal)
-        ctrl.register_failure(error=ErrorCode.GUARDRAIL_LOOPING, reason="non-terminal")
-        # Second failure triggers failure_count >= 2 → WAITING_SIGNAL (non-terminal)
-        ctrl.register_failure(error=ErrorCode.GUARDRAIL_LOOPING, reason="non-terminal 2")
+        ctrl.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="non-terminal")
+        # Second failure triggers failure_count >= 2 → the model-health valve
+        # → WAITING_SIGNAL (non-terminal; the topic itself stays alive).
+        ctrl.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="non-terminal 2")
 
         # Topic must still be active (non-terminal)
         assert ctrl.active_topic is not None, "active_topic was wrongly cleared on non-terminal path"

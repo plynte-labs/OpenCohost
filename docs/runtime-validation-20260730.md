@@ -23,15 +23,29 @@ git log --oneline 8cd0a88..HEAD
 `OPENCOHOST_DEBUG=1` is set **before the process starts** — it is read once at import time, so
 setting it after launch does nothing.
 
-1. In the **same shell** you will launch OpenCohost from:
+**On Tauri, use the wired script — it does step 1 for you and guards the trap in step 1b:**
+
+```powershell
+cd E:\VoiceAI\OpenCohost_UI  # path-ok: local env example
+pnpm tauri:debug
+```
+
+1. Or, manually, in the **same shell** you will launch OpenCohost from:
    ```powershell
    $env:OPENCOHOST_DEBUG = "1"
    ```
-2. Launch OpenCohost as you normally do.
+1b. ⚠ **Make sure no backend is already listening on 8765/8770 before you launch.**
+   `src-tauri/src/backend.rs` spawns the Python backend with a plain `Command` and never calls
+   `env_clear()`, so the child *does* inherit this variable — **but only if Tauri actually spawns
+   it.** If `run-api.bat`, a stale `uvicorn`, or a previous session is already on that port, Tauri
+   **reuses** that process, your variable never reaches the backend, and nothing tells you. The
+   `pnpm tauri:debug` script prints a warning in exactly that case. To confirm after launch, check
+   `managed: true` in `backend_info`.
+2. Launch OpenCohost.
 3. Note the exact log filename it created — you will grep it directly instead of a wildcard, so
    you are never reading a stale file from an earlier run:
    ```powershell
-   Get-ChildItem E:\VoiceAI\logs\opencohost_*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+   Get-ChildItem E:\VoiceAI\logs\opencohost_*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1  # path-ok: local env example
    ```
 
 If you skip this, `[TURN_LATENCY]` will still appear (it logs at INFO) but `[CLAUSE_SANITIZER]`
@@ -123,9 +137,20 @@ DEBUG on (section 0).
    ```powershell
    Select-String -Path <log-file> -Pattern 'CLAUSE_SANITIZER' | Group-Object { ($_ -split 'stage=|\s')[1] + '|' + ($_.Line -split 'verdict=')[1].Split()[0] } | Select-Object Name, Count
    ```
-   If that one-liner is fiddly, the simple version is enough — just count manually:
+   ⚠ **There is no `verdict=clean` line to count, and its absence proves nothing.**
+   `_log_clause_sanitizer` is only ever reached inside `if san.verdict != "clean"` —
+   both call sites, `llm_engine.py:1994` and `:3426`. A clean turn is silent by
+   construction, so grepping `verdict=clean` returns zero whether the tier ran 90
+   times or never ran at all. Derive the clean count instead:
+
+   **clean = (total `[TURN_LATENCY]` lines) − (repaired + rejected at `stage=generate`)**
+
+   `[TURN_LATENCY]` emits at `logger.info` (`llm_engine.py:5296`) on every turn
+   regardless of verdict, which makes it the only trustworthy denominator here.
+
+   If the one-liner above is fiddly, the simple version is enough — just count manually:
    ```powershell
-   Select-String -Path <log-file> -Pattern 'stage=generate.*verdict=clean'
+   Select-String -Path <log-file> -Pattern 'TURN_LATENCY'          # the denominator
    Select-String -Path <log-file> -Pattern 'stage=generate.*verdict=repaired'
    Select-String -Path <log-file> -Pattern 'stage=generate.*verdict=rejected'
    Select-String -Path <log-file> -Pattern 'stage=pregen_draft.*verdict=repaired'
@@ -212,10 +237,15 @@ Fill in and paste back.
 
 ### A/B — Clause sanitizer verdict counts
 
-| stage | clean | repaired | rejected |
+| stage | repaired | rejected | clean (derived, not grepped) |
 |---|---|---|---|
-| generate | | | |
-| pregen_draft | | | |
+| generate | | | = TURN_LATENCY total − repaired − rejected |
+| pregen_draft | | | n/a — no per-draft denominator is logged |
+
+**Total `[TURN_LATENCY]` lines (the denominator):** ____
+
+⚠ Do not write `0` in a clean column from a grep. Clean verdicts are never logged
+(`llm_engine.py:1994`, `:3426`); a zero there is the logger's silence, not a measurement.
 
 **PTT/direct sanitizer lines found (should be 0):** ____
 

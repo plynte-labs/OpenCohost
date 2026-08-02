@@ -470,11 +470,16 @@ class PttController:
         # source="direct" for every dispatched turn, so PTT turns logged and
         # telemetered as direct. Rides as the 4th tuple element, like history_text
         # rides as the 3rd.
+        # Unit 4.1 (runtime_findings_batch_20260731, F5): stamp submitted_at HERE
+        # too — the same seam covers PTT "for free" per the unit's scope (no
+        # separate seam per source). Lets queue_wait_ms report an honest wait
+        # if a PTT flush lands while the motor is busy.
         self._dispatcher.dispatch(
             "process_context",
             i18n_active.ptt_wrapper().format(text=text),
             history_text=i18n_active.ptt_history_wrapper().format(text=text),
             source="ptt",
+            submitted_at=time.monotonic(),
         )
 
     def start(self) -> str:

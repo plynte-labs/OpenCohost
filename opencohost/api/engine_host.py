@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import threading
 import time
+from typing import Optional
 
 import ollama
 
@@ -89,14 +90,48 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         # (that surface is out of scope per owner decision); the Tauri client's
         # own status subset is a separate UI-repo change.
         "cloud_llm_error",
+        # Unit 2.1 (runtime_findings_batch_20260731): cloud auth/key failure
+        # (`bad_key` class) -- a "check your key" banner, latched once per
+        # failure event on the engine side (never per-turn spam). Same
+        # pattern as `cloud_llm_error` right above: NOT added to the CTK
+        # ui/motor_event_handlers dispatch table (out of scope per owner
+        # decision, and unnecessary -- that table only wires the legacy CTK
+        # UI's own callback, not this whitelist/Tauri emit path).
+        "cloud_bad_key",
         # E1 (memoria_quality_20260717): fresh-memoria notice for the Tauri
         # chat-panel feed. Detail stays None (whitelist contract) — the event
         # only says "a memoria was saved", never which one. Not added to the
         # CTK ui/motor_event_handlers dispatch table on purpose: that frontend
         # drops unmapped statuses as a no-op, so the desktop app ignores it.
         "memoria_captured",
+        # Unit 2.2 (runtime_findings_batch_20260731): cloud auto-return
+        # narration -- fallback engaged, a background probe (re)scheduled, and
+        # a successful return to cloud. Detail stays None except
+        # cloud_probe_scheduled (see _MOTOR_EVENT_DETAIL_FIELDS below); the
+        # reason CLASS is exposed separately via GET /api/status
+        # (StatusResponse.fallback_reason), never riding this event's detail.
+        "cloud_fallback_engaged",
+        "cloud_probe_scheduled",
+        "cloud_restored",
+        # WU3 (cloud_rearm_20260801): the ambiguous_429 conservative
+        # auto-return exhausted its attempts budget without a successful
+        # probe. Detail stays None -- NOT added to _MOTOR_EVENT_DETAIL_FIELDS
+        # (privacy gate, same as cloud_fallback_engaged/cloud_restored).
+        "cloud_probe_gave_up",
     }
 )
+
+# Unit 2.3 (runtime_findings_batch_20260731 F10): per-event detail schema,
+# relaxing the detail=None-ALWAYS privacy gate ONLY for the statuses listed
+# here. `_on_ctx_pressure_high` copies ONLY these keys, and ONLY when the
+# value is numeric (int/float, not bool) -- a text/malicious value for a key
+# drops that key rather than forwarding it. Every whitelisted status NOT
+# listed here keeps detail=None, unconditionally, in _record_motor_event.
+_MOTOR_EVENT_DETAIL_FIELDS: dict = {
+    "ctx_pressure_high": ("ratio", "effective_ctx", "native_ctx", "evicted_pairs"),
+    # Unit 2.2: numeric seconds-until-next-probe, same numeric-only gate.
+    "cloud_probe_scheduled": ("seconds",),
+}
 
 
 class _Drain:
@@ -162,11 +197,41 @@ class ChatReplySink:
         self._lock = threading.Lock()
         self._turn_id = 0
 
-    def record(self, text: str, source: str) -> None:
+    def record(
+        self,
+        text: str,
+        source: str,
+        queue_wait_ms: Optional[int] = None,
+        answered_by_provider: Optional[str] = None,
+        answered_by_transport: Optional[str] = None,
+        submitted_under_provider: Optional[str] = None,
+        provider_changed_while_queued: Optional[bool] = None,
+    ) -> None:
         with self._lock:
             self._turn_id += 1
             self._replies.append(
-                {"text": text, "source": source, "turn_id": self._turn_id, "ts": time.time()}
+                {
+                    "text": text,
+                    "source": source,
+                    "turn_id": self._turn_id,
+                    "ts": time.time(),
+                    # Unit 4.1 (runtime_findings_batch_20260731, F5): the queue wait
+                    # for a front-originated (direct/chat/ptt) turn, in ms. None for
+                    # any turn with no submitted_at stamp (agenda, accumulated) —
+                    # never a fake 0. Exposed so GET /api/chat/last-reply (4.2) can
+                    # report it without a second seam.
+                    "queue_wait_ms": queue_wait_ms,
+                    # Unit 4.2 (F12 closure): the ANSWERING provider/transport,
+                    # captured at generation time (not live global state), and
+                    # the provider the item was dispatched UNDER, so the front
+                    # can disclose a fallback/return that happened while the
+                    # item sat queued. All None unless this turn was tagged at
+                    # submit time (agenda/accumulated/legacy turns never are).
+                    "answered_by_provider": answered_by_provider,
+                    "answered_by_transport": answered_by_transport,
+                    "submitted_under_provider": submitted_under_provider,
+                    "provider_changed_while_queued": provider_changed_while_queued,
+                }
             )
 
     def last(self) -> dict:
@@ -386,7 +451,56 @@ class EngineHost:
         """
         if status not in _MOTOR_EVENT_WHITELIST:
             return
+        if status in _MOTOR_EVENT_DETAIL_FIELDS:
+            # Unit 2.3: this status carries a numeric detail payload, recorded
+            # by its own dedicated callback (see on_ctx_pressure_high wiring
+            # in start() / _on_ctx_pressure_high below) because the detail
+            # needs THIS generation's own locals, not a second positional
+            # argument threaded through the shared `ui_callback` (CTK's
+            # concrete callback takes exactly one argument -- see
+            # MotorVocalIA.on_ctx_pressure_high's docstring). Skip here so the
+            # event is recorded exactly once, with real detail, not twice.
+            return
         self.event_log.record("motor", status)
+
+    def _on_ctx_pressure_high(self, payload: dict) -> None:
+        """Unit 2.3 (runtime_findings_batch_20260731 F10): record
+        ctx_pressure_high with a numeric-only detail payload.
+
+        Wired as `motor.on_ctx_pressure_high` in start() -- fires
+        synchronously on whichever thread produced this generation
+        (foreground or a pregen worker), with `payload` as a plain call
+        argument (never shared instance state), so two concurrent
+        generations crossing the pressure threshold cannot clobber each
+        other's detail. Only the whitelisted keys survive, and only when the
+        value is numeric (bool excluded -- True/False are not utilization
+        numbers); anything else is dropped, never forwarded verbatim
+        (privacy gate, same contract as _MOTOR_EVENT_WHITELIST above).
+        """
+        fields = _MOTOR_EVENT_DETAIL_FIELDS.get("ctx_pressure_high", ())
+        detail = {
+            key: payload[key]
+            for key in fields
+            if key in payload
+            and isinstance(payload[key], (int, float))
+            and not isinstance(payload[key], bool)
+        }
+        self.event_log.record("motor", "ctx_pressure_high", detail or None)
+
+    def _on_cloud_probe_scheduled(self, payload: dict) -> None:
+        """Unit 2.2 (runtime_findings_batch_20260731): record
+        cloud_probe_scheduled with a numeric-only detail payload, mirroring
+        `_on_ctx_pressure_high` exactly. Wired as `motor.on_cloud_probe_scheduled`
+        in start()."""
+        fields = _MOTOR_EVENT_DETAIL_FIELDS.get("cloud_probe_scheduled", ())
+        detail = {
+            key: payload[key]
+            for key in fields
+            if key in payload
+            and isinstance(payload[key], (int, float))
+            and not isinstance(payload[key], bool)
+        }
+        self.event_log.record("motor", "cloud_probe_scheduled", detail or None)
 
     def _dispatch_motor_event(self, status, *_args, **_kwargs) -> None:
         """Fan a motor status string out to every registered handler.
@@ -614,6 +728,14 @@ class EngineHost:
                 ui_callback=self._dispatch_motor_event,
                 dialogue_callback=self.chat_sink.record,
             )
+            # Unit 2.3: wired unconditionally (unlike the agenda-only guardrail
+            # hook below) -- ctx_pressure_high is a pure LLM/context concern,
+            # unrelated to whether the agenda constructed successfully.
+            self.motor.on_ctx_pressure_high = self._on_ctx_pressure_high
+            # Unit 2.2: same rationale as ctx_pressure_high above -- wired
+            # unconditionally, a pure cloud/fallback concern independent of
+            # agenda construction.
+            self.motor.on_cloud_probe_scheduled = self._on_cloud_probe_scheduled
             self.monitor = HealthMonitor()
             self.motor.health_monitor = self.monitor  # mirrors app_shell.py:196-197
             self.motor.start()

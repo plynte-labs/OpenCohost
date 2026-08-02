@@ -97,6 +97,12 @@ class RecoveryPolicy:
         self._last_failure_time: float = 0.0
         self._last_error: ErrorCode = ErrorCode.NONE
         self._reasons: list[str] = []     # human-readable, max MAX_HISTORY
+        # D2 valve fix (2026-07-31, finding 2): consecutive model-health
+        # failures (GUARDRAIL_EMPTY/LLM_TIMEOUT/OLLAMA_DOWN), separate from
+        # the shared `_failures` counter. Any content-class failure or a
+        # success resets it to 0, so one content rejection followed by one
+        # empty generation no longer trips the "model is dead" valve.
+        self._consecutive_model_health_failures: int = 0
 
     # ── public API ─────────────────────────────────────────────────────
 
@@ -104,6 +110,10 @@ class RecoveryPolicy:
         self._failures += 1
         self._last_failure_time = _time_module.time()
         self._last_error = error
+        if error in _MODEL_HEALTH_ERRORS:
+            self._consecutive_model_health_failures += 1
+        else:
+            self._consecutive_model_health_failures = 0
         if reason:
             self._reasons.append(reason)
             self._reasons = self._reasons[-self.MAX_HISTORY:]
@@ -112,6 +122,7 @@ class RecoveryPolicy:
         self._failures = 0
         self._retry_attempt = 0
         self._last_error = ErrorCode.NONE
+        self._consecutive_model_health_failures = 0
 
     def set_error(self, error: ErrorCode) -> None:
         """Set the last error without touching failure/retry counters.
@@ -137,6 +148,10 @@ class RecoveryPolicy:
     @property
     def failure_count(self) -> int:
         return self._failures
+
+    @property
+    def consecutive_model_health_failures(self) -> int:
+        return self._consecutive_model_health_failures
 
     @property
     def retry_attempt(self) -> int:
@@ -201,6 +216,21 @@ class TopicStatus(str, Enum):
 # Terminal statuses never block a fresh add_topic dedup (WU4/D6).
 _TERMINAL_TOPIC_STATUSES = frozenset({TopicStatus.COMPLETED, TopicStatus.SKIPPED})
 
+# Model-health safety valve (D2, 2026-07-31): force-kill only fires for these
+# errors. A model that returns nothing / times out / is down twice in a row is
+# dead — a "different angle" cannot resurrect it. Content errors (SIMILAR,
+# LOOPING, LEAK, BREAKS_CHARACTER) never force-kill; each rejection debits an
+# attempt instead (register_failure), so a chronically-repeating topic burns
+# its own budget and closes naturally.
+# Coverage note: today only GUARDRAIL_EMPTY actually reaches register_failure
+# on the live path (via _validate_output's empty branch). LLM_TIMEOUT and
+# OLLAMA_DOWN have no caller that registers them — a timeout/down surfaces to
+# the controller as an empty generation (GUARDRAIL_EMPTY), not as those two
+# codes. They stay in this set for forward-looking callers that may one day
+# report them directly; removing them would silently narrow the valve for
+# that future caller with no test able to catch it.
+_MODEL_HEALTH_ERRORS = frozenset({ErrorCode.GUARDRAIL_EMPTY, ErrorCode.LLM_TIMEOUT, ErrorCode.OLLAMA_DOWN})
+
 
 @dataclass
 class AgendaTopic:
@@ -211,6 +241,8 @@ class AgendaTopic:
     response_length: str = "normal"
     id: str = field(default_factory=lambda: f"topic-{uuid4()}")
     status: TopicStatus = TopicStatus.DRAFTED
+    # Attempts spent (D1 2026-07-31): accepted, rejected and empty live
+    # generations each debit 1; the closing (kira-agenda-stop) never does.
     turns_spoken: int = 0
     confidence: str = "LOW"   # Suggester metadata: HIGH | MEDIUM | LOW
     source: str = ""           # Suggester metadata: "entity:<name>" | "vibe" | "transition"
@@ -433,7 +465,6 @@ class KiraAgendaController:
         response_length: str = "normal",
         rhythm: str = "normal",
         safety_mode: str = "live_safe",
-        turn_batch_size: int = 2,
         chat_cadence_blocks: int = 2,
     ) -> None:
         self.state = AgendaState.OFF
@@ -449,9 +480,12 @@ class KiraAgendaController:
         self.response_length = self.normalize_response_length(response_length)
         self.rhythm = self.normalize_rhythm(rhythm)
         self.safety_mode = self.normalize_safety_mode(safety_mode)
-        self.turn_batch_size = self.clamp_turn_batch_size(turn_batch_size)
         self.chat_cadence_blocks = self.clamp_chat_cadence(chat_cadence_blocks)
         self.blocks_since_chat_check = 0
+        # Prompt-only knob (D1 2026-07-31): feeds {block_size} in _build_prompt
+        # so the i18n template can render "representa N beat(s)". Always 1 on
+        # every production path; accounting (mark_speech_complete,
+        # register_failure) never reads this field.
         self._pending_turns_spoken = 1
         self._pending_action_source = ""
         self.topics: list[AgendaTopic] = []
@@ -613,14 +647,6 @@ class KiraAgendaController:
         return max(cls.MIN_TURNS_PER_TOPIC, min(cls.MAX_TURNS_PER_TOPIC, turns))
 
     @staticmethod
-    def clamp_turn_batch_size(value: object) -> int:
-        try:
-            turns = int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            turns = 2
-        return max(1, min(4, turns))
-
-    @staticmethod
     def clamp_chat_cadence(value: object) -> int:
         try:
             cadence = int(value)  # type: ignore[arg-type]
@@ -743,6 +769,7 @@ class KiraAgendaController:
         self.stop_requested = False
 
     def soft_stop(self) -> AgendaAction:
+        logger.info("Agenda stop: mode=soft")
         self.stop_requested = True
         if self.state in {AgendaState.OFF, AgendaState.IDLE, AgendaState.WAITING_SIGNAL} and not self.active_topic:
             self.state = AgendaState.OFF
@@ -764,6 +791,7 @@ class KiraAgendaController:
         self._last_matched_phrase = ""
 
     def emergency_stop(self) -> None:
+        logger.info("Agenda stop: mode=emergency")
         self.stop_requested = False
         self.state = AgendaState.OFF
         self.active_topic = None
@@ -820,6 +848,21 @@ class KiraAgendaController:
             return self._streamer_action(ptt_text.strip())
 
         if self.state == AgendaState.IDLE:
+            if self.active_topic is not None:
+                # A pause (should_pause, fc>=5) or its auto-resume never
+                # clears active_topic — only the recovery state moves to
+                # PAUSED_NEEDS_OPERATOR and back to IDLE. Re-enter the
+                # still-ACTIVE topic via the WAITING_SIGNAL path (continue,
+                # close if the budget is spent) instead of selecting/
+                # overwriting with a queued topic — resuming where it left
+                # off, never stranding it (finding 1, 2026-07-31).
+                self.state = AgendaState.WAITING_SIGNAL
+                return self.next_action(
+                    motor_busy=motor_busy,
+                    kira_speaking=kira_speaking,
+                    ptt_text=ptt_text,
+                    compact_chat=compact_chat,
+                )
             selected = self._select_next_topic()
             if not selected:
                 return AgendaAction.none()
@@ -859,7 +902,7 @@ class KiraAgendaController:
             return AgendaAction.none()
         projected_turns = min(
             self.max_turns_per_topic,
-            self.active_topic.turns_spoken + max(1, self._pending_turns_spoken),
+            self.active_topic.turns_spoken + 1,
         )
         if self.stop_requested or projected_turns >= self.max_turns_per_topic:
             # Shares the `closing` slot with _closing_action: their pre-migration
@@ -869,11 +912,10 @@ class KiraAgendaController:
                 source="kira-agenda-stop",
                 turns=1,
             )
-        turns = min(self.turn_batch_size, self.max_turns_per_topic - projected_turns)
         return self._preview_topic_action(
             i18n_active.agenda_instructions()["preview_continue"],
             source="kira-agenda",
-            turns=max(1, turns),
+            turns=1,
         )
 
     def start_prefetched_action(self, action: AgendaAction) -> bool:
@@ -915,10 +957,15 @@ class KiraAgendaController:
                 self.blocks_since_chat_check += 1
             elif self._pending_action_source == "chat":
                 self.blocks_since_chat_check = 0
-            self.active_topic.turns_spoken = min(
-                self.max_turns_per_topic,
-                self.active_topic.turns_spoken + max(1, self._pending_turns_spoken),
-            )
+            # D1 (2026-07-31): one generation = one attempt = one debit. The
+            # closing (kira-agenda-stop) never debits — its budget was already
+            # spent on the normal path; this guard makes non-consumption
+            # structural rather than relying on the min() cap to absorb it.
+            if self.active_topic.status != TopicStatus.CLOSING:
+                self.active_topic.turns_spoken = min(
+                    self.max_turns_per_topic,
+                    self.active_topic.turns_spoken + 1,
+                )
             self._pending_turns_spoken = 1
             self._pending_action_source = ""
             if self.active_topic.status == TopicStatus.CLOSING:
@@ -951,6 +998,13 @@ class KiraAgendaController:
             self._regen_retry_count += 1
         if error == ErrorCode.GUARDRAIL_BREAKS_CHARACTER:
             self._character_repair_needed = True
+        # D1 (2026-07-31): a rejected/empty live generation still spent the
+        # attempt — debit one, same as an accepted generation. The closing
+        # never debits (its budget is already spent by the time it fires).
+        if self.active_topic is not None and self.active_topic.status != TopicStatus.CLOSING:
+            self.active_topic.turns_spoken = min(
+                self.max_turns_per_topic, self.active_topic.turns_spoken + 1
+            )
         # Force-complete: if the topic is already closing and we've failed
         # to generate a closing line 3+ times, just mark it done silently.
         # Prevents the infinite kira-agenda-stop retry cascade seen under
@@ -963,7 +1017,14 @@ class KiraAgendaController:
             self.stop_requested = False
             self.recovery.record_success()  # reset counter for next topic
             return
-        if self.active_topic and self.recovery.failure_count >= 2:
+        # D2 (2026-07-31): force-kill is now a model-health safety valve only.
+        # A model returning nothing / timing out / being down twice in a row
+        # is dead — no "different angle" can fix that. Content errors (SIMILAR,
+        # LOOPING, LEAK, BREAKS_CHARACTER) never force-kill; they debit above
+        # and fall through to the degrade/pause ladder below, so a
+        # chronically-repeating topic burns its own budget and closes
+        # naturally instead of being killed on the first rejection.
+        if self.active_topic and error in _MODEL_HEALTH_ERRORS and self.recovery.consecutive_model_health_failures >= 2:
             self.active_topic.turns_spoken = self.max_turns_per_topic
             self._character_repair_needed = False
             self.state = AgendaState.WAITING_SIGNAL
@@ -1010,7 +1071,7 @@ class KiraAgendaController:
             if mutate:
                 if self.active_topic is None:
                     # The engine fires a trailing accept_output("") after every
-                    # agenda turn (llm_engine.py:2461). When the preceding
+                    # agenda turn (llm_engine.py:5328). When the preceding
                     # rejection already force-completed the topic (active_topic is
                     # now None), re-running the failure ladder here double-counts
                     # the same rejection and, with no active topic, drops into
@@ -1026,7 +1087,16 @@ class KiraAgendaController:
                     }:
                         self.state = AgendaState.OFF if self.stop_requested else AgendaState.IDLE
                         self.stop_requested = False
-                else:
+                elif self.state in {AgendaState.GENERATING, AgendaState.TOPIC_CLOSING}:
+                    # The engine fires a trailing accept_output("") after every
+                    # agenda turn (llm_engine.py:5328). GENERATING/TOPIC_CLOSING
+                    # are the only states a genuinely-empty live generation can
+                    # arrive in — any other state means the non-empty rejection
+                    # for this same turn already registered a failure a few
+                    # lines earlier in the same engine call; registering again
+                    # here would double-count one rejected generation into two
+                    # debits (F7's double-count hazard). State-based, not
+                    # caller-based, so no caller sequence can reintroduce it.
                     self.register_failure(error=ErrorCode.GUARDRAIL_EMPTY, reason="El modelo devolvió vacío")
             return False
         # ── HIGH-2: reset matched phrase so register_failure never captures a stale
@@ -1289,7 +1359,7 @@ class KiraAgendaController:
         return None
 
     def _topic_action(self, instruction: str) -> AgendaAction:
-        self._pending_turns_spoken = self._next_block_size()
+        self._pending_turns_spoken = 1
         self._pending_action_source = "kira-agenda"
         prompt = self._build_prompt(
             instruction=instruction,
@@ -1463,12 +1533,6 @@ class KiraAgendaController:
 
     def _topic_complete(self) -> bool:
         return bool(self.active_topic and self.active_topic.turns_spoken >= self.max_turns_per_topic)
-
-    def _next_block_size(self) -> int:
-        if not self.active_topic:
-            return 1
-        remaining = max(1, self.max_turns_per_topic - self.active_topic.turns_spoken)
-        return min(self.turn_batch_size, remaining)
 
     def _chat_due(self) -> bool:
         return self.blocks_since_chat_check >= self.chat_cadence_blocks

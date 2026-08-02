@@ -15,6 +15,7 @@ dialogue must NEVER cross HTTP here — Kira's reply is observed via GET
 """
 
 import re
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,7 +46,9 @@ def _app():
 def test_valid_text_accepted_and_enqueued_as_process_context():
     app = _app()
     with TestClient(app) as client:
+        before = time.monotonic()
         resp = client.post("/api/chat/turn", json={"text": "hola Kira, como estas?"})
+        after = time.monotonic()
         assert resp.status_code == 200
         body = resp.json()
         assert body["accepted"] is True
@@ -55,11 +58,16 @@ def test_valid_text_accepted_and_enqueued_as_process_context():
         queued = app.state.host.motor.command_queue.get_nowait()
         # B1 (turn provenance): the prompt payload is still the raw text; the
         # honest speaker frame rides as the 3rd element (history_text).
-        assert queued == (
+        # Unit 4.1 (runtime_findings_batch_20260731, F5): source (4th) and the
+        # monotonic submitted_at stamp (5th) now ride alongside it — the
+        # earliest backend receipt point for a typed direct question.
+        assert queued[:4] == (
             "process_context",
             "hola Kira, como estas?",
             i18n_active.typed_history_wrapper().format(text="hola Kira, como estas?"),
+            "direct",
         )
+        assert before <= queued[4] <= after
         assert app.state.dispatcher.state_version == 1
 
 
@@ -76,12 +84,21 @@ def test_typed_turn_commits_history_text_naming_the_speaker():
         resp = client.post("/api/chat/turn", json={"text": text})
         assert resp.status_code == 200
 
-        command, payload, history_text = app.state.host.motor.command_queue.get_nowait()
+        # Unit 4.1: the queue tuple grew a 4th (source) and 5th (submitted_at)
+        # element — see test_valid_text_accepted_and_enqueued_as_process_context.
+        # Unit 4.2 (F12 closure): a 6th (submitted_under_provider) rides
+        # alongside it now — the provider posture at submit time.
+        command, payload, history_text, source, submitted_at, submitted_under_provider = (
+            app.state.host.motor.command_queue.get_nowait()
+        )
         assert command == "process_context"
         assert payload == text  # prompt unchanged — generation behavior untouched
         assert history_text == i18n_active.typed_history_wrapper().format(text=text)
         assert text in history_text
+        assert source == "direct"
+        assert isinstance(submitted_at, float)
         assert history_text != i18n_active.ptt_history_wrapper().format(text=text)
+        assert submitted_under_provider == "local"
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t  \n"])

@@ -51,6 +51,14 @@ from opencohost.config.settings import (
     CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS, CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
     CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, CLOUD_MAX_TOKENS, LLM_KEYS_FILE,
     CLAUSE_SANITIZER_SOURCES,
+    CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS, CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS,
+    CTX_TELEMETRY_RING_MAXLEN,
+    CLOUD_AUTO_RETURN_RATE_LIMIT_FLOOR_SECONDS, CLOUD_AUTO_RETURN_RATE_LIMIT_CAP_SECONDS,
+    CLOUD_AUTO_RETURN_TRANSIENT_BASE_SECONDS, CLOUD_AUTO_RETURN_TRANSIENT_CAP_SECONDS,
+    CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED, CLOUD_AUTO_RETURN_AMBIGUOUS_429_BASE_SECONDS,
+    CLOUD_AUTO_RETURN_AMBIGUOUS_429_CAP_SECONDS, CLOUD_AUTO_RETURN_AMBIGUOUS_429_MAX_ATTEMPTS,
+    CLOUD_PROBER_JOIN_TIMEOUT_SECONDS,
+    DIRECT_ANSWER_MAX_WAIT_SECONDS,
 )
 from opencohost.core import context_budget
 from opencohost.core import cloud_llm_client
@@ -83,6 +91,122 @@ logger = get_logger()
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 _TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
 _TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
+
+# Unit 1.2 (runtime_findings_batch_20260731) — a cloud model can emit non-Latin
+# glyphs (CJK/Arabic/Cyrillic/emoji/...). The SCREEN keeps them (owner ruling);
+# espeak-ng would otherwise generate a spoken *description* of the glyph from
+# the character itself — that description is never in our text, so there is no
+# marker to filter, only characters to strip before espeak ever sees them.
+#
+# Small, conservative verbalization map: symbols outside ASCII that are common
+# enough in dialogue to spell out instead of silently dropping. Anything not
+# on this list falls through to the strip pass below. `=`/`%`/`$` are ASCII
+# and already reach espeak untouched (see test_tts_sanitizer_keeps_math_and_
+# code_like_asterisks) — do not add them here, that would change behavior a
+# passing test already pins.
+_TTS_MATH_SYMBOL_VERBALIZATION = {
+    "±": " más menos ",
+    "×": " por ",
+    "÷": " entre ",
+}
+
+# Non-Latin script ranges to strip, by Unicode block — NOT a glyph enumeration.
+# `contains_emoji_or_symbol` (kira_agenda_controller.py) cannot be reused here:
+# it only tests `ord > 0xFFFF` or 0x2600-0x27BF, so CJK/kana/hangul/Arabic/
+# Hebrew/Greek/Cyrillic (all BMP, all below 0x2600) would sail through, and it
+# raises rather than returning cleaned text.
+_TTS_NON_LATIN_RANGES = (
+    (0x0300, 0x036F, None),        # combining diacritics — handled as "keep" below, not here
+    (0x0370, 0x03FF, "greek"), (0x1F00, 0x1FFF, "greek"),
+    (0x0400, 0x052F, "cyrillic"),
+    (0x0590, 0x05FF, "hebrew"),
+    (0x0600, 0x06FF, "arabic"), (0x0750, 0x077F, "arabic"),
+    (0xFB50, 0xFDFF, "arabic"), (0xFE70, 0xFEFF, "arabic"),
+    (0x1100, 0x11FF, "hangul"), (0x3130, 0x318F, "hangul"), (0xAC00, 0xD7A3, "hangul"),
+    (0x3040, 0x309F, "kana"), (0x30A0, 0x30FF, "kana"),
+    (0x2E80, 0x2EFF, "cjk"), (0x3000, 0x303F, "cjk"), (0x3400, 0x4DBF, "cjk"),
+    (0x4E00, 0x9FFF, "cjk"), (0xF900, 0xFAFF, "cjk"), (0x20000, 0x2FFFF, "cjk"),
+    (0x2600, 0x27BF, "emoji"), (0x1F000, 0x1FFFF, "emoji"), (0x1F1E6, 0x1F1FF, "emoji"),
+    (0x2500, 0x259F, "symbol"),
+)
+# Smart punctuation LLMs commonly emit that is not ASCII but is speakable/
+# harmless to keep as-is (dashes, curly quotes, ellipsis).
+_TTS_KEEP_PUNCT_CODEPOINTS = frozenset({0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026})
+
+
+def _tts_is_keep_char(ch: str) -> bool:
+    """True for Latin script (incl. accents), digits, whitespace, common punctuation."""
+    if ch.isspace():
+        return True
+    cp = ord(ch)
+    if cp < 0x80:  # Basic Latin: ASCII letters/digits/punctuation
+        return True
+    if 0x00A1 <= cp <= 0x00FF:  # Latin-1 Supplement: á é í ó ú ñ ü ¿ ¡ « » ° ... (× ÷ verbalized earlier)
+        return True
+    if 0x0100 <= cp <= 0x024F:  # Latin Extended-A/B
+        return True
+    if 0x0300 <= cp <= 0x036F:  # combining diacritics (NFD-decomposed accents)
+        return True
+    if cp in _TTS_KEEP_PUNCT_CODEPOINTS:
+        return True
+    return False
+
+
+def _tts_classify_non_latin_char(ch: str) -> str:
+    cp = ord(ch)
+    for start, end, label in _TTS_NON_LATIN_RANGES:
+        if label and start <= cp <= end:
+            return label
+    return "other"
+
+
+def _tts_cleanup_punctuation(text: str) -> str:
+    """Collapse whitespace/punctuation artifacts left by stripping characters.
+
+    e.g. "dijo  , y" -> "dijo, y"; a clause reduced to bare punctuation
+    (".", ".") collapses into a single "."; no leading commas.
+    """
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"\.{2}(?!\.)", ".", text)  # exactly two dots -> one; keep "..." ellipsis
+    text = re.sub(r"([,;:!?])\1+", r"\1", text)
+    text = re.sub(r"^[\s,;:]+", "", text)
+    return text.strip()
+
+
+def _tts_strip_non_latin(text: str) -> str:
+    """Verbalize a tiny symbol allowlist, strip everything non-Latin, clean up.
+
+    Returns the SAME object when nothing needed changing (preserves the
+    identity fast-path the markdown stage below relies on).
+    """
+    working = text
+    for symbol, replacement in _TTS_MATH_SYMBOL_VERBALIZATION.items():
+        if symbol in working:
+            working = working.replace(symbol, replacement)
+
+    changed = working is not text
+    removed_counts: dict[str, int] = {}
+    kept_chars = []
+    for ch in working:
+        if _tts_is_keep_char(ch):
+            kept_chars.append(ch)
+            continue
+        changed = True
+        category = _tts_classify_non_latin_char(ch)
+        removed_counts[category] = removed_counts.get(category, 0) + 1
+
+    if not changed:
+        return text
+
+    cleaned = _tts_cleanup_punctuation("".join(kept_chars))
+    if removed_counts:
+        # Metadata only — counts and category names, never the removed text.
+        logger.debug(
+            "[TTS_SANITIZE] non_latin_stripped chars=%d categories=%s",
+            sum(removed_counts.values()), ",".join(sorted(removed_counts)),
+        )
+    return cleaned
 
 # D1 — eviction source-gating (privacy_prereq_fixes_20260701). Only these
 # origins may be promoted into the MemoryDigest when their history pair is
@@ -445,6 +569,63 @@ class MotorVocalIA(threading.Thread):
         # chosen provider. Read by `_cfg_is_local` so a posture snapshot taken
         # AFTER `_handle_cloud_failure` engages resolves to local.
         self._cloud_fallback_active: bool = False
+        # F2 (runtime_findings_batch_20260731 unit 1.1): the class the last
+        # CLOUD transport failure was sorted into (bad_key/rate_limited/
+        # ambiguous_429/transient), so 2.1/2.2 can act on a reason instead of
+        # re-deriving one. Cleared on the next successful generation, same as
+        # `_last_llm_failure`. Never set on a LOCAL failure.
+        self._last_cloud_failure_class: Optional[str] = None
+        # Unit 2.1: "check your key" banner latch for `bad_key` -- one
+        # ui_callback per failure EVENT, not per retried/repeated turn.
+        # Resets alongside `_last_cloud_failure_class` on the next success.
+        self._cloud_bad_key_notified: bool = False
+        # Unit 2.2 (runtime_findings_batch_20260731 F3/F12): WHY the current
+        # fallback engaged -- one of the 1.1 classes, or None outside
+        # fallback. Distinct from `_last_cloud_failure_class` above: that one
+        # resets on every successful generation (including LOCAL ones during
+        # an active fallback), so it cannot describe "why we are still in
+        # fallback" -- only this field, cleared solely by a successful
+        # auto-return probe or an explicit provider PUT, can. All of
+        # `_cloud_fallback_reason`/`provider_epoch`/`_cloud_probe_next_at`/
+        # `_cloud_prober_stop` are guarded by `self._lock` -- reused rather
+        # than a new lock, matching how `is_speaking`/`is_processing`/
+        # `_llm_generating`/the provider-config swap in `set_provider_config`
+        # already use it for exactly this class of tiny attribute
+        # get/set-only critical sections (no network call is ever made while
+        # holding it).
+        self._cloud_fallback_reason: Optional[str] = None
+        # Bumped on every provider TRANSITION (cloud<->local, in either
+        # direction) -- fallback engaging, an auto-return, or a manual PUT
+        # that changes active_provider. Purely observational (exposed via
+        # provider_runtime_state()); the F12 draft-safety contract itself is
+        # met by unconditional invalidation at each transition (see
+        # `_handle_cloud_failure`/`_on_cloud_probe_success`/
+        # `set_provider_config`), not by tagging stash entries with this
+        # number -- simpler, and sufficient per the plan.
+        self.provider_epoch: int = 0
+        # Monotonic deadline of the next scheduled background probe, or None
+        # when no probe is scheduled (no active fallback, or a
+        # non-probeable class: ambiguous_429/bad_key).
+        self._cloud_probe_next_at: Optional[float] = None
+        # The currently-running prober's cancellation flag + thread handle
+        # (None when no prober is active). A manual provider PUT sets the
+        # event so an in-flight wait/probe can bail without touching state
+        # it no longer owns (`set_provider_config` below).
+        self._cloud_prober_stop: Optional[threading.Event] = None
+        self._cloud_prober_thread: Optional[threading.Thread] = None
+        # Unit 2.2 fix (runtime_findings_batch_20260731 findings 1/2/4/6):
+        # bumped every time a prober is stopped or a new one is started.
+        # Every prober captures its OWN generation at creation and every
+        # state-mutating write it makes re-checks it under `_lock` first --
+        # a superseded prober (stopped, replaced by a new failure class, or
+        # raced by a concurrent stop/start) becomes a harmless zombie: its
+        # join may still time out and let it keep running, but none of its
+        # writes can ever take effect once stale.
+        self._cloud_prober_generation: int = 0
+        # Optional numeric-only payload hook, mirroring on_ctx_pressure_high:
+        # fires with {"seconds": <float>} whenever a background probe is
+        # (re)scheduled, so the UI can render a countdown without polling.
+        self.on_cloud_probe_scheduled: Optional[Callable[[dict], None]] = None
 
         self.voz_referencia = None
         self.is_ready = False
@@ -738,6 +919,26 @@ class MotorVocalIA(threading.Thread):
         # None = zero behavior change (mirrors the on_chat_* callbacks above).
         self.on_guardrail_rejected: Optional[Callable[[str], None]] = None
 
+        # Unit 2.3 (runtime_findings_batch_20260731 F10): bounded per-request
+        # context telemetry ring, appended once per completed generation whose
+        # ctx_utilization line actually logs (see _generar_dialogo). NEVER a
+        # single self.last_* scalar: pregenerate's background worker
+        # (~:1773) calls _generar_dialogo concurrently with the foreground
+        # turn, so a scalar would be silently clobbered mid-turn by a draft
+        # nobody has spoken yet. Each entry is built entirely from one call's
+        # own locals and deque.append is atomic under the GIL, so no extra
+        # lock is needed for the append itself.
+        self._ctx_telemetry_ring: "deque[dict]" = deque(maxlen=CTX_TELEMETRY_RING_MAXLEN)
+        # Optional numeric-only payload hook for ctx_pressure_high, mirroring
+        # on_guardrail_rejected above. NOT a second positional argument on
+        # ui_callback: CTK's concrete callback (app_shell.py's
+        # _on_motor_event(self, status: str)) takes exactly one positional
+        # argument with no *args/default, so calling self.ui_callback(status,
+        # payload) would raise TypeError there. payload is passed as a plain
+        # call argument (never shared instance state), so two threads racing
+        # here (foreground + a pregen worker) cannot clobber each other.
+        self.on_ctx_pressure_high: Optional[Callable[[dict], None]] = None
+
     @property
     def is_speaking(self):
         with self._lock:
@@ -754,6 +955,63 @@ class MotorVocalIA(threading.Thread):
         Ollama generation call is actually in flight (foreground or pregen)."""
         with self._lock:
             return self._llm_generating
+
+    def provider_runtime_state(self) -> dict:
+        """Live provider/transport truth (F4, runtime_findings_batch_20260731 1.3).
+
+        Read-only snapshot of the EFFECTIVE posture — the same
+        `_cfg_is_local(...) or _cloud_fallback_active` posture `_is_local`
+        computes — so status/telemetry can never again drift from what a live
+        generation would actually use. Deliberately never reads
+        `llm_provider.json` from disk: that disk read is exactly what let
+        `_display_model` (opencohost/api/main.py) keep reporting the stale
+        cloud model name through an active `_cloud_fallback_active` fallback.
+
+        Returns a dict with:
+        - `provider`: "local" when the effective transport is local (whether
+          by config or by fallback); otherwise the persisted cloud provider id.
+        - `transport`: "local" | "cloud".
+        - `fallback_active`: the raw `_cloud_fallback_active` flag.
+        - `fallback_reason` (unit 2.2): the 1.1 class the fallback engaged
+          for, or None outside fallback.
+        - `provider_epoch` (unit 2.2): the running count of provider
+          transitions this process has made.
+        - `next_cloud_probe_in_seconds` (unit 2.2): seconds until the next
+          background return probe, or None when no probe is scheduled
+          (no active fallback, or a non-probeable class).
+        - `generation_model`: the model a request dispatched right now would
+          actually use — `current_model` locally, the active cloud profile's
+          `model` on cloud (None if unset/missing, same graceful degradation
+          `_display_model` already had).
+        """
+        cfg = self._provider_config
+        with self._lock:
+            fallback_active = self._cloud_fallback_active
+            fallback_reason = self._cloud_fallback_reason
+            provider_epoch = self.provider_epoch
+            probe_next_at = self._cloud_probe_next_at
+        next_probe_in = None if probe_next_at is None else max(0.0, probe_next_at - time.monotonic())
+        is_local = self._cfg_is_local(cfg) or fallback_active
+        if is_local:
+            return {
+                "provider": "local",
+                "transport": "local",
+                "fallback_active": fallback_active,
+                "fallback_reason": fallback_reason,
+                "provider_epoch": provider_epoch,
+                "next_cloud_probe_in_seconds": next_probe_in,
+                "generation_model": self.current_model,
+            }
+        profile = self._cfg_active_profile(cfg) or {}
+        return {
+            "provider": cfg.get("active_provider") or "local",
+            "transport": "cloud",
+            "fallback_active": fallback_active,
+            "fallback_reason": fallback_reason,
+            "provider_epoch": provider_epoch,
+            "next_cloud_probe_in_seconds": next_probe_in,
+            "generation_model": str(profile.get("model") or "") or None,
+        }
 
     @property
     def current_speech_source(self):
@@ -1286,7 +1544,23 @@ class MotorVocalIA(threading.Thread):
         tipo, payload, *rest = comando
         history_text = rest[0] if rest else None
         source = rest[1] if len(rest) > 1 and rest[1] else "direct"
-        self._dispatch_command(tipo, payload, history_text=history_text, source=source)
+        # Unit 4.1: OPTIONAL 5th element, the monotonic submit stamp (dispatch.py).
+        # Omitted -> None, so a control/legacy 2-4 tuple is unchanged.
+        submitted_at = rest[2] if len(rest) > 2 else None
+        # Unit 4.2 (F12 closure): OPTIONAL 6th element, the provider posture at
+        # submit time (dispatch.py). Omitted -> None, so a shorter tuple (every
+        # caller before this unit) is unchanged.
+        submitted_under_provider = rest[3] if len(rest) > 3 else None
+        if submitted_at is not None:
+            if submitted_under_provider is not None:
+                self._dispatch_command(
+                    tipo, payload, history_text=history_text, source=source,
+                    submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                )
+            else:
+                self._dispatch_command(tipo, payload, history_text=history_text, source=source, submitted_at=submitted_at)
+        else:
+            self._dispatch_command(tipo, payload, history_text=history_text, source=source)
 
     def _dispatch_command(
         self,
@@ -1294,6 +1568,8 @@ class MotorVocalIA(threading.Thread):
         payload,
         history_text: Optional[str] = None,
         source: str = "direct",
+        submitted_at: Optional[float] = None,
+        submitted_under_provider: Optional[str] = None,
     ) -> None:
         """Dispatch a command tuple. Extracted from run() for testability.
 
@@ -1340,7 +1616,20 @@ class MotorVocalIA(threading.Thread):
             if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                self.enqueue(payload, priority=1, source=source, history_text=history_text)
+                # Unit 4.1: forward submitted_at ONLY when present so a caller/test
+                # that stubs enqueue() with the pre-4.1 signature is unaffected.
+                # Unit 4.2 (F12 closure): submitted_under_provider rides the same
+                # conditional-forward idiom, ONLY alongside submitted_at.
+                if submitted_at is not None:
+                    if submitted_under_provider is not None:
+                        self.enqueue(
+                            payload, priority=1, source=source, history_text=history_text,
+                            submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                        )
+                    else:
+                        self.enqueue(payload, priority=1, source=source, history_text=history_text, submitted_at=submitted_at)
+                else:
+                    self.enqueue(payload, priority=1, source=source, history_text=history_text)
                 return
             with self._lock:
                 self._processing = True
@@ -1352,7 +1641,18 @@ class MotorVocalIA(threading.Thread):
             # speaking_start so it never races this turn's own generation.
             self._note_detour_turn(source)
             try:
-                self._ejecutar_inferencia(payload, source=source, history_text=history_text)
+                # Unit 4.1: same conditional-forward rationale as enqueue() above.
+                # Unit 4.2 (F12 closure): submitted_under_provider mirrors it.
+                if submitted_at is not None:
+                    if submitted_under_provider is not None:
+                        self._ejecutar_inferencia(
+                            payload, source=source, history_text=history_text,
+                            submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                        )
+                    else:
+                        self._ejecutar_inferencia(payload, source=source, history_text=history_text, submitted_at=submitted_at)
+                else:
+                    self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
                 self._complete_processing_cycle()
 
@@ -1493,6 +1793,8 @@ class MotorVocalIA(threading.Thread):
         priority: int = 1,
         source: str = "chat",
         history_text: Optional[str] = None,
+        submitted_at: Optional[float] = None,
+        submitted_under_provider: Optional[str] = None,
     ) -> None:
         """Add a message to the priority queue.
 
@@ -1503,9 +1805,22 @@ class MotorVocalIA(threading.Thread):
             history_text: Honest text to commit to historial for this turn
                 (agenda_ptt_commit_raw_text). None (default) commits `payload`
                 as before — every caller other than agenda-PTT stays unchanged.
+            submitted_at: Unit 4.1 (runtime_findings_batch_20260731, F5) — the
+                monotonic stamp of the original front-end submission (API
+                dispatch entry), carried through so `_process_priority_queue`
+                can compute an honest queue_wait_ms at pop time. None for every
+                internally-generated item (agenda's own turns, accumulation) —
+                those never fake a wait they didn't measure.
+            submitted_under_provider: Unit 4.2 (F12 closure) — the provider
+                posture at submit time, carried through so a fallback/return
+                that happens while the item sits queued can be disclosed on
+                the reply instead of silently answering under a different
+                provider. None for every internally-generated item.
         """
         with self._pq_lock:
-            self._priority_queue.append((priority, time.time(), payload, source, history_text))
+            self._priority_queue.append(
+                (priority, time.time(), payload, source, history_text, submitted_at, submitted_under_provider)
+            )
             self._priority_queue.sort(key=lambda x: (x[0], x[1]))
             # Enforce max items — drop lowest priority (highest number) first,
             # breaking ties by newest timestamp. PTT (0) is always preserved over
@@ -2327,10 +2642,15 @@ class MotorVocalIA(threading.Thread):
                     return
 
                 item = self._priority_queue.pop(0)
-                # Unpack tolerating both the legacy 4-tuple and the current
-                # 5-tuple (payload, source, history_text) produced by enqueue().
+                # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
+                # source, history_text), the 6-tuple that adds submitted_at
+                # (Unit 4.1), and the current 7-tuple that adds
+                # submitted_under_provider (Unit 4.2, F12), all produced by
+                # enqueue().
                 priority, ts, payload, source, *rest = item
                 history_text = rest[0] if rest else None
+                submitted_at = rest[1] if len(rest) > 1 else None
+                submitted_under_provider = rest[2] if len(rest) > 2 else None
 
             # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
             # popped but _processing is still False here — this is exactly the
@@ -2386,7 +2706,20 @@ class MotorVocalIA(threading.Thread):
                             f"Pregen boundary: draft=none source={source} gap_ms=-1 "
                             f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
                         )
-                    self._ejecutar_inferencia(payload, source=source, history_text=history_text)
+                    # Unit 4.1: conditional forward (see _dispatch_command) — a
+                    # stubbed _ejecutar_inferencia in existing tests never sees
+                    # the new kwarg unless a real submitted_at was queued.
+                    # Unit 4.2 (F12 closure): submitted_under_provider mirrors it.
+                    if submitted_at is not None:
+                        if submitted_under_provider is not None:
+                            self._ejecutar_inferencia(
+                                payload, source=source, history_text=history_text,
+                                submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                            )
+                        else:
+                            self._ejecutar_inferencia(payload, source=source, history_text=history_text, submitted_at=submitted_at)
+                    else:
+                        self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
                 # process_queue=False: the loop (not recursion) drains the next
                 # ready item, keeping the stack flat (F1). The per-item idle
@@ -2400,6 +2733,9 @@ class MotorVocalIA(threading.Thread):
             self._current_processing_source = None
         self.ui_callback("idle")
         self._drain_control_commands()
+        # Unit 4.2 (runtime_findings_batch_20260731, D3b): see the method's own
+        # docstring for the root cause this closes.
+        self._drain_pending_direct_into_priority_queue()
         self._check_pending_model_switch()
         if process_queue:
             self._process_priority_queue()
@@ -2451,6 +2787,78 @@ class MotorVocalIA(threading.Thread):
         if applied > 0:
             self._log(f"Boundary drain: {applied} comando(s) de control aplicados.")
             self.ui_callback("commands_drained")
+
+    def _drain_pending_direct_into_priority_queue(self) -> None:
+        """Unit 4.2 (runtime_findings_batch_20260731, D3b): move a queued
+        source=direct command from `command_queue` into `_priority_queue` at
+        every turn boundary.
+
+        Root cause (F5, and the F12 follow-up this closes): WU2's
+        consume-at-event (`_hablar`'s speaking_end tail; see the comment on
+        `AgendaDriver._prefetch` in `api/agenda_driver.py`) adopts the NEXT
+        agenda block straight into `_priority_queue` SYNCHRONOUSLY, on THIS
+        engine thread, before this boundary ever runs. As long as that keeps
+        succeeding (the 2026-07-30 run pregenerated 87 of 126 blocks),
+        `_process_priority_queue`'s drain loop never finds `_priority_queue`
+        empty and never returns to `run()`'s `command_queue.get()` -- so a
+        `source=direct` command sitting in `command_queue` (put there by
+        `Dispatcher.dispatch`, api/dispatch.py) is never even looked at for
+        as long as agenda content keeps flowing. `_priority_queue`'s own
+        priority sort (0=PTT, 1=chat/direct, 2=agenda; see `enqueue()`) is
+        completely correct once an item actually reaches it -- the 2026-07-30
+        defect (four direct questions waiting 13.8-29.1 minutes) was a direct
+        item that never got there at all, not a sort-order bug.
+
+        Fix: peek `command_queue`'s FRONT (mirrors `_drain_control_commands`'s
+        mutex-peek, called immediately before this at every boundary) and, if
+        it is a `process_context` command with `source=="direct"`, pop it and
+        `enqueue()` it into `_priority_queue` at priority=1 -- the SAME
+        conversion `_dispatch_command`'s busy branch already does for a
+        command read the normal way. Once queued, the priority sort
+        guarantees it is served ahead of any further agenda action
+        (priority=2), even if an agenda block was already re-queued earlier
+        in this same boundary (insertion order does not matter, only the
+        sort key does).
+
+        Scoped strictly to an EXPLICIT `source=="direct"` tag (D3) -- the 4th
+        tuple element must literally be "direct", never the tolerant-unpack
+        default `_consume_command` falls back to for a bare/legacy tuple. A
+        plain `("process_context", payload)` 2-tuple (the CTK/legacy internal
+        dispatch shape, still used by a few call sites/tests) is NOT an API
+        turn tagged by `Dispatcher.dispatch` and must stay deferred exactly as
+        before (WU1's command-starvation fix, tests/test_command_drain.py) --
+        only a real `/api/chat/turn` turn (which always dispatches an
+        explicit 4+ tuple) qualifies. PTT never reaches this path either way
+        (its own interrupt/cut mechanism, WU5, is untouched -- a PTT arrival
+        cuts speech directly instead of waiting for a boundary). Stops at the
+        first non-matching front item so nothing else is reordered. Bounded
+        by a qsize() snapshot, mirroring `_drain_control_commands`, so a
+        sustained stream can never loop indefinitely.
+        """
+        for _ in range(self.command_queue.qsize()):
+            with self.command_queue.mutex:
+                if not self.command_queue.queue:
+                    return
+                comando = self.command_queue.queue[0]
+                if (
+                    comando is None
+                    or comando[0] != "process_context"
+                    or len(comando) < 4
+                    or comando[3] != "direct"
+                ):
+                    return
+                _tipo, payload, history_text, _source, *rest = comando
+                submitted_at = rest[0] if rest else None
+                submitted_under_provider = rest[1] if len(rest) > 1 else None
+                self.command_queue.queue.popleft()
+            if submitted_at is not None:
+                self.enqueue(
+                    payload, priority=1, source="direct", history_text=history_text,
+                    submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                )
+            else:
+                self.enqueue(payload, priority=1, source="direct", history_text=history_text)
+            self._log("Boundary drain: turno directo movido a cola prioritaria (D3b).", level="debug")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         if not self._is_local:
@@ -3193,7 +3601,16 @@ class MotorVocalIA(threading.Thread):
                                     timeout=chat_timeout,
                                 )
                             else:
-                                self._handle_cloud_failure(source)
+                                # A watchdog timeout carries no HTTP status/
+                                # headers to classify from (it never got a
+                                # response) -- `transient` is the correct
+                                # class per classify_cloud_error's own rule
+                                # ("anything without a status_code ... is
+                                # transient"), and drives exponential-backoff
+                                # auto-return (unit 2.2).
+                                self._handle_cloud_failure(
+                                    source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                                )
                             if commit_history:
                                 self._invalidate_pregen_epoch()
                         return ""
@@ -3205,6 +3622,7 @@ class MotorVocalIA(threading.Thread):
                     # byte-identical (no "provider" key) so existing exact-match
                     # assertions keep passing. Full MODEL_TRACE attribution is
                     # deferred (residual).
+                    _cloud_class = None
                     if is_local:
                         self._last_llm_failure = {
                             "model": self.current_model,
@@ -3215,6 +3633,12 @@ class MotorVocalIA(threading.Thread):
                         }
                     else:
                         _fail_profile = self._cfg_active_profile(provider_cfg) or {}
+                        # F2 (runtime_findings_batch_20260731 unit 1.1): classify
+                        # from status_code/headers already carried on the
+                        # exception -- never from `str(e)`/body, which would mean
+                        # parsing a guessed provider-specific shape.
+                        _cloud_class = cloud_llm_client.classify_cloud_error(e)
+                        self._last_cloud_failure_class = _cloud_class
                         self._last_llm_failure = {
                             "model": _fail_profile.get("model") or self.current_model,
                             "provider": provider_cfg.get("active_provider"),
@@ -3222,29 +3646,90 @@ class MotorVocalIA(threading.Thread):
                             "attempt": intento + 1,
                             "reason": type(e).__name__,
                             "message": str(e),
+                            "clase": _cloud_class,
                         }
+                    _clase_suffix = f" clase={_cloud_class}" if _cloud_class else ""
                     self._log(
-                        f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}: {e}",
+                        f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}{_clase_suffix}: {e}",
                         level="error",
                     )
                     logger.warning(
-                        "Ollama chat transport failure: model=%s source=%s attempt=%s/%s",
+                        "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s",
                         request_model,
                         source,
                         intento + 1,
                         max_intentos,
+                        _cloud_class or "n/a",
                         exc_info=True,
                     )
+                    # Unit 2.1 (runtime_findings_batch_20260731): `rate_limited`
+                    # is the ONE class that spends the existing max_intentos
+                    # budget instead of exiting immediately -- honour a bounded
+                    # Retry-After when the budget still has an attempt left.
+                    # `bad_key` / `ambiguous_429` / `transient` never retry here
+                    # (the honest completion of "do not guess a provider-
+                    # specific table": an unclassifiable or non-timing 429 gets
+                    # conservative treatment, not a guessed wait).
+                    if (
+                        not is_local
+                        and _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
+                        and intento < max_intentos - 1
+                    ):
+                        _retry_after = cloud_llm_client.parse_retry_after_seconds(
+                            getattr(e, "headers", None) or {}
+                        )
+                        _wait_seconds = (
+                            _retry_after if _retry_after is not None
+                            else CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS
+                        )
+                        if _wait_seconds <= CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS:
+                            self._log(
+                                f"rate_limited: retrying in {_wait_seconds}s "
+                                f"(intento {intento+1}/{max_intentos}).",
+                                level="warning",
+                            )
+                            # Dead-air bound: this sleep runs BETWEEN attempts,
+                            # after `_ollama_chat_with_watchdog` has already
+                            # raised -- outside `_call_with_watchdog`'s own
+                            # worker thread, so the watchdog cannot kill it.
+                            time.sleep(_wait_seconds)
+                            continue
+                        self._log(
+                            f"rate_limited: Retry-After={_wait_seconds}s exceeds "
+                            f"{CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS}s bound; not retrying in-turn.",
+                            level="warning",
+                        )
+                    # `bad_key` never retries; surface a "check your key" banner
+                    # ONCE per failure event (latch resets alongside
+                    # `_last_cloud_failure_class` on the next success, above).
+                    if _cloud_class == cloud_llm_client.CLOUD_ERROR_BAD_KEY and not self._cloud_bad_key_notified:
+                        self._cloud_bad_key_notified = True
+                        self.ui_callback("cloud_bad_key")
                     # F1 (multi_provider_llm_20260723): a CLOUD transport error
-                    # surviving retry (401 bad key, DNS, 5xx via
-                    # CloudLLMResponseError/ConnectionError/RequestException) must
-                    # engage the SAME fallback state machine as a cloud timeout
+                    # exits the attempt loop here when not retried above -- it
+                    # engages the SAME fallback state machine as a cloud timeout
                     # (spec C: fallback on "cloud timeout OR a non-2xx/connection
-                    # error surviving retry/backoff"). The LOCAL transport path
-                    # stays byte-identical (spec B: a local fault never routes to
-                    # cloud fallback / never rolls back here).
+                    # error"). The LOCAL transport path stays byte-identical
+                    # (spec B: a local fault never routes to cloud fallback /
+                    # never rolls back here).
                     if not is_local:
-                        self._handle_cloud_failure(source)
+                        # Unit 2.2: re-derive Retry-After directly from `e` in
+                        # scope rather than the loop-local `_retry_after` --
+                        # that variable is only assigned inside the in-turn
+                        # retry branch above and can carry a stale value from
+                        # an EARLIER attempt this same call when this attempt
+                        # skipped that branch (e.g. rate_limited on the final,
+                        # budget-exhausted attempt).
+                        _probe_retry_after = (
+                            cloud_llm_client.parse_retry_after_seconds(getattr(e, "headers", None) or {})
+                            if _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
+                            else None
+                        )
+                        self._handle_cloud_failure(
+                            source,
+                            failure_class=_cloud_class or cloud_llm_client.CLOUD_ERROR_TRANSIENT,
+                            retry_after_seconds=_probe_retry_after,
+                        )
                     if commit_history:
                         self._invalidate_pregen_epoch()
                     return ""
@@ -3360,11 +3845,56 @@ class MotorVocalIA(threading.Thread):
                     request_model, _pec_final, _native_ctx, _effective_ctx, _util,
                     _prefill_ms, _decode_ms, _ec_final, source,
                 )
+                # Unit 2.3 (runtime_findings_batch_20260731 F10): stash the SAME
+                # numbers the line above just logged, per request, in the bounded
+                # ring -- built entirely from this call's own locals (never a
+                # shared attribute), so it cannot diverge from the log line for
+                # this turn and cannot race a concurrent pregen worker's own call.
+                # `_ctx_evicted` is the ctx_budget_gate local from earlier in this
+                # SAME _generar_dialogo call (still in scope, set once before the
+                # retry loop -- never re-threaded across a call boundary).
+                # `_ctx_provider` mirrors trace_provider's formula below without
+                # depending on it (that variable is computed later in this
+                # method and must not gate whether this snapshot is built).
+                _ctx_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
+                _ctx_snapshot = {
+                    "request_id": str(uuid.uuid4()),
+                    "timestamp": time.time(),
+                    "source": source,
+                    "provider": _ctx_provider,
+                    "model": request_model,
+                    "native_ctx": _native_ctx,
+                    "effective_ctx": _effective_ctx,
+                    "ratio": _util,
+                    "prompt_eval_count": _pec_final,
+                    "prefill_ms": _prefill_ms,
+                    "decode_ms": _decode_ms,
+                    "eval_count": _ec_final,
+                    "evicted_pairs": _ctx_evicted,
+                }
+                # getattr-guarded: several existing tests build a MotorVocalIA
+                # via __new__ (bypassing __init__) and only set the attributes
+                # their scenario touches -- mirrors the agenda_output_transformer
+                # guard above.
+                _ctx_ring = getattr(self, "_ctx_telemetry_ring", None)
+                if _ctx_ring is not None:
+                    _ctx_ring.append(_ctx_snapshot)
                 if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
                     logger.warning(
                         "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
                         _util * 100, request_model, source,
                     )
+                    _on_ctx_pressure_high = getattr(self, "on_ctx_pressure_high", None)
+                    if _on_ctx_pressure_high is not None:
+                        try:
+                            _on_ctx_pressure_high({
+                                "ratio": _util,
+                                "effective_ctx": _effective_ctx,
+                                "native_ctx": _native_ctx,
+                                "evicted_pairs": _ctx_evicted,
+                            })
+                        except Exception:
+                            logger.exception("on_ctx_pressure_high callback failed")
                     self.ui_callback("ctx_pressure_high")
 
             # MODEL_TRACE: audit which model was used for this generation
@@ -3372,12 +3902,33 @@ class MotorVocalIA(threading.Thread):
             desired = self._desired_model
             active = self.current_model
             loaded = self._loaded_model or "unknown"
+            # F4 (runtime_findings_batch_20260731 1.3): provider/transport for
+            # THIS generation, derived from the entry-snapshot `is_local` (never
+            # a fresh live read — same pinning rule as the rest of this method).
+            # `fallback_active` here means "local ONLY because of the runtime
+            # fallback flag, not because cfg was genuinely local" — derived from
+            # values already in scope, no extra snapshot variable needed.
+            trace_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
+            trace_transport = "local" if is_local else "cloud"
+            trace_fallback_active = is_local and not self._cfg_is_local(provider_cfg)
             trace_msg = (
                 f"[MODEL_TRACE] desired={desired} active={active} "
                 f"loaded={loaded} generation={generation_model} "
-                f"profile={self._current_profile_name} source={source}"
+                f"profile={self._current_profile_name} source={source} "
+                f"provider={trace_provider} transport={trace_transport} "
+                f"fallback_active={trace_fallback_active}"
             )
-            if desired != active or active != loaded or loaded != generation_model:
+            # Root cause confirmed against logs/opencohost_20260730_162650.log:
+            # `_prepare_model` short-circuits without ever setting `_loaded_model`
+            # while cloud is the effective transport (`:2683-2687` — see
+            # `_judge_model`'s docstring for the same fact), so `loaded` reads
+            # "unknown" on EVERY cloud-by-design turn even though nothing is
+            # wrong — that is the entire cause of the 29/29 false positives, not
+            # `generation` carrying the cloud model id (it never does: `request_model`
+            # is captured once at this method's entry and is always the local alias).
+            cloud_by_design = trace_transport == "cloud" and not trace_fallback_active
+            mismatch = desired != active or active != loaded or loaded != generation_model
+            if mismatch and not cloud_by_design:
                 self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
             else:
                 logger.info(f"Motor: {trace_msg}")
@@ -3402,7 +3953,13 @@ class MotorVocalIA(threading.Thread):
                 # the fallback state machine. Local stays byte-identical.
                 if not is_local:
                     self.ui_callback("cloud_llm_error")
-                    self._handle_cloud_failure(source)
+                    # No exception/status here (a well-formed but empty 2xx) --
+                    # `transient` per classify_cloud_error's own rule for a
+                    # malformed/unclassifiable 2xx body; drives backoff auto-
+                    # return (unit 2.2).
+                    self._handle_cloud_failure(
+                        source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                    )
                 if commit_history:
                     self._invalidate_pregen_epoch()
                 return ""
@@ -3500,6 +4057,8 @@ class MotorVocalIA(threading.Thread):
                 return ""
 
             self._last_llm_failure = None
+            self._last_cloud_failure_class = None
+            self._cloud_bad_key_notified = False
 
             # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
             # brake let through (verbatim dups + synonym-swap templates) BEFORE it
@@ -3547,6 +4106,30 @@ class MotorVocalIA(threading.Thread):
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
+
+    def ctx_telemetry_snapshot(self, sources: Optional[tuple] = None) -> dict:
+        """Unit 2.3 (runtime_findings_batch_20260731 F10): read-only view of the
+        per-request context telemetry ring for API/status consumers (unit 2.5).
+
+        "latest" is honestly defined as the most recently APPENDED entry
+        regardless of source -- a background pregen generation can be
+        "latest" even while a different (previous) turn is still being
+        spoken. Pass `sources` (e.g. ("direct", "kira-agenda")) to restrict
+        "latest" to entries whose `source` matches, letting a caller pick the
+        latest FOREGROUND entry instead. `ring` is always the full unfiltered
+        history, oldest first, so a caller wanting a filtered ring can filter
+        the list itself.
+
+        Returns ``{"latest": <entry dict or None>, "ring": [<entry dict>, ...]}``.
+        """
+        ring = list(getattr(self, "_ctx_telemetry_ring", ()) or ())
+        latest = None
+        candidates = ring
+        if sources is not None:
+            candidates = [entry for entry in ring if entry.get("source") in sources]
+        if candidates:
+            latest = candidates[-1]
+        return {"latest": latest, "ring": ring}
 
     def _create_ollama_chat_client(self, ollama_module):
         client_factory = getattr(ollama_module, "Client", None)
@@ -3635,6 +4218,7 @@ class MotorVocalIA(threading.Thread):
         """
         if not isinstance(cfg, dict):
             return
+        provider_changed = False
         with self._lock:
             # F5 (multi_provider_llm_20260723): clear the runtime fallback flag
             # ONLY when the PUT actually CHANGES active_provider — an explicit
@@ -3647,9 +4231,46 @@ class MotorVocalIA(threading.Thread):
             incoming_provider = (cfg.get("active_provider") or "local")
             self._provider_config = cfg
             if incoming_provider != previous_provider:
+                provider_changed = True
                 self._cloud_fallback_active = False
+                # Unit 2.2: a manual re-arm (this IS the documented re-arm path
+                # for ambiguous_429/bad_key) clears the reason/schedule and is
+                # itself a provider transition, so it bumps the epoch too.
+                self._cloud_fallback_reason = None
+                self._cloud_probe_next_at = None
+                self.provider_epoch += 1
+        if provider_changed:
+            # Unit 2.2 fix (finding 3): invalidate speculative drafts FIRST,
+            # immediately after the swap/flag clear above -- BEFORE the
+            # potentially ~2s blocking join inside _stop_cloud_prober below.
+            # Plan step 6 mandates drafts invalidated before the transition
+            # completes; leaving the (up to 2s) join in front of this let a
+            # consumer thread (play_prefetched_agenda / restore_frozen_stash)
+            # pop a draft made under the OLD provider during that window.
+            # Mirrors the invalidate-then-transition order _handle_cloud_failure
+            # and _on_cloud_probe_success already use.
+            #
+            # F12 (runtime_findings_batch_20260731): a provider switch must
+            # invalidate speculative drafts -- unconditionally, on every
+            # transition, rather than tagging each stash entry with
+            # provider_epoch and checking it at consumption. The contract only
+            # requires that no draft survive a provider switch in either
+            # direction, not that a survivor be identifiable by provider; the
+            # unconditional invalidate is the simpler choice that already
+            # satisfies it, so no consumption-path changes are needed.
+            self._invalidate_pregen_epoch()
+            self._invalidate_frozen_stash()
+            # Cancel any running background return probe cleanly (outside the
+            # lock above -- _stop_cloud_prober takes it again itself).
+            self._stop_cloud_prober()
 
-    def _handle_cloud_failure(self, source: str) -> None:
+    def _handle_cloud_failure(
+        self,
+        source: str,
+        *,
+        failure_class: str = cloud_llm_client.CLOUD_ERROR_TRANSIENT,
+        retry_after_seconds: Optional[int] = None,
+    ) -> None:
         """Cloud-only failure response (spec C / design 'Cloud Failure Flow').
 
         Invoked from the cloud branch of a watchdog-timeout failure — the
@@ -3664,6 +4285,15 @@ class MotorVocalIA(threading.Thread):
         semantics'). Warm + speak run on a background daemon thread (mirrors
         `play_prefetched_agenda`'s `speaker()` closure) so a slow local warm-up
         (~10-20s, spec C) never blocks the caller or this already-failed turn.
+
+        Unit 2.2 (runtime_findings_batch_20260731 F3/F12): `failure_class` is
+        the 1.1 taxonomy class for THIS failure, computed by the caller from
+        the exception in scope — never re-derived from the possibly-stale
+        `_last_cloud_failure_class` instance attribute, which a watchdog
+        timeout or an empty-response return (neither carries an exception)
+        would leave holding a class from an earlier, unrelated turn.
+        Recorded as `_cloud_fallback_reason` and used to schedule (or
+        deliberately not schedule) the background return probe.
         """
         provider_cfg = self._provider_config
         fallback_mode = provider_cfg.get("fallback_mode", "auto")
@@ -3675,14 +4305,28 @@ class MotorVocalIA(threading.Thread):
             self.ui_callback("cloud_llm_error")
             return
 
+        # F12/2.2 precondition: invalidate speculative drafts BEFORE any state
+        # flips, in the cloud->local direction too ("in either direction" is
+        # the contract) -- a draft generated under cloud must never survive
+        # into local playback. Unconditional (not provider-tagged): simpler,
+        # and sufficient (see set_provider_config's identical note).
+        self._invalidate_pregen_epoch()
+        self._invalidate_frozen_stash()
+
         # Set the flag OPTIMISTICALLY so a generation racing the warm-up already
         # routes local; the worker CLEARS it again if the local backend turns out
         # to be unavailable (F3).
-        self._cloud_fallback_active = True
+        with self._lock:
+            self._cloud_fallback_active = True
+            self._cloud_fallback_reason = failure_class
+            self.provider_epoch += 1
         self._log(
-            f"Cloud LLM failure (source={source}); auto-falling back to local Ollama.",
+            f"Cloud LLM failure (source={source}); auto-falling back to local Ollama "
+            f"(reason={failure_class}).",
             level="warning",
         )
+        self.ui_callback("cloud_fallback_engaged")
+        self._start_cloud_prober(failure_class, retry_after_seconds)
         fallback_model = self._last_known_good_model or self.current_model
 
         def worker() -> None:
@@ -3697,7 +4341,27 @@ class MotorVocalIA(threading.Thread):
                 logger.exception("Cloud fallback: local model warm-up failed")
                 warmed = False
             if not warmed:
-                self._cloud_fallback_active = False
+                # Unit 2.2 fix (finding 5): this un-fallback is a provider
+                # TRANSITION (effective transport flips back to cloud, since
+                # _cloud_fallback_active clears) exactly like
+                # set_provider_config/_on_cloud_probe_success -- it must
+                # invalidate speculative drafts and bump provider_epoch the
+                # same way ("in either direction" per the F12 precondition,
+                # and per provider_epoch's own docstring). Invalidate BEFORE
+                # flipping the flag, same order as the other two transitions,
+                # so a consumer can never pop a draft made during the local
+                # warm-up window under the now-stale local posture.
+                self._invalidate_pregen_epoch()
+                self._invalidate_frozen_stash()
+                with self._lock:
+                    self._cloud_fallback_active = False
+                    self._cloud_fallback_reason = None
+                    self._cloud_probe_next_at = None
+                    self.provider_epoch += 1
+                # Neither backend works -- a probe would only re-discover that;
+                # the flag clearing above already sends the NEXT turn straight
+                # back at cloud, which re-enters this whole method on failure.
+                self._stop_cloud_prober()
                 self._log(
                     f"Cloud fallback (source={source}): local warm-up failed; "
                     "neither cloud nor local is usable.",
@@ -3711,6 +4375,348 @@ class MotorVocalIA(threading.Thread):
                 logger.exception("Cloud fallback: could not speak provider_fallback_notice")
 
         threading.Thread(target=worker, name="CloudFallbackWarm", daemon=True).start()
+
+    def _stop_cloud_prober(self) -> None:
+        """Unit 2.2: cancel any running background return probe.
+
+        Best-effort, bounded join -- a probe mid network-call cannot be
+        interrupted, so it is left to finish on its own daemon thread; it
+        checks the stop event both before scheduling its next wait and right
+        after its network call returns, and drops the result if set, so a
+        late-finishing probe can never mutate state a caller here already
+        moved past.
+
+        Fix (finding 1): the thread handle, stop event and generation bump
+        are ALL captured/mutated inside ONE `_lock` critical section (the
+        prior code read/nulled `_cloud_prober_thread` outside the lock while
+        `_start_cloud_prober` writes it inside -- a torn read/write could
+        either starve a fresh prober behind a stale `already_running`, or
+        have this call null out a thread a concurrent `_start_cloud_prober`
+        had just assigned). The generation bump makes the stopped prober
+        stale for every guarded write it might still make even if the join
+        below times out; `_cloud_probe_next_at` is always cleared here too
+        (finding 6) so a frozen countdown can never survive a stop.
+        """
+        with self._lock:
+            stop_event = self._cloud_prober_stop
+            thread = self._cloud_prober_thread
+            self._cloud_prober_stop = None
+            self._cloud_prober_generation += 1
+            self._cloud_probe_next_at = None
+        if stop_event is None:
+            return
+        stop_event.set()
+        if thread is not None:
+            thread.join(timeout=CLOUD_PROBER_JOIN_TIMEOUT_SECONDS)
+        with self._lock:
+            # Compare-and-clear: only null the handle if nothing newer (a
+            # fresh _start_cloud_prober racing this join) already replaced it.
+            if self._cloud_prober_thread is thread:
+                self._cloud_prober_thread = None
+
+    def _initial_cloud_probe_wait(
+        self, failure_class: str, retry_after_seconds: Optional[int]
+    ) -> Optional[float]:
+        """Unit 2.2 per-class policy: seconds until the FIRST probe, or None
+        when this class never gets an automatic probe loop.
+
+        WU3 (cloud_rearm_20260801, owner decision D-A): `ambiguous_429` now
+        ALSO gets a conservative automatic probe loop, gated by
+        `CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED` (one-line off-switch).
+        `bad_key` stays manual-only in every variant -- waiting cannot fix a
+        bad credential. Either way, the manual trigger
+        (`trigger_cloud_probe_now`, WU1) bypasses this table entirely."""
+        if failure_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED:
+            wait = (
+                retry_after_seconds
+                if retry_after_seconds is not None
+                else CLOUD_AUTO_RETURN_RATE_LIMIT_FLOOR_SECONDS
+            )
+            return float(
+                min(
+                    max(wait, CLOUD_AUTO_RETURN_RATE_LIMIT_FLOOR_SECONDS),
+                    CLOUD_AUTO_RETURN_RATE_LIMIT_CAP_SECONDS,
+                )
+            )
+        if failure_class == cloud_llm_client.CLOUD_ERROR_TRANSIENT:
+            return float(CLOUD_AUTO_RETURN_TRANSIENT_BASE_SECONDS)
+        if (
+            failure_class == cloud_llm_client.CLOUD_ERROR_AMBIGUOUS_429
+            and CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED
+        ):
+            return float(CLOUD_AUTO_RETURN_AMBIGUOUS_429_BASE_SECONDS)
+        return None
+
+    def _next_cloud_probe_wait(self, failure_class: str, previous_wait: float) -> float:
+        """Exponential backoff on a FAILED probe, capped per class."""
+        if failure_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED:
+            cap = CLOUD_AUTO_RETURN_RATE_LIMIT_CAP_SECONDS
+        elif failure_class == cloud_llm_client.CLOUD_ERROR_AMBIGUOUS_429:
+            # WU3: its own cap, independent of transient's (reuses the
+            # rate-limit ceiling by design -- see settings.py).
+            cap = CLOUD_AUTO_RETURN_AMBIGUOUS_429_CAP_SECONDS
+        else:
+            cap = CLOUD_AUTO_RETURN_TRANSIENT_CAP_SECONDS
+        return float(min(previous_wait * 2, cap))
+
+    def _cloud_probe_max_attempts(self, failure_class: str) -> Optional[int]:
+        """WU3 (cloud_rearm_20260801): probe-count ceiling for a class's
+        background loop. None means unbounded (rate_limited/transient keep
+        retrying forever, unchanged). Only ambiguous_429's conservative
+        auto-return (owner decision D-A) is bounded, and only while the
+        flag is on -- when off, `_initial_cloud_probe_wait` never arms it
+        in the first place, so this is never consulted for that case."""
+        if (
+            failure_class == cloud_llm_client.CLOUD_ERROR_AMBIGUOUS_429
+            and CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED
+        ):
+            return CLOUD_AUTO_RETURN_AMBIGUOUS_429_MAX_ATTEMPTS
+        return None
+
+    def _notify_cloud_probe_gave_up(self) -> None:
+        """WU3: the background probe loop exhausted its attempts budget
+        without a successful probe. No detail payload -- privacy gate, same
+        as cloud_fallback_engaged/cloud_restored (see
+        engine_host._MOTOR_EVENT_WHITELIST)."""
+        self.ui_callback("cloud_probe_gave_up")
+
+    def _notify_cloud_probe_scheduled(self, wait: float) -> None:
+        hook = getattr(self, "on_cloud_probe_scheduled", None)
+        if hook is not None:
+            try:
+                hook({"seconds": wait})
+            except Exception:
+                logger.exception("on_cloud_probe_scheduled callback failed")
+        self.ui_callback("cloud_probe_scheduled")
+
+    def _cloud_probe_once(self, provider_cfg: dict) -> bool:
+        """Unit 2.2: single bounded probe through the SAME cloud client/config
+        real turns use. Static minimal message only -- NO history, NO
+        persona, NO user content (privacy contract) -- and `num_predict=1`
+        (mapped to `max_tokens`) to minimize cost. Success = a well-formed
+        response; any exception (timeout, non-2xx, malformed body) is a
+        failure, exactly like a real turn's transport-error classification."""
+        try:
+            self._cloud_chat(
+                provider_cfg=provider_cfg,
+                messages=[{"role": "user", "content": "ping"}],
+                options={"num_predict": 1},
+                is_local=False,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _on_cloud_probe_success(self, generation: int) -> None:
+        """Unit 2.2 RETURN sequence, in the mandated order: (a) invalidate
+        speculative drafts FIRST, (b) bump provider_epoch, (c) clear the
+        fallback flag/reason under the lock, (d) narrate. History and
+        persistent memoria are untouched by design -- continuity across the
+        switch is the point (F15).
+
+        Fix (finding 1/2): `generation` is the caller prober's OWN generation,
+        captured when it was started. Checked under `_lock` before doing
+        anything, and again right before the state flip, so a superseded
+        (stopped/replaced) prober whose network call was already in flight
+        can never resurrect the fallback flag or clobber a newer failure
+        under a manual provider choice.
+        """
+        with self._lock:
+            if generation != self._cloud_prober_generation:
+                return
+        self._invalidate_pregen_epoch()
+        self._invalidate_frozen_stash()
+        with self._lock:
+            if generation != self._cloud_prober_generation:
+                return
+            self.provider_epoch += 1
+            self._cloud_fallback_active = False
+            self._cloud_fallback_reason = None
+            self._cloud_probe_next_at = None
+            self._cloud_prober_stop = None
+        self._log("Cloud restored; returning from local fallback.", level="info")
+        self.ui_callback("cloud_restored")
+
+    def _run_cloud_prober(
+        self,
+        stop_event: threading.Event,
+        failure_class: str,
+        wait: float,
+        generation: int,
+        attempts_left: Optional[int] = None,
+    ) -> None:
+        """Unit 2.2: the background probe loop. Runs on its OWN daemon
+        thread (started by `_start_cloud_prober`), NEVER inside a
+        user-facing turn. `stop_event.wait` (not `time.sleep`) so a manual
+        provider PUT (`_stop_cloud_prober`) interrupts the wait immediately
+        instead of only being noticed on the next tick.
+
+        Fix (findings 1/2/4/6): `generation` is THIS prober's own id,
+        captured by `_start_cloud_prober` at creation. Every state-mutating
+        write below re-checks `generation == self._cloud_prober_generation`
+        under `_lock` first (alongside the pre-existing stop_event check) --
+        a superseded prober (stopped outright, or replaced by a fresh
+        failure's class/schedule) keeps running harmlessly to completion
+        but can never reschedule a countdown or trigger a return once stale.
+
+        WU3 (cloud_rearm_20260801): `attempts_left` is None for every
+        caller except a bounded class (ambiguous_429, when its flag is on)
+        -- None means unbounded, so rate_limited/transient never give up,
+        exactly as before this unit. When bounded, a failed probe consumes
+        one attempt; reaching zero gives up instead of rescheduling, via
+        `_notify_cloud_probe_gave_up`, leaving `_cloud_fallback_reason`
+        untouched (still local) but `_cloud_probe_next_at` cleared -- the
+        manual trigger (WU1) remains the door back in.
+        """
+        while True:
+            if stop_event.wait(timeout=wait):
+                return  # stop requested during the wait
+            with self._lock:
+                if stop_event.is_set() or generation != self._cloud_prober_generation:
+                    return
+                provider_cfg = self._provider_config
+            ok = self._cloud_probe_once(provider_cfg)
+            if stop_event.is_set():
+                return  # superseded by a manual re-arm while probing
+            if ok:
+                self._on_cloud_probe_success(generation)
+                return
+            if attempts_left is not None:
+                attempts_left -= 1
+                if attempts_left <= 0:
+                    with self._lock:
+                        if stop_event.is_set() or generation != self._cloud_prober_generation:
+                            return
+                        self._cloud_probe_next_at = None
+                        self._cloud_prober_stop = None
+                    self._log(f"Cloud probe gave up: clase={failure_class}", level="warning")
+                    self._notify_cloud_probe_gave_up()
+                    return
+            if wait == 0:
+                # Post-WU3 fix: a manual trigger (WU1) arms with wait=0 for
+                # "probe immediately". Doubling zero is a fixed point (0*2
+                # == 0), which would otherwise re-probe in a tight loop
+                # forever. Hand off to the class's own auto-return cadence
+                # instead. Only reached for a class WITH an auto policy --
+                # a no-policy class (bad_key always; ambiguous_429 flag-off)
+                # was already exhausted by the one-shot attempts budget
+                # `_arm_cloud_prober` gives it, above.
+                wait = self._initial_cloud_probe_wait(failure_class, None)
+            else:
+                wait = self._next_cloud_probe_wait(failure_class, wait)
+            with self._lock:
+                if stop_event.is_set() or generation != self._cloud_prober_generation:
+                    return
+                self._cloud_probe_next_at = time.monotonic() + wait
+            self._notify_cloud_probe_scheduled(wait)
+
+    def _arm_cloud_prober(self, failure_class: str, wait: float) -> None:
+        """WU1 (cloud_rearm_20260801): the stop-old/generation-bump/
+        thread-start tail extracted from `_start_cloud_prober` (unchanged
+        code, just named) so `trigger_cloud_probe_now` can reuse the exact
+        same thread-safety choreography for an immediate manual probe
+        without a second prober flavor to keep in sync. Never called with
+        `wait=None` -- the caller decides whether this class/situation gets
+        a probe at all.
+
+        `_stop_cloud_prober` makes this safe even though its join is
+        bounded and best-effort: it bumps `_cloud_prober_generation` before
+        returning, so the old prober -- even if its join times out and it
+        keeps running -- becomes a harmless zombie the moment this method's
+        own generation bump below runs; none of its writes can land.
+
+        WU3: `attempts_left` is computed HERE from `failure_class` alone,
+        so it is uniform for both callers -- an automatic arm
+        (`_start_cloud_prober`) and a manual one (`trigger_cloud_probe_now`)
+        get the identical (fresh) attempts budget for the class, never a
+        stale leftover count from a prior give-up.
+
+        Post-WU3 fix: a class with NO automatic policy at all (bad_key
+        always; ambiguous_429 when its flag is off) gets a ONE-SHOT budget
+        here. Without this, a manual trigger's wait=0 on a failed probe
+        would loop forever in `_run_cloud_prober` (0*2 is a fixed point) --
+        this class was never meant to retry unattended, so one attempt then
+        `cloud_probe_gave_up` (manual re-trigger still works after) is the
+        correct manual-probe contract, not silent infinite spin.
+        """
+        self._stop_cloud_prober()
+        attempts_left = self._cloud_probe_max_attempts(failure_class)
+        if attempts_left is None and self._initial_cloud_probe_wait(failure_class, None) is None:
+            attempts_left = 1
+        with self._lock:
+            self._cloud_prober_generation += 1
+            generation = self._cloud_prober_generation
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=self._run_cloud_prober,
+                args=(stop_event, failure_class, wait, generation, attempts_left),
+                name="CloudProber",
+                daemon=True,
+            )
+            self._cloud_prober_stop = stop_event
+            self._cloud_prober_thread = thread
+            self._cloud_probe_next_at = time.monotonic() + wait
+        self._log(
+            f"Cloud probe armed: clase={failure_class} wait={int(wait)}s "
+            f"attempts_left={'unbounded' if attempts_left is None else attempts_left}",
+            level="info",
+        )
+        self._notify_cloud_probe_scheduled(wait)
+        thread.start()
+
+    def _start_cloud_prober(
+        self, failure_class: str, retry_after_seconds: Optional[int]
+    ) -> None:
+        """Unit 2.2: reconcile the background return probe with a NEW
+        failure (fix for findings 2/4). No-op (after stopping any live
+        prober) for ambiguous_429/bad_key -- no automatic probe loop, manual
+        re-arm only. For a probeable class, UNCONDITIONALLY replaces
+        whatever prober is already running with a fresh one for the new
+        class/wait: a second failure must never be silently swallowed by
+        the old `already_running` single-flight gate, which let a
+        non-probeable second failure leave a live prober able to auto-return
+        under a reason it forbids (finding 2), and let a probeable second
+        failure's own class/schedule (e.g. `rate_limited`'s Retry-After) be
+        discarded in favour of the stale one (finding 4).
+
+        WU1 (cloud_rearm_20260801): thin wrapper now -- this method only
+        decides WHETHER to arm (per-class policy via
+        `_initial_cloud_probe_wait`); the stop/generation-bump/thread
+        choreography lives in `_arm_cloud_prober`, shared with the manual
+        `trigger_cloud_probe_now` path.
+        """
+        wait = self._initial_cloud_probe_wait(failure_class, retry_after_seconds)
+        if wait is None:
+            self._stop_cloud_prober()
+            return
+        self._arm_cloud_prober(failure_class, wait)
+
+    def trigger_cloud_probe_now(self) -> dict:
+        """WU1 (cloud_rearm_20260801): manual probe trigger -- arms an
+        immediate probe (wait~=0) bypassing `_initial_cloud_probe_wait`'s
+        per-class table, so `ambiguous_429`/`bad_key` (manual-re-arm-only
+        classes) can also be probed on demand. Backs
+        `POST /api/llm/provider/probe` (WU2); synchronous and never touches
+        `command_queue`/the dispatcher, so it is usable mid-agenda,
+        side-stepping the locked model selector.
+
+        No-op (200-style, not an error) when there is nothing to probe:
+        `not_in_fallback` (nothing to return from) or `no_cloud_profile` (no
+        cloud profile configured to probe against). Otherwise collapses any
+        already-scheduled probe to now via the same `_arm_cloud_prober` tail
+        `_start_cloud_prober` uses, so success runs through the untouched
+        `_on_cloud_probe_success` -- never a second prober flavor.
+        """
+        with self._lock:
+            in_fallback = self._cloud_fallback_active
+            provider_cfg = self._provider_config
+            failure_class = self._cloud_fallback_reason
+        if not in_fallback:
+            return {"armed": False, "reason": "not_in_fallback"}
+        if self._cfg_active_profile(provider_cfg) is None:
+            return {"armed": False, "reason": "no_cloud_profile"}
+        self._arm_cloud_prober(failure_class, 0.0)
+        return {"armed": True, "reason": None}
 
     def _cloud_api_key(self, profile_id) -> str:
         """Read the per-profile cloud key from the OAuthStore (LLM_KEYS_FILE)."""
@@ -5281,7 +6287,15 @@ class MotorVocalIA(threading.Thread):
                 return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:300]
         return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", context)[:800]
 
-    def _ejecutar_inferencia(self, contexto, source: str = "direct", *, history_text: Optional[str] = None):
+    def _ejecutar_inferencia(
+        self,
+        contexto,
+        source: str = "direct",
+        *,
+        history_text: Optional[str] = None,
+        submitted_at: Optional[float] = None,
+        submitted_under_provider: Optional[str] = None,
+    ):
         # §7 instrument: the request -> TTS-receives-text span. A LOCAL, not an
         # instance slot: _hablar has four callers and two of them run on
         # background threads (play_prefetched_agenda's detached speaker at :1883
@@ -5291,12 +6305,57 @@ class MotorVocalIA(threading.Thread):
         # one where the span means anything — a pregenerated draft is spoken much
         # later by design (that overlap IS the feature).
         request_start = time.monotonic()
+        # Unit 4.1 (runtime_findings_batch_20260731, F5): the ORIGINAL bug —
+        # TURN_LATENCY measured engine-receipt -> TTS only, so the queue wait
+        # before this method ever ran (13.8-29.1 min in the 2026-07-30 run) was
+        # invisible. submitted_at (monotonic, stamped at the API dispatch entry
+        # in dispatch.py) lets us report the FULL wait as an ADDITIVE field —
+        # None for any item with no stamp (agenda-internal turns, the
+        # accumulation-buffer flush) logs with no fake value, never a fake 0.
+        queue_wait_ms: Optional[int] = None
+        if submitted_at is not None:
+            queue_wait_ms = max(0, int((request_start - submitted_at) * 1000))
+        # Unit 4.2 (F12 closure): capture the ANSWERING provider posture right
+        # before generation -- the same `_provider_config`/
+        # `_cloud_fallback_active` snapshot `_generar_dialogo` takes a moment
+        # later at its own entry (F15: collapsed to one `is_local` bool),
+        # so this is honest disclosure of what generation is ABOUT to use,
+        # not a second, possibly-drifted read taken after the (possibly
+        # long) generation call returns. None unless this turn was actually
+        # tagged at submit time (`submitted_under_provider`) -- an
+        # agenda/accumulated turn was never "submitted" through that seam.
+        answered_by_provider: Optional[str] = None
+        answered_by_transport: Optional[str] = None
+        provider_changed_while_queued: Optional[bool] = None
+        if submitted_under_provider is not None:
+            _answer_state = self.provider_runtime_state()
+            answered_by_provider = _answer_state["provider"]
+            answered_by_transport = _answer_state["transport"]
+            provider_changed_while_queued = submitted_under_provider != answered_by_provider
         dialogo = self._generar_dialogo(contexto, source=source, commit_history=True, history_text=history_text)
         if dialogo:
-            logger.info(
-                "[TURN_LATENCY] source=%s request_to_tts_ms=%d",
-                source, int((time.monotonic() - request_start) * 1000),
-            )
+            engine_ms = int((time.monotonic() - request_start) * 1000)
+            if queue_wait_ms is not None:
+                logger.info(
+                    "[TURN_LATENCY] source=%s request_to_tts_ms=%d queue_wait_ms=%d request_to_tts_total_ms=%d",
+                    source, engine_ms, queue_wait_ms, queue_wait_ms + engine_ms,
+                )
+                # Unit 4.2 (D3b): the documented bound is "current block's
+                # remaining speech + one generation" (DIRECT_ANSWER_MAX_WAIT_
+                # SECONDS, settings.py) -- NOT an enforcement timer, nothing is
+                # cancelled or retried because of this. Metadata-only WARNING,
+                # scoped strictly to source=="direct" per D3, so the claim
+                # stays honest without ever touching the reply itself.
+                if source == "direct" and queue_wait_ms > DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000:
+                    logger.warning(
+                        "[DIRECT_WAIT_EXCEEDED] source=direct queue_wait_ms=%d bound_ms=%d",
+                        queue_wait_ms, int(DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000),
+                    )
+            else:
+                logger.info(
+                    "[TURN_LATENCY] source=%s request_to_tts_ms=%d",
+                    source, engine_ms,
+                )
             # FIX-B2: single emit chokepoint for every spoken live line — the
             # main reply AND the guardrail/repetition fallbacks all arrive here
             # as a non-empty `dialogo` and are spoken below, so last-reply stays
@@ -5304,7 +6363,26 @@ class MotorVocalIA(threading.Thread):
             # emits from its own speaker (play_prefetched_agenda). Guarded, so a
             # raising callback never blocks speech. R8: Kira's own text only.
             emit_source = source if source.startswith("kira-agenda") else "kira"
-            self._emit_dialogue(dialogo, emit_source)
+            # Unit 4.1: conditional forward — an unstamped turn (agenda,
+            # accumulated) must call _emit_dialogue exactly as before so a
+            # pinned dialogue_callback spy assertion (2 positional args) never
+            # sees a surprise kwarg.
+            # Unit 4.2 (F12 closure): the provider-disclosure kwargs ride the
+            # SAME idiom, gated on submitted_under_provider so every existing
+            # queue_wait_ms-only caller/test is unaffected.
+            if queue_wait_ms is not None:
+                if submitted_under_provider is not None:
+                    self._emit_dialogue(
+                        dialogo, emit_source, queue_wait_ms=queue_wait_ms,
+                        answered_by_provider=answered_by_provider,
+                        answered_by_transport=answered_by_transport,
+                        submitted_under_provider=submitted_under_provider,
+                        provider_changed_while_queued=provider_changed_while_queued,
+                    )
+                else:
+                    self._emit_dialogue(dialogo, emit_source, queue_wait_ms=queue_wait_ms)
+            else:
+                self._emit_dialogue(dialogo, emit_source)
 
             self._hablar(dialogo, source=source)
             # Measure-first telemetry seam: a chat turn actually played to completion —
@@ -5329,11 +6407,18 @@ class MotorVocalIA(threading.Thread):
 
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:
-        """Strip common Markdown emphasis markers without deleting speech text."""
+        """Strip Markdown emphasis markers and non-Latin script glyphs, without
+        deleting otherwise-speakable text.
+
+        Screen/speech split: this runs inside _hablar_impl, AFTER _emit_dialogue
+        already forwarded the original (unfiltered) string to the screen sink —
+        the screen keeps CJK/etc glyphs, only the TTS-bound copy is filtered.
+        """
         if text is None:
             return ""
         if not isinstance(text, str):
             text = str(text)
+        text = _tts_strip_non_latin(text)
         if "*" not in text:
             return text
 
@@ -5862,17 +6947,49 @@ class MotorVocalIA(threading.Thread):
             self._speaking_start_monotonic = None
         self.ui_callback("speaking_end")
 
-    def _emit_dialogue(self, text: str, source: str) -> None:
+    def _emit_dialogue(
+        self,
+        text: str,
+        source: str,
+        queue_wait_ms: Optional[int] = None,
+        answered_by_provider: Optional[str] = None,
+        answered_by_transport: Optional[str] = None,
+        submitted_under_provider: Optional[str] = None,
+        provider_changed_while_queued: Optional[bool] = None,
+    ) -> None:
         """P3 producer sink: forwards Kira's own generated reply text.
 
         Opt-in (dialogue_callback defaults to None). A raising callback must
         never break the turn, so it's guarded the same way ui_callback sites
         are — logged, swallowed, never re-raised.
+
+        queue_wait_ms (Unit 4.1, runtime_findings_batch_20260731 F5): forwarded
+        ONLY when given — every existing caller/test that asserts an exact
+        2-positional-arg call on dialogue_callback (e.g. ChatReplySink.record)
+        stays byte-identical when this turn had no submitted_at stamp.
+
+        The provider-disclosure kwargs (Unit 4.2, F12 closure) ride the SAME
+        idiom, gated on submitted_under_provider — forwarded ONLY together,
+        ONLY when the turn was tagged at submit time, so every existing
+        queue_wait_ms-only caller/test (2 positional args + queue_wait_ms)
+        stays byte-identical too.
         """
         if self.dialogue_callback is None:
             return
         try:
-            self.dialogue_callback(text, source)
+            if queue_wait_ms is not None:
+                if submitted_under_provider is not None:
+                    self.dialogue_callback(
+                        text, source, queue_wait_ms=queue_wait_ms,
+                        answered_by_provider=answered_by_provider,
+                        answered_by_transport=answered_by_transport,
+                        submitted_under_provider=submitted_under_provider,
+                        provider_changed_while_queued=provider_changed_while_queued,
+                    )
+                else:
+                    self.dialogue_callback(text, source, queue_wait_ms=queue_wait_ms)
+            else:
+                self.dialogue_callback(text, source)
         except Exception:
             logger.exception("dialogue_callback failed")
 

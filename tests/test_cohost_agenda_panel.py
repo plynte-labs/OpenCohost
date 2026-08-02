@@ -39,7 +39,7 @@ def test_cohost_panel_exposes_priority_and_global_session_controls() -> None:
     assert "combo_turns" in text
     assert "combo_safety_mode" in text
     assert "Configuración de sesión" in text
-    assert "Turnos globales" in text
+    assert "Intentos globales" in text
     assert "Ritmo global" in text
     assert "Longitud global" in text
     assert "Modo vivo" in text
@@ -180,7 +180,7 @@ def test_cohost_panel_exposes_bulk_import_controls() -> None:
     assert "Prioridad: alta" in text
     assert "Ritmo: normal" in text
     assert "Longitud: expandida" in text
-    assert "Los turnos son globales 1-20" in text
+    assert "Los intentos son globales 1-20" in text
     assert "metadatos legacy no autoritativos" in text
 
 

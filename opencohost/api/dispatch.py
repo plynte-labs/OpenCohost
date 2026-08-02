@@ -53,6 +53,8 @@ class Dispatcher:
         key: Optional[str] = None,
         history_text: Optional[str] = None,
         source: Optional[str] = None,
+        submitted_at: Optional[float] = None,
+        submitted_under_provider: Optional[str] = None,
     ) -> DispatchResult:
         with self._lock:
             now = time.time()
@@ -78,7 +80,28 @@ class Dispatcher:
             # dispatched turn, so a PTT turn logged/telemetered as "direct".
             # Omitted -> the tuple shape is unchanged for every other caller.
             # Also deliberately NOT part of the idempotency hash/cache key.
-            if source is not None:
+            # Unit 4.1 (runtime_findings_batch_20260731, F5): submitted_at rides as
+            # an OPTIONAL 5th tuple element -- the monotonic stamp of the EARLIEST
+            # backend receipt of a front-originated turn (direct/chat/ptt), so the
+            # engine can compute an honest queue_wait_ms at dequeue instead of the
+            # invisible-queue-wait TURN_LATENCY reported before this unit. Omitted
+            # -> tuple shape unchanged for every other caller (mirrors history_text
+            # /source). Never part of the idempotency identity.
+            # Unit 4.2 (F12 closure): submitted_under_provider rides as an OPTIONAL
+            # 6th tuple element, ONLY alongside submitted_at (it is meaningless
+            # without a submit-time stamp to pair it against) -- the provider
+            # posture (`motor.provider_runtime_state()["provider"]`) in effect at
+            # the moment this item was submitted, so the engine can disclose a
+            # fallback/return that happened while the item sat queued. Omitted ->
+            # tuple shape unchanged. Never part of the idempotency identity.
+            if submitted_at is not None:
+                if submitted_under_provider is not None:
+                    self._queue.put_nowait(
+                        (command, payload, history_text, source, submitted_at, submitted_under_provider)
+                    )
+                else:
+                    self._queue.put_nowait((command, payload, history_text, source, submitted_at))
+            elif source is not None:
                 self._queue.put_nowait((command, payload, history_text, source))
             elif history_text is not None:
                 self._queue.put_nowait((command, payload, history_text))

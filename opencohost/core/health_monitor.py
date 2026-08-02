@@ -65,6 +65,8 @@ class VRAMGuard:
     def __init__(self) -> None:
         self._pynvml_available = False
         self._free_mb: float = 0.0
+        self._total_mb: float = 0.0
+        self._used_mb: float = 0.0
         self._status: str = "unavailable"
         self._lock = threading.Lock()
 
@@ -85,13 +87,22 @@ class VRAMGuard:
             with self._lock:
                 self._status = "unavailable"
                 self._free_mb = 0.0
+                self._total_mb = 0.0
+                self._used_mb = 0.0
             return
 
         try:
+            # F9 (runtime_findings_batch_20260731): total/used come back on the
+            # SAME nvmlDeviceGetMemoryInfo call as free — they were being read
+            # and discarded.
             info = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle)
             free_mb = info.free / (1024 * 1024)
+            total_mb = info.total / (1024 * 1024)
+            used_mb = info.used / (1024 * 1024)
             with self._lock:
                 self._free_mb = free_mb
+                self._total_mb = total_mb
+                self._used_mb = used_mb
                 if free_mb < VRAM_CRITICAL_THRESHOLD_MB:
                     self._status = "critical"
                 elif free_mb < VRAM_LOW_THRESHOLD_MB:
@@ -103,6 +114,8 @@ class VRAMGuard:
             with self._lock:
                 self._status = "unavailable"
                 self._free_mb = 0.0
+                self._total_mb = 0.0
+                self._used_mb = 0.0
 
     @property
     def status(self) -> str:
@@ -113,6 +126,16 @@ class VRAMGuard:
     def free_mb(self) -> float:
         with self._lock:
             return self._free_mb
+
+    @property
+    def total_mb(self) -> float:
+        with self._lock:
+            return self._total_mb
+
+    @property
+    def used_mb(self) -> float:
+        with self._lock:
+            return self._used_mb
 
 
 # ──────────────────────────────────────────────
@@ -177,6 +200,124 @@ class OllamaWatchdog:
     def message(self) -> str:
         with self._lock:
             return self._message
+
+
+# ──────────────────────────────────────────────
+# Ollama Residency Probe (F9 — Ollama's own accounting, never process RSS)
+# ──────────────────────────────────────────────
+
+class OllamaResidencyProbe:
+    """Polls `ollama.ps()` (`/api/ps`) for the loaded model's memory split.
+
+    `OLLAMA_MAX_LOADED_MODELS=1` (ollama_startup.py) — at most one entry ever
+    comes back; only models[0] is read. Every number here is OLLAMA's OWN
+    ESTIMATE of where the model sits (`size` total vs. `size_vram` in VRAM),
+    NOT process RSS (F9, runtime_findings_batch_20260731) — hence the `_est`
+    suffix on the numeric fields.
+
+    Bounded via a short-timeout `ollama.Client`: the package's module-level
+    default client uses `timeout=None` and would let a busy/stalling daemon
+    hang this poll (and the whole health-monitor thread) forever.
+    """
+
+    def __init__(self) -> None:
+        self._ollama_module = None
+        try:
+            import ollama
+            self._ollama_module = ollama
+        except ImportError:
+            logger.debug("OllamaResidencyProbe: ollama package not available")
+
+        self._resident_mb: Optional[float] = None
+        self._vram_mb: Optional[float] = None
+        self._spill_mb: Optional[float] = None
+        self._processor_split: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def _clear(self) -> None:
+        with self._lock:
+            self._resident_mb = None
+            self._vram_mb = None
+            self._spill_mb = None
+            self._processor_split = None
+
+    def poll(self, ollama_up: bool) -> None:
+        """Refresh residency estimates.
+
+        Skipped entirely while Ollama is not reachable (per the existing
+        OllamaWatchdog flag) so a dying daemon never adds a probe on top of
+        the reachability check that already failed. Values are CLEARED
+        rather than left stale from the last healthy read.
+        """
+        if not ollama_up or self._ollama_module is None:
+            self._clear()
+            return
+
+        try:
+            client_factory = getattr(self._ollama_module, "Client", None)
+            if client_factory is None:
+                self._clear()
+                return
+            try:
+                client = client_factory(timeout=OLLAMA_REQUEST_TIMEOUT)
+            except TypeError:
+                # Mirrors llm_engine._create_ollama_chat_client's defensive
+                # fallback for an ollama-python version that rejects timeout.
+                client = client_factory()
+            response = client.ps()
+            models = getattr(response, "models", None) or []
+            if not models:
+                self._clear()
+                return
+
+            model = models[0]
+            size = getattr(model, "size", None) or 0
+            size_vram = getattr(model, "size_vram", None) or 0
+            resident_mb = float(size) / (1024 * 1024)
+            vram_mb = float(size_vram) / (1024 * 1024)
+            spill_mb = max(0.0, resident_mb - vram_mb)
+
+            # ollama-python's ProcessResponse.Model has no `processor` field
+            # today (checked: model/name/digest/expires_at/size/size_vram/
+            # details/context_length) — the CLI's PROCESSOR column is
+            # derived, not returned. Prefer it if a future version adds it;
+            # else derive the split ourselves.
+            processor_split = getattr(model, "processor", None)
+            if not processor_split:
+                if resident_mb > 0:
+                    pct_gpu = round(vram_mb / resident_mb * 100)
+                    processor_split = f"{pct_gpu}% GPU / {100 - pct_gpu}% CPU"
+                else:
+                    processor_split = None
+
+            with self._lock:
+                self._resident_mb = resident_mb
+                self._vram_mb = vram_mb
+                self._spill_mb = spill_mb
+                self._processor_split = processor_split
+        except Exception as e:
+            logger.warning(f"OllamaResidencyProbe: poll failed: {e}")
+            self._clear()
+
+    @property
+    def resident_mb(self) -> Optional[float]:
+        with self._lock:
+            return self._resident_mb
+
+    @property
+    def vram_mb(self) -> Optional[float]:
+        with self._lock:
+            return self._vram_mb
+
+    @property
+    def spill_mb(self) -> Optional[float]:
+        with self._lock:
+            return self._spill_mb
+
+    @property
+    def processor_split(self) -> Optional[str]:
+        with self._lock:
+            return self._processor_split
 
 
 # ──────────────────────────────────────────────
@@ -485,6 +626,16 @@ class MonitorState:
     free_vram_mb: float = 0.0
     rtf_rolling_avg: Optional[float] = None
     last_updated: float = 0.0
+    # F9/2.4 (runtime_findings_batch_20260731): same nvmlDeviceGetMemoryInfo
+    # call as free_vram_mb — total/used were being read and discarded.
+    total_vram_mb: float = 0.0
+    used_vram_mb: float = 0.0
+    # Ollama residency ESTIMATES from ollama.ps() (size/size_vram) — NOT
+    # process RSS. None while no model is loaded or Ollama is unreachable.
+    model_resident_mb_est: Optional[float] = None
+    model_vram_mb_est: Optional[float] = None
+    model_ram_spill_mb_est: Optional[float] = None
+    model_processor_split: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -502,6 +653,7 @@ class HealthMonitor(threading.Thread):
         super().__init__(name="HealthMonitor", daemon=True)
         self._vram = VRAMGuard()
         self._ollama = OllamaWatchdog()
+        self._ollama_residency = OllamaResidencyProbe()
         self._rtf = RTFTracker()
         self._qwen = QwenProcessManager()
 
@@ -536,6 +688,9 @@ class HealthMonitor(threading.Thread):
         """Poll all sub-components and update state atomically."""
         self._vram.poll()
         self._ollama.poll()
+        # No new timer/thread — piggybacks on this same 5s (HEALTH_POLL_INTERVAL)
+        # cadence. Only probes while OllamaWatchdog already says "healthy".
+        self._ollama_residency.poll(ollama_up=self._ollama.status == "healthy")
         qwen_healthy = self._qwen.is_healthy  # triggers health check + idle TTL reset
 
         qwen_status = self._qwen_status(qwen_healthy)
@@ -553,6 +708,12 @@ class HealthMonitor(threading.Thread):
                 free_vram_mb=self._vram.free_mb,
                 rtf_rolling_avg=self._rtf.rolling_average,
                 last_updated=time.time(),
+                total_vram_mb=self._vram.total_mb,
+                used_vram_mb=self._vram.used_mb,
+                model_resident_mb_est=self._ollama_residency.resident_mb,
+                model_vram_mb_est=self._ollama_residency.vram_mb,
+                model_ram_spill_mb_est=self._ollama_residency.spill_mb,
+                model_processor_split=self._ollama_residency.processor_split,
             )
 
     def _qwen_status(self, qwen_healthy: bool) -> str:
@@ -623,6 +784,12 @@ class HealthMonitor(threading.Thread):
                 free_vram_mb=self._state.free_vram_mb,
                 rtf_rolling_avg=self._state.rtf_rolling_avg,
                 last_updated=self._state.last_updated,
+                total_vram_mb=self._state.total_vram_mb,
+                used_vram_mb=self._state.used_vram_mb,
+                model_resident_mb_est=self._state.model_resident_mb_est,
+                model_vram_mb_est=self._state.model_vram_mb_est,
+                model_ram_spill_mb_est=self._state.model_ram_spill_mb_est,
+                model_processor_split=self._state.model_processor_split,
             )
 
     def should_use_heavy_tts(self, auto_fallback_enabled: bool, manual_motor: str) -> bool:

@@ -636,7 +636,7 @@ def kira_agenda_add_topic(
     except ValueError as e:
         notify_operator("Kira Agenda", str(e))
         return
-    stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {kira_agenda.rhythm}/{kira_agenda.response_length}, {kira_agenda.max_turns_per_topic} turnos globales)")
+    stream_admin_log(f"[Kira Agenda] Tema aprobado y encolado: {topic.title} ({topic.priority}; sesión: {kira_agenda.rhythm}/{kira_agenda.response_length}, {kira_agenda.max_turns_per_topic} intentos globales)")
     kira_agenda_update_status()
 
 
@@ -667,7 +667,7 @@ def kira_agenda_update_status(
         error_info = f" · ⚠ {recovery.error_code.human()} (intento {recovery.retry_attempt}/{len(RecoveryPolicy.RETRY_DELAYS_SECONDS)})"
     if active:
         text = f"Kira está desarrollando: “{active.title}” · Estado: {kira_agenda.state.value} · modo: {kira_agenda.safety_mode} · fallos: {kira_agenda.failure_count}{error_info}"
-        current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {kira_agenda.rhythm}/{kira_agenda.response_length}/{kira_agenda.safety_mode}\nTurnos hablados: {active.turns_spoken}/{kira_agenda.max_turns_per_topic}"
+        current_topic = f"“{active.title}”\nPrioridad: {active.priority} · Sesión: {kira_agenda.rhythm}/{kira_agenda.response_length}/{kira_agenda.safety_mode}\nIntentos: {active.turns_spoken}/{kira_agenda.max_turns_per_topic}"
     else:
         text = f"Agenda: {kira_agenda.state.value} · temas en cola: {queued} · modo: {kira_agenda.safety_mode} · fallos: {kira_agenda.failure_count}{error_info}"
         current_topic = "Sin tema activo"

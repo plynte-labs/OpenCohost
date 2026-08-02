@@ -49,6 +49,10 @@ CTX_FALLBACK_DEFAULT: int = 4096            # used when ollama.show exposes no c
 CHAR_BUDGET_SAFETY_FACTOR: float = 3.5      # chars per token; conservative estimate
 CTX_PRESSURE_HIGH_THRESHOLD: float = 0.80   # utilization ratio for UI warning
 CTX_OVERFLOW_SIGNAL_RATIO: float = 0.95     # prompt_eval_count / num_ctx threshold for reactive trim
+# Unit 2.3 (runtime_findings_batch_20260731 F10): bounded per-request context
+# telemetry ring on the engine instance. ~50 turns is a few minutes of agenda
+# history -- enough for a status-bar consumer (unit 2.5) without unbounded growth.
+CTX_TELEMETRY_RING_MAXLEN: int = 50
 # Chat-reactive anti-repetition sampling brake. Added ONLY to source=="chat"
 # generations (RF3 viewer chat, agenda HANDLE_CHAT, and default-enqueue chat
 # turns). Keeps direct/ptt/accumulated/kira-agenda sampling byte-identical.
@@ -119,6 +123,53 @@ CLOUD_MAX_TOKENS = 16384
 # replacing the reactive prompt_eval_count/eval_duration trim that OpenAI-
 # compatible responses don't expose; wired in Phase 3.
 CLOUD_CTX_BUDGET: int = 32768
+
+# Unit 2.1 (runtime_findings_batch_20260731): in-turn retry bound for a
+# `rate_limited` cloud 429 (F1/F2). Below CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS,
+# the retry waits for Retry-After (or this default when the header is absent)
+# and consumes one attempt of the existing max_intentos budget. Above the
+# max, a live turn must not park for a long Retry-After -- no in-turn retry,
+# same behavior as before this unit (return "" -> fallback path).
+CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS: int = 2
+CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS: int = 10
+
+# Unit 2.2 (runtime_findings_batch_20260731): background auto-return probe
+# scheduling, per F2/1.1 failure class. `rate_limited` honours the provider's
+# own Retry-After, clamped to [FLOOR, CAP] so neither a tiny nor a runaway
+# header value drives the probe cadence. `transient`/5xx has no timing hint
+# from the provider, so it starts at BASE and doubles on each failed probe,
+# capped at CAP. `ambiguous_429` and `bad_key` deliberately have NO constants
+# here -- policy is "no automatic probe loop, manual re-arm only" (owner
+# ruling), so there is nothing to schedule.
+CLOUD_AUTO_RETURN_RATE_LIMIT_FLOOR_SECONDS: int = 15
+CLOUD_AUTO_RETURN_RATE_LIMIT_CAP_SECONDS: int = 900
+CLOUD_AUTO_RETURN_TRANSIENT_BASE_SECONDS: int = 30
+CLOUD_AUTO_RETURN_TRANSIENT_CAP_SECONDS: int = 600
+
+# cloud_rearm_20260801 (WU3, owner decision D-A): `ambiguous_429` now ALSO
+# gets a conservative automatic probe loop -- runtime evidence (a real bare
+# NVIDIA NIM 429, no Retry-After) showed the prior "manual re-arm only"
+# policy left a session stuck on local for 2h46m with no automatic path
+# back. BASE is 4x the transient base -- a bare 429 might be quota
+# exhaustion, so this deliberately does not hammer the provider. CAP reuses
+# the rate-limit ceiling. MAX_ATTEMPTS bounds total probes (unlike
+# rate_limited/transient, which retry forever): 120->240->480->900->900->900
+# seconds of waiting between the 6 attempts (~59 min) before giving up --
+# still leaves the operator no worse off than the pre-WU3 silent 2h46m gap,
+# and the manual trigger (WU1) remains the door back in after give-up.
+# One-line off-switch: flip ENABLED to False to revert to manual-only.
+CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED: bool = True
+CLOUD_AUTO_RETURN_AMBIGUOUS_429_BASE_SECONDS: int = 120
+CLOUD_AUTO_RETURN_AMBIGUOUS_429_CAP_SECONDS: int = 900
+CLOUD_AUTO_RETURN_AMBIGUOUS_429_MAX_ATTEMPTS: int = 6
+
+# Bounded join when cancelling/replacing a background prober
+# (`_stop_cloud_prober`). A prober blocked mid network-call cannot be
+# interrupted, so this is best-effort; the generation guard is what actually
+# makes a join timeout safe (the stale prober becomes a harmless zombie
+# instead of a starvation hazard). Kept as its own constant so tests can
+# monkeypatch it down instead of actually waiting out the real value.
+CLOUD_PROBER_JOIN_TIMEOUT_SECONDS: float = 2.0
 
 # Intra-sentence clause sanitizer (clause_sanitizer V1, 2026-07-29) — which
 # dialogue sources run repetition_guard.sanitize_clause_repetition() at the
@@ -522,6 +573,22 @@ OLLAMA_FAILURE_THRESHOLD = 3 # consecutive failures before "down"
 OLLAMA_REQUEST_TIMEOUT = 5   # timeout for Ollama /api/tags request
 OLLAMA_CHAT_TIMEOUT = 180    # max seconds to wait for an Ollama chat generation
 HEALTH_POLL_INTERVAL = 5     # seconds between overall health polls
+
+# Unit 4.2 (runtime_findings_batch_20260731, D3b): NOT an enforcement timer --
+# nothing is cancelled or forced when this is exceeded. It documents the bound
+# the D3b fix guarantees for a queued source=direct item: the remaining speech
+# of the CURRENT agenda block (bounded above, conservatively, by one full
+# block's playback) plus ONE generation (OLLAMA_CHAT_TIMEOUT, worst case). A
+# block's exact playback duration isn't tracked, so the speech-ceiling term is
+# a conservative estimate, not a measured cap -- the 2026-07-30 run's median
+# per-block speech was ~15s (F5); this leaves generous headroom for a longer
+# block or a slow TTS chunk. Exceeding this bound does not mean the D3b fix
+# failed -- it means something else is degraded (e.g. a stalling model). The
+# WARNING it drives (llm_engine.py `_ejecutar_inferencia`) is metadata-only
+# telemetry, never an enforcement -- nothing is cancelled or retried because
+# of it.
+_DIRECT_ANSWER_BLOCK_SPEECH_CEILING_SECONDS = 120.0
+DIRECT_ANSWER_MAX_WAIT_SECONDS = _DIRECT_ANSWER_BLOCK_SPEECH_CEILING_SECONDS + OLLAMA_CHAT_TIMEOUT
 
 # WU4 4c (agenda_no_dead_air fase 2, design-fase2.md §3 WU4): a rejected
 # background pregen retries once only when the remaining speech window

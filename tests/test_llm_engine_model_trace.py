@@ -510,7 +510,12 @@ class TestModelTrace:
         assert len(trace_records) >= 1
 
     def test_model_mismatch_warning(self, tmp_path):
-        """desired != active -> MODEL_MISMATCH_WARNING in log queue."""
+        """desired != active -> MODEL_MISMATCH_WARNING in log queue.
+
+        Regression guard for the F4 gate (runtime_findings_batch_20260731
+        1.3): this motor is on the default LOCAL posture (no provider config
+        set -> `_cfg_is_local` reads True), so the new cloud-by-design
+        suppression must NOT swallow a genuine local mismatch."""
         motor, log_q, _ = self._setup_motor_for_generation(tmp_path)
 
         # Simulate: UI requested gemma4:e4b but motor still on default
@@ -523,6 +528,43 @@ class TestModelTrace:
         mismatch_logs = [l for l in logs if "MODEL_MISMATCH_WARNING" in l]
         assert len(mismatch_logs) >= 1, f"No MODEL_MISMATCH_WARNING found in: {logs}"
         assert "desired=gemma4:e4b" in mismatch_logs[0]
+        assert "transport=local" in mismatch_logs[0]
+
+    def test_model_mismatch_warning_silenced_for_cloud_by_design(self, tmp_path):
+        """F4 fix (runtime_findings_batch_20260731 1.3): a genuine cloud-by-
+        design generation must NOT log MODEL_MISMATCH_WARNING.
+
+        Root cause confirmed against logs/opencohost_20260730_162650.log (29/29
+        occurrences match this exact shape): while cloud is the effective
+        transport, `_prepare_model` short-circuits without ever setting
+        `_loaded_model` (llm_engine.py `_prepare_model`), so `loaded` reads
+        "unknown" on EVERY cloud turn even though nothing is wrong — NOT
+        because `generation` carries the cloud model id (it never does;
+        `request_model` is captured once at `_generar_dialogo` entry and is
+        always the local alias, on cloud or local).
+        """
+        motor, log_q, _ = _make_motor(tmp_dir=str(tmp_path))
+        motor._provider_config = {
+            "active_provider": "nvidia_nim",
+            "fallback_mode": "auto",
+            "pregen_enabled": False,
+            "profiles": {"nvidia_nim": {"base_url": "https://example.test/v1", "model": "z-ai/glm-5.2"}},
+        }
+        # Never warmed locally -> `_loaded_model` stays None ("unknown" in the
+        # trace) -- reproduces the exact real-world condition, not a rigged one.
+        assert motor._loaded_model is None
+
+        with patch(
+            "opencohost.core.llm_engine.cloud_llm_client.send_chat_completion",
+            return_value={"message": {"content": "cloud reply", "thinking": ""}, "usage": {}},
+        ):
+            result = motor._generar_dialogo("test cloud", source="direct", commit_history=False)
+
+        assert result == "cloud reply"
+        logs = _drain_log(log_q)
+        assert not any("MODEL_MISMATCH_WARNING" in l for l in logs), (
+            f"cloud-by-design generation must not warn: {logs}"
+        )
 
     def test_reply_preview_shown_in_debug_mode(self, tmp_path, caplog, monkeypatch):
         """Candidate 8C: OPENCOHOST_DEBUG=1 keeps the cleartext reply preview

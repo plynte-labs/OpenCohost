@@ -1682,3 +1682,67 @@ PREFERENCE (owner runs `monologue`), not a defect.
   promotion is the approved real fix so `_FILLER_PHRASE_PATTERNS` stops growing (`vas` escaped the
   list within a day, the `en` locale's "said" escaped it too); (D) pre-existing backlog. Recommended
   order and the tradeoff for each is in the proposal.*
+
+- [~] **Track: Runtime Findings Batch — post-validation loop (2026-07-31)**
+  *All 11 units from `conductor/tracks/runtime_findings_batch_20260731/plan.md` (F1–F15, 4 batches)
+  applied in one overnight loop, uncommitted by design. Units 2.2 and 3.1 opus-judged, findings
+  fixed (2.2: 7 incl. two prober-race criticals; 3.1: 5 incl. a stranded-topic BLOCKER).
+  Orchestrator-recounted suites: backend 5072 passed / 14 skipped / 0 failed · front 1031 passed
+  (baseline 4907 / ~1010, zero regressions).*
+  *Status 2026-08-01 (RUNTIME VALIDATION PARTIAL — owner ran 3h12m on 2026-07-31, log
+  `opencohost_20260731_171728.log`, cut by a power outage at 20:29): validated in the wild — a REAL
+  bare NIM 429 → `clase=ambiguous_429`, no in-turn retry, fallback to local, no probe (exactly per
+  contract; session stayed local 2h46m); `MODEL_MISMATCH_WARNING`=0 (was 29); TTS non-Latin filter
+  fired on real CJK (chars=2); direct-during-agenda measured `queue_wait_ms=63030` (~77 s total vs
+  the old 13.8–29.1 min); ctx telemetry live (ratio 0.65–0.73, 7–8 evicted pairs/turn); status rail
+  visually confirmed showing gemma4 during fallback (the 2026-07-30 bug is dead). Still WITHOUT
+  runtime evidence: PTT §5 (zero events ever), injected bad_key (§1a), injected 429+Retry-After
+  (§1b — in-turn retry `intento 2/2` and the auto-return prober arc), remaining visual checks.
+  ADR-039 ruled NOT closed by the owner: 0 non-clean sanitizer verdicts in 3h proves it does not
+  harm healthy sessions, but the repair path stays lab-only; the owner's closure path is now
+  session transcripts + external semantic evaluation (research, out of track). New investigation
+  items (owner 2026-08-01, none implemented): (a) manual cloud re-arm during agenda — a small probe
+  endpoint reusing the 2.2 prober, optionally auto for `ambiguous_429` with conservative backoff
+  (revisits the no-provider-tables decision with runtime evidence); (b) opt-in session transcript
+  capture (requires an explicit carve-out of the never-log-raw-dialogue rule — separate artifact,
+  never the main log); (c) guardrail rejection pairs (previous vs rejected) for external semantic
+  evaluation. Full forensics: engram `runtime/validation-run-20260731`.*
+  *Status 2026-08-01 (cloud re-arm loop EXECUTED overnight): investigation item (a) is now
+  IMPLEMENTED — track `cloud_rearm_20260801` (`conductor/tracks/cloud_rearm_20260801/plan.md`,
+  six work units, strict TDD, uncommitted by design). Backend: `trigger_cloud_probe_now()` on the
+  motor (reuses the 2.2 prober verbatim — never a second prober flavor), `POST
+  /api/llm/provider/probe`, and conservative auto-return for `ambiguous_429` gated by
+  `CLOUD_AUTO_RETURN_AMBIGUOUS_429_ENABLED` (default ON per owner D-A: 120→240→480→900 s, 6
+  attempts, then `cloud_probe_gave_up` with no detail; `bad_key` never auto-arms). Front:
+  `useTriggerCloudProbe()` + feed labels + a self-contained StatusRail fallback chip (red
+  action for ambiguous_429/bad_key, amber with countdown for rate_limited/transient, "Probar
+  ahora" button with honest armed/error rendering) — closes the §1b countdown gap. One sonnet
+  judge per stage: front judge found 1 should-fix (silent probe-request failure — fixed, alert
+  per ProviderCard convention); backend judge found 1 BLOCKER (a failed manual probe degenerated
+  into a zero-backoff hammer loop, `0*2==0` fixed point — fixed with class-cadence hand-off +
+  one-shot give-up for no-policy classes, 5 regression tests, fix re-verified by the judge).
+  Orchestrator-recounted suites: backend 5097 passed / 14 skipped (baseline 5072, +25 net new) ·
+  front 1042 passed (baseline 1031, +11 net new) · zero regressions. Owner questions parked at
+  `conductor/tracks/cloud_rearm_20260801/post-loop-questions.md`; runtime validation is §8 of
+  `docs/runtime-validation-20260731.md` (needs the owner's next run).*
+  *Status 2026-08-01 evening (§8 RUNTIME-VALIDATED same day): the owner ran a 4h33m real agenda
+  session that hit FOUR real bare NIM 429s. §8.1/§8.2 fully pass (4 manual probe POSTs in the
+  API audit, failed-manual→120 s reseed proven second-exact at 17:15:49→17:17:52, no
+  machine-gun anywhere); §8.3 cadence proven (two pure-auto restores at 2642 s vs 2640 s
+  theoretical, attempt 5 of 6) but give-up never reached; §8.4 bad_key, §8.5 error alert and
+  the rate_limited countdown chip still pending (need the mock). §1b's "prober arc has zero
+  runtime evidence" gap is closed; §6 satisfied (n=11 directs, both providers). ADR-039:
+  second consecutive clean session (0 non-clean verdicts over ~275 generations). Full
+  second-pass results table appended to `docs/runtime-validation-20260731.md`; forensics in
+  engram `llm/cloud-rearm-runtime-validation-20260801`.*
+  *Owner rulings 2026-08-01 (post-validation): Q1→(a) applied (chip tone follows
+  probe-scheduling state); Q2→deferred to
+  `conductor/tracks/cloud_rearm_20260801/proposal-q2-manual-probe-failure-label.md`; Q3→open;
+  ADR-039 gate PARTIALLY CLOSED (see the ADR's gate-ruling addendum) with the editorial
+  findings spun off to a NEW parked research proposal:
+  `conductor/tracks/editorial_direction_research_20260801/proposal.md` (conceptual/rhetorical
+  repetition beyond literal guards, evaluation framework, user-programmable editorial
+  harness — NOT started, registered only). Prober text-log observability approved and
+  applied (numeric-only lines for probe arm/give-up + agenda stop). Validation mock
+  materialized at `tools/mock_cloud_429.py` (--bare, --fail forever for the pending §8
+  give-up/bad_key/error-alert arcs).*

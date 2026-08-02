@@ -31,7 +31,13 @@ class _FakeRequest:
 
 class _FakeResponse:
     def __init__(
-        self, status_code=200, json_data=None, text="", raise_json_error=False, request_headers=None
+        self,
+        status_code=200,
+        json_data=None,
+        text="",
+        raise_json_error=False,
+        request_headers=None,
+        headers=None,
     ):
         self.status_code = status_code
         self._json_data = json_data
@@ -39,6 +45,10 @@ class _FakeResponse:
         self._raise_json_error = raise_json_error
         self.reason = text or "Error"
         self.request = _FakeRequest(request_headers or {})
+        # F2 (runtime_findings_batch_20260731 unit 1.1): real requests.Response
+        # always has .headers -- send_chat_completion now reads it (bounded
+        # subset) to build CloudLLMResponseError.headers.
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:

@@ -145,7 +145,7 @@ Each of these was raised once and never mentioned again. Say "dead" and I delete
 | # | Item | Last seen | Why I think it is stale |
 |---|---|---|---|
 | 5.1 | UI pivot to a "music-player" concept (album cover / now-playing bar), marked AWAITING OWNER | `AGENT_HANDOFF.md:481-482` | Every later UI description (ProviderCard, ModelCard, ConversationPanel, StreamPanel) uses conventional panel language. Looks superseded in practice, but nothing says so on the record |
-| 5.2 | Agenda turn semantics — `turn_batch_size=2` vs the UI "turns" slider counting half-blocks | `AGENT_HANDOFF.md:266,285-287` (07-09/10) | The UI has been substantially rebuilt since |
+| 5.2 | ~~Agenda turn semantics — `turn_batch_size=2` vs the UI "turns" slider counting half-blocks~~ | `AGENT_HANDOFF.md:266,285-287` (07-09/10) | **RESOLVED 2026-07-31** — D1/D2, unit 3.1: one generation = one attempt = one debit, `turn_batch_size` deleted, UI relabeled "intentos por tema" |
 | 5.3 | Cohost STYLE profiles are es-authored with no locale-coherence check | `AGENT_HANDOFF.md:422-423` (07-08) | Predates the whole bilingual/i18n effort; not re-raised |
 
 ## §5b — Owner priority ruling 2026-07-29: viewer chat is out of scope

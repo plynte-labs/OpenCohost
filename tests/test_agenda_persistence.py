@@ -51,7 +51,7 @@ def make_persistence(tmp_path: Path, log_fn=None) -> tuple[AgendaPersistence, st
 
 def controller_with_queue() -> KiraAgendaController:
     """Two queued topics (alta then normal) plus one approved-not-queued."""
-    ctrl = KiraAgendaController(max_turns_per_topic=4, turn_batch_size=2)
+    ctrl = KiraAgendaController(max_turns_per_topic=4)
     ctrl.set_session_settings(rhythm="calmo", response_length="corta", safety_mode="monologue")
     t1 = ctrl.add_topic("Tema urgente", "Angulo uno.", ["una frase corta"], approved=True, priority="alta")
     ctrl.queue_topic(t1.id)

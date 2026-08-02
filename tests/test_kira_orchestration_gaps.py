@@ -42,7 +42,7 @@ def _build_motor() -> llm_engine.MotorVocalIA:
 
 def _build_agenda_with_topic(turns: int = 3) -> tuple[KiraAgendaController, str]:
     """Build a controller with one approved+queued topic. Returns (controller, topic_id)."""
-    ctrl = KiraAgendaController(max_turns_per_topic=turns, turn_batch_size=1)
+    ctrl = KiraAgendaController(max_turns_per_topic=turns)
     topic = ctrl.add_topic("Tema de test", angle="ángulo de prueba", approved=True)
     ctrl.queue_topic(topic.id)
     ctrl.enable()
@@ -582,7 +582,7 @@ class TestOrchestrationSequence:
         """Agenda start → prefetch → PTT interrupt → chat cadence →
         emergency stop → re-enable → verify clean state."""
         motor = _build_motor()
-        ctrl = KiraAgendaController(max_turns_per_topic=3, turn_batch_size=1)
+        ctrl = KiraAgendaController(max_turns_per_topic=3)
 
         # Add topics
         for title in ["Tema A", "Tema B", "Tema C"]:

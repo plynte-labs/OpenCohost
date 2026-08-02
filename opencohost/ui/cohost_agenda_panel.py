@@ -169,7 +169,7 @@ class CoHostAgendaPanel:
         for col in range(4):
             session.grid_columnconfigure(col, weight=1)
         ctk.CTkLabel(session, text="Configuración de sesión", font=ctk.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, columnspan=4, sticky="ew", padx=12, pady=(10, 2))
-        ctk.CTkLabel(session, text="Turnos globales", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 2))
+        ctk.CTkLabel(session, text="Intentos globales", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 2))
         ctk.CTkLabel(session, text="Ritmo global", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 2))
         ctk.CTkLabel(session, text="Longitud global", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=2, sticky="ew", padx=12, pady=(2, 2))
         ctk.CTkLabel(session, text="Modo vivo", text_color=theme.TEXT_MUTED, anchor="w").grid(row=1, column=3, sticky="ew", padx=12, pady=(2, 2))
@@ -360,13 +360,13 @@ class CoHostAgendaPanel:
         bulk_text.insert("end", "1. Sociedad Latam\nTema: La nostalgia noventera en internet\nÁngulo: Por qué volvemos a símbolos viejos cuando el presente pesa.\nPrioridad: alta\nRitmo: normal\nTags: #Latam #Nostalgia #Internet\n\n2. Gaming\nTema: Mods como cultura popular\nÁngulo: Comunidades chicas que terminan definiendo gustos enormes.\nLongitud: expandida\nPrioridad: baja\nTags: #Gaming #Mods")
         self._widgets["text_bulk_topics"] = bulk_text
         ctk.CTkButton(content_bulk, text="Importar temas", command=self._dispatch_bulk_import, fg_color=theme.PRIMARY).grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 4))
-        bulk_status = ctk.CTkLabel(content_bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los turnos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color=theme.TEXT_DIM, anchor="w", justify="left", wraplength=760)
+        bulk_status = ctk.CTkLabel(content_bulk, text="Estructura por bloque: Tema, Ángulo, Prioridad alta|normal|baja, Tags. Ritmo/Longitud en importación se aceptan como metadatos legacy no autoritativos; mandan los controles globales. Los intentos son globales 1-20 desde el selector. Se ignora HTML/código y texto excesivo.", text_color=theme.TEXT_DIM, anchor="w", justify="left", wraplength=760)
         bulk_status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
         self._widgets["lbl_bulk_status"] = bulk_status
 
         guardrails = ctk.CTkLabel(
             root,
-            text="Guardrails: se rechazan textos larguísimos, código, HTML, emojis/símbolos raros y demasiadas restricciones. Modos: Live_safe ≈25-40s/cap 1100; Monologue permite monólogos largos interruptibles/cap 3000; Test permite 60-90s/cap 6000. Longitud global: Corta ≈450 chars; Normal ≈1500 chars mini monólogo; Expandida = monólogo largo de prueba con cap 6000. Turnos globales 1-20.",
+            text="Guardrails: se rechazan textos larguísimos, código, HTML, emojis/símbolos raros y demasiadas restricciones. Modos: Live_safe ≈25-40s/cap 1100; Monologue permite monólogos largos interruptibles/cap 3000; Test permite 60-90s/cap 6000. Longitud global: Corta ≈450 chars; Normal ≈1500 chars mini monólogo; Expandida = monólogo largo de prueba con cap 6000. Intentos globales 1-20.",
             text_color=theme.TEXT_DIM,
             anchor="w",
             justify="left",

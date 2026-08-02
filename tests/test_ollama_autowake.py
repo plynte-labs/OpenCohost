@@ -205,6 +205,15 @@ def test_status_endpoint_exposes_ollama_warming():
             self.motor._current_profile_name = "default"
             self.motor._current_profile_id = None
             self.motor.command_queue = Queue()
+            # F4 (runtime_findings_batch_20260731 1.3): get_status() now reads
+            # this real dict instead of a bare MagicMock (which would fail
+            # StatusResponse's str/bool validation for provider/transport).
+            self.motor.provider_runtime_state.return_value = {
+                "provider": "local",
+                "transport": "local",
+                "fallback_active": False,
+                "generation_model": "qwen3:8b",
+            }
             self.monitor = MagicMock()
             from opencohost.core.health_monitor import MonitorState
 

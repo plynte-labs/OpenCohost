@@ -21,6 +21,7 @@ from opencohost.api.agenda_driver import (
 from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaAction,
     AgendaState,
+    ErrorCode,
     KiraAgendaController,
     TopicStatus,
 )
@@ -180,14 +181,17 @@ class RejectingFakeMotor(FakeMotor):
     """FakeMotor that reproduces the real engine reject contract.
 
     The engine validates every dequeued agenda generation through the
-    controller guardrail callback (``llm_engine.py:1573`` ->
+    controller guardrail callback (``llm_engine.py:3526`` ->
     ``accept_output(dialogo)``) and then ALWAYS fires a trailing
-    ``accept_output("")`` (``llm_engine.py:2461``).  A mode-collapse turn is
+    ``accept_output("")`` (``llm_engine.py:5328``).  A mode-collapse turn is
     rejected on the first call; the trailing empty is rejected on the second.
     The stock ``FakeMotor`` only ever drives ACCEPTED outputs, so the reject
     path / double register_failure / None-loop are untested.  This stand-in
     replays that exact double-signal synchronously the moment an agenda turn is
     enqueued, driving the controller state machine down the reject path.
+    Since D1+D2 (2026-07-31) the controller dedups this double-signal into
+    one debited failure per rejected generation — that dedup is exactly what
+    these tests now verify, not a bug in this stand-in.
     """
 
     #: Pre-seeded into ``controller.last_outputs`` so ``is_repetition`` rejects
@@ -201,7 +205,7 @@ class RejectingFakeMotor(FakeMotor):
     def _reject_cycle(self, source):
         if not source.startswith("kira-agenda"):
             return
-        # Mirror llm_engine.py:1573 (reject the generated dup) then :2461
+        # Mirror llm_engine.py:3526 (reject the generated dup) then :5328
         # (trailing empty re-signal) for one rejected agenda turn.
         self._controller.accept_output(self.DUP_LINE)
         self._controller.accept_output("")
@@ -272,7 +276,7 @@ def test_driver_skips_while_motor_busy():
 
 
 def test_speaking_routing_advances_states_and_increments_turns():
-    controller, topic = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -308,7 +312,7 @@ def test_speaking_end_nudge_fires_only_when_speech_completed():
 
 
 def test_topic_completes_after_max_turns():
-    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2, turn_batch_size=1)
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -344,7 +348,7 @@ def test_auto_exit_to_off_on_empty_queue():
 
 
 def test_soft_stop_enqueues_single_closing_action_then_off():
-    controller, topic = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -462,6 +466,90 @@ def test_paused_auto_resume_reachable_with_frozen_stash_pending():
     assert motor.discarded is False
 
 
+# ── finding 1 (2026-07-31): stranded ACTIVE topic after pause ─────────────
+
+
+def test_paused_stranded_topic_reenters_and_reaches_off_no_queue():
+    """Finding 1 end to end, no-queue topology: five consecutive content-
+    error rejections pause the session (should_pause never clears
+    active_topic). Auto-resume must re-enter the SAME topic instead of
+    stranding it forever or leaving the queue-empty auto-exit unreachable.
+    Walking the rest of the budget must still reach CLOSING -> COMPLETED ->
+    the driver's own auto-exit to OFF."""
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=8)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+
+    driver.tick_once()  # opens the topic -> active_topic set, ACTIVE
+    assert controller.active_topic is topic
+
+    # Drive 5 consecutive content-error rejections (mirrors a real bad-model
+    # run) until the recovery policy pauses the session.
+    for _ in range(5):
+        controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR, reason="repite")
+    assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
+    assert controller.active_topic is topic
+    assert topic.status == TopicStatus.ACTIVE
+
+    # Force the cooldown so the next tick auto-resumes.
+    controller.recovery._last_failure_time = 0.0
+    driver.tick_once()
+
+    assert controller.state != AgendaState.PAUSED_NEEDS_OPERATOR
+    assert controller.active_topic is topic, (
+        "resume must re-enter the existing ACTIVE topic instead of "
+        "stranding it or overwriting it"
+    )
+    assert motor.replaced, "the re-entered topic must produce a real turn"
+
+    # Walk the rest of the budget to completion via the normal speak cycle.
+    for _ in range(12):
+        _speak_cycle(controller)
+        if topic.status == TopicStatus.COMPLETED:
+            break
+        driver.tick_once()
+    assert topic.status == TopicStatus.COMPLETED
+
+    driver.tick_once()  # IDLE + no queue -> driver auto-exit to OFF
+    assert controller.state == AgendaState.OFF
+
+
+def test_paused_stranded_topic_reenters_before_queued_topic_advances():
+    """Finding 1 end to end, queued-topic topology: a queued second topic
+    must NOT preempt the paused, still-ACTIVE first topic on resume. Only
+    after the active topic completes does the driver advance to the queued
+    one."""
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2)
+    controller.enable()
+    second = controller.add_topic("Tema dos", "angulo", approved=True)
+    controller.queue_topic(second.id)
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+
+    driver.tick_once()  # opens the first topic
+    assert controller.active_topic is topic
+
+    for _ in range(5):
+        controller.register_failure(error=ErrorCode.GUARDRAIL_SIMILAR, reason="repite")
+    assert controller.state == AgendaState.PAUSED_NEEDS_OPERATOR
+    assert controller.active_topic is topic
+
+    controller.recovery._last_failure_time = 0.0
+    driver.tick_once()  # auto-resume must re-enter `topic`, not `second`
+
+    assert controller.active_topic is topic, (
+        "the queued second topic must not preempt the paused ACTIVE one"
+    )
+    assert second.status == TopicStatus.QUEUED
+
+    _speak_cycle(controller)  # deliver the (budget-exhausted) closing line
+    assert topic.status == TopicStatus.COMPLETED
+
+    driver.tick_once()  # IDLE -> only now may the queue advance
+    assert controller.active_topic is second
+
+
 # ── thread lifecycle ──────────────────────────────────────────────────────
 
 
@@ -565,10 +653,14 @@ def _rejecting_setup(num_topics=1, **kwargs):
     """Enabled controller + RejectingFakeMotor + driver, with the dup seeded.
 
     Every kira-agenda* turn the driver enqueues is rejected twice (dup + trailing
-    empty), reproducing the runtime None-loop trigger.  tick1 forces the open
-    topic to its turn cap (WAITING_SIGNAL); tick2 rejects the closing line and
-    hits the >=3 force-complete gate — the trailing empty then runs with the
-    topic already gone (the bug point).
+    empty), reproducing the runtime None-loop trigger. Since D1+D2 (2026-07-31)
+    a rejected content generation (GUARDRAIL_LOOPING here) debits one attempt
+    per turn (the dedup guard folds the trailing empty into a no-op) and never
+    force-kills — with max_turns_per_topic=2 that is tick1 (open, 0->1) + tick2
+    (continue, 1->2, budget exhausted) before the topic is even CLOSING; tick3
+    rejects the closing line and hits the >=3 force-complete gate — the
+    trailing empty then runs with the topic already gone (the bug point this
+    suite exists to pin).
     """
     controller = KiraAgendaController(**kwargs)
     topics = []
@@ -585,12 +677,13 @@ def _rejecting_setup(num_topics=1, **kwargs):
 
 def test_rejected_closing_turn_advances_to_next_topic():
     controller, motor, driver, topics = _rejecting_setup(
-        num_topics=2, max_turns_per_topic=2, turn_batch_size=1
+        num_topics=2, max_turns_per_topic=2
     )
     t1, t2 = topics
 
-    driver.tick_once()  # tick1: open turn rejected -> turns forced, WAITING_SIGNAL
-    driver.tick_once()  # tick2: closing turn rejected -> force-complete + trailing empty
+    driver.tick_once()  # tick1: open turn rejected -> turns_spoken 0->1, REGENERATING_SAFE
+    driver.tick_once()  # tick2: continue turn rejected -> turns_spoken 1->2, budget exhausted
+    driver.tick_once()  # tick3: closing turn rejected -> force-complete + trailing empty
 
     # The trailing empty signal runs with active_topic already None. On the buggy
     # code it lands in REGENERATING_SAFE and never returns to IDLE; fixed, it
@@ -599,17 +692,18 @@ def test_rejected_closing_turn_advances_to_next_topic():
     assert controller.active_topic is None
     assert t1.status == TopicStatus.COMPLETED
 
-    driver.tick_once()  # tick3: IDLE must select the next queued topic
+    driver.tick_once()  # tick4: IDLE must select the next queued topic
     assert controller.active_topic is not None
     assert controller.active_topic.id == t2.id
 
 
 def test_rejected_closing_turn_with_empty_queue_reaches_off():
     controller, motor, driver, _ = _rejecting_setup(
-        num_topics=1, max_turns_per_topic=2, turn_batch_size=1
+        num_topics=1, max_turns_per_topic=2
     )
 
-    driver.tick_once()  # open turn rejected
+    driver.tick_once()  # open turn rejected -> turns_spoken 0->1
+    driver.tick_once()  # continue turn rejected -> turns_spoken 1->2, budget exhausted
     driver.tick_once()  # closing turn rejected -> force-complete, empty queue
     driver.tick_once()  # IDLE + empty queue -> driver auto-exit to OFF
 
@@ -618,10 +712,11 @@ def test_rejected_closing_turn_with_empty_queue_reaches_off():
 
 def test_soft_stop_terminates_after_rejected_closing():
     controller, motor, driver, _ = _rejecting_setup(
-        num_topics=1, max_turns_per_topic=2, turn_batch_size=1
+        num_topics=1, max_turns_per_topic=2
     )
 
-    driver.tick_once()  # open turn rejected
+    driver.tick_once()  # open turn rejected -> turns_spoken 0->1
+    driver.tick_once()  # continue turn rejected -> turns_spoken 1->2, budget exhausted
     driver.tick_once()  # closing turn rejected -> force-complete settles state
 
     motor.reset()
@@ -655,7 +750,7 @@ def _arm_prefetch(controller, driver, motor, source="kira-agenda"):
 
 
 def test_speaking_start_triggers_prefetch_for_agenda_speech():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -702,7 +797,7 @@ def test_speaking_start_skips_prefetch_when_interactive_pending():
 def test_prefetch_stash_survives_mid_speech_tick():
     # The 4.5s cadence fires MANY ticks inside a 60s speech window. A tick while
     # the turn is still SPEAKING must NOT drop or consume the in-flight draft.
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -718,7 +813,7 @@ def test_prefetch_stash_survives_mid_speech_tick():
 
 
 def test_speaking_end_consumes_ready_draft_without_new_generation():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -742,7 +837,7 @@ def test_speaking_end_consumes_ready_draft_without_new_generation():
 
 
 def test_valid_draft_is_consumed_before_next_action_can_clobber_it():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -760,7 +855,7 @@ def test_valid_draft_is_consumed_before_next_action_can_clobber_it():
 
 
 def test_consume_yields_to_pending_ptt_and_clears_draft():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -782,7 +877,7 @@ def test_consume_yields_to_pending_ptt_and_clears_draft():
 def test_consume_drops_draft_when_topic_vanished():
     # active_topic went away before consume (e.g. emergency clear): the topic-None
     # staleness guard drops the draft and falls back to a normal tick.
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -803,7 +898,7 @@ def test_consume_drops_draft_on_topic_id_mismatch():
     # A DIFFERENT (non-None) topic is active at consume time — the draft was
     # pinned to the old topic id, so the id-mismatch guard drops it (this is the
     # branch a topic-None test can't reach).
-    controller, topic1 = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, topic1 = _controller_with_queued_topic(max_turns_per_topic=3)
     topic2 = controller.add_topic("Tema dos", "angulo", approved=True)
     controller.queue_topic(topic2.id)
     controller.enable()
@@ -825,7 +920,7 @@ def test_consume_drops_draft_on_topic_id_mismatch():
 
 
 def test_late_draft_requests_short_retick_without_enqueue():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -843,7 +938,7 @@ def test_late_draft_requests_short_retick_without_enqueue():
 
 
 def test_failed_prefetch_falls_back_to_plain_generation():
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -871,7 +966,7 @@ def test_stop_turn_prefetch_full_cycle_no_topic_closing_deadlock():
     # #468: consuming a kira-agenda-stop prefetch drives the controller through
     # TOPIC_CLOSING. The speaking_start guard must include TOPIC_CLOSING so the
     # closing turn completes instead of deadlocking.
-    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2, turn_batch_size=1)
+    controller, topic = _controller_with_queued_topic(max_turns_per_topic=2)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -926,7 +1021,7 @@ def test_prefetch_never_blocks_under_the_lock():
     # The lock is held across the whole tick body, so the driver must only SPAWN
     # (prefetch_agenda) and poll NON-BLOCKING (wait timeout=0); a real ~17s
     # generation must never be awaited under the lock.
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -944,7 +1039,7 @@ def test_run_honors_next_wait_retick_for_late_draft():
     # Prove the RUNNING loop honors the short _next_wait re-tick (not the full
     # cadence) when a draft is still generating at speaking_end. A 30s cadence
     # would never catch the draft; the 0.25s re-tick must.
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor, tick_seconds=30.0)
@@ -1004,7 +1099,7 @@ def test_clear_prefetch_leaves_interactive_draft_but_clears_agenda_draft():
 
 
 def test_none_boundary_telemetry_on_driver_fallback_with_no_draft(caplog):
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)
@@ -1074,7 +1169,7 @@ def test_tick_debug_logs_when_engine_has_draft_but_driver_forgot_its_stash(caplo
 
 
 def test_tick_no_desync_log_when_stash_and_engine_agree(caplog):
-    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3, turn_batch_size=1)
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
     controller.enable()
     motor = FakeMotor()
     driver = _driver(controller, motor)

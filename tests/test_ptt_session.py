@@ -434,7 +434,7 @@ class _RecordingDispatcher:
     def __init__(self):
         self.calls = []
 
-    def dispatch(self, command, payload, key=None, history_text=None, source=None):
+    def dispatch(self, command, payload, key=None, history_text=None, source=None, submitted_at=None):
         self.calls.append(
             {
                 "command": command,
@@ -442,6 +442,7 @@ class _RecordingDispatcher:
                 "key": key,
                 "history_text": history_text,
                 "source": source,
+                "submitted_at": submitted_at,
             }
         )
 
@@ -476,6 +477,21 @@ def test_dispatch_sends_ptt_wrapper_prompt_and_ptt_history_wrapper_history_text(
     assert call["payload"] == "El streamer acaba de decir (PTT): hola mundo esto es una prueba"
     assert call["history_text"] == "El streamer dijo (PTT): hola mundo esto es una prueba"
     assert call["key"] is None
+
+
+def test_dispatch_stamps_submitted_at_monotonic():
+    # Unit 4.1 (runtime_findings_batch_20260731, F5): PTT shares the same
+    # dispatch() seam as /api/chat/turn "for free" — no separate stamp path.
+    disp = _RecordingDispatcher()
+    controller = PttController("ws://test/whisperlive", disp, MagicMock())
+
+    before = time.monotonic()
+    controller._dispatch("hola mundo esto es una prueba")
+    after = time.monotonic()
+
+    submitted_at = disp.calls[0]["submitted_at"]
+    assert isinstance(submitted_at, float)
+    assert before <= submitted_at <= after
 
 
 # ──────────────────────────────────────────────────────────────────────────

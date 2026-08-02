@@ -2,6 +2,53 @@
 
 This is the first file an AI agent should read when starting work in this repo.
 
+> **⇢ LATEST (2026-08-01 evening): §8 RUNTIME-VALIDATED same day + owner rulings APPLIED, UNCOMMITTED.**
+> The owner ran a 4h33m real agenda session that hit FOUR real bare NIM 429s: §8.1/§8.2 pass
+> (4 manual probe POSTs in the API audit; failed-manual→120 s reseed proven second-exact; no
+> machine-gun), §8.3 cadence proven (two pure-auto restores at 2642 s vs 2640 s theoretical,
+> attempt 5 of 6); pending: give-up, bad_key, error-alert, rate_limited countdown — all need
+> `tools/mock_cloud_429.py` (NEW, `--bare` / `--fail forever`). Second-pass results table:
+> `docs/runtime-validation-20260731.md`. Rulings applied same evening: **Q1(a)** — chip tone
+> now follows probe-scheduling state (amber+countdown while probes remain, red only when the
+> engine won't retry alone); **prober text-log observability** — numeric-only lines for probe
+> arm/give-up + agenda stop (the event-store-only gap found during forensics). Q2 deferred
+> (`proposal-q2-manual-probe-failure-label.md`); Q3 open. **ADR-039 gate PARTIALLY CLOSED**
+> (2 clean sessions, ~449 generations, 0 non-clean verdicts — see the ADR's gate-ruling
+> addendum); editorial findings spun off to parked research:
+> `conductor/tracks/editorial_direction_research_20260801/proposal.md`. Orchestrator-recounted
+> suites: **backend 5103 passed / 14 skipped · front 1044 passed, tsc clean** (zero
+> regressions). Engram: `llm/cloud-rearm-runtime-validation-20260801`. Nothing committed.
+
+> **⇢ LOOP EXECUTED (2026-08-01, overnight, autonomous): cloud re-arm — ALL 6 WUs APPLIED, UNCOMMITTED.**
+> Plan: `conductor/tracks/cloud_rearm_20260801/plan.md`. Shipped: `trigger_cloud_probe_now()` +
+> `POST /api/llm/provider/probe` + conservative auto-return for `ambiguous_429` (flag ON,
+> 120→240→480→900 s, give-up after 6, `cloud_probe_gave_up`) + front StatusRail fallback chip
+> with countdown and "Probar ahora" (closes the §1b countdown gap). One sonnet judge per stage
+> (owner rule): front → 1 should-fix (silent probe-error, fixed); backend → 1 BLOCKER (zero-backoff
+> manual-probe hammer loop, fixed + 5 tests, fix judge-re-verified). Orchestrator-recounted:
+> **backend 5097 passed / 14 skipped · front 1042 passed** (baselines 5072 / 1031, zero
+> regressions). Owner questions for post-loop review:
+> `conductor/tracks/cloud_rearm_20260801/post-loop-questions.md`. Runtime validation: §8 of
+> `docs/runtime-validation-20260731.md` (owner's next run). Engram:
+> `llm/cloud-manual-rearm-20260801`. Nothing committed; the tree stays dirty by design.
+
+> **⇢ LOOP EXECUTED (2026-07-31): post-validation findings batch — ALL 11 UNITS APPLIED, UNCOMMITTED.**
+> Plan: `conductor/tracks/runtime_findings_batch_20260731/plan.md` (F1–F15, 4 batches). Design for
+> 3.1: `design-3.1-attempts-accounting.md` (same dir). Units 2.2 and 3.1 were opus-judged and their
+> findings fixed (2.2: 7, incl. 2 prober-race criticals; 3.1: 5, incl. a stranded-topic BLOCKER).
+> Orchestrator-recounted suites: **backend 5072 passed / 14 skipped / 0 failed · front 1031 passed**
+> (baseline pre-loop: 4907 / ~1010; zero regressions). Engram: `runtime/findings-batch-plan-20260731`.
+> **Validation first pass DONE (2026-07-31, 3h12m run, cut by a power outage):** see the Results
+> appendix in `docs/runtime-validation-20260731.md` and the tracks.md entry. Validated in the wild:
+> a real bare NIM 429 → `ambiguous_429` fallback exactly per contract, `MODEL_MISMATCH_WARNING`=0,
+> TTS filter on real CJK, direct-in-agenda 77 s measured (was 13.8–29.1 min), status rail visually
+> correct during fallback. **Still without runtime evidence: PTT (§5), injected §1a/§1b (in-turn
+> retry + the auto-return prober arc), and the remaining visual checks — the next owner run only
+> needs those.** ADR-039 ruled NOT closed by the owner: 0 non-clean verdicts in 3h clears the
+> false-positive half; closure path is now transcripts + external semantic eval (research). Three
+> new investigation items (cloud re-arm endpoint, opt-in transcripts, guardrail pairs) are logged
+> in tracks.md — none implemented. Nothing is committed anywhere; the tree stays dirty by design.
+
 ## Current operating mode
 
 **Less expansion, more controlled validation.**
@@ -12,11 +59,74 @@ runtime uncertainty before packaging or broad product polish.
 
 ---
 
-# ⇢ SESSION CLOSE 2026-07-30 — START HERE
+# ⇢ VALIDATION SESSION — START HERE (updated 2026-07-30, second pass)
 
-**Everything is committed. Working tree clean. Suite 4907 passed · 0 failed · 14 skipped.**
-Branch `codex/ui-ux-audit-proposal-20260709`, **22 commits** this session (`34a6df6..HEAD`),
-**nothing pushed** — push/branch shaping is still an open owner decision (§3.1).
+**The next action is the owner's live run, not an implementation step.** Read their report first;
+their findings outrank everything staged below.
+
+## Three things to do before pressing start
+
+1. **Launch with `pnpm tauri:debug`, not `pnpm tauri dev`.** The new script
+   (`OpenCohost_UI/package.json`) sets `OPENCOHOST_DEBUG=1` and warns if a backend is already
+   listening. **The variable only reaches the backend when Tauri spawns it** — `backend.rs`'s
+   `Command` never calls `env_clear()`, so the child inherits the shell env, but if 8765/8770 is
+   already busy Tauri *reuses* that process and the setting is silently irrelevant. Confirm
+   `managed: true` in `backend_info` if in doubt. Manual equivalent: `$env:OPENCOHOST_DEBUG="1"`
+   before launching, with no backend already running.
+2. **Empty only the leaked TTS artifacts from `temp/`, and count them first.**
+   `cd /e/VoiceAI/temp && ls tts_chunk_* out_ligero_* out_pesado_* | wc -l` → then `rm -f` those
+   three prefixes only. Counting before and after converts a theoretical disk leak into a measured
+   per-turn rate. **Do NOT empty `temp/` wholesale** — it holds five live git checkouts of the
+   front-end repo (`temp/worktrees/`, no backup anywhere), 25 model-eval `.db` files, 16 scripts,
+   and the `.png` comparisons of the class lost on 2026-07-15. Manifest in
+   `docs/long-session-readiness-20260730.md`.
+3. **Generating the topic list?** Use `docs/agenda-bulk-prompt-template.md` — the Tauri bulk parser
+   takes **one pipe-separated line per topic**, and CTK's labelled-block format is a *different*
+   parser that fails silently in Tauri.
+
+## AFK run — pick the axis before you walk away
+
+**`config/llm_provider.json` has `active_provider: nvidia_nim`.** The engine is on **cloud**, not
+local. An unattended agenda run therefore measures NVIDIA NIM, not the machine OpenCohost ships on.
+
+| An AFK agenda run proves | It cannot prove |
+|---|---|
+| Clause sanitizer end to end (provider-agnostic **by construction** — no `is_local` gate between the seam and the return) | **PTT and direct chat** — both need a human |
+| Agenda state machine + turn arithmetic at the untested multi-topic × batch-2 combination | **Local Ollama inference** on your own hardware, if the provider stays cloud |
+| Repetition behavior across many consecutive turns | **Heavy-model watchdog rollback** — `_rollback_to_last_known_good_model` targets local tags; it does not arm on the cloud path |
+| Disk-leak rate per turn (count `temp/` before and after) | **Cloud → local fallback** — `_handle_cloud_failure` fires only on a real NIM timeout or non-2xx. If NIM behaves, you learn nothing about recovery; a clean run is a pass for normal operation, not a test of it |
+
+**Recommendation: switch `active_provider` to local for this run.** OpenCohost's entire pitch is
+local-first with no cloud subscription — a validation session on NIM validates the thing that is
+not the product, costs real tokens for ~210 generations, and disarms the one recovery mechanism
+(the watchdog) that a long session is uniquely good at exercising. Test the cloud path separately
+and deliberately, where you can provoke the failure instead of hoping for one.
+
+Ollama is up with `gemma4:12b` available, so a fallback has somewhere to land. If you shut Ollama
+down during a cloud run, the fallback has no target and you will be testing two failures at once.
+
+## What the numbers will and will not mean
+
+- **10 topics × 20 turns ≈ ~210 generations** — D1 (2026-07-31, unit 3.1) deleted
+  `turn_batch_size`/`_next_block_size`; one generation now debits exactly one attempt, so a
+  configured turn count is the real generation count (was ≈110 under the old batch-2 halving).
+- **No test covers your exact configuration.** Multi-topic scale and the production batch size are
+  each covered, never together (`ADR-042` §5). The parts are tested; the combination is not.
+- **A green suite has never run a line against a real Ollama.** Ten tests repo-wide touch a real
+  external dependency, all behind env vars, all skipped by default (`ADR-042` §3).
+- **On Tauri the agenda ends silently** — the driver sets `OFF` with no log
+  (`api/agenda_driver.py:282-288`); CTK logs "Sesión completada" and cleans up. Both are pinned by
+  tests, but nothing pins them *against each other*.
+
+## Uncommitted work sitting in the tree
+
+`ADR-042`, `docs/long-session-readiness-20260730.md`, `docs/agenda-bulk-prompt-template.md`, the
+corrected `docs/runtime-validation-20260730.md`, and the Tauri turn-selector fix (1..20, front
+suite 1010 green). **The front fix is not committable here** — `.gitignore:120` excludes
+`OpenCohost_UI/` entirely; it lives in its own repo.
+
+Prior session: 22 commits (`34a6df6..ba1035c`), nothing pushed — push/branch shaping is still an
+open owner decision (§3.1).
 
 > **Before running the validation gate: `$env:OPENCOHOST_DEBUG="1"` must be set BEFORE launching
 > the app.** The sanitizer's telemetry emits at DEBUG and the log level is fixed at process start.
@@ -473,7 +583,8 @@ todo" on close day, including their Codex audit-entry revision). NEVER committed
 config/ (owner tokens), OpenCohost_UI/.atl/, src-tauri/backend.config.json (machine-local), .pnpm-store/.
 Still owed by owner from earlier snapshots: watchdog kill-mid-hold proof, Tauri drain re-validation,
 locale=en session, auth enforcement flip, heavy-model stall test, reject test proposal ti_6edb78... from
-the UI. Open product question: agenda turn semantics (turn_batch_size=2 vs UI slider labeling).
+the UI. Agenda turn semantics question below (batch-2 vs UI slider labeling): **DECIDED and shipped**
+— see D1/D2, unit 3.1, 2026-07-31.
 
 ## LATEST SNAPSHOT — 2026-07-09 night (owner runtime validation + command-starvation fix track)
 
@@ -492,9 +603,10 @@ turn boundary; NO straggler turn after emergency stop; Edge-TTS speed audibly ch
 Also explored (engram sdd/liveaudio-tauri-parity/explore): Tauri PTTCard is a UI stub (no mic/hotkey/net);
 CTK LiveVoice = WS client to external WhisperLive; guillotine = physical-key reconcile (ptt_manager.py:419).
 3 scoped options for parity, favorite = sidecar WS bridge (reuses ~90% CTK logic, no SSE dependency).
-Open product question from owner testing: agenda turn semantics — turn_batch_size=2 means the UI "turns"
-slider (max 8) counts HALF-blocks; 50 configured would sound like 25 blocks. Needs a product decision
-(relabel vs true per-turn counting) — small fix once decided.
+Open product question from owner testing: agenda turn semantics — turn_batch_size=2 meant the UI "turns"
+slider counted HALF-blocks. **DECIDED 2026-07-31 (D1/D2, unit 3.1):** one generation = one attempt = one
+debit (rejected/empty generations debit too); `turn_batch_size`/`_next_block_size` deleted; the UI now
+says "intentos por tema", honest by construction.
 
 ## LATEST SNAPSHOT — 2026-07-09 PM (FULL SUITE GREEN: threading track closed + Phase 7 extraction landed)
 

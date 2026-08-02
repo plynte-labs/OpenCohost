@@ -56,8 +56,17 @@ def test_status_response_wire_keys_exact():
         "health",
         "state_version",
         "ollama_warming",
+        "session_mode",
+        "llm_generating",
+        "pending_commands_count",
         "avatar_state",
         "obs_connected",
+        "provider",
+        "transport",
+        "fallback_active",
+        "fallback_reason",
+        "next_cloud_probe_in_seconds",
+        "ctx_telemetry",
     }
     # A-M1 pin: NOT the shortened forms.
     assert "ready" not in dumped

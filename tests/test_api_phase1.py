@@ -238,6 +238,26 @@ class FakeMotor:
             "source_breakdown": {},
             "digest": {"line_count": 0, "total_chars": 0, "max_chars": 4000},
         }
+        # F4 (runtime_findings_batch_20260731 1.3): mirrors
+        # MotorVocalIA._provider_config / _cloud_fallback_active / the real
+        # provider_runtime_state() derivation, so tests can flip these
+        # in-memory fields directly (app.state.host.motor._provider_config = ...)
+        # instead of going through the disk-backed load_provider_config().
+        self._provider_config = {"active_provider": "local", "profiles": {}}
+        self._cloud_fallback_active = False
+        # Unit 2.5 (runtime_findings_batch_20260731 F13): mirrors
+        # MotorVocalIA.llm_generating (a property there too) and
+        # ctx_telemetry_snapshot() (unit 2.3) so tests can flip
+        # `_llm_generating`/`_ctx_ring` directly, same pattern as
+        # `_provider_config`/`_cloud_fallback_active` above.
+        self._llm_generating = False
+        self._ctx_ring: list = []
+        # WU2 (cloud_rearm_20260801): settable stub for
+        # POST /api/llm/provider/probe -- mirrors MotorVocalIA.trigger_cloud_probe_now().
+        # Tests override the return value directly (`.return_value = {...}`) or
+        # `del motor.trigger_cloud_probe_now` to simulate a motor build that
+        # predates this method (the endpoint's 503 `motor_unavailable` path).
+        self.trigger_cloud_probe_now = MagicMock(return_value={"armed": True, "reason": None})
 
     @property
     def is_speaking(self):
@@ -247,6 +267,18 @@ class FakeMotor:
     def is_processing(self):
         return self._is_processing
 
+    @property
+    def llm_generating(self):
+        return self._llm_generating
+
+    def ctx_telemetry_snapshot(self, sources=None):
+        """Mirrors MotorVocalIA.ctx_telemetry_snapshot() (llm_engine.py) —
+        same "latest = last appended, optionally source-filtered" contract."""
+        ring = list(self._ctx_ring)
+        candidates = [e for e in ring if e.get("source") in sources] if sources is not None else ring
+        latest = candidates[-1] if candidates else None
+        return {"latest": latest, "ring": ring}
+
     def is_alive(self):
         return True
 
@@ -255,6 +287,31 @@ class FakeMotor:
 
     def set_memorias_private(self, value):
         self._memorias_private = bool(value)
+
+    def provider_runtime_state(self) -> dict:
+        """Mirrors MotorVocalIA.provider_runtime_state() (llm_engine.py) —
+        same local/cloud/fallback derivation over `_provider_config` /
+        `_cloud_fallback_active`, kept as a small duplicate here (rather than
+        importing the real engine) the same way this fake mirrors every other
+        MotorVocalIA attribute/property above."""
+        cfg = self._provider_config
+        fallback_active = self._cloud_fallback_active
+        active_provider = cfg.get("active_provider") or "local"
+        is_local = active_provider == "local" or fallback_active
+        if is_local:
+            return {
+                "provider": "local",
+                "transport": "local",
+                "fallback_active": fallback_active,
+                "generation_model": self.current_model,
+            }
+        profile = (cfg.get("profiles") or {}).get(active_provider) or {}
+        return {
+            "provider": active_provider,
+            "transport": "cloud",
+            "fallback_active": fallback_active,
+            "generation_model": str(profile.get("model") or "") or None,
+        }
 
     @property
     def memorias_private(self):
@@ -551,8 +608,17 @@ def test_status_shape_and_read_purity():
                 "health",
                 "state_version",
                 "ollama_warming",
+                "session_mode",
+                "llm_generating",
+                "pending_commands_count",
                 "avatar_state",
                 "obs_connected",
+                "provider",
+                "transport",
+                "fallback_active",
+                "fallback_reason",
+                "next_cloud_probe_in_seconds",
+                "ctx_telemetry",
             }
             assert isinstance(body["avatar_state"], str)
             # FakeMotor is ready, not speaking, not processing -> derived "idle".
