@@ -25,7 +25,6 @@ importing this module has zero side effects on hardware/VRAM/Ollama.
 """
 
 import concurrent.futures
-import dataclasses
 import logging
 import mimetypes
 import os
@@ -88,7 +87,6 @@ from opencohost.api.models import (
     AgentStatusResponse,
     AgentTopicRequest,
     AgentTopicResponse,
-    AvatarConfigRequest,
     AvatarConfigResponse,
     ChatLastReplyResponse,
     ChatTurnRequest,
@@ -99,14 +97,7 @@ from opencohost.api.models import (
     CohostProfilesResponse,
     CommandRequest,
     CtxTelemetryOut,
-    EventLogResponse,
-    HealthResponse,
-    HealthState,
-    I18nSetLocaleRequest,
-    I18nStateResponse,
     LlmProviderProfileOut,
-    LlmProviderProbeResponse,
-    LlmProviderRequest,
     LlmProviderResponse,
     MemoriaDeleteRequest,
     MemoriaFlagsRequest,
@@ -123,7 +114,6 @@ from opencohost.api.models import (
     MemoriaRowResponse,
     MemoriaStatsResponse,
     MemoriaUpdateRequest,
-    ModelsResponse,
     MusicFadeRequest,
     MusicImportRequest,
     MusicImportResponse,
@@ -132,9 +122,7 @@ from opencohost.api.models import (
     MusicMoodResponse,
     MusicStateResponse,
     MusicTrackOut,
-    ObsConfigRequest,
     ObsConfigResponse,
-    ObsTestResponse,
     PersonalizationResponse,
     PersonalizationUpdateRequest,
     ProfileCreateRequest,
@@ -151,38 +139,41 @@ from opencohost.api.models import (
     PttStopResponse,
     PttTestRequest,
     PttTestResponse,
-    StatusResponse,
     StreamChatLiveResponse,
     StreamConnectRequest,
     StreamLimitsRequest,
     SwitchProfileRequest,
-    TTSConfigResponse,
 )
-from opencohost.avatar.avatar_config import (
-    VALID_STATES,
-    AvatarConfigUnreadableError,
-    load_avatar_config,
-    save_avatar_config,
-)
+# `opencohost.api.routers.avatar`/`.obs` own VALID_STATES/AvatarConfigUnreadableError/
+# load_avatar_config/save_avatar_config directly now (refactor_core_api_20260802 B4)
+# -- this module has no remaining caller for them.
 from opencohost.avatar.obs_client import OBSClient
-from opencohost.config.llm_provider import load_provider_config, save_provider_config
+# `save_provider_config` moved with PUT /api/llm/provider to
+# `opencohost.api.routers.llm_provider`, which imports it directly.
+# `load_provider_config` stays: `opencohost.api.deps.load_provider_config()`
+# reads it off THIS module at call time (GET /api/models replaces the whole
+# function in tests/test_api_reads.py, so the router can't bind it at its
+# own import time -- see deps.py's module docstring).
+from opencohost.config.llm_provider import load_provider_config
 from opencohost.config.settings import (
     EDITORIAL_CARDS_DB,
+    # EXPERIMENTAL_HEAVY_TTS_ENABLED/LLM_KEYS_FILE/load_piper_voice/
+    # load_tts_local_only/load_tts_speed are read by opencohost.api.deps at
+    # call time off THIS module (tests monkeypatch them here, not at their
+    # settings.py source) -- kept even though no code in this file calls
+    # them directly anymore.
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     LLM_KEYS_FILE,
-    LLM_PROVIDER_PRESETS,
     MEMORIAS_DB,
     MEMORIAS_ENABLED,
     MEMORIAS_IMPORT_CAP,
     MEMORIAS_IMPORT_MAX_BYTES,
     MEMORIAS_IMPORT_MAX_ITEMS,
-    MODELS_CATALOG,
     PERSONALIZATION_INSTRUCTIONS_MAX,
     PERSONALIZATION_INTERESTS_MAX,
     PERSONALIZATION_NICKNAME_MAX,
     PERSONALIZATION_OCCUPATION_MAX,
     _canonical_model_tag,
-    default_piper_voice_for_locale,
     is_valid_stt_ws_uri,
     load_memorias_notice_dismissed,
     load_piper_voice,
@@ -192,7 +183,6 @@ from opencohost.config.settings import (
     save_memorias_notice_dismissed,
     save_ptt_ws_uri,
     load_tts_speed,
-    resolve_llm_tiers,
 )
 from opencohost.core.agent_notices import (
     AgentNoticeCapError,
@@ -232,10 +222,6 @@ from opencohost.core.cohost_profiles import (
 from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
 from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
-from opencohost.i18n import state as i18n_state
-from opencohost.i18n import tags as i18n_tags
-from opencohost.i18n.coherence import check_coherence
-from opencohost.i18n.startup import load_registry
 from opencohost.core.topic_inbox import (
     TopicInboxCapError,
     TopicInboxStore,
@@ -1030,84 +1016,22 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         allow_credentials=False,
     )
 
-    @app.get("/api/health", response_model=HealthResponse)
-    def get_health(request: Request) -> HealthResponse:
-        # Fast liveness probe: no engine work, no queue touch. Truthful even
-        # if the host has no motor yet (fresh process / no feeder).
-        motor = getattr(request.app.state.host, "motor", None)
-        is_alive = getattr(motor, "is_alive", None)
-        engine_alive = bool(is_alive()) if callable(is_alive) else False
-        return HealthResponse(status="ok", engine_alive=engine_alive)
+    # B4 (refactor_core_api_20260802): events, status/health/models,
+    # llm_provider, i18n/tts, avatar, obs -- mounted here, replacing their
+    # original inline @app. decorators. Late import (see
+    # opencohost/api/routers/__init__.py docstring) breaks the import cycle:
+    # these router modules import helper functions straight from THIS
+    # module's namespace at their own import time, which must already be
+    # populated (it is, by this point in create_app()). No path in any
+    # moved router is parameterized, so mounting them here instead of at
+    # their original scattered positions changes nothing observable --
+    # Starlette only cares about registration order for AMBIGUOUS/
+    # overlapping path templates, and none exist between these routes and
+    # anything still declared inline below.
+    from opencohost.api.routers import ALL_ROUTERS
 
-    @app.get("/api/status", response_model=StatusResponse)
-    def get_status(request: Request) -> StatusResponse:
-        host = request.app.state.host
-        # F4 (runtime_findings_batch_20260731 1.3): the engine's LIVE
-        # effective posture, never `load_provider_config()` — that disk read
-        # is exactly what let this endpoint keep reporting a stale cloud
-        # provider/model through an active `_cloud_fallback_active` fallback.
-        provider_state = host.motor.provider_runtime_state()
-        is_ready = host.motor.is_ready
-        is_speaking = host.motor.is_speaking
-        is_processing = host.motor.is_processing
-        # F4: derive coarse avatar state (motor has no AvatarStateBridge).
-        # Mirrors the FE deriveAvatarState fallback so both agree.
-        if is_speaking:
-            avatar_state = "speaking"
-        elif is_processing:
-            avatar_state = "thinking"
-        elif not is_ready:
-            avatar_state = "sleeping"
-        else:
-            avatar_state = "idle"
-        # FIX-B: real OBS connection state from the API-hosted ObsRuntime.
-        # Guarded (getattr + try/except) so a host double without a runtime, or
-        # a runtime error, degrades to None rather than failing the probe.
-        runtime = getattr(host, "obs_runtime", None)
-        obs_connected: Optional[bool] = None
-        if runtime is not None:
-            try:
-                obs_connected = bool(runtime.is_connected)
-            except Exception:
-                obs_connected = None
-        # Unit 2.5 (F13): session_mode is DERIVED here, every call — see
-        # _derive_session_mode's docstring for the rule and its accepted
-        # risks. `agenda is None` (no headless controller wired) counts as
-        # OFF: there is no agenda to be "active", so it falls through to the
-        # post-agenda/inactiva read on the booleans below, same as a real OFF.
-        agenda = getattr(host, "agenda", None)
-        agenda_off = agenda is None or agenda.state == AgendaState.OFF
-        llm_generating = bool(getattr(host.motor, "llm_generating", False))
-        pending_commands_count = host.motor.command_queue.qsize()
-        session_mode = _derive_session_mode(
-            agenda_off=agenda_off,
-            is_speaking=is_speaking,
-            is_processing=is_processing,
-            llm_generating=llm_generating,
-            pending_commands_count=pending_commands_count,
-        )
-        return StatusResponse(
-            is_ready=is_ready,
-            current_model=_display_model(host, provider_state),
-            is_speaking=is_speaking,
-            is_processing=is_processing,
-            active_profile=host.motor._current_profile_name,
-            active_profile_id=getattr(host.motor, "_current_profile_id", None),
-            health=HealthState(**dataclasses.asdict(host.monitor.state)),
-            state_version=request.app.state.dispatcher.state_version,
-            ollama_warming=getattr(host, "ollama_warming", False),
-            session_mode=session_mode,
-            llm_generating=llm_generating,
-            pending_commands_count=pending_commands_count,
-            avatar_state=avatar_state,
-            provider=provider_state["provider"],
-            transport=provider_state["transport"],
-            fallback_active=provider_state["fallback_active"],
-            fallback_reason=provider_state.get("fallback_reason"),
-            next_cloud_probe_in_seconds=provider_state.get("next_cloud_probe_in_seconds"),
-            ctx_telemetry=_ctx_telemetry_out(host.motor),
-            obs_connected=obs_connected,
-        )
+    for _router in ALL_ROUTERS:
+        app.include_router(_router)
 
     @app.get("/api/perfiles", response_model=ProfilesListResponse)
     def list_perfiles() -> ProfilesListResponse:
@@ -1224,52 +1148,6 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
         return {"ok": True}
 
-    def _i18n_state_response() -> I18nStateResponse:
-        # Reuses load_registry() (official + community discovery, official-wins
-        # anti-shadowing merge) and get_active_bundle() — zero new state
-        # (design §7.1). `available` reads each bundle's own `meta.display`/
-        # `meta.status` (already authored per-locale), not a re-derived check.
-        registry = load_registry()
-        active_bundle = i18n_active.get_active_bundle()
-        persisted_locale = i18n_state.get_locale()
-        pending_restart = i18n_tags.normalize(persisted_locale) != active_bundle.code
-        available = [
-            {
-                "code": code,
-                "display": str((bundle.data.get("meta") or {}).get("display", code)),
-                "tier": bundle.tier,
-                "status": str((bundle.data.get("meta") or {}).get("status", "unknown")),
-            }
-            for code, bundle in sorted(registry.items())
-        ]
-        # Bundle-level only (design §7.1) — no profile/piper args, so only
-        # BUNDLE_VOICE_MISMATCH can ever fire here.
-        warnings = [
-            {"code": w.code, "message": w.message} for w in check_coherence(active_bundle)
-        ]
-        return I18nStateResponse(
-            active_locale=active_bundle.code,
-            persisted_locale=persisted_locale,
-            pending_restart=pending_restart,
-            available=available,
-            warnings=warnings,
-        )
-
-    @app.get("/api/i18n", response_model=I18nStateResponse)
-    def get_i18n() -> I18nStateResponse:
-        return _i18n_state_response()
-
-    @app.put("/api/i18n", response_model=I18nStateResponse)
-    def set_i18n(body: I18nSetLocaleRequest):
-        registry = load_registry()
-        matched = i18n_tags.match(body.locale, list(registry.keys()))
-        if not matched:
-            return JSONResponse(status_code=422, content={"detail": "unknown locale"})
-        # D6: next-boot only — persists the choice, never hot-swaps the
-        # running process's active bundle.
-        i18n_state.set_locale(matched)
-        return _i18n_state_response()
-
     def _personalization_response(data: dict) -> PersonalizationResponse:
         # Explicit field picks only — never `**data` — so the internal
         # `version` key (or any future field) can never leak through.
@@ -1335,63 +1213,6 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     status_code=503, content={"detail": "personalization_write_failed"}
                 )
         return {"ok": True}
-
-    @app.get("/api/models", response_model=ModelsResponse)
-    def get_models(request: Request) -> ModelsResponse:
-        host = request.app.state.host
-        provider_cfg = load_provider_config()
-        active_provider = provider_cfg.get("active_provider", "local")
-        if active_provider != "local":
-            # Cloud active (multi_provider_llm_20260723 Phase 5, spec D): no
-            # `ollama.list` discovery, no download/install catalog (VRAM
-            # tiers are a local-only concept) — only the ACTIVE profile's
-            # own model, read from `profiles[active_provider]`, never
-            # another profile's. Shared with /api/status via _display_model
-            # so the two endpoints can never report different models again.
-            # NOTE: _display_model now reads the engine's LIVE provider state
-            # (1.3), not this `provider_cfg` disk read — the two can disagree
-            # during an active `_cloud_fallback_active` fallback; the branch
-            # selection above (whether to skip Ollama discovery) is still the
-            # persisted config's call, deliberately unchanged by this unit.
-            active_model = _display_model(host)
-            return ModelsResponse(
-                catalog={},
-                discovered=[active_model] if active_model else [],
-                current_model=active_model,
-                tiers={},
-                active_tier="cloud",
-            )
-        try:
-            discovered = _discover_ollama_models()
-        except Exception:
-            # _discover_ollama_models already fails open internally; this
-            # outer guard is a second layer so a mocked/monkeypatched or
-            # future-refactored discovery call can never 500 this endpoint.
-            discovered = []
-        # Pass our bounded `discovered` in so resolve_llm_tiers never falls
-        # back to its own unbounded, no-timeout `_discover_installed_model_tags()`
-        # internally (settings.py) — one bounded discovery call per request.
-        tiers = resolve_llm_tiers(installed_model_tags=discovered)
-        return ModelsResponse(
-            catalog=MODELS_CATALOG,
-            discovered=discovered,
-            current_model=_display_model(host),
-            tiers=tiers,
-            active_tier=host.motor.active_llm_tier,
-        )
-
-    @app.get("/api/tts/config", response_model=TTSConfigResponse)
-    def get_tts_config(request: Request) -> TTSConfigResponse:
-        host = request.app.state.host
-        return TTSConfigResponse(
-            piper_voice=load_piper_voice(
-                default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
-            ),
-            local_only=load_tts_local_only(),
-            speed=load_tts_speed(),
-            engine=host.motor.motor_tts,
-            heavy_available=EXPERIMENTAL_HEAVY_TTS_ENABLED,
-        )
 
     @app.get("/api/memoria/stats", response_model=MemoriaStatsResponse)
     def get_memoria_stats(request: Request, profile_id: Optional[str] = None) -> MemoriaStatsResponse:
@@ -2411,292 +2232,6 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # ChatReplySink docstring (engine_host.py). Never the viewer/operator
         # text that triggered it.
         return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
-
-    @app.get("/api/events", response_model=EventLogResponse)
-    def get_events(request: Request, since: int = 0) -> EventLogResponse:
-        # Item B: engine-thread event log, metadata-only (see EventLogSink /
-        # EngineHost._record_motor_event's closed whitelist, engine_host.py).
-        # GET stays open per auth.py rule 3 (non-mutating reads are never
-        # gated), same tier as /api/status and /api/chat/last-reply above.
-        return EventLogResponse(**request.app.state.host.event_log.since(since))
-
-    @app.get("/api/obs/config", response_model=ObsConfigResponse)
-    def get_obs_config() -> ObsConfigResponse:
-        return _obs_config_response(load_avatar_config())
-
-    @app.put("/api/obs/config", response_model=ObsConfigResponse)
-    def put_obs_config(request: Request, body: ObsConfigRequest) -> ObsConfigResponse:
-        with _config_lock:
-            try:
-                cfg = load_avatar_config(strict=True)
-            except AvatarConfigUnreadableError:
-                return JSONResponse(status_code=503, content={"detail": "config_unreadable"})
-            if body.enabled is not None:
-                cfg.obs.enabled = body.enabled
-            if body.host is not None:
-                cfg.obs.host = body.host
-            if body.port is not None:
-                cfg.obs.port = body.port
-            if body.source is not None:
-                cfg.obs.source_name = body.source
-            if body.password is not None:
-                cfg.obs.password = body.password
-            try:
-                save_avatar_config(cfg)
-            except (OSError, RuntimeError):
-                return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
-            response = _obs_config_response(cfg)
-        # FIX-B: push the saved config to the live OBS runtime (outside the
-        # write-lock so an OBS reconnect never holds the shared-yaml lock).
-        _apply_avatar_runtime(request)
-        return response
-
-    @app.post("/api/obs/test", response_model=ObsTestResponse)
-    def post_obs_test(body: Optional[ObsConfigRequest] = None) -> ObsTestResponse:
-        cfg = load_avatar_config()
-        obs_cfg = cfg.obs
-        if body is not None:
-            obs_cfg = dataclasses.replace(
-                obs_cfg,
-                host=body.host if body.host is not None else obs_cfg.host,
-                port=body.port if body.port is not None else obs_cfg.port,
-                password=body.password if body.password is not None else obs_cfg.password,
-            )
-        client = OBSClient(config=obs_cfg, assets_folder=cfg.assets_folder)
-        ok, message = _test_obs_connection_bounded(client)
-        return ObsTestResponse(ok=ok, error=None if ok else message)
-
-    @app.get("/api/avatar/config", response_model=AvatarConfigResponse)
-    def get_avatar_config() -> AvatarConfigResponse:
-        return _avatar_config_response(load_avatar_config())
-
-    @app.put("/api/avatar/config", response_model=AvatarConfigResponse)
-    def put_avatar_config(request: Request, body: AvatarConfigRequest):
-        if body.state_images is not None:
-            unknown = sorted(set(body.state_images) - VALID_STATES)
-            if unknown:
-                return JSONResponse(
-                    status_code=422, content={"detail": f"unknown avatar state(s): {unknown}"}
-                )
-        with _config_lock:
-            try:
-                cfg = load_avatar_config(strict=True)
-            except AvatarConfigUnreadableError:
-                return JSONResponse(status_code=503, content={"detail": "config_unreadable"})
-            if body.enabled is not None:
-                cfg.enabled = body.enabled
-            if body.mode is not None:
-                cfg.mode = body.mode
-            if body.state_images is not None:
-                new_state_images = dict(cfg.state_images)
-                for state, path in body.state_images.items():
-                    new_state_images[state] = Path(path)
-                cfg.state_images = new_state_images
-            try:
-                save_avatar_config(cfg)
-            except (OSError, RuntimeError):
-                return JSONResponse(status_code=503, content={"detail": "config_write_failed"})
-            response = _avatar_config_response(cfg)
-        # FIX-B: a live OBSClient snapshots state_images at construction, so an
-        # avatar-card change needs a full runtime rebuild, not just a reconnect.
-        _apply_avatar_runtime(request)
-        return response
-
-    # ── Multi-provider LLM config (multi_provider_llm_20260723 Phase 1) ──
-    # Phase 1 persists to disk ONLY — `motor.set_provider_config` wiring and
-    # `is_local` gating land in Phase 3 (design Doubts #2). GET stays open
-    # (auth.py rule 3, same tier as /api/obs/config below); PUT is gated by
-    # auth_middleware rule 2 (operator token, warn-only until API_AUTH_ENFORCED).
-
-    @app.get("/api/llm/provider", response_model=LlmProviderResponse)
-    def get_llm_provider() -> LlmProviderResponse:
-        return _llm_provider_response(load_provider_config(), OAuthStore(LLM_KEYS_FILE))
-
-    @app.put("/api/llm/provider", response_model=LlmProviderResponse)
-    def put_llm_provider(body: LlmProviderRequest, request: Request):
-        scoped_given = (
-            body.base_url is not None
-            or body.model is not None
-            or body.preset is not None
-            or body.api_key is not None
-        )
-        # delete_profile is a standalone action field -- never combines with a
-        # profile edit in the same PUT (design 'Provider Config Surface').
-        if body.delete_profile is not None and scoped_given:
-            return JSONResponse(
-                status_code=422,
-                content={"detail": "delete_profile cannot be combined with profile edits"},
-            )
-        if scoped_given and body.profile_id is None:
-            return JSONResponse(status_code=422, content={"detail": "profile_id required"})
-        if body.profile_id is not None and (
-            body.profile_id == "local" or not _PROFILE_ID_RE.fullmatch(body.profile_id)
-        ):
-            return JSONResponse(status_code=422, content={"detail": "invalid profile_id"})
-        if body.preset is not None and body.preset not in LLM_PROVIDER_PRESETS:
-            return JSONResponse(status_code=422, content={"detail": "unknown preset"})
-
-        with _llm_provider_lock:
-            cfg = load_provider_config()
-            profiles = cfg.setdefault("profiles", {})
-            key_store = OAuthStore(LLM_KEYS_FILE)
-
-            if body.delete_profile is not None and body.delete_profile not in profiles:
-                return JSONResponse(status_code=422, content={"detail": "unknown profile"})
-
-            if body.active_provider is not None:
-                known = set(profiles) | ({body.profile_id} if body.profile_id else set())
-                if body.active_provider != "local" and body.active_provider not in known:
-                    return JSONResponse(status_code=422, content={"detail": "unknown provider"})
-
-            if body.delete_profile is not None:
-                # Target must not be the RESOLVED active provider -- i.e. after
-                # this same PUT's active_provider change (if any) is applied.
-                # This is what makes switch-then-delete work in one call.
-                resolved_active = (
-                    body.active_provider
-                    if body.active_provider is not None
-                    else cfg.get("active_provider", "local")
-                )
-                if body.delete_profile == resolved_active:
-                    return JSONResponse(
-                        status_code=422, content={"detail": "cannot delete active profile"}
-                    )
-                # Delete the key FIRST: if the key store write fails, the
-                # profile removal below must never run, so a 503 here leaves
-                # the profile (and its key) exactly as they were -- no config
-                # change is persisted without the key delete succeeding.
-                try:
-                    key_store.delete(body.delete_profile)
-                except OSError:
-                    return JSONResponse(
-                        status_code=503, content={"detail": "key_store_write_failed"}
-                    )
-                profiles.pop(body.delete_profile, None)
-
-            if body.profile_id is not None and (
-                body.base_url is not None or body.model is not None or body.preset is not None
-            ):
-                profile = dict(profiles.get(body.profile_id, {}))
-                if body.preset is not None:
-                    preset_cfg = LLM_PROVIDER_PRESETS[body.preset]
-                    profile["preset"] = body.preset
-                    if not profile.get("base_url"):
-                        profile["base_url"] = preset_cfg["base_url"]
-                    if not profile.get("model") and preset_cfg.get("models"):
-                        profile["model"] = preset_cfg["models"][0]
-                if body.base_url is not None:
-                    profile["base_url"] = body.base_url
-                if body.model is not None:
-                    profile["model"] = body.model
-                profiles[body.profile_id] = profile
-            elif (
-                body.profile_id is not None
-                and body.api_key is not None
-                and body.profile_id not in profiles
-            ):
-                # F3: an api_key-only PUT for a brand-new profile id must
-                # still create the (empty) profile entry -- otherwise the
-                # stored key is invisible forever (no GET ever reports it).
-                profiles[body.profile_id] = {}
-
-            if body.active_provider is not None:
-                cfg["active_provider"] = body.active_provider
-            if body.fallback_mode is not None:
-                cfg["fallback_mode"] = body.fallback_mode
-            if body.pregen_enabled is not None:
-                cfg["pregen_enabled"] = body.pregen_enabled
-
-            # Activation-time completeness (design 'Provider Config Surface'
-            # rule 5): fires whether this PUT switched the selector OR edited
-            # the currently-active profile into an invalid state. Saving an
-            # incomplete INACTIVE profile (draft) is never blocked here.
-            active = cfg.get("active_provider", "local")
-            if active != "local":
-                active_profile = profiles.get(active, {})
-                base_url = str(active_profile.get("base_url") or "")
-                if not base_url.startswith(("http://", "https://")):
-                    return JSONResponse(
-                        status_code=422,
-                        content={"detail": "base_url required for active cloud profile"},
-                    )
-                if not str(active_profile.get("model") or ""):
-                    return JSONResponse(
-                        status_code=422,
-                        content={"detail": "model required for active cloud profile"},
-                    )
-                # Spec 'Cloud selected': base_url + model + a STORED KEY. An
-                # api_key supplied in this SAME PUT counts; clearing the
-                # active profile's key (api_key: "") never leaves it active.
-                is_same_put = body.profile_id == active
-                key_provided_now = is_same_put and bool(body.api_key)
-                key_cleared_now = is_same_put and body.api_key == ""
-                has_key = key_provided_now or (
-                    not key_cleared_now and key_store.has_token(active)
-                )
-                if not has_key:
-                    return JSONResponse(
-                        status_code=422,
-                        content={"detail": "api_key required for active cloud profile"},
-                    )
-
-            # F1: persist the config FIRST. A config-write failure must leave
-            # nothing persisted (no orphan key committed while the response
-            # claims total failure). Only once the config is safely on disk
-            # do we touch the key store, so a key-write failure afterward
-            # leaves a visible, keyless draft profile a retry can converge --
-            # never an invisible orphan secret.
-            try:
-                save_provider_config(cfg)
-            except OSError:
-                # Log the traceback so a persistent 503 is diagnosable. The
-                # provider config carries no secret, and standard logging never
-                # renders frame locals -- only source lines -- so no key leaks.
-                logger.exception("llm provider config write failed")
-                return JSONResponse(
-                    status_code=503, content={"detail": "provider_config_write_failed"}
-                )
-
-            if body.api_key is not None:
-                try:
-                    if body.api_key == "":
-                        key_store.delete(body.profile_id)
-                    else:
-                        key_store.save(body.profile_id, {"api_key": body.api_key})
-                except OSError:
-                    # Log the traceback so a persistent 503 is diagnosable. The
-                    # OAuthStore error (e.g. PermissionError on os.replace)
-                    # never carries the key value, and standard logging renders
-                    # only source lines, not frame locals -- so no key leaks.
-                    logger.exception("llm key store write failed")
-                    return JSONResponse(
-                        status_code=503, content={"detail": "key_store_write_failed"}
-                    )
-
-            # Phase 3: live-push the freshly-persisted config to the running
-            # engine (no restart) — the piece Phase 1 deferred (design Doubts #2).
-            # getattr-guarded: a fresh process / no feeder has no motor yet.
-            motor = getattr(getattr(request.app.state, "host", None), "motor", None)
-            if motor is not None and hasattr(motor, "set_provider_config"):
-                motor.set_provider_config(cfg)
-
-            return _llm_provider_response(cfg, key_store)
-
-    @app.post("/api/llm/provider/probe", response_model=LlmProviderProbeResponse)
-    def post_llm_provider_probe(request: Request) -> LlmProviderProbeResponse:
-        """WU2 (cloud_rearm_20260801): manual cloud re-arm trigger. Same tier
-        as PUT /api/llm/provider right above -- synchronous direct call onto
-        the running motor, no dispatcher, no config-file write. Auth is
-        inherited automatically (auth.py rule 2, mutating /api/* path
-        prefix) -- no allowlist entry needed. `armed:false` is a benign
-        no-op (not_in_fallback / no_cloud_profile), so it is still a 200;
-        only a motor build predating trigger_cloud_probe_now is a 503.
-        """
-        motor = getattr(getattr(request.app.state, "host", None), "motor", None)
-        if motor is None or not hasattr(motor, "trigger_cloud_probe_now"):
-            return JSONResponse(status_code=503, content={"detail": "motor_unavailable"})
-        result = motor.trigger_cloud_probe_now()
-        return LlmProviderProbeResponse(**result)
 
     # ── Agent gateway (agent_context_gateway Phase 2) ────────────────────
     # Token gating lives in auth_middleware rule 1: everything under

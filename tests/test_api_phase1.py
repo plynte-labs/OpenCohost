@@ -684,8 +684,13 @@ def test_status_active_profile_id_defaults_to_null_when_motor_lacks_attr():
 
 def test_active_profile_source_scan_pin():
     import opencohost.api.main as main_mod
+    from opencohost.api.routers import status as status_router_mod
 
-    source = inspect.getsource(main_mod)
+    # GET /api/status (and its `_current_profile_name` read) moved to
+    # routers/status.py in refactor_core_api_20260802 B4 -- the pin follows
+    # the code to its new home rather than assuming it still lives in
+    # main.py's own source text. Same guarantee, updated location.
+    source = inspect.getsource(main_mod) + inspect.getsource(status_router_mod)
     assert "_current_profile_name" in source
 
 
