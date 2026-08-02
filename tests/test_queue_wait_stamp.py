@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 from opencohost.api.dispatch import Dispatcher
 from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.core.turn_stamp import TurnStamp
 
 
 def _resp(text):
@@ -60,7 +61,7 @@ def test_queue_wait_ms_reports_the_full_wait_not_the_engine_span(monkeypatch, ca
     clock["t"] += 60.0  # the item sat queued (busy motor) for 60s
 
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
-        motor._ejecutar_inferencia("hola", source="direct", submitted_at=submitted_at)
+        motor._ejecutar_inferencia("hola", source="direct", stamp=TurnStamp(submitted_at=submitted_at))
 
     records = _latency_records(caplog)
     assert len(records) == 1
@@ -84,7 +85,7 @@ def test_immediate_idle_dispatch_reports_near_zero_wait_not_none(monkeypatch, ca
 
     submitted_at = time.monotonic()
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
-        motor._dispatch_command("process_context", "hola", source="direct", submitted_at=submitted_at)
+        motor._dispatch_command("process_context", "hola", source="direct", stamp=TurnStamp(submitted_at=submitted_at))
 
     records = _latency_records(caplog)
     assert len(records) == 1

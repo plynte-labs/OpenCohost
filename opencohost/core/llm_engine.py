@@ -63,6 +63,7 @@ from opencohost.config.settings import (
 from opencohost.core import context_budget
 from opencohost.core import cloud_llm_client
 from opencohost.core import personalization
+from opencohost.core.turn_stamp import TurnStamp
 from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
@@ -1551,16 +1552,14 @@ class MotorVocalIA(threading.Thread):
         # submit time (dispatch.py). Omitted -> None, so a shorter tuple (every
         # caller before this unit) is unchanged.
         submitted_under_provider = rest[3] if len(rest) > 3 else None
-        if submitted_at is not None:
-            if submitted_under_provider is not None:
-                self._dispatch_command(
-                    tipo, payload, history_text=history_text, source=source,
-                    submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-                )
-            else:
-                self._dispatch_command(tipo, payload, history_text=history_text, source=source, submitted_at=submitted_at)
-        else:
-            self._dispatch_command(tipo, payload, history_text=history_text, source=source)
+        # C1 (refactor_core_api_20260802): the two optional stamp fields collapse
+        # into ONE optional TurnStamp -- None (never a stamp with a None
+        # submitted_at) for a tuple that never carried a submit-time stamp.
+        stamp = (
+            TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+            if submitted_at is not None else None
+        )
+        self._dispatch_command(tipo, payload, history_text=history_text, source=source, stamp=stamp)
 
     def _dispatch_command(
         self,
@@ -1568,8 +1567,7 @@ class MotorVocalIA(threading.Thread):
         payload,
         history_text: Optional[str] = None,
         source: str = "direct",
-        submitted_at: Optional[float] = None,
-        submitted_under_provider: Optional[str] = None,
+        stamp: Optional[TurnStamp] = None,
     ) -> None:
         """Dispatch a command tuple. Extracted from run() for testability.
 
@@ -1616,18 +1614,15 @@ class MotorVocalIA(threading.Thread):
             if self._processing or self._speaking:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                # Unit 4.1: forward submitted_at ONLY when present so a caller/test
-                # that stubs enqueue() with the pre-4.1 signature is unaffected.
-                # Unit 4.2 (F12 closure): submitted_under_provider rides the same
-                # conditional-forward idiom, ONLY alongside submitted_at.
-                if submitted_at is not None:
-                    if submitted_under_provider is not None:
-                        self.enqueue(
-                            payload, priority=1, source=source, history_text=history_text,
-                            submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-                        )
-                    else:
-                        self.enqueue(payload, priority=1, source=source, history_text=history_text, submitted_at=submitted_at)
+                # C1 (refactor_core_api_20260802): forward the stamp's fields ONLY
+                # when a stamp is present, so a caller/test that stubs enqueue()
+                # with the pre-C1 signature (no submitted_at/submitted_under_provider
+                # params) is unaffected by an unstamped turn.
+                if stamp is not None:
+                    self.enqueue(
+                        payload, priority=1, source=source, history_text=history_text,
+                        submitted_at=stamp.submitted_at, submitted_under_provider=stamp.submitted_under_provider,
+                    )
                 else:
                     self.enqueue(payload, priority=1, source=source, history_text=history_text)
                 return
@@ -1641,16 +1636,10 @@ class MotorVocalIA(threading.Thread):
             # speaking_start so it never races this turn's own generation.
             self._note_detour_turn(source)
             try:
-                # Unit 4.1: same conditional-forward rationale as enqueue() above.
-                # Unit 4.2 (F12 closure): submitted_under_provider mirrors it.
-                if submitted_at is not None:
-                    if submitted_under_provider is not None:
-                        self._ejecutar_inferencia(
-                            payload, source=source, history_text=history_text,
-                            submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-                        )
-                    else:
-                        self._ejecutar_inferencia(payload, source=source, history_text=history_text, submitted_at=submitted_at)
+                # C1 (refactor_core_api_20260802): same conditional-forward
+                # rationale as enqueue() above.
+                if stamp is not None:
+                    self._ejecutar_inferencia(payload, source=source, history_text=history_text, stamp=stamp)
                 else:
                     self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
@@ -2651,6 +2640,13 @@ class MotorVocalIA(threading.Thread):
                 history_text = rest[0] if rest else None
                 submitted_at = rest[1] if len(rest) > 1 else None
                 submitted_under_provider = rest[2] if len(rest) > 2 else None
+                # C1 (refactor_core_api_20260802): build the stamp at unpack —
+                # enqueue()'s public signature and internal tuple storage stay
+                # unchanged, only the downstream threading collapses to one object.
+                stamp = (
+                    TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+                    if submitted_at is not None else None
+                )
 
             # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
             # popped but _processing is still False here — this is exactly the
@@ -2706,18 +2702,12 @@ class MotorVocalIA(threading.Thread):
                             f"Pregen boundary: draft=none source={source} gap_ms=-1 "
                             f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
                         )
-                    # Unit 4.1: conditional forward (see _dispatch_command) — a
-                    # stubbed _ejecutar_inferencia in existing tests never sees
-                    # the new kwarg unless a real submitted_at was queued.
-                    # Unit 4.2 (F12 closure): submitted_under_provider mirrors it.
-                    if submitted_at is not None:
-                        if submitted_under_provider is not None:
-                            self._ejecutar_inferencia(
-                                payload, source=source, history_text=history_text,
-                                submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-                            )
-                        else:
-                            self._ejecutar_inferencia(payload, source=source, history_text=history_text, submitted_at=submitted_at)
+                    # C1 (refactor_core_api_20260802): conditional forward (see
+                    # _dispatch_command) — a stubbed _ejecutar_inferencia in
+                    # existing tests never sees the new kwarg unless a real
+                    # stamp was queued.
+                    if stamp is not None:
+                        self._ejecutar_inferencia(payload, source=source, history_text=history_text, stamp=stamp)
                     else:
                         self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
@@ -2851,13 +2841,14 @@ class MotorVocalIA(threading.Thread):
                 submitted_at = rest[0] if rest else None
                 submitted_under_provider = rest[1] if len(rest) > 1 else None
                 self.command_queue.queue.popleft()
-            if submitted_at is not None:
-                self.enqueue(
-                    payload, priority=1, source="direct", history_text=history_text,
-                    submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-                )
-            else:
-                self.enqueue(payload, priority=1, source="direct", history_text=history_text)
+            # C1 (refactor_core_api_20260802): enqueue()'s own signature keeps the
+            # two separate kwargs (public API, unchanged) — both default to None,
+            # so passing them unconditionally is byte-identical to the old
+            # branch-per-presence idiom.
+            self.enqueue(
+                payload, priority=1, source="direct", history_text=history_text,
+                submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+            )
             self._log("Boundary drain: turno directo movido a cola prioritaria (D3b).", level="debug")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
@@ -6293,8 +6284,7 @@ class MotorVocalIA(threading.Thread):
         source: str = "direct",
         *,
         history_text: Optional[str] = None,
-        submitted_at: Optional[float] = None,
-        submitted_under_provider: Optional[str] = None,
+        stamp: Optional[TurnStamp] = None,
     ):
         # §7 instrument: the request -> TTS-receives-text span. A LOCAL, not an
         # instance slot: _hablar has four callers and two of them run on
@@ -6305,6 +6295,13 @@ class MotorVocalIA(threading.Thread):
         # one where the span means anything — a pregenerated draft is spoken much
         # later by design (that overlap IS the feature).
         request_start = time.monotonic()
+        # C1 (refactor_core_api_20260802): the two submit-time fields now ride
+        # in ONE optional TurnStamp instead of two independently-optional
+        # kwargs. None (no stamp) is the same "never submitted through that
+        # seam" state the old submitted_at=None / submitted_under_provider=None
+        # pair encoded.
+        submitted_at = stamp.submitted_at if stamp is not None else None
+        submitted_under_provider = stamp.submitted_under_provider if stamp is not None else None
         # Unit 4.1 (runtime_findings_batch_20260731, F5): the ORIGINAL bug —
         # TURN_LATENCY measured engine-receipt -> TTS only, so the queue wait
         # before this method ever ran (13.8-29.1 min in the 2026-07-30 run) was
@@ -6363,26 +6360,22 @@ class MotorVocalIA(threading.Thread):
             # emits from its own speaker (play_prefetched_agenda). Guarded, so a
             # raising callback never blocks speech. R8: Kira's own text only.
             emit_source = source if source.startswith("kira-agenda") else "kira"
-            # Unit 4.1: conditional forward — an unstamped turn (agenda,
-            # accumulated) must call _emit_dialogue exactly as before so a
-            # pinned dialogue_callback spy assertion (2 positional args) never
-            # sees a surprise kwarg.
-            # Unit 4.2 (F12 closure): the provider-disclosure kwargs ride the
-            # SAME idiom, gated on submitted_under_provider so every existing
-            # queue_wait_ms-only caller/test is unaffected.
-            if queue_wait_ms is not None:
-                if submitted_under_provider is not None:
-                    self._emit_dialogue(
-                        dialogo, emit_source, queue_wait_ms=queue_wait_ms,
-                        answered_by_provider=answered_by_provider,
-                        answered_by_transport=answered_by_transport,
-                        submitted_under_provider=submitted_under_provider,
-                        provider_changed_while_queued=provider_changed_while_queued,
-                    )
-                else:
-                    self._emit_dialogue(dialogo, emit_source, queue_wait_ms=queue_wait_ms)
-            else:
-                self._emit_dialogue(dialogo, emit_source)
+            # C1 (refactor_core_api_20260802): _emit_dialogue's OWN branching
+            # (kept, see its docstring) is entirely value-based — gated on
+            # `queue_wait_ms is not None` / `submitted_under_provider is not
+            # None`, not on how many kwargs the caller bothered to pass. So the
+            # caller can pass every field unconditionally: an unstamped turn
+            # has queue_wait_ms=None and the rest None too, which routes
+            # _emit_dialogue into its own no-kwargs branch exactly as before —
+            # a pinned dialogue_callback spy assertion (2 positional args)
+            # never sees a surprise kwarg.
+            self._emit_dialogue(
+                dialogo, emit_source, queue_wait_ms=queue_wait_ms,
+                answered_by_provider=answered_by_provider,
+                answered_by_transport=answered_by_transport,
+                submitted_under_provider=submitted_under_provider,
+                provider_changed_while_queued=provider_changed_while_queued,
+            )
 
             self._hablar(dialogo, source=source)
             # Measure-first telemetry seam: a chat turn actually played to completion —
@@ -6963,16 +6956,14 @@ class MotorVocalIA(threading.Thread):
         never break the turn, so it's guarded the same way ui_callback sites
         are — logged, swallowed, never re-raised.
 
-        queue_wait_ms (Unit 4.1, runtime_findings_batch_20260731 F5): forwarded
-        ONLY when given — every existing caller/test that asserts an exact
-        2-positional-arg call on dialogue_callback (e.g. ChatReplySink.record)
-        stays byte-identical when this turn had no submitted_at stamp.
-
-        The provider-disclosure kwargs (Unit 4.2, F12 closure) ride the SAME
-        idiom, gated on submitted_under_provider — forwarded ONLY together,
-        ONLY when the turn was tagged at submit time, so every existing
-        queue_wait_ms-only caller/test (2 positional args + queue_wait_ms)
-        stays byte-identical too.
+        This branch IS the dialogue_callback contract (C1, TurnStamp): the
+        caller passes every kwarg unconditionally, and the VALUE gates below
+        (queue_wait_ms, then submitted_under_provider) reduce the invocation
+        to exactly one of three shapes — 2 positional; + queue_wait_ms
+        (Unit 4.1, runtime_findings_batch_20260731 F5); + the four
+        provider-disclosure kwargs together (Unit 4.2, F12 closure) — so
+        every existing caller/test pinned on an exact shape (e.g.
+        ChatReplySink.record's 2-positional assert) stays byte-identical.
         """
         if self.dialogue_callback is None:
             return

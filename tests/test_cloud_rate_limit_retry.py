@@ -69,7 +69,8 @@ def test_rate_limited_retries_once_and_succeeds(tmp_path, monkeypatch):
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
-        motor, "_handle_cloud_failure", lambda source, **_kwargs: handle_calls.append(source)
+        motor, "_handle_cloud_failure",
+        lambda source, **kwargs: handle_calls.append((source, kwargs)),
     )
     exc = CloudLLMResponseError("HTTP 429", status_code=429, headers={"retry-after": "2"})
 
@@ -124,7 +125,8 @@ def test_rate_limited_budget_exhausted_falls_back_like_today(tmp_path, monkeypat
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
-        motor, "_handle_cloud_failure", lambda source, **_kwargs: handle_calls.append(source)
+        motor, "_handle_cloud_failure",
+        lambda source, **kwargs: handle_calls.append((source, kwargs)),
     )
     exc = CloudLLMResponseError("HTTP 429", status_code=429, headers={"retry-after": "2"})
 
@@ -134,7 +136,11 @@ def test_rate_limited_budget_exhausted_falls_back_like_today(tmp_path, monkeypat
     assert mock_send.call_count == 2
     assert result == ""
     assert sleeps == [2]  # the one retry still waited before its (failed) 2nd attempt
-    assert handle_calls == ["direct"]
+    # The exact kwargs _generar_dialogo's cloud-transport-error branch passes
+    # (llm_engine.py's `not is_local` _handle_cloud_failure call site):
+    # failure_class from classify_cloud_error, retry_after_seconds re-derived
+    # from the exception's own headers (never the stale in-turn retry var).
+    assert handle_calls == [("direct", {"failure_class": "rate_limited", "retry_after_seconds": 2})]
     assert motor._last_cloud_failure_class == "rate_limited"
 
 
@@ -144,7 +150,8 @@ def test_rate_limited_retry_after_exceeds_max_no_retry(tmp_path, monkeypatch):
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
-        motor, "_handle_cloud_failure", lambda source, **_kwargs: handle_calls.append(source)
+        motor, "_handle_cloud_failure",
+        lambda source, **kwargs: handle_calls.append((source, kwargs)),
     )
     exc = CloudLLMResponseError("HTTP 429", status_code=429, headers={"retry-after": "3600"})
 
@@ -154,7 +161,10 @@ def test_rate_limited_retry_after_exceeds_max_no_retry(tmp_path, monkeypatch):
     assert mock_send.call_count == 1  # no in-turn retry
     assert result == ""
     assert sleeps == []  # never slept for a wait it wasn't going to honour
-    assert handle_calls == ["direct"]
+    # retry_after_seconds is the RAW parsed value (3600), unclamped -- the
+    # CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS bound only gates the in-turn retry
+    # decision above, not what's disclosed to _handle_cloud_failure.
+    assert handle_calls == [("direct", {"failure_class": "rate_limited", "retry_after_seconds": 3600})]
     assert motor._last_cloud_failure_class == "rate_limited"
 
 
@@ -164,7 +174,8 @@ def test_ambiguous_429_never_retries(tmp_path, monkeypatch):
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
-        motor, "_handle_cloud_failure", lambda source, **_kwargs: handle_calls.append(source)
+        motor, "_handle_cloud_failure",
+        lambda source, **kwargs: handle_calls.append((source, kwargs)),
     )
     exc = CloudLLMResponseError("HTTP 429", status_code=429)  # bare -- no timing headers
 
@@ -174,7 +185,8 @@ def test_ambiguous_429_never_retries(tmp_path, monkeypatch):
     assert mock_send.call_count == 1
     assert result == ""
     assert sleeps == []
-    assert handle_calls == ["direct"]
+    # ambiguous_429 never carries a Retry-After (no timing headers at all).
+    assert handle_calls == [("direct", {"failure_class": "ambiguous_429", "retry_after_seconds": None})]
     assert motor._last_cloud_failure_class == "ambiguous_429"
 
 

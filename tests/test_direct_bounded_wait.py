@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 from opencohost.api.dispatch import Dispatcher
 from opencohost.config.settings import DIRECT_ANSWER_MAX_WAIT_SECONDS
 from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.core.turn_stamp import TurnStamp
 
 
 def _resp(text):
@@ -103,8 +104,7 @@ def test_queued_direct_item_dispatched_ahead_of_further_agenda_action(monkeypatc
     motor = MotorVocalIA(queue.Queue(), lambda e: None)
     call_log: list = []
 
-    def fake_infer(payload, source="direct", history_text=None,
-                    submitted_at=None, submitted_under_provider=None):
+    def fake_infer(payload, source="direct", history_text=None, stamp=None):
         call_log.append((source, payload))
         if source == "kira-agenda" and payload == "agenda-block-1":
             # WU2 consume-at-event: the driver adopts the NEXT agenda block
@@ -152,7 +152,7 @@ def test_direct_over_bound_wait_logs_warning_metadata_only(monkeypatch, caplog):
     clock["t"] += DIRECT_ANSWER_MAX_WAIT_SECONDS + 30  # push past the documented bound
 
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
-        motor._ejecutar_inferencia(secret_text, source="direct", submitted_at=submitted_at)
+        motor._ejecutar_inferencia(secret_text, source="direct", stamp=TurnStamp(submitted_at=submitted_at))
 
     warnings = _latency_warnings(caplog)
     assert len(warnings) == 1
@@ -174,7 +174,7 @@ def test_direct_within_bound_wait_logs_no_warning(monkeypatch, caplog):
     clock["t"] += 5.0
 
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
-        motor._ejecutar_inferencia("hola", source="direct", submitted_at=submitted_at)
+        motor._ejecutar_inferencia("hola", source="direct", stamp=TurnStamp(submitted_at=submitted_at))
 
     assert _latency_warnings(caplog) == []
 
@@ -193,7 +193,7 @@ def test_over_bound_wait_for_non_direct_source_logs_no_warning(monkeypatch, capl
     clock["t"] += DIRECT_ANSWER_MAX_WAIT_SECONDS + 30
 
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
-        motor._ejecutar_inferencia("hola", source="chat", submitted_at=submitted_at)
+        motor._ejecutar_inferencia("hola", source="chat", stamp=TurnStamp(submitted_at=submitted_at))
 
     assert _latency_warnings(caplog) == []
 

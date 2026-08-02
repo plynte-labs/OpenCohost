@@ -137,7 +137,10 @@ def test_run_tolerant_unpacks_2tuple_and_3tuple_commands(monkeypatch):
         motor,
         "_dispatch_command",
         # source (B2) is asserted by the 4-tuple test below; ignored here.
-        lambda tipo, payload, history_text=None, source="direct": captured.append(
+        # stamp (C1, refactor_core_api_20260802) is asserted by
+        # test_consume_command_builds_stamp_and_threads_to_dispatch_command
+        # (test_turn_stamp.py); ignored here too.
+        lambda tipo, payload, history_text=None, source="direct", stamp=None: captured.append(
             (tipo, payload, history_text)
         ),
     )
@@ -171,7 +174,7 @@ def test_run_tolerant_unpacks_4tuple_command_with_source(monkeypatch):
     monkeypatch.setattr(
         motor,
         "_dispatch_command",
-        lambda tipo, payload, history_text=None, source="direct": captured.append(
+        lambda tipo, payload, history_text=None, source="direct", stamp=None: captured.append(
             (tipo, payload, history_text, source)
         ),
     )
