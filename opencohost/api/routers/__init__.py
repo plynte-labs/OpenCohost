@@ -12,7 +12,8 @@ module's own docstring) -- order here stays cosmetic, not load-bearing
 (verified during the B4, B5, and B6 moves; see the batch handoff notes):
 
 - ``routers/perfiles.py``: ``GET/PUT/DELETE /api/perfiles/{name}``
-- ``routers/music.py``: ``GET /api/music/track/{track_id}[/audio]``
+- ``routers/music.py``: ``DELETE /api/music/track/{track_id}``,
+  ``GET /api/music/track/{track_id}/audio``
 - ``routers/agent.py``: ``POST /api/agent/cards/{card_id}/arm``,
   ``POST /api/agent/notices/{notice_id}/dismiss``
 - ``routers/memoria.py`` (B6): ``GET /api/memoria/row/{row_id}``

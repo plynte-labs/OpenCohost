@@ -33,7 +33,7 @@ moving the function anywhere else would silently stop honoring the
 `probe_stt_ws` patch (unlike `_test_obs_connection_bounded` in shared.py,
 which never calls `OBSClient` by name -- it receives an already-built
 client instance as a parameter). POST /api/ptt/test therefore calls it
-through `deps.test_stt_connection_bounded()`, a variadic late-import
+through `deps.stt_connection_bounded_check()`, a variadic late-import
 accessor mirroring `deps.discover_ollama_models()`.
 
 `PttUnreachable`/`SessionActive` (ptt_session.py exceptions) and
@@ -191,5 +191,5 @@ def post_ptt_test(request: Request, body: Optional[PttTestRequest] = None):
         uri = state.get("stt_ws_url") or load_ptt_ws_uri()
     if not is_valid_stt_ws_uri(uri):
         return PttTestResponse(ok=False, detail="invalid_scheme")
-    ok, detail = deps.test_stt_connection_bounded(uri)
+    ok, detail = deps.stt_connection_bounded_check(uri)
     return PttTestResponse(ok=ok, detail=detail)

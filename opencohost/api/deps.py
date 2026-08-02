@@ -228,7 +228,7 @@ def memoria_store_or_none():
     return _main._memoria_store_or_none()
 
 
-def test_stt_connection_bounded(*args, **kwargs):
+def stt_connection_bounded_check(*args, **kwargs):
     """Bounded WhisperLive probe, resolved through the CURRENT ``main``
     binding. Stays defined in ``main.py`` (not moved) because it calls
     ``probe_stt_ws`` by its own bare name from INSIDE that function body --

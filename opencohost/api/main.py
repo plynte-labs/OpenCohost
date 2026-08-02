@@ -64,11 +64,10 @@ from opencohost.config.settings import (
     # them directly anymore.
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     LLM_KEYS_FILE,
-    # MEMORIAS_DB/MEMORIAS_ENABLED/MEMORIAS_IMPORT_CAP/save_ptt_ws_uri are
-    # ALSO monkeypatched on `main` (every memoria test; test_api_ptt.py's
-    # write-failure case) -- deps.memorias_db()/.memorias_enabled()/
-    # .memorias_import_cap()/.save_ptt_ws_uri() read them off THIS module at
-    # call time for routers/memoria.py and routers/ptt.py.
+    # MEMORIAS_DB/MEMORIAS_ENABLED/MEMORIAS_IMPORT_CAP are ALSO monkeypatched
+    # on `main` (every memoria test) -- deps.memorias_db()/.memorias_enabled()/
+    # .memorias_import_cap() read them off THIS module at call time for
+    # routers/memoria.py.
     MEMORIAS_DB,
     MEMORIAS_ENABLED,
     MEMORIAS_IMPORT_CAP,
@@ -78,6 +77,9 @@ from opencohost.config.settings import (
     # monkeypatched); routers/ptt.py imports it separately from settings.
     load_ptt_ws_uri,
     load_tts_local_only,
+    # save_ptt_ws_uri is ALSO monkeypatched on `main` (test_api_ptt.py's
+    # write-failure case) -- deps.save_ptt_ws_uri() reads it off THIS module
+    # at call time for routers/ptt.py.
     save_ptt_ws_uri,
     load_tts_speed,
 )
@@ -230,7 +232,7 @@ def _test_stt_connection_bounded(uri: str, timeout: float = _PTT_TEST_TIMEOUT_SE
     which also calls `main_mod._test_stt_connection_bounded` directly) --
     unlike `_test_obs_connection_bounded` (shared.py), which receives an
     already-built client instead of resolving a patchable name itself.
-    `deps.test_stt_connection_bounded()` is the router-facing accessor.
+    `deps.stt_connection_bounded_check()` is the router-facing accessor.
     """
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:

@@ -20,6 +20,7 @@ try:
 except ImportError:
     winsound = None  # non-Windows: the PTT cue is a silent no-op
 from collections import deque, Counter
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from opencohost.config.settings import (
@@ -424,6 +425,47 @@ _DRAIN_SAFE_COMMANDS = frozenset({
     "switch_llm_tier",
     "switch_model",
 })
+
+
+# refactor_core_api_20260802 B7 (Phase C4): _generar_dialogo's in-place phase
+# split. These two carriers exist ONLY to kill parameter sprawl between the
+# three phase methods -- they are not a data model, hold no state of their
+# own, and are never touched outside _generar_dialogo's own call chain.
+@dataclass
+class _GenerationSetup:
+    """_build_generation_request's output: everything the retry loop and/or
+    the finalize phase need that used to just be a local in the one big
+    method body. `history_snapshot` and `editorial_block` are the two
+    surprises here -- both are built during setup but read again all the way
+    down in _finalize_generation (chat-repetition window and the editorial
+    usage-recorder trigger, respectively), so they ride in this bundle
+    instead of being recomputed or promoted to an instance attribute.
+    """
+    messages: list
+    opciones_llm: dict
+    chat_timeout: float
+    max_intentos: int
+    start_llm: float
+    native_ctx: int
+    effective_ctx: int
+    ctx_evicted: int
+    editorial_block: str
+    history_snapshot: list
+
+
+@dataclass
+class _GenerationAttemptOutcome:
+    """_cloud_attempt_loop's result. `early_return` mirrors the original
+    method's own control flow: every early `return` inside the retry loop
+    (watchdog timeout, transport failure exhausting the retry budget)
+    returned exactly `""`, so `is not None` on this field is the one check
+    the orchestrator needs to reproduce that identically -- it is NOT a
+    truthiness check, since `""` itself is a valid (falsy) early-return
+    value that must still short-circuit finalize.
+    """
+    raw_content: str = ""
+    respuesta: object = None
+    early_return: Optional[str] = None
 
 
 class MotorVocalIA(threading.Thread):
@@ -3211,769 +3253,37 @@ class MotorVocalIA(threading.Thread):
         is_local = self._cfg_is_local(provider_cfg) or self._cloud_fallback_active
         self._log(f"Analizando contexto con {request_model}...")
         try:
-            messages = []
-
-            # Personalization block (kira_personalization_onboarding_20260705,
-            # design §2; memoria_recall_20260718 W1): built ONCE PER REQUEST and
-            # emitted at the SYSTEM position — mirroring set_profile's persona
-            # (self.system_prompt, llm_engine.py:715-737). This is a stable
-            # per-request copy at the system position, NOT literally once-per-
-            # session: ollama.chat is stateless, so identity must be re-supplied
-            # every request. It never enters historial or memoria capture
-            # (_commit_history stores raw contexto, not this system content).
-            # Same _PERSONALIZATION_INJECT_SOURCES gate as before. Fail-open: a
-            # raising build must never break a turn.
-            personalization_block = ""
-            if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
-                try:
-                    personalization_block = personalization.build_injection_block(
-                        self._sanitize_history_context
-                    )
-                except Exception:
-                    personalization_block = ""
-            # grounding_authority_temporal_humility: the grounding-authority +
-            # temporal-humility rules ride at the SYSTEM position on EVERY
-            # generation, appended by the engine rather than authored into
-            # llm.system_prompt.
-            #
-            # WHY HERE and not in the persona slot: `set_profile` replaces
-            # self.system_prompt wholesale with the profile's own prompt
-            # (`payload.get("prompt", ...)` in the set_profile handler). All six shipped
-            # profiles carry a full prompt of their own, and profiles are
-            # persisted to the user's PROFILES_FILE on first run — so a rule
-            # written into the locale persona (or into default_profiles.json)
-            # would be dead text for every existing install. This single site is
-            # the funnel all three _generar_dialogo callers route through.
-            #
-            # Unconditional by source: the "that doesn't exist" failure is not
-            # direct-only (chat and agenda turns assert facts too), unlike the
-            # <editorial_context> block below which stays gated on source.
-            #
-            # Position: persona -> rules -> personalization. The rules are a
-            # constant, so keeping them in the stable prefix ahead of the
-            # per-session personalization block preserves KV-cache reuse.
-            # Fail-open by construction: grounding_rules() is _slot-backed and
-            # cannot raise; "" simply appends nothing.
-            grounding_block = i18n_active.grounding_rules()
-            system_parts = [self.system_prompt]
-            if grounding_block:
-                system_parts.append(grounding_block)
-            if personalization_block:
-                system_parts.append(personalization_block)
-            system_content = "\n\n".join(system_parts)
-
-            if self.use_system_role:
-                messages.append({'role': 'system', 'content': system_content})
-
-            # Take a consistent snapshot of historial and (for host-turn paths) the
-            # digest block under _history_lock so that a concurrent _commit_history
-            # call from the agenda speaker daemon cannot mutate the deque while we
-            # are iterating it (RuntimeError: deque mutated during iteration).
-            # The lock is held ONLY for the fast snapshot + build_block reads;
-            # it is released before any I/O or the Ollama call.
-            with self._history_lock:
-                history_snapshot = list(self.historial)
-                if source in _DIGEST_INJECT_SOURCES:
-                    digest_block = self._memory_digest.build_block(
-                        sanitize_fn=self._sanitize_history_context,
-                        line_format=i18n_active.digest_line_format(),
-                        unit_singular=i18n_active.digest_unit_singular(),
-                        unit_plural=i18n_active.digest_unit_plural(),
-                    )
-                else:
-                    digest_block = ""
-                # Slice 5 (R9): snapshot the profile id under the lock
-                # (engine state protected by _history_lock) — the actual
-                # store READ happens AFTER the lock releases, below,
-                # since memorias retrieval is disk I/O and _history_lock
-                # must never be held during I/O (same rule as capture).
-                # Candidate 1: gate site 1 of 3 — direct AND ptt snapshot.
-                if source in _MEMORIA_INJECT_SOURCES:
-                    memorias_profile_id = self._current_profile_id
-                else:
-                    memorias_profile_id = None
-
-            # Rebuild a fresh {role, content} per entry — never append by
-            # reference and never pop/mutate — so the stored `source` tag
-            # (history_source_tag_20260629) is projected away before the dicts
-            # reach ollama.chat, and the live deque entries keep their tag.
-            for msg in history_snapshot:
-                messages.append({'role': msg['role'], 'content': msg['content']})
-
-            # Slice 5 (R9): memorias retrieval + injection for direct and ptt
-            # turns (candidate 1: gate site 2 of 3). Store I/O happens here,
-            # AFTER _history_lock released above (the store's own
-            # READ_TIMEOUT_SECONDS bounds the read). Fail-open to "" on any
-            # error — a retrieval failure must never break a turn.
-            memorias_block = ""
-            if source in _MEMORIA_INJECT_SOURCES and MEMORIAS_ENABLED and memorias_profile_id:
-                memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
-
-            # Editorial host-turn enrichment: inject matching ARMED card context for
-            # host queries, typed OR spoken (F1 — the operator arms a card and then
-            # asks about it by voice just as often as by keyboard).
-            # NON-CONSUMING — card stays ARMED for the agenda path.
-            # Never inject for chat/aggregator-driven sources.
-            editorial_block = ""
-            if source in _EDITORIAL_INJECT_SOURCES:
-                provider = self.direct_editorial_context_provider
-                if provider is not None:
-                    try:
-                        editorial_block = provider(contexto) or ""
-                    except Exception:
-                        editorial_block = ""
-
-            if editorial_block:
-                enriched = f"{contexto}\n\n{editorial_block}"
-                logger.info(
-                    "editorial direct context injected (source=%s, len=%d)",
-                    source,
-                    len(editorial_block),
-                )
-            else:
-                enriched = contexto
-
-            # D3 — digest injection: only for host-turn prompts (typed or spoken),
-            # never chat/agenda. digest_block was already computed under
-            # _history_lock above. E3b: Wrap in explicit read-only delimiter so the
-            # LLM cannot mistake ledger lines for instructions (structural
-            # isolation, language-agnostic).
-            if source in _DIGEST_INJECT_SOURCES:
-                if digest_block:
-                    wrapped_digest = (
-                        i18n_active.memory_block_open() + "\n"
-                        + digest_block
-                        + "\n" + i18n_active.memory_block_close()
-                    )
-                    enriched = f"{wrapped_digest}\n\n{enriched}"
-                    logger.debug("L1 digest injected into direct prompt (len=%d)", len(digest_block))
-
-            # Memorias block (R9) is PREPENDED before the digest wrap — it
-            # must appear earlier in the prompt than <memoria_de_fondo>.
-            # Candidate 1: gate site 3 of 3 — own sibling gate (no longer
-            # nested inside `source == "direct"`), same pattern as
-            # _PERSONALIZATION_INJECT_SOURCES below, so ptt turns receive it.
-            if source in _MEMORIA_INJECT_SOURCES and memorias_block:
-                enriched = f"{memorias_block}\n\n{enriched}"
-
-            # W1 (memoria_recall_20260718): the personalization <perfil_streamer>
-            # block no longer prepends the user turn here — it was built above and
-            # folded into `system_content` at the SYSTEM position. Only the
-            # memorias/digest/editorial context rides in `enriched` now.
-            if self.use_system_role:
-                messages.append({'role': 'user', 'content': enriched})
-            else:
-                prompt_completo = f"{system_content}\n\n[{i18n_active.user_message_label()}]: {enriched}"
-                messages.append({'role': 'user', 'content': prompt_completo})
-
-            # Layer 1+2: discover the model's native context window (cached, free
-            # after first call — also covers the name-heuristic short-circuit gap)
-            # but budget against OpenCohost's effective runtime cap so large
-            # native windows do not disable prompt eviction or over-allocate KV.
-            if is_local:
-                self._discover_model_ctx(request_model)
-                _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
-                _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
-            else:
-                # Cloud: no ollama.show telemetry (prompt_eval_count/eval_duration
-                # are absent from OpenAI-compatible responses). Apply the
-                # provider-aware budget proactively (design 'Cloud context budget'),
-                # replacing the reactive trim.
-                _native_ctx = CLOUD_CTX_BUDGET
-                _effective_ctx = CLOUD_CTX_BUDGET
-            messages, _ctx_evicted = context_budget.apply_char_budget(
-                messages,
-                ctx_limit=_effective_ctx,
-                max_output_tokens=LLM_MAX_TOKENS,
-                safety_factor=CHAR_BUDGET_SAFETY_FACTOR,
+            setup = self._build_generation_request(
+                contexto,
+                source,
+                is_local=is_local,
+                provider_cfg=provider_cfg,
+                request_model=request_model,
+                watchdog_timeout=watchdog_timeout,
             )
-            if _ctx_evicted > 0:
-                self._log(
-                    f"ctx_budget_gate: evicted {_ctx_evicted} pair(s) from messages "
-                    f"(model={request_model}, native_ctx={_native_ctx}, effective_ctx={_effective_ctx})",
-                    level="warning",
-                )
-
-            # Cloud item 3 (2026-07-24 incident): the LOCAL 768-token cap
-            # (LLM_MAX_TOKENS) was starving cloud/reasoning models. Cloud uses
-            # the high CLOUD_MAX_TOKENS ceiling instead -- gated on the
-            # snapshotted `is_local`, never a live re-read (F2 invariant above).
-            opciones_llm = {
-                'temperature': LLM_TEMPERATURE,
-                'top_p': LLM_TOP_P,
-                'num_predict': LLM_MAX_TOKENS if is_local else CLOUD_MAX_TOKENS,
-                'num_ctx': _effective_ctx,
-            }
-
-            if is_local and "gemma" in request_model.lower():
-                opciones_llm.pop('num_ctx', None)
-                opciones_llm['temperature'] = 0.7
-
-            # Reasoning-capability discovery is an ollama.show probe (local-only);
-            # for cloud, num_predict maps to max_tokens and the provider owns any
-            # reasoning-token behavior. gemma temperature override is local-only too.
-            if is_local and self._resolve_reasoning_classification(request_model):
-                opciones_llm.pop('num_predict', None)
-                self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
-
-            # FIX 1 — chat-reactive anti-repetition sampling brake. Gated to
-            # source=="chat" (RF3 viewer chat, agenda HANDLE_CHAT, default-enqueue
-            # chat); NEVER applied to direct/ptt/accumulated/kira-agenda. Only ADDS
-            # keys, so non-chat options stay byte-identical. See the event_taxonomy
-            # track for the source-disambiguation follow-up.
-            if source == "chat":
-                opciones_llm["repeat_penalty"] = CHAT_REPEAT_PENALTY
-                opciones_llm["presence_penalty"] = CHAT_PRESENCE_PENALTY
-                opciones_llm["frequency_penalty"] = CHAT_FREQUENCY_PENALTY
-
-            start_llm = time.time()
-            max_intentos = 2
-            raw_content = ""
-            respuesta = None
-            # R3: a bounded connector-upgrade call passes its own short watchdog
-            # timeout; every other caller keeps the resolved chat timeout.
-            chat_timeout = (
-                watchdog_timeout
-                if watchdog_timeout is not None
-                else self._resolve_chat_watchdog_timeout(
-                    request_model, provider_cfg=provider_cfg, is_local=is_local
-                )
+            outcome = self._cloud_attempt_loop(
+                setup,
+                source=source,
+                commit_history=commit_history,
+                is_local=is_local,
+                provider_cfg=provider_cfg,
+                request_model=request_model,
+                watchdog_timeout=watchdog_timeout,
             )
-            
-            for intento in range(max_intentos):
-                # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
-                # actual generation call, cleared in finally on every exit path.
-                with self._lock:
-                    self._llm_generating = True
-                try:
-                    respuesta = self._ollama_chat_with_watchdog(
-                        timeout=chat_timeout,
-                        model=request_model,
-                        messages=messages,
-                        keep_alive=LLM_KEEP_ALIVE,
-                        options=opciones_llm,
-                        provider_cfg=provider_cfg,
-                        is_local=is_local,
-                    )
-                except Exception as e:
-                    if self._is_watchdog_timeout_error(e):
-                        # R3: a bounded connector-upgrade call (watchdog_timeout set)
-                        # abandons SILENTLY on timeout — it is cosmetic, so it must
-                        # never trigger the heavyweight stall recovery (model rollback
-                        # / UI signal) a real turn's timeout does. Just return "" so
-                        # the pool floor stands.
-                        if watchdog_timeout is None:
-                            # A cloud stall must NOT roll back a local model
-                            # (spec B): gate the heavyweight model-rollback
-                            # recovery on `is_local`. Cloud instead routes to
-                            # `_handle_cloud_failure` (Phase 4: fallback state
-                            # machine); the max_intentos retry + existing
-                            # failure contract still apply either way.
-                            if is_local:
-                                self._recover_from_stalled_inference(
-                                    request_model=request_model,
-                                    source=source,
-                                    timeout=chat_timeout,
-                                )
-                            else:
-                                # A watchdog timeout carries no HTTP status/
-                                # headers to classify from (it never got a
-                                # response) -- `transient` is the correct
-                                # class per classify_cloud_error's own rule
-                                # ("anything without a status_code ... is
-                                # transient"), and drives exponential-backoff
-                                # auto-return (unit 2.2).
-                                self._handle_cloud_failure(
-                                    source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
-                                )
-                            if commit_history:
-                                self._invalidate_pregen_epoch()
-                        return ""
-                    if not self._is_ollama_transport_error(e):
-                        raise
-                    # F7b: attribute a CLOUD failure to the cloud profile model +
-                    # provider id (the local current_model tag would make a cloud
-                    # 401 look like a local fault). The LOCAL branch stays
-                    # byte-identical (no "provider" key) so existing exact-match
-                    # assertions keep passing. Full MODEL_TRACE attribution is
-                    # deferred (residual).
-                    _cloud_class = None
-                    if is_local:
-                        self._last_llm_failure = {
-                            "model": self.current_model,
-                            "source": source,
-                            "attempt": intento + 1,
-                            "reason": type(e).__name__,
-                            "message": str(e),
-                        }
-                    else:
-                        _fail_profile = self._cfg_active_profile(provider_cfg) or {}
-                        # F2 (runtime_findings_batch_20260731 unit 1.1): classify
-                        # from status_code/headers already carried on the
-                        # exception -- never from `str(e)`/body, which would mean
-                        # parsing a guessed provider-specific shape.
-                        _cloud_class = cloud_llm_client.classify_cloud_error(e)
-                        self._last_cloud_failure_class = _cloud_class
-                        self._last_llm_failure = {
-                            "model": _fail_profile.get("model") or self.current_model,
-                            "provider": provider_cfg.get("active_provider"),
-                            "source": source,
-                            "attempt": intento + 1,
-                            "reason": type(e).__name__,
-                            "message": str(e),
-                            "clase": _cloud_class,
-                        }
-                    _clase_suffix = f" clase={_cloud_class}" if _cloud_class else ""
-                    self._log(
-                        f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}{_clase_suffix}: {e}",
-                        level="error",
-                    )
-                    logger.warning(
-                        "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s",
-                        request_model,
-                        source,
-                        intento + 1,
-                        max_intentos,
-                        _cloud_class or "n/a",
-                        exc_info=True,
-                    )
-                    # Unit 2.1 (runtime_findings_batch_20260731): `rate_limited`
-                    # is the ONE class that spends the existing max_intentos
-                    # budget instead of exiting immediately -- honour a bounded
-                    # Retry-After when the budget still has an attempt left.
-                    # `bad_key` / `ambiguous_429` / `transient` never retry here
-                    # (the honest completion of "do not guess a provider-
-                    # specific table": an unclassifiable or non-timing 429 gets
-                    # conservative treatment, not a guessed wait).
-                    if (
-                        not is_local
-                        and _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
-                        and intento < max_intentos - 1
-                    ):
-                        _retry_after = cloud_llm_client.parse_retry_after_seconds(
-                            getattr(e, "headers", None) or {}
-                        )
-                        _wait_seconds = (
-                            _retry_after if _retry_after is not None
-                            else CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS
-                        )
-                        if _wait_seconds <= CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS:
-                            self._log(
-                                f"rate_limited: retrying in {_wait_seconds}s "
-                                f"(intento {intento+1}/{max_intentos}).",
-                                level="warning",
-                            )
-                            # Dead-air bound: this sleep runs BETWEEN attempts,
-                            # after `_ollama_chat_with_watchdog` has already
-                            # raised -- outside `_call_with_watchdog`'s own
-                            # worker thread, so the watchdog cannot kill it.
-                            time.sleep(_wait_seconds)
-                            continue
-                        self._log(
-                            f"rate_limited: Retry-After={_wait_seconds}s exceeds "
-                            f"{CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS}s bound; not retrying in-turn.",
-                            level="warning",
-                        )
-                    # `bad_key` never retries; surface a "check your key" banner
-                    # ONCE per failure event (latch resets alongside
-                    # `_last_cloud_failure_class` on the next success, above).
-                    if _cloud_class == cloud_llm_client.CLOUD_ERROR_BAD_KEY and not self._cloud_bad_key_notified:
-                        self._cloud_bad_key_notified = True
-                        self.ui_callback("cloud_bad_key")
-                    # F1 (multi_provider_llm_20260723): a CLOUD transport error
-                    # exits the attempt loop here when not retried above -- it
-                    # engages the SAME fallback state machine as a cloud timeout
-                    # (spec C: fallback on "cloud timeout OR a non-2xx/connection
-                    # error"). The LOCAL transport path stays byte-identical
-                    # (spec B: a local fault never routes to cloud fallback /
-                    # never rolls back here).
-                    if not is_local:
-                        # Unit 2.2: re-derive Retry-After directly from `e` in
-                        # scope rather than the loop-local `_retry_after` --
-                        # that variable is only assigned inside the in-turn
-                        # retry branch above and can carry a stale value from
-                        # an EARLIER attempt this same call when this attempt
-                        # skipped that branch (e.g. rate_limited on the final,
-                        # budget-exhausted attempt).
-                        _probe_retry_after = (
-                            cloud_llm_client.parse_retry_after_seconds(getattr(e, "headers", None) or {})
-                            if _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
-                            else None
-                        )
-                        self._handle_cloud_failure(
-                            source,
-                            failure_class=_cloud_class or cloud_llm_client.CLOUD_ERROR_TRANSIENT,
-                            retry_after_seconds=_probe_retry_after,
-                        )
-                    if commit_history:
-                        self._invalidate_pregen_epoch()
-                    return ""
-                finally:
-                    with self._lock:
-                        self._llm_generating = False
-
-                msg_obj = respuesta.get('message', {})
-                if isinstance(msg_obj, dict):
-                    raw_content = msg_obj.get('content', '')
-                    thinking = msg_obj.get('thinking', '')
-                else:
-                    raw_content = getattr(msg_obj, 'content', '')
-                    thinking = getattr(msg_obj, 'thinking', '')
-
-                # Cloud usage.* is recorded to logs only (spec E) — the local
-                # ctx_utilization block below reads Ollama-only telemetry
-                # (prompt_eval_count/eval_duration) absent from cloud responses.
-                if not is_local and isinstance(respuesta, dict):
-                    _usage = respuesta.get('usage')
-                    if _usage:
-                        logger.info("cloud_llm_usage: %s source=%s", _usage, source)
-
-                if thinking:
-                    logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
-
-                # Layer 3 reactive trim: an empty response whose prompt_eval_count
-                # plateaued at/near the context ceiling is Ollama's silent input-
-                # overflow signal. Drop the oldest in-flight pairs and retry ONCE
-                # (intento==0 guard). Inserted BEFORE the reasoning-model branch so
-                # trimming context wins over removing the output-token cap. Delegates
-                # the int-threshold comparison to context_budget.is_overflow_signal.
-                _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
-                _ctx_limit_now = _effective_ctx
-                if is_local and intento == 0 and context_budget.is_overflow_signal(
-                    raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
-                ):
-                    _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
-                    self._log(
-                        f"ctx_overflow_reactive: prompt_eval_count={_pec} >= "
-                        f"{_ctx_limit_now}*{CTX_OVERFLOW_SIGNAL_RATIO:.2f}; dropped "
-                        f"{_dropped} pair(s) from in-flight messages, retrying.",
-                        level="warning",
-                    )
-                    continue
-
-                # Layer 2 self-heal: empty visible content + internal thinking means a
-                # reasoning model spent its budget thinking and hit the num_predict cap.
-                # Drop the cap, remember the classification, and retry uncapped.
-                if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
-                    opciones_llm.pop('num_predict', None)
-                    if is_local:
-                        # F3: never write the LOCAL reasoning cache from a CLOUD
-                        # response. On cloud request_model is the local
-                        # current_model tag, so caching True here would uncap the
-                        # local model for the rest of the session once we return
-                        # to local. The uncapped cloud retry itself may stay.
-                        self._reasoning_model_cache[request_model] = True
-                    self._log(
-                        f"Auto-corrección: {request_model} devolvió contenido vacío con "
-                        f"pensamiento interno; removiendo límite de tokens y reintentando.",
-                        level="warning",
-                    )
-                    continue
-
-                if raw_content.strip():
-                    break
-                
-                self._log(f"⚠️ Intento {intento+1}: {request_model} devolvió respuesta vacía. Reintentando...", level="warning")
-                time.sleep(0.5)
-
-            dialogo = raw_content.strip().strip('\x00\ufeff')
-            elapsed = time.time() - start_llm
-            # T2(a) [v5]: last COMPLETED generation's duration (foreground or
-            # pregen, this is the shared _generar_dialogo body both use),
-            # feeding the adaptive retry gate (_pregen_retry_gate_seconds).
-            # Single Ollama runner -> at most one writer at a time; plain
-            # assignment is safe (atomic under the GIL).
-            self._pregen_last_gen_duration = elapsed
-
-            # Editorial direct-mode USED trigger (D2): commit the pending
-            # injection exactly once, only when this turn actually injected a
-            # card block AND produced a non-empty dialogo. Single engine worker
-            # thread is the only caller (no lock needed). Fail-open \u2014 a recorder
-            # error must never break a turn.
-            #
-            # NO SOURCE GATE, deliberately-but-unratified: since F1 widened
-            # _EDITORIAL_INJECT_SOURCES to direct+ptt, a VOICE turn also consumes
-            # a single_use card. Pinned by
-            # test_editorial_direct_context.py::test_ptt_turn_consumes_single_use_armed_card
-            # \u2014 read that test before adding a gate here; it is an owner decision,
-            # not a bug.
-            if editorial_block and dialogo and self.direct_editorial_usage_recorder is not None:
-                try:
-                    self.direct_editorial_usage_recorder()
-                except Exception:
-                    logger.warning("editorial direct usage recorder failed", exc_info=True)
-
-            # Layer 4 observability: log prompt-window utilization on every populated
-            # response and raise a UI pressure signal when it crosses the high mark.
-            _pec_final = (getattr(respuesta, "prompt_eval_count", 0) or 0) if respuesta is not None else 0
-            if _pec_final > 0:
-                _util = context_budget.utilization(_pec_final, _effective_ctx)
-                # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
-                # vs decode wall-time split so the prefill fraction of TTFT is observable
-                # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
-                _prefill_ms = (getattr(respuesta, "prompt_eval_duration", 0) or 0) / 1e6
-                _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
-                _ec_final = getattr(respuesta, "eval_count", 0) or 0
-                logger.info(
-                    "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
-                    "prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
-                    request_model, _pec_final, _native_ctx, _effective_ctx, _util,
-                    _prefill_ms, _decode_ms, _ec_final, source,
-                )
-                # Unit 2.3 (runtime_findings_batch_20260731 F10): stash the SAME
-                # numbers the line above just logged, per request, in the bounded
-                # ring -- built entirely from this call's own locals (never a
-                # shared attribute), so it cannot diverge from the log line for
-                # this turn and cannot race a concurrent pregen worker's own call.
-                # `_ctx_evicted` is the ctx_budget_gate local from earlier in this
-                # SAME _generar_dialogo call (still in scope, set once before the
-                # retry loop -- never re-threaded across a call boundary).
-                # `_ctx_provider` mirrors trace_provider's formula below without
-                # depending on it (that variable is computed later in this
-                # method and must not gate whether this snapshot is built).
-                _ctx_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
-                _ctx_snapshot = {
-                    "request_id": str(uuid.uuid4()),
-                    "timestamp": time.time(),
-                    "source": source,
-                    "provider": _ctx_provider,
-                    "model": request_model,
-                    "native_ctx": _native_ctx,
-                    "effective_ctx": _effective_ctx,
-                    "ratio": _util,
-                    "prompt_eval_count": _pec_final,
-                    "prefill_ms": _prefill_ms,
-                    "decode_ms": _decode_ms,
-                    "eval_count": _ec_final,
-                    "evicted_pairs": _ctx_evicted,
-                }
-                # getattr-guarded: several existing tests build a MotorVocalIA
-                # via __new__ (bypassing __init__) and only set the attributes
-                # their scenario touches -- mirrors the agenda_output_transformer
-                # guard above.
-                _ctx_ring = getattr(self, "_ctx_telemetry_ring", None)
-                if _ctx_ring is not None:
-                    _ctx_ring.append(_ctx_snapshot)
-                if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
-                    logger.warning(
-                        "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
-                        _util * 100, request_model, source,
-                    )
-                    _on_ctx_pressure_high = getattr(self, "on_ctx_pressure_high", None)
-                    if _on_ctx_pressure_high is not None:
-                        try:
-                            _on_ctx_pressure_high({
-                                "ratio": _util,
-                                "effective_ctx": _effective_ctx,
-                                "native_ctx": _native_ctx,
-                                "evicted_pairs": _ctx_evicted,
-                            })
-                        except Exception:
-                            logger.exception("on_ctx_pressure_high callback failed")
-                    self.ui_callback("ctx_pressure_high")
-
-            # MODEL_TRACE: audit which model was used for this generation
-            generation_model = request_model
-            desired = self._desired_model
-            active = self.current_model
-            loaded = self._loaded_model or "unknown"
-            # F4 (runtime_findings_batch_20260731 1.3): provider/transport for
-            # THIS generation, derived from the entry-snapshot `is_local` (never
-            # a fresh live read — same pinning rule as the rest of this method).
-            # `fallback_active` here means "local ONLY because of the runtime
-            # fallback flag, not because cfg was genuinely local" — derived from
-            # values already in scope, no extra snapshot variable needed.
-            trace_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
-            trace_transport = "local" if is_local else "cloud"
-            trace_fallback_active = is_local and not self._cfg_is_local(provider_cfg)
-            trace_msg = (
-                f"[MODEL_TRACE] desired={desired} active={active} "
-                f"loaded={loaded} generation={generation_model} "
-                f"profile={self._current_profile_name} source={source} "
-                f"provider={trace_provider} transport={trace_transport} "
-                f"fallback_active={trace_fallback_active}"
+            if outcome.early_return is not None:
+                return outcome.early_return
+            return self._finalize_generation(
+                setup,
+                outcome,
+                contexto,
+                source=source,
+                commit_history=commit_history,
+                log_prefix=log_prefix,
+                history_text=history_text,
+                is_local=is_local,
+                provider_cfg=provider_cfg,
+                request_model=request_model,
             )
-            # Root cause confirmed against logs/opencohost_20260730_162650.log:
-            # `_prepare_model` short-circuits without ever setting `_loaded_model`
-            # while cloud is the effective transport (`:2683-2687` — see
-            # `_judge_model`'s docstring for the same fact), so `loaded` reads
-            # "unknown" on EVERY cloud-by-design turn even though nothing is
-            # wrong — that is the entire cause of the 29/29 false positives, not
-            # `generation` carrying the cloud model id (it never does: `request_model`
-            # is captured once at this method's entry and is always the local alias).
-            cloud_by_design = trace_transport == "cloud" and not trace_fallback_active
-            mismatch = desired != active or active != loaded or loaded != generation_model
-            if mismatch and not cloud_by_design:
-                self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
-            else:
-                logger.info(f"Motor: {trace_msg}")
-
-            if source.startswith("kira-agenda"):
-                dialogo = self._sanitize_agenda_output(dialogo)
-                transformer = getattr(self, "agenda_output_transformer", None)
-                if transformer is not None:
-                    try:
-                        dialogo = transformer(dialogo)
-                    except Exception:
-                        logger.exception("Agenda output transformer failed")
-
-            if not dialogo:
-                self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
-                logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
-                # Item 4 (2026-07-24 incident): this is the FINAL empty return
-                # (max_intentos + Layer-2 self-heal already exhausted) -- on
-                # cloud that used to be silent dead air (no callback, no
-                # fallback). Surface it the same way a transport failure does
-                # (F1): fire the existing whitelisted status, then route to
-                # the fallback state machine. Local stays byte-identical.
-                if not is_local:
-                    self.ui_callback("cloud_llm_error")
-                    # No exception/status here (a well-formed but empty 2xx) --
-                    # `transient` per classify_cloud_error's own rule for a
-                    # malformed/unclassifiable 2xx body; drives backoff auto-
-                    # return (unit 2.2).
-                    self._handle_cloud_failure(
-                        source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
-                    )
-                if commit_history:
-                    self._invalidate_pregen_epoch()
-                return ""
-
-            if is_local:
-                # F5: a cloud success must not set an unvalidated LOCAL model as
-                # the rollback/fallback target (request_model is the local tag on
-                # cloud) nor clear _awaiting_first_success_after_switch.
-                self._mark_model_generation_success(request_model)
-            # clause_sanitizer V1: intra-sentence clause repetition. Placed here,
-            # before output_guard, so it is provider-agnostic by construction —
-            # there is no is_local gate between this point and the return.
-            if source in CLAUSE_SANITIZER_SOURCES:
-                san = sanitize_clause_repetition(dialogo)
-                if san.verdict != "clean":
-                    # A pregen/connector-upgrade worker generates on its own
-                    # thread and interleaves into the same log, so the stage must
-                    # say which one this was — otherwise the tuning pass cannot
-                    # tell a spoken foreground turn from a speculative draft that
-                    # may never be spoken at all.
-                    self._log_clause_sanitizer(
-                        san, source,
-                        stage="generate" if commit_history else "pregen_draft",
-                    )
-                # Tier 2 (reject -> regenerate) needs an owner for the
-                # regeneration, and only agenda has one: the ADR-011 ladder,
-                # reached by returning "" — the same idiom the ladder reject
-                # below already uses. Elsewhere this is repair-only; the verdict
-                # is still recorded so evidence for arming tier 2 accrues.
-                if san.verdict == "rejected" and source.startswith("kira-agenda"):
-                    self._log(
-                        f"Salida descartada por repetición de cláusulas "
-                        f"(removed={san.removed_fragments} distinct={san.distinct_looping}).",
-                        level="warning",
-                    )
-                    if commit_history:
-                        self._invalidate_pregen_epoch()
-                    return ""
-                dialogo = san.text
-            allowed, guard_reason = output_guard(dialogo, source=source)
-            if not allowed:
-                self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
-                # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
-                # ONE extra generation, same prompt + a corrective system nudge,
-                # before falling back to the canned line. A SEPARATE call outside
-                # the max_intentos transport-retry loop above — never consumes
-                # that budget. Posture (provider_cfg/is_local) stays the F2
-                # snapshot; no live re-read.
-                retry_content = self._retry_after_guard_block(
-                    messages=messages,
-                    opciones_llm=opciones_llm,
-                    request_model=request_model,
-                    chat_timeout=chat_timeout,
-                    provider_cfg=provider_cfg,
-                    is_local=is_local,
-                )
-                if retry_content and source.startswith("kira-agenda"):
-                    retry_content = self._sanitize_agenda_output(retry_content)
-                    transformer = getattr(self, "agenda_output_transformer", None)
-                    if transformer is not None:
-                        try:
-                            retry_content = transformer(retry_content)
-                        except Exception:
-                            logger.exception("Agenda output transformer failed (guardrail retry)")
-                if retry_content:
-                    retry_allowed, _ = output_guard(retry_content, source=source)
-                    if retry_allowed:
-                        self._log("Guardrail retry: respuesta corregida aceptada tras un intento adicional.")
-                        dialogo = retry_content
-                        allowed = True
-
-            if not allowed:
-                fallback = self._guardrail_fallback_line(source, guard_reason)
-                if fallback:
-                    self._log("Guardrail fallback: usando línea neutral sin LLM.")
-                    # D4 (memoria_quality_20260717): a guardrail-blocked turn used
-                    # to return here BEFORE _commit_history, so the whole exchange
-                    # vanished from history AND capture (F4). Commit the user turn
-                    # + the spoken fallback line instead. Gated on commit_history
-                    # so callers that opted out are unaffected, and on a truthy
-                    # fallback so agenda sources (fallback="") keep their existing
-                    # state-machine handling with no empty pair appended. C1's
-                    # canned-fallback skip guarantees these pairs never become
-                    # memorias.
-                    if commit_history:
-                        self._commit_history(
-                            contexto, fallback, source=source, history_text=history_text,
-                        )
-                    return fallback
-                # WU4 F3 (WU3 follow-up): guardrail-no-fallback is a
-                # non-committing foreground return — bump the pregen epoch so
-                # a late zombie store cannot survive into the next pop.
-                if commit_history:
-                    self._invalidate_pregen_epoch()
-                return ""
-
-            self._last_llm_failure = None
-            self._last_cloud_failure_class = None
-            self._cloud_bad_key_notified = False
-
-            # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
-            # brake let through (verbatim dups + synonym-swap templates) BEFORE it
-            # reaches TTS or gets committed into the history window that feeds the
-            # next prompt. Reuses the proven neutral-fallback seam. Gated to
-            # source=="chat" so agenda/direct/ptt/LiveVoice paths are untouched.
-            if source == "chat":
-                recent_outputs = [
-                    m.get("content", "")
-                    for m in history_snapshot
-                    if isinstance(m, dict) and m.get("role") == "assistant"
-                ][-REPETITION_CONFIG.window:]
-                repetition = detect_repetition(dialogo, recent_outputs)
-                if repetition.is_repetitive:
-                    self._log(
-                        f"Repetición de chat bloqueada ({repetition.reason}); "
-                        f"usando línea neutral sin LLM.",
-                        level="warning",
-                    )
-                    if commit_history:
-                        self._invalidate_pregen_epoch()
-                    return self._guardrail_fallback_line(source) or ""
-
-            if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
-                self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
-                self._invalidate_pregen_epoch()
-                return ""
-
-            if commit_history:
-                self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
-                # FIX-B2: emission moved to the speak site (_ejecutar_inferencia)
-                # so guardrail/repetition fallbacks — which return EARLIER than
-                # this block yet are still spoken — also update last-reply.
-            preview = dialogo[:200] if _debug_enabled() else f"len={len(dialogo)}"
-            logger.info(f"{log_prefix} response ({elapsed:.2f}s): {preview}")
-
-            if commit_history:
-                self._commit_history(contexto, dialogo, source=source, history_text=history_text)
-
-            return dialogo
 
         except Exception as e:
             self._log(f"ERROR Ollama: {e}", level="error")
@@ -3981,6 +3291,860 @@ class MotorVocalIA(threading.Thread):
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
+
+    def _build_generation_request(
+        self,
+        contexto,
+        source: str,
+        *,
+        is_local: bool,
+        provider_cfg: dict,
+        request_model: str,
+        watchdog_timeout: Optional[float],
+    ) -> "_GenerationSetup":
+        """Phase 1 of _generar_dialogo (refactor_core_api_20260802 B7):
+        build the message list + sampling options + posture-aware timeout.
+        Verbatim body moved from the original method (comments included) --
+        no behavior change, only a name and an explicit return.
+        """
+        messages = []
+
+        # Personalization block (kira_personalization_onboarding_20260705,
+        # design §2; memoria_recall_20260718 W1): built ONCE PER REQUEST and
+        # emitted at the SYSTEM position — mirroring set_profile's persona
+        # (self.system_prompt, llm_engine.py:715-737). This is a stable
+        # per-request copy at the system position, NOT literally once-per-
+        # session: ollama.chat is stateless, so identity must be re-supplied
+        # every request. It never enters historial or memoria capture
+        # (_commit_history stores raw contexto, not this system content).
+        # Same _PERSONALIZATION_INJECT_SOURCES gate as before. Fail-open: a
+        # raising build must never break a turn.
+        personalization_block = ""
+        if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
+            try:
+                personalization_block = personalization.build_injection_block(
+                    self._sanitize_history_context
+                )
+            except Exception:
+                personalization_block = ""
+        # grounding_authority_temporal_humility: the grounding-authority +
+        # temporal-humility rules ride at the SYSTEM position on EVERY
+        # generation, appended by the engine rather than authored into
+        # llm.system_prompt.
+        #
+        # WHY HERE and not in the persona slot: `set_profile` replaces
+        # self.system_prompt wholesale with the profile's own prompt
+        # (`payload.get("prompt", ...)` in the set_profile handler). All six shipped
+        # profiles carry a full prompt of their own, and profiles are
+        # persisted to the user's PROFILES_FILE on first run — so a rule
+        # written into the locale persona (or into default_profiles.json)
+        # would be dead text for every existing install. This single site is
+        # the funnel all three _generar_dialogo callers route through.
+        #
+        # Unconditional by source: the "that doesn't exist" failure is not
+        # direct-only (chat and agenda turns assert facts too), unlike the
+        # <editorial_context> block below which stays gated on source.
+        #
+        # Position: persona -> rules -> personalization. The rules are a
+        # constant, so keeping them in the stable prefix ahead of the
+        # per-session personalization block preserves KV-cache reuse.
+        # Fail-open by construction: grounding_rules() is _slot-backed and
+        # cannot raise; "" simply appends nothing.
+        grounding_block = i18n_active.grounding_rules()
+        system_parts = [self.system_prompt]
+        if grounding_block:
+            system_parts.append(grounding_block)
+        if personalization_block:
+            system_parts.append(personalization_block)
+        system_content = "\n\n".join(system_parts)
+
+        if self.use_system_role:
+            messages.append({'role': 'system', 'content': system_content})
+
+        # Take a consistent snapshot of historial and (for host-turn paths) the
+        # digest block under _history_lock so that a concurrent _commit_history
+        # call from the agenda speaker daemon cannot mutate the deque while we
+        # are iterating it (RuntimeError: deque mutated during iteration).
+        # The lock is held ONLY for the fast snapshot + build_block reads;
+        # it is released before any I/O or the Ollama call.
+        with self._history_lock:
+            history_snapshot = list(self.historial)
+            if source in _DIGEST_INJECT_SOURCES:
+                digest_block = self._memory_digest.build_block(
+                    sanitize_fn=self._sanitize_history_context,
+                    line_format=i18n_active.digest_line_format(),
+                    unit_singular=i18n_active.digest_unit_singular(),
+                    unit_plural=i18n_active.digest_unit_plural(),
+                )
+            else:
+                digest_block = ""
+            # Slice 5 (R9): snapshot the profile id under the lock
+            # (engine state protected by _history_lock) — the actual
+            # store READ happens AFTER the lock releases, below,
+            # since memorias retrieval is disk I/O and _history_lock
+            # must never be held during I/O (same rule as capture).
+            # Candidate 1: gate site 1 of 3 — direct AND ptt snapshot.
+            if source in _MEMORIA_INJECT_SOURCES:
+                memorias_profile_id = self._current_profile_id
+            else:
+                memorias_profile_id = None
+
+        # Rebuild a fresh {role, content} per entry — never append by
+        # reference and never pop/mutate — so the stored `source` tag
+        # (history_source_tag_20260629) is projected away before the dicts
+        # reach ollama.chat, and the live deque entries keep their tag.
+        for msg in history_snapshot:
+            messages.append({'role': msg['role'], 'content': msg['content']})
+
+        # Slice 5 (R9): memorias retrieval + injection for direct and ptt
+        # turns (candidate 1: gate site 2 of 3). Store I/O happens here,
+        # AFTER _history_lock released above (the store's own
+        # READ_TIMEOUT_SECONDS bounds the read). Fail-open to "" on any
+        # error — a retrieval failure must never break a turn.
+        memorias_block = ""
+        if source in _MEMORIA_INJECT_SOURCES and MEMORIAS_ENABLED and memorias_profile_id:
+            memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
+
+        # Editorial host-turn enrichment: inject matching ARMED card context for
+        # host queries, typed OR spoken (F1 — the operator arms a card and then
+        # asks about it by voice just as often as by keyboard).
+        # NON-CONSUMING — card stays ARMED for the agenda path.
+        # Never inject for chat/aggregator-driven sources.
+        editorial_block = ""
+        if source in _EDITORIAL_INJECT_SOURCES:
+            provider = self.direct_editorial_context_provider
+            if provider is not None:
+                try:
+                    editorial_block = provider(contexto) or ""
+                except Exception:
+                    editorial_block = ""
+
+        if editorial_block:
+            enriched = f"{contexto}\n\n{editorial_block}"
+            logger.info(
+                "editorial direct context injected (source=%s, len=%d)",
+                source,
+                len(editorial_block),
+            )
+        else:
+            enriched = contexto
+
+        # D3 — digest injection: only for host-turn prompts (typed or spoken),
+        # never chat/agenda. digest_block was already computed under
+        # _history_lock above. E3b: Wrap in explicit read-only delimiter so the
+        # LLM cannot mistake ledger lines for instructions (structural
+        # isolation, language-agnostic).
+        if source in _DIGEST_INJECT_SOURCES:
+            if digest_block:
+                wrapped_digest = (
+                    i18n_active.memory_block_open() + "\n"
+                    + digest_block
+                    + "\n" + i18n_active.memory_block_close()
+                )
+                enriched = f"{wrapped_digest}\n\n{enriched}"
+                logger.debug("L1 digest injected into direct prompt (len=%d)", len(digest_block))
+
+        # Memorias block (R9) is PREPENDED before the digest wrap — it
+        # must appear earlier in the prompt than <memoria_de_fondo>.
+        # Candidate 1: gate site 3 of 3 — own sibling gate (no longer
+        # nested inside `source == "direct"`), same pattern as
+        # _PERSONALIZATION_INJECT_SOURCES below, so ptt turns receive it.
+        if source in _MEMORIA_INJECT_SOURCES and memorias_block:
+            enriched = f"{memorias_block}\n\n{enriched}"
+
+        # W1 (memoria_recall_20260718): the personalization <perfil_streamer>
+        # block no longer prepends the user turn here — it was built above and
+        # folded into `system_content` at the SYSTEM position. Only the
+        # memorias/digest/editorial context rides in `enriched` now.
+        if self.use_system_role:
+            messages.append({'role': 'user', 'content': enriched})
+        else:
+            prompt_completo = f"{system_content}\n\n[{i18n_active.user_message_label()}]: {enriched}"
+            messages.append({'role': 'user', 'content': prompt_completo})
+
+        # Layer 1+2: discover the model's native context window (cached, free
+        # after first call — also covers the name-heuristic short-circuit gap)
+        # but budget against OpenCohost's effective runtime cap so large
+        # native windows do not disable prompt eviction or over-allocate KV.
+        if is_local:
+            self._discover_model_ctx(request_model)
+            _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
+            _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
+        else:
+            # Cloud: no ollama.show telemetry (prompt_eval_count/eval_duration
+            # are absent from OpenAI-compatible responses). Apply the
+            # provider-aware budget proactively (design 'Cloud context budget'),
+            # replacing the reactive trim.
+            _native_ctx = CLOUD_CTX_BUDGET
+            _effective_ctx = CLOUD_CTX_BUDGET
+        messages, _ctx_evicted = context_budget.apply_char_budget(
+            messages,
+            ctx_limit=_effective_ctx,
+            max_output_tokens=LLM_MAX_TOKENS,
+            safety_factor=CHAR_BUDGET_SAFETY_FACTOR,
+        )
+        if _ctx_evicted > 0:
+            self._log(
+                f"ctx_budget_gate: evicted {_ctx_evicted} pair(s) from messages "
+                f"(model={request_model}, native_ctx={_native_ctx}, effective_ctx={_effective_ctx})",
+                level="warning",
+            )
+
+        # Cloud item 3 (2026-07-24 incident): the LOCAL 768-token cap
+        # (LLM_MAX_TOKENS) was starving cloud/reasoning models. Cloud uses
+        # the high CLOUD_MAX_TOKENS ceiling instead -- gated on the
+        # snapshotted `is_local`, never a live re-read (F2 invariant above).
+        opciones_llm = {
+            'temperature': LLM_TEMPERATURE,
+            'top_p': LLM_TOP_P,
+            'num_predict': LLM_MAX_TOKENS if is_local else CLOUD_MAX_TOKENS,
+            'num_ctx': _effective_ctx,
+        }
+
+        if is_local and "gemma" in request_model.lower():
+            opciones_llm.pop('num_ctx', None)
+            opciones_llm['temperature'] = 0.7
+
+        # Reasoning-capability discovery is an ollama.show probe (local-only);
+        # for cloud, num_predict maps to max_tokens and the provider owns any
+        # reasoning-token behavior. gemma temperature override is local-only too.
+        if is_local and self._resolve_reasoning_classification(request_model):
+            opciones_llm.pop('num_predict', None)
+            self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
+
+        # FIX 1 — chat-reactive anti-repetition sampling brake. Gated to
+        # source=="chat" (RF3 viewer chat, agenda HANDLE_CHAT, default-enqueue
+        # chat); NEVER applied to direct/ptt/accumulated/kira-agenda. Only ADDS
+        # keys, so non-chat options stay byte-identical. See the event_taxonomy
+        # track for the source-disambiguation follow-up.
+        if source == "chat":
+            opciones_llm["repeat_penalty"] = CHAT_REPEAT_PENALTY
+            opciones_llm["presence_penalty"] = CHAT_PRESENCE_PENALTY
+            opciones_llm["frequency_penalty"] = CHAT_FREQUENCY_PENALTY
+
+        start_llm = time.time()
+        max_intentos = 2
+        # R3: a bounded connector-upgrade call passes its own short watchdog
+        # timeout; every other caller keeps the resolved chat timeout.
+        chat_timeout = (
+            watchdog_timeout
+            if watchdog_timeout is not None
+            else self._resolve_chat_watchdog_timeout(
+                request_model, provider_cfg=provider_cfg, is_local=is_local
+            )
+        )
+
+        return _GenerationSetup(
+            messages=messages,
+            opciones_llm=opciones_llm,
+            chat_timeout=chat_timeout,
+            max_intentos=max_intentos,
+            start_llm=start_llm,
+            native_ctx=_native_ctx,
+            effective_ctx=_effective_ctx,
+            ctx_evicted=_ctx_evicted,
+            editorial_block=editorial_block,
+            history_snapshot=history_snapshot,
+        )
+
+    def _cloud_attempt_loop(
+        self,
+        setup: "_GenerationSetup",
+        *,
+        source: str,
+        commit_history: bool,
+        is_local: bool,
+        provider_cfg: dict,
+        request_model: str,
+        watchdog_timeout: Optional[float],
+    ) -> "_GenerationAttemptOutcome":
+        """Phase 2 of _generar_dialogo (refactor_core_api_20260802 B7): the
+        max_intentos retry loop, including the cloud transport-failure
+        classification + rate-limited Retry-After retry branch, moved as ONE
+        piece with its comments intact. Every early `return ""` here becomes
+        `early_return=""` on the outcome -- the orchestrator propagates it
+        identically via `if outcome.early_return is not None: return ...`.
+        """
+        messages = setup.messages
+        opciones_llm = setup.opciones_llm
+        chat_timeout = setup.chat_timeout
+        max_intentos = setup.max_intentos
+        _effective_ctx = setup.effective_ctx
+        raw_content = ""
+        respuesta = None
+
+        for intento in range(max_intentos):
+            # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
+            # actual generation call, cleared in finally on every exit path.
+            with self._lock:
+                self._llm_generating = True
+            try:
+                respuesta = self._ollama_chat_with_watchdog(
+                    timeout=chat_timeout,
+                    model=request_model,
+                    messages=messages,
+                    keep_alive=LLM_KEEP_ALIVE,
+                    options=opciones_llm,
+                    provider_cfg=provider_cfg,
+                    is_local=is_local,
+                )
+            except Exception as e:
+                if self._is_watchdog_timeout_error(e):
+                    # R3: a bounded connector-upgrade call (watchdog_timeout set)
+                    # abandons SILENTLY on timeout — it is cosmetic, so it must
+                    # never trigger the heavyweight stall recovery (model rollback
+                    # / UI signal) a real turn's timeout does. Just return "" so
+                    # the pool floor stands.
+                    if watchdog_timeout is None:
+                        # A cloud stall must NOT roll back a local model
+                        # (spec B): gate the heavyweight model-rollback
+                        # recovery on `is_local`. Cloud instead routes to
+                        # `_handle_cloud_failure` (Phase 4: fallback state
+                        # machine); the max_intentos retry + existing
+                        # failure contract still apply either way.
+                        if is_local:
+                            self._recover_from_stalled_inference(
+                                request_model=request_model,
+                                source=source,
+                                timeout=chat_timeout,
+                            )
+                        else:
+                            # A watchdog timeout carries no HTTP status/
+                            # headers to classify from (it never got a
+                            # response) -- `transient` is the correct
+                            # class per classify_cloud_error's own rule
+                            # ("anything without a status_code ... is
+                            # transient"), and drives exponential-backoff
+                            # auto-return (unit 2.2).
+                            self._handle_cloud_failure(
+                                source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                            )
+                        if commit_history:
+                            self._invalidate_pregen_epoch()
+                    return _GenerationAttemptOutcome(early_return="")
+                if not self._is_ollama_transport_error(e):
+                    raise
+                # F7b: attribute a CLOUD failure to the cloud profile model +
+                # provider id (the local current_model tag would make a cloud
+                # 401 look like a local fault). The LOCAL branch stays
+                # byte-identical (no "provider" key) so existing exact-match
+                # assertions keep passing. Full MODEL_TRACE attribution is
+                # deferred (residual).
+                _cloud_class = None
+                if is_local:
+                    self._last_llm_failure = {
+                        "model": self.current_model,
+                        "source": source,
+                        "attempt": intento + 1,
+                        "reason": type(e).__name__,
+                        "message": str(e),
+                    }
+                else:
+                    _fail_profile = self._cfg_active_profile(provider_cfg) or {}
+                    # F2 (runtime_findings_batch_20260731 unit 1.1): classify
+                    # from status_code/headers already carried on the
+                    # exception -- never from `str(e)`/body, which would mean
+                    # parsing a guessed provider-specific shape.
+                    _cloud_class = cloud_llm_client.classify_cloud_error(e)
+                    self._last_cloud_failure_class = _cloud_class
+                    self._last_llm_failure = {
+                        "model": _fail_profile.get("model") or self.current_model,
+                        "provider": provider_cfg.get("active_provider"),
+                        "source": source,
+                        "attempt": intento + 1,
+                        "reason": type(e).__name__,
+                        "message": str(e),
+                        "clase": _cloud_class,
+                    }
+                _clase_suffix = f" clase={_cloud_class}" if _cloud_class else ""
+                self._log(
+                    f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}{_clase_suffix}: {e}",
+                    level="error",
+                )
+                logger.warning(
+                    "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s",
+                    request_model,
+                    source,
+                    intento + 1,
+                    max_intentos,
+                    _cloud_class or "n/a",
+                    exc_info=True,
+                )
+                # Unit 2.1 (runtime_findings_batch_20260731): `rate_limited`
+                # is the ONE class that spends the existing max_intentos
+                # budget instead of exiting immediately -- honour a bounded
+                # Retry-After when the budget still has an attempt left.
+                # `bad_key` / `ambiguous_429` / `transient` never retry here
+                # (the honest completion of "do not guess a provider-
+                # specific table": an unclassifiable or non-timing 429 gets
+                # conservative treatment, not a guessed wait).
+                if (
+                    not is_local
+                    and _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
+                    and intento < max_intentos - 1
+                ):
+                    _retry_after = cloud_llm_client.parse_retry_after_seconds(
+                        getattr(e, "headers", None) or {}
+                    )
+                    _wait_seconds = (
+                        _retry_after if _retry_after is not None
+                        else CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS
+                    )
+                    if _wait_seconds <= CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS:
+                        self._log(
+                            f"rate_limited: retrying in {_wait_seconds}s "
+                            f"(intento {intento+1}/{max_intentos}).",
+                            level="warning",
+                        )
+                        # Dead-air bound: this sleep runs BETWEEN attempts,
+                        # after `_ollama_chat_with_watchdog` has already
+                        # raised -- outside `_call_with_watchdog`'s own
+                        # worker thread, so the watchdog cannot kill it.
+                        time.sleep(_wait_seconds)
+                        continue
+                    self._log(
+                        f"rate_limited: Retry-After={_wait_seconds}s exceeds "
+                        f"{CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS}s bound; not retrying in-turn.",
+                        level="warning",
+                    )
+                # `bad_key` never retries; surface a "check your key" banner
+                # ONCE per failure event (latch resets alongside
+                # `_last_cloud_failure_class` on the next success, above).
+                if _cloud_class == cloud_llm_client.CLOUD_ERROR_BAD_KEY and not self._cloud_bad_key_notified:
+                    self._cloud_bad_key_notified = True
+                    self.ui_callback("cloud_bad_key")
+                # F1 (multi_provider_llm_20260723): a CLOUD transport error
+                # exits the attempt loop here when not retried above -- it
+                # engages the SAME fallback state machine as a cloud timeout
+                # (spec C: fallback on "cloud timeout OR a non-2xx/connection
+                # error"). The LOCAL transport path stays byte-identical
+                # (spec B: a local fault never routes to cloud fallback /
+                # never rolls back here).
+                if not is_local:
+                    # Unit 2.2: re-derive Retry-After directly from `e` in
+                    # scope rather than the loop-local `_retry_after` --
+                    # that variable is only assigned inside the in-turn
+                    # retry branch above and can carry a stale value from
+                    # an EARLIER attempt this same call when this attempt
+                    # skipped that branch (e.g. rate_limited on the final,
+                    # budget-exhausted attempt).
+                    _probe_retry_after = (
+                        cloud_llm_client.parse_retry_after_seconds(getattr(e, "headers", None) or {})
+                        if _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
+                        else None
+                    )
+                    self._handle_cloud_failure(
+                        source,
+                        failure_class=_cloud_class or cloud_llm_client.CLOUD_ERROR_TRANSIENT,
+                        retry_after_seconds=_probe_retry_after,
+                    )
+                if commit_history:
+                    self._invalidate_pregen_epoch()
+                return _GenerationAttemptOutcome(early_return="")
+            finally:
+                with self._lock:
+                    self._llm_generating = False
+
+            msg_obj = respuesta.get('message', {})
+            if isinstance(msg_obj, dict):
+                raw_content = msg_obj.get('content', '')
+                thinking = msg_obj.get('thinking', '')
+            else:
+                raw_content = getattr(msg_obj, 'content', '')
+                thinking = getattr(msg_obj, 'thinking', '')
+
+            # Cloud usage.* is recorded to logs only (spec E) — the local
+            # ctx_utilization block below reads Ollama-only telemetry
+            # (prompt_eval_count/eval_duration) absent from cloud responses.
+            if not is_local and isinstance(respuesta, dict):
+                _usage = respuesta.get('usage')
+                if _usage:
+                    logger.info("cloud_llm_usage: %s source=%s", _usage, source)
+
+            if thinking:
+                logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
+
+            # Layer 3 reactive trim: an empty response whose prompt_eval_count
+            # plateaued at/near the context ceiling is Ollama's silent input-
+            # overflow signal. Drop the oldest in-flight pairs and retry ONCE
+            # (intento==0 guard). Inserted BEFORE the reasoning-model branch so
+            # trimming context wins over removing the output-token cap. Delegates
+            # the int-threshold comparison to context_budget.is_overflow_signal.
+            _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
+            _ctx_limit_now = _effective_ctx
+            if is_local and intento == 0 and context_budget.is_overflow_signal(
+                raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
+            ):
+                _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
+                self._log(
+                    f"ctx_overflow_reactive: prompt_eval_count={_pec} >= "
+                    f"{_ctx_limit_now}*{CTX_OVERFLOW_SIGNAL_RATIO:.2f}; dropped "
+                    f"{_dropped} pair(s) from in-flight messages, retrying.",
+                    level="warning",
+                )
+                continue
+
+            # Layer 2 self-heal: empty visible content + internal thinking means a
+            # reasoning model spent its budget thinking and hit the num_predict cap.
+            # Drop the cap, remember the classification, and retry uncapped.
+            if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
+                opciones_llm.pop('num_predict', None)
+                if is_local:
+                    # F3: never write the LOCAL reasoning cache from a CLOUD
+                    # response. On cloud request_model is the local
+                    # current_model tag, so caching True here would uncap the
+                    # local model for the rest of the session once we return
+                    # to local. The uncapped cloud retry itself may stay.
+                    self._reasoning_model_cache[request_model] = True
+                self._log(
+                    f"Auto-corrección: {request_model} devolvió contenido vacío con "
+                    f"pensamiento interno; removiendo límite de tokens y reintentando.",
+                    level="warning",
+                )
+                continue
+
+            if raw_content.strip():
+                break
+
+            self._log(f"⚠️ Intento {intento+1}: {request_model} devolvió respuesta vacía. Reintentando...", level="warning")
+            time.sleep(0.5)
+
+        return _GenerationAttemptOutcome(raw_content=raw_content, respuesta=respuesta)
+
+    def _finalize_generation(
+        self,
+        setup: "_GenerationSetup",
+        outcome: "_GenerationAttemptOutcome",
+        contexto,
+        *,
+        source: str,
+        commit_history: bool,
+        log_prefix: str,
+        history_text: Optional[str],
+        is_local: bool,
+        provider_cfg: dict,
+        request_model: str,
+    ) -> str:
+        """Phase 3 of _generar_dialogo (refactor_core_api_20260802 B7):
+        post-process the raw completion (ctx telemetry, MODEL_TRACE, agenda
+        sanitize, clause sanitizer, guardrail + retry, chat repetition guard,
+        agenda acceptance) and commit/return. The ctx-telemetry snapshot
+        block keeps reading only THIS call's own locals/params (never a
+        shared attribute) -- same documented design as before the split.
+        """
+        raw_content = outcome.raw_content
+        respuesta = outcome.respuesta
+        messages = setup.messages
+        opciones_llm = setup.opciones_llm
+        chat_timeout = setup.chat_timeout
+        start_llm = setup.start_llm
+        _native_ctx = setup.native_ctx
+        _effective_ctx = setup.effective_ctx
+        _ctx_evicted = setup.ctx_evicted
+        editorial_block = setup.editorial_block
+        history_snapshot = setup.history_snapshot
+
+        dialogo = raw_content.strip().strip('\x00\ufeff')
+        elapsed = time.time() - start_llm
+        # T2(a) [v5]: last COMPLETED generation's duration (foreground or
+        # pregen, this is the shared _generar_dialogo body both use),
+        # feeding the adaptive retry gate (_pregen_retry_gate_seconds).
+        # Single Ollama runner -> at most one writer at a time; plain
+        # assignment is safe (atomic under the GIL).
+        self._pregen_last_gen_duration = elapsed
+
+        # Editorial direct-mode USED trigger (D2): commit the pending
+        # injection exactly once, only when this turn actually injected a
+        # card block AND produced a non-empty dialogo. Single engine worker
+        # thread is the only caller (no lock needed). Fail-open \u2014 a recorder
+        # error must never break a turn.
+        #
+        # NO SOURCE GATE, deliberately-but-unratified: since F1 widened
+        # _EDITORIAL_INJECT_SOURCES to direct+ptt, a VOICE turn also consumes
+        # a single_use card. Pinned by
+        # test_editorial_direct_context.py::test_ptt_turn_consumes_single_use_armed_card
+        # \u2014 read that test before adding a gate here; it is an owner decision,
+        # not a bug.
+        if editorial_block and dialogo and self.direct_editorial_usage_recorder is not None:
+            try:
+                self.direct_editorial_usage_recorder()
+            except Exception:
+                logger.warning("editorial direct usage recorder failed", exc_info=True)
+
+        # Layer 4 observability: log prompt-window utilization on every populated
+        # response and raise a UI pressure signal when it crosses the high mark.
+        _pec_final = (getattr(respuesta, "prompt_eval_count", 0) or 0) if respuesta is not None else 0
+        if _pec_final > 0:
+            _util = context_budget.utilization(_pec_final, _effective_ctx)
+            # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
+            # vs decode wall-time split so the prefill fraction of TTFT is observable
+            # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
+            _prefill_ms = (getattr(respuesta, "prompt_eval_duration", 0) or 0) / 1e6
+            _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
+            _ec_final = getattr(respuesta, "eval_count", 0) or 0
+            logger.info(
+                "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
+                "prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
+                request_model, _pec_final, _native_ctx, _effective_ctx, _util,
+                _prefill_ms, _decode_ms, _ec_final, source,
+            )
+            # Unit 2.3 (runtime_findings_batch_20260731 F10): stash the SAME
+            # numbers the line above just logged, per request, in the bounded
+            # ring -- built entirely from this call's own locals (never a
+            # shared attribute), so it cannot diverge from the log line for
+            # this turn and cannot race a concurrent pregen worker's own call.
+            # `_ctx_evicted` is the ctx_budget_gate value from THIS call's own
+            # `_GenerationSetup` (set once in `_build_generation_request`,
+            # carried per call, never stored on `self`) -- it cannot be
+            # another turn's value.
+            # `_ctx_provider` mirrors trace_provider's formula below without
+            # depending on it (that variable is computed later in this
+            # method and must not gate whether this snapshot is built).
+            _ctx_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
+            _ctx_snapshot = {
+                "request_id": str(uuid.uuid4()),
+                "timestamp": time.time(),
+                "source": source,
+                "provider": _ctx_provider,
+                "model": request_model,
+                "native_ctx": _native_ctx,
+                "effective_ctx": _effective_ctx,
+                "ratio": _util,
+                "prompt_eval_count": _pec_final,
+                "prefill_ms": _prefill_ms,
+                "decode_ms": _decode_ms,
+                "eval_count": _ec_final,
+                "evicted_pairs": _ctx_evicted,
+            }
+            # getattr-guarded: several existing tests build a MotorVocalIA
+            # via __new__ (bypassing __init__) and only set the attributes
+            # their scenario touches -- mirrors the agenda_output_transformer
+            # guard above.
+            _ctx_ring = getattr(self, "_ctx_telemetry_ring", None)
+            if _ctx_ring is not None:
+                _ctx_ring.append(_ctx_snapshot)
+            if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
+                logger.warning(
+                    "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
+                    _util * 100, request_model, source,
+                )
+                _on_ctx_pressure_high = getattr(self, "on_ctx_pressure_high", None)
+                if _on_ctx_pressure_high is not None:
+                    try:
+                        _on_ctx_pressure_high({
+                            "ratio": _util,
+                            "effective_ctx": _effective_ctx,
+                            "native_ctx": _native_ctx,
+                            "evicted_pairs": _ctx_evicted,
+                        })
+                    except Exception:
+                        logger.exception("on_ctx_pressure_high callback failed")
+                self.ui_callback("ctx_pressure_high")
+
+        # MODEL_TRACE: audit which model was used for this generation
+        generation_model = request_model
+        desired = self._desired_model
+        active = self.current_model
+        loaded = self._loaded_model or "unknown"
+        # F4 (runtime_findings_batch_20260731 1.3): provider/transport for
+        # THIS generation, derived from the entry-snapshot `is_local` (never
+        # a fresh live read — same pinning rule as the rest of the
+        # generation, threaded in from `_generar_dialogo`'s entry).
+        # `fallback_active` here means "local ONLY because of the runtime
+        # fallback flag, not because cfg was genuinely local" — derived from
+        # values already in scope, no extra snapshot variable needed.
+        trace_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
+        trace_transport = "local" if is_local else "cloud"
+        trace_fallback_active = is_local and not self._cfg_is_local(provider_cfg)
+        trace_msg = (
+            f"[MODEL_TRACE] desired={desired} active={active} "
+            f"loaded={loaded} generation={generation_model} "
+            f"profile={self._current_profile_name} source={source} "
+            f"provider={trace_provider} transport={trace_transport} "
+            f"fallback_active={trace_fallback_active}"
+        )
+        # Root cause confirmed against logs/opencohost_20260730_162650.log:
+        # `_prepare_model` short-circuits without ever setting `_loaded_model`
+        # while cloud is the effective transport (`:2683-2687` — see
+        # `_judge_model`'s docstring for the same fact), so `loaded` reads
+        # "unknown" on EVERY cloud-by-design turn even though nothing is
+        # wrong — that is the entire cause of the 29/29 false positives, not
+        # `generation` carrying the cloud model id (it never does: `request_model`
+        # is captured once at `_generar_dialogo`'s entry, threaded through the
+        # phases unrebound, and is always the local alias).
+        cloud_by_design = trace_transport == "cloud" and not trace_fallback_active
+        mismatch = desired != active or active != loaded or loaded != generation_model
+        if mismatch and not cloud_by_design:
+            self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
+        else:
+            logger.info(f"Motor: {trace_msg}")
+
+        if source.startswith("kira-agenda"):
+            dialogo = self._sanitize_agenda_output(dialogo)
+            transformer = getattr(self, "agenda_output_transformer", None)
+            if transformer is not None:
+                try:
+                    dialogo = transformer(dialogo)
+                except Exception:
+                    logger.exception("Agenda output transformer failed")
+
+        if not dialogo:
+            self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
+            logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
+            # Item 4 (2026-07-24 incident): this is the FINAL empty return
+            # (max_intentos + Layer-2 self-heal already exhausted) -- on
+            # cloud that used to be silent dead air (no callback, no
+            # fallback). Surface it the same way a transport failure does
+            # (F1): fire the existing whitelisted status, then route to
+            # the fallback state machine. Local stays byte-identical.
+            if not is_local:
+                self.ui_callback("cloud_llm_error")
+                # No exception/status here (a well-formed but empty 2xx) --
+                # `transient` per classify_cloud_error's own rule for a
+                # malformed/unclassifiable 2xx body; drives backoff auto-
+                # return (unit 2.2).
+                self._handle_cloud_failure(
+                    source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                )
+            if commit_history:
+                self._invalidate_pregen_epoch()
+            return ""
+
+        if is_local:
+            # F5: a cloud success must not set an unvalidated LOCAL model as
+            # the rollback/fallback target (request_model is the local tag on
+            # cloud) nor clear _awaiting_first_success_after_switch.
+            self._mark_model_generation_success(request_model)
+        # clause_sanitizer V1: intra-sentence clause repetition. Placed here,
+        # before output_guard, so it is provider-agnostic by construction —
+        # there is no is_local gate between this point and the return.
+        if source in CLAUSE_SANITIZER_SOURCES:
+            san = sanitize_clause_repetition(dialogo)
+            if san.verdict != "clean":
+                # A pregen/connector-upgrade worker generates on its own
+                # thread and interleaves into the same log, so the stage must
+                # say which one this was — otherwise the tuning pass cannot
+                # tell a spoken foreground turn from a speculative draft that
+                # may never be spoken at all.
+                self._log_clause_sanitizer(
+                    san, source,
+                    stage="generate" if commit_history else "pregen_draft",
+                )
+            # Tier 2 (reject -> regenerate) needs an owner for the
+            # regeneration, and only agenda has one: the ADR-011 ladder,
+            # reached by returning "" — the same idiom the ladder reject
+            # below already uses. Elsewhere this is repair-only; the verdict
+            # is still recorded so evidence for arming tier 2 accrues.
+            if san.verdict == "rejected" and source.startswith("kira-agenda"):
+                self._log(
+                    f"Salida descartada por repetición de cláusulas "
+                    f"(removed={san.removed_fragments} distinct={san.distinct_looping}).",
+                    level="warning",
+                )
+                if commit_history:
+                    self._invalidate_pregen_epoch()
+                return ""
+            dialogo = san.text
+        allowed, guard_reason = output_guard(dialogo, source=source)
+        if not allowed:
+            self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
+            # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
+            # ONE extra generation, same prompt + a corrective system nudge,
+            # before falling back to the canned line. A SEPARATE call outside
+            # the max_intentos transport-retry loop above — never consumes
+            # that budget. Posture (provider_cfg/is_local) stays the F2
+            # snapshot; no live re-read.
+            retry_content = self._retry_after_guard_block(
+                messages=messages,
+                opciones_llm=opciones_llm,
+                request_model=request_model,
+                chat_timeout=chat_timeout,
+                provider_cfg=provider_cfg,
+                is_local=is_local,
+            )
+            if retry_content and source.startswith("kira-agenda"):
+                retry_content = self._sanitize_agenda_output(retry_content)
+                transformer = getattr(self, "agenda_output_transformer", None)
+                if transformer is not None:
+                    try:
+                        retry_content = transformer(retry_content)
+                    except Exception:
+                        logger.exception("Agenda output transformer failed (guardrail retry)")
+            if retry_content:
+                retry_allowed, _ = output_guard(retry_content, source=source)
+                if retry_allowed:
+                    self._log("Guardrail retry: respuesta corregida aceptada tras un intento adicional.")
+                    dialogo = retry_content
+                    allowed = True
+
+        if not allowed:
+            fallback = self._guardrail_fallback_line(source, guard_reason)
+            if fallback:
+                self._log("Guardrail fallback: usando línea neutral sin LLM.")
+                # D4 (memoria_quality_20260717): a guardrail-blocked turn used
+                # to return here BEFORE _commit_history, so the whole exchange
+                # vanished from history AND capture (F4). Commit the user turn
+                # + the spoken fallback line instead. Gated on commit_history
+                # so callers that opted out are unaffected, and on a truthy
+                # fallback so agenda sources (fallback="") keep their existing
+                # state-machine handling with no empty pair appended. C1's
+                # canned-fallback skip guarantees these pairs never become
+                # memorias.
+                if commit_history:
+                    self._commit_history(
+                        contexto, fallback, source=source, history_text=history_text,
+                    )
+                return fallback
+            # WU4 F3 (WU3 follow-up): guardrail-no-fallback is a
+            # non-committing foreground return — bump the pregen epoch so
+            # a late zombie store cannot survive into the next pop.
+            if commit_history:
+                self._invalidate_pregen_epoch()
+            return ""
+
+        self._last_llm_failure = None
+        self._last_cloud_failure_class = None
+        self._cloud_bad_key_notified = False
+
+        # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
+        # brake let through (verbatim dups + synonym-swap templates) BEFORE it
+        # reaches TTS or gets committed into the history window that feeds the
+        # next prompt. Reuses the proven neutral-fallback seam. Gated to
+        # source=="chat" so agenda/direct/ptt/LiveVoice paths are untouched.
+        if source == "chat":
+            recent_outputs = [
+                m.get("content", "")
+                for m in history_snapshot
+                if isinstance(m, dict) and m.get("role") == "assistant"
+            ][-REPETITION_CONFIG.window:]
+            repetition = detect_repetition(dialogo, recent_outputs)
+            if repetition.is_repetitive:
+                self._log(
+                    f"Repetición de chat bloqueada ({repetition.reason}); "
+                    f"usando línea neutral sin LLM.",
+                    level="warning",
+                )
+                if commit_history:
+                    self._invalidate_pregen_epoch()
+                return self._guardrail_fallback_line(source) or ""
+
+        if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
+            self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
+            self._invalidate_pregen_epoch()
+            return ""
+
+        if commit_history:
+            self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
+            # FIX-B2: emission moved to the speak site (_ejecutar_inferencia)
+            # so guardrail/repetition fallbacks — which return EARLIER than
+            # this block yet are still spoken — also update last-reply.
+        preview = dialogo[:200] if _debug_enabled() else f"len={len(dialogo)}"
+        logger.info(f"{log_prefix} response ({elapsed:.2f}s): {preview}")
+
+        if commit_history:
+            self._commit_history(contexto, dialogo, source=source, history_text=history_text)
+
+        return dialogo
 
     def ctx_telemetry_snapshot(self, sources: Optional[tuple] = None) -> dict:
         """Unit 2.3 (runtime_findings_batch_20260731 F10): read-only view of the
