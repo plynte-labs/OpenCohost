@@ -2,12 +2,20 @@
 
 ``ALL_ROUTERS`` order mirrors proposal.md's migration order (small ->
 large): events -> status -> llm_provider -> i18n_tts -> avatar -> obs ->
-personalization -> perfiles -> music -> agent. `perfiles.py` and `music.py`
-each carry parameterized (``{...}``) paths, but neither collides with any
-other route in the app on segment-count + literal-prefix (documented per
-family in each router module's own docstring) -- order here stays cosmetic,
-not load-bearing (verified during the B4 and B5 moves; see the batch
-handoff notes).
+personalization -> perfiles -> music -> agent -> memoria -> ptt -> agenda ->
+chat -> stream. Every parameterized (``{...}``) path across all 15 routers
+is indexed below. One pair shares segment-count + literal-prefix --
+``/api/perfiles/{name}`` vs ``POST /api/perfiles/switch`` -- and is
+disambiguated by HTTP method alone (see perfiles.py's CAUTION block); every
+other template collides with nothing (documented per family in each router
+module's own docstring) -- order here stays cosmetic, not load-bearing
+(verified during the B4, B5, and B6 moves; see the batch handoff notes):
+
+- ``routers/perfiles.py``: ``GET/PUT/DELETE /api/perfiles/{name}``
+- ``routers/music.py``: ``GET /api/music/track/{track_id}[/audio]``
+- ``routers/agent.py``: ``POST /api/agent/cards/{card_id}/arm``,
+  ``POST /api/agent/notices/{notice_id}/dismiss``
+- ``routers/memoria.py`` (B6): ``GET /api/memoria/row/{row_id}``
 
 Imported LAZILY by ``create_app()`` (never at ``main.py`` module-load time)
 to preserve `main.py`'s own import order. Since refactor_core_api_20260802
@@ -20,16 +28,21 @@ every router instead imports shared, never-monkeypatched objects from
 """
 
 from opencohost.api.routers import (
+    agenda,
     agent,
     avatar,
+    chat,
     events,
     i18n_tts,
     llm_provider,
+    memoria,
     music,
     obs,
     perfiles,
     personalization,
+    ptt,
     status,
+    stream,
 )
 
 ALL_ROUTERS = (
@@ -43,4 +56,9 @@ ALL_ROUTERS = (
     perfiles.router,
     music.router,
     agent.router,
+    memoria.router,
+    ptt.router,
+    agenda.router,
+    chat.router,
+    stream.router,
 )

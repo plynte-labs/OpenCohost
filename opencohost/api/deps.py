@@ -128,9 +128,9 @@ def cargar_perfiles():
     tests/test_api_phase1.py's perfiles + POST /api/perfiles/switch tests
     (``monkeypatch.setattr(main_mod, "cargar_perfiles", ...)``) -- a plain
     top-level import in routers/perfiles.py would bind the pre-patch
-    function object. ``main.py``'s own ``_legacy_profile_key`` (memoria
-    family, not moved) also calls ``cargar_perfiles()`` directly, so the
-    import stays on ``main`` regardless of this accessor.
+    function object. Those patches are the ONLY reason the import stays on
+    ``main``: since B6, ``_legacy_profile_key`` lives in routers/memoria.py
+    and calls this accessor too.
     """
     from opencohost.api import main as _main
 
@@ -171,10 +171,83 @@ def editorial_cards_db() -> str:
     tests/test_agent_cards_api.py and tests/test_api_agent_gateway.py
     (autouse fixtures, every /api/agent/cards|notices test) to isolate each
     test's db in a tmp file. tests/test_api_reads.py also patches this name
-    for GET /api/memoria/stats -- that endpoint stays inline in main.py and
-    reads the module global directly (no accessor needed there); this
-    accessor exists only for routers/agent.py's own reads.
+    for GET /api/memoria/stats -- used by both routers/agent.py and
+    routers/memoria.py (refactor_core_api_20260802 B6).
     """
     from opencohost.api import main as _main
 
     return _main.EDITORIAL_CARDS_DB
+
+
+def memorias_db() -> str:
+    """Current memorias sqlite path. Patched directly on ``main`` by every
+    memoria test (test_api_memoria_*.py, test_api_reads.py,
+    test_api_write_failures.py) to isolate each test's db in a tmp file --
+    routers/memoria.py (refactor_core_api_20260802 B6) reads it here."""
+    from opencohost.api import main as _main
+
+    return _main.MEMORIAS_DB
+
+
+def memorias_enabled() -> bool:
+    """Current memorias feature flag. Patched directly on ``main`` by every
+    memoria test to flip the feature on/off per case -- routers/memoria.py
+    (refactor_core_api_20260802 B6) reads it here."""
+    from opencohost.api import main as _main
+
+    return _main.MEMORIAS_ENABLED
+
+
+def memorias_import_cap() -> int:
+    """Current per-profile import cap. test_api_memoria_import.py patches
+    ``main.MEMORIAS_IMPORT_CAP`` down (to 2 or 4) to exercise the D6 cap
+    paths without importing thousands of rows -- routers/memoria.py
+    (refactor_core_api_20260802 B6) reads it here."""
+    from opencohost.api import main as _main
+
+    return _main.MEMORIAS_IMPORT_CAP
+
+
+def memoria_store_or_none():
+    """The shared ``MemoriaStore`` singleton, or None if unavailable.
+
+    tests/test_api_memoria_row.py replaces ``main._memoria_store_or_none``
+    wholesale (``lambda: None``) to exercise a 503 path;
+    tests/test_api_write_failures.py replaces ``main._get_memoria_store``
+    (which ``_memoria_store_or_none`` calls internally, by its own bare name,
+    inside ``main``'s module namespace) the same way. Both the singleton
+    (``main._memoria_store``) and the two functions stay in ``main.py`` --
+    not moved -- because several tests also reset the singleton directly
+    with a bare ``main_mod._memoria_store = None`` autouse fixture, which
+    only has an effect if the global they're resetting is the SAME one the
+    read path uses. routers/memoria.py (refactor_core_api_20260802 B6) is
+    the only caller of this accessor.
+    """
+    from opencohost.api import main as _main
+
+    return _main._memoria_store_or_none()
+
+
+def test_stt_connection_bounded(*args, **kwargs):
+    """Bounded WhisperLive probe, resolved through the CURRENT ``main``
+    binding. Stays defined in ``main.py`` (not moved) because it calls
+    ``probe_stt_ws`` by its own bare name from INSIDE that function body --
+    ``probe_stt_ws`` is monkeypatched directly on ``main``
+    (test_api_ptt.py's hung-server test), and a bare call only re-resolves
+    through a patched attribute when the call site lives in the SAME module
+    as the patch. routers/ptt.py (refactor_core_api_20260802 B6) is the only
+    caller of this accessor.
+    """
+    from opencohost.api import main as _main
+
+    return _main._test_stt_connection_bounded(*args, **kwargs)
+
+
+def save_ptt_ws_uri(uri: str) -> None:
+    """Persist the WhisperLive WS URI. test_api_ptt.py replaces
+    ``main.save_ptt_ws_uri`` wholesale (a ``_boom`` raiser) to exercise PUT
+    /api/ptt/config's 503 write-failure path -- routers/ptt.py
+    (refactor_core_api_20260802 B6) reads it here."""
+    from opencohost.api import main as _main
+
+    return _main.save_ptt_ws_uri(uri)

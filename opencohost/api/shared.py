@@ -101,6 +101,17 @@ _STATS_DB_READ_TIMEOUT_SECONDS = 0.5
 # manage the executor manually and shutdown(wait=False, cancel_futures=True).
 _OBS_TEST_TIMEOUT_SECONDS = 5.0
 
+# POST /api/memoria/update length caps (routers/memoria.py, refactor_core_
+# api_20260802 B6). Never monkeypatched, but test_api_memoria_mutations.py
+# reads them directly as `main_mod._MEMORIA_TITLE_MAX_LENGTH` /
+# `main_mod._MEMORIA_CONTENT_MAX_LENGTH` to compute an over-length fixture,
+# so they live here (like `_OBS_TEST_TIMEOUT_SECONDS` above) rather than
+# moving wholesale with the rest of the memoria family, and main.py
+# re-exports both. update_row whitespace-normalizes but never validates
+# length/emptiness, so both checks are API-side before the write.
+_MEMORIA_TITLE_MAX_LENGTH = 200
+_MEMORIA_CONTENT_MAX_LENGTH = 4000
+
 
 def _count_sql(db_path: str, sql: str, params: tuple = ()) -> int:
     """Bounded, fail-open COUNT(*) read. Never creates db_path as a side

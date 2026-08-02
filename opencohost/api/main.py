@@ -1,11 +1,11 @@
 """Standalone FastAPI app exposing Kira's engine control surface (Phase 1).
 
-Run form (REQUIRED — see design v2.1 B-SF2):
+Run form (REQUIRED -- see design v2.1 B-SF2):
 
     uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 
 WARNING: binding `--host 0.0.0.0` exposes the engine control surface to the
-LAN. CORS only defends BROWSER callers — it does nothing against curl or a
+LAN. CORS only defends BROWSER callers -- it does nothing against curl or a
 script hitting the port directly. Keep this process on loopback unless a
 separate authenticating proxy sits in front of it. `--workers` MUST stay at
 1: a second worker means a second `MotorVocalIA` (second Ollama load +
@@ -15,12 +15,12 @@ in-process `_host_active` guard below are the best-effort in-process layers.
 
 R8 (carried non-negotiable, binds Phase 2+): no raw viewer chat may ever be
 exposed over HTTP. Any future `/api/memorias` or `/api/history` endpoint
-MUST reuse the T1 provenance gate verbatim — the `_DIGEST_CAPTURE_SOURCES`
+MUST reuse the T1 provenance gate verbatim -- the `_DIGEST_CAPTURE_SOURCES`
 allowlist (opencohost/core/llm_engine.py) and the `memory_inspector_snapshot`
 policy are the ONLY provenance gates; never re-derived.
 
 This package NEVER imports `opencohost.ui` or `customtkinter`. The engine
-is constructed only inside `lifespan()` — never at import time — so
+is constructed only inside `lifespan()` -- never at import time -- so
 importing this module has zero side effects on hardware/VRAM/Ollama.
 """
 
@@ -28,72 +28,17 @@ import concurrent.futures
 import os
 import sqlite3
 import threading
-import time
-from contextlib import asynccontextmanager, closing
-from typing import Optional
+from contextlib import asynccontextmanager
 
 import ollama
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from opencohost.api.agenda_driver import enqueue_agenda_action
 from opencohost.api.auth import auth_middleware, ensure_tokens
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost, EventLogSink
 from opencohost.api.observability import audit_middleware, setup_api_logging
-from opencohost.api.ptt_session import (
-    PttController,
-    PttUnreachable,
-    SessionActive,
-    probe_stt_ws,
-)
-from opencohost.api.models import (
-    AgendaMetrics,
-    AgendaResponse,
-    AgendaSessionActionRequest,
-    AgendaSessionRequest,
-    AgendaSessionSettings,
-    AgendaTopicActionRequest,
-    AgendaTopicOut,
-    AgendaTopicRequest,
-    ChatLastReplyResponse,
-    ChatTurnRequest,
-    CohostProfileOut,
-    CohostProfileSaveRequest,
-    CohostProfileSelectRequest,
-    CohostProfileSelectResponse,
-    CohostProfilesResponse,
-    CommandRequest,
-    MemoriaDeleteRequest,
-    MemoriaFlagsRequest,
-    MemoriaImportRequest,
-    MemoriaImportResponse,
-    MemoriaListResponse,
-    MemoriaListItem,
-    MemoriaCaptureRequest,
-    MemoriaMutationResponse,
-    MemoriaNoticeRequest,
-    MemoriaNoticeResponse,
-    MemoriaPurgeRequest,
-    MemoriaPurgeResponse,
-    MemoriaRowResponse,
-    MemoriaStatsResponse,
-    MemoriaUpdateRequest,
-    PttConfigRequest,
-    PttConfigResponse,
-    PttKeepaliveRequest,
-    PttKeepaliveResponse,
-    PttStartResponse,
-    PttStateResponse,
-    PttStopRequest,
-    PttStopResponse,
-    PttTestRequest,
-    PttTestResponse,
-    StreamChatLiveResponse,
-    StreamConnectRequest,
-    StreamLimitsRequest,
-)
+from opencohost.api.ptt_session import PttController, probe_stt_ws
 # `opencohost.api.routers.avatar`/`.obs` own VALID_STATES/AvatarConfigUnreadableError/
 # load_avatar_config/save_avatar_config directly now (refactor_core_api_20260802 B4)
 # -- this module has no remaining caller for them. `OBSClient` stays imported
@@ -119,66 +64,50 @@ from opencohost.config.settings import (
     # them directly anymore.
     EXPERIMENTAL_HEAVY_TTS_ENABLED,
     LLM_KEYS_FILE,
+    # MEMORIAS_DB/MEMORIAS_ENABLED/MEMORIAS_IMPORT_CAP/save_ptt_ws_uri are
+    # ALSO monkeypatched on `main` (every memoria test; test_api_ptt.py's
+    # write-failure case) -- deps.memorias_db()/.memorias_enabled()/
+    # .memorias_import_cap()/.save_ptt_ws_uri() read them off THIS module at
+    # call time for routers/memoria.py and routers/ptt.py.
     MEMORIAS_DB,
     MEMORIAS_ENABLED,
     MEMORIAS_IMPORT_CAP,
-    MEMORIAS_IMPORT_MAX_BYTES,
-    MEMORIAS_IMPORT_MAX_ITEMS,
     _canonical_model_tag,
-    is_valid_stt_ws_uri,
-    load_memorias_notice_dismissed,
     load_piper_voice,
+    # load_ptt_ws_uri: used directly below by lifespan() (never
+    # monkeypatched); routers/ptt.py imports it separately from settings.
     load_ptt_ws_uri,
     load_tts_local_only,
-    save_memorias_notice_dismissed,
     save_ptt_ws_uri,
     load_tts_speed,
 )
-from opencohost.core.memoria_import import parse_import, strip_control_chars
-from opencohost.core.memoria_store import (
-    MemoriaStore,
-    build_signature,
-    build_title,
-    derive_import_key,
-    is_capturable,
-)
-# `clear_personalization`/`save_personalization` stay imported here (never
-# called by this file's own code anymore) because both ARE monkeypatched
-# directly on `main` by test_api_personalization.py and
-# `opencohost.api.deps.save_personalization()`/`.clear_personalization()`
-# read them off THIS module at call time -- same "kept even though no code
-# in this file calls them directly" idiom as the settings block above.
-# `load_personalization` is never monkeypatched, so
-# `opencohost.api.routers.personalization` imports it straight from its home
-# module instead.
+# `build_signature`/`build_title`/`derive_import_key`/`is_capturable` moved
+# with POST /api/memoria/import to `opencohost.api.routers.memoria`, which
+# imports them directly (never monkeypatched). `MemoriaStore` stays: it is
+# constructed by `_get_memoria_store()` below.
+from opencohost.core.memoria_store import MemoriaStore
+# `clear_personalization`/`save_personalization`/`cargar_perfiles` stay
+# imported here (never called by this file's own code anymore) because all
+# three ARE monkeypatched directly on `main` -- opencohost.api.deps'
+# accessors read them off THIS module at call time for
+# routers/personalization.py, routers/perfiles.py, and routers/memoria.py's
+# `_legacy_profile_key` (refactor_core_api_20260802 B6).
 from opencohost.core.personalization import clear_personalization, save_personalization
-from opencohost.core.cohost_profiles import (
-    load_cohost_profiles,
-    normalize_cohost_profile,
-    sanitize_profile_name,
-    save_cohost_profiles,
-)
-# `guardar_perfiles` moved with the perfiles CRUD handlers to
-# `opencohost.api.routers.perfiles`, which imports it directly (never
-# monkeypatched). `cargar_perfiles` stays: `_legacy_profile_key` below (the
-# still-inline memoria family) calls it directly, AND it IS monkeypatched on
-# `main` (test_api_phase1.py), which `opencohost.api.deps.cargar_perfiles()`
-# reads off THIS module at call time.
 from opencohost.core.profiles import cargar_perfiles
-from opencohost.i18n import active as i18n_active
-from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, TopicStatus
-from opencohost.smart_aggregator.url_parser import parse_chat_url
 # `logger`, the cross-family write locks, `_PROFILE_ID_RE`, `_count_sql`,
-# `_editorial_cards_by_status`, and the handful of plain response-builder
-# helpers below live in `opencohost.api.shared` (refactor_core_api_20260802
-# B5 Part B) so both this module and every router can import them at module
-# load time without either one importing the other -- see shared.py's module
-# docstring for the full cycle-breaking rationale. Every name is re-exported
-# here unchanged so existing code/tests that read it off `opencohost.api.
-# main` keep working (e.g. `_list_memoria_metadata` below still calls
-# `_count_sql`/uses `_STATS_DB_READ_TIMEOUT_SECONDS`; test_api_obs_timeout.py
-# still calls `main_mod._test_obs_connection_bounded` directly).
+# `_editorial_cards_by_status`, `_MEMORIA_TITLE_MAX_LENGTH`/
+# `_MEMORIA_CONTENT_MAX_LENGTH`, and the handful of plain response-builder
+# helpers below live in `opencohost.api.shared` (B5 Part B / B6) so both
+# this module and every router can import them without either importing the
+# other -- see shared.py's docstring. Names with a live reader off
+# `opencohost.api.main` (e.g. `main_mod._test_obs_connection_bounded`,
+# `main_mod._MEMORIA_TITLE_MAX_LENGTH`) MUST stay; the rest of the block
+# (locks, response builders, `_count_sql`, `logger`, ...) currently has no
+# external reader and is kept only as inert back-compat surface -- safe to
+# prune in a later cleanup if grep still finds no reader.
 from opencohost.api.shared import (
+    _MEMORIA_CONTENT_MAX_LENGTH,
+    _MEMORIA_TITLE_MAX_LENGTH,
     _OBS_TEST_TIMEOUT_SECONDS,
     _PROFILE_ID_RE,
     _STATS_DB_READ_TIMEOUT_SECONDS,
@@ -199,13 +128,10 @@ from opencohost.api.shared import (
     logger,
 )
 
-# GET /api/models external I/O bound — short client timeout so a stalled/
+# GET /api/models external I/O bound -- short client timeout so a stalled/
 # unreachable Ollama daemon degrades the response instead of pinning a
 # threadpool thread (design v2.1 Tier B resilience).
 _OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.5
-
-# POST /api/memoria/purge — mirrors memoria_store.py's WRITE_TIMEOUT_SECONDS.
-_MEMORIA_WRITE_TIMEOUT_SECONDS = 1.0
 
 
 def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) -> list[str]:
@@ -214,7 +140,7 @@ def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) 
     Mirrors the `ollama.Client(timeout=...)` pattern MotorVocalIA already
     uses for chat calls (llm_engine.py `_create_ollama_chat_client`).
     Degrades to `[]` on ANY failure (timeout, connection error, malformed
-    response) — never raises, never hangs the request thread.
+    response) -- never raises, never hangs the request thread.
     """
     try:
         client = ollama.Client(timeout=timeout)
@@ -236,102 +162,18 @@ def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) 
         return []
 
 
-def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
-    """Bounded, fail-open metadata read for GET /api/memoria/list.
-
-    WU-H (operator viewing decision, 2026-07-05): the SELECT now ALSO reads
-    `title` — a deliberate, scoped relaxation of the prior metadata-only
-    rule so the operator can recognize a row before deciding to load it.
-    `content` still stays off this SELECT entirely; it is only readable one
-    row at a time via GET /api/memoria/row/{id} (R8 unaffected — memoria
-    title/content is Kira's curated/derived memory, not raw viewer chat)."""
-    if not db_path or not os.path.exists(db_path):
-        return []
-    try:
-        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, title, created_at, updated_at, revision, pinned, private, inactive, status "
-                "FROM memorias WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
-                (profile_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
-    except sqlite3.Error:
-        return []
-
-
-def _purge_memoria(db_path: str, profile_id: str) -> int:
-    """Bounded, fail-open hard-delete for POST /api/memoria/purge."""
-    if not db_path or not os.path.exists(db_path):
-        return 0
-    try:
-        with closing(sqlite3.connect(db_path, timeout=_MEMORIA_WRITE_TIMEOUT_SECONDS)) as conn, conn:
-            cur = conn.execute("DELETE FROM memorias WHERE profile_id = ?", (profile_id,))
-            return cur.rowcount
-    except sqlite3.Error:
-        return 0
-
-
-def _legacy_profile_key(profile_id: str) -> "str | None":
-    """The profile's current display NAME whose stable `id` == profile_id.
-
-    Memorias were historically saved keyed by the display name; the FE now
-    lists by the stable UUID, so the name is the legacy key we must migrate
-    from. Returns None when no profile carries this id (a deleted profile —
-    nothing to migrate) or when the resolved name would equal the UUID (never
-    the case in practice; guards against a pointless self-re-key). Renamed
-    profiles whose legacy rows sit under an OLD name are unreachable here —
-    cargar_perfiles only knows the current name — and are out of scope.
-    """
-    perfiles = cargar_perfiles()
-    if not isinstance(perfiles, dict):
-        return None
-    for name, data in perfiles.items():
-        if isinstance(data, dict) and data.get("id") == profile_id and name != profile_id:
-            return name
-    return None
-
-
-def _rekey_legacy_memorias(db_path: str, legacy_key: str, profile_id: str) -> int:
-    """Migrate-on-read: point legacy name-keyed rows at the profile's UUID.
-
-    Additive re-key of the profile_id column only (zero deletions), scoped to
-    legacy_key — the requested profile's current display name — so a different
-    profile's name-keyed rows are never swallowed. One bounded transaction;
-    idempotent (once re-keyed the name rows are gone, so the next call updates
-    nothing). Returns the rows re-keyed, fail-open to 0 on a missing db or any
-    sqlite error.
-
-    stable_key is deliberately left untouched: it embeds the old name
-    (`{name}|tokens`), but rewriting it to `{uuid}|tokens` could collide with a
-    row already captured fresh under the UUID and roll the WHOLE migration back
-    — leaving the reported bug (invisible legacy rows) unfixed. Keeping the
-    stale prefix keeps every row's (profile_id, stable_key) pair unique, so the
-    UPDATE never rolls back. ponytail: the only residual cost is that a future
-    auto-capture of identical content derives a fresh `{uuid}|tokens` key and
-    inserts a duplicate draft (self-heals via the growth-cap prune for drafts);
-    rewrite stable_key too only if duplicate curated rows become a real problem.
-    """
-    if not db_path or not os.path.exists(db_path) or not legacy_key or legacy_key == profile_id:
-        return 0
-    try:
-        with closing(sqlite3.connect(db_path, timeout=_MEMORIA_WRITE_TIMEOUT_SECONDS)) as conn, conn:
-            cur = conn.execute(
-                "UPDATE memorias SET profile_id = ? WHERE profile_id = ?",
-                (profile_id, legacy_key),
-            )
-            return cur.rowcount
-    except sqlite3.Error:
-        return 0
-
-
 # Lazy module-level MemoriaStore singleton (design D1). MemoriaStore.__init__
 # mkdirs + runs CREATE TABLE / PRAGMA writes, so it must NEVER be constructed
 # at import time (module contract: importing has zero side effects). One shared
-# instance is thread-safe across FastAPI's threadpool — the store opens a fresh
-# connection per operation and guards its warn-once state with its own lock —
+# instance is thread-safe across FastAPI's threadpool -- the store opens a fresh
+# connection per operation and guards its warn-once state with its own lock --
 # and preserves that warn-once episode state (a per-request instance would
-# reset it every call).
+# reset it every call). Stays HERE, not moved with the rest of the memoria
+# family to routers/memoria.py in B6: tests reset it with a bare
+# `main_mod._memoria_store = None` fixture and monkeypatch
+# `_get_memoria_store`/`_memoria_store_or_none` directly on `main` -- both
+# only work if the global and the functions closing over it stay put.
+# `deps.memoria_store_or_none()` is the router-facing accessor.
 _memoria_store: "MemoriaStore | None" = None
 _memoria_store_lock = threading.Lock()
 
@@ -356,96 +198,6 @@ def _memoria_store_or_none() -> "MemoriaStore | None":
     except (sqlite3.Error, OSError):
         return None
 
-# Server-side verb whitelist for POST /api/commands — exactly the verbs
-# MotorVocalIA._dispatch_command (opencohost/core/llm_engine.py) handles.
-# A command NOT in this set is rejected before it ever reaches the queue.
-_COMMAND_WHITELIST = frozenset(
-    {
-        "clear_history",
-        "set_tts_local_only",
-        "set_tts_speed",
-        "set_piper_voice",
-        "set_motor_tts",
-        "switch_model",
-        "switch_llm_tier",
-    }
-)
-
-
-def _engine_command_payload(command: str, payload: dict):
-    """Translate the wire-level `{payload: dict}` body into the raw scalar
-    (or None) each engine verb actually consumes — `_dispatch_command`
-    reads `payload` directly as a str/float/bool/None per verb, never a
-    dict. `"value"` is the one wire key used until a verb needs more than
-    one field.
-    """
-    if command == "clear_history":
-        return None
-    return payload.get("value")
-
-
-def _validate_command_value(command: str, value) -> "str | None":
-    """Validate `value` against the per-verb contract `_dispatch_command`
-    (opencohost/core/llm_engine.py) actually expects. Returns None when the
-    value is acceptable, or a rejection reason string when it is not.
-
-    This is the trust-boundary fix for the DoS where an uncaught `TypeError`
-    (e.g. `float(None)` for `set_tts_speed`) inside `_dispatch_command`
-    kills the engine command-loop thread — that call sits outside the
-    `queue.Empty` try in `run()`. Rejecting bad values here means they are
-    never enqueued in the first place.
-    """
-    if command == "clear_history":
-        return None
-    if command == "set_tts_speed":
-        try:
-            float(value)
-        except (TypeError, ValueError):
-            return "set_tts_speed requires a numeric value"
-        return None
-    if command in ("switch_model", "switch_llm_tier", "set_piper_voice", "set_motor_tts"):
-        if not isinstance(value, str):
-            return f"{command} requires a non-None string value"
-        return None
-    if command == "set_tts_local_only":
-        if not isinstance(value, bool):
-            return "set_tts_local_only requires a boolean value"
-        return None
-    return None
-
-
-# POST /api/chat/turn value guard — mirrors `_validate_command_value`'s
-# trust-boundary philosophy: reject empty/whitespace or unbounded text
-# BEFORE it ever reaches the engine command_queue. 4000 chars is a sane cap
-# for a single chat turn (process_context builds the full prompt from this).
-_CHAT_TEXT_MAX_LENGTH = 4000
-
-# POST /api/memoria/update length caps — mirror _CHAT_TEXT_MAX_LENGTH's
-# trust-boundary bound. update_row whitespace-normalizes but never validates
-# length/emptiness, so both checks are API-side before the write.
-_MEMORIA_TITLE_MAX_LENGTH = 200
-_MEMORIA_CONTENT_MAX_LENGTH = 4000
-
-# POST /api/memoria/import source-label cap (memoria_import_20260718). The
-# label becomes the row title prefix `[{label}] `; 40 chars matches the
-# client-side <Input maxLength> and bounds the untrusted provenance tag.
-_MEMORIA_IMPORT_LABEL_MAX_LENGTH = 40
-
-# POST /api/memoria/import early-abort threshold: after this many CONSECUTIVE
-# insert_imported 'error' outcomes the DB is provably unavailable for this
-# request, so the remaining items are not attempted and count into `failed`
-# (R4) — bounds a locked-DB import to ~3 * WRITE_TIMEOUT_SECONDS, not ~100s.
-_MAX_CONSECUTIVE_IMPORT_ERRORS = 3
-
-
-def _validate_chat_text(text: str) -> "str | None":
-    """Returns None when `text` is acceptable, or a rejection reason string."""
-    if not text.strip():
-        return "text must not be empty or whitespace-only"
-    if len(text) > _CHAT_TEXT_MAX_LENGTH:
-        return f"text exceeds max length of {_CHAT_TEXT_MAX_LENGTH} characters"
-    return None
-
 
 _DEFAULT_CORS_ORIGINS = [
     "http://localhost:5173",
@@ -461,26 +213,7 @@ _DEFAULT_CORS_ORIGINS = [
 # (in-process) -> env var check below (best-effort) -> docs.
 _host_active = False
 
-# cohost_profiles.json write-lock (WU3): guards the read-modify-write of the
-# cohost-profiles file (save). A separate file gets a separate lock (D4).
-_cohost_profiles_lock = threading.Lock()
-
-
-def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
-    return CohostProfilesResponse(
-        profiles=[
-            CohostProfileOut(
-                name=name,
-                style=str(p.get("style", "")),
-                default_priority=str(p.get("default_priority", "normal")),
-                default_response_length=str(p.get("default_response_length", "normal")),
-            )
-            for name, p in profiles.items()
-        ]
-    )
-
-
-# POST /api/ptt/test bound — same shape and the same reasoning as
+# POST /api/ptt/test bound -- same shape and the same reasoning as
 # _OBS_TEST_TIMEOUT_SECONDS above. `probe_stt_ws` self-bounds via the WS
 # open_timeout, so this executor is only a backstop for what that cannot cover
 # (a server that completes the TCP/WS handshake and then stalls). It must NOT
@@ -489,12 +222,16 @@ def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
 # just timed out on.
 _PTT_TEST_TIMEOUT_SECONDS = 5.0
 
-# Serializes writes to ptt_settings.json (shared with the legacy CTK
-# PTTManager hotkey store), mirroring _config_lock / _llm_provider_lock.
-_ptt_config_lock = threading.Lock()
-
 
 def _test_stt_connection_bounded(uri: str, timeout: float = _PTT_TEST_TIMEOUT_SECONDS):
+    """Stays HERE, not moved to routers/ptt.py or opencohost.api.shared:
+    calls `probe_stt_ws(...)` by bare name, and `probe_stt_ws` IS
+    monkeypatched directly on `main` (test_api_ptt.py's hung-server test,
+    which also calls `main_mod._test_stt_connection_bounded` directly) --
+    unlike `_test_obs_connection_bounded` (shared.py), which receives an
+    already-built client instead of resolving a patchable name itself.
+    `deps.test_stt_connection_bounded()` is the router-facing accessor.
+    """
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         future = executor.submit(probe_stt_ws, uri, open_timeout=timeout)
@@ -511,97 +248,11 @@ def _test_stt_connection_bounded(uri: str, timeout: float = _PTT_TEST_TIMEOUT_SE
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _apply_ptt_ws_uri(request: Request, uri: str) -> None:
-    """Push the just-saved WhisperLive URL to the live PttController.
-
-    Same best-effort, doubly-guarded contract as ``_apply_avatar_runtime``
-    below: called ONLY after a successful save, OUTSIDE the config lock, and
-    guarded twice (getattr for the missing attribute, try/except for a runtime
-    error) so a controller that cannot be repointed — a minimal test double,
-    or app state without one — never turns a good write into a 500.
-
-    Only the NEXT hold picks the new socket up; an in-flight session keeps the
-    URI it was built with (see ``PttController.set_ws_uri``).
-    """
-    controller = getattr(request.app.state, "ptt_controller", None)
-    setter = getattr(controller, "set_ws_uri", None)
-    if setter is None:
-        return
-    try:
-        setter(uri)
-    except Exception:
-        pass
-
-
-# POST /api/agenda/topic/action verb whitelist — mirrors _COMMAND_WHITELIST.
-# "reject" acts on the pre-approval DRAFTED suggestion inbox (-> SKIPPED),
-# distinct from "remove" which drops a post-approval QUEUED topic.
-_AGENDA_ACTION_WHITELIST = frozenset({"approve", "queue", "remove", "move", "reject"})
-
-# POST /api/agenda/session/action verb whitelist — the three KiraAgendaController
-# mode controls. None of them raise, so the handler needs no try/except.
-_AGENDA_SESSION_ACTION_WHITELIST = frozenset({"enable", "soft_stop", "emergency_stop"})
-
-# POST /api/agenda/topic raw-constraint DoS bound = 2x controller MAX_CONSTRAINTS
-# (12). add_topic sanitizes EVERY submitted constraint (regex chain) BEFORE
-# slicing to MAX_CONSTRAINTS, so an unbounded list is unbounded regex work at a
-# trust boundary. Truncation-to-12 stays the controller's contract; this only
-# caps the raw count before any sanitization runs.
-_AGENDA_CONSTRAINTS_RAW_MAX = 24
-
-
-def _agenda_topic_out(topic) -> AgendaTopicOut:
-    return AgendaTopicOut(
-        id=topic.id,
-        title=topic.title,
-        angle=topic.angle,
-        priority=topic.priority,
-        response_length=topic.response_length,
-        status=topic.status.value,
-        turns_spoken=topic.turns_spoken,
-        confidence=topic.confidence,
-        source=topic.source,
-    )
-
-
-def _agenda_response(agenda, *, applied=None, reason=None) -> AgendaResponse:
-    metrics = agenda.get_metrics()
-    return AgendaResponse(
-        state=agenda.state.value,
-        active_topic=_agenda_topic_out(agenda.active_topic) if agenda.active_topic else None,
-        queued_topics=[_agenda_topic_out(t) for t in agenda.queued_topics()],
-        drafted_topics=[_agenda_topic_out(t) for t in agenda.drafted_topics()],
-        session_settings=AgendaSessionSettings(
-            max_turns_per_topic=agenda.max_turns_per_topic,
-            rhythm=agenda.rhythm,
-            response_length=agenda.response_length,
-            safety_mode=agenda.safety_mode,
-            profile_style=agenda.profile.get("style", ""),
-        ),
-        metrics=AgendaMetrics(
-            total_rejections=metrics["total_rejections"],
-            by_error_code=metrics["by_error_code"],
-            by_guardrail=metrics["by_guardrail"],
-            avg_similarity_overlap_pct=metrics["avg_similarity_overlap_pct"],
-            current_state=metrics["current_state"],
-            failure_count=metrics["failure_count"],
-            response_length=metrics["response_length"],
-            active_topic=metrics["active_topic"],
-            topics_queued=metrics["topics_queued"],
-            last_outputs_count=metrics["last_outputs_count"],
-        ),
-        # FIX-C: session/action outcome. Only POST /api/agenda/session/action
-        # sets these; every other response leaves them null.
-        applied=applied,
-        reason=reason,
-    )
-
-
 # POST /api/music/import size cap. `opencohost.api.routers.music` reads this
 # through `deps.music_import_max_bytes()` -- test_api_music_library_mutations.py
-# monkeypatches it directly on this module (down to 4 bytes) to make a
-# 12-byte wav fixture deterministically exceed the cap, so it stays defined
-# here rather than moving with the rest of the music family.
+# monkeypatches it directly on this module (down to 4 bytes so a 12-byte wav
+# fixture deterministically exceeds the cap) so it stays defined here rather
+# than moving with the rest of the music family.
 _MUSIC_IMPORT_MAX_BYTES = 200 * 1024 * 1024
 
 
@@ -617,7 +268,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     async def lifespan(app: FastAPI):
         global _host_active
         # Persist + redact the opencohost.api logger tree (WU-C) before
-        # anything else in startup can log — idempotent, safe across
+        # anything else in startup can log -- idempotent, safe across
         # repeated create_app()/TestClient cycles in one process.
         setup_api_logging()
         _check_single_worker()
@@ -636,7 +287,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             # PTT single-slot controller: recv-only WhisperLive bridge. ws_uri
             # comes from the operator's persisted choice, falling back to
             # settings.WS_URI when nothing was ever saved (nothing hardcodes
-            # 8765/8770 here — the API's own uvicorn port is separate). Reading
+            # 8765/8770 here -- the API's own uvicorn port is separate). Reading
             # it here is what makes PUT /api/ptt/config survive a restart; the
             # same PUT also live-applies it to this instance, so a reconnect
             # never needs a process kill. Dispatches flushes through the SAME
@@ -644,7 +295,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
             # (detail=None) on the host event log.
             # getattr fallback mirrors the obs_runtime resiliency in get_status:
             # a real EngineHost always has event_log, but minimal host doubles
-            # (health/status test fakes) may not — never break app startup.
+            # (health/status test fakes) may not -- never break app startup.
             app.state.ptt_controller = PttController(
                 load_ptt_ws_uri(),
                 app.state.dispatcher,
@@ -658,7 +309,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     getattr(host, "motor", None), "mark_audio_suspect", None
                 ),
                 # Listening cue (ptt_cue_20260717): same smallest-surface,
-                # getattr-guarded pattern — a bound motor.play_ptt_cue fired
+                # getattr-guarded pattern -- a bound motor.play_ptt_cue fired
                 # when the hold reaches listening, so the operator hears the
                 # mic go live even with the app window unfocused.
                 on_listening=getattr(
@@ -666,7 +317,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 ),
                 # WU5 (agenda interruption, ADR-037): position-aware PTT cut.
                 # Fires SYNCHRONOUSLY at flush so it can interrupt agenda
-                # speech mid-turn (the queued command path can't — the engine
+                # speech mid-turn (the queued command path can't -- the engine
                 # thread is inside _hablar). Same guarded bound-method idiom.
                 on_flush_precheck=getattr(
                     getattr(host, "motor", None),
@@ -681,12 +332,12 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan, debug=False)
     # Auth gate (agent_context_gateway ADR-4): registered BEFORE CORSMiddleware
-    # so CORS — added last, therefore outermost in Starlette's stack — still
+    # so CORS -- added last, therefore outermost in Starlette's stack -- still
     # decorates 401/403/503 auth responses and handles OPTIONS preflight.
     app.middleware("http")(auth_middleware)
     # Audit trail (WU-B, api_observability): registered AFTER auth_middleware
-    # and BEFORE CORSMiddleware — later registration = outer in Starlette's
-    # stack — so it wraps auth and audits its 401/403/429/503 rejections too.
+    # and BEFORE CORSMiddleware -- later registration = outer in Starlette's
+    # stack -- so it wraps auth and audits its 401/403/429/503 rejections too.
     app.middleware("http")(audit_middleware)
     app.add_middleware(
         CORSMiddleware,
@@ -696,854 +347,24 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         allow_credentials=False,
     )
 
-    # B4+B5 (refactor_core_api_20260802): every extracted resource family --
-    # all routers in ALL_ROUTERS (see opencohost/api/routers/__init__.py) --
-    # mounts here, replacing the original inline @app. decorators. Routers
-    # NEVER import this module at module level: cross-cutting objects (locks,
-    # logger, response builders) come from opencohost.api.shared, and every
-    # name a test monkeypatches on THIS module goes through a call-time
-    # accessor in opencohost.api.deps. Reintroducing a module-level
-    # `from opencohost.api.main import ...` in any router recreates the
-    # import-order landmine killed in B5 (tests/test_routers_import_order.py
-    # pins it dead). The import below is late only to keep main.py's own
-    # import order stable. Parameterized paths DO exist in the routers
+    # B4-B6 (refactor_core_api_20260802): every resource family -- all
+    # routers in ALL_ROUTERS (opencohost/api/routers/__init__.py) -- mounts
+    # here; main.py no longer carries a single inline @app. decorator (B6
+    # moved the last five: memoria, ptt, agenda, chat, stream). Routers
+    # NEVER import this module at module level: cross-cutting objects come
+    # from opencohost.api.shared, and every monkeypatched name goes through
+    # a call-time accessor in opencohost.api.deps -- reintroducing a
+    # module-level `from opencohost.api.main import ...` in any router
+    # recreates the import-order landmine tests/test_routers_import_order.py
+    # pins dead. The import below is late only to keep main.py's own import
+    # order stable. Parameterized paths exist in several routers
     # (perfiles/{name}, music/track/{track_id}[/audio], agent card/notice
-    # actions), but no template overlaps any other route on segment count +
-    # literal prefix -- each router's docstring carries its family's
-    # rationale, and mounting order vs the remaining inline routes is not
-    # load-bearing for resolution.
+    # actions, memoria/row/{row_id}); none overlaps another route on segment
+    # count + literal prefix -- see each router's own docstring.
     from opencohost.api.routers import ALL_ROUTERS
 
     for _router in ALL_ROUTERS:
         app.include_router(_router)
-
-    @app.get("/api/memoria/stats", response_model=MemoriaStatsResponse)
-    def get_memoria_stats(request: Request, profile_id: Optional[str] = None) -> MemoriaStatsResponse:
-        host = request.app.state.host
-        # R8: reuse the ONLY provenance gate (memory_inspector_snapshot
-        # already applies _DIGEST_CAPTURE_SOURCES) — take counts only, never
-        # touch entry["content"] / digest line text.
-        snapshot = host.motor.memory_inspector_snapshot()
-        session_turns = len(snapshot["entries"])
-        digest_entries = snapshot["digest"]["line_count"]
-
-        # FIX-A: when `profile_id` is present, `saved_memorias`/`pinned` filter
-        # to that profile (semantics parity with MemoriaStore.count_all /
-        # count_all_pinned) so the headline count agrees with the per-profile
-        # GET /api/memoria/list. `saved_memorias_total`/`pinned_total` keep the
-        # global figures as separate fields. Without `profile_id`, the two
-        # halves coincide (both global) — preserves the pre-FIX-A contract for
-        # any old caller.
-        saved_total = 0
-        pinned_total = 0
-        saved_memorias = 0
-        pinned = 0
-        if MEMORIAS_ENABLED:
-            saved_total = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias")
-            pinned_total = _count_sql(MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE pinned = 1")
-            if profile_id:
-                saved_memorias = _count_sql(
-                    MEMORIAS_DB, "SELECT COUNT(*) FROM memorias WHERE profile_id = ?", (profile_id,)
-                )
-                pinned = _count_sql(
-                    MEMORIAS_DB,
-                    "SELECT COUNT(*) FROM memorias WHERE profile_id = ? AND pinned = 1",
-                    (profile_id,),
-                )
-            else:
-                saved_memorias = saved_total
-                pinned = pinned_total
-
-        return MemoriaStatsResponse(
-            session_turns=session_turns,
-            digest_entries=digest_entries,
-            saved_memorias=saved_memorias,
-            pinned=pinned,
-            saved_memorias_total=saved_total,
-            pinned_total=pinned_total,
-            editorial_cards_by_status=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
-        )
-
-    @app.get("/api/memoria/list", response_model=MemoriaListResponse)
-    def get_memoria_list(profile_id: str) -> MemoriaListResponse:
-        if not MEMORIAS_ENABLED:
-            return MemoriaListResponse(items=[])
-        # Migrate-on-read: legacy rows keyed by the profile's display NAME are
-        # invisible to this UUID-scoped list. Re-key them to the UUID once, on
-        # the first list for this profile (the exact action that surfaced "No
-        # hay memorias guardadas"), then read normally.
-        legacy_key = _legacy_profile_key(profile_id)
-        if legacy_key:
-            count = _rekey_legacy_memorias(MEMORIAS_DB, legacy_key, profile_id)
-            if count:
-                logger.info("rekeyed %d legacy memorias rows for profile %s", count, profile_id)
-        rows = _list_memoria_metadata(MEMORIAS_DB, profile_id)
-        return MemoriaListResponse(
-            items=[
-                MemoriaListItem(
-                    id=row["id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    revision=row["revision"],
-                    pinned=bool(row["pinned"]),
-                    private=bool(row["private"]),
-                    inactive=bool(row["inactive"]),
-                    imported=bool(row["status"] == "imported"),
-                    draft=bool(row["status"] == "draft"),
-                    promoted=bool(row["status"] == "promoted"),
-                )
-                for row in rows
-            ]
-        )
-
-    @app.get("/api/memoria/row/{row_id}", response_model=MemoriaRowResponse)
-    def get_memoria_row(row_id: str, profile_id: str):
-        """One row's full content, on-demand (WU-H, operator viewing decision).
-
-        Mirrors the ownership-guard pattern from POST /api/memoria/{delete,
-        update}: store.get(raising=True) pre-check, then the SAME 404 body
-        for a missing row and a wrong-profile row (R7: no cross-profile
-        existence oracle). Disabled feature also maps to 404 — there is no
-        "empty" analog for a single-row GET the way list/stats have.
-        """
-        if not MEMORIAS_ENABLED:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        store = _memoria_store_or_none()
-        if store is None:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        try:
-            row = store.get(row_id, raising=True)
-        except sqlite3.Error:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        if row is None or row["profile_id"] != profile_id:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        return MemoriaRowResponse(
-            id=row["id"],
-            title=row["title"],
-            content=row["content"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            pinned=bool(row["pinned"]),
-            private=bool(row["private"]),
-            inactive=bool(row["inactive"]),
-            draft=bool(row["status"] == "draft"),
-            promoted=bool(row["status"] == "promoted"),
-        )
-
-    @app.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)
-    def post_memoria_purge(body: MemoriaPurgeRequest) -> MemoriaPurgeResponse:
-        if not MEMORIAS_ENABLED:
-            return MemoriaPurgeResponse(deleted=0)
-        deleted = _purge_memoria(MEMORIAS_DB, body.profile_id)
-        return MemoriaPurgeResponse(deleted=deleted)
-
-    @app.post("/api/memoria/flags", response_model=MemoriaMutationResponse)
-    def post_memoria_flags(body: MemoriaFlagsRequest):
-        if not MEMORIAS_ENABLED:
-            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors purge deleted=0
-        if body.pinned is None and body.private is None and body.inactive is None:
-            return JSONResponse(status_code=422, content={"detail": "no flags provided"})
-        store = _memoria_store_or_none()
-        if store is None:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        try:
-            row = store.get(body.id, raising=True)
-        except sqlite3.Error:
-            # Transient lock/db error on the pre-check must NOT masquerade as a
-            # missing row (404) — surface it as unavailable (503).
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        # Same 404 for a wrong-profile row as for a missing one (R7: no
-        # cross-profile existence oracle — identical shape and detail).
-        if row is None or row["profile_id"] != body.profile_id:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        # F5: set_flags enforces the freeze rule (pin/private promote curated,
-        # un-pin never demotes). A genuine write failure raises (raising=True) —
-        # it MUST surface as 503, never be swallowed, or the next auto-capture
-        # could overwrite a row the operator believed frozen.
-        try:
-            applied = store.set_flags(
-                body.id, pinned=body.pinned, private=body.private, inactive=body.inactive, raising=True
-            )
-        except sqlite3.Error:
-            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
-        if not applied:
-            # rowcount==0 on a pre-found row: it vanished in the check-then-act
-            # race window — that is not-found, not a write failure.
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        return MemoriaMutationResponse(ok=True)
-
-    @app.post("/api/memoria/delete", response_model=MemoriaMutationResponse)
-    def post_memoria_delete(body: MemoriaDeleteRequest):
-        if not MEMORIAS_ENABLED:
-            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/purge
-        store = _memoria_store_or_none()
-        if store is None:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        try:
-            row = store.get(body.id, raising=True)
-        except sqlite3.Error:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        # Same 404 for a wrong-profile row as for a missing one (R7: no
-        # cross-profile existence oracle). This pre-check owns the "already
-        # gone" case, so delete_row's False below can only mean a real write
-        # failure — never "the row wasn't there" (delete_row is idempotent).
-        if row is None or row["profile_id"] != body.profile_id:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        if not store.delete_row(body.id):
-            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
-        return MemoriaMutationResponse(ok=True)
-
-    @app.post("/api/memoria/update", response_model=MemoriaMutationResponse)
-    def post_memoria_update(body: MemoriaUpdateRequest):
-        if not MEMORIAS_ENABLED:
-            return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/delete
-        # Empty-check is API-side: update_row whitespace-normalizes without
-        # validating emptiness, so an all-whitespace body would write ''.
-        title, content = body.title.strip(), body.content.strip()
-        if not title or not content:
-            return JSONResponse(
-                status_code=422, content={"detail": "title and content must not be empty"}
-            )
-        if len(title) > _MEMORIA_TITLE_MAX_LENGTH or len(content) > _MEMORIA_CONTENT_MAX_LENGTH:
-            return JSONResponse(
-                status_code=422, content={"detail": "title or content exceeds max length"}
-            )
-        store = _memoria_store_or_none()
-        if store is None:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        try:
-            row = store.get(body.id, raising=True)
-        except sqlite3.Error:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        # Same 404 for a wrong-profile row as for a missing one (R7: no
-        # cross-profile existence oracle — identical shape and detail).
-        if row is None or row["profile_id"] != body.profile_id:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        # F5: update_row promotes status='curated' in the same statement. A
-        # genuine write failure raises (raising=True) -> 503; a plain False now
-        # means only rowcount==0 (the row vanished in the check-then-act race)
-        # -> 404, never a misleading write-failed.
-        try:
-            applied = store.update_row(body.id, title=title, content=content, raising=True)
-        except sqlite3.Error:
-            return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
-        if not applied:
-            return JSONResponse(status_code=404, content={"detail": "memoria not found"})
-        return MemoriaMutationResponse(ok=True)
-
-    @app.post("/api/memoria/import", response_model=MemoriaImportResponse)
-    def post_memoria_import(body: MemoriaImportRequest):
-        """Import an external-AI export into the per-profile store as 'imported'
-        rows (memoria_import_20260718, WU3).
-
-        Posture mirrors post_memoria_update: MEMORIAS_ENABLED no-op, 422 for the
-        trust-boundary caps, 503 memoria_unavailable when the store is down, same
-        loopback auth as the sibling routes (no rate limiting — single operator).
-
-        Counts-only response (R8 — never echoes claim/title/content). Every parsed
-        claim maps to exactly one of the four insert_imported outcomes so a lock
-        loss is reported as `failed`, never a `duplicate` (R4).
-
-        Bounded work: the byte cap bounds parse cost, the 100-item cap bounds the
-        per-item loop, and each insert_imported is bounded by WRITE_TIMEOUT_SECONDS.
-        Under a sustained DB lock the loop early-aborts after 3 consecutive `error`
-        outcomes (remaining items count into `failed`, R4), so the worst case is
-        ~3s of lock probing plus parse time — not ~100s of grinding every item.
-
-        D6 cap honesty: a profile already at MEMORIAS_IMPORT_CAP is rejected
-        pre-flight (422); otherwise the cap is enforced in-loop — only `created`
-        rows consume headroom, and creatable items past the cap are counted in
-        `skipped_cap`, so a full-duplicate re-import near the cap lands 0 rows and
-        is never falsely rejected (duplicates/too-short never consume headroom).
-        """
-        if not MEMORIAS_ENABLED:
-            # Benign no-op, mirrors flags/delete/update. Zeroed counts.
-            return MemoriaImportResponse(
-                ok=False, imported=0, skipped_duplicates=0,
-                skipped_too_short=0, skipped_cap=0, failed=0,
-            )
-        # profile_id is the store's per-profile scope key; a blank one would pass
-        # Pydantic (non-empty str is optional) but make insert_imported raise
-        # MemoriaValidationError (uncaught -> 500). Reject it at the boundary,
-        # matching the sibling routes' 422 error style.
-        if not (body.profile_id or "").strip():
-            return JSONResponse(status_code=422, content={"detail": "invalid profile_id"})
-        content = body.content or ""
-        if not content.strip():
-            return JSONResponse(status_code=422, content={"detail": "content must not be empty"})
-        # Sanitize the untrusted provenance tag before it becomes a title prefix:
-        # strip control chars (an embedded NUL raises ValueError inside sqlite3,
-        # escaping the store's sqlite3.Error catch -> 500) then collapse whitespace.
-        label = " ".join(strip_control_chars(body.source_label).split())
-        if len(label) > _MEMORIA_IMPORT_LABEL_MAX_LENGTH:
-            return JSONResponse(
-                status_code=422, content={"detail": "source_label exceeds max length"}
-            )
-        # Byte cap first — bounds the parser's input before any work.
-        if len(content.encode("utf-8")) > MEMORIAS_IMPORT_MAX_BYTES:
-            return JSONResponse(status_code=422, content={"detail": "content exceeds max size"})
-        items = parse_import(content)
-        if len(items) > MEMORIAS_IMPORT_MAX_ITEMS:
-            return JSONResponse(
-                status_code=422, content={"detail": "too many items, split the file"}
-            )
-        store = _memoria_store_or_none()
-        if store is None:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        # D2/D6 import cap — pre-flight reject ONLY when the profile is already
-        # full (no silent pruning of deliberate imports). A -1 fail-open count
-        # means the read itself failed -> 503. The batch itself is bounded
-        # in-loop below, so a full-duplicate re-import near the cap is never
-        # falsely rejected (0 new rows would land).
-        existing = store.count_imported(body.profile_id)
-        if existing < 0:
-            return JSONResponse(status_code=503, content={"detail": "memoria_unavailable"})
-        if existing >= MEMORIAS_IMPORT_CAP:
-            return JSONResponse(status_code=422, content={"detail": "import cap exceeded"})
-        headroom = MEMORIAS_IMPORT_CAP - existing  # >= 1 (guaranteed above)
-
-        imported = skipped_duplicates = skipped_too_short = skipped_cap = failed = 0
-        consecutive_errors = 0
-        for idx, item in enumerate(items):
-            claim = item.content
-            if not is_capturable(claim):
-                skipped_too_short += 1
-                continue
-            # D6: only `created` rows consume cap headroom. Once it is spent, a
-            # further creatable claim is not attempted (would breach the cap) —
-            # counted as skipped_cap, honestly distinct from a duplicate.
-            if imported >= headroom:
-                skipped_cap += 1
-                continue
-            source_key = derive_import_key(body.profile_id, claim) or ""
-            title = f"[{label}] {build_title(claim)}" if label else build_title(claim)
-            signature = build_signature(f"{item.section} {claim}")
-            outcome = store.insert_imported(
-                body.profile_id, title, claim, signature=signature, source_key=source_key
-            )
-            if outcome == "created":
-                imported += 1
-                consecutive_errors = 0
-            elif outcome == "duplicate":
-                skipped_duplicates += 1
-                consecutive_errors = 0
-            elif outcome == "skipped":
-                skipped_too_short += 1
-                consecutive_errors = 0
-            else:  # "error" — fail-open store failure, surfaced honestly (R4)
-                failed += 1
-                consecutive_errors += 1
-                if consecutive_errors >= _MAX_CONSECUTIVE_IMPORT_ERRORS:
-                    # DB provably unavailable for this request: stop grinding,
-                    # count every remaining (unattempted) item as failed.
-                    failed += len(items) - (idx + 1)
-                    break
-
-        return MemoriaImportResponse(
-            ok=failed == 0,
-            imported=imported,
-            skipped_duplicates=skipped_duplicates,
-            skipped_too_short=skipped_too_short,
-            skipped_cap=skipped_cap,
-            failed=failed,
-        )
-
-    @app.post("/api/memoria/capture", response_model=MemoriaMutationResponse)
-    def post_memoria_capture(request: Request, body: MemoriaCaptureRequest):
-        if not MEMORIAS_ENABLED:
-            return MemoriaMutationResponse(ok=False)  # gated no-op, mirrors flags/delete/update
-        # Direct motor call (design resolution 2905/D3): the CTK toggles this on
-        # the motor directly (inspector_memory.py), NOT via the command queue.
-        # No llm_engine.py change, no _COMMAND_WHITELIST entry.
-        request.app.state.host.motor.set_memorias_private(body.paused)
-        return MemoriaMutationResponse(ok=True)
-
-    @app.get("/api/memoria/notice", response_model=MemoriaNoticeResponse)
-    def get_memoria_notice() -> MemoriaNoticeResponse:
-        # Fail-open to False (banner shows) when the flag file is absent — no
-        # host state, works even before host init. No lock: single-flag read.
-        return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
-
-    @app.post("/api/memoria/notice", response_model=MemoriaNoticeResponse)
-    def post_memoria_notice(body: MemoriaNoticeRequest) -> MemoriaNoticeResponse:
-        # Atomic single-flag write (os.replace), no read-modify-write, so no
-        # lock. Re-read from disk so the response reflects actual persisted
-        # state (save swallows write errors by design — CTK fail-open parity).
-        save_memorias_notice_dismissed(body.dismissed)
-        return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
-
-    @app.get("/api/agenda", response_model=AgendaResponse)
-    def get_agenda(request: Request):
-        agenda = getattr(request.app.state.host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        with request.app.state.host.agenda_lock:
-            return _agenda_response(agenda)
-
-    @app.post("/api/agenda/topic", response_model=AgendaResponse)
-    def post_agenda_topic(request: Request, body: AgendaTopicRequest):
-        host = request.app.state.host
-        agenda = getattr(host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        # Raw-count guard BEFORE the lock/sanitization: bound the regex work the
-        # controller does per constraint (truncation-to-12 stays its contract).
-        if body.constraints is not None and len(body.constraints) > _AGENDA_CONSTRAINTS_RAW_MAX:
-            return JSONResponse(status_code=422, content={"detail": "too many constraints"})
-        with host.agenda_lock:
-            try:
-                # CTK parity decision 2026-07-05 (Option A): a POSTed topic is
-                # operator-approved and goes straight to the queue, matching the
-                # UI label "Agregar a cola" and app_shell.py:1317-1318
-                # (add_topic(approved=True) + queue_topic). Only QUEUED topics
-                # are selectable by the driver (_select_next_topic).
-                topic = agenda.add_topic(
-                    body.title,
-                    angle=body.angle or "",
-                    constraints=body.constraints or [],
-                    priority=body.priority or "normal",
-                    response_length=body.response_length or "normal",
-                    approved=True,
-                )
-            except ValueError as exc:
-                return JSONResponse(status_code=422, content={"detail": str(exc)})
-            # Idempotent: a dedup that returns an already-QUEUED (or otherwise
-            # non-APPROVED) topic must not re-queue — queue_topic only accepts
-            # APPROVED and would raise on a repeat POST (WU4 idempotency test).
-            if topic.status == TopicStatus.APPROVED:
-                agenda.queue_topic(topic.id)
-            return _agenda_response(agenda)
-
-    @app.post("/api/agenda/topic/action", response_model=AgendaResponse)
-    def post_agenda_topic_action(request: Request, body: AgendaTopicActionRequest):
-        host = request.app.state.host
-        agenda = getattr(host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        if body.action not in _AGENDA_ACTION_WHITELIST:
-            return JSONResponse(status_code=422, content={"detail": "unknown action"})
-        with host.agenda_lock:
-            try:
-                if body.action == "approve":
-                    # CTK parity decision 2026-07-05 (Option A): approving a
-                    # drafted suggestion also queues it in one step, mirroring
-                    # topic_inbox_bridge.py:138-139. approve_topic raises on a
-                    # non-DRAFTED topic (surfaced as 422 below), so a repeat
-                    # never double-queues.
-                    agenda.approve_topic(body.topic_id)
-                    agenda.queue_topic(body.topic_id)
-                elif body.action == "queue":
-                    agenda.queue_topic(body.topic_id)
-                elif body.action == "remove":
-                    agenda.remove_queued_topic(body.topic_id)
-                elif body.action == "move":
-                    agenda.move_queued_topic(body.topic_id, body.direction or 1)
-                elif body.action == "reject":
-                    agenda.reject_topic(body.topic_id)
-            except (ValueError, KeyError) as exc:
-                return JSONResponse(status_code=422, content={"detail": str(exc)})
-            return _agenda_response(agenda)
-
-    @app.put("/api/agenda/session", response_model=AgendaResponse)
-    def put_agenda_session(request: Request, body: AgendaSessionRequest):
-        host = request.app.state.host
-        agenda = getattr(host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        with host.agenda_lock:
-            if body.profile is not None and body.profile.style is not None:
-                try:
-                    agenda.set_profile({"style": body.profile.style})
-                except ValueError as exc:
-                    return JSONResponse(status_code=422, content={"detail": str(exc)})
-            agenda.set_session_settings(
-                max_turns_per_topic=body.max_turns_per_topic,
-                rhythm=body.rhythm,
-                response_length=body.response_length,
-                safety_mode=body.safety_mode,
-            )
-            return _agenda_response(agenda)
-
-    @app.get("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
-    def get_cohost_profiles() -> CohostProfilesResponse:
-        # Disk-only read; no host needed. Falls back to the 3 defaults when the
-        # file is absent. No `selected` field — selection is stateless (RAM).
-        with _cohost_profiles_lock:
-            return _cohost_profiles_response(load_cohost_profiles())
-
-    @app.post("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
-    def save_cohost_profile(body: CohostProfileSaveRequest):
-        clean = sanitize_profile_name(body.name)
-        if not clean:
-            return JSONResponse(status_code=422, content={"detail": "empty profile name"})
-        with _cohost_profiles_lock:
-            profiles = load_cohost_profiles()
-            profiles[clean] = normalize_cohost_profile(
-                {
-                    "style": body.style,
-                    "default_priority": body.priority or "normal",
-                    "default_response_length": body.length or "normal",
-                }
-            )
-            if not save_cohost_profiles(profiles):
-                return JSONResponse(status_code=503, content={"detail": "cohost_write_failed"})
-            return _cohost_profiles_response(profiles)
-
-    @app.post("/api/agenda/cohost-profiles/select", response_model=CohostProfileSelectResponse)
-    def select_cohost_profile(request: Request, body: CohostProfileSelectRequest):
-        host = request.app.state.host
-        agenda = getattr(host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        # Load under the disk lock but NEVER write — selection is stateless.
-        with _cohost_profiles_lock:
-            profiles = load_cohost_profiles()
-        if body.name not in profiles:
-            return JSONResponse(status_code=404, content={"detail": "profile not found"})
-        with host.agenda_lock:
-            try:
-                agenda.set_profile({"style": profiles[body.name]["style"]})
-            except ValueError as exc:
-                return JSONResponse(status_code=422, content={"detail": str(exc)})
-        return CohostProfileSelectResponse(selected=body.name)
-
-    @app.post("/api/agenda/session/action", response_model=AgendaResponse)
-    def post_agenda_session_action(request: Request, body: AgendaSessionActionRequest):
-        host = request.app.state.host
-        agenda = getattr(host, "agenda", None)
-        if agenda is None:
-            return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
-        if body.action not in _AGENDA_SESSION_ACTION_WHITELIST:
-            return JSONResponse(status_code=422, content={"detail": "unknown action"})
-        motor = getattr(host, "motor", None)
-        with host.agenda_lock:
-            if body.action == "enable":
-                # CTK parity (app_shell.py:1415-1419): never start a session with
-                # an empty queue and no active topic. Return 200 with an explicit
-                # not-applied outcome so the UI can explain, instead of silently
-                # flipping to IDLE with nothing to say.
-                if not agenda.queued_topics() and not agenda.active_topic:
-                    return _agenda_response(agenda, applied=False, reason="empty_queue")
-                agenda.enable()
-                if agenda.state == AgendaState.OFF:
-                    # Fail-closed gate refused (GUARDRAILS_MISSING) — mirror the
-                    # empty_queue branch above: honest applied=False instead of
-                    # claiming success while the state never left OFF.
-                    return _agenda_response(agenda, applied=False, reason="guardrails_missing")
-                # Bug B fix: clear any speech-cancellation token left by a prior
-                # emergency stop so this legitimate agenda run can speak.
-                if motor is not None and hasattr(motor, "clear_speech_cancel"):
-                    motor.clear_speech_cancel()
-                # CTK parity (app_shell.py:1432): tick immediately on enable so
-                # Kira opens the first topic without waiting out the driver
-                # cadence. nudge() just sets an Event — safe under the lock.
-                driver = getattr(host, "_agenda_driver", None)
-                if driver is not None:
-                    driver.nudge()
-                return _agenda_response(agenda, applied=True)
-            if body.action == "soft_stop":
-                # FIX-C: the headless host now HAS a speech pipeline (chat works),
-                # so enqueue the closing line the controller returns instead of
-                # dropping it (mirror app_shell.py:1435). A none() action (agenda
-                # already idle) is a no-op inside enqueue_agenda_action.
-                enqueue_agenda_action(motor, agenda.soft_stop())
-                return _agenda_response(agenda, applied=True)
-            # emergency_stop
-            agenda.emergency_stop()
-            # Mirror app_shell.py:1494-1497: interrupt in-flight speech and drop
-            # any pending agenda turns from the motor queue.
-            if motor is not None:
-                # Bug B fix: set the speech-cancellation token BEFORE interrupt
-                # so a turn already popped from the priority queue during its
-                # generation phase (the straggler) is refused at _hablar entry
-                # instead of playing after the stop.
-                if hasattr(motor, "cancel_speech_for_sources"):
-                    motor.cancel_speech_for_sources(("kira-agenda",))
-                if hasattr(motor, "interrupt_speaking"):
-                    motor.interrupt_speaking()
-                if hasattr(motor, "drop_pending_sources"):
-                    motor.drop_pending_sources(("kira-agenda",))
-            return _agenda_response(agenda, applied=True)
-
-    def _stream_state(agg) -> StreamChatLiveResponse:
-        # R8: STATE + LIMITS ONLY — never read anything but the accessors
-        # below (no message/user/text field exists on Aggregator's public
-        # surface for this to leak from).
-        source = agg._source
-        connected = source is not None and source.is_connected()
-        return StreamChatLiveResponse(
-            connected=connected,
-            platform=source.platform if source is not None else None,
-            source_id=source._source_id if source is not None else None,
-            threshold_per_second=agg.activity.threshold_per_second,
-            cooldown_seconds=agg.activity.cooldown_seconds,
-            max_messages_per_user=agg._spam_max_messages,
-            filter_policy=agg.get_filter_policy(),
-        )
-
-    @app.get("/api/stream/chat-live", response_model=StreamChatLiveResponse)
-    def get_stream_chat_live(request: Request):
-        agg = getattr(request.app.state.host, "aggregator", None)
-        if agg is None:
-            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
-        return _stream_state(agg)
-
-    @app.post("/api/stream/chat-live/connect", response_model=StreamChatLiveResponse)
-    def post_stream_connect(request: Request, body: StreamConnectRequest):
-        host = request.app.state.host
-        agg = getattr(host, "aggregator", None)
-        if agg is None:
-            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
-        try:
-            parsed = parse_chat_url(body.url)
-        except ValueError:
-            return JSONResponse(status_code=422, content={"detail": "invalid_url"})
-        if not host.aggregator_lock.acquire(blocking=False):
-            return JSONResponse(status_code=409, content={"detail": "busy"})
-        try:
-            agg.connect(parsed["source_id"], platform=parsed["platform"])
-        except ValueError:
-            # Aggregator rejected the platform (e.g. "Plataforma no soportada").
-            return JSONResponse(status_code=422, content={"detail": "unsupported_platform"})
-        except RuntimeError:
-            # Chat connector unavailable (e.g. pytchat not installed).
-            return JSONResponse(status_code=503, content={"detail": "chat_source_unavailable"})
-        except Exception:
-            # Unexpected failure: degrade to 503 without leaking internals.
-            # R8: log id/platform only — never chat content or the raw message.
-            logger.warning(
-                "chat-live connect failed platform=%s source_id=%s",
-                parsed["platform"],
-                parsed["source_id"],
-            )
-            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
-        finally:
-            host.aggregator_lock.release()
-        return _stream_state(agg)
-
-    @app.post("/api/stream/chat-live/disconnect", response_model=StreamChatLiveResponse)
-    def post_stream_disconnect(request: Request):
-        host = request.app.state.host
-        agg = getattr(host, "aggregator", None)
-        if agg is None:
-            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
-        # Single-flight with connect: both mutate agg._source, so serialize
-        # them on the same lock (mirrors post_stream_connect) to avoid a
-        # disconnect racing an in-flight connect on _source.
-        if not host.aggregator_lock.acquire(blocking=False):
-            return JSONResponse(status_code=409, content={"detail": "busy"})
-        try:
-            agg.disconnect()
-        finally:
-            host.aggregator_lock.release()
-        return _stream_state(agg)
-
-    @app.put("/api/stream/chat-live/limits", response_model=StreamChatLiveResponse)
-    def put_stream_limits(request: Request, body: StreamLimitsRequest):
-        agg = getattr(request.app.state.host, "aggregator", None)
-        if agg is None:
-            return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
-        if body.threshold_per_second is not None or body.cooldown_seconds is not None:
-            agg.set_activity_limits(
-                threshold_per_second=body.threshold_per_second,
-                cooldown_seconds=body.cooldown_seconds,
-            )
-        if body.max_messages_per_user is not None:
-            agg.set_spam_limits(max_messages_per_user=body.max_messages_per_user)
-        if body.filter_policy is not None:
-            try:
-                agg.set_filter_policy(body.filter_policy)
-            except ValueError:
-                return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
-        return _stream_state(agg)
-
-    @app.post("/api/commands")
-    def post_command(request: Request, body: CommandRequest):
-        if body.command not in _COMMAND_WHITELIST:
-            return JSONResponse(status_code=422, content={"detail": "unknown command"})
-        engine_payload = _engine_command_payload(body.command, body.payload)
-        rejection = _validate_command_value(body.command, engine_payload)
-        if rejection is not None:
-            return JSONResponse(status_code=422, content={"detail": rejection})
-        key = request.headers.get("Idempotency-Key") or body.idempotency_key
-        dispatcher = request.app.state.dispatcher
-        result = dispatcher.dispatch(body.command, engine_payload, key)
-        if result.state in ("accepted", "replay"):
-            return {
-                "accepted": True,
-                "command_id": result.command_id,
-                "status": "queued",
-                "state_version": dispatcher.state_version,
-            }
-        if result.state == "conflict":
-            return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
-        return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
-
-    @app.post("/api/chat/turn")
-    def post_chat_turn(request: Request, body: ChatTurnRequest):
-        # R8-CRITICAL: this handler must never return `body.text` (or any
-        # derived dialogue) in the response, and must never log it. The ack
-        # below carries only accepted/command_id/status/state_version.
-        rejection = _validate_chat_text(body.text)
-        if rejection is not None:
-            return JSONResponse(status_code=422, content={"detail": rejection})
-        key = request.headers.get("Idempotency-Key") or body.idempotency_key
-        dispatcher = request.app.state.dispatcher
-        host = request.app.state.host
-        # B1 (turn provenance): a typed turn used to commit to historial BARE, so
-        # the model could not tell WHO spoke and guessed (it referred to "the
-        # viewer before" with no chat platform connected at all). history_text
-        # gives it the same speaker frame PTT already had; the prompt payload
-        # stays the raw text, so generation behavior is unchanged.
-        # Unit 4.1 (runtime_findings_batch_20260731, F5): stamp submitted_at HERE
-        # — the earliest backend receipt of a typed direct question — so
-        # queue_wait_ms can later report the FULL wait (queue time was
-        # invisible to TURN_LATENCY before this unit). source="direct" made
-        # explicit alongside it (was previously left to _consume_command's
-        # default).
-        # Unit 4.2 (F12 closure): tag the item with the provider posture in
-        # effect AT SUBMIT time (unit 1.3's provider_runtime_state — the same
-        # live truth /api/status reports), so a fallback/return that happens
-        # while this item sits queued can be disclosed on the reply instead of
-        # silently answering under a different provider with no note.
-        result = dispatcher.dispatch(
-            "process_context",
-            body.text,
-            key,
-            history_text=i18n_active.typed_history_wrapper().format(text=body.text),
-            source="direct",
-            submitted_at=time.monotonic(),
-            submitted_under_provider=host.motor.provider_runtime_state()["provider"],
-        )
-        if result.state in ("accepted", "replay"):
-            return {
-                "accepted": True,
-                "command_id": result.command_id,
-                "status": "queued",
-                "state_version": dispatcher.state_version,
-            }
-        if result.state == "conflict":
-            return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
-        return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Push-to-Talk (liveaudio_ptt_tauri_20260710)
-    #
-    # PRIVACY (hard rule 2): NO /api/ptt/* request or response body ever carries
-    # transcript text — the dictation travels WhisperLive WS -> PttSession
-    # buffer (RAM) -> the process_context dispatch and never crosses HTTP, so
-    # the Tauri client literally never receives it. buffered_chars is an int
-    # count; events are fixed literals with detail=None (recorded by the
-    # controller on host.event_log). POSTs are operator-token tier (auth.py rule
-    # 2) and NOT rate-limited (RateLimiter counts only /api/agent/ mutations);
-    # GET stays open per rule 3.
-    # ──────────────────────────────────────────────────────────────────────
-    @app.post("/api/ptt/start")
-    def post_ptt_start(request: Request):
-        controller = request.app.state.ptt_controller
-        try:
-            session_id = controller.start()
-        except SessionActive:
-            return JSONResponse(status_code=409, content={"detail": "session_active"})
-        except PttUnreachable:
-            return JSONResponse(status_code=503, content={"detail": "stt_unreachable"})
-        return PttStartResponse(session_id=session_id, state="listening")
-
-    @app.post("/api/ptt/keepalive")
-    def post_ptt_keepalive(request: Request, body: PttKeepaliveRequest):
-        controller = request.app.state.ptt_controller
-        result = controller.keepalive(body.session_id)
-        if result is None:
-            # Server guillotined this session (watchdog) — client drops to idle.
-            return JSONResponse(
-                status_code=409, content={"state": "idle", "detail": "session_not_active"}
-            )
-        return PttKeepaliveResponse(**result)
-
-    @app.post("/api/ptt/stop")
-    def post_ptt_stop(request: Request, body: Optional[PttStopRequest] = None):
-        # ALWAYS 200, fully idempotent: returns immediately, the grace + flush
-        # happen in the background watcher. A stop on an unknown/absent session
-        # returns state=idle, so client retries and watchdog races never error.
-        controller = request.app.state.ptt_controller
-        session_id = body.session_id if body is not None else None
-        return PttStopResponse(**controller.stop(session_id))
-
-    @app.get("/api/ptt/state", response_model=PttStateResponse)
-    def get_ptt_state(request: Request) -> PttStateResponse:
-        # buffered_chars is an int count, NEVER text. GET stays open (rule 3).
-        # This is ALSO the read surface for the configured stt_ws_url — no
-        # dedicated GET /api/ptt/config exists, deliberately.
-        return PttStateResponse(**request.app.state.ptt_controller.state())
-
-    @app.put("/api/ptt/config", response_model=PttConfigResponse)
-    def put_ptt_config(request: Request, body: PttConfigRequest):
-        # Repoint the PTT bridge at a different LiveAudio/WhisperLive server
-        # WITHOUT restarting the backend: the operator regularly launches
-        # OpenCohost before LiveAudio, and killing the process to recover is
-        # the pain this closes (liveaudio_ws_uri_config_20260724).
-        #
-        # SECURITY: WhisperLive is recv-only and its text flows straight into
-        # `process_context` — the SAME path as a real operator turn (privacy
-        # header, opencohost/api/ptt_session.py:1-21). A URL pointed at an
-        # arbitrary WS server is therefore a prompt-injection channel
-        # impersonating the operator. Scheme validation (mirroring the
-        # base_url gate on /api/llm/provider) is the guard we ship; the read
-        # side in settings.load_ptt_ws_uri enforces the SAME predicate so a
-        # hand-edited file cannot bypass it. A loopback-only restriction was
-        # deliberately NOT applied (owner decision): LiveAudio on a second
-        # capture PC is a legitimate dual-PC setup, exactly like OBS accepting
-        # any host.
-        if body.stt_ws_uri is None:
-            return PttConfigResponse(stt_ws_uri=load_ptt_ws_uri())
-        if not is_valid_stt_ws_uri(body.stt_ws_uri):
-            return JSONResponse(
-                status_code=422,
-                content={"detail": "stt_ws_uri must start with ws:// or wss://"},
-            )
-        with _ptt_config_lock:
-            try:
-                save_ptt_ws_uri(body.stt_ws_uri)
-            except (OSError, RuntimeError, ValueError):
-                return JSONResponse(
-                    status_code=503, content={"detail": "config_write_failed"}
-                )
-        # Live-apply AFTER a successful save and OUTSIDE the write lock (same
-        # ordering as _apply_avatar_runtime on PUT /api/obs/config), so a URL
-        # is never applied to the runtime unless it also survives a restart.
-        _apply_ptt_ws_uri(request, body.stt_ws_uri)
-        return PttConfigResponse(stt_ws_uri=body.stt_ws_uri)
-
-    @app.post("/api/ptt/test", response_model=PttTestResponse)
-    def post_ptt_test(request: Request, body: Optional[PttTestRequest] = None):
-        # Bare connect + immediate close. Builds NO PttSession, never claims
-        # the single slot, never dispatches, never logs a lifecycle event — so
-        # it is safe to run mid-hold and cannot be used to inject a turn.
-        # ALWAYS 200: a failed probe is a result the operator asked for, not
-        # an HTTP error.
-        uri = body.stt_ws_uri if body is not None else None
-        if uri is None:
-            controller = getattr(request.app.state, "ptt_controller", None)
-            state = controller.state() if controller is not None else {}
-            uri = state.get("stt_ws_url") or load_ptt_ws_uri()
-        if not is_valid_stt_ws_uri(uri):
-            return PttTestResponse(ok=False, detail="invalid_scheme")
-        ok, detail = _test_stt_connection_bounded(uri)
-        return PttTestResponse(ok=ok, detail=detail)
-
-    @app.get("/api/chat/last-reply", response_model=ChatLastReplyResponse)
-    def get_chat_last_reply(request: Request) -> ChatLastReplyResponse:
-        # R8-safe: surfaces Kira's OWN generated reply text only — see
-        # ChatReplySink docstring (engine_host.py). Never the viewer/operator
-        # text that triggered it.
-        return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
-
-    # Agent gateway (agent_context_gateway Phase 2) -- routes live in
-    # opencohost.api.routers.agent (refactor_core_api_20260802 B5). Token
-    # gating lives in auth_middleware rule 1: everything under /api/agent/
-    # requires the agent OR operator token (always enforced), and mutating
-    # calls are rate limited per token (429 on breach).
 
     return app
 

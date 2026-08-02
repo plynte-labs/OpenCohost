@@ -27,6 +27,19 @@ paths (`tests/test_api_agent_gateway.py::TestD1AgendaIsolation::
 test_agent_surface_exposes_exactly_the_designed_routes` pins the exact
 7-path set as a structural trust-model guard) -- all 8 move here verbatim;
 see the B5 batch handoff for the reconciled endpoint inventory.
+
+CAUTION (path ambiguity, verified during the move): this file registers 5
+literal paths (`/api/agent/topics`, `/api/agent/status`, `/api/agent/cards`,
+`/api/agent/notice`, `/api/agent/notices`) and 2 templates
+(`/api/agent/cards/{card_id}/arm`, `/api/agent/notices/{notice_id}/dismiss`).
+The literals sit at segment count 3 after `/api/`; both templates sit at
+segment count 5, with segment 3 pinned to the SAME literal as their
+short-form sibling (`cards`/`notices`) and a distinct trailing literal
+(`arm`/`dismiss`) at segment 5. No literal collides with a template on
+segment count, and `notice` (singular, POST) never collides with `notices`
+(plural) on the literal segment itself -- so relative registration order
+here is cosmetic, not load-bearing (same reasoning documented in
+routers/music.py/perfiles.py for their own template/literal mixes).
 """
 
 import sqlite3

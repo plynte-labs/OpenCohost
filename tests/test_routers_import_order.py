@@ -20,9 +20,14 @@ import sys
 
 import pytest
 
-# One wave-1 router (pre-existing B4 cycle) and one wave-2 router (new in
-# B5) -- both go through the same `opencohost.api.shared`/`deps` seam now.
-_ROUTER_MODULES = ["opencohost.api.routers.obs", "opencohost.api.routers.agent"]
+# One router per wave (B4 obs, B5 agent, B6 memoria) -- all go through the
+# same `opencohost.api.shared`/`deps` seam now. The package-level test below
+# covers ALL 15 regardless; these direct cases just localize a failure.
+_ROUTER_MODULES = [
+    "opencohost.api.routers.obs",
+    "opencohost.api.routers.agent",
+    "opencohost.api.routers.memoria",
+]
 
 
 @pytest.mark.parametrize("module", _ROUTER_MODULES)
@@ -39,7 +44,7 @@ def test_routers_package_importable_first_on_fresh_interpreter():
     """The package `__init__.py` itself (ALL_ROUTERS) must also survive
     being the first thing imported, not just an individual submodule."""
     result = subprocess.run(
-        [sys.executable, "-c", "from opencohost.api.routers import ALL_ROUTERS; assert len(ALL_ROUTERS) == 10"],
+        [sys.executable, "-c", "from opencohost.api.routers import ALL_ROUTERS; assert len(ALL_ROUTERS) == 15"],
         capture_output=True,
         text=True,
     )
