@@ -3,12 +3,15 @@
 
 `OBSClient` goes through `deps.obs_client_cls()` -- test_api_obs.py replaces
 it directly on `opencohost.api.main` with fakes across most of its POST
-/api/obs/test cases. `_test_obs_connection_bounded`/`_OBS_TEST_TIMEOUT_SECONDS`
-stay defined in main.py (test_api_obs_timeout.py calls
+/api/obs/test cases. `_test_obs_connection_bounded` and
+`_OBS_TEST_TIMEOUT_SECONDS` live in `opencohost.api.shared`
+(refactor_core_api_20260802 B5 Part B -- moved out of main.py to break the
+routers<->main module-level import cycle); `main.py` re-exports both, which
+is why `test_api_obs_timeout.py` can still call
 `main_mod._test_obs_connection_bounded` directly as a unit test of the
-helper itself) and are imported here unchanged -- never monkeypatched, so a
-plain top-level import is safe. `_config_lock` is the SAME lock instance
-`avatar.py` guards `avatar.yaml` writes with (one file, one lock, D4).
+helper itself. Neither name is ever monkeypatched, so a plain import here is
+safe. `_config_lock` is the SAME lock instance `avatar.py` guards
+`avatar.yaml` writes with (one file, one lock, D4).
 """
 
 import dataclasses
@@ -17,7 +20,7 @@ from typing import Optional
 from fastapi import APIRouter, Request
 
 from opencohost.api import deps
-from opencohost.api.main import _apply_avatar_runtime, _config_lock, _obs_config_response, _test_obs_connection_bounded
+from opencohost.api.shared import _apply_avatar_runtime, _config_lock, _obs_config_response, _test_obs_connection_bounded
 from opencohost.api.models import ObsConfigRequest, ObsConfigResponse, ObsTestResponse
 from opencohost.avatar.avatar_config import AvatarConfigUnreadableError, load_avatar_config, save_avatar_config
 from fastapi.responses import JSONResponse

@@ -1,17 +1,19 @@
 """GET/PUT /api/avatar/config (moved verbatim from main.py, refactor_core_api_20260802 B4).
 
-`_avatar_config_response`, `_apply_avatar_runtime`, and `_config_lock` stay
-defined in main.py (never monkeypatched by any test -- confirmed by grep)
-and are imported directly here. `_config_lock` is the SAME lock instance
-`obs.py` guards `avatar.yaml` writes with (one file, one lock, D4) --
-importing the module-level singleton preserves that shared identity.
+`_avatar_config_response`, `_apply_avatar_runtime`, and `_config_lock` live
+in `opencohost.api.shared` (refactor_core_api_20260802 B5 Part B -- moved
+out of main.py to break the routers<->main module-level import cycle; never
+monkeypatched by any test, confirmed by grep, so a plain import is safe).
+`_config_lock` is the SAME lock instance `obs.py` guards `avatar.yaml`
+writes with (one file, one lock, D4) -- importing the shared module-level
+singleton preserves that shared identity.
 """
 
 from pathlib import Path
 
 from fastapi import APIRouter, Request
 
-from opencohost.api.main import _apply_avatar_runtime, _avatar_config_response, _config_lock
+from opencohost.api.shared import _apply_avatar_runtime, _avatar_config_response, _config_lock
 from opencohost.api.models import AvatarConfigRequest, AvatarConfigResponse
 from opencohost.avatar.avatar_config import (
     VALID_STATES,

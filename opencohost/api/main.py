@@ -25,37 +25,20 @@ importing this module has zero side effects on hardware/VRAM/Ollama.
 """
 
 import concurrent.futures
-import logging
-import mimetypes
 import os
-import re
 import sqlite3
 import threading
 import time
-import uuid
 from contextlib import asynccontextmanager, closing
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import ollama
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import JSONResponse
 
 from opencohost.api.agenda_driver import enqueue_agenda_action
-
-# _bearer_token/_resolve_role are auth-internal, imported here ONLY to
-# differentiate operator vs agent on the operator-only notice routes —
-# auth_middleware rule 1 already guaranteed the token is valid.
-from opencohost.api.auth import (
-    TokenFileError,
-    _bearer_token,
-    _resolve_role,
-    auth_middleware,
-    ensure_tokens,
-)
+from opencohost.api.auth import auth_middleware, ensure_tokens
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost, EventLogSink
 from opencohost.api.observability import audit_middleware, setup_api_logging
@@ -74,20 +57,6 @@ from opencohost.api.models import (
     AgendaTopicActionRequest,
     AgendaTopicOut,
     AgendaTopicRequest,
-    AgentCardArmResponse,
-    AgentCardListItem,
-    AgentCardRequest,
-    AgentCardResponse,
-    AgentCardsListResponse,
-    AgentNoticeDismissResponse,
-    AgentNoticeOut,
-    AgentNoticeRequest,
-    AgentNoticeResponse,
-    AgentNoticesResponse,
-    AgentStatusResponse,
-    AgentTopicRequest,
-    AgentTopicResponse,
-    AvatarConfigResponse,
     ChatLastReplyResponse,
     ChatTurnRequest,
     CohostProfileOut,
@@ -96,9 +65,6 @@ from opencohost.api.models import (
     CohostProfileSelectResponse,
     CohostProfilesResponse,
     CommandRequest,
-    CtxTelemetryOut,
-    LlmProviderProfileOut,
-    LlmProviderResponse,
     MemoriaDeleteRequest,
     MemoriaFlagsRequest,
     MemoriaImportRequest,
@@ -114,21 +80,6 @@ from opencohost.api.models import (
     MemoriaRowResponse,
     MemoriaStatsResponse,
     MemoriaUpdateRequest,
-    MusicFadeRequest,
-    MusicImportRequest,
-    MusicImportResponse,
-    MusicLibraryResponse,
-    MusicMoodRequest,
-    MusicMoodResponse,
-    MusicStateResponse,
-    MusicTrackOut,
-    ObsConfigResponse,
-    PersonalizationResponse,
-    PersonalizationUpdateRequest,
-    ProfileCreateRequest,
-    ProfileDetailResponse,
-    ProfileUpdateRequest,
-    ProfilesListResponse,
     PttConfigRequest,
     PttConfigResponse,
     PttKeepaliveRequest,
@@ -142,11 +93,15 @@ from opencohost.api.models import (
     StreamChatLiveResponse,
     StreamConnectRequest,
     StreamLimitsRequest,
-    SwitchProfileRequest,
 )
 # `opencohost.api.routers.avatar`/`.obs` own VALID_STATES/AvatarConfigUnreadableError/
 # load_avatar_config/save_avatar_config directly now (refactor_core_api_20260802 B4)
-# -- this module has no remaining caller for them.
+# -- this module has no remaining caller for them. `OBSClient` stays imported
+# even though `_test_obs_connection_bounded` (its last direct caller) moved
+# to `opencohost.api.shared` in B5 Part B: `opencohost.api.deps.
+# obs_client_cls()` reads `main.OBSClient` at call time, and
+# tests/test_api_obs.py monkeypatches it directly on THIS module across most
+# of its POST /api/obs/test cases.
 from opencohost.avatar.obs_client import OBSClient
 # `save_provider_config` moved with PUT /api/llm/provider to
 # `opencohost.api.routers.llm_provider`, which imports it directly.
@@ -169,31 +124,15 @@ from opencohost.config.settings import (
     MEMORIAS_IMPORT_CAP,
     MEMORIAS_IMPORT_MAX_BYTES,
     MEMORIAS_IMPORT_MAX_ITEMS,
-    PERSONALIZATION_INSTRUCTIONS_MAX,
-    PERSONALIZATION_INTERESTS_MAX,
-    PERSONALIZATION_NICKNAME_MAX,
-    PERSONALIZATION_OCCUPATION_MAX,
     _canonical_model_tag,
     is_valid_stt_ws_uri,
     load_memorias_notice_dismissed,
     load_piper_voice,
     load_ptt_ws_uri,
     load_tts_local_only,
-    save_last_profile,
     save_memorias_notice_dismissed,
     save_ptt_ws_uri,
     load_tts_speed,
-)
-from opencohost.core.agent_notices import (
-    AgentNoticeCapError,
-    AgentNoticeStore,
-    AgentNoticeValidationError,
-)
-from opencohost.core.editorial_cards import (
-    EditorialCard,
-    EditorialCardStatus,
-    EditorialCardStore,
-    EditorialCardValidationError,
 )
 from opencohost.core.memoria_import import parse_import, strip_control_chars
 from opencohost.core.memoria_store import (
@@ -203,45 +142,67 @@ from opencohost.core.memoria_store import (
     derive_import_key,
     is_capturable,
 )
-from opencohost.core.personalization import (
-    clear_personalization,
-    load_personalization,
-    save_personalization,
-)
-from opencohost.core.music_library import (
-    ALLOWED_AUDIO_EXTENSIONS,
-    KNOWN_MOODS,
-    is_supported_audio_path,
-)
+# `clear_personalization`/`save_personalization` stay imported here (never
+# called by this file's own code anymore) because both ARE monkeypatched
+# directly on `main` by test_api_personalization.py and
+# `opencohost.api.deps.save_personalization()`/`.clear_personalization()`
+# read them off THIS module at call time -- same "kept even though no code
+# in this file calls them directly" idiom as the settings block above.
+# `load_personalization` is never monkeypatched, so
+# `opencohost.api.routers.personalization` imports it straight from its home
+# module instead.
+from opencohost.core.personalization import clear_personalization, save_personalization
 from opencohost.core.cohost_profiles import (
     load_cohost_profiles,
     normalize_cohost_profile,
     sanitize_profile_name,
     save_cohost_profiles,
 )
-from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
-from opencohost.stream_admin.oauth_store import OAuthStore
+# `guardar_perfiles` moved with the perfiles CRUD handlers to
+# `opencohost.api.routers.perfiles`, which imports it directly (never
+# monkeypatched). `cargar_perfiles` stays: `_legacy_profile_key` below (the
+# still-inline memoria family) calls it directly, AND it IS monkeypatched on
+# `main` (test_api_phase1.py), which `opencohost.api.deps.cargar_perfiles()`
+# reads off THIS module at call time.
+from opencohost.core.profiles import cargar_perfiles
 from opencohost.i18n import active as i18n_active
-from opencohost.core.topic_inbox import (
-    TopicInboxCapError,
-    TopicInboxStore,
-    TopicInboxValidationError,
-)
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, TopicStatus
 from opencohost.smart_aggregator.url_parser import parse_chat_url
-
-# PUT /api/llm/provider profile ids (multi_provider_llm_20260723 design
-# 'Provider Config Surface'). "local" is reserved for the local-only selector.
-_PROFILE_ID_RE = re.compile(r"^[a-z0-9_]+$")
+# `logger`, the cross-family write locks, `_PROFILE_ID_RE`, `_count_sql`,
+# `_editorial_cards_by_status`, and the handful of plain response-builder
+# helpers below live in `opencohost.api.shared` (refactor_core_api_20260802
+# B5 Part B) so both this module and every router can import them at module
+# load time without either one importing the other -- see shared.py's module
+# docstring for the full cycle-breaking rationale. Every name is re-exported
+# here unchanged so existing code/tests that read it off `opencohost.api.
+# main` keep working (e.g. `_list_memoria_metadata` below still calls
+# `_count_sql`/uses `_STATS_DB_READ_TIMEOUT_SECONDS`; test_api_obs_timeout.py
+# still calls `main_mod._test_obs_connection_bounded` directly).
+from opencohost.api.shared import (
+    _OBS_TEST_TIMEOUT_SECONDS,
+    _PROFILE_ID_RE,
+    _STATS_DB_READ_TIMEOUT_SECONDS,
+    _apply_avatar_runtime,
+    _avatar_config_response,
+    _config_lock,
+    _count_sql,
+    _ctx_telemetry_out,
+    _derive_session_mode,
+    _display_model,
+    _editorial_cards_by_status,
+    _llm_provider_lock,
+    _llm_provider_response,
+    _obs_config_response,
+    _personalization_lock,
+    _profiles_lock,
+    _test_obs_connection_bounded,
+    logger,
+)
 
 # GET /api/models external I/O bound — short client timeout so a stalled/
 # unreachable Ollama daemon degrades the response instead of pinning a
 # threadpool thread (design v2.1 Tier B resilience).
 _OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.5
-
-# GET /api/memoria/stats sqlite reads — short, mirrors memoria_store.py's
-# READ_TIMEOUT_SECONDS (bounded, fail-open to a zero count).
-_STATS_DB_READ_TIMEOUT_SECONDS = 0.5
 
 # POST /api/memoria/purge — mirrors memoria_store.py's WRITE_TIMEOUT_SECONDS.
 _MEMORIA_WRITE_TIMEOUT_SECONDS = 1.0
@@ -273,67 +234,6 @@ def _discover_ollama_models(timeout: float = _OLLAMA_DISCOVERY_TIMEOUT_SECONDS) 
         return sorted(tags)
     except Exception:
         return []
-
-
-def _count_sql(db_path: str, sql: str, params: tuple = ()) -> int:
-    """Bounded, fail-open COUNT(*) read. Never creates db_path as a side
-    effect: a missing file (e.g. a standalone API process that never
-    touched this store) returns 0 without connecting.
-
-    `params` are bound positionally for parameterized WHERE clauses (e.g. the
-    per-profile split in GET /api/memoria/stats) — never string-interpolated."""
-    if not db_path or not os.path.exists(db_path):
-        return 0
-    try:
-        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
-            row = conn.execute(sql, params).fetchone()
-            return int(row[0]) if row else 0
-    except sqlite3.Error:
-        return 0
-
-
-def _parse_iso8601_utc(value: str | None) -> datetime | None:
-    """Parse an optional ISO-8601 timestamp; naive values are treated as UTC
-    (same normalization editorial_cards applies on storage). Raises
-    ValueError on malformed input."""
-    if not value:
-        return None
-    if value.endswith(("Z", "z")):
-        # Python 3.10 fromisoformat rejects the Z suffix — the canonical
-        # machine-emitted UTC form (Date.toISOString(), RFC3339 emitters).
-        value = value[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _agent_request_role(request: Request) -> str | None:
-    """Token role of an already-authenticated /api/agent/* caller.
-
-    auth_middleware rule 1 guarantees a valid bearer token reached the
-    handler; this only differentiates operator vs agent for the
-    operator-only notice surface (agent token -> 403, design error
-    contract). Fail-closed: any token-file hiccup reads as no role.
-    """
-    token = _bearer_token(request)
-    if token is None:
-        return None
-    try:
-        return _resolve_role(token)
-    except TokenFileError:
-        return None
-
-
-def _editorial_cards_by_status(db_path: str) -> dict:
-    """Bounded, fail-open status->count aggregation. Same missing-file/error
-    fail-open behavior as `_count_sql`; never returns row content."""
-    if not db_path or not os.path.exists(db_path):
-        return {}
-    try:
-        with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
-            rows = conn.execute("SELECT status, COUNT(*) FROM editorial_cards GROUP BY status").fetchall()
-            return {status: count for status, count in rows}
-    except sqlite3.Error:
-        return {}
 
 
 def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
@@ -556,38 +456,14 @@ _DEFAULT_CORS_ORIGINS = [
     "tauri://localhost",
 ]
 
-# Child of the "opencohost.api" tree that setup_api_logging() attaches
-# handlers to and raises to INFO -- no separate wiring needed here.
-logger = logging.getLogger("opencohost.api.main")
-
 # In-process double-start guard. Layered defense, weakest to strongest:
 # lockfile (cross-process, primary, in engine_host.py) -> this flag
 # (in-process) -> env var check below (best-effort) -> docs.
 _host_active = False
 
-# Tier-C config write-lock (WS3 slice 2): guards every PUT to avatar.yaml
-# (OBS + avatar config share the one file) so a read-modify-write is atomic
-# across concurrent requests. Reads do not need it — only read-modify-write.
-_config_lock = threading.Lock()
-
-# profiles.json write-lock (WU5): guards every read-modify-write of the
-# profiles file (create/update/delete). Deliberately NOT `_config_lock`,
-# which is avatar.yaml-specific — a separate file gets a separate lock (D4).
-_profiles_lock = threading.Lock()
-
 # cohost_profiles.json write-lock (WU3): guards the read-modify-write of the
 # cohost-profiles file (save). A separate file gets a separate lock (D4).
 _cohost_profiles_lock = threading.Lock()
-
-# personalization.json write-lock (Phase 2, kira_personalization_onboarding):
-# guards every read-modify-write of the global personalization store. A
-# separate file gets a separate lock (D4).
-_personalization_lock = threading.Lock()
-
-# llm_provider.json write-lock (multi_provider_llm_20260723 Phase 1): guards
-# every read-modify-write of the provider/profiles config. A separate file
-# gets a separate lock (D4).
-_llm_provider_lock = threading.Lock()
 
 
 def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
@@ -602,31 +478,6 @@ def _cohost_profiles_response(profiles: dict) -> CohostProfilesResponse:
             for name, p in profiles.items()
         ]
     )
-
-
-# POST/PUT /api/perfiles bounds — profiles.json is loaded whole per request,
-# so cap the write to keep a single profile from ballooning the file.
-_PROFILE_NAME_MAX_LENGTH = 100
-_PROFILE_PROMPT_MAX_LENGTH = 20000
-
-# POST /api/obs/test bound: the socket timeout is now threaded into
-# OBSClient.test_connection (obsws ws.connect self-bounds), so the worker
-# returns on its own. This executor is only a backstop for anything the socket
-# timeout can't cover — and it must NOT join a stuck worker: a `with` block's
-# shutdown(wait=True) would re-block on the very thread we timed out on, so we
-# manage the executor manually and shutdown(wait=False, cancel_futures=True).
-_OBS_TEST_TIMEOUT_SECONDS = 5.0
-
-
-def _test_obs_connection_bounded(client: OBSClient, timeout: float = _OBS_TEST_TIMEOUT_SECONDS):
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(client.test_connection, timeout=timeout)
-        return future.result(timeout=timeout + 1.0)  # socket self-bounds; +1s backstop
-    except concurrent.futures.TimeoutError:
-        return False, "OBS connection test timed out"
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 # POST /api/ptt/test bound — same shape and the same reasoning as
@@ -679,140 +530,6 @@ def _apply_ptt_ws_uri(request: Request, uri: str) -> None:
     try:
         setter(uri)
     except Exception:
-        pass
-
-
-def _obs_config_response(cfg) -> ObsConfigResponse:
-    return ObsConfigResponse(
-        enabled=cfg.obs.enabled,
-        host=cfg.obs.host,
-        port=cfg.obs.port,
-        source=cfg.obs.source_name,
-        password_set=bool(cfg.obs.password),
-    )
-
-
-def _display_model(host, provider_state: Optional[dict] = None) -> Optional[str]:
-    """Resolve the model name to REPORT to clients (display bug fix).
-
-    Mirrors the active provider so `/api/status` and `/api/models` can never
-    drift apart again: cloud active -> the active profile's OWN `model`
-    (never another profile's, never the engine's stale local bookkeeping
-    attr); local active (or no provider config) -> the engine's own
-    `current_model`. Degrades to None if the active cloud profile is
-    missing or its `model` is blank — same graceful degradation
-    `/api/models` already had.
-
-    F4 fix (runtime_findings_batch_20260731 1.3): reads the engine's LIVE
-    effective posture via `MotorVocalIA.provider_runtime_state()` — never the
-    persisted `llm_provider.json`. That disk read is exactly what kept this
-    function reporting the stale cloud model name through an active
-    `_cloud_fallback_active` fallback. `provider_state` lets a caller that
-    already computed it (get_status) pass it through instead of a second call.
-    """
-    state = provider_state if provider_state is not None else host.motor.provider_runtime_state()
-    return state["generation_model"]
-
-
-def _derive_session_mode(
-    agenda_off: bool,
-    is_speaking: bool,
-    is_processing: bool,
-    llm_generating: bool,
-    pending_commands_count: int,
-) -> str:
-    """Unit 2.5 (runtime_findings_batch_20260731 F13): a session-level mode
-    ABOVE `AgendaState.OFF`. Owner ruling: "agenda finalizada" (OFF) already
-    means exactly what it says and stays; what's missing is the verdict on
-    whether KIRA is still doing anything after it. DERIVED here, every call —
-    never a stored field, or it would drift from the booleans it summarises
-    (the exact failure class F4's `_display_model` bug already was).
-
-    ponytail: accepted risks (plan's 2.5 table), not fixed here:
-      - Queue.qsize() is documented racy under concurrency; a display
-        refreshed every 1.5-2s tolerates one stale tick, it is not a scheduler.
-      - agenda state (1500ms poll) and this status (2000ms poll) are read on
-        the front from two different cadences, so they can briefly disagree —
-        at most a one-tick post-agenda/inactiva flicker.
-      - background pregen workers never touch command_queue — llm_generating
-        is what covers that gap, which is why it is required below, not optional.
-      - a queued-but-never-executed item (drained/cancelled/epoch-invalidated)
-        still reads as busy — failing toward "not idle" is the safe direction:
-        a late `inactiva` is only slow, a false one is a lie.
-    """
-    if not agenda_off:
-        return "agenda"
-    if is_speaking or is_processing or llm_generating or pending_commands_count > 0:
-        return "post-agenda"
-    return "inactiva"
-
-
-def _ctx_telemetry_out(motor) -> Optional[CtxTelemetryOut]:
-    """Unit 2.5: `motor.ctx_telemetry_snapshot()["latest"]` (unit 2.3), narrowed
-    to the wire shape. Defensively typed (not a bare `**latest`) so a test
-    double / older motor without a real ring degrades to None instead of a 500.
-    """
-    snapshot_fn = getattr(motor, "ctx_telemetry_snapshot", None)
-    if not callable(snapshot_fn):
-        return None
-    snapshot = snapshot_fn()
-    latest = snapshot.get("latest") if isinstance(snapshot, dict) else None
-    if not isinstance(latest, dict):
-        return None
-    try:
-        return CtxTelemetryOut(
-            ratio=latest["ratio"],
-            effective_ctx=latest["effective_ctx"],
-            native_ctx=latest["native_ctx"],
-            evicted_pairs=latest["evicted_pairs"],
-            source=latest["source"],
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _llm_provider_response(cfg: dict, key_store: OAuthStore) -> LlmProviderResponse:
-    """Build the never-echoes-a-key response (multi_provider_llm_20260723).
-
-    `api_key_set` is derived per profile from the SEPARATE key store — the
-    provider config dict itself never carries a key, mirroring
-    `_obs_config_response`'s `password_set` derivation below.
-    """
-    profiles_out = {
-        pid: LlmProviderProfileOut(
-            base_url=str(prof.get("base_url", "")),
-            model=str(prof.get("model", "")),
-            preset=prof.get("preset"),
-            api_key_set=key_store.has_token(pid),
-        )
-        for pid, prof in cfg.get("profiles", {}).items()
-    }
-    return LlmProviderResponse(
-        active_provider=cfg.get("active_provider", "local"),
-        fallback_mode=cfg.get("fallback_mode", "auto"),
-        pregen_enabled=bool(cfg.get("pregen_enabled", False)),
-        profiles=profiles_out,
-    )
-
-
-def _apply_avatar_runtime(request: Request) -> None:
-    """FIX-B: push the just-saved avatar.yaml to the live OBS runtime.
-
-    Best-effort and doubly guarded (getattr for the missing attribute, try/except
-    for a runtime error) so a successful config write never turns into a 500:
-    FakeHost test doubles carry no ``obs_runtime``, and a failed/absent runtime
-    must not fail the request. The ObsRuntime rebuilds its OBSClient (state_images
-    are snapshotted at construction — see obs_client.py) and reconnects on the
-    new host/port. Called ONLY after a successful save (never on the 503 paths).
-    """
-    host = getattr(request.app.state, "host", None)
-    runtime = getattr(host, "obs_runtime", None)
-    if runtime is None:
-        return
-    try:
-        runtime.apply_config()
-    except Exception:
-        # OBS is best-effort; a runtime rebuild failure never fails the write.
         pass
 
 
@@ -880,49 +597,12 @@ def _agenda_response(agenda, *, applied=None, reason=None) -> AgendaResponse:
     )
 
 
-def _music_track_status(track) -> str:
-    if track.missing:
-        return "faltante"
-    if track.invalid:
-        return "invalido"
-    return "ok"
-
-
-def _music_track_out(track) -> MusicTrackOut:
-    return MusicTrackOut(
-        id=track.id, label=track.label, mood=track.mood, status=_music_track_status(track)
-    )
-
-
-def _normalize_mood_strict(mood: str) -> "str | None":
-    """Case/whitespace-normalize `mood`, then REQUIRE KNOWN_MOODS membership.
-
-    Mirrors music_library.normalize_mood's regex normalization but returns
-    None on an unknown mood instead of silently falling back to 'normal'. That
-    silent fallback is safe for the CTK dropdown (it can't send garbage) but a
-    footgun at an API trust boundary — a typo like 'hyep' would otherwise file
-    the track under 'normal' with no signal (design D5)."""
-    normalized = re.sub(r"[^a-z0-9_]+", "_", (mood or "").strip().lower()).strip("_")
-    return normalized if normalized in KNOWN_MOODS else None
-
-
-# POST /api/music/fade — a fade INTENT (client executes it, never backend audio).
-_MUSIC_FADE_DIRECTIONS = frozenset({"in", "out"})
-_MUSIC_FADE_DEFAULT_MS = 6000
-_MUSIC_FADE_MAX_MS = 60000
-
-# POST /api/music/import — bound the source path + copy size at the trust boundary.
-_MUSIC_IMPORT_PATH_MAX_LENGTH = 1024
+# POST /api/music/import size cap. `opencohost.api.routers.music` reads this
+# through `deps.music_import_max_bytes()` -- test_api_music_library_mutations.py
+# monkeypatches it directly on this module (down to 4 bytes) to make a
+# 12-byte wav fixture deterministically exceed the cap, so it stays defined
+# here rather than moving with the rest of the music family.
 _MUSIC_IMPORT_MAX_BYTES = 200 * 1024 * 1024
-
-
-def _avatar_config_response(cfg) -> AvatarConfigResponse:
-    return AvatarConfigResponse(
-        enabled=cfg.enabled,
-        mode=cfg.mode,
-        assets_folder=str(cfg.assets_folder),
-        state_images={state: str(path) for state, path in cfg.state_images.items()},
-    )
 
 
 def _check_single_worker() -> None:
@@ -1016,203 +696,26 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         allow_credentials=False,
     )
 
-    # B4 (refactor_core_api_20260802): events, status/health/models,
-    # llm_provider, i18n/tts, avatar, obs -- mounted here, replacing their
-    # original inline @app. decorators. Late import (see
-    # opencohost/api/routers/__init__.py docstring) breaks the import cycle:
-    # these router modules import helper functions straight from THIS
-    # module's namespace at their own import time, which must already be
-    # populated (it is, by this point in create_app()). No path in any
-    # moved router is parameterized, so mounting them here instead of at
-    # their original scattered positions changes nothing observable --
-    # Starlette only cares about registration order for AMBIGUOUS/
-    # overlapping path templates, and none exist between these routes and
-    # anything still declared inline below.
+    # B4+B5 (refactor_core_api_20260802): every extracted resource family --
+    # all routers in ALL_ROUTERS (see opencohost/api/routers/__init__.py) --
+    # mounts here, replacing the original inline @app. decorators. Routers
+    # NEVER import this module at module level: cross-cutting objects (locks,
+    # logger, response builders) come from opencohost.api.shared, and every
+    # name a test monkeypatches on THIS module goes through a call-time
+    # accessor in opencohost.api.deps. Reintroducing a module-level
+    # `from opencohost.api.main import ...` in any router recreates the
+    # import-order landmine killed in B5 (tests/test_routers_import_order.py
+    # pins it dead). The import below is late only to keep main.py's own
+    # import order stable. Parameterized paths DO exist in the routers
+    # (perfiles/{name}, music/track/{track_id}[/audio], agent card/notice
+    # actions), but no template overlaps any other route on segment count +
+    # literal prefix -- each router's docstring carries its family's
+    # rationale, and mounting order vs the remaining inline routes is not
+    # load-bearing for resolution.
     from opencohost.api.routers import ALL_ROUTERS
 
     for _router in ALL_ROUTERS:
         app.include_router(_router)
-
-    @app.get("/api/perfiles", response_model=ProfilesListResponse)
-    def list_perfiles() -> ProfilesListResponse:
-        perfiles = cargar_perfiles()
-        if not isinstance(perfiles, dict):
-            return ProfilesListResponse(profiles=[])
-        return ProfilesListResponse(profiles=list(perfiles.keys()))
-
-    @app.get("/api/perfiles/{name}", response_model=ProfileDetailResponse)
-    def get_perfil(name: str):
-        # R8/D5: explicit field picks — never `**data` — so only name/id/
-        # prompt/use_system are ever returned; any future persisted field
-        # (or chat content) can never leak through. `id` IS returned so the
-        # FE can target this profile's memoria rows (stored keyed by uuid).
-        # GET is lock-free like list.
-        perfiles = cargar_perfiles()
-        if not isinstance(perfiles, dict) or name not in perfiles or not isinstance(
-            perfiles[name], dict
-        ):
-            return JSONResponse(status_code=404, content={"detail": "profile not found"})
-        data = perfiles[name]
-        return ProfileDetailResponse(
-            name=name,
-            id=str(data.get("id", "")),
-            prompt=str(data.get("prompt", "")),
-            use_system=bool(data.get("use_system", False)),
-            locale=data.get("locale"),
-        )
-
-    @app.post("/api/perfiles", response_model=ProfileDetailResponse)
-    def create_perfil(body: ProfileCreateRequest):
-        name = body.name.strip()
-        if not name or len(name) > _PROFILE_NAME_MAX_LENGTH:
-            return JSONResponse(status_code=422, content={"detail": "invalid profile name"})
-        if len(body.prompt) > _PROFILE_PROMPT_MAX_LENGTH:
-            return JSONResponse(status_code=422, content={"detail": "prompt exceeds max length"})
-        with _profiles_lock:
-            perfiles = cargar_perfiles()
-            if not isinstance(perfiles, dict):
-                return JSONResponse(status_code=503, content={"detail": "profiles_unavailable"})
-            if name in perfiles:
-                return JSONResponse(status_code=409, content={"detail": "profile already exists"})
-            # Stable id minted server-side (R12) — never accepted from the wire.
-            new_id = str(uuid.uuid4())
-            perfiles[name] = {
-                "id": new_id,
-                "prompt": body.prompt,
-                "use_system": body.use_system,
-                "locale": body.locale,
-            }
-            if not guardar_perfiles(perfiles):
-                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
-        return ProfileDetailResponse(
-            name=name,
-            id=new_id,
-            prompt=body.prompt,
-            use_system=body.use_system,
-            locale=body.locale,
-        )
-
-    @app.put("/api/perfiles/{name}", response_model=ProfileDetailResponse)
-    def update_perfil(name: str, body: ProfileUpdateRequest):
-        new_name = body.new_name.strip() if body.new_name is not None else None
-        if new_name is not None and (not new_name or len(new_name) > _PROFILE_NAME_MAX_LENGTH):
-            return JSONResponse(status_code=422, content={"detail": "invalid profile name"})
-        if body.prompt is not None and len(body.prompt) > _PROFILE_PROMPT_MAX_LENGTH:
-            return JSONResponse(status_code=422, content={"detail": "prompt exceeds max length"})
-        with _profiles_lock:
-            perfiles = cargar_perfiles()
-            if not isinstance(perfiles, dict) or name not in perfiles:
-                return JSONResponse(status_code=404, content={"detail": "profile not found"})
-            # Copy preserves the stable id (R12) across both edit and rename.
-            data = dict(perfiles[name])
-            if body.prompt is not None:
-                data["prompt"] = body.prompt
-            if body.use_system is not None:
-                data["use_system"] = body.use_system
-            if body.locale is not None:
-                data["locale"] = body.locale
-            target = name
-            if new_name and new_name != name:
-                if new_name in perfiles:
-                    return JSONResponse(
-                        status_code=409, content={"detail": "profile already exists"}
-                    )
-                del perfiles[name]
-                target = new_name
-            perfiles[target] = data
-            if not guardar_perfiles(perfiles):
-                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
-        return ProfileDetailResponse(
-            name=target,
-            id=str(data.get("id", "")),
-            prompt=str(data.get("prompt", "")),
-            use_system=bool(data.get("use_system", False)),
-            locale=data.get("locale"),
-        )
-
-    @app.delete("/api/perfiles/{name}")
-    def delete_perfil(name: str):
-        with _profiles_lock:
-            perfiles = cargar_perfiles()
-            if not isinstance(perfiles, dict) or name not in perfiles:
-                return JSONResponse(status_code=404, content={"detail": "profile not found"})
-            # Last-profile guard ONLY (resolution 2905): deleting the active
-            # profile is allowed — the engine keeps its in-memory copy until
-            # the next switch (CTK parity, not an improvement).
-            if len(perfiles) <= 1:
-                return JSONResponse(
-                    status_code=409, content={"detail": "cannot delete the last profile"}
-                )
-            del perfiles[name]
-            if not guardar_perfiles(perfiles):
-                return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
-        return {"ok": True}
-
-    def _personalization_response(data: dict) -> PersonalizationResponse:
-        # Explicit field picks only — never `**data` — so the internal
-        # `version` key (or any future field) can never leak through.
-        return PersonalizationResponse(
-            enabled=bool(data.get("enabled", True)),
-            nickname=str(data.get("nickname", "")),
-            occupation=str(data.get("occupation", "")),
-            interests=str(data.get("interests", "")),
-            custom_instructions=str(data.get("custom_instructions", "")),
-            updated_at=data.get("updated_at"),
-        )
-
-    @app.get("/api/personalization", response_model=PersonalizationResponse)
-    def get_personalization() -> PersonalizationResponse:
-        # Lock-free like list_perfiles/get_perfil — GET never mutates and
-        # load_personalization() already fails open to defaults.
-        return _personalization_response(load_personalization())
-
-    @app.put("/api/personalization", response_model=PersonalizationResponse)
-    def update_personalization(body: PersonalizationUpdateRequest):
-        if body.nickname is not None and len(body.nickname) > PERSONALIZATION_NICKNAME_MAX:
-            return JSONResponse(status_code=422, content={"detail": "nickname exceeds max length"})
-        if body.occupation is not None and len(body.occupation) > PERSONALIZATION_OCCUPATION_MAX:
-            return JSONResponse(
-                status_code=422, content={"detail": "occupation exceeds max length"}
-            )
-        if body.interests is not None and len(body.interests) > PERSONALIZATION_INTERESTS_MAX:
-            return JSONResponse(status_code=422, content={"detail": "interests exceeds max length"})
-        if (
-            body.custom_instructions is not None
-            and len(body.custom_instructions) > PERSONALIZATION_INSTRUCTIONS_MAX
-        ):
-            return JSONResponse(
-                status_code=422, content={"detail": "custom_instructions exceeds max length"}
-            )
-        with _personalization_lock:
-            data = load_personalization()
-            if body.enabled is not None:
-                data["enabled"] = body.enabled
-            if body.nickname is not None:
-                data["nickname"] = body.nickname
-            if body.occupation is not None:
-                data["occupation"] = body.occupation
-            if body.interests is not None:
-                data["interests"] = body.interests
-            if body.custom_instructions is not None:
-                data["custom_instructions"] = body.custom_instructions
-            if not save_personalization(data):
-                return JSONResponse(
-                    status_code=503, content={"detail": "personalization_write_failed"}
-                )
-            # Re-read: save_personalization stamps its own `updated_at` and
-            # re-clamps, so the response must reflect the persisted values,
-            # not the pre-save `data` dict.
-            data = load_personalization()
-        return _personalization_response(data)
-
-    @app.delete("/api/personalization")
-    def delete_personalization():
-        with _personalization_lock:
-            if not clear_personalization():
-                return JSONResponse(
-                    status_code=503, content={"detail": "personalization_write_failed"}
-                )
-        return {"ok": True}
 
     @app.get("/api/memoria/stats", response_model=MemoriaStatsResponse)
     def get_memoria_stats(request: Request, profile_id: Optional[str] = None) -> MemoriaStatsResponse:
@@ -1570,180 +1073,6 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         save_memorias_notice_dismissed(body.dismissed)
         return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
 
-    @app.get("/api/music/library", response_model=MusicLibraryResponse)
-    def get_music_library(request: Request):
-        host = request.app.state.host
-        library = getattr(host, "music_library", None)
-        if library is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        # D4: guard every library read/mutation on host.music_lock — the
-        # library has no internal lock and all_tracks() iterates self.tracks,
-        # which a concurrent import/delete could mutate mid-iteration.
-        with host.music_lock:
-            tracks = [_music_track_out(t) for t in library.all_tracks()]
-        return MusicLibraryResponse(
-            tracks=tracks, count=len(tracks), moods=sorted({t.mood for t in tracks})
-        )
-
-    @app.post("/api/music/mood", response_model=MusicMoodResponse)
-    def post_music_mood(request: Request, body: MusicMoodRequest):
-        host = request.app.state.host
-        library = getattr(host, "music_library", None)
-        if library is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        mood = _normalize_mood_strict(body.mood)
-        if mood is None:
-            return JSONResponse(status_code=422, content={"detail": "unknown mood"})
-        # State only — orchestration, NEVER backend audio (2911). The Tauri
-        # client reads this mood and plays the corresponding track itself.
-        host.music_state.set_mood(mood)
-        with host.music_lock:
-            valid = library.valid_tracks()
-            matching = [t for t in valid if t.mood == mood]
-            suggested = library.select_for_mood(mood)
-            fallback = not matching
-            if fallback:
-                # Mirror select_for_mood's mood->normal->any fallback chain so
-                # `tracks` and `suggested_track_id` stay consistent — an empty
-                # bucket must never leave the client rotating over nothing.
-                normal_pool = [t for t in valid if t.mood == "normal"]
-                pool = normal_pool if normal_pool else valid
-            else:
-                pool = matching
-        return MusicMoodResponse(
-            active_mood=mood,
-            tracks=[_music_track_out(t) for t in pool],
-            suggested_track_id=suggested.id if suggested else None,
-            fallback=fallback,
-        )
-
-    @app.get("/api/music/state", response_model=MusicStateResponse)
-    def get_music_state(request: Request):
-        host = request.app.state.host
-        if getattr(host, "music_library", None) is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        return MusicStateResponse(**host.music_state.snapshot())
-
-    @app.post("/api/music/fade", response_model=MusicStateResponse)
-    def post_music_fade(request: Request, body: MusicFadeRequest):
-        host = request.app.state.host
-        if getattr(host, "music_library", None) is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        if body.direction not in _MUSIC_FADE_DIRECTIONS:
-            return JSONResponse(status_code=422, content={"detail": "unknown direction"})
-        duration_ms = _MUSIC_FADE_DEFAULT_MS if body.duration_ms is None else body.duration_ms
-        if not 0 < duration_ms <= _MUSIC_FADE_MAX_MS:
-            return JSONResponse(status_code=422, content={"detail": "duration_ms out of range"})
-        # Intent only — the Tauri client runs the fade; the API never touches
-        # AudioBedEngine (2911, headless host has none).
-        host.music_state.set_fade(body.direction, duration_ms)
-        return MusicStateResponse(**host.music_state.snapshot())
-
-    @app.post("/api/music/import", response_model=MusicImportResponse)
-    def post_music_import(request: Request, body: MusicImportRequest):
-        host = request.app.state.host
-        library = getattr(host, "music_library", None)
-        if library is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        mood = _normalize_mood_strict(body.mood)
-        if mood is None:
-            return JSONResponse(status_code=422, content={"detail": "unknown mood"})
-        raw = body.path.strip()
-        if not raw or len(raw) > _MUSIC_IMPORT_PATH_MAX_LENGTH:
-            return JSONResponse(status_code=422, content={"detail": "invalid path"})
-        source = Path(raw)
-        if not source.is_absolute():
-            return JSONResponse(status_code=422, content={"detail": "path must be absolute"})
-        if source.suffix.lower() not in ALLOWED_AUDIO_EXTENSIONS:
-            return JSONResponse(status_code=422, content={"detail": "only .mp3/.wav files"})
-        try:
-            if not source.is_file():
-                return JSONResponse(status_code=422, content={"detail": "file not found"})
-            if source.stat().st_size > _MUSIC_IMPORT_MAX_BYTES:
-                return JSONResponse(status_code=422, content={"detail": "file too large"})
-        except OSError:
-            return JSONResponse(status_code=422, content={"detail": "file not readable"})
-        # WU5: dedup pre-check under the lock, then do the (up-to-200MB) copy
-        # OUTSIDE the lock so it never blocks concurrent control-plane reads,
-        # then re-take the lock only to register the finished track. stage_copy
-        # re-validates the audio signature and copies into the managed dir under
-        # a uuid name (traversal-proof); register_staged rechecks dedup and rolls
-        # back (pop + unlink) on save failure. No backend audio.
-        with host.music_lock:
-            existing = library.find_existing(source, mood)
-        if existing is not None:
-            return MusicImportResponse(track=_music_track_out(existing))
-        try:
-            staged = library.stage_copy(source)
-        except ValueError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc)})
-        except OSError:
-            return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
-        try:
-            with host.music_lock:
-                track = library.register_staged(staged, source, mood)
-        except OSError:
-            return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
-        return MusicImportResponse(track=_music_track_out(track))
-
-    @app.delete("/api/music/track/{track_id}")
-    def delete_music_track(request: Request, track_id: str):
-        host = request.app.state.host
-        library = getattr(host, "music_library", None)
-        if library is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        # remove(delete_file=True) unlinks only files inside library_dir
-        # (_delete_managed_file's is_relative_to guard); an externally-pathed
-        # entry is deregistered but its file survives. No backend audio.
-        try:
-            with host.music_lock:
-                removed = library.remove(track_id, delete_file=True, raising=True)
-        except OSError:
-            return JSONResponse(status_code=503, content={"detail": "music_write_failed"})
-        if not removed:
-            return JSONResponse(status_code=404, content={"detail": "track not found"})
-        return {"ok": True}  # mirrors delete_perfil; repeat DELETE -> 404
-
-    @app.get("/api/music/track/{track_id}/audio")
-    def get_music_track_audio(request: Request, track_id: str):
-        # Client-side-playback model (2911) + resolution 2914: the API is the
-        # single point that mediates audio access. It never plays audio; it
-        # streams the managed file and reports availability. Missing/moved/
-        # corrupted/out-of-library files all surface as 404 instead of the
-        # client hitting a phantom source unnoticed.
-        host = request.app.state.host
-        library = getattr(host, "music_library", None)
-        if library is None:
-            return JSONResponse(status_code=503, content={"detail": "music_unavailable"})
-        # WU5/D8 TOCTOU: resolve, validate, AND open the file handle all under
-        # the lock, then hand the handle to FileResponse via BackgroundTask so
-        # it is closed only when the stream finishes. On Windows the open handle
-        # blocks a concurrent DELETE's unlink -> that DELETE gets a retryable
-        # 503 instead of pulling the file out from under a live stream (500).
-        # ponytail: handle-as-delete-guard is Windows semantics; POSIX would
-        # need fd-based serving to get the same interlock.
-        with host.music_lock:
-            track = library.tracks.get(track_id)
-            if track is None:
-                return JSONResponse(status_code=404, content={"detail": "track not found"})
-            library_root = library.library_dir.resolve()
-            track_path = Path(track.path).resolve()
-            # Path-safety: serve ONLY files inside library_dir (mirrors
-            # _delete_managed_file's is_relative_to guard). is_supported_audio_path
-            # then covers both missing-on-disk and failed-signature in one check.
-            if not track_path.is_relative_to(library_root):
-                return JSONResponse(status_code=404, content={"detail": "track not found"})
-            if not is_supported_audio_path(track_path):
-                return JSONResponse(status_code=404, content={"detail": "track not found"})
-            try:
-                fh = track_path.open("rb")
-            except OSError:
-                return JSONResponse(status_code=404, content={"detail": "track not found"})
-        media_type = mimetypes.guess_type(str(track_path))[0] or "application/octet-stream"
-        return FileResponse(
-            track_path, media_type=media_type, background=BackgroundTask(fh.close)
-        )
-
     @app.get("/api/agenda", response_model=AgendaResponse)
     def get_agenda(request: Request):
         agenda = getattr(request.app.state.host, "agenda", None)
@@ -1936,29 +1265,6 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 if hasattr(motor, "drop_pending_sources"):
                     motor.drop_pending_sources(("kira-agenda",))
             return _agenda_response(agenda, applied=True)
-
-    @app.post("/api/perfiles/switch")
-    def switch_profile(request: Request, body: SwitchProfileRequest):
-        key = request.headers.get("Idempotency-Key") or body.idempotency_key
-        perfiles = cargar_perfiles()
-        if not isinstance(perfiles, dict) or body.name not in perfiles:
-            return JSONResponse(status_code=404, content={"detail": "profile not found"})
-        data = dict(perfiles[body.name])
-        data["_profile_name"] = body.name
-        result = request.app.state.dispatcher.dispatch("set_profile", data, key)
-        if result.state in ("accepted", "replay"):
-            # FIX-A: remember this as the last-used profile so the next engine
-            # boot seeds it (best-effort — persistence must never fail the
-            # switch; save_last_profile already swallows, the guard is defense
-            # in depth).
-            try:
-                save_last_profile(body.name)
-            except Exception:
-                pass
-            return {"accepted": True, "command_id": result.command_id, "status": "queued"}
-        if result.state == "conflict":
-            return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
-        return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
 
     def _stream_state(agg) -> StreamChatLiveResponse:
         # R8: STATE + LIMITS ONLY — never read anything but the accessors
@@ -2233,216 +1539,11 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
         # text that triggered it.
         return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
 
-    # ── Agent gateway (agent_context_gateway Phase 2) ────────────────────
-    # Token gating lives in auth_middleware rule 1: everything under
-    # /api/agent/ requires the agent OR operator token (always enforced),
-    # and mutating calls are rate limited per token (429 on breach).
-
-    @app.post("/api/agent/topics", response_model=AgentTopicResponse)
-    def post_agent_topic(body: AgentTopicRequest):
-        # Owner decision D1: this is the ONLY topic path agents get. The
-        # proposal lands in the human-gated topic_inbox as 'proposed' and
-        # the operator approves it in the app UI. POST /api/agenda/topic
-        # (auto-approve + queue) stays operator-token-only and is never
-        # called from here.
-        try:
-            store = TopicInboxStore(EDITORIAL_CARDS_DB)
-            # ponytail: read-before-write dedupe detection instead of a store
-            # API change; single-process local app, the race window is moot.
-            prior_ids = {row["id"] for row in store.list_all(status_filter="proposed")}
-            row = store.propose(body.title, body.angle, body.tags, source=body.agent)
-        except TopicInboxValidationError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc)})
-        except TopicInboxCapError as exc:
-            # Cap semantics for agents are "back off, tell your human" —
-            # retry-later 429 fits better than 409 (design, endpoint
-            # contracts).
-            return JSONResponse(status_code=429, content={"detail": str(exc)})
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "topic_inbox_unavailable"}
-            )
-        return AgentTopicResponse(
-            id=row["id"], status=row["status"], deduped=row["id"] in prior_ids
-        )
-
-    @app.get("/api/agent/status", response_model=AgentStatusResponse)
-    def get_agent_status():
-        # Read-only with any valid token; counts only (no topic/card text).
-        # Both reads are bounded + fail-open (0 / {}) like the memoria stats
-        # helpers they reuse.
-        return AgentStatusResponse(
-            topics_pending=_count_sql(
-                EDITORIAL_CARDS_DB,
-                "SELECT COUNT(*) FROM topic_inbox WHERE status='proposed'",
-            ),
-            cards=_editorial_cards_by_status(EDITORIAL_CARDS_DB),
-            notices_undismissed=_count_sql(
-                EDITORIAL_CARDS_DB,
-                "SELECT COUNT(*) FROM agent_notices WHERE status='proposed'",
-            ),
-        )
-
-    @app.post("/api/agent/cards", response_model=AgentCardResponse)
-    def post_agent_card(body: AgentCardRequest):
-        # Card content validation is owned by the EditorialCard dataclass
-        # (same rules as the CLI); its error string becomes the 422 detail.
-        try:
-            expires = _parse_iso8601_utc(body.expires_at)
-        except ValueError:
-            return JSONResponse(
-                status_code=422,
-                content={"detail": "expires_at is not a valid ISO-8601 timestamp"},
-            )
-        try:
-            card = EditorialCard(
-                topic=body.topic,
-                summary=body.summary,
-                streamer_take=body.streamer_take,
-                counterpoints=body.counterpoints,
-                discussion_hooks=body.discussion_hooks,
-                triggers=body.triggers,
-                expires_at=expires,
-                origin=body.agent,
-                single_use=body.single_use,
-            )
-        except EditorialCardValidationError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc)})
-        try:
-            store = EditorialCardStore(EDITORIAL_CARDS_DB)
-            stored = store.upsert(card)
-            # Demotion rule (design 'POST /api/agent/cards'): upsert
-            # preserves existing status, so an agent rewriting an ARMED/
-            # ACTIVE card would silently keep it auto-firing with
-            # unreviewed content. Force it back to DRAFT — the operator
-            # re-arms via CLI/UI. New cards are already DRAFT (no-op).
-            demoted = store.demote_to_draft(stored.id)
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "editorial_cards_unavailable"}
-            )
-        return AgentCardResponse(
-            id=stored.id,
-            topic_slug=stored.topic_slug,
-            status=EditorialCardStatus.DRAFT.value if demoted else stored.status.value,
-            demoted=demoted,
-        )
-
-    @app.get("/api/agent/cards", response_model=AgentCardsListResponse)
-    def get_agent_cards():
-        # Light projection (design D4): no summary/streamer_take/list
-        # fields — the operator UI only needs enough to show status and
-        # arm a draft, and terminal statuses are counts-only elsewhere.
-        try:
-            cards = EditorialCardStore(EDITORIAL_CARDS_DB).list_all()
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "editorial_cards_unavailable"}
-            )
-        return AgentCardsListResponse(
-            cards=[
-                AgentCardListItem(
-                    id=card.id,
-                    topic=card.topic,
-                    topic_slug=card.topic_slug,
-                    status=card.status.value,
-                    origin=card.origin,
-                    expires_at=card.expires_at.isoformat() if card.expires_at else None,
-                    updated_at=card.updated_at.isoformat(),
-                    single_use=card.single_use,
-                )
-                for card in cards
-            ]
-        )
-
-    @app.post("/api/agent/cards/{card_id}/arm", response_model=AgentCardArmResponse)
-    def post_agent_card_arm(card_id: str):
-        # Mirrors editorial_cli.py's arm semantics (store.arm): refuses
-        # expired/USED/ACTIVE cards, idempotent on an already-ARMED card.
-        try:
-            store = EditorialCardStore(EDITORIAL_CARDS_DB)
-            card = store.get(card_id)
-            if card is None:
-                return JSONResponse(status_code=404, content={"detail": "card_not_found"})
-            armed = store.arm(card_id)
-            if not armed:
-                # arm() already flipped an expired card to EXPIRED as a side
-                # effect; re-fetch to tell that apart from USED/ACTIVE.
-                current = store.get(card_id)
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "editorial_cards_unavailable"}
-            )
-        if not armed:
-            detail = (
-                "card_expired"
-                if current is not None and current.status is EditorialCardStatus.EXPIRED
-                else "card_not_armable"
-            )
-            return JSONResponse(status_code=409, content={"detail": detail})
-        return AgentCardArmResponse(id=card_id, status=EditorialCardStatus.ARMED.value)
-
-    @app.post("/api/agent/notice", response_model=AgentNoticeResponse)
-    def post_agent_notice(body: AgentNoticeRequest):
-        try:
-            store = AgentNoticeStore(EDITORIAL_CARDS_DB)
-            # ponytail: read-before-write dedupe detection, same pattern as
-            # POST /api/agent/topics — single-process local app.
-            prior_ids = {row["id"] for row in store.list_all(status_filter="proposed")}
-            row = store.propose(body.text, source=body.agent)
-        except AgentNoticeValidationError as exc:
-            return JSONResponse(status_code=422, content={"detail": str(exc)})
-        except AgentNoticeCapError as exc:
-            return JSONResponse(status_code=429, content={"detail": str(exc)})
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "agent_notices_unavailable"}
-            )
-        return AgentNoticeResponse(id=row["id"], deduped=row["id"] in prior_ids)
-
-    @app.get("/api/agent/notices", response_model=AgentNoticesResponse)
-    def get_agent_notices(request: Request):
-        # Operator surface: the agent token can CREATE notices but never
-        # read the board back (other agents' notices are not its business).
-        if _agent_request_role(request) != "operator":
-            return JSONResponse(
-                status_code=403, content={"detail": "operator token required"}
-            )
-        pending = AgentNoticeStore(EDITORIAL_CARDS_DB).list_pending()
-        return AgentNoticesResponse(
-            notices=[
-                AgentNoticeOut(
-                    id=row["id"],
-                    text=row["text"],
-                    source=row["source"],
-                    created_at=row["created_at"],
-                )
-                for row in pending["valid"]
-            ]
-        )
-
-    @app.post(
-        "/api/agent/notices/{notice_id}/dismiss",
-        response_model=AgentNoticeDismissResponse,
-    )
-    def dismiss_agent_notice(notice_id: str, request: Request):
-        # Operator surface: a self-dismissing agent could hide its own
-        # messages from the human — only the operator token may dismiss.
-        if _agent_request_role(request) != "operator":
-            return JSONResponse(
-                status_code=403, content={"detail": "operator token required"}
-            )
-        try:
-            dismissed = AgentNoticeStore(EDITORIAL_CARDS_DB).dismiss(notice_id)
-        except (sqlite3.Error, OSError):
-            return JSONResponse(
-                status_code=503, content={"detail": "agent_notices_unavailable"}
-            )
-        if not dismissed:
-            return JSONResponse(
-                status_code=404, content={"detail": "notice_not_found"}
-            )
-        return AgentNoticeDismissResponse(dismissed=True)
+    # Agent gateway (agent_context_gateway Phase 2) -- routes live in
+    # opencohost.api.routers.agent (refactor_core_api_20260802 B5). Token
+    # gating lives in auth_middleware rule 1: everything under /api/agent/
+    # requires the agent OR operator token (always enforced), and mutating
+    # calls are rate limited per token (429 on breach).
 
     return app
 

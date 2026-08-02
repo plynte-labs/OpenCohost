@@ -61,11 +61,13 @@ def discover_ollama_models(*args, **kwargs):
 def load_provider_config():
     """GET /api/models routes through here because
     test_models_cloud_active_* (tests/test_api_reads.py) replaces the whole
-    function on ``main``. GET/PUT /api/llm/provider do NOT need this
-    accessor: those tests only patch
-    ``opencohost.config.llm_provider.LLM_PROVIDER_CONFIG_FILE``, so the
-    router there imports ``load_provider_config`` straight from its home
-    module with no seam required.
+    function on ``main``. GET/PUT /api/llm/provider (routers/llm_provider.py)
+    and POST /api/llm/provider/probe's callers ALSO go through this accessor
+    now -- the suite's established idiom patches ``main.load_provider_config``
+    directly in several places, not just ``opencohost.config.llm_provider.
+    LLM_PROVIDER_CONFIG_FILE``, so a plain top-level import in the router
+    would silently bypass those patches (same reasoning as every other
+    accessor in this module).
     """
     from opencohost.api import main as _main
 
@@ -92,18 +94,87 @@ def load_piper_voice(*args, **kwargs):
 
 
 def load_tts_local_only():
+    """test_tts_config_shape_from_accessors (tests/test_api_reads.py) replaces
+    ``main.load_tts_local_only`` wholesale for GET /api/tts/config, alongside
+    ``load_piper_voice``/``load_tts_speed``/``EXPERIMENTAL_HEAVY_TTS_ENABLED``
+    in the same test."""
     from opencohost.api import main as _main
 
     return _main.load_tts_local_only()
 
 
 def load_tts_speed():
+    """test_tts_config_shape_from_accessors (tests/test_api_reads.py) replaces
+    ``main.load_tts_speed`` wholesale for GET /api/tts/config, alongside
+    ``load_piper_voice``/``load_tts_local_only``/``EXPERIMENTAL_HEAVY_TTS_ENABLED``
+    in the same test."""
     from opencohost.api import main as _main
 
     return _main.load_tts_speed()
 
 
 def experimental_heavy_tts_enabled() -> bool:
+    """test_tts_config_shape_from_accessors (tests/test_api_reads.py) replaces
+    ``main.EXPERIMENTAL_HEAVY_TTS_ENABLED`` wholesale for GET /api/tts/config,
+    alongside ``load_piper_voice``/``load_tts_local_only``/``load_tts_speed``
+    in the same test."""
     from opencohost.api import main as _main
 
     return _main.EXPERIMENTAL_HEAVY_TTS_ENABLED
+
+
+def cargar_perfiles():
+    """Current profiles dict. Patched directly on ``main`` by
+    tests/test_api_phase1.py's perfiles + POST /api/perfiles/switch tests
+    (``monkeypatch.setattr(main_mod, "cargar_perfiles", ...)``) -- a plain
+    top-level import in routers/perfiles.py would bind the pre-patch
+    function object. ``main.py``'s own ``_legacy_profile_key`` (memoria
+    family, not moved) also calls ``cargar_perfiles()`` directly, so the
+    import stays on ``main`` regardless of this accessor.
+    """
+    from opencohost.api import main as _main
+
+    return _main.cargar_perfiles()
+
+
+def save_personalization(data: dict) -> bool:
+    """test_api_personalization.py replaces ``main.save_personalization``
+    wholesale (``lambda data: False``) to exercise PUT /api/personalization's
+    503 write-failure path."""
+    from opencohost.api import main as _main
+
+    return _main.save_personalization(data)
+
+
+def clear_personalization() -> bool:
+    """test_api_personalization.py replaces ``main.clear_personalization``
+    wholesale (``lambda: False``) to exercise DELETE /api/personalization's
+    503 write-failure path."""
+    from opencohost.api import main as _main
+
+    return _main.clear_personalization()
+
+
+def music_import_max_bytes() -> int:
+    """POST /api/music/import size cap. test_api_music_library_mutations.py
+    patches ``main._MUSIC_IMPORT_MAX_BYTES`` down to 4 bytes so a 12-byte wav
+    fixture deterministically exceeds it -- a plain top-level import in
+    routers/music.py would freeze the pre-patch 200MB value at router import
+    time."""
+    from opencohost.api import main as _main
+
+    return _main._MUSIC_IMPORT_MAX_BYTES
+
+
+def editorial_cards_db() -> str:
+    """Current editorial-cards sqlite path. Patched directly on ``main`` by
+    tests/test_agent_cards_api.py and tests/test_api_agent_gateway.py
+    (autouse fixtures, every /api/agent/cards|notices test) to isolate each
+    test's db in a tmp file. tests/test_api_reads.py also patches this name
+    for GET /api/memoria/stats -- that endpoint stays inline in main.py and
+    reads the module global directly (no accessor needed there); this
+    accessor exists only for routers/agent.py's own reads.
+    """
+    from opencohost.api import main as _main
+
+    return _main.EDITORIAL_CARDS_DB

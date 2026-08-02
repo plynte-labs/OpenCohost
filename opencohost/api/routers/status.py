@@ -7,8 +7,9 @@ Handler bodies are byte-identical to the originals. The only seam changes:
 `opencohost.api.main` by tests/test_api_reads.py -- a plain top-level import
 here would bind the pre-patch function object and silently ignore the
 monkeypatch). `_display_model`, `_derive_session_mode`, `_ctx_telemetry_out`
-are plain, never-monkeypatched module functions living in main.py, so they
-are imported directly.
+are plain, never-monkeypatched functions living in `opencohost.api.shared`
+(refactor_core_api_20260802 B5 Part B -- moved out of main.py to break the
+routers<->main module-level import cycle), so they are imported directly.
 """
 
 import dataclasses
@@ -17,7 +18,7 @@ from typing import Optional
 from fastapi import APIRouter, Request
 
 from opencohost.api import deps
-from opencohost.api.main import _ctx_telemetry_out, _derive_session_mode, _display_model
+from opencohost.api.shared import _ctx_telemetry_out, _derive_session_mode, _display_model
 from opencohost.api.models import HealthResponse, HealthState, ModelsResponse, StatusResponse
 from opencohost.config.settings import MODELS_CATALOG, resolve_llm_tiers
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState

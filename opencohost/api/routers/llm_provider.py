@@ -1,26 +1,30 @@
 """/api/llm/provider GET/PUT + /api/llm/provider/probe
 (moved verbatim from main.py, refactor_core_api_20260802 B4).
 
-`load_provider_config` goes through `deps.load_provider_config()`: while
-these routes' own tests only monkeypatch `opencohost.config.llm_provider.
-LLM_PROVIDER_CONFIG_FILE`, the suite's established idiom elsewhere patches
-`main.load_provider_config` directly (7 sites), and a direct from-import
-here would silently bypass such a patch. `save_provider_config` is patched
-nowhere, so it stays a direct import. `LLM_KEYS_FILE` IS monkeypatched
-directly on `main` (by these tests AND by tests/conftest.py's autouse
-key-file isolation fixture), so it goes through `deps.llm_keys_file()`.
+`load_provider_config` goes through `deps.load_provider_config()`: the
+suite's established idiom patches `main.load_provider_config` directly in
+several places, and a direct from-import here would silently bypass such a
+patch. `save_provider_config` is patched nowhere, so it stays a direct
+import. `LLM_KEYS_FILE` IS monkeypatched directly on `main` (by these tests
+AND by tests/conftest.py's autouse key-file isolation fixture), so it goes
+through `deps.llm_keys_file()`.
 
-`logger` is imported from `main` (not re-created via `logging.getLogger`)
-so the two `logger.exception(...)` calls below keep emitting under the
-exact `"opencohost.api.main"` logger name --
-test_llm_provider_config.py's `caplog.at_level(..., logger="opencohost.api.main")`
-scopes to that name specifically.
+`_PROFILE_ID_RE`, `_llm_provider_lock`, `_llm_provider_response`, and
+`logger` live in `opencohost.api.shared` (refactor_core_api_20260802 B5 Part
+B -- moved out of main.py to break the routers<->main module-level import
+cycle; none are ever monkeypatched, confirmed by grep, so a plain import is
+safe). `logger` is `logging.getLogger("opencohost.api.main")` regardless of
+which module holds the name -- `logging.getLogger` caches by name, so the
+two `logger.exception(...)` calls below keep emitting under the exact
+`"opencohost.api.main"` logger name -- test_llm_provider_config.py's
+`caplog.at_level(..., logger="opencohost.api.main")` scopes to that name
+specifically.
 """
 
 from fastapi import APIRouter, Request
 
 from opencohost.api import deps
-from opencohost.api.main import _PROFILE_ID_RE, _llm_provider_lock, _llm_provider_response, logger
+from opencohost.api.shared import _PROFILE_ID_RE, _llm_provider_lock, _llm_provider_response, logger
 from opencohost.api.models import (
     LlmProviderProbeResponse,
     LlmProviderRequest,
