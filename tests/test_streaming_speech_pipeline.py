@@ -5,7 +5,7 @@ that users will hit: empty streams, long bursts, trailing text, and
 token-by-token delivery.
 """
 
-from opencohost.core.streaming_speech import StreamingSpeechPipeline
+from opencohost.core.speech.streaming_speech import StreamingSpeechPipeline
 
 
 class FakeLLM:

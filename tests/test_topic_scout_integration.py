@@ -24,7 +24,7 @@ from opencohost.ui.app_shell import VocalAIApp
 from opencohost.smart_aggregator import AgendaState
 from opencohost.core import llm_engine
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core import topic_inbox
+from opencohost.core.agenda import topic_inbox
 from opencohost.smart_aggregator import session_history as session_history_mod
 from opencohost.smart_aggregator.kira_agenda_controller import (
     KiraAgendaController,

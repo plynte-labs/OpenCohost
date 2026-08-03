@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 import opencohost.api.auth as auth
 import opencohost.api.main as main_mod
-from opencohost.core.editorial_cards import (
+from opencohost.core.editorial.editorial_cards import (
     EditorialCard,
     EditorialCardStatus,
     EditorialCardStore,

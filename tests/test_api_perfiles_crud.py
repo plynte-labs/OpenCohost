@@ -7,7 +7,7 @@ dedicated `_profiles_lock`; rename preserves the stable on-disk `id` (R12).
 DELETE has ONLY the last-profile guard (resolution 2905 — deleting the
 active profile is allowed, matching CTK parity, not an improvement).
 
-Isolation: `opencohost.core.profiles.PROFILES_FILE` is monkeypatched to a
+Isolation: `opencohost.core.profiles.profiles.PROFILES_FILE` is monkeypatched to a
 tmp json file — no real user profiles are touched. `cargar_perfiles` /
 `guardar_perfiles` read that module global at call time, so patching it
 redirects both the API handlers and the on-disk assertions. The
@@ -47,7 +47,7 @@ def _reset_host_active():
 @pytest.fixture
 def profiles_file(tmp_path, monkeypatch):
     """Seed a >=2-profile tmp json and redirect PROFILES_FILE to it."""
-    import opencohost.core.profiles as profiles_mod
+    import opencohost.core.profiles.profiles as profiles_mod
 
     path = tmp_path / "perfiles.json"
     _write_profiles(

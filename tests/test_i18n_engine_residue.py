@@ -273,7 +273,7 @@ def test_grounding_rules_missing_slot_returns_legacy():
 def test_editorial_card_instruction_es_matches_card_default(official):
     # Anti-drift: the es slot is the canonical text the renderer falls back to
     # (same lockstep trick test_i18n_persona uses for settings.SYSTEM_PROMPT).
-    from opencohost.core.editorial_cards import EditorialCard
+    from opencohost.core.editorial.editorial_cards import EditorialCard
 
     _activate("es", official)
     assert active.editorial_card_instruction() == EditorialCard.DEFAULT_PROMPT_INSTRUCTION

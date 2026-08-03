@@ -15,7 +15,7 @@ tests/test_api_phase1 (now always carrying `music_state`/`music_lock`),
 import pytest
 from fastapi.testclient import TestClient
 
-from opencohost.core.music_library import MusicLibrary, MusicTrack
+from opencohost.core.music.music_library import MusicLibrary, MusicTrack
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]

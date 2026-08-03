@@ -376,7 +376,15 @@ class QwenProcessManager:
     Detects manually-started servers and avoids killing them.
     """
 
-    SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server_qwen.py")
+    # Three levels up from this file is the opencohost package root, where
+    # server_qwen.py lives. Adding a directory level to this module's path
+    # silently repoints this at a file that does not exist -- every start()
+    # test mocks Popen, so only test_qwen_server_script_resolves_to_an_existing_file
+    # catches it.
+    SERVER_SCRIPT = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "server_qwen.py",
+    )
     HEALTH_URL = "http://127.0.0.1:5000/health"
     APP_ID = "opencohost-qwen-tts"
 

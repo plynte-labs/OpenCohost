@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 from opencohost.config.settings import CLOUD_CHAT_TIMEOUT
 from opencohost.i18n import active as i18n_active
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 
 def _make_motor(tmp_path, *, provider_config=None):
@@ -85,7 +85,7 @@ def _transport_fail_cloud_chat(motor, exc=None):
     """Force the cloud chat attempt to fail as a TRANSPORT error (surviving
     retry) — e.g. a 401 bad key / DNS / 5xx surfaced as a CloudLLMResponseError
     (a ``requests.RequestException`` subclass), NOT a watchdog timeout."""
-    from opencohost.core import cloud_llm_client
+    from opencohost.core.providers.cloud import cloud_llm_client
 
     err = exc if exc is not None else cloud_llm_client.CloudLLMResponseError("HTTP 401 bad key")
     motor._ollama_chat_with_watchdog = MagicMock(side_effect=err)

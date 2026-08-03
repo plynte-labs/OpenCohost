@@ -7,7 +7,7 @@ profile's `style` to the running controller (RAM) only. It never persists a
 `selected` field anywhere; clients default to "Natural" (CTK parity — app_shell
 tracks `_current_cohost_profile` in RAM, defaults "Natural").
 
-Isolation gotcha: `opencohost.core.cohost_profiles.COHOST_PROFILES_FILE` is
+Isolation gotcha: `opencohost.core.profiles.cohost_profiles.COHOST_PROFILES_FILE` is
 imported INTO that module's namespace at IMPORT time
 (`from opencohost.config.settings import COHOST_PROFILES_FILE`). Patch it THERE
 — NOT `settings.COHOST_PROFILES_FILE` — because `load_cohost_profiles` /
@@ -41,7 +41,7 @@ def cohost_profiles_file(tmp_path, monkeypatch):
     No file is written up front — many cases assert the no-file default path,
     so tests that need a seeded file write it themselves.
     """
-    import opencohost.core.cohost_profiles as cp_mod
+    import opencohost.core.profiles.cohost_profiles as cp_mod
 
     path = tmp_path / "cohost_profiles.json"
     monkeypatch.setattr(cp_mod, "COHOST_PROFILES_FILE", str(path))

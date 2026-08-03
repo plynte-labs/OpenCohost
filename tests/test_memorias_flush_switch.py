@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import opencohost.core.llm_engine as llm_engine
-from opencohost.core.memoria_store import MemoriaStore, derive_stable_key
+from opencohost.core.memory.memoria_store import MemoriaStore, derive_stable_key
 
 
 # ---------------------------------------------------------------------------

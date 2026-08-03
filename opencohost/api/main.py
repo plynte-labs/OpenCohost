@@ -87,15 +87,15 @@ from opencohost.config.settings import (
 # with POST /api/memoria/import to `opencohost.api.routers.memoria`, which
 # imports them directly (never monkeypatched). `MemoriaStore` stays: it is
 # constructed by `_get_memoria_store()` below.
-from opencohost.core.memoria_store import MemoriaStore
+from opencohost.core.memory.memoria_store import MemoriaStore
 # `clear_personalization`/`save_personalization`/`cargar_perfiles` stay
 # imported here (never called by this file's own code anymore) because all
 # three ARE monkeypatched directly on `main` -- opencohost.api.deps'
 # accessors read them off THIS module at call time for
 # routers/personalization.py, routers/perfiles.py, and routers/memoria.py's
 # `_legacy_profile_key` (refactor_core_api_20260802 B6).
-from opencohost.core.personalization import clear_personalization, save_personalization
-from opencohost.core.profiles import cargar_perfiles
+from opencohost.core.profiles.personalization import clear_personalization, save_personalization
+from opencohost.core.profiles.profiles import cargar_perfiles
 # `logger`, the cross-family write locks, `_PROFILE_ID_RE`, `_count_sql`,
 # `_editorial_cards_by_status`, `_MEMORIA_TITLE_MAX_LENGTH`/
 # `_MEMORIA_CONTENT_MAX_LENGTH`, and the handful of plain response-builder

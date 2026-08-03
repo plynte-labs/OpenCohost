@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from opencohost.core.repetition_guard import detect_repetition, DEFAULT_CONFIG
+from opencohost.core.context.repetition_guard import detect_repetition, DEFAULT_CONFIG
 
 
 def _content_token_jaccard(a: str, b: str) -> float:

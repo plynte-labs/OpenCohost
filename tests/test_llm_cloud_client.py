@@ -13,7 +13,7 @@ imports -- it must be importable standalone.
 import requests
 import pytest
 
-from opencohost.core.cloud_llm_client import (
+from opencohost.core.providers.cloud.cloud_llm_client import (
     CloudLLMResponseError,
     map_options_to_openai,
     send_chat_completion,
@@ -121,7 +121,7 @@ def test_send_posts_to_chat_completions_with_bearer_auth_and_timeout(monkeypatch
             json_data={"choices": [{"message": {"content": "hi there"}}], "usage": {}}
         )
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     send_chat_completion(
         base_url="https://api.example.com/v1",
@@ -148,7 +148,7 @@ def test_send_normalizes_trailing_slash_on_base_url(monkeypatch):
         captured["url"] = url
         return _FakeResponse(json_data={"choices": [{"message": {"content": "hi"}}], "usage": {}})
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     send_chat_completion(
         base_url="https://api.example.com/v1/",
@@ -182,7 +182,7 @@ def test_response_adapter_maps_content_thinking_and_usage(
             json_data={"choices": [{"message": message_body}], "usage": expected_usage}
         )
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     result = send_chat_completion(
         base_url="https://api.example.com/v1",
@@ -223,7 +223,7 @@ def test_send_propagates_network_and_timeout_errors(monkeypatch, raised):
     def fake_post(url, json=None, headers=None, timeout=None):
         raise raised
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     with pytest.raises(requests.exceptions.RequestException) as excinfo:
         send_chat_completion(
@@ -249,7 +249,7 @@ def test_send_raises_on_http_error_status(monkeypatch):
             request_headers={"Authorization": f"Bearer {_SENTINEL_KEY}"},
         )
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     with pytest.raises(CloudLLMResponseError) as excinfo:
         send_chat_completion(
@@ -283,7 +283,7 @@ def test_send_raises_cloud_llm_response_error_on_malformed_body(monkeypatch, res
     def fake_post(url, json=None, headers=None, timeout=None):
         return _FakeResponse(**response_kwargs)
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     with pytest.raises(CloudLLMResponseError) as excinfo:
         send_chat_completion(
@@ -311,7 +311,7 @@ def test_response_adapter_defaults_usage_when_key_absent_entirely(monkeypatch):
     def fake_post(url, json=None, headers=None, timeout=None):
         return _FakeResponse(json_data={"choices": [{"message": {"content": "hi"}}]})
 
-    monkeypatch.setattr("opencohost.core.cloud_llm_client.requests.post", fake_post)
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
 
     result = send_chat_completion(
         base_url="https://api.example.com/v1",

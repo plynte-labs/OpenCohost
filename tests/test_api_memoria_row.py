@@ -175,7 +175,7 @@ def test_get_memoria_row_store_unavailable_503(tmp_path, monkeypatch):
 
 
 def test_get_memoria_row_transient_read_error_503(tmp_path, monkeypatch):
-    import opencohost.core.memoria_store as store_mod
+    import opencohost.core.memory.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)

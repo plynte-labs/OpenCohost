@@ -48,13 +48,13 @@ from fastapi.testclient import TestClient
 import opencohost.api.auth as auth
 import opencohost.api.main as main_mod
 from opencohost.core import llm_engine
-from opencohost.core.agent_notices import UNDISMISSED_CAP, AgentNoticeStore
-from opencohost.core.editorial_cards import (
+from opencohost.core.observability.agent_notices import UNDISMISSED_CAP, AgentNoticeStore
+from opencohost.core.editorial.editorial_cards import (
     EditorialCard,
     EditorialCardStatus,
     EditorialCardStore,
 )
-from opencohost.core.topic_inbox import PENDING_CAP, SOURCE_MAX, TopicInboxStore
+from opencohost.core.agenda.topic_inbox import PENDING_CAP, SOURCE_MAX, TopicInboxStore
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 from tests.test_api_phase1 import FakeHost
 

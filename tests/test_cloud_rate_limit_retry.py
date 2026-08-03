@@ -18,15 +18,16 @@ import os
 import queue
 import sys
 from unittest.mock import patch
+from opencohost.core.providers.cloud.cloud_llm_client import CloudLLMResponseError
+from opencohost.api import engine_host
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.core.cloud_llm_client import CloudLLMResponseError
-from opencohost.api import engine_host
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 
 def _cloud_config():

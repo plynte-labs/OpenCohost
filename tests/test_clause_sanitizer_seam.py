@@ -262,7 +262,7 @@ def test_instructed_repetition_within_sentence_is_collapsed_when_armed(monkeypat
 @pytest.mark.parametrize("source", ["kira-agenda", "chat", "direct", "ptt"])
 def test_output_guard_verdict_unchanged(source):
     """Sanitizing must never flip a guardrail verdict in either direction."""
-    from opencohost.core.repetition_guard import sanitize_clause_repetition
+    from opencohost.core.context.repetition_guard import sanitize_clause_repetition
 
     for raw in (INCIDENT, SEVERE,
                 "Sí, sí, esto va en serio.",

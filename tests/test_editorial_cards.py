@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from opencohost.core.editorial_cards import (
+from opencohost.core.editorial.editorial_cards import (
     EditorialCard,
     EditorialCardRating,
     EditorialCardRatingValue,
@@ -259,7 +259,7 @@ def test_list_all_orders_by_updated_at_desc(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 def _make_store_card(store: EditorialCardStore, topic: str) -> "EditorialCard":
-    from opencohost.core.editorial_cards import EditorialCard
+    from opencohost.core.editorial.editorial_cards import EditorialCard
     return store.upsert(EditorialCard(
         topic=topic,
         summary="Summary for test card.",
@@ -278,7 +278,7 @@ def test_list_armed_returns_only_armed_non_expired_cards(tmp_path) -> None:
     expired_card = _make_store_card(store, "Expired Topic Card")
     store.arm(expired_card.id)
     # Manually set expires_at to the past via upsert trick
-    from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus
+    from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStatus
     with store._connect() as conn:
         conn.execute(
             "UPDATE editorial_cards SET expires_at = ? WHERE id = ?",
@@ -461,7 +461,7 @@ def test_delete_removes_card_from_store(tmp_path) -> None:
 def test_delete_removes_associated_ratings(tmp_path) -> None:
     store = EditorialCardStore(tmp_path / "cards.db")
     card = _make_store_card(store, "Delete With Ratings")
-    from opencohost.core.editorial_cards import EditorialCardRating, EditorialCardRatingValue
+    from opencohost.core.editorial.editorial_cards import EditorialCardRating, EditorialCardRatingValue
     store.record_rating(EditorialCardRating(
         card_id=card.id,
         rating=EditorialCardRatingValue.USEFUL,
@@ -516,7 +516,7 @@ def test_set_auto_attach_provider_stores_callback() -> None:
 # ---------------------------------------------------------------------------
 
 def test_bridge_has_auto_attach_method(tmp_path) -> None:
-    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
     from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
     store = EditorialCardStore(tmp_path / "cards.db")
     controller = KiraAgendaController()
@@ -525,7 +525,7 @@ def test_bridge_has_auto_attach_method(tmp_path) -> None:
 
 
 def test_register_provider_wires_auto_attach(tmp_path) -> None:
-    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
     from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
     store = EditorialCardStore(tmp_path / "cards.db")
     controller = KiraAgendaController()
@@ -538,7 +538,7 @@ def test_register_provider_wires_auto_attach(tmp_path) -> None:
 
 
 def test_auto_attach_returns_false_when_no_armed_cards(tmp_path) -> None:
-    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
     from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
     store = EditorialCardStore(tmp_path / "cards.db")
     controller = KiraAgendaController()
@@ -549,7 +549,7 @@ def test_auto_attach_returns_false_when_no_armed_cards(tmp_path) -> None:
 
 
 def test_auto_attach_attaches_matching_card(tmp_path) -> None:
-    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
     from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
     store = EditorialCardStore(tmp_path / "cards.db")
     controller = KiraAgendaController()
@@ -576,7 +576,7 @@ def test_auto_attach_attaches_matching_card(tmp_path) -> None:
 
 def test_auto_attach_returns_false_on_corrupt_store(tmp_path) -> None:
     """auto_attach must be fail-open: exception -> False, no crash."""
-    from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
+    from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
     from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
 
     # Write garbage to the DB file so sqlite3 fails

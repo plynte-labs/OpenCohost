@@ -43,7 +43,7 @@ from opencohost.api.models import (
 )
 from opencohost.api.shared import _profiles_lock
 from opencohost.config.settings import save_last_profile
-from opencohost.core.profiles import guardar_perfiles
+from opencohost.core.profiles.profiles import guardar_perfiles
 
 router = APIRouter()
 

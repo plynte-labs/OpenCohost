@@ -24,7 +24,7 @@ from opencohost.core import llm_engine as le
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.stream_admin.oauth_store import OAuthStore
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 INCIDENT = "No había roadmap, no había monetización, no había roadmap, no había roadmap."
 INCIDENT_REPAIRED = "No había roadmap, no había monetización."

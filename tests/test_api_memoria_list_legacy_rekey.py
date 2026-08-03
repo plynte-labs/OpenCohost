@@ -50,7 +50,7 @@ def _app():
 def _seed(db_path):
     """Real schema (UNIQUE(profile_id, stable_key)) + legacy name-keyed rows
     and a UUID-keyed row, mirroring the production save history."""
-    from opencohost.core.memoria_store import MemoriaStore
+    from opencohost.core.memory.memoria_store import MemoriaStore
 
     MemoriaStore(db_path)  # creates the real schema, index, and PRAGMA v1
 

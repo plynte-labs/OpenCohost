@@ -23,8 +23,8 @@ import threading
 from unittest.mock import MagicMock
 
 import opencohost.core.llm_engine as llm_engine
-from opencohost.core import memoria_store
-from opencohost.core.memoria_store import MemoriaStore, _SESSION_SUMMARY_MARKER
+from opencohost.core.memory import memoria_store
+from opencohost.core.memory.memoria_store import MemoriaStore, _SESSION_SUMMARY_MARKER
 from opencohost.config.settings import (
     MEMORIAS_SUMMARY_CAP,
     MEMORIAS_SUMMARY_MIN_TITLES,

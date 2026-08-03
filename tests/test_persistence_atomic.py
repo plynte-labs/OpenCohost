@@ -25,14 +25,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from opencohost.config.storage import atomic_write_text
-from opencohost.core.music_library import MusicLibrary, MusicTrack
+from opencohost.core.music.music_library import MusicLibrary, MusicTrack
 from opencohost.avatar.avatar_config import (
     AvatarConfig,
     AvatarConfigUnreadableError,
     load_avatar_config,
     save_avatar_config,
 )
-import opencohost.core.cohost_profiles as cohost_mod
+import opencohost.core.profiles.cohost_profiles as cohost_mod
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]

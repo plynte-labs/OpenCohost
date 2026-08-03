@@ -1,4 +1,4 @@
-"""Tests for opencohost.core.agenda_persistence — AgendaPersistence.
+"""Tests for opencohost.core.agenda.agenda_persistence — AgendaPersistence.
 
 Design contract (engram sdd/agenda-persistence/design, owner-approved):
   - Restart survival only: APPROVED/QUEUED topic definitions + session
@@ -20,13 +20,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from opencohost.core.agenda_persistence import (
+from opencohost.core.agenda.agenda_persistence import (
     READ_TIMEOUT_SECONDS,
     RESTORE_CAP,
     SCHEMA_VERSION,
@@ -38,6 +32,12 @@ from opencohost.smart_aggregator.kira_agenda_controller import (
     KiraAgendaController,
     TopicStatus,
 )
+
+import pytest
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ def test_save_if_changed_skips_disk_when_state_is_identical(tmp_path: Path) -> N
     ctrl = controller_with_queue()
 
     assert persistence.save_if_changed(ctrl) is True
-    with patch("opencohost.core.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
+    with patch("opencohost.core.agenda.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
         assert persistence.save_if_changed(ctrl) is False
         connect.assert_not_called()
 
@@ -262,11 +262,11 @@ def test_bounded_timeouts_on_save_and_load(tmp_path: Path) -> None:
     persistence, db = make_persistence(tmp_path)
     ctrl = controller_with_queue()
 
-    with patch("opencohost.core.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
+    with patch("opencohost.core.agenda.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
         persistence.save_if_changed(ctrl)
         assert connect.call_args.kwargs.get("timeout") == WRITE_TIMEOUT_SECONDS
 
-    with patch("opencohost.core.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
+    with patch("opencohost.core.agenda.agenda_persistence.sqlite3.connect", wraps=sqlite3.connect) as connect:
         AgendaPersistence(db).load_into(KiraAgendaController())
         assert connect.call_args.kwargs.get("timeout") == READ_TIMEOUT_SECONDS
 
@@ -283,7 +283,7 @@ def test_connections_are_closed(tmp_path: Path) -> None:
         created.append(conn)
         return conn
 
-    with patch("opencohost.core.agenda_persistence.sqlite3.connect", side_effect=recording_connect):
+    with patch("opencohost.core.agenda.agenda_persistence.sqlite3.connect", side_effect=recording_connect):
         persistence.save_if_changed(controller_with_queue())
         AgendaPersistence(db).load_into(KiraAgendaController())
 
@@ -343,7 +343,7 @@ def test_failed_load_makes_persistence_read_only_and_preserves_disk(tmp_path: Pa
     warnings: list[str] = []
     loader = AgendaPersistence(db, log_fn=warnings.append)
     with patch(
-        "opencohost.core.agenda_persistence.sqlite3.connect",
+        "opencohost.core.agenda.agenda_persistence.sqlite3.connect",
         side_effect=sqlite3.OperationalError("database is locked"),
     ):
         assert loader.load_into(KiraAgendaController()) == 0
@@ -365,7 +365,7 @@ def test_warn_flag_resets_after_successful_write(tmp_path: Path) -> None:
     ctrl = controller_with_queue()
 
     with patch(
-        "opencohost.core.agenda_persistence.sqlite3.connect",
+        "opencohost.core.agenda.agenda_persistence.sqlite3.connect",
         side_effect=sqlite3.OperationalError("disk I/O error"),
     ):
         persistence.save_if_changed(ctrl)
@@ -376,7 +376,7 @@ def test_warn_flag_resets_after_successful_write(tmp_path: Path) -> None:
     extra = ctrl.add_topic("Tema extra", approved=True)
     ctrl.queue_topic(extra.id)
     with patch(
-        "opencohost.core.agenda_persistence.sqlite3.connect",
+        "opencohost.core.agenda.agenda_persistence.sqlite3.connect",
         side_effect=sqlite3.OperationalError("disk I/O error"),
     ):
         persistence.save_if_changed(ctrl)
@@ -407,7 +407,7 @@ def test_oversized_constraints_row_is_skipped(tmp_path: Path) -> None:
 
 
 def test_constructor_fails_open_when_directory_creation_fails(tmp_path: Path) -> None:
-    with patch("opencohost.core.agenda_persistence.Path.mkdir", side_effect=PermissionError("denied")):
+    with patch("opencohost.core.agenda.agenda_persistence.Path.mkdir", side_effect=PermissionError("denied")):
         persistence = AgendaPersistence(str(tmp_path / "sub" / "cards.db"))
     assert persistence is not None  # launch never breaks
 

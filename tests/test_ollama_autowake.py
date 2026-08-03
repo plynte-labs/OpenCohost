@@ -215,7 +215,7 @@ def test_status_endpoint_exposes_ollama_warming():
                 "generation_model": "qwen3:8b",
             }
             self.monitor = MagicMock()
-            from opencohost.core.health_monitor import MonitorState
+            from opencohost.core.observability.health_monitor import MonitorState
 
             self.monitor.state = MonitorState(
                 vram_status="ok",

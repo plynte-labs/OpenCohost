@@ -256,7 +256,7 @@ def test_destructive_music_and_agenda_cleanup_require_confirmation() -> None:
 
 
 def test_audio_bed_state_mutation_is_locked() -> None:
-    source = read_text(ROOT / "opencohost" / "core" / "audio_bed.py")
+    source = read_text(ROOT / "opencohost" / "core" / "music" / "audio_bed.py")
 
     assert "threading.RLock()" in source
     assert "with self._lock:" in source

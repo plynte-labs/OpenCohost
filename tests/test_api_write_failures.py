@@ -63,7 +63,7 @@ def _app():
 
 @pytest.fixture
 def profiles_file(tmp_path, monkeypatch):
-    import opencohost.core.profiles as profiles_mod
+    import opencohost.core.profiles.profiles as profiles_mod
 
     path = tmp_path / "perfiles.json"
     path.write_text(
@@ -80,7 +80,7 @@ def profiles_file(tmp_path, monkeypatch):
 
 
 def test_post_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
-    import opencohost.core.profiles as profiles_mod
+    import opencohost.core.profiles.profiles as profiles_mod
 
     monkeypatch.setattr(profiles_mod.os, "replace", _raise_oserror)
     with TestClient(_app()) as client:
@@ -90,7 +90,7 @@ def test_post_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
 
 
 def test_put_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
-    import opencohost.core.profiles as profiles_mod
+    import opencohost.core.profiles.profiles as profiles_mod
 
     monkeypatch.setattr(profiles_mod.os, "replace", _raise_oserror)
     with TestClient(_app()) as client:
@@ -100,7 +100,7 @@ def test_put_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
 
 
 def test_delete_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
-    import opencohost.core.profiles as profiles_mod
+    import opencohost.core.profiles.profiles as profiles_mod
 
     monkeypatch.setattr(profiles_mod.os, "replace", _raise_oserror)
     with TestClient(_app()) as client:
@@ -115,7 +115,7 @@ def test_delete_perfiles_write_failure_returns_503(profiles_file, monkeypatch):
 
 
 def test_post_cohost_profiles_write_failure_returns_503(tmp_path, monkeypatch):
-    import opencohost.core.cohost_profiles as cp_mod
+    import opencohost.core.profiles.cohost_profiles as cp_mod
     import opencohost.config.storage as storage_mod
 
     monkeypatch.setattr(cp_mod, "COHOST_PROFILES_FILE", str(tmp_path / "cohost.json"))

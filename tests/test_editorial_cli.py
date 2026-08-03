@@ -186,7 +186,7 @@ def test_arm_missing_card_exits_1(tmp_path: Path) -> None:
 
 def test_arm_used_card_exits_1(tmp_path: Path) -> None:
     """Arming a USED card returns False from the store, so the CLI exits 1."""
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
 
     db = str(tmp_path / "cards.db")
     run(["--db", db, "create",
@@ -366,7 +366,7 @@ def test_create_with_invalid_expires_exits_1(tmp_path: Path) -> None:
 
 def _create_used_card(db: str, topic: str = "Rearm Test Card") -> str:
     """Create, arm, activate, and mark-used a card. Returns card_id."""
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
     run(["--db", db, "create",
          "--topic", topic,
          "--summary", f"Summary for {topic}.",
@@ -412,7 +412,7 @@ def test_rearm_expired_card_needs_clear_expiry_flag(tmp_path: Path) -> None:
     code, out, _ = run(["--db", db, "list", "--json"])
     card_id = json.loads(out)[0]["id"]
 
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
     with EditorialCardStore(db)._connect() as conn:
         conn.execute(
             "UPDATE editorial_cards SET status = 'expired' WHERE id = ?",
@@ -433,7 +433,7 @@ def test_rearm_with_clear_expiry_flag_succeeds(tmp_path: Path) -> None:
     code, out, _ = run(["--db", db, "list", "--json"])
     card_id = json.loads(out)[0]["id"]
 
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
     with EditorialCardStore(db)._connect() as conn:
         conn.execute(
             "UPDATE editorial_cards SET status = 'expired', expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",

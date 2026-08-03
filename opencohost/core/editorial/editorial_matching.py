@@ -12,7 +12,7 @@ import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from opencohost.core.editorial_cards import EditorialCard
+    from opencohost.core.editorial.editorial_cards import EditorialCard
 
 
 # ---------------------------------------------------------------------------

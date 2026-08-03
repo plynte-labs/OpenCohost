@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 from opencohost.api.dispatch import Dispatcher
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.turn_stamp import TurnStamp
+from opencohost.core.scheduling.turn_stamp import TurnStamp
 
 
 def _resp(text):

@@ -41,7 +41,7 @@ from opencohost.api.models import (
     CohostProfileSelectResponse,
     CohostProfilesResponse,
 )
-from opencohost.core.cohost_profiles import (
+from opencohost.core.profiles.cohost_profiles import (
     load_cohost_profiles,
     normalize_cohost_profile,
     sanitize_profile_name,

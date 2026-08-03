@@ -25,7 +25,7 @@ import pytest
 
 import opencohost.core.llm_engine as llm_engine
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.memoria_store import MemoriaStore, build_signature
+from opencohost.core.memory.memoria_store import MemoriaStore, build_signature
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +634,7 @@ def test_logs_carry_counts_but_never_memory_text(monkeypatch, tmp_path, caplog):
     'profile-1|k1' key can never carry a sentinel, so the assertion would pass
     over `upsert_draft`'s own `logger.debug("memoria upsert conflict
     stable_key=%s ...")` — which fires on exactly the mid-sweep race path."""
-    from opencohost.core.memoria_store import derive_stable_key
+    from opencohost.core.memory.memoria_store import derive_stable_key
 
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
@@ -860,7 +860,7 @@ def test_cloud_transport_routes_the_judge_through_the_active_profile(monkeypatch
     the real `_ollama_judge_chat`, whose `if not is_local` branch must reach
     `_cloud_chat` with the active profile's base_url/model. Only the HTTP call
     itself is stubbed."""
-    from opencohost.core import cloud_llm_client
+    from opencohost.core.providers.cloud import cloud_llm_client
 
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
     store = _store(tmp_path)

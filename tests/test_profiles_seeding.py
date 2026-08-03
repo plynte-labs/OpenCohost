@@ -39,7 +39,7 @@ VALID_DEFAULTS = {
 
 def _call_cargar(profiles_path: str, defaults_path: str) -> dict:
     """Call cargar_perfiles() with patched paths. Always uses fresh patch context."""
-    import opencohost.core.profiles as prof_mod
+    import opencohost.core.profiles.profiles as prof_mod
     with (
         patch.object(prof_mod, "PROFILES_FILE", profiles_path),
         patch.object(prof_mod, "DEFAULT_PROFILES_FILE", defaults_path),

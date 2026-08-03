@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from opencohost.core.health_monitor import QwenProcessManager
+from opencohost.core.observability.health_monitor import QwenProcessManager
 
 
 def _server_app_id() -> str:

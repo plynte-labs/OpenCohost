@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from opencohost.core.repetition_guard import (
+from opencohost.core.context.repetition_guard import (
     SANITIZE_LENGTH_AXES_FLOOR,
     SANITIZE_MIN_REMAINING_CHARS,
     SANITIZE_REJECT_DISTINCT,
@@ -331,7 +331,7 @@ def test_no_intent_detection_exists():
     """
     import inspect
 
-    from opencohost.core import repetition_guard
+    from opencohost.core.context import repetition_guard
 
     source = inspect.getsource(repetition_guard)
     marker = "sanitize_clause_repetition"

@@ -5,7 +5,7 @@ Design: sdd/kira-personalization-onboarding-20260705 (design.md §5 CTK, §7).
 
 Structurally mirrors opencohost/ui/profile_panel.py's build/cleanup
 lifecycle and constructor-injected-callback style, but talks to
-opencohost.core.personalization directly — no engine access, no
+opencohost.core.profiles.personalization directly — no engine access, no
 CallbackDispatcher. Unlike a profile switch, personalization has nothing
 to dispatch to the running engine: llm_engine.py reads the store itself
 each turn via its own mtime cache (opencohost/core/personalization.py),
@@ -25,7 +25,7 @@ from opencohost.config.settings import (
     PERSONALIZATION_NICKNAME_MAX,
     PERSONALIZATION_OCCUPATION_MAX,
 )
-from opencohost.core.personalization import (
+from opencohost.core.profiles.personalization import (
     clear_personalization,
     load_personalization,
     save_personalization,
@@ -109,7 +109,7 @@ def unmount(owner: Any) -> None:
 class _PersonalizationWindow(ctk.CTkToplevel):
     """CTkToplevel form for the global streamer personalization store.
 
-    Reads/writes opencohost.core.personalization directly (no dispatcher).
+    Reads/writes opencohost.core.profiles.personalization directly (no dispatcher).
     """
 
     def __init__(self, parent: ctk.CTkFrame, on_log: Callable[[str], None]) -> None:

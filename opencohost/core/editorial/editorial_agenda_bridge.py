@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from opencohost.config import settings
-from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
+from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.i18n import active as i18n_active
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaTopic, KiraAgendaController
 
@@ -115,7 +115,7 @@ class EditorialAgendaBridge:
                 c for c in cards
                 if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
             ]
-            from opencohost.core.editorial_matching import match_score, select_card
+            from opencohost.core.editorial.editorial_matching import match_score, select_card
             text = (topic.title or "") + (" " + topic.angle if topic.angle else "")
             candidates = [c for c in eligible if match_score(text, c) >= 0.8]
             card = select_card(text, eligible)
@@ -164,7 +164,7 @@ class EditorialAgendaBridge:
                 c for c in cards
                 if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
             ]
-            from opencohost.core.editorial_matching import select_card
+            from opencohost.core.editorial.editorial_matching import select_card
             card = select_card(query_text, eligible)
             if card is None:
                 return None

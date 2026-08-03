@@ -1,7 +1,7 @@
 import json
 
 from opencohost.config import settings
-from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState
+from opencohost.core.providers.llm_tiers import LLMTierConfig, LLMTierState
 
 
 def test_tier_config_resolves_configured_models():

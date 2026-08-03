@@ -17,8 +17,8 @@ import customtkinter as ctk
 import tkinter.messagebox as messagebox
 
 from opencohost.config.settings import DEFAULT_MODEL, MODELS_CATALOG, resolve_llm_tiers, resolve_startup_model
-from opencohost.core.ollama_startup import OllamaStartupManager
-from opencohost.core.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
+from opencohost.core.providers.local.ollama_startup import OllamaStartupManager
+from opencohost.core.providers.llm_tiers import LLM_TIER_LABELS, LLM_TIERS
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
 from opencohost.ui import styles, theme

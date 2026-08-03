@@ -2,10 +2,6 @@ import os
 import json
 import time
 from typing import Callable, Optional
-
-# Auto-revoke write mode after inactivity (seconds)
-WRITE_TIMEOUT_SECONDS = 900  # 15 minutes
-
 import yaml
 
 from .analytics import AnalyticsTracker
@@ -14,6 +10,11 @@ from .oauth_store import OAuthStore, redact_token_text
 from .providers import ProviderAuthError, ProviderError, ProviderUnsupportedError, StreamMetadata
 from .twitch_provider import TwitchProvider
 from .youtube_provider import YouTubeProvider
+
+# Auto-revoke write mode after inactivity (seconds)
+WRITE_TIMEOUT_SECONDS = 900  # 15 minutes
+
+
 
 
 class AdminManager:

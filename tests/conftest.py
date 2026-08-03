@@ -202,7 +202,7 @@ def _isolate_personalization_file(tmp_path, monkeypatch):
     be patched — patching ``settings.PERSONALIZATION_FILE`` would have no
     effect.
     """
-    import opencohost.core.personalization as personalization_mod
+    import opencohost.core.profiles.personalization as personalization_mod
 
     monkeypatch.setattr(
         personalization_mod,

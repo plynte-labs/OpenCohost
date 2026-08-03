@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
-from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
+from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
 
 

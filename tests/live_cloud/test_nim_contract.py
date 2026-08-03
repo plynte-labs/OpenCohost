@@ -73,7 +73,7 @@ def test_live_auth_failure_is_a_contract_failure(live_posture):
     Proves the auth path is actually exercised by the test above: with a bogus
     key the same call must NOT return usable content.
     """
-    from opencohost.core import cloud_llm_client
+    from opencohost.core.providers.cloud import cloud_llm_client
 
     with pytest.raises(Exception):
         cloud_llm_client.send_chat_completion(

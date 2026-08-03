@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-from opencohost.core import editorial_cards as editorial_cards_mod
-from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
-from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
+from opencohost.core.editorial import editorial_cards as editorial_cards_mod
+from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStatus, EditorialCardStore
 from opencohost.smart_aggregator import AgendaState, KiraAgendaController, TopicStatus
 
 

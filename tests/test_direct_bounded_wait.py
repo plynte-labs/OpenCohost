@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 from opencohost.api.dispatch import Dispatcher
 from opencohost.config.settings import DIRECT_ANSWER_MAX_WAIT_SECONDS
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.turn_stamp import TurnStamp
+from opencohost.core.scheduling.turn_stamp import TurnStamp
 
 
 def _resp(text):

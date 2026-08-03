@@ -12,7 +12,7 @@ name lookup — same precedent as tests/test_memorias_capture_engine.py) AND
 redirect `llm_engine.MEMORIAS_DB` to a tmp path (see the `_enable_memorias`
 helper) — NEVER let the real store be instantiated against USER_DATA_DIR.
 Pure store-level tests (retrieval scoring, budget assembly, clipping) do
-not need the flag at all — they call opencohost.core.memoria_store
+not need the flag at all — they call opencohost.core.memory.memoria_store
 functions directly.
 """
 
@@ -32,7 +32,7 @@ from opencohost.config.settings import (
     MEMORIAS_PINNED_CLIP_CHARS,
     MEMORIAS_PROFILE_CAP,
 )
-from opencohost.core.memoria_store import (
+from opencohost.core.memory.memoria_store import (
     MemoriaStore,
     build_injection_lines,
     build_title,
@@ -217,7 +217,7 @@ def test_signature_recall_beats_title_only_on_paraphrase(tmp_path):
     """Candidate 2 (memoria_rag_followups_20260716): a row whose 3-token title
     misses the topic but whose 12-token signature (built from the full pair)
     shares >=2 tokens is selected — the whole point of the signature column."""
-    from opencohost.core.memoria_store import build_signature
+    from opencohost.core.memory.memoria_store import build_signature
 
     db_path = tmp_path / "memorias.db"
     signature = build_signature(
@@ -264,7 +264,7 @@ def test_min_clip_remainder_exact_boundary_40_clips_39_rejects(tmp_path):
     """4R correction round (R3 suggestion): pins the exact
     _MIN_CLIP_REMAINDER_CHARS boundary — a remaining budget of exactly 40
     chars still clips the row in; 39 rejects it."""
-    from opencohost.core.memoria_store import _MIN_CLIP_REMAINDER_CHARS
+    from opencohost.core.memory.memoria_store import _MIN_CLIP_REMAINDER_CHARS
 
     db_path = tmp_path / "memorias.db"
     long_content = "musica synthwave " + "relleno " * 20  # well over 40 chars

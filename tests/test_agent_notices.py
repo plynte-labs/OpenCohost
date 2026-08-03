@@ -1,4 +1,4 @@
-"""Strict-TDD tests for opencohost.core.agent_notices — AgentNoticeStore.
+"""Strict-TDD tests for opencohost.core.observability.agent_notices — AgentNoticeStore.
 
 Phase 3 of track agent_context_gateway_20260705 (design.md 'POST
 /api/agent/notice'). The store clones the TopicInboxStore shape:
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from opencohost.core.agent_notices import (
+from opencohost.core.observability.agent_notices import (
     ID_PREFIX,
     SOURCE_MAX,
     TEXT_MAX,
@@ -311,13 +311,13 @@ def test_fail_open_corrupt_db(tmp_path: Path) -> None:
 def test_list_pending_uses_short_read_timeout(tmp_path: Path) -> None:
     from unittest.mock import patch
 
-    from opencohost.core.agent_notices import READ_TIMEOUT_SECONDS
+    from opencohost.core.observability.agent_notices import READ_TIMEOUT_SECONDS
 
     store, _ = make_store(tmp_path)
     store.propose("Timeout probe", source="bot")
 
     with patch(
-        "opencohost.core.agent_notices.sqlite3.connect", wraps=sqlite3.connect
+        "opencohost.core.observability.agent_notices.sqlite3.connect", wraps=sqlite3.connect
     ) as connect:
         store.list_pending()
 
@@ -328,13 +328,13 @@ def test_list_pending_uses_short_read_timeout(tmp_path: Path) -> None:
 def test_dismiss_uses_short_write_timeout(tmp_path: Path) -> None:
     from unittest.mock import patch
 
-    from opencohost.core.agent_notices import WRITE_TIMEOUT_SECONDS
+    from opencohost.core.observability.agent_notices import WRITE_TIMEOUT_SECONDS
 
     store, _ = make_store(tmp_path)
     row = store.propose("Write timeout probe", source="bot")
 
     with patch(
-        "opencohost.core.agent_notices.sqlite3.connect", wraps=sqlite3.connect
+        "opencohost.core.observability.agent_notices.sqlite3.connect", wraps=sqlite3.connect
     ) as connect:
         store.dismiss(row["id"])
 
@@ -357,7 +357,7 @@ def test_store_closes_sqlite_connections(tmp_path: Path) -> None:
         return conn
 
     with patch(
-        "opencohost.core.agent_notices.sqlite3.connect", side_effect=recording_connect
+        "opencohost.core.observability.agent_notices.sqlite3.connect", side_effect=recording_connect
     ):
         row = store.propose("Close me", source="bot")
         store.list_pending()

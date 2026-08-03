@@ -17,6 +17,9 @@ import os
 import sys
 import threading
 from unittest.mock import MagicMock, patch, PropertyMock
+from opencohost.ui.state import UIState
+from opencohost.ui.protocols import CallbackDispatcher
+from opencohost.ui.stream_admin_ui import StreamAdminUI
 
 import pytest
 
@@ -24,9 +27,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.ui.state import UIState
-from opencohost.ui.protocols import CallbackDispatcher
-from opencohost.ui.stream_admin_ui import StreamAdminUI
+
 
 
 # ---------------------------------------------------------------------------

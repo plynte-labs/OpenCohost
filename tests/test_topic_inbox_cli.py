@@ -132,7 +132,7 @@ def test_topic_propose_validation_error_exits_1(tmp_path: Path) -> None:
 
 
 def test_topic_propose_cap_error_exits_1(tmp_path: Path) -> None:
-    from opencohost.core.topic_inbox import PENDING_CAP
+    from opencohost.core.agenda.topic_inbox import PENDING_CAP
 
     db = str(tmp_path / "cards.db")
     for i in range(PENDING_CAP):

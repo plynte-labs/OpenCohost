@@ -30,7 +30,7 @@ import pytest
 
 import opencohost.core.llm_engine as llm_engine
 from opencohost.config.settings import HISTORY_MAX_TURNS
-from opencohost.core.memoria_store import MemoriaStore
+from opencohost.core.memory.memoria_store import MemoriaStore
 from opencohost.i18n import active as i18n_active
 
 
@@ -309,7 +309,7 @@ def test_eviction_capture_stores_full_pair_signature(monkeypatch, tmp_path):
     """Candidate 2 (memoria_rag_followups_20260716): the captured draft row
     persists a retrieval signature built from the FULL user+assistant pair
     via build_signature — the scorer's input, wider than the 3-token title."""
-    from opencohost.core.memoria_store import build_signature
+    from opencohost.core.memory.memoria_store import build_signature
 
     motor, _, _ = _make_motor()
     _enable_memorias(monkeypatch, motor, tmp_path)

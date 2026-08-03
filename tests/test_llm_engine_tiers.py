@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from opencohost.config.settings import LLM_TIER_EFFECTIVE_CTX_CAPS
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.llm_tiers import LLMTierConfig
+from opencohost.core.providers.llm_tiers import LLMTierConfig
 from opencohost.i18n import active as i18n_active
 
 
@@ -171,7 +171,7 @@ def test_fast_qwen_native_ctx_is_clamped_to_effective_cap_for_options_and_budget
     motor.ollama.chat.return_value = {"message": {"content": "respuesta rapida"}}
 
     captured_budget = {}
-    from opencohost.core import context_budget
+    from opencohost.core.context import context_budget
     real_apply = context_budget.apply_char_budget
 
     def spy_apply(messages, *, ctx_limit, max_output_tokens, safety_factor):

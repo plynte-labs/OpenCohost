@@ -11,7 +11,7 @@ re-derived — see opencohost/core/llm_engine.py).
 import pytest
 from fastapi.testclient import TestClient
 
-from opencohost.core.health_monitor import MonitorState
+from opencohost.core.observability.health_monitor import MonitorState
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]

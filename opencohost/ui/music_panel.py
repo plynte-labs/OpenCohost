@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
-from opencohost.core.music_library import KNOWN_MOODS, MusicTrack
+from opencohost.core.music.music_library import KNOWN_MOODS, MusicTrack
 from opencohost.ui import theme
 
 

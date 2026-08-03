@@ -1,4 +1,4 @@
-"""Tests for opencohost.core.topic_inbox — TopicInboxStore.
+"""Tests for opencohost.core.agenda.topic_inbox — TopicInboxStore.
 
 TDD Slice 1: write ALL tests first, confirm they fail, then implement the module.
 
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 # This import will FAIL until the module exists — that is intentional for TDD.
-from opencohost.core.topic_inbox import (
+from opencohost.core.agenda.topic_inbox import (
     TITLE_MAX,
     ANGLE_MAX,
     TAGS_MAX,
@@ -381,12 +381,12 @@ def test_list_pending_uses_short_read_timeout(tmp_path: Path) -> None:
     """list_pending runs on the Tk main thread every poll; a writer holding
     the lock must stall it for READ_TIMEOUT_SECONDS, not sqlite's 5s default."""
     from unittest.mock import patch
-    from opencohost.core.topic_inbox import READ_TIMEOUT_SECONDS
+    from opencohost.core.agenda.topic_inbox import READ_TIMEOUT_SECONDS
 
     store, _db = make_store(tmp_path)
     valid_propose(store)
 
-    with patch("opencohost.core.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
+    with patch("opencohost.core.agenda.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
         store.list_pending()
 
     assert connect.call_args.kwargs.get("timeout") == READ_TIMEOUT_SECONDS
@@ -439,7 +439,7 @@ def test_bare_prefix_id_lands_in_invalid(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_oversized_source_rejected_at_propose(tmp_path: Path) -> None:
-    from opencohost.core.topic_inbox import SOURCE_MAX
+    from opencohost.core.agenda.topic_inbox import SOURCE_MAX
 
     store, _ = make_store(tmp_path)
     with pytest.raises(TopicInboxValidationError):
@@ -471,12 +471,12 @@ def test_approve_and_discard_use_short_write_timeout(tmp_path: Path) -> None:
     """approve/discard run on the Tk main thread (button press); a CLI writer
     holding the lock must not freeze the UI for sqlite's 5s default."""
     from unittest.mock import patch
-    from opencohost.core.topic_inbox import WRITE_TIMEOUT_SECONDS
+    from opencohost.core.agenda.topic_inbox import WRITE_TIMEOUT_SECONDS
 
     store, _ = make_store(tmp_path)
     row = valid_propose(store)
 
-    with patch("opencohost.core.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
+    with patch("opencohost.core.agenda.topic_inbox.sqlite3.connect", wraps=sqlite3.connect) as connect:
         store.approve(row["id"])
         store.discard(row["id"])
 
@@ -503,7 +503,7 @@ def test_store_closes_sqlite_connections(tmp_path: Path) -> None:
         created.append(conn)
         return conn
 
-    with patch("opencohost.core.topic_inbox.sqlite3.connect", side_effect=recording_connect):
+    with patch("opencohost.core.agenda.topic_inbox.sqlite3.connect", side_effect=recording_connect):
         row = store.propose(title="Close Me", angle="a", tags=[], source="bot")
         store.list_pending()
         store.list_all()

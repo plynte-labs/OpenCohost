@@ -22,7 +22,7 @@ import pytest
 
 def _make_library_with_track():
     """Return a MusicLibrary stub with one valid track."""
-    from opencohost.core.music_library import MusicLibrary, MusicTrack
+    from opencohost.core.music.music_library import MusicLibrary, MusicTrack
 
     lib = MagicMock(spec=MusicLibrary)
     track = MusicTrack(
@@ -40,7 +40,7 @@ def _make_library_with_track():
 
 def _make_audio_bed():
     """Return an AudioBedEngine with pygame mocked out, current_track set."""
-    from opencohost.core.audio_bed import AudioBedEngine, AudioBedPolicy
+    from opencohost.core.music.audio_bed import AudioBedEngine, AudioBedPolicy
 
     lib, track = _make_library_with_track()
     policy = AudioBedPolicy(

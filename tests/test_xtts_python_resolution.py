@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from opencohost.config.storage import resolve_xtts_python
-from opencohost.core.health_monitor import LIFECYCLE_FAILED, QwenProcessManager
+from opencohost.core.observability.health_monitor import LIFECYCLE_FAILED, QwenProcessManager
 
 
 # ──────────────────────────────────────────────
@@ -137,7 +137,7 @@ class TestQwenDegradationWhenNoPython:
         with patch.dict(os.environ, env, clear=True):
             with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     result = mgr.start()
 
         assert result is False
@@ -179,7 +179,7 @@ class TestQwenDegradationWhenNoPython:
         with patch.dict(os.environ, env, clear=True):
             with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("opencohost.core.health_monitor.logger") as mock_logger:
+                with patch("opencohost.core.observability.health_monitor.logger") as mock_logger:
                     mgr.start()
 
         # At least one warning should mention how to fix the problem
@@ -196,8 +196,8 @@ class TestQwenDegradationWhenNoPython:
         with patch.dict(os.environ, {"XTTS_PYTHON": "/fake/python"}, clear=False):
             with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("opencohost.core.health_monitor.LOG_DIR", str(tmp_path)):
-                    with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
+                with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                         with patch.object(mgr, "_check_health", return_value=True):
                             mock_popen.return_value.poll.return_value = None
                             result = mgr.start()

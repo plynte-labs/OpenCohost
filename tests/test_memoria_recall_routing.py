@@ -18,7 +18,7 @@ The two REAL owner queries that failed in production are pinned as fixtures,
 both plain and PTT-wrapped: they must route to recency AND produce a non-empty
 injection when summaries/rows exist.
 
-Pure detector/recency tests call opencohost.core.memoria_store directly; engine
+Pure detector/recency tests call opencohost.core.memory.memoria_store directly; engine
 router tests drive a real MotorVocalIA + real MemoriaStore (mirror
 tests/test_memorias_retrieval.py) and never touch USER_DATA_DIR.
 """
@@ -37,7 +37,7 @@ from opencohost.config.settings import (
     MEMORIAS_MAX_INJECT_CHARS,
     MEMORIAS_META_RECALL_K,
 )
-from opencohost.core.memoria_store import (
+from opencohost.core.memory.memoria_store import (
     MemoriaStore,
     _SESSION_SUMMARY_MARKER,
     build_recency_lines,

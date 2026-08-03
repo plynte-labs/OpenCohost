@@ -36,7 +36,7 @@ from opencohost.config.settings import (
     load_memorias_notice_dismissed,
     save_memorias_notice_dismissed,
 )
-from opencohost.core.memoria_store import pinned_injection_counter
+from opencohost.core.memory.memoria_store import pinned_injection_counter
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 from opencohost.ui.window_utils import apply_app_icon, raise_window, show_toplevel
 

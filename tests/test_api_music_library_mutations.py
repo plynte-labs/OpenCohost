@@ -19,7 +19,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from opencohost.core.music_library import MusicLibrary, MusicTrack
+from opencohost.core.music.music_library import MusicLibrary, MusicTrack
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
@@ -215,7 +215,7 @@ def test_import_unknown_mood_422_no_copy(tmp_path):
 def test_import_copy_oserror_503_registry_unchanged(tmp_path, monkeypatch):
     """A copy failure (OSError from shutil.copy2) surfaces as 503
     music_write_failed and leaves the registry/config untouched."""
-    import opencohost.core.music_library as music_mod
+    import opencohost.core.music.music_library as music_mod
 
     def _boom(*args, **kwargs):
         raise OSError("disk full")

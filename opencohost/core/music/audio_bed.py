@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from opencohost.core.music_library import MusicLibrary, MusicTrack, normalize_mood
+from opencohost.core.music.music_library import MusicLibrary, MusicTrack, normalize_mood
 
 
 @dataclass

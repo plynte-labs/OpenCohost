@@ -32,10 +32,10 @@ from unittest.mock import MagicMock, patch
 
 from opencohost.api import engine_host
 from opencohost.config import settings
-from opencohost.core import cloud_llm_client
+from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.llm_engine import MotorVocalIA
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 
 def _wait_until(predicate, *, timeout=2.0):

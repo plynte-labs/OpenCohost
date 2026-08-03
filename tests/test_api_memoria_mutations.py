@@ -197,7 +197,7 @@ def test_post_memoria_flags_missing_id_404(tmp_path, monkeypatch):
 def test_post_memoria_flags_store_write_failure_503(tmp_path, monkeypatch):
     import sqlite3
 
-    import opencohost.core.memoria_store as store_mod
+    import opencohost.core.memory.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)
@@ -283,7 +283,7 @@ def test_post_memoria_delete_wrong_profile_id_404_row_survives(tmp_path, monkeyp
 
 
 def test_post_memoria_delete_store_write_failure_503(tmp_path, monkeypatch):
-    import opencohost.core.memoria_store as store_mod
+    import opencohost.core.memory.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)
@@ -479,7 +479,7 @@ def test_post_memoria_update_missing_id_404(tmp_path, monkeypatch):
 def test_post_memoria_update_store_write_failure_503(tmp_path, monkeypatch):
     import sqlite3
 
-    import opencohost.core.memoria_store as store_mod
+    import opencohost.core.memory.memoria_store as store_mod
 
     db_path = tmp_path / "memorias.db"
     _seed_memorias_db(db_path)

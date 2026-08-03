@@ -110,7 +110,7 @@ def _format_dt(value: datetime | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _cmd_create(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import (
+    from opencohost.core.editorial.editorial_cards import (
         EditorialCard,
         EditorialCardStore,
         EditorialCardValidationError,
@@ -184,7 +184,7 @@ def _cmd_create(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_list(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
 
     store = EditorialCardStore(args.db)
     cards = store.list_all()
@@ -205,7 +205,7 @@ def _cmd_list(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_show(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
 
     store = EditorialCardStore(args.db)
     card = store.get(args.card_id)
@@ -241,7 +241,7 @@ def _cmd_show(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_arm(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
 
     store = EditorialCardStore(args.db)
     result = store.arm(args.card_id)
@@ -271,7 +271,7 @@ def _cmd_link(args: argparse.Namespace, use_json: bool) -> int:
          is its slug in the in-process controller, but the CLI only needs the
          store link which is slug-based).
     """
-    from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStatus, EditorialCardStore
 
     store = EditorialCardStore(args.db)
     card = store.get(args.card_id)
@@ -311,7 +311,7 @@ def _cmd_link(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_rearm(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStatus, EditorialCardStore
 
     store = EditorialCardStore(args.db)
     card = store.get(args.card_id)
@@ -341,7 +341,7 @@ def _cmd_rearm(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_disable(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStatus, EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStatus, EditorialCardStore
 
     store = EditorialCardStore(args.db)
     card = store.get(args.card_id)
@@ -363,7 +363,7 @@ def _cmd_disable(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_delete(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.editorial_cards import EditorialCardStore
+    from opencohost.core.editorial.editorial_cards import EditorialCardStore
 
     store = EditorialCardStore(args.db)
     result = store.delete(args.card_id)
@@ -397,7 +397,7 @@ def _cmd_topic(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_topic_propose(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.topic_inbox import (
+    from opencohost.core.agenda.topic_inbox import (
         TopicInboxCapError,
         TopicInboxStore,
         TopicInboxValidationError,
@@ -434,7 +434,7 @@ def _cmd_topic_propose(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_topic_list(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.topic_inbox import TopicInboxStore
+    from opencohost.core.agenda.topic_inbox import TopicInboxStore
 
     store = TopicInboxStore(args.db)
     result = store.list_pending()
@@ -460,7 +460,7 @@ def _cmd_topic_list(args: argparse.Namespace, use_json: bool) -> int:
 
 
 def _cmd_topic_discard(args: argparse.Namespace, use_json: bool) -> int:
-    from opencohost.core.topic_inbox import TopicInboxStore
+    from opencohost.core.agenda.topic_inbox import TopicInboxStore
 
     store = TopicInboxStore(args.db)
     if not store.discard(args.topic_id):

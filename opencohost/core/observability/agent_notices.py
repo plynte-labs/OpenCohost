@@ -34,7 +34,7 @@ from uuid import uuid4
 # operator-facing panel, so the same content rules apply. Single source of
 # truth on purpose (topic_inbox.py already warns its patterns are mirrored
 # in the UI; do not add a third copy).
-from opencohost.core.topic_inbox import _looks_like_code
+from opencohost.core.agenda.topic_inbox import _looks_like_code
 
 logger = logging.getLogger(__name__)
 

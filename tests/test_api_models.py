@@ -16,7 +16,7 @@ from opencohost.api.models import (
 
 # Import from core is fine in a test — only the opencohost/api/ PACKAGE itself
 # must avoid core/ui imports.
-from opencohost.core.health_monitor import MonitorState
+from opencohost.core.observability.health_monitor import MonitorState
 
 
 def _health_kwargs():

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from opencohost.core.health_monitor import HealthMonitor, MonitorState
+from opencohost.core.observability.health_monitor import HealthMonitor, MonitorState
 from opencohost.ui.state import UIState
 
 

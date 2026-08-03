@@ -87,7 +87,7 @@ def _count_imported(db_path, profile_id):
 def _seed_imported(db_path, profile_id, n):
     """Insert *n* distinct synthetic status='imported' rows so count_imported
     returns a precise 'existing' baseline for the D6 cap tests."""
-    from opencohost.core.memoria_store import MemoriaStore
+    from opencohost.core.memory.memoria_store import MemoriaStore
 
     MemoriaStore(db_path)  # real schema + signature migration
     conn = sqlite3.connect(db_path)
@@ -367,7 +367,7 @@ def test_import_aborts_after_three_consecutive_errors(tmp_path, monkeypatch):
     """Finding 4 (R4): under a sustained store error the loop must NOT grind all
     items — it early-aborts after 3 consecutive 'error' outcomes, counting every
     remaining item into `failed` (ok=False)."""
-    from opencohost.core.memoria_store import MemoriaStore
+    from opencohost.core.memory.memoria_store import MemoriaStore
 
     db_path = tmp_path / "memorias.db"
     _enable(monkeypatch, db_path)
@@ -416,7 +416,7 @@ def test_import_disabled_is_benign_noop(tmp_path, monkeypatch):
 
 def _seed_list_db(db_path):
     """Real schema + one 'imported' row and one 'draft' row for the badge test."""
-    from opencohost.core.memoria_store import MemoriaStore
+    from opencohost.core.memory.memoria_store import MemoriaStore
 
     MemoriaStore(db_path)  # real schema/index/PRAGMA
     conn = sqlite3.connect(db_path)

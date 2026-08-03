@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from opencohost.core.memory_digest import MemoryDigest
+from opencohost.core.memory.memory_digest import MemoryDigest
 from opencohost.i18n import active
 from opencohost.i18n.contract import resolve
 from opencohost.i18n.registry import (

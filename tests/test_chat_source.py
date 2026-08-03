@@ -120,11 +120,11 @@ class TestNormalizedChatMessage:
         assert "user" in annotations
         assert "text" in annotations
         assert "timestamp" in annotations
-        assert annotations["platform"] == str
-        assert annotations["source_id"] == str
-        assert annotations["user"] == str
-        assert annotations["text"] == str
-        assert annotations["timestamp"] == float
+        assert annotations["platform"] is str
+        assert annotations["source_id"] is str
+        assert annotations["user"] is str
+        assert annotations["text"] is str
+        assert annotations["timestamp"] is float
 
     def test_partial_message_is_valid(self):
         """REQ-3: total=False allows partial messages."""

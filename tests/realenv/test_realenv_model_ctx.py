@@ -3,7 +3,7 @@
 Runs only with ``OPENCOHOST_REALENV_TESTS=1`` and auto-skips when Ollama or the
 required model is absent. Calls the REAL ``ollama.show`` (cheap metadata RPC, no
 generation) and feeds the real ``ShowResponse`` into the production ctx-discovery
-logic ``opencohost.core.context_budget.parse_model_ctx`` — the exact object type
+logic ``opencohost.core.context.context_budget.parse_model_ctx`` — the exact object type
 the engine's ``_discover_model_ctx`` -> ``_fetch_show`` path passes in production.
 
 Guards the ctx-discovery fix: ``parse_model_ctx`` must read the real ``modelinfo``
@@ -55,7 +55,7 @@ def test_ctx_discovery_matches_real_model_ctx(tag):
     import ollama
 
     from opencohost.config.settings import CTX_FALLBACK_DEFAULT
-    from opencohost.core import context_budget
+    from opencohost.core.context import context_budget
 
     resp = run_bounded(lambda: ollama.show(tag), seconds=20)
     real_ctx = _real_ctx_from_show(resp)

@@ -10,7 +10,7 @@ custom_instructions, updated_at} — built via explicit field picks, never
 
 Isolation: the `_isolate_personalization_file` autouse fixture in
 tests/conftest.py already redirects
-`opencohost.core.personalization.PERSONALIZATION_FILE` to a per-test tmp
+`opencohost.core.profiles.personalization.PERSONALIZATION_FILE` to a per-test tmp
 path — no real user data is touched here.
 """
 

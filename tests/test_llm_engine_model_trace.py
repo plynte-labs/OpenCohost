@@ -12,7 +12,7 @@ import queue
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
+from opencohost.config.settings import DEFAULT_MODEL
 import pytest
 
 # Ensure project root is on path
@@ -22,7 +22,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.config.settings import DEFAULT_MODEL
+
 
 
 # ---------------------------------------------------------------------------

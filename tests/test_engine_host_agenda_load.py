@@ -10,7 +10,7 @@ from queue import Queue
 from unittest.mock import MagicMock
 
 import opencohost.api.engine_host as engine_host_mod
-from opencohost.core.agenda_persistence import AgendaPersistence
+from opencohost.core.agenda.agenda_persistence import AgendaPersistence
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, KiraAgendaController
 
 

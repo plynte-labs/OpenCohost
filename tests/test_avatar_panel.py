@@ -15,6 +15,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from opencohost.avatar.avatar_config import VALID_STATES, AvatarConfig, assign_image_to_state
+from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
 
 import pytest
 
@@ -34,8 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from opencohost.avatar.avatar_config import VALID_STATES, AvatarConfig, assign_image_to_state
-from opencohost.avatar.avatar_state import AvatarState, AvatarStateBridge
+
 
 
 # ---------------------------------------------------------------------------

@@ -540,7 +540,7 @@ class TestFormatSavedAgendaTopics:
 class TestSavedAgendaStatusesDriftGuard:
     def test_matches_agenda_persistence_persisted_statuses(self):
         from opencohost.ui.inspector_memory import _SAVED_AGENDA_STATUSES
-        from opencohost.core.agenda_persistence import _PERSISTED_STATUSES
+        from opencohost.core.agenda.agenda_persistence import _PERSISTED_STATUSES
 
         assert {s.value for s in _SAVED_AGENDA_STATUSES} == set(_PERSISTED_STATUSES)
 
@@ -745,7 +745,7 @@ class TestMemoriaRowMetadata:
 
 class TestEditModalPromotesToCurated:
     def test_edit_modal_saves_content_and_promotes_row_to_curated(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -793,7 +793,7 @@ class TestEditModalPromotesToCurated:
 
 class TestFlagTogglesPromoteToCurated:
     def test_pin_toggle_promotes_row_to_curated(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -821,7 +821,7 @@ class TestFlagTogglesPromoteToCurated:
         assert row["pinned"] == 1
 
     def test_private_toggle_promotes_row_to_curated(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -849,7 +849,7 @@ class TestFlagTogglesPromoteToCurated:
         assert row["private"] == 1
 
     def test_inactive_toggle_does_not_promote_to_curated(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -879,7 +879,7 @@ class TestFlagTogglesPromoteToCurated:
 
 class TestDeleteRow:
     def test_delete_row_removes_it_from_store_and_ui(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -909,7 +909,7 @@ class TestDeleteRow:
         assert "Titulo a borrar" not in texts
 
     def test_delete_declined_by_operator_keeps_row(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1069,7 +1069,7 @@ class TestCurationWriteFailureSurfaced:
 
 class TestPurgeActiveProfile:
     def test_purge_button_scoped_to_active_profile_only_with_confirm_dialog(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1099,7 +1099,7 @@ class TestPurgeActiveProfile:
         assert len(store.list_for_profile("p2")) == 1, "purge must never touch a different profile"
 
     def test_purge_shows_row_count_and_curated_warning_before_confirm(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1338,7 +1338,7 @@ def _make_pinned_rows(store, profile_id, count, private_count=0):
 
 class TestPinnedCounter:
     def test_pinned_counter_shows_fijadas_n_se_inyectan_2_when_n_greater_than_2(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1359,7 +1359,7 @@ class TestPinnedCounter:
         assert "Fijadas: 3 · se inyectan 2" in texts
 
     def test_pinned_counter_shows_fewer_than_2_when_n_less_than_2(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1387,7 +1387,7 @@ class TestPinnedCounterF6bSemantics:
     injectable-pinned only, capped at MEMORIAS_MAX_PINNED_INJECT."""
 
     def test_n_counts_all_pinned_including_private_rows(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1408,7 +1408,7 @@ class TestPinnedCounterF6bSemantics:
         assert "Fijadas: 5 · se inyectan 2" in texts
 
     def test_m_shrinks_further_as_more_pinned_rows_go_private(self, tmp_path):
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")
@@ -1432,7 +1432,7 @@ class TestPinnedCounterF6bSemantics:
         """B-N3: the overclaim guard — pinning N rows and marking ALL of
         them private must show «se inyectan 0», proving M never overclaims
         injection when every pinned row is excluded from the candidate set."""
-        from opencohost.core.memoria_store import MemoriaStore
+        from opencohost.core.memory.memoria_store import MemoriaStore
         import opencohost.ui.inspector_memory as inspector_memory
 
         store = MemoriaStore(tmp_path / "memorias.db")

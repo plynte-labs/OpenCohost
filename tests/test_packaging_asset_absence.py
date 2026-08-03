@@ -27,7 +27,7 @@ if ROOT_DIR not in sys.path:
 class TestMusicLibraryAbsentAssets:
     def test_load_does_not_crash_when_dir_absent(self, tmp_path):
         """MusicLibrary.load() returns silently when neither dir nor config exist."""
-        from opencohost.core.music_library import MusicLibrary
+        from opencohost.core.music.music_library import MusicLibrary
 
         absent_dir = tmp_path / "music"
         absent_config = tmp_path / "music_library.json"
@@ -46,7 +46,7 @@ class TestMusicLibraryAbsentAssets:
 
     def test_counts_by_mood_empty_when_no_tracks(self, tmp_path):
         """counts_by_mood() returns empty dict (no crash) when library is empty."""
-        from opencohost.core.music_library import MusicLibrary
+        from opencohost.core.music.music_library import MusicLibrary
 
         library = MusicLibrary(
             library_dir=tmp_path / "music",
@@ -58,7 +58,7 @@ class TestMusicLibraryAbsentAssets:
 
     def test_select_for_mood_returns_none_when_empty(self, tmp_path):
         """select_for_mood() returns None gracefully when no tracks are loaded."""
-        from opencohost.core.music_library import MusicLibrary
+        from opencohost.core.music.music_library import MusicLibrary
 
         library = MusicLibrary(
             library_dir=tmp_path / "music",

@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
-from opencohost.core.profiles import guardar_perfiles
+from opencohost.core.profiles.profiles import guardar_perfiles
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
 from opencohost.ui import personalization_panel

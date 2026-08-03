@@ -30,11 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from opencohost.core.cloud_llm_client import (
+from opencohost.core.providers.cloud.cloud_llm_client import (
     CLOUD_ERROR_AMBIGUOUS_429,
     CLOUD_ERROR_BAD_KEY,
     CLOUD_ERROR_RATE_LIMITED,
@@ -45,7 +41,13 @@ from opencohost.core.cloud_llm_client import (
     send_chat_completion,
 )
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+
+
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ class _FakeResponse:
 
 def _post_returning(response, monkeypatch):
     monkeypatch.setattr(
-        "opencohost.core.cloud_llm_client.requests.post",
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
         lambda url, json=None, headers=None, timeout=None: response,
     )
 

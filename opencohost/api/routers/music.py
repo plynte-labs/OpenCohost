@@ -48,7 +48,7 @@ from opencohost.api.models import (
     MusicStateResponse,
     MusicTrackOut,
 )
-from opencohost.core.music_library import ALLOWED_AUDIO_EXTENSIONS, KNOWN_MOODS, is_supported_audio_path
+from opencohost.core.music.music_library import ALLOWED_AUDIO_EXTENSIONS, KNOWN_MOODS, is_supported_audio_path
 
 router = APIRouter()
 

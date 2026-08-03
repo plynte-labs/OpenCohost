@@ -7,6 +7,7 @@ import asyncio
 import inspect
 from pathlib import Path
 
+
 from opencohost.config.storage import STORAGE_PATHS
 from opencohost.core.temp_file_cleanup import register_temp_file_cleanup
 
@@ -79,7 +80,11 @@ if _LOCAL_MODEL_PATH_AT_IMPORT:
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
-from qwen_tts import Qwen3TTSModel
+# Imported HERE, not with the other imports: qwen_tts pulls in transformers and
+# huggingface_hub, which read HF_HOME/HF_HUB_CACHE/HF_HUB_OFFLINE at THEIR import
+# time. Hoisting this to the top block (an import sorter will try) sets those
+# variables too late and the cache redirect plus offline mode stop taking effect.
+from qwen_tts import Qwen3TTSModel  # noqa: E402
 
 
 def _from_pretrained_kwargs(model_path, device):

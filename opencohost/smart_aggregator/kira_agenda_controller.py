@@ -15,7 +15,7 @@ from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
 from opencohost.config.logger import get_logger
-from opencohost.core.repetition_guard import detect_repetition
+from opencohost.core.context.repetition_guard import detect_repetition
 from opencohost.i18n import active as i18n_active
 
 logger = get_logger()

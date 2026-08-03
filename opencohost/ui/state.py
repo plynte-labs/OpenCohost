@@ -16,6 +16,7 @@ import threading
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Optional
+from opencohost.core.speech.qwen_markers import ENGINE_STATUSES as VALID_ENGINE_STATUSES
 
 # ---------------------------------------------------------------------------
 # Valid status literals – used for runtime validation
@@ -34,7 +35,7 @@ VALID_OLLAMA_STATES = frozenset(
 VALID_HEALTH_STATUSES = frozenset({"unknown", "green", "yellow", "red"})
 # Engine (voice) badge statuses — single source of truth lives in core.qwen_markers (SV-A),
 # so ui and core can never diverge on the valid set.
-from opencohost.core.qwen_markers import ENGINE_STATUSES as VALID_ENGINE_STATUSES
+
 
 # ---------------------------------------------------------------------------
 # Observer callback type

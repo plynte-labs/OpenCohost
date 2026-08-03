@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from opencohost.core.ollama_startup import OllamaStartupManager
+from opencohost.core.providers.local.ollama_startup import OllamaStartupManager
 
 
 @dataclass

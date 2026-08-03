@@ -1,4 +1,4 @@
-"""Tests for opencohost.core.memoria_store — MemoriaStore.
+"""Tests for opencohost.core.memory.memoria_store — MemoriaStore.
 
 Design contract (engram sdd/kira-memory-persistence-20260701/design v2.1,
 section 1-3): own unshared SQLite file (memorias.db, PRAGMA user_version=1),
@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from opencohost.core.memoria_store import (
+from opencohost.core.memory.memoria_store import (
     READ_TIMEOUT_SECONDS,
     WRITE_TIMEOUT_SECONDS,
     MemoriaStore,
@@ -164,7 +164,7 @@ def _create_v1_db(db_path, rows=()) -> None:
 
 
 def test_legacy_v1_db_migrates_signature_column_and_backfills(tmp_path) -> None:
-    from opencohost.core.memoria_store import build_signature
+    from opencohost.core.memory.memoria_store import build_signature
 
     db_path = tmp_path / "memorias.db"
     # Legacy 2026-07-15 rows are NAME-keyed (stable_key prefix is the profile
@@ -219,7 +219,7 @@ def test_interrupted_migration_column_present_version_stale_self_heals(tmp_path)
     immediately — a kill after ALTER but before the version bump leaves the
     column present with user_version still < 2. Construction must survive
     (no duplicate-column crash), backfill, and bump the version."""
-    from opencohost.core.memoria_store import build_signature
+    from opencohost.core.memory.memoria_store import build_signature
 
     db_path = tmp_path / "memorias.db"
     _create_v1_db(db_path, rows=[{
@@ -244,7 +244,7 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     """Resume path: column present, user_version < 2, SOME rows already
     backfilled. Construction must fill only the empty ones (never rewrite an
     already-set signature) and bump the version."""
-    from opencohost.core.memoria_store import build_signature
+    from opencohost.core.memory.memoria_store import build_signature
 
     db_path = tmp_path / "memorias.db"
     _create_v1_db(db_path, rows=[
@@ -554,7 +554,7 @@ def test_domain_stopwords_extended_acaba_decir_dijo_ptt_contexto() -> None:
     acaba/decir/dijo/ptt/contexto join the domain-stopword set. RC-1/RC-7
     lockstep: these tokens never reach stable_key/title, and — retroactively —
     can never be the shared token that scores a select_top_k match."""
-    from opencohost.core.memoria_store import _significant_tokens, select_top_k
+    from opencohost.core.memory.memoria_store import _significant_tokens, select_top_k
 
     # 1) The five new tokens are stripped from the significant-token set.
     assert _significant_tokens("acaba decir dijo ptt contexto") == []
@@ -583,7 +583,7 @@ def test_significant_token_count_public_helper() -> None:
     reuses for content shaping (user-side >=2 capture gate, Kira-side first
     >=3-token sentence). Counts DISTINCT significant tokens (domain + generic
     stopwords filtered), mirroring _significant_tokens exactly."""
-    from opencohost.core.memoria_store import _significant_tokens, significant_token_count
+    from opencohost.core.memory.memoria_store import _significant_tokens, significant_token_count
 
     assert significant_token_count("kira obs streamer") == 0          # all domain stopwords
     assert significant_token_count("streamer prefiere musica") == 2   # streamer filtered
@@ -632,7 +632,7 @@ def test_all_generic_vocabulary_text_produces_no_stable_key() -> None:
 # ---------------------------------------------------------------------------
 
 def test_owner_exact_greeting_now_rejected_by_capture_gate() -> None:
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     text = "Buenas, como vamos el dia de hoy"
     # Pre-fix this was 5 (buenas, como, vamos, dia, hoy) -- comfortably above
@@ -650,7 +650,7 @@ def test_owner_exact_greeting_now_rejected_by_capture_gate() -> None:
     "Buenos dias",
 ])
 def test_spanish_greetings_and_farewells_rejected(text: str) -> None:
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     assert significant_token_count(text) < 2
 
@@ -662,7 +662,7 @@ def test_spanish_greetings_and_farewells_rejected(text: str) -> None:
     "Hello, good morning",
 ])
 def test_english_greetings_and_farewells_rejected(text: str) -> None:
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     assert significant_token_count(text) < 2
 
@@ -698,7 +698,7 @@ def test_como_vas_greeting_rejected() -> None:
     # "como vas?" still persisted as a memoria. BAND-AID, not the fix: a closed
     # filler list provably does not scale (this one escaped within a day of the
     # list shipping) — the real fix is LLM-judged promotion at session close.
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     assert significant_token_count("Como vas?") == 0
     assert is_capturable("Como vas?") is False
@@ -777,7 +777,7 @@ def test_wrapped_turn_derives_same_key_and_title_as_bare_turn(
     ("en", "The streamer just said (PTT): hi, how is it going"),
 ])
 def test_wrapped_pure_greeting_still_rejected(reset_locale, locale: str, text: str) -> None:
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     _activate_locale(locale)
     assert significant_token_count(text) == 0
@@ -807,7 +807,7 @@ def test_filler_word_mixed_with_content_is_not_stripped_per_token() -> None:
     """'hoy' is part of the greeting-shape vocabulary but must NOT be
     blacklisted as a standalone stopword -- when it rides along with real
     content the whole turn (including 'hoy') is preserved untouched."""
-    from opencohost.core.memoria_store import significant_token_count
+    from opencohost.core.memory.memoria_store import significant_token_count
 
     assert significant_token_count("Quiero jugar shooter hoy") == 4
 
@@ -1292,7 +1292,7 @@ def test_summary_row_is_upsert_immune_via_status_guard(tmp_path) -> None:
 def test_summary_row_immune_to_draft_growth_prune_status(monkeypatch, tmp_path) -> None:
     """_prune_profile targets status='draft' only; a status='summary' row is
     never a prune candidate however far the draft pool overflows the cap."""
-    from opencohost.core import memoria_store as store_mod
+    from opencohost.core.memory import memoria_store as store_mod
     monkeypatch.setattr(store_mod, "MEMORIAS_PROFILE_CAP", 3)
     store = MemoriaStore(tmp_path / "memorias.db")
 
@@ -1397,7 +1397,7 @@ def test_imported_row_survives_draft_growth_prune(monkeypatch, tmp_path) -> None
     """_prune_profile targets status='draft' only; a status='imported' row is
     never a prune candidate however far the draft pool overflows the cap —
     imports never eat the 200-draft pool (D1)."""
-    from opencohost.core import memoria_store as store_mod
+    from opencohost.core.memory import memoria_store as store_mod
     monkeypatch.setattr(store_mod, "MEMORIAS_PROFILE_CAP", 3)
     store = MemoriaStore(tmp_path / "memorias.db")
 
@@ -1739,7 +1739,7 @@ def test_promoted_row_is_upsert_immune(tmp_path) -> None:
 
 def test_promoted_row_survives_the_draft_growth_prune(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "memorias.db"
-    monkeypatch.setattr("opencohost.core.memoria_store.MEMORIAS_PROFILE_CAP", 3)
+    monkeypatch.setattr("opencohost.core.memory.memoria_store.MEMORIAS_PROFILE_CAP", 3)
     _seed_judged_row(db_path, "p", "pr", status="promoted", stable_key="p|promoted-key",
                      updated_at="2026-01-01T00:00:00+00:00")
     store = MemoriaStore(db_path)

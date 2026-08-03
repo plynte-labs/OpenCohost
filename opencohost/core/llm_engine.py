@@ -61,25 +61,25 @@ from opencohost.config.settings import (
     CLOUD_PROBER_JOIN_TIMEOUT_SECONDS,
     DIRECT_ANSWER_MAX_WAIT_SECONDS,
 )
-from opencohost.core import context_budget
-from opencohost.core import cloud_llm_client
-from opencohost.core import personalization
-from opencohost.core.turn_stamp import TurnStamp
-from opencohost.core.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
-from opencohost.core.ctx_telemetry import CtxTelemetryRing
+from opencohost.core.context import context_budget
+from opencohost.core.providers.cloud import cloud_llm_client
+from opencohost.core.profiles import personalization
+from opencohost.core.scheduling.turn_stamp import TurnStamp
+from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
+from opencohost.core.context.ctx_telemetry import CtxTelemetryRing
 from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import coherence as i18n_coherence
-from opencohost.core.tts_piper import PiperEngine
-from opencohost.core.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
-from opencohost.core.memory_digest import MemoryDigest
-from opencohost.core.memoria_store import (
+from opencohost.core.speech.backends.tts_piper import PiperEngine
+from opencohost.core.providers.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
+from opencohost.core.memory.memory_digest import MemoryDigest
+from opencohost.core.memory.memoria_store import (
     MemoriaStore, derive_stable_key, build_title, build_signature,
     build_injection_lines, build_recency_lines, is_meta_recall_query,
     pinned_injection_counter, significant_token_count, strip_history_wrapper,
 )
-from opencohost.core.repetition_guard import (
+from opencohost.core.context.repetition_guard import (
     detect_repetition,
     sanitize_clause_repetition,
     DEFAULT_CONFIG as REPETITION_CONFIG,

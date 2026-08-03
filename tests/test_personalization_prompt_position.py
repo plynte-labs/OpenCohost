@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import opencohost.core.llm_engine as llm_engine
-from opencohost.core import personalization
+from opencohost.core.profiles import personalization
 from opencohost.i18n import active as i18n_active
 
 

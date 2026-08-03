@@ -80,8 +80,8 @@ class TestTtsSpeedSettings:
 
 class TestPiperSetLengthScale:
     def test_set_length_scale_rebuilds_syn_config(self):
-        with patch("opencohost.core.tts_piper._SynthesisConfig", _FakeSynthesisConfig):
-            from opencohost.core.tts_piper import PiperEngine
+        with patch("opencohost.core.speech.backends.tts_piper._SynthesisConfig", _FakeSynthesisConfig):
+            from opencohost.core.speech.backends.tts_piper import PiperEngine
 
             engine = PiperEngine("/fake/model.onnx", length_scale=1.15)
             engine.set_length_scale(1.30)
@@ -90,8 +90,8 @@ class TestPiperSetLengthScale:
         assert engine._syn_config.length_scale == pytest.approx(1.30)
 
     def test_set_length_scale_back_to_default_clears_config(self):
-        with patch("opencohost.core.tts_piper._SynthesisConfig", _FakeSynthesisConfig):
-            from opencohost.core.tts_piper import PiperEngine
+        with patch("opencohost.core.speech.backends.tts_piper._SynthesisConfig", _FakeSynthesisConfig):
+            from opencohost.core.speech.backends.tts_piper import PiperEngine
 
             engine = PiperEngine("/fake/model.onnx", length_scale=1.15)
             engine.set_length_scale(1.0)

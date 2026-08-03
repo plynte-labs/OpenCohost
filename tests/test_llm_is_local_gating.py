@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
+from opencohost.config.settings import CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, LLM_TEMPERATURE
 
 import pytest
 
@@ -28,9 +29,8 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.config.settings import CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, LLM_TEMPERATURE
 
-_SEND = "opencohost.core.cloud_llm_client.send_chat_completion"
+_SEND = "opencohost.core.providers.cloud.cloud_llm_client.send_chat_completion"
 
 
 def _make_motor(tmp_path, *, provider_config=None):
@@ -598,7 +598,7 @@ class TestCloudFailureDegrade:
         assert motor._last_llm_failure["reason"] == "CloudLLMResponseError"
 
     def test_cloud_failure_records_cloud_model_and_provider(self, tmp_path):
-        from opencohost.core.cloud_llm_client import CloudLLMResponseError
+        from opencohost.core.providers.cloud.cloud_llm_client import CloudLLMResponseError
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         motor.current_model = "local-tag:7b"  # the LOCAL tag must NOT be recorded
         with patch(_SEND, side_effect=CloudLLMResponseError("boom 401")):
@@ -626,7 +626,7 @@ class TestCloudFailureDegrade:
         }
 
     def test_cloud_response_error_no_rollback_no_health_change(self, tmp_path):
-        from opencohost.core.cloud_llm_client import CloudLLMResponseError
+        from opencohost.core.providers.cloud.cloud_llm_client import CloudLLMResponseError
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         motor._recover_from_stalled_inference = MagicMock()
         motor._last_known_good_model = "sentinel-local"

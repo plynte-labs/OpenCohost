@@ -5,7 +5,7 @@ punctuation, trailing incomplete text, multi-sentence bursts, and
 abbreviation edge cases that a TTS pipeline will actually encounter.
 """
 
-from opencohost.core.sentence_splitter import SentenceSplitter
+from opencohost.core.speech.sentence_splitter import SentenceSplitter
 
 
 def test_streaming_splitter_buffers_abbreviations_and_spanish_questions():

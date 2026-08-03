@@ -1,4 +1,4 @@
-"""Tests for opencohost.core.memoria_import — pure external-AI export parser.
+"""Tests for opencohost.core.memory.memoria_import — pure external-AI export parser.
 
 Design contract (engram sdd/memoria_import_20260718/design, "Parser rules"):
 a pure, no-I/O module that turns an external-AI export (Gemini-shaped or
@@ -15,7 +15,7 @@ and must never be read, quoted, or committed by an apply agent.
 from __future__ import annotations
 
 from opencohost.config.settings import MEMORIAS_IMPORT_ITEM_CHARS
-from opencohost.core.memoria_import import (
+from opencohost.core.memory.memoria_import import (
     ParsedItem,
     parse_import,
     parse_source_hint,

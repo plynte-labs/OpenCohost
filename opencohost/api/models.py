@@ -26,7 +26,7 @@ class ModelCatalogEntry(BaseModel):
 
 
 class HealthState(BaseModel):
-    """Mirrors `opencohost.core.health_monitor.MonitorState`."""
+    """Mirrors `opencohost.core.observability.health_monitor.MonitorState`."""
 
     vram_status: str
     rtf_status: str
@@ -383,7 +383,7 @@ class ModelsResponse(BaseModel):
 
 
 class MusicTrackOut(BaseModel):
-    """Mirrors `opencohost.core.music_library.MusicTrack` (READ-ONLY slice,
+    """Mirrors `opencohost.core.music.music_library.MusicTrack` (READ-ONLY slice,
     WS3 slice 4). `status` is derived, never the raw `missing`/`invalid`
     booleans: ok (file present + valid signature), faltante (path gone),
     invalido (file present but fails the audio-signature check).

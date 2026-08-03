@@ -8,6 +8,7 @@ All tests use mocking — no GPU, no Ollama, no Qwen server required.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import subprocess
@@ -15,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from opencohost.core.health_monitor import (
+from opencohost.core.observability.health_monitor import (
     HealthMonitor,
     MonitorState,
     OllamaResidencyProbe,
@@ -100,7 +101,7 @@ class TestOllamaWatchdog:
     def test_healthy_on_success(self):
         """Returns 'healthy' when /api/tags returns 200."""
         wd = OllamaWatchdog()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             mock_get.return_value = MagicMock(status_code=200)
             wd.poll()
         assert wd.status == "healthy"
@@ -109,7 +110,7 @@ class TestOllamaWatchdog:
     def test_down_after_threshold_failures(self):
         """Returns 'down' after OLLAMA_FAILURE_THRESHOLD consecutive failures."""
         wd = OllamaWatchdog()
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=Exception("connection refused")):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=Exception("connection refused")):
             for _ in range(4):  # threshold is 3
                 wd.poll()
         assert wd.status == "down"
@@ -118,13 +119,13 @@ class TestOllamaWatchdog:
     def test_recovery_after_success(self):
         """Resets failure count on successful poll."""
         wd = OllamaWatchdog()
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=Exception("fail")):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=Exception("fail")):
             for _ in range(2):
                 wd.poll()
         assert wd.consecutive_failures == 2
 
         # Now succeed
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             mock_get.return_value = MagicMock(status_code=200)
             wd.poll()
         assert wd.status == "healthy"
@@ -134,13 +135,13 @@ class TestOllamaWatchdog:
         """Timeout exception doesn't crash the watchdog."""
         wd = OllamaWatchdog()
         import requests
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=requests.exceptions.Timeout):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=requests.exceptions.Timeout):
             wd.poll()  # Should not raise
 
     def test_startup_failures_wait_before_degraded(self):
         """Transient Ollama startup failures are waiting, not immediate down."""
         wd = OllamaWatchdog()
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=Exception("connection refused")):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=Exception("connection refused")):
             wd.poll()
 
         assert wd.status == "unknown"
@@ -150,7 +151,7 @@ class TestOllamaWatchdog:
     def test_exhausted_startup_retries_become_degraded(self):
         """After retry threshold, Ollama exposes actionable degraded state."""
         wd = OllamaWatchdog()
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=Exception("connection refused")):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=Exception("connection refused")):
             for _ in range(4):
                 wd.poll()
 
@@ -212,7 +213,7 @@ class TestOllamaResidencyProbe:
     def test_computes_estimates_and_bounds_the_client_timeout(self):
         """Also pins F9's bounded-call requirement: the client is created
         with an explicit timeout, never the package's default timeout=None."""
-        from opencohost.core.health_monitor import OLLAMA_REQUEST_TIMEOUT
+        from opencohost.core.observability.health_monitor import OLLAMA_REQUEST_TIMEOUT
 
         model = _FakeProcessModel(size=8 * 1024 * 1024, size_vram=6 * 1024 * 1024)
         created = {}
@@ -331,6 +332,12 @@ class TestRTFTracker:
 class TestQwenProcessManager:
     """Tests for QwenProcessManager — subprocess lifecycle."""
 
+    def test_qwen_server_script_resolves_to_an_existing_file(self):
+        """SERVER_SCRIPT is derived from __file__, so moving this module between
+        directories repoints it. Every other start() test mocks Popen and never
+        resolves the argv against disk, so nothing else would notice."""
+        assert os.path.isfile(QwenProcessManager.SERVER_SCRIPT), QwenProcessManager.SERVER_SCRIPT
+
     def test_is_running_false_initially(self):
         """Not running before start()."""
         mgr = QwenProcessManager()
@@ -357,9 +364,9 @@ class TestQwenProcessManager:
 
         mgr = QwenProcessManager()
 
-        with patch("opencohost.core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.health_monitor.sys.platform", "win32"):
-                with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
+        with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("opencohost.core.observability.health_monitor.sys.platform", "win32"):
+                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     with patch.object(mgr, "_check_health", return_value=True):
                         mock_popen.return_value.poll.return_value = None
 
@@ -374,9 +381,9 @@ class TestQwenProcessManager:
 
         mgr = QwenProcessManager()
 
-        with patch("opencohost.core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.health_monitor.LOG_DIR", str(tmp_path)):
-                with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
+        with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     with patch.object(mgr, "_check_health", return_value=True):
                         mock_popen.return_value.poll.return_value = None
 
@@ -400,9 +407,9 @@ class TestQwenProcessManager:
         mgr._stdout_log = stale_stdout
         mgr._stderr_log = stale_stderr
 
-        with patch("opencohost.core.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.health_monitor.LOG_DIR", str(tmp_path)):
-                with patch("opencohost.core.health_monitor.subprocess.Popen") as mock_popen:
+        with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
+            with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     with patch.object(mgr, "_check_health", return_value=True):
                         mock_popen.return_value.poll.return_value = None
 
@@ -423,7 +430,7 @@ class TestQwenProcessManager:
         proc.send_signal.side_effect = RuntimeError("signal failed")
         mgr._process = proc
 
-        with patch("opencohost.core.health_monitor.sys.platform", "win32"):
+        with patch("opencohost.core.observability.health_monitor.sys.platform", "win32"):
             mgr.stop()
 
         proc.kill.assert_called_once()
@@ -476,13 +483,13 @@ class TestQwenProcessManager:
     def test_check_health_returns_false_on_error(self):
         """_check_health returns False on connection error."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get", side_effect=Exception("fail")):
+        with patch("opencohost.core.observability.health_monitor.requests.get", side_effect=Exception("fail")):
             assert mgr._check_health() is False
 
     def test_check_health_returns_true_on_200(self):
         """_check_health returns True on 200 response."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=200)
             response.json.side_effect = ValueError("not json")
             mock_get.return_value = response
@@ -491,7 +498,7 @@ class TestQwenProcessManager:
     def test_check_health_rejects_wrong_app_identifier(self):
         """_check_health rejects healthy JSON from a different app on port 5000."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=200)
             response.json.return_value = {
                 "app": "some-other-service",
@@ -505,7 +512,7 @@ class TestQwenProcessManager:
     def test_check_health_accepts_correct_app_identifier(self):
         """_check_health accepts VoiceAI Qwen health JSON with the expected app id."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=200)
             response.json.return_value = {
                 "app": QwenProcessManager.APP_ID,
@@ -519,7 +526,7 @@ class TestQwenProcessManager:
     def test_check_health_requires_loaded_model_when_json_available(self):
         """_check_health rejects alive Qwen server when model is not loaded."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=200)
             response.json.return_value = {"status": "error", "model_loaded": False}
             mock_get.return_value = response
@@ -529,7 +536,7 @@ class TestQwenProcessManager:
     def test_check_health_accepts_loaded_model_without_status_for_compat(self):
         """Manual compatible servers may only expose model_loaded in JSON."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=200)
             response.json.return_value = {"model_loaded": True}
             mock_get.return_value = response
@@ -539,7 +546,7 @@ class TestQwenProcessManager:
     def test_check_health_returns_false_on_503_model_not_loaded(self):
         """_check_health rejects Qwen /health 503 even if the port responds."""
         mgr = QwenProcessManager()
-        with patch("opencohost.core.health_monitor.requests.get") as mock_get:
+        with patch("opencohost.core.observability.health_monitor.requests.get") as mock_get:
             response = MagicMock(status_code=503)
             response.json.return_value = {"status": "error", "model_loaded": False}
             mock_get.return_value = response
@@ -640,7 +647,7 @@ class TestHealthMonitor:
         monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
 
         with caplog.at_level("ERROR", logger="HealthMonitor"):
-            with patch("opencohost.core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+            with patch("opencohost.core.observability.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
                 monitor.start()
                 monitor.join(timeout=1)
 
@@ -673,7 +680,7 @@ class TestHealthMonitor:
 
         monitor._poll_all = MagicMock(side_effect=poll_once_then_stop)
 
-        with patch("opencohost.core.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
+        with patch("opencohost.core.observability.health_monitor.HEALTH_POLL_INTERVAL", 0.01):
             monitor.start()
             monitor.join(timeout=1)
 
@@ -860,7 +867,7 @@ class TestHealthMonitor:
         monitor._vram._free_mb = 5000.0
         monitor._ollama._status = "down"
         with patch(
-            "opencohost.core.health_monitor.load_provider_config",
+            "opencohost.core.observability.health_monitor.load_provider_config",
             return_value={"active_provider": "openai", "profiles": {}},
         ):
             monitor._poll_all()
@@ -875,7 +882,7 @@ class TestHealthMonitor:
         monitor._vram._free_mb = 5000.0
         monitor._ollama._status = "down"
         with patch(
-            "opencohost.core.health_monitor.load_provider_config",
+            "opencohost.core.observability.health_monitor.load_provider_config",
             return_value={"active_provider": "local", "profiles": {}},
         ):
             monitor._poll_all()
@@ -890,7 +897,7 @@ class TestHealthMonitor:
         monitor._vram._free_mb = 5000.0
         monitor._ollama._status = "down"
         with patch(
-            "opencohost.core.health_monitor.load_provider_config",
+            "opencohost.core.observability.health_monitor.load_provider_config",
             side_effect=Exception("boom"),
         ):
             monitor._poll_all()
@@ -905,7 +912,7 @@ class TestHealthMonitor:
         monitor._vram._free_mb = 500.0
         monitor._ollama._status = "down"
         with patch(
-            "opencohost.core.health_monitor.load_provider_config",
+            "opencohost.core.observability.health_monitor.load_provider_config",
             return_value={"active_provider": "openai", "profiles": {}},
         ):
             monitor._poll_all()
@@ -924,7 +931,7 @@ class TestHealthMonitor:
 
         def poll_with(active_provider: str) -> str:
             with patch(
-                "opencohost.core.health_monitor.load_provider_config",
+                "opencohost.core.observability.health_monitor.load_provider_config",
                 return_value={"active_provider": active_provider, "profiles": {}},
             ):
                 monitor._poll_all()
@@ -1068,7 +1075,7 @@ def test_lifecycle_and_keepwarm_constants():
         QWEN_KEEP_WARM_SECONDS,
         QWEN_VRAM_FOOTPRINT_MB,
     )
-    from opencohost.core.health_monitor import LIFECYCLE_STOPPED
+    from opencohost.core.observability.health_monitor import LIFECYCLE_STOPPED
     assert QWEN_KEEP_WARM_SECONDS == 30
     # blip backoff + VRAM footprint are owner-pending values — pin existence/type, not the number
     assert isinstance(QWEN_BLIP_BACKOFF, (int, float)) and QWEN_BLIP_BACKOFF > 0
@@ -1078,7 +1085,7 @@ def test_lifecycle_and_keepwarm_constants():
 
 def test_stop_resets_idle_and_lifecycle():
     """T0.4 — stopping an OWNED server resets the idle clock and marks it STOPPED."""
-    from opencohost.core.health_monitor import LIFECYCLE_READY, LIFECYCLE_STOPPED
+    from opencohost.core.observability.health_monitor import LIFECYCLE_READY, LIFECYCLE_STOPPED
     mgr = QwenProcessManager()
     mgr._is_manual = False
     proc = MagicMock()
@@ -1095,7 +1102,7 @@ def test_stop_resets_idle_and_lifecycle():
 
 def test_stop_manual_does_not_reset():
     """T0.4 — a manual/external server is never auto-stopped, so its state is untouched."""
-    from opencohost.core.health_monitor import LIFECYCLE_READY
+    from opencohost.core.observability.health_monitor import LIFECYCLE_READY
     mgr = QwenProcessManager()
     mgr._is_manual = True
     mgr._lifecycle_state = LIFECYCLE_READY
@@ -1112,7 +1119,7 @@ def test_stop_preserves_failed_verdict():
     start() sets FAILED on a startup timeout and then calls stop(); the idle-clock reset
     must not overwrite that failure verdict (the health pill / failure classifier rely on it).
     """
-    from opencohost.core.health_monitor import LIFECYCLE_FAILED
+    from opencohost.core.observability.health_monitor import LIFECYCLE_FAILED
     mgr = QwenProcessManager()
     mgr._is_manual = False
     proc = MagicMock()

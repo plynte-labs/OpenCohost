@@ -25,16 +25,17 @@ import queue
 import sys
 import threading
 from unittest.mock import MagicMock
-
+from opencohost.core.llm_engine import MotorVocalIA
+from opencohost.config.settings import CTX_TELEMETRY_RING_MAXLEN
+import opencohost.api.engine_host as engine_host_mod
+from types import SimpleNamespace
 import pytest
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.config.settings import CTX_TELEMETRY_RING_MAXLEN
-import opencohost.api.engine_host as engine_host_mod
+
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +211,6 @@ class TestCtxPressureHighPayload:
 # engine_host.py: detail schema + privacy gate
 # ---------------------------------------------------------------------------
 
-from types import SimpleNamespace
 
 
 class TestEngineHostCtxPressureDetail:

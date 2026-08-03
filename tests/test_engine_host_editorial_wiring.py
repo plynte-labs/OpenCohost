@@ -24,7 +24,7 @@ from queue import Queue
 from unittest.mock import MagicMock
 
 import opencohost.api.engine_host as engine_host_mod
-from opencohost.core.editorial_cards import (
+from opencohost.core.editorial.editorial_cards import (
     EditorialCard,
     EditorialCardStatus,
     EditorialCardStore,

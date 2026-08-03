@@ -1,11 +1,11 @@
-"""Unit tests for opencohost.core.ctx_telemetry.CtxTelemetryRing (Phase C3,
+"""Unit tests for opencohost.core.context.ctx_telemetry.CtxTelemetryRing (Phase C3,
 refactor_core_api_20260802 batch B3). Pins the ring + snapshot contract that
 used to live inline in MotorVocalIA as `_ctx_telemetry_ring` +
 `ctx_telemetry_snapshot()`. tests/test_ctx_telemetry_ring.py stays the
 motor-integrated contract; this file is the leaf-class unit harness.
 """
 
-from opencohost.core.ctx_telemetry import CtxTelemetryRing
+from opencohost.core.context.ctx_telemetry import CtxTelemetryRing
 
 
 def test_empty_ring_snapshot():

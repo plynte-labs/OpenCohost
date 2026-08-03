@@ -1,4 +1,4 @@
-"""Pure-function unit tests for opencohost.core.context_budget.
+"""Pure-function unit tests for opencohost.core.context.context_budget.
 
 These tests cover the PURE-LOGIC slice of the context_overflow_guardrail track
 (design.md §0.1 modular split). Every function under test is pure: it takes all
@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from opencohost.core import context_budget as cb
+from opencohost.core.context import context_budget as cb
 
 FALLBACK = 4096
 

@@ -3,15 +3,16 @@ import sys
 import tempfile
 
 import yaml
+from opencohost.stream_admin import AdminManager
+from opencohost.stream_admin.moderation import ModerationEngine
+from opencohost.stream_admin.oauth_store import OAuthStore
+from opencohost.stream_admin.providers import ProviderUnsupportedError
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from opencohost.stream_admin import AdminManager
-from opencohost.stream_admin.moderation import ModerationEngine
-from opencohost.stream_admin.oauth_store import OAuthStore
-from opencohost.stream_admin.providers import ProviderUnsupportedError
+
 
 
 def write_config(path, token_path):

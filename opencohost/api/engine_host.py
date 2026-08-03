@@ -23,14 +23,14 @@ from opencohost.config.settings import (
     OLLAMA_MODELS_DIR,
     load_last_profile,
 )
-from opencohost.core.agenda_persistence import AgendaPersistence
-from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
-from opencohost.core.editorial_cards import EditorialCardStore
-from opencohost.core.health_monitor import HealthMonitor, OllamaWatchdog
+from opencohost.core.agenda.agenda_persistence import AgendaPersistence
+from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial.editorial_cards import EditorialCardStore
+from opencohost.core.observability.health_monitor import HealthMonitor, OllamaWatchdog
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.profiles import cargar_perfiles
-from opencohost.core.music_library import MusicLibrary
-from opencohost.core.ollama_startup import OllamaStartupManager
+from opencohost.core.profiles.profiles import cargar_perfiles
+from opencohost.core.music.music_library import MusicLibrary
+from opencohost.core.providers.local.ollama_startup import OllamaStartupManager
 from opencohost.avatar.obs_runtime import ObsRuntime
 from opencohost.api.agenda_driver import AgendaDriver, route_motor_event_to_agenda
 from opencohost.api.observability import log_motor_accion

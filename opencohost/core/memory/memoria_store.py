@@ -43,7 +43,7 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
     `MARKER in stable_key` substring test classifies any row unambiguously
     (build_recency_lines and the UI rely on exactly this).
   - stable_key / title derivation applies a small domain-stopword list on
-    top of opencohost.core.editorial_matching.normalize_tokens (which stays
+    top of opencohost.core.editorial.editorial_matching.normalize_tokens (which stays
     untouched) — see _MEMORIA_DOMAIN_STOPWORDS. Capture requires >=3
     significant tokens (RC-1); fewer -> derive_stable_key returns None and
     is_capturable() returns False.
@@ -84,7 +84,7 @@ from opencohost.config.settings import (
 # normalize exactly like the rest of the pipeline that feeds it. Single source
 # of truth on purpose (editorial_matching owns the normalizer; do not add a
 # second copy here).
-from opencohost.core.editorial_matching import _strip_accents, normalize_tokens
+from opencohost.core.editorial.editorial_matching import _strip_accents, normalize_tokens
 # History-wrapper templates (see strip_history_wrapper below). Import-safe:
 # i18n.active resolves its bundle lazily on first accessor call, never at import.
 from opencohost.i18n import active as i18n_active

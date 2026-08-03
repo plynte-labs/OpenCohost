@@ -21,7 +21,7 @@ import logging
 
 import pytest
 
-import opencohost.core.personalization as personalization
+import opencohost.core.profiles.personalization as personalization
 from opencohost.config import settings
 
 

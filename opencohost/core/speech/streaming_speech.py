@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from opencohost.core.sentence_splitter import SentenceSplitter
+from opencohost.core.speech.sentence_splitter import SentenceSplitter
 
 
 class StreamingSpeechPipeline:

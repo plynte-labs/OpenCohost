@@ -92,8 +92,8 @@ from opencohost.config.settings import (
     load_memorias_notice_dismissed,
     save_memorias_notice_dismissed,
 )
-from opencohost.core.memoria_import import parse_import, strip_control_chars
-from opencohost.core.memoria_store import build_signature, build_title, derive_import_key, is_capturable
+from opencohost.core.memory.memoria_import import parse_import, strip_control_chars
+from opencohost.core.memory.memoria_store import build_signature, build_title, derive_import_key, is_capturable
 
 router = APIRouter()
 

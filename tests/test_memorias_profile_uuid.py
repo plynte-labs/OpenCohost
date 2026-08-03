@@ -32,7 +32,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _call_cargar(profiles_path: str, defaults_path: str) -> dict:
-    import opencohost.core.profiles as prof_mod
+    import opencohost.core.profiles.profiles as prof_mod
     with (
         patch.object(prof_mod, "PROFILES_FILE", profiles_path),
         patch.object(prof_mod, "DEFAULT_PROFILES_FILE", defaults_path),
@@ -749,7 +749,7 @@ class TestEnsureStableIdsCoercesNonStringIds:
         """int 123 and str '123' must not collapse into the same identity
         once coerced — the int occurrence is reseeded, the string occurrence
         (already a valid non-empty str) is left as-is, so they stay distinct."""
-        from opencohost.core.profiles import _ensure_stable_ids
+        from opencohost.core.profiles.profiles import _ensure_stable_ids
 
         perfiles = {
             "IntId": {"id": 123, "prompt": "a", "use_system": True},
@@ -767,7 +767,7 @@ class TestGuardarPerfilesAtomicWrite:
     def test_normal_save_round_trips(self, tmp_path):
         """A normal save round-trips through the atomic temp-file + replace
         dance without losing or altering any data."""
-        import opencohost.core.profiles as prof_mod
+        import opencohost.core.profiles.profiles as prof_mod
 
         profiles_file = tmp_path / "perfiles.json"
         data = {"Akira": {"id": str(uuid.uuid4()), "prompt": "hola", "use_system": True}}
@@ -783,7 +783,7 @@ class TestGuardarPerfilesAtomicWrite:
         it before writing. If the write is interrupted mid-way (here:
         os.replace fails), the pre-existing perfiles.json on disk must be
         left untouched — never empty, never partially written, never lost."""
-        import opencohost.core.profiles as prof_mod
+        import opencohost.core.profiles.profiles as prof_mod
 
         profiles_file = tmp_path / "perfiles.json"
         original_content = json.dumps({"Akira": {"id": "old-id", "prompt": "old", "use_system": True}})
@@ -806,7 +806,7 @@ class TestGuardarPerfilesAtomicWrite:
         logged on write failure, containing only the path + exception type,
         never the actual profile content (never expose raw chat/profile
         content in logs, per CLAUDE.md safety rules)."""
-        import opencohost.core.profiles as prof_mod
+        import opencohost.core.profiles.profiles as prof_mod
 
         profiles_file = tmp_path / "perfiles.json"
         secret_prompt = "SUPER_SECRET_PROMPT_CONTENT"

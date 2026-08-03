@@ -17,11 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from opencohost.core.topic_inbox import TopicInboxStore
+from opencohost.core.agenda.topic_inbox import TopicInboxStore
 from opencohost.smart_aggregator.kira_agenda_controller import (
     KiraAgendaController,
     TopicStatus,
@@ -31,6 +27,11 @@ from opencohost.ui.topic_inbox_bridge import (
     POLL_INTERVAL_MS,
     TopicInboxBridge,
 )
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from opencohost.config.settings import (
     PERSONALIZATION_NICKNAME_MAX,
     PERSONALIZATION_OCCUPATION_MAX,
 )
-from opencohost.core.personalization import load_personalization
+from opencohost.core.profiles.personalization import load_personalization
 
 router = APIRouter()
 

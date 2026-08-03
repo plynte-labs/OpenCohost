@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from opencohost.core.editorial_cards import EditorialCardStatus
+from opencohost.core.editorial.editorial_cards import EditorialCardStatus
 from opencohost.ui.window_utils import apply_app_icon, raise_window, show_toplevel
 
 logger = logging.getLogger(__name__)

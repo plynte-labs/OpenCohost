@@ -35,8 +35,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from opencohost.core.audio_bed import AudioBedEngine, AudioBedPolicy
-from opencohost.core.music_library import MusicLibrary, MusicTrack
+from opencohost.core.music.audio_bed import AudioBedEngine, AudioBedPolicy
+from opencohost.core.music.music_library import MusicLibrary, MusicTrack
 
 
 # ---------------------------------------------------------------------------

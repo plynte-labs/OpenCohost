@@ -116,7 +116,7 @@ def _make_schedule():
 
 
 def _make_card(topic="Topic", status=None, expires_at=None, **overrides):
-    from opencohost.core.editorial_cards import EditorialCard, EditorialCardStatus
+    from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStatus
 
     kwargs = dict(
         topic=topic,
@@ -273,7 +273,7 @@ class TestFailOpen:
 class TestGroupCardsByStatus:
     def test_groups_in_active_armed_draft_used_expired_order(self):
         from opencohost.ui.inspector_cards import group_cards_by_status
-        from opencohost.core.editorial_cards import EditorialCardStatus
+        from opencohost.core.editorial.editorial_cards import EditorialCardStatus
 
         used = _make_card(topic="Used", status=EditorialCardStatus.USED)
         active = _make_card(topic="Active", status=EditorialCardStatus.ACTIVE)
@@ -288,7 +288,7 @@ class TestGroupCardsByStatus:
 
     def test_computed_vencida_chip_when_expired_but_status_not_expired(self):
         from opencohost.ui.inspector_cards import group_cards_by_status
-        from opencohost.core.editorial_cards import EditorialCardStatus
+        from opencohost.core.editorial.editorial_cards import EditorialCardStatus
         from datetime import datetime, timedelta, timezone
 
         stale_armed = _make_card(
@@ -303,7 +303,7 @@ class TestGroupCardsByStatus:
 
     def test_no_vencida_chip_when_status_already_expired(self):
         from opencohost.ui.inspector_cards import group_cards_by_status
-        from opencohost.core.editorial_cards import EditorialCardStatus
+        from opencohost.core.editorial.editorial_cards import EditorialCardStatus
         from datetime import datetime, timedelta, timezone
 
         expired = _make_card(
@@ -318,7 +318,7 @@ class TestGroupCardsByStatus:
 
     def test_no_vencida_chip_for_non_expired_card(self):
         from opencohost.ui.inspector_cards import group_cards_by_status
-        from opencohost.core.editorial_cards import EditorialCardStatus
+        from opencohost.core.editorial.editorial_cards import EditorialCardStatus
 
         fresh = _make_card(topic="Fresh", status=EditorialCardStatus.ARMED)
 

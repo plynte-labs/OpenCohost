@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from opencohost.core.music_library import MusicLibrary
+from opencohost.core.music.music_library import MusicLibrary
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
@@ -73,7 +73,7 @@ def test_import_copies_outside_music_lock(tmp_path: Path, monkeypatch):
     if the lock is free (acquirable) during the copy, the copy is outside the
     lock. On the old code the copy ran inside `with host.music_lock`, so a
     same-thread non-reentrant acquire returns False."""
-    import opencohost.core.music_library as ml
+    import opencohost.core.music.music_library as ml
 
     library = _make_library(tmp_path)
     source = tmp_path / "incoming" / "song.wav"
@@ -106,7 +106,7 @@ def test_import_copies_outside_music_lock(tmp_path: Path, monkeypatch):
 def test_import_save_failure_rolls_back_track_and_staged_file(tmp_path: Path, monkeypatch):
     """A save failure during register must leave NO live track in RAM and NO
     orphan copy on disk — a 503 must be a clean no-op, not a half-import."""
-    import opencohost.core.music_library as ml
+    import opencohost.core.music.music_library as ml
 
     library = _make_library(tmp_path)
     source = tmp_path / "incoming" / "song.wav"

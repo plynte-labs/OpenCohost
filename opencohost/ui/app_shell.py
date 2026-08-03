@@ -55,20 +55,20 @@ from opencohost.config.settings import (
 )
 from opencohost.config.logger import get_logger
 from opencohost.i18n import active as i18n_active
-from opencohost.core.agenda_persistence import AgendaPersistence
-from opencohost.core.topic_inbox import TopicInboxStore
+from opencohost.core.agenda.agenda_persistence import AgendaPersistence
+from opencohost.core.agenda.topic_inbox import TopicInboxStore
 from opencohost.ui.topic_inbox_bridge import TopicInboxBridge
 from opencohost.ui.tts_speed_control import build_tts_speed_selector
 from opencohost.ui import locale_control
-from opencohost.core.profiles import cargar_perfiles, guardar_perfiles
-from opencohost.core.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
-from opencohost.core.audio_bed import AudioBedEngine
-from opencohost.core.editorial_agenda_bridge import EditorialAgendaBridge
-from opencohost.core.editorial_cards import EditorialCard, EditorialCardStore
+from opencohost.core.profiles.profiles import cargar_perfiles, guardar_perfiles
+from opencohost.core.profiles.cohost_profiles import load_cohost_profiles, save_cohost_profiles, normalize_cohost_profile, sanitize_profile_name
+from opencohost.core.music.audio_bed import AudioBedEngine
+from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
+from opencohost.core.editorial.editorial_cards import EditorialCard, EditorialCardStore
 from opencohost.core.llm_engine import MotorVocalIA
-from opencohost.core.health_monitor import HealthMonitor
+from opencohost.core.observability.health_monitor import HealthMonitor
 from opencohost.core.temp_file_cleanup import cleanup_opencohost_temp_artifacts
-from opencohost.core.music_library import MusicLibrary
+from opencohost.core.music.music_library import MusicLibrary
 from opencohost.smart_aggregator import AgendaAction, AgendaState, Aggregator, generate_suggestions, KiraAgendaController
 logger = get_logger()
 def _cargar_geometria() -> dict | None:

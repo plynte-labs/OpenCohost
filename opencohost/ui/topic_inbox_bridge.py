@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from opencohost.core.topic_inbox import ID_PREFIX as INBOX_ID_PREFIX
+from opencohost.core.agenda.topic_inbox import ID_PREFIX as INBOX_ID_PREFIX
 from opencohost.smart_aggregator.kira_agenda_controller import TopicStatus
 
 logger = logging.getLogger(__name__)

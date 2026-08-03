@@ -66,18 +66,18 @@ from opencohost.api.models import (
     AgentTopicResponse,
 )
 from opencohost.api.shared import _count_sql, _editorial_cards_by_status
-from opencohost.core.agent_notices import (
+from opencohost.core.observability.agent_notices import (
     AgentNoticeCapError,
     AgentNoticeStore,
     AgentNoticeValidationError,
 )
-from opencohost.core.editorial_cards import (
+from opencohost.core.editorial.editorial_cards import (
     EditorialCard,
     EditorialCardStatus,
     EditorialCardStore,
     EditorialCardValidationError,
 )
-from opencohost.core.topic_inbox import (
+from opencohost.core.agenda.topic_inbox import (
     TopicInboxCapError,
     TopicInboxStore,
     TopicInboxValidationError,

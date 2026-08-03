@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from opencohost.core.health_monitor import MonitorState
+from opencohost.core.observability.health_monitor import MonitorState
 
 COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

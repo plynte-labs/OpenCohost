@@ -1,7 +1,7 @@
 """Global (profile-independent) streamer personalization store.
 
 Design: sdd/kira-personalization-onboarding-20260705 (design.md §1/§2).
-Mirrors opencohost/core/profiles.py's atomic-write pattern (mkstemp +
+Mirrors opencohost/core/profiles/profiles.py's atomic-write pattern (mkstemp +
 os.replace, fail-open, never raises, logs path + exception type only —
 never field content, per CLAUDE.md).
 

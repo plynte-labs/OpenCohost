@@ -15,8 +15,8 @@ capture stays byte-identical.
 
 from __future__ import annotations
 
-import opencohost.core.memoria_store as ms
-from opencohost.core.memoria_store import select_top_k
+import opencohost.core.memory.memoria_store as ms
+from opencohost.core.memory.memoria_store import select_top_k
 
 
 def _row(row_id, *, signature="", title="x"):
