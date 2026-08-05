@@ -1086,7 +1086,12 @@ def test_hablar_impl_drives_speech_progress_from_the_real_consumer_loop(tmp_path
 
     motor._log = _spy_log
 
-    motor._hablar_impl("Frase uno. Frase dos. Frase tres.", source="direct")
+    # Step 2 (speech-router design §11 B1): the gap_ms/speaking_end bookkeeping
+    # asserted at the end of this test left `_hablar_impl` for the boundary
+    # owner (`_hablar` on the legacy path, the router when armed), so the drive
+    # is the wrapper. The progress counters below are still the REAL
+    # `_hablar_impl` consumer loop's.
+    motor._hablar("Frase uno. Frase dos. Frase tres.", source="direct")
 
     assert seen["mid"] is not None, "speech progress must be tracked mid-playback"
     assert seen["mid"]["speaking"] is True

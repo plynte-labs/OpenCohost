@@ -67,6 +67,11 @@ from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
 from opencohost.core.scheduling.turn_stamp import TurnStamp
 from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
+from opencohost.core.speech.router import (
+    SPEECH_BOUNDARY_COMMAND,
+    SpeechRouter,
+    priority_for_source,
+)
 from opencohost.core.context.ctx_telemetry import CtxTelemetryRing
 from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
@@ -865,6 +870,13 @@ class MotorVocalIA(threading.Thread):
         # product behavior. EngineHost sets this True; the CTK app never
         # constructs EngineHost, so CTK keeps its unchanged no-cut behavior.
         self._ptt_position_cut_enabled: bool = False
+        # Speech-router host flag (interruptible_speech_architecture_20260804
+        # §8 step 2), same pattern as the D1 flag above and the same reason:
+        # EngineHost turns it ON, CTK never does. OFF is the kill switch —
+        # `_speak_or_submit` falls back to a direct, blocking `_hablar`.
+        self._speech_router_enabled: bool = False
+        # Built (and its daemon thread started) on the FIRST routed submit.
+        self._speech_router = None
 
         # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
         # serializes _hablar so two callers can never share the TTS/audio
@@ -934,8 +946,36 @@ class MotorVocalIA(threading.Thread):
 
     @property
     def is_speaking(self):
+        """Public speech predicate — `_speech_active` since step 2.
+
+        Converting this ONE property carries every API reader with it
+        (agenda_driver :300/:595, routers/status, ptt_session, routers/chat,
+        shared), which is why none of them changes a line.
+        """
+        return self._speech_active
+
+    @property
+    def _speech_active(self) -> bool:
+        """ACTIVE ∨ INCOMING ∨ STACK, plus the raw `_speaking` flag (design
+        §11 B2).
+
+        The INCOMING clause is the load-bearing one: without it the
+        submit->pick window is open ON THE SUBMITTING THREAD — submit returns,
+        `_complete_processing_cycle` runs, `_process_priority_queue` tests its
+        gate against False and pops a second item mid-speech.
+
+        `_speaking` stays in the predicate so the legacy direct-`_hablar` path
+        (kill switch OFF, and CTK, which never arms the router) keeps exactly
+        today's semantics. It is never NARROWER than before, only wider.
+        """
         with self._lock:
-            return self._speaking
+            speaking = self._speaking
+        if speaking:
+            return True
+        router = self._speech_router
+        # Read outside `_lock`: `_sched_lock` is a leaf and must never be
+        # taken under another engine lock (design §4 I10).
+        return router is not None and router.has_work()
 
     @property
     def is_processing(self):
@@ -1057,6 +1097,11 @@ class MotorVocalIA(threading.Thread):
         slower than its real playback rate. Falls back to the legacy
         `start`-based measurement when `first_play` is absent (e.g. a
         test-constructed progress dict), so behavior is unchanged there.
+
+        DELIBERATELY still on `_speaking`, not `_speech_active` (design §11):
+        this predicate's consumers need "audio playing RIGHT NOW". A queued or
+        suspended job has no rate to extrapolate from, and the connector
+        upgrade would spawn an Ollama call on a false GPU-free premise.
         """
         with self._lock:
             if not self._speaking:
@@ -1616,6 +1661,17 @@ class MotorVocalIA(threading.Thread):
         one remaining direct-only gate is the read-only memory inspector's
         user-content dump (memory_inspector_snapshot), which is a privacy
         display gate, not a prompt gate."""
+        if tipo == SPEECH_BOUNDARY_COMMAND:
+            # §11 B5: the router's wake sentinel. Without it the post-boundary
+            # tail (control drain, direct drain, pending model switch,
+            # priority-queue re-entry) would only re-enter through run()'s 1 s
+            # `command_queue.get` idle tick — up to a second of NEW dead air at
+            # every turn boundary. `emit_idle=False`: the router already
+            # emitted 'idle' at job completion (B3), and a second one would
+            # flicker the avatar.
+            self._complete_processing_cycle(emit_idle=False)
+            return
+
         if tipo == "set_voice":
             self.voz_referencia = payload
             if isinstance(payload, tuple):
@@ -1634,7 +1690,7 @@ class MotorVocalIA(threading.Thread):
                 self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
                 self.ui_callback("ollama_unavailable")
                 return
-            if self._processing or self._speaking:
+            if self._processing or self._speech_active:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
                 # C1 (refactor_core_api_20260802): forward the stamp's fields ONLY
@@ -1684,7 +1740,7 @@ class MotorVocalIA(threading.Thread):
                 self.ui_callback("model_switch_failed")
                 return
 
-            if self._processing or self._speaking:
+            if self._processing or self._speech_active:
                 if self._pending_model_switch == new_model:
                     self._log(f"Switch a {new_model} ya esta pendiente; ignorando duplicado.", level="debug")
                     return
@@ -2344,9 +2400,15 @@ class MotorVocalIA(threading.Thread):
             self._log("Agenda: usando respuesta prefabricada durante el audio anterior.")
             self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
             self._emit_dialogue(dialogo, item.get("source", "kira-agenda"))
-            self._hablar(dialogo, source=item.get("source", "kira-agenda"))
+            self._speak_or_submit(dialogo, source=item.get("source", "kira-agenda"))
 
-        threading.Thread(target=speaker, daemon=True).start()
+        if self._speech_router_enabled:
+            # Step 2: the detached speaker thread existed only so playback
+            # would not block this caller. `submit` is non-blocking, so it is
+            # gone — one fewer thread that can outlive the turn that spawned it.
+            speaker()
+        else:
+            threading.Thread(target=speaker, daemon=True).start()
         return True
 
     def _take_pregen_if_match(self, payload: str, source: str) -> Optional[dict]:
@@ -2501,12 +2563,11 @@ class MotorVocalIA(threading.Thread):
                 f"Pregen boundary: draft={draft_label} source={source} gap_ms={gap_ms} "
                 f"gen_ms={gen_ms} speech_ms={self._speech_ms_for_boundary()}"
             )
-        self._hablar(dialogo, source=source)
-        if source == "chat" and self.on_chat_turn_spoken is not None:
-            try:
-                self.on_chat_turn_spoken()
-            except Exception:
-                pass
+        # Step 2: the chat spoken clock moved to the router's job-completion
+        # path (design §11 B1/B5) — it must fire only when the job actually
+        # FINISHED with speech delivered, which a non-blocking submit can no
+        # longer tell from here.
+        self._speak_or_submit(dialogo, source=source)
 
     def _pregen_in_flight_for(self, payload: str, source: str) -> bool:
         """True when a pregen worker is currently generating THIS exact
@@ -2891,7 +2952,7 @@ class MotorVocalIA(threading.Thread):
         flat stack.
         """
         while True:
-            if self._processing or self._speaking:
+            if self._processing or self._speech_active:
                 return
 
             expired_chat_infos: list = []
@@ -3128,11 +3189,19 @@ class MotorVocalIA(threading.Thread):
                 # here, once per item — the same cadence the old recursion had.
                 self._complete_processing_cycle(process_queue=False)
 
-    def _complete_processing_cycle(self, *, process_queue: bool = True) -> None:
+    def _complete_processing_cycle(self, *, process_queue: bool = True, emit_idle: bool = True) -> None:
         with self._lock:
             self._processing = False
             self._current_processing_source = None
-        self.ui_callback("idle")
+        # §11 B3: this cycle no longer ends when the speech does — under the
+        # router it ends the moment `submit` returns. ObsRuntime maps 'idle' to
+        # AvatarState.IDLE + _stop_speaking_alt (the mouth stops mid-sentence,
+        # visibly) and CTK re-enables input, so it must not fire mid-speech.
+        # The router emits it at job completion instead; a cycle that never
+        # spoke still emits it here, exactly as today.
+        # `emit_idle=False` is the router's own wake path — it already emitted.
+        if emit_idle and not self._speech_active:
+            self.ui_callback("idle")
         self._drain_control_commands()
         # Unit 4.2 (runtime_findings_batch_20260731, D3b): see the method's own
         # docstring for the root cause this closes.
@@ -3166,7 +3235,18 @@ class MotorVocalIA(threading.Thread):
         re-insertion, which would itself reorder it behind whatever else
         arrived while draining). Bounded by a qsize() snapshot so it can never
         loop indefinitely even under a sustained stream of whitelisted commands.
+
+        §11 B4: "true idle point" is now enforced, not assumed. Under the
+        router this runs while speech may still be pending or playing, and
+        `_DRAIN_SAFE_COMMANDS` includes `set_piper_voice` (-> `_piper.reload`)
+        and `set_tts_speed` (-> `set_length_scale`) on the very Piper object
+        the producer is mid-utterance on — the producer snapshots
+        `tts_local_only`/`edge_rate` at start precisely because drains were
+        boundary-only. Deferred drains are picked up by the router's wake
+        sentinel at the real boundary (B5).
         """
+        if self._speech_active:
+            return
         applied = 0
         for _ in range(self.command_queue.qsize()):
             with self.command_queue.mutex:
@@ -3195,10 +3275,13 @@ class MotorVocalIA(threading.Thread):
         every turn boundary.
 
         Root cause (F5, and the F12 follow-up this closes): WU2's
-        consume-at-event (`_hablar`'s speaking_end tail; see the comment on
-        `AgendaDriver._prefetch` in `api/agenda_driver.py`) adopts the NEXT
-        agenda block straight into `_priority_queue` SYNCHRONOUSLY, on THIS
-        engine thread, before this boundary ever runs. As long as that keeps
+        consume-at-event (the speaking_end boundary emission — the
+        SPEECHROUTER thread when the router is armed, `_hablar`'s tail on the
+        legacy path; see the comment on `AgendaDriver._prefetch` in
+        `api/agenda_driver.py`) adopts the NEXT agenda block straight into
+        `_priority_queue` SYNCHRONOUSLY before this boundary ever runs — the
+        router preserves the ordering by enqueueing its wake sentinel AFTER
+        the boundary event. As long as that keeps
         succeeding (the 2026-07-30 run pregenerated 87 of 126 blocks),
         `_process_priority_queue`'s drain loop never finds `_priority_queue`
         empty and never returns to `run()`'s `command_queue.get()` -- so a
@@ -3451,7 +3534,7 @@ class MotorVocalIA(threading.Thread):
             return
         if time.monotonic() < self._pending_switch_next_at:
             return  # not time yet
-        if self._processing or self._speaking:
+        if self._processing or self._speech_active:
             return  # still busy
 
         model = self._pending_model_switch
@@ -4912,7 +4995,14 @@ class MotorVocalIA(threading.Thread):
                 self.ui_callback("cloud_llm_error")
                 return
             try:
-                self._hablar(i18n_active.provider_fallback_notice(), source=source)
+                # EXPLICIT priority (design §11, the audit's rider): this notice
+                # inherits the FAILED TURN's source, which may be `direct`/`ptt`.
+                # Letting it inherit the owner band (priority 0) would make a
+                # system notice preemptive at step 3 under owner decision D3
+                # (uniform priority-0 preemption). It is chat-band work.
+                self._speak_or_submit(
+                    i18n_active.provider_fallback_notice(), source=source, priority=1
+                )
             except Exception:
                 logger.exception("Cloud fallback: could not speak provider_fallback_notice")
 
@@ -6931,18 +7021,12 @@ class MotorVocalIA(threading.Thread):
                 provider_changed_while_queued=provider_changed_while_queued,
             )
 
-            self._hablar(dialogo, source=source)
-            # Measure-first telemetry seam: a chat turn actually played to completion —
-            # advance the spoken clock so secs_since_last_spoken stays honest vs a
-            # should_call that may later expire via TTL. Chat-only; no-op when unset.
-            # Intentionally NOT in a finally: if _hablar raises (TTS failure) Kira did
-            # NOT speak, so the spoken gap should keep growing — that growing gap is the
-            # very signal that surfaces silent TTS failures to the operator.
-            if source == "chat" and self.on_chat_turn_spoken is not None:
-                try:
-                    self.on_chat_turn_spoken()
-                except Exception:
-                    pass
+            # Step 2: playback (and, with it, the chat spoken clock) moved
+            # behind `_speak_or_submit`. Under the router this returns while
+            # the job is still QUEUED, so nothing after this line may assume
+            # speech completed — see `_complete_processing_cycle`'s idle gate
+            # and `_drain_control_commands`' `_speech_active` gate.
+            self._speak_or_submit(dialogo, source=source)
         elif source.startswith("kira-agenda"):
             # Empty or guardrail-blocked agenda generation: _generar_dialogo
             # returned "", so _hablar never runs and no speaking_start event
@@ -7004,7 +7088,111 @@ class MotorVocalIA(threading.Thread):
             result.original_len, result.remaining_len, result.removed_pct,
         )
 
-    def _hablar(self, texto_a_generar, source: str = "direct"):
+    def _speak_or_submit(self, dialogo, source: str = "direct", priority: Optional[int] = None) -> None:
+        """The ONE seam every spoken line goes through (design §8 step 2).
+
+        Router armed: hand the text to the router thread and return
+        immediately — playback no longer occupies the calling thread.
+        Kill switch OFF: the legacy direct, BLOCKING `_hablar`, byte-identical
+        to what each of the four converted call sites did before.
+
+        `priority` defaults to the source's band; a caller passes it
+        explicitly when the source tag would lie about the content's urgency
+        (see the cloud-fallback notice).
+        """
+        if not self._speech_router_enabled:
+            self._hablar(dialogo, source=source)
+            # Measure-first telemetry seam: a chat turn actually played to
+            # completion — advance the spoken clock so secs_since_last_spoken
+            # stays honest vs a should_call that may later expire via TTL.
+            # Chat-only; no-op when unset. Intentionally NOT in a finally: if
+            # `_hablar` raises (TTS failure) Kira did NOT speak, so the spoken
+            # gap should keep growing — that growing gap is the very signal
+            # that surfaces silent TTS failures to the operator. The router
+            # reproduces exactly this rule at job completion (FINISHED only).
+            if source == "chat" and self.on_chat_turn_spoken is not None:
+                try:
+                    self.on_chat_turn_spoken()
+                except Exception:
+                    pass
+            return
+        router = self._speech_router
+        if router is None:
+            with self._lock:
+                if self._speech_router is None:
+                    self._speech_router = SpeechRouter(self)
+                router = self._speech_router
+        router.start()  # idempotent
+        router.submit(
+            dialogo,
+            source,
+            priority_for_source(source) if priority is None else priority,
+        )
+
+    def _speech_cancelled(self, source: str) -> bool:
+        """True when an emergency path cancelled this source's speech.
+
+        Extracted from `_hablar_impl`'s entry guard (Bug B straggler) so the
+        router can refuse a job BEFORE any boundary event exists for consumers
+        to react to (design §2 reconcile / §11 B1).
+        """
+        with self._lock:
+            cancelled = self._cancelled_speech_prefixes
+        return bool(cancelled) and any(source.startswith(p) for p in cancelled)
+
+    def _speech_boundary_start(self, source: str) -> None:
+        """Open a speech boundary: arm the cut flag, publish the source, emit
+        `speaking_start`.
+
+        Step 2 (design §11 B1): this LEFT `_hablar_impl`. A job is one boundary
+        pair no matter how many `_hablar` invocations it takes (a retry today, a
+        resume at step 3), and a zero-fragment job no longer emits a second
+        `speaking_end` from inside the invocation. The emitter is the ROUTER
+        when it is armed, and `_hablar` itself on the legacy direct path.
+
+        A raising `speaking_start` consumer must not strand `_speaking` /
+        `_current_speech_source` (pinned semantic, test_llm_engine_timeouts) —
+        both are cleared here and the exception keeps propagating.
+        """
+        with self._lock:
+            self._speaking = True
+            self._current_speech_source = source
+            # T1(a) [v5]: monotonic start of THIS turn's speech, paired with
+            # `_speech_boundary_end` to record the previous turn's own speech
+            # duration for the `speech_ms=` boundary telemetry field.
+            self._speaking_start_monotonic = time.monotonic()
+        try:
+            self.ui_callback("speaking_start")
+        except Exception:
+            with self._lock:
+                self._speaking = False
+                self._current_speech_source = None
+                self._speaking_start_monotonic = None
+            logger.exception("UI callback failed during speaking_start")
+            raise
+
+    def _speech_boundary_end(self) -> None:
+        """Close a speech boundary: disarm, clear the source, emit
+        `speaking_end`. Counterpart of `_speech_boundary_start` (design §11 B1).
+
+        `_current_speech_source` is cleared HERE, not in `_hablar_impl`'s tail:
+        `agenda_driver._has_non_agenda_audio_work` reads `is_speaking` and
+        `current_speech_source` together, and clearing the tag while the job is
+        still ACTIVE would read as "non-agenda audio work".
+        """
+        with self._lock:
+            self._speaking = False
+            self._current_speech_source = None
+            now = time.monotonic()
+            self._last_speaking_end_monotonic = now
+            # T1(a) [v5]: this turn's own speech duration, recorded as the
+            # "previous turn" value the NEXT boundary's speech_ms reads.
+            if self._speaking_start_monotonic is not None:
+                self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
+            self._speaking_start_monotonic = None
+        self.ui_callback("speaking_end")
+
+    def _hablar(self, texto_a_generar, source: str = "direct", *, emit_boundary: bool = True):
         """WU2b belt lock (design-fase2.md §2.5): serialize every _hablar caller.
 
         Thin wrapper around _hablar_impl. After WU2 the engine worker is the ONLY
@@ -7015,22 +7203,45 @@ class MotorVocalIA(threading.Thread):
         working. Both call sites are terminal/non-recursive (neither _hablar_impl
         nor its callbacks re-enter _hablar), so the non-reentrant Lock never
         self-deadlocks; it is released in finally on every exit path.
+
+        Step 2: `emit_boundary=False` is the ROUTER's call — it owns one
+        `speaking_start`/`speaking_end` pair per JOB and would otherwise get a
+        second pair per invocation (design §11 B1). Every other caller keeps the
+        invocation-scoped pair, which is exactly today's behavior.
         """
+        if self._speech_cancelled(source):
+            # Bug B fix: refuse a turn whose source was cancelled during its
+            # generation phase (already popped from the priority queue, so
+            # drop_pending_sources can't reach it). Checked BEFORE the boundary
+            # opens so an emergency-stopped straggler emits no event pair at all.
+            self._log(f"Habla suprimida (cancelada): source={source}", level="warning")
+            return SpeechOutcome(chunks=[], cursor=0, spoken=[], skipped=[], interrupted=False, error=None)
+        # The boundary pair lives INSIDE the belt-lock critical section — the
+        # same discipline `_hablar_impl` had when it emitted the pair itself.
+        # Emitting `speaking_start` before the acquire (or `speaking_end`
+        # after the release) lets two concurrent legacy callers (CTK's
+        # `play_prefetched_agenda` speaker, `CloudFallbackWarm`) interleave
+        # nested pairs, clobber `_current_speech_source` mid-playback, and cut
+        # the lock holder's utterance via the unlocked `_speaking = False`.
         if not self._hablar_lock.acquire(blocking=False):
             self._log("hablar contention (serialized)")
             self._hablar_lock.acquire()
         try:
-            return self._hablar_impl(texto_a_generar, source=source)
+            if emit_boundary:
+                self._speech_boundary_start(source)
+            try:
+                return self._hablar_impl(texto_a_generar, source=source)
+            finally:
+                if emit_boundary:
+                    self._speech_boundary_end()
         finally:
             self._hablar_lock.release()
 
     def _hablar_impl(self, texto_a_generar, source: str = "direct"):
-        # Bug B fix: refuse a turn whose source was cancelled during its
-        # generation phase (already popped from the priority queue, so
-        # drop_pending_sources can't reach it). Checked BEFORE _speaking=True /
-        # speaking_start so a straggler never starts playback after an emergency
-        # stop. Mid-playback truncation is handled separately by the _speaking
-        # guard in the consumer loop via interrupt_speaking().
+        # Bug B fix (second line of defence): the token can still be set in the
+        # window between the caller's own check and this frame. Mid-playback
+        # truncation is handled separately by the _speaking guard in the
+        # consumer loop via interrupt_speaking().
         with self._lock:
             cancelled = self._cancelled_speech_prefixes
         if cancelled and any(source.startswith(p) for p in cancelled):
@@ -7038,26 +7249,11 @@ class MotorVocalIA(threading.Thread):
             return SpeechOutcome(chunks=[], cursor=0, spoken=[], skipped=[], interrupted=False, error=None)
 
         with self._lock:
+            # `_speaking` SURVIVES as this method's cut mechanism (design §11):
+            # the consumer loop and interrupt_speaking() both key off it. It is
+            # not renamed and not replaced by `_speech_active`.
             self._speaking = True
             self._current_speech_source = source
-            # T1(a) [v5]: monotonic start of THIS turn's speech, paired with
-            # the speaking_end sites below to record the previous turn's own
-            # speech duration for the `speech_ms=` boundary telemetry field.
-            self._speaking_start_monotonic = time.monotonic()
-        try:
-            self.ui_callback("speaking_start")
-        except Exception:
-            with self._lock:
-                self._speaking = False
-                self._current_speech_source = None
-            logger.exception("UI callback failed during speaking_start")
-            # NOT converted to a returned SpeechOutcome: test_llm_engine_timeouts
-            # ::test_speaking_start_callback_failure_clears_speech_source locks in
-            # that this raise must keep propagating out of _hablar/_hablar_impl.
-            # Zero-audible-behavior-change (design §8 step 1) means this
-            # already-tested contract stays exactly as-is; only exit paths that
-            # already returned/fell through silently gain a SpeechOutcome.
-            raise
 
         # WU5 D3 (design-fase2.md §3 WU5): while an interruption ANSWER's TTS
         # plays (GPU free — generation already finished), opportunistically
@@ -7099,18 +7295,13 @@ class MotorVocalIA(threading.Thread):
 
         if not oraciones:
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
+            # Step 2 (design §11 B1): the THIRD speaking_end site. It used to
+            # fire from in here, so a zero-fragment job completed the agenda
+            # turn (and idled the avatar) while the router still held the job
+            # ACTIVE, then emitted a second end at FINISHED. The boundary owner
+            # emits the single pair now.
             with self._lock:
                 self._speaking = False
-                self._current_speech_source = None
-                now = time.monotonic()
-                self._last_speaking_end_monotonic = now
-                # T1(a) [v5]: record THIS turn's own speech duration (here:
-                # ~0, nothing was ever synthesized) as the "previous turn"
-                # value for the NEXT boundary's speech_ms field.
-                if self._speaking_start_monotonic is not None:
-                    self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
-                self._speaking_start_monotonic = None
-            self.ui_callback("speaking_end")
             return SpeechOutcome(chunks=[], cursor=0, spoken=[], skipped=[], interrupted=False, error=None)
 
         self._log(f"Sintetizando {len(oraciones)} fragmento(s) con pipeline...")
@@ -7518,16 +7709,10 @@ class MotorVocalIA(threading.Thread):
             self._log(f"⚠️ {error_count} fragmento(s) fallaron.", level="warning")
         with self._lock:
             self._speaking = False
-            self._current_speech_source = None
             self._speech_progress = None
-            now = time.monotonic()
-            self._last_speaking_end_monotonic = now
-            # T1(a) [v5]: this turn's own speech duration, recorded as the
-            # "previous turn" value the NEXT boundary's speech_ms reads.
-            if self._speaking_start_monotonic is not None:
-                self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
-            self._speaking_start_monotonic = None
-        self.ui_callback("speaking_end")
+        # Step 2 (design §11 B1): `speaking_end`, the speech-source clear and
+        # the boundary telemetry all moved to `_speech_boundary_end`, which the
+        # JOB owner calls — once per job, after this invocation returns.
         # Step 1 (design §3/§8 step 1): every exit path returns a
         # SpeechOutcome. capture-and-discard only -- `_hablar` propagates this
         # verbatim and every existing caller ignores it (verified by grep),

@@ -551,6 +551,12 @@ class EngineHost:
         # precheck (main.py wires PttController.on_flush_precheck ->
         # motor.ptt_interrupt_if_agenda_speaking); this flag gates it.
         motor._ptt_position_cut_enabled = True
+        # Speech-router host flag (interruptible_speech_architecture_20260804
+        # §8 step 2), same pattern and same scope as the D1 flag above: the
+        # API host arms it, CTK never constructs an EngineHost and keeps the
+        # legacy blocking `_hablar`. Flip to False to revert playback to that
+        # legacy path — the kill switch for the whole router.
+        motor._speech_router_enabled = True
         # WU4 4b (design-fase2.md §3): surface a preview-guardrail rejection to
         # the operator. Fires on the PREGEN WORKER THREAD — no lock wrapper
         # needed here (EventLogSink.record guards its own append with a lock,
@@ -653,7 +659,11 @@ class EngineHost:
     def _handle_agenda_motor_event(self, status) -> None:
         """Feed a motor status event into the agenda controller (FIX-C).
 
-        Runs on the ENGINE thread (via _dispatch_motor_event). Takes
+        Runs on whichever thread emits the boundary event (via
+        _dispatch_motor_event): the SPEECHROUTER thread when the router is
+        armed (speaking_start/speaking_end/idle all emit there, so
+        `agenda_lock` is acquired from that thread too), or the engine/speaker
+        thread on the legacy kill-switch-OFF path. Takes
         `agenda_lock` and applies the SAME controller-state guards as
         motor_event_handlers.py:352-356/404-407: `speaking_start` accepts the
         in-flight generation, `speaking_end` completes the turn and nudges the
@@ -672,13 +682,18 @@ class EngineHost:
             else None
         )
         # WU2 (design-fase2.md §2.4): on an agenda speaking_end, consume the ready
-        # draft SYNCHRONOUSLY here — this runs on the ENGINE (worker) thread inside
-        # _hablar's tail, under agenda_lock, so the enqueue lands BEFORE the
-        # worker's post-turn _process_priority_queue. That closes the accumulation-
-        # flush race window and lets the worker's pop find the item (pregen cache
-        # hit). The driver-tick consume remains as the late-draft fallback.
-        # Lock safety: this thread takes agenda_lock (here) THEN motor locks (in
-        # replace_pending) — the SAME order the driver tick uses; no inversion.
+        # draft SYNCHRONOUSLY here. Router armed (step 2): this runs on the
+        # SPEECHROUTER thread inside the boundary emission, and the causal
+        # ordering survives because the router enqueues its engine-wake sentinel
+        # AFTER the boundary event — so this enqueue still lands BEFORE the
+        # engine's post-boundary _process_priority_queue pop. Legacy path:
+        # engine/speaker thread inside _hablar's tail, as before. Either way the
+        # accumulation-flush race window stays closed and the pop finds the item
+        # (pregen cache hit). The driver-tick consume remains the late-draft
+        # fallback.
+        # Lock safety: the emitting thread takes agenda_lock (here) THEN motor
+        # locks (in replace_pending) — the SAME order the driver tick uses; no
+        # inversion. The router holds NO router lock while emitting (§11 B6).
         consume = (
             (lambda: driver._maybe_consume_prefetch(agenda, self.motor))
             if driver is not None
