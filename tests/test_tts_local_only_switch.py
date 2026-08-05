@@ -49,7 +49,9 @@ def _make_motor():
     motor.ollama = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
     motor.pygame = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
     motor.is_ready = True
-    motor._speaking = True
+    # NOTE: never hand-set `_speaking` here — dispatch now DEFERS drain-safe
+    # verbs while `_speech_active` (§11 B4 primary path), so a fixture lying
+    # about speech state turns every setter test vacuous or failing.
     return motor, log_q, ui_events
 
 

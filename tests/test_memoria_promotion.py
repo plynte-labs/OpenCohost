@@ -934,6 +934,11 @@ class _EmptyQueue:
             raise queue.Empty
         return None
 
+    def qsize(self):
+        # run()'s idle branch drains control commands (§11 B4 backstop);
+        # the drain sizes its bounded pass off qsize(). Always empty here.
+        return 0
+
 
 def _drive_run(motor, idle_ticks):
     motor.command_queue = _EmptyQueue(idle_ticks)

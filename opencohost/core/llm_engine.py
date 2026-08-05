@@ -460,6 +460,13 @@ _DRAIN_SAFE_COMMANDS = frozenset({
     "switch_model",
 })
 
+# §11 B4 primary path: verbs `_dispatch_command` parks while speech is
+# active. `switch_model` is excluded because its branch carries its OWN
+# mid-speech gate (`_pending_model_switch`: dedupes repeats, cancels on a
+# switch-back) — a blind FIFO defer would apply every queued reload in
+# sequence at the boundary instead of collapsing to the latest.
+_SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model"}
+
 
 # refactor_core_api_20260802 B7 (Phase C4): _generar_dialogo's in-place phase
 # split. These two carriers exist ONLY to kill parameter sprawl between the
@@ -542,6 +549,10 @@ class MotorVocalIA(threading.Thread):
         # viewer chat (R8). None = zero behavior change for the CTk app.
         self.dialogue_callback = dialogue_callback
         self.command_queue = queue.Queue()
+        # §11 B4 (primary path): drain-safe verbs the run() loop consumed
+        # while the router was speaking, parked for the next true boundary.
+        # Engine-thread only (dispatch and drain both run there).
+        self._deferred_control_commands: deque = deque()
         self._reasoning_model_cache: dict[str, bool] = {}
         self._model_ctx_limit: dict[str, int] = {}
         # multi_provider_llm_20260723 Phase 3: the persisted provider config
@@ -1561,7 +1572,11 @@ class MotorVocalIA(threading.Thread):
             try:
                 comando = self.command_queue.get(timeout=1.0)
             except queue.Empty:
-                # Check priority queue and accumulation buffer when idle
+                # Check priority queue and accumulation buffer when idle.
+                # §11 B4 backstop: apply verbs deferred mid-utterance even if
+                # no further boundary ever runs (CTK detached playback; a
+                # lost wake sentinel). Gated inside on _speech_active.
+                self._drain_control_commands()
                 self._process_priority_queue()
                 self._check_pending_model_switch()
                 # memory_promotion_20260725 (owner decision 7): the FIRST idle
@@ -1670,6 +1685,18 @@ class MotorVocalIA(threading.Thread):
             # emitted 'idle' at job completion (B3), and a second one would
             # flicker the avatar.
             self._complete_processing_cycle(emit_idle=False)
+            return
+
+        # §11 B4, PRIMARY path (closure finding 2026-08-05): with the router
+        # armed the engine loop is FREE during playback, so this dispatch can
+        # run MID-UTTERANCE — set_piper_voice would reload the very Piper
+        # object the producer is synthesizing on. Park drain-safe verbs until
+        # the boundary drain (wake sentinel / idle tick), exactly when a
+        # pre-router engine — blocked inside `_hablar` — applied them.
+        # Payload never logged (set_profile carries a prompt).
+        if self._speech_active and tipo in _SPEECH_DEFER_COMMANDS:
+            self._deferred_control_commands.append((tipo, payload))
+            logger.info("Control command '%s' deferred until the speech boundary", tipo)
             return
 
         if tipo == "set_voice":
@@ -3243,11 +3270,23 @@ class MotorVocalIA(threading.Thread):
         the producer is mid-utterance on — the producer snapshots
         `tts_local_only`/`edge_rate` at start precisely because drains were
         boundary-only. Deferred drains are picked up by the router's wake
-        sentinel at the real boundary (B5).
+        sentinel at the real boundary (B5). The PRIMARY consume path defers
+        here too: `_dispatch_command` parks drain-safe verbs while
+        `_speech_active` (closure finding 2026-08-05) and this drain applies
+        them FIRST, ahead of the queue front-run.
         """
         if self._speech_active:
             return
         applied = 0
+        # §11 B4 primary path: verbs run() consumed mid-utterance and
+        # `_dispatch_command` parked. FIFO holds: anything still sitting in
+        # command_queue arrived AFTER these were popped, so they apply first.
+        # Bounded snapshot — an item re-deferred by a submit racing this
+        # flush goes to the back and the loop still exits.
+        for _ in range(len(self._deferred_control_commands)):
+            tipo, payload = self._deferred_control_commands.popleft()
+            self._dispatch_command(tipo, payload)
+            applied += 1
         for _ in range(self.command_queue.qsize()):
             with self.command_queue.mutex:
                 if not self.command_queue.queue:

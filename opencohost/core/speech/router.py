@@ -330,12 +330,14 @@ class SpeechRouter:
             except Exception:
                 logger.exception("speaking_end consumer failed")
 
-        # The chat spoken clock preserves the LEGACY rule exactly: it advanced
-        # whenever `_hablar` RETURNED without raising — including a turn cut
-        # mid-playback, which did (partially) speak. So: FINISHED, or
-        # DISCARDED by a bare interruption. A raise (reason=error) or a cancel
-        # keeps the gap growing — that growing gap is what surfaces silent TTS
-        # failures to the operator.
+        # The chat spoken clock ticks where speech genuinely happened and
+        # ended: FINISHED, or DISCARDED by a bare interruption (a cut turn
+        # did partially speak — legacy ticked there too). DELIBERATE
+        # divergence from legacy, which ticked on ANY non-raising return: a
+        # raise, a cancel, AND a non-raising error return (queue_empty_timeout
+        # — reachable with zero exceptions, §12) keep the gap growing. That
+        # growing gap is what surfaces silent TTS failures to the operator.
+        # Pinned by the nonraising-error clock test.
         if job.source == "chat" and (
             state is SpeechJobState.FINISHED
             or (state is SpeechJobState.DISCARDED and reason == "interrupted")

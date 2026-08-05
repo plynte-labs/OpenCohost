@@ -354,6 +354,56 @@ def test_control_commands_do_not_drain_while_speech_is_active(router_motors):
     assert applied == ["set_tts_speed"]
 
 
+def test_a_command_consumed_by_the_run_loop_mid_utterance_is_deferred(
+    router_motors, monkeypatch
+):
+    """§11 B4, PRIMARY path (2026-08-05 closure finding): the boundary drain
+    is gated, but with the router armed the engine loop is FREE during
+    playback — run() pops a control verb within its 1 s tick and
+    `_dispatch_command` applies it MID-UTTERANCE. `set_tts_speed` mutates the
+    very Piper object the producer is synthesizing on (pre-router this was
+    impossible on the main paths: `_hablar` occupied the engine thread).
+    Dispatch must DEFER drain-safe verbs while `_speech_active`, and the
+    boundary drain must apply them — never lose them."""
+    mixer = _ScriptedMixerMusic(block_at=0)
+    motor, rec, _ = _armed(router_motors, mixer_music=mixer)
+    applied: list = []
+    monkeypatch.setattr(
+        motor._piper, "set_length_scale", lambda v: applied.append(v)
+    )
+    monkeypatch.setattr(llm_engine, "save_tts_speed", lambda *_a, **_k: None)
+
+    consumed = threading.Event()
+    real_dispatch = motor._dispatch_command
+
+    def _spy(tipo, payload, **kw):
+        real_dispatch(tipo, payload, **kw)
+        if tipo == "set_tts_speed":
+            consumed.set()
+
+    motor._dispatch_command = _spy
+
+    stop = threading.Event()
+    pump = _pump(motor, stop)
+    try:
+        motor._speak_or_submit(_text(2), source="kira-agenda:t1")
+        assert mixer.entered_block.wait(5.0)
+
+        motor.command_queue.put(("set_tts_speed", 1.4))
+        assert consumed.wait(5.0), "run() never consumed the command"
+        assert applied == [], "a TTS-mutating verb was applied mid-utterance"
+
+        mixer.release()
+        assert rec.wait_for("speaking_end", 1), rec.names()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not applied:
+            time.sleep(0.005)
+        assert applied == [1.4], "the deferred command was lost at the boundary"
+    finally:
+        stop.set()
+        pump.join(5.0)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # (6) B5 — the router wakes the engine loop at a job boundary
 # ──────────────────────────────────────────────────────────────────────────
@@ -518,6 +568,34 @@ def test_chat_spoken_clock_does_not_advance_on_a_failed_job(router_motors):
 
     assert rec.wait_for("speaking_end", 1), rec.names()
     assert ticks == []
+
+
+def test_chat_spoken_clock_does_not_advance_on_a_nonraising_error_return(router_motors):
+    """DELIBERATE divergence from legacy (closure residual, 2026-08-05):
+    `_hablar_impl` can fail WITHOUT raising — `queue_empty_timeout` returns a
+    normal outcome with `error` set (§12: 195 s is per-socket-op, so this is
+    reachable with zero exceptions). Legacy ticked the clock on any
+    non-raising return; the router treats this as what it is — a silent TTS
+    failure — and lets the gap grow. Pinned as chosen behavior, not accident.
+    A non-raising error return must not retry either (retry is raise-only)."""
+    motor, rec, _ = _armed(router_motors)
+    ticks: list = []
+    motor.on_chat_turn_spoken = lambda: ticks.append(1)
+    calls: list = []
+
+    def _returns_error_outcome(texto, source="direct", **kw):
+        calls.append(source)
+        return llm_engine.SpeechOutcome(
+            chunks=["frag-a", "frag-b"], cursor=0, spoken=[], skipped=[],
+            interrupted=False, error="queue_empty_timeout",
+        )
+
+    motor._hablar = _returns_error_outcome
+    motor._speak_or_submit(_text(2), source="chat")
+
+    assert rec.wait_for("speaking_end", 1), rec.names()
+    assert ticks == []
+    assert calls == ["chat"]
 
 
 def test_agenda_source_never_advances_the_chat_clock(router_motors):

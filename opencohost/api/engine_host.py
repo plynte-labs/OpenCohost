@@ -661,9 +661,11 @@ class EngineHost:
 
         Runs on whichever thread emits the boundary event (via
         _dispatch_motor_event): the SPEECHROUTER thread when the router is
-        armed (speaking_start/speaking_end/idle all emit there, so
-        `agenda_lock` is acquired from that thread too), or the engine/speaker
-        thread on the legacy kill-switch-OFF path. Takes
+        armed (speaking_start/speaking_end emit there; `idle` emits there at
+        job completion but ALSO from the ENGINE thread on a cycle that never
+        spoke — `_complete_processing_cycle`), or the engine/speaker
+        thread on the legacy kill-switch-OFF path. Either way `agenda_lock`
+        is acquired from the emitting thread. Takes
         `agenda_lock` and applies the SAME controller-state guards as
         motor_event_handlers.py:352-356/404-407: `speaking_start` accepts the
         in-flight generation, `speaking_end` completes the turn and nudges the
