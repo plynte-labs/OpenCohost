@@ -55,6 +55,11 @@ class FakeMotor:
         # has_pending_priority_before(p) as any(item_priority < p) — NOT an
         # exact-key lookup — so a wrong-priority-arg regression is catchable.
         self.queued_priorities = []
+        # Step 4 (interruptible_speech_architecture_20260804 §OQ-3): how many
+        # owner questions (direct/ptt) sit in the engine's priority queue.
+        # Defaults 0 — "the owner is not waiting" — so every pre-Step-4 test
+        # sees unchanged behavior.
+        self.owner_questions = 0
         self.wait_timeouts = []  # every timeout passed to wait_prefetched_agenda
         # T1(c) [v5]: records every motor._log(...) call — the surface the
         # driver's own "Pregen boundary: draft=none" line must reach.
@@ -158,6 +163,9 @@ class FakeMotor:
 
     def has_pending_priority_before(self, priority):
         return any(p < priority for p in self.queued_priorities)
+
+    def pending_owner_questions(self):
+        return self.owner_questions
 
     def drop_pending_sources(self, prefixes):
         self.dropped_prefixes.append(prefixes)
@@ -1180,3 +1188,92 @@ def test_tick_no_desync_log_when_stash_and_engine_agree(caplog):
     driver.tick_once()
 
     assert not any("desync" in r.getMessage() for r in caplog.records)
+
+
+# ── Step 4: the agenda yields the mic to pending owner questions ───────────
+# interruptible_speech_architecture_20260804 §6 Step 4 / §OQ-3. The prefetch
+# START gate already existed (maybe_start_prefetch's has_pending_priority_before(2),
+# agenda_driver.py:341-343); the agenda TURN gate did not, so a fresh priority-2
+# block could still land in front of the owner's next bundle.
+
+
+def _spy_next_action(controller):
+    """Record every next_action call, keeping the real behavior."""
+    seen = []
+    real = controller.next_action
+
+    def _spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    controller.next_action = _spy
+    return seen
+
+
+def test_one_pending_owner_question_blocks_a_fresh_agenda_turn():
+    """§OQ-3 is ruled at ZERO, not <= 2: ONE waiting owner question already
+    keeps the agenda off the mic. A `>= 2` or `> 2` threshold would pass a
+    two-question test and fail here — which is why the count under test is 1."""
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    motor.owner_questions = 1
+    driver = _driver(controller, motor)
+    seen = _spy_next_action(controller)
+
+    driver.tick_once()
+
+    assert seen == [], "next_action must not run while an owner question waits"
+    assert motor.replaced == [] and motor.enqueued == []
+    assert controller.state == AgendaState.IDLE, "the gated tick left the controller untouched"
+
+
+def test_agenda_resumes_the_moment_the_owner_queue_empties():
+    """The way out of starvation: the gate holds NO state. It is a fresh read
+    of the queue on every tick, and one bundled turn drains every pending
+    owner question at once (§1.1), so the gate re-opens by itself with nothing
+    to reset. There is no latch that can be left closed."""
+    controller, _ = _controller_with_queued_topic()
+    controller.enable()
+    motor = FakeMotor()
+    motor.owner_questions = 3
+    driver = _driver(controller, motor)
+    seen = _spy_next_action(controller)
+
+    driver.tick_once()
+    assert seen == [] and motor.replaced == []
+
+    motor.owner_questions = 0  # one bundled turn answered all three
+
+    driver.tick_once()
+
+    assert len(seen) == 1, "the gate re-opens on the next tick, with no reset"
+    assert motor.replaced and motor.replaced[-1]["source"] == "kira-agenda"
+
+
+def test_a_yielded_agenda_draft_does_not_become_a_fresh_agenda_turn():
+    """The in-flight/ready prefetch flip. `_maybe_consume_prefetch` already
+    drops the draft when interactive work is queued ahead (#338, :387-391) and
+    then returns False — so before Step 4 the tick fell straight through to
+    next_action and enqueued a FRESH agenda block that landed in front of the
+    owner's next bundle. The gate sits AFTER the consume attempt on purpose:
+    the draft is dropped exactly as today, but nothing replaces it."""
+    controller, _ = _controller_with_queued_topic(max_turns_per_topic=3)
+    controller.enable()
+    motor = FakeMotor()
+    driver = _driver(controller, motor)
+    _arm_prefetch(controller, driver, motor)
+    motor.reset()
+    motor.draft_ready = True
+
+    route_motor_event_to_agenda(controller, "speaking_end")  # -> WAITING_SIGNAL
+    motor.queued_priorities = [0]  # the owner's PTT question, priority 0
+    motor.owner_questions = 1
+
+    driver.tick_once()
+
+    assert driver._prefetch is None, "the yielded draft is still dropped, as today"
+    assert motor.cleared_prefetch >= 1
+    assert motor.replaced == [] and motor.enqueued == [], (
+        "no fresh agenda turn may be generated over a waiting owner question"
+    )

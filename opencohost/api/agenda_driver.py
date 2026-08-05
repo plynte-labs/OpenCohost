@@ -272,6 +272,29 @@ class AgendaDriver:
         if state == AgendaState.PAUSED_NEEDS_OPERATOR:
             if not agenda.can_auto_resume():
                 return
+        # interruptible_speech_architecture_20260804 §6 Step 4 / §OQ-3: the
+        # agenda does not take the mic while the owner is waiting for an answer.
+        # `maybe_start_prefetch` already refuses to DRAFT ahead of interactive
+        # work (:341-343); nothing stopped it from generating a fresh priority-2
+        # TURN, which the sort then parks in front of the owner's next bundle.
+        # Threshold is ZERO by owner ruling (not the "1 o 2" of the proposal):
+        # one bundled turn drains every pending question, so the livelock the
+        # 1-2 threshold guarded against no longer exists.
+        # Starvation: the gate is stateless — a fresh read of the queue every
+        # tick — so it re-opens by itself as soon as a bundle drains the queue.
+        # There is no latch to reset and no path that leaves it closed while the
+        # engine keeps processing; only an owner who literally never pauses can
+        # keep the agenda quiet, which is what he asked for.
+        # Placement is deliberate: AFTER `_maybe_return_frozen_stash` (:256), so
+        # a pending interruption-return still resolves (it holds itself on the
+        # same queue via `has_pending_priority_before`, :523-526, instead of
+        # rotting until the deadline backstop), AFTER `_maybe_consume_prefetch`
+        # (:267), which keeps the existing #338 draft-yield behavior unchanged,
+        # and AFTER the auto-resume branch above, so a health pause can still
+        # recover while questions pend.
+        pending = getattr(motor, "pending_owner_questions", None)
+        if callable(pending) and pending() > 0:
+            return
         action = agenda.next_action(
             motor_busy=bool(getattr(motor, "is_processing", False)),
             kira_speaking=bool(getattr(motor, "is_speaking", False)),

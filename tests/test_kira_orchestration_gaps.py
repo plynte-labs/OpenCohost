@@ -833,3 +833,38 @@ class TestAppShellThreadsHistoryTextToEnqueue:
             action.prompt, priority=2, source="kira-agenda",
         )
         app.motor_ia.enqueue.assert_not_called()
+
+
+class TestInternalLeakRejectionRendersPhrase:
+    """2026-08-03 incident: an agenda turn was discarded as
+    contains_internal_leak with zero diagnostic — the log said only
+    "Agenda: salida rechazada (contains_internal_leak)." and the phrase that
+    actually leaked was unrecoverable.
+
+    contains_internal_leak's match is now recorded into rejection_log's
+    "matched_phrase" — always a literal from the closed INTERNAL_PHRASES
+    vocabulary, never generated text — so _format_agenda_rejection can render
+    it while _agenda_rejection_code, which rides the event stream, stays
+    code-only (the privacy contract llm_engine.py:5678 documents)."""
+
+    LEAK_TEXT = "Nos vemos en el próximo episodio, gracias por venir."
+
+    def _rejected_motor(self) -> llm_engine.MotorVocalIA:
+        motor = _build_motor()
+        motor.agenda_controller = KiraAgendaController()
+        assert motor.agenda_controller.accept_output(self.LEAK_TEXT) is False
+        assert motor.agenda_controller.rejection_log[-1]["guardrail"] == "contains_internal_leak"
+        return motor
+
+    def test_format_agenda_rejection_renders_matched_internal_phrase(self):
+        motor = self._rejected_motor()
+
+        reason = motor._format_agenda_rejection()
+
+        assert reason.startswith("contains_internal_leak (")
+        assert any(phrase in reason for phrase in KiraAgendaController.INTERNAL_PHRASES)
+
+    def test_agenda_rejection_code_stays_bare_for_same_rejection(self):
+        motor = self._rejected_motor()
+
+        assert motor._agenda_rejection_code() == "contains_internal_leak"

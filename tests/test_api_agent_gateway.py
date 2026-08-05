@@ -776,9 +776,22 @@ class TestOperatorNoticeSurface:
 
 class TestAdr2MemoriaIsolation:
     def test_digest_capture_sources_is_the_literal_frozen_allowlist(self):
-        """ADR-2 (literal): the fail-closed capture allowlist must stay
-        EXACTLY {"direct", "ptt"}. Adding any agent source here would let
-        agent text reach memorias.db — a trust-model regression this track
-        explicitly forbids. Do NOT update this assertion to make a diff
-        pass; remove the new source instead."""
-        assert llm_engine._DIGEST_CAPTURE_SOURCES == frozenset({"direct", "ptt"})
+        """ADR-2 (literal): the fail-closed capture allowlist is pinned to an
+        EXACT set. Adding any agent source here would let agent text reach
+        memorias.db — a trust-model regression this track explicitly forbids.
+        Do NOT update this assertion to make a diff pass; remove the new source
+        instead.
+
+        Moved ONCE, deliberately, by an owner-approved ruling:
+        interruptible_speech_architecture_20260804 §5.1 added "owner-bundle".
+        It is not an agent source and cannot become one — an owner bundle is
+        composed only from queue items whose source is in
+        _OWNER_QUESTION_SOURCES ({"direct", "ptt"}), the prefix scan stops at
+        the first non-owner item, and the tag is synthesized at the pop and is
+        never enqueued or dispatched, so no agent (or viewer) text can reach a
+        payload carrying it. The literal pin is kept, not loosened: the next
+        addition still fails here, which is the whole point of this test.
+        """
+        assert llm_engine._DIGEST_CAPTURE_SOURCES == frozenset(
+            {"direct", "ptt", "owner-bundle"}
+        )

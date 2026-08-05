@@ -87,6 +87,29 @@ LEGACY_GROUNDING_RULES = (
 )
 LEGACY_ACCUMULATION_PTT = "El streamer dijo (acumulado): {messages}"
 LEGACY_ACCUMULATION_CHAT = "Mientras procesabas, llegaron estos mensajes del chat: {messages}"
+# interruptible_speech_architecture_20260804 §OQ-6 — owner-question bundling.
+# The asymmetry that makes this work: NUMBER the input so the model can count
+# and not lose one, FORBID numbering the output so the answer does not sound
+# like a robot reading a list aloud. States structure only, never voice —
+# persona lives in the system prompt via set_profile and must not be fought
+# from here. The failure this is designed against is _flush_accumulation's
+# punctuation-joined blob (LEGACY_ACCUMULATION_CHAT above), which carries no
+# instruction to answer everything and typically gets only the last item
+# answered — the exact "stale question ignored" failure this track exists to fix.
+LEGACY_OWNER_BUNDLE_HEADER = (
+    "El streamer te hizo {count} preguntas mientras hablabas, en el orden en que "
+    "las hizo:\n"
+    "{questions}\n\n"
+    "Respóndelas TODAS en una sola intervención hablada y continua. No las "
+    "enumeres ni las trates como una lista: enlázalas como quien contesta varias "
+    "cosas de corrido. Si dos se solapan, únelas en una sola respuesta en vez de "
+    "repetirte. No dejes ninguna sin contestar, aunque alguna sea corta."
+)
+# Deliberately carries NO instruction text: this is what _commit_history stores
+# as safe_context, so it is what memoria and the digest later re-read and
+# recite. Storing the numbered prompt scaffolding there would put "Respóndelas
+# TODAS" into Kira's long-term memory.
+LEGACY_OWNER_BUNDLE_HISTORY = "El streamer preguntó: {questions}"
 LEGACY_LEDGER_CONTEXT_LABEL = "contexto"
 LEGACY_LEDGER_KIRA_LABEL = "→ Kira"
 LEGACY_AGENDA_SANITIZER_FALLBACK = (
@@ -410,6 +433,18 @@ def accumulation_ptt() -> str:
 def accumulation_chat() -> str:
     """Template for chat accumulation context string. Placeholder: ``{messages}``."""
     return _slot("llm.scaffolding.accumulation_chat", LEGACY_ACCUMULATION_CHAT)
+
+
+def owner_bundle_header() -> str:
+    """Prompt template for a bundled owner turn. Placeholders: ``{count}``,
+    ``{questions}`` (the enumerated, chronologically ordered questions)."""
+    return _slot("llm.scaffolding.owner_bundle_header", LEGACY_OWNER_BUNDLE_HEADER)
+
+
+def owner_bundle_history() -> str:
+    """Historial/memoria recap for a bundled owner turn — instruction-free by
+    design (see LEGACY_OWNER_BUNDLE_HISTORY). Placeholder: ``{questions}``."""
+    return _slot("llm.scaffolding.owner_bundle_history", LEGACY_OWNER_BUNDLE_HISTORY)
 
 
 def ledger_context_label() -> str:

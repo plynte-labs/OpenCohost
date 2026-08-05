@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from opencohost.api.models import ChatLastReplyResponse, ChatTurnRequest, CommandRequest
+from opencohost.api.shared import logger
 from opencohost.i18n import active as i18n_active
 
 router = APIRouter()
@@ -157,6 +158,37 @@ def post_chat_turn(request: Request, body: ChatTurnRequest):
         submitted_under_provider=host.motor.provider_runtime_state()["provider"],
     )
     if result.state in ("accepted", "replay"):
+        # Step 1 (direct_turn_preemption_20260803, OQ-6): while the engine is
+        # busy it only reads command_queue between dispatches, so this turn
+        # would sit there invisible until the next speech boundary -- and the
+        # interactive-pregen trigger, which works off the priority-queue HEAD,
+        # would never see it (the measured "Pregen boundary: draft=none
+        # source=direct"). Move it into the priority queue NOW, on this HTTP
+        # thread, using the engine's own existing boundary drain: it re-checks
+        # the front of command_queue under its mutex, pops only a leading
+        # explicitly-tagged source="direct" process_context, and re-enqueues it
+        # at priority 1 with its stamps. Nothing here interrupts anything --
+        # the queue is non-preemptive; the win is that the reply can now
+        # pregenerate under cover of the agenda's remaining speech.
+        #
+        # The engine-boundary call stays as the backstop for the cases this one
+        # cannot cover (a non-direct command ahead of it in FIFO, or this
+        # busy-check racing the engine going idle -- run()'s 1s idle tick picks
+        # the item up either way).
+        #
+        # Best-effort by construction: the dispatch already succeeded and the
+        # ack below is the receipt, so a motor that predates this seam
+        # (getattr) or a drain that raises must never turn a queued turn into a
+        # 500 the client would retry. Same getattr-and-call idiom the driver
+        # uses for every optional engine seam (api/agenda_driver.py).
+        motor = host.motor
+        if motor is not None and (motor.is_processing or motor.is_speaking):
+            drain = getattr(motor, "_drain_pending_direct_into_priority_queue", None)
+            if callable(drain):
+                try:
+                    drain()
+                except Exception:
+                    logger.exception("arrival-time direct drain failed; the boundary drain still covers it")
         return {
             "accepted": True,
             "command_id": result.command_id,

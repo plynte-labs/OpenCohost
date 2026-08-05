@@ -352,11 +352,19 @@ def test_pregen_draft_and_foreground_are_distinguishable_in_telemetry(caplog):
     assert stages == ["generate", "pregen_draft"]
 
 
-def test_telemetry_silent_on_clean_turn(caplog):
+def test_telemetry_emitted_on_clean_turn(caplog):
+    """ADR-039 gate: the owner has to report clause-sanitizer verdict counts
+    from the log, so a clean verdict must emit too — a gap of zero lines is
+    otherwise indistinguishable from "the sanitizer never ran"."""
     motor = _motor()
     motor._ollama_chat = MagicMock(return_value=_resp("Todo tranquilo por acá."))
 
     with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
         motor._generar_dialogo("tema", source="kira-agenda", commit_history=True)
 
-    assert not [r for r in caplog.records if "[CLAUSE_SANITIZER]" in r.getMessage()]
+    records = [r for r in caplog.records if "[CLAUSE_SANITIZER]" in r.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    for field in ("stage=generate", "source=kira-agenda", "verdict=clean",
+                  "removed=0", "distinct=0"):
+        assert field in message

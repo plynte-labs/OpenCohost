@@ -326,6 +326,13 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     "ptt_interrupt_if_agenda_speaking",
                     None,
                 ),
+                # Step 1 (interruptible_speech_architecture_20260804): the
+                # arrival-time drain hook (ptt_session.py:_dispatch) needs the
+                # motor itself, not a single bound method -- it checks
+                # is_processing/is_speaking THEN conditionally drains, mirroring
+                # chat.py:184-191 exactly. getattr fallback mirrors the hooks
+                # above: a minimal host double in tests may not have `motor`.
+                motor=getattr(host, "motor", None),
             )
             yield
         finally:

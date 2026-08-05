@@ -1123,6 +1123,9 @@ class KiraAgendaController:
         extra: dict[str, object] = {}               # Phase 0a: sub-type metadata
         if self.contains_internal_leak(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Dijo frase interna prohibida (ej. 'próximo episodio')", "contains_internal_leak"
+            matched = self._matched_internal_leak_phrase(clean)
+            if matched:
+                extra["matched_phrase"] = matched
         elif self.is_repetition(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Repitió exactamente una respuesta anterior", "exact_repetition"
         elif self.has_looping_lines(output):
@@ -1262,6 +1265,21 @@ class KiraAgendaController:
     def contains_internal_leak(cls, output: str) -> bool:
         lowered = output.lower()
         return any(phrase in lowered for phrase in cls.INTERNAL_PHRASES)
+
+    @classmethod
+    def _matched_internal_leak_phrase(cls, output: str) -> str | None:
+        """Which INTERNAL_PHRASES entry tripped contains_internal_leak, or None.
+
+        Separate helper so contains_internal_leak's boolean contract is
+        untouched for its other callers. The return value is always a literal
+        from the closed INTERNAL_PHRASES vocabulary, never a slice of
+        `output` — that is what makes it safe to put in rejection_log.
+        """
+        lowered = output.lower()
+        for phrase in cls.INTERNAL_PHRASES:
+            if phrase in lowered:
+                return phrase
+        return None
 
     def is_repetition(self, output: str) -> bool:
         normalized = " ".join((output or "").lower().split())

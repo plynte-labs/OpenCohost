@@ -131,6 +131,16 @@ llm:
   scaffolding:
     accumulation_ptt: "El streamer dijo (acumulado): {messages}"
     accumulation_chat: "Mientras procesabas, llegaron estos mensajes del chat: {messages}"
+    # interruptible_speech_architecture_20260804 §OQ-6: number the INPUT so the
+    # model can count, forbid numbering the OUTPUT so it does not read a list
+    # aloud. The _history slot is instruction-free on purpose — it is what
+    # memoria and the digest recite back.
+    owner_bundle_header: |-
+      El streamer te hizo {count} preguntas mientras hablabas, en el orden en que las hizo:
+      {questions}
+
+      Respóndelas TODAS en una sola intervención hablada y continua. No las enumeres ni las trates como una lista: enlázalas como quien contesta varias cosas de corrido. Si dos se solapan, únelas en una sola respuesta en vez de repetirte. No dejes ninguna sin contestar, aunque alguna sea corta.
+    owner_bundle_history: "El streamer preguntó: {questions}"
     ledger_context_label: contexto
     ledger_kira_label: "→ Kira"
     # ptt_wrapper / live_voice_wrapper / ptt_history_wrapper are three DISTINCT

@@ -123,6 +123,14 @@ llm:
   scaffolding:
     accumulation_ptt: "The streamer said (accumulated): {messages}"
     accumulation_chat: "While you were processing, these chat messages arrived: {messages}"
+    # See the es manifest comment (§OQ-6): numbered input, explicitly
+    # non-numbered spoken output; the _history slot carries no instruction text.
+    owner_bundle_header: |-
+      The streamer asked you {count} questions while you were talking, in the order they were asked:
+      {questions}
+
+      Answer them ALL in one continuous spoken turn. Do not number them or treat them as a list: link them together the way someone answers several things in a row. If two overlap, merge them into one answer instead of repeating yourself. Leave none unanswered, even a short one.
+    owner_bundle_history: "The streamer asked: {questions}"
     ledger_context_label: context
     ledger_kira_label: "→ Kira"
     # See the es manifest comment: three distinct slots, not one shared slot —

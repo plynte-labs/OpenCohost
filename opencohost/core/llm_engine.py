@@ -60,6 +60,7 @@ from opencohost.config.settings import (
     CLOUD_AUTO_RETURN_AMBIGUOUS_429_CAP_SECONDS, CLOUD_AUTO_RETURN_AMBIGUOUS_429_MAX_ATTEMPTS,
     CLOUD_PROBER_JOIN_TIMEOUT_SECONDS,
     DIRECT_ANSWER_MAX_WAIT_SECONDS,
+    OWNER_BUNDLE_SOURCE, OWNER_BUNDLE_MAX_ITEMS, OWNER_BUNDLE_MAX_CHARS,
 )
 from opencohost.core.context import context_budget
 from opencohost.core.providers.cloud import cloud_llm_client
@@ -94,6 +95,21 @@ logger = get_logger()
 # than the producer's configured request timeout.
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 
+# interruptible_speech_architecture_20260804 §5.1 — WHY "owner-bundle" joins
+# all five frozensets below while "accumulated" still cannot. The two look
+# alike (both merge several messages into one turn) and are opposites on the
+# only axis that matters here: _flush_accumulation bundles VERBATIM VIEWER CHAT
+# (i18n LEGACY_ACCUMULATION_CHAT), whereas an owner bundle is composed ONLY
+# from queue items whose source is in _OWNER_QUESTION_SOURCES — the prefix scan
+# in _take_owner_bundle_prefix stops at the first non-owner item, so viewer text
+# is structurally incapable of reaching an owner-bundle payload, and therefore
+# of reaching persistence through one. That containment is why the owner ruled
+# against simply reusing the "accumulated" tag; it is pinned by the T3.4 privacy
+# test in tests/test_owner_question_bundling.py. Leaving the tag OUT would be
+# the real defect: the host's own burst would be answered with no profile, no
+# memorias, no digest and no cue-card context — Kira blanked precisely on the
+# turns where the owner asked the most.
+#
 # D1 — eviction source-gating (privacy_prereq_fixes_20260701). Only these
 # origins may be promoted into the MemoryDigest when their history pair is
 # evicted. "accumulated" must NEVER be added here: _flush_accumulation
@@ -101,7 +117,7 @@ TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 # capturing it would leak raw chat into the digest. "chat" is excluded for
 # the same reason. Missing/unknown source values are fail-closed (not
 # captured) — see the eviction gate in _commit_history.
-_DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
+_DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
 # kira_personalization_onboarding_20260705 — sources that qualify for the
 # <perfil_streamer> injection. Deliberately its OWN gate (not nested inside
@@ -109,7 +125,8 @@ _DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt"})
 # test-covered behavioral change (design §2). The digest/editorial enrichments
 # were direct-only when this landed; F1 moved them onto the same direct+ptt
 # footing (see _DIGEST_INJECT_SOURCES / _EDITORIAL_INJECT_SOURCES below).
-_PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
+# owner-bundle IS a host turn, so <perfil_streamer> applies (§5.1).
+_PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
 # memoria_rag_followups_20260716 candidate 1 — sources that qualify for the
 # <memorias_guardadas> injection. Widened from direct-only to direct+ptt
@@ -117,7 +134,9 @@ _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt"})
 # recall stored memorias too, under the SAME shared 700-char budget. This
 # gate has THREE sites: the profile-id snapshot, the injection call, and the
 # prompt prepend — all must use this frozenset or the ptt path stays dead.
-_MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt"})
+# Same three-site warning applies to owner-bundle (§5.1): the test asserts an
+# injected memoria reaches the BUILT prompt, not merely frozenset membership.
+_MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
 # F1 (turn provenance follow-up) — sources that qualify for the L1
 # <memoria_de_fondo> digest block and for the ARMED editorial cue-card block.
@@ -129,10 +148,20 @@ _MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt"})
 # about a while ago" got no digest at all — while the SAME question typed still
 # got both. ptt is already in _DIGEST_CAPTURE_SOURCES, so voice turns FEED the
 # digest; they must be able to READ it. Same precedent as the two frozensets
-# above. NOT widened beyond direct+ptt: chat/accumulated/agenda stay excluded
-# (the digest may hold host-turn text and the card is host-editorial context).
-_DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt"})
-_EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt"})
+# above. NOT widened beyond direct+ptt+owner-bundle: chat/accumulated/agenda
+# stay excluded (the digest may hold host-turn text and the card is
+# host-editorial context). owner-bundle joins both because "¿de qué hablábamos
+# hace rato?" and a question about an armed cue card can each be one of the N
+# a burst merges (§5.1) — the bundle must not answer them memory-blind.
+_DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
+_EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
+
+# interruptible_speech_architecture_20260804 §3.1 — the single definition of
+# "a question the owner asked" (typed OR spoken), used by the drain guard
+# below (Step 1) and by the overflow/bundling logic that follows in later
+# steps of the same track. Declared here (Step 1) because the drain guard
+# needs it now; Step 2/3 reuse this same frozenset rather than redeclaring it.
+_OWNER_QUESTION_SOURCES = frozenset({"direct", "ptt"})
 
 # W2a (memoria_recall_20260718): max captured titles retained per session for
 # the mechanical session summary. Bounds the RAM held between summaries; the
@@ -744,6 +773,16 @@ class MotorVocalIA(threading.Thread):
         self._pq_lock = threading.Lock()
         self._pq_max_items: int = 5
         self._pq_ttl_seconds: float = 30.0  # non-PTT items expire after this delay
+        # Step 1 (direct_turn_preemption_20260803): serializes
+        # _drain_pending_direct_into_priority_queue, which is now called from the
+        # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
+        # The drain's pop (under command_queue.mutex) and its enqueue (under
+        # _pq_lock) are two separate critical sections; without this lock two
+        # concurrent drains can pop directs A then B and enqueue them B then A,
+        # inverting the FIFO order of two questions typed seconds apart
+        # (enqueue sorts by insertion time). Held across the whole drain — the
+        # only acquirer, so it can never participate in a lock cycle.
+        self._direct_drain_lock = threading.Lock()
 
         # Accumulation buffer for discarded/overflowed messages
         # (timestamp, payload, source)
@@ -1067,17 +1106,26 @@ class MotorVocalIA(threading.Thread):
         a draft was frozen (nothing to return to otherwise — normal flow resumes).
         """
         with self._prefetch_lock:
-            cached = self._prefetched_agenda
-            if cached is None or not str(cached.get("source", "")).startswith("kira-agenda"):
-                return False
-            frozen = dict(cached)
-            frozen["connector"] = None
-            self._frozen_stash = frozen
-            # R1: stamp the freeze time so the driver can bound the hold.
-            self._frozen_stash_at = time.monotonic()
-            self._prefetched_agenda = None
-            self._prefetch_done.clear()
-            self._detour_turns = 0
+            return self._freeze_agenda_stash_locked()
+
+    def _freeze_agenda_stash_locked(self) -> bool:
+        """`_freeze_agenda_stash`'s body, with the caller holding `_prefetch_lock`.
+
+        Split out for Step 2 (direct_turn_preemption_20260803): `pregenerate`'s
+        slot-handover branch already holds `_prefetch_lock`, and threading.Lock
+        is not reentrant. Same contract, same mutations, no epoch bump.
+        """
+        cached = self._prefetched_agenda
+        if cached is None or not str(cached.get("source", "")).startswith("kira-agenda"):
+            return False
+        frozen = dict(cached)
+        frozen["connector"] = None
+        self._frozen_stash = frozen
+        # R1: stamp the freeze time so the driver can bound the hold.
+        self._frozen_stash_at = time.monotonic()
+        self._prefetched_agenda = None
+        self._prefetch_done.clear()
+        self._detour_turns = 0
         return True
 
     def has_frozen_stash(self) -> bool:
@@ -1739,9 +1787,29 @@ class MotorVocalIA(threading.Thread):
             self._priority_queue.sort(key=lambda x: (x[0], x[1]))
             # Enforce max items — drop lowest priority (highest number) first,
             # breaking ties by newest timestamp. PTT (0) is always preserved over
-            # chat (1) and agenda (2).
+            # chat (1) and agenda (2). interruptible_speech_architecture_20260804
+            # §6 Step 2: an owner question (_OWNER_QUESTION_SOURCES) must never be
+            # demoted into _accumulation_buffer — it would be answered under
+            # source="accumulated", excluded from all five privacy/personalization
+            # frozensets. Scan from the tail for the last non-owner item instead of
+            # blindly popping the tail.
             while len(self._priority_queue) > self._pq_max_items:
-                dropped = self._priority_queue.pop()
+                idx = next(
+                    (
+                        i
+                        for i in range(len(self._priority_queue) - 1, -1, -1)
+                        if self._priority_queue[i][3] not in _OWNER_QUESTION_SOURCES
+                    ),
+                    None,
+                )
+                if idx is None:
+                    # ponytail: every pending item is an owner question — the cap
+                    # yields rather than silently losing one. Bounded in practice
+                    # by human typing rate and drained wholesale by the next
+                    # bundle (design §4 step 10). Add a hard owner cap only if a
+                    # real session shows unbounded growth.
+                    break
+                dropped = self._priority_queue.pop(idx)
                 self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
                 self.enqueue_accumulation(dropped[2], source=dropped[3])
             # WU3 (design-fase2.md §2.3): snapshot the HEAD under the lock; the
@@ -1749,11 +1817,45 @@ class MotorVocalIA(threading.Thread):
             # enqueue caller. F1 [v4]: carry history_text (tuple index 4) so a
             # reply spoken from the pregen cache commits the HONEST turn text, not
             # the raw prompt template (the memoria_quality regression).
-            head = self._priority_queue[0] if self._priority_queue else None
-            head_snapshot = (
-                (head[0], head[2], head[3], head[4] if len(head) > 4 else None)
-                if head else None
-            )
+            head_snapshot = self._head_snapshot_locked()
+        self._maybe_trigger_interactive_pregen(head_snapshot)
+
+    def _head_snapshot_locked(self):
+        """(priority, payload, source, history_text) of the queue HEAD, or None.
+
+        Caller MUST hold `_pq_lock`. Extracted so the pregen completion
+        re-trigger (Step 2, direct_turn_preemption_20260803) builds the snapshot
+        in exactly the same shape `enqueue()`'s tail does.
+        """
+        head = self._priority_queue[0] if self._priority_queue else None
+        if head is None:
+            return None
+        return (head[0], head[2], head[3], head[4] if len(head) > 4 else None)
+
+    def _retrigger_interactive_pregen(self, just_finished: tuple) -> None:
+        """Step 2 (direct_turn_preemption_20260803): re-evaluate the queue head
+        when a pregen worker releases the slot.
+
+        The interactive trigger fires ONLY from `enqueue()`'s tail, and its
+        GPU-free gate refuses while a generation is in flight. That is the exact
+        measured gap: on 2026-08-03 at 14:33:12 a direct turn was enqueued while
+        the agenda's own pregen was mid-flight (14:33:11 -> 14:33:25), the gate
+        refused, and nothing ever re-fired — the turn reached its boundary with
+        `Pregen boundary: draft=none source=direct` and generated serially.
+
+        `just_finished` is this spawn's own (payload, source). A spawn whose own
+        item is STILL the head must not re-fire: for a stored draft the
+        occupancy check in `_maybe_trigger_interactive_pregen` already no-ops,
+        but for a REJECTED/discarded one (which stores nothing) it would spawn
+        the identical generation again — and again at its completion — an
+        unbounded regeneration loop for as long as the speech lasts.
+        """
+        with self._pq_lock:
+            head_snapshot = self._head_snapshot_locked()
+        if head_snapshot is None:
+            return
+        if (head_snapshot[1], head_snapshot[2]) == just_finished:
+            return
         self._maybe_trigger_interactive_pregen(head_snapshot)
 
     def _maybe_trigger_interactive_pregen(self, head_snapshot) -> None:
@@ -1770,11 +1872,39 @@ class MotorVocalIA(threading.Thread):
         a PTT behind a chat pregen) displaces the now-stale one and pregenerates
         the new head. Spawn-only: `pregenerate()` starts a daemon thread and
         returns immediately, so the enqueue caller never blocks.
+
+        Two callers: `enqueue()`'s tail (arrival) and
+        `_retrigger_interactive_pregen` (Step 2, direct_turn_preemption_20260803
+        — a pregen worker releasing the slot). Every gate below applies
+        identically to both; nothing here interrupts anything, it only decides
+        whether to start a background generation.
         """
         if head_snapshot is None:
             return
         priority, payload, source, history_text = head_snapshot
         if source == "accumulated":
+            return
+        # Rule 2 (interruptible_speech_architecture_20260804 §2c) — the
+        # load-bearing half of the pair. With >=2 owner questions pending, the
+        # next boundary bundles them into ONE request; drafting just the head
+        # would re-serialize the burst, because Rule 1 always speaks a draft
+        # that exists: answer 1's playback covers a draft for question 2, whose
+        # playback covers a draft for question 3, and so on. Every question ends
+        # up individually drafted and individually spoken, the bundle never
+        # forms, and the busier the session the LESS bundling fires — the exact
+        # inversion of the feature, and the measured 2026-08-03 incident (one
+        # question per ~108s turn at 99.8% utilization). This removes spawns,
+        # never adds them: a draft that already exists or is in flight is
+        # untouched, because paid GPU work is always spoken.
+        #
+        # Race-sound while speaking: pops only happen in _process_priority_queue
+        # which returns immediately while _speaking (see its head), so the count
+        # can only GROW during the window this can fire in. Both directions are
+        # benign — 1 becoming 2 right after a spawn means that draft is spoken
+        # and the rest bundle; a 2 read just before speech ends still produces
+        # the right bundle at the boundary. Same TOCTOU posture as the F6
+        # re-check below, with the same backstop.
+        if source in _OWNER_QUESTION_SOURCES and self.pending_owner_questions() >= 2:
             return
         if not (self.is_speaking and not self.llm_generating):
             return
@@ -1857,7 +1987,10 @@ class MotorVocalIA(threading.Thread):
 
         Slot occupancy [v4 — F2]: eviction applies to CACHED occupants ONLY. A
         request with STRICTLY higher priority (lower number) than a cached draft
-        epoch-invalidates it and takes the slot; an equal-or-lower request is
+        epoch-invalidates it and takes the slot (Step 2,
+        direct_turn_preemption_20260803: a `direct` winner FREEZES a displaced
+        `kira-agenda*` draft instead of discarding it — see the branch below);
+        an equal-or-lower request is
         refused. While a worker is IN FLIGHT (marker set, nothing stored yet) its
         Ollama call is uncancellable, so ANY new request is refused — spawning a
         replacement would leave a zombie worker running concurrently whose finally
@@ -1872,8 +2005,9 @@ class MotorVocalIA(threading.Thread):
         if not payload:
             return False
         is_agenda = source.startswith("kira-agenda")
-        evicted_source: Optional[str] = None
-        evicted_gen_ms: int = -1
+        displaced_source: Optional[str] = None
+        displaced_gen_ms: int = -1
+        displaced_frozen: bool = False
         with self._prefetch_lock:
             # F2 [v4]: an in-flight worker (marker set, nothing stored yet) is
             # uncancellable -> refuse rather than spawn a second concurrent
@@ -1885,13 +2019,41 @@ class MotorVocalIA(threading.Thread):
             if cached is not None:
                 occupant_priority = cached.get("priority")
                 if occupant_priority is not None and priority < occupant_priority:
-                    # Evict the strictly-lower-priority CACHED occupant: clear it
-                    # and bump the epoch (defensive — no in-flight worker here).
-                    evicted_source = str(cached.get("source", ""))
-                    evicted_gen_ms = cached.get("gen_ms", -1)
-                    self._prefetched_agenda = None
-                    self._prefetch_done.clear()
-                    self._prefetch_epoch += 1
+                    displaced_source = str(cached.get("source", ""))
+                    displaced_gen_ms = cached.get("gen_ms", -1)
+                    # OQ-2 (direct_turn_preemption_20260803, Step 2): a DIRECT
+                    # turn taking the slot FREEZES the agenda draft it displaces
+                    # instead of discarding it — 11-14s of already-paid GPU work
+                    # that the driver then resumes with a connector
+                    # (AgendaDriver._maybe_return_frozen_stash), rather than
+                    # regenerating the lost beat into dead air.
+                    #
+                    # Scoped to source=="direct", NOT to every interactive
+                    # source, on purpose: `_frozen_stash` has exactly ONE
+                    # consumer, api/agenda_driver.py, and `direct` is produced
+                    # only by /api/chat/turn — i.e. only on the surface that
+                    # runs that driver. A CTK-only `chat` winner would freeze a
+                    # beat with nothing to return it, stranding it forever,
+                    # which is strictly worse than the eviction it replaces.
+                    # An already-frozen stash is never overwritten either — that
+                    # would destroy the beat the driver is currently holding
+                    # ticks for; evict as before in that case.
+                    if (
+                        source == "direct"
+                        and self._frozen_stash is None
+                        and self._freeze_agenda_stash_locked()
+                    ):
+                        # _freeze_agenda_stash_locked already cleared the slot and
+                        # _prefetch_done. No epoch bump — freezing is not
+                        # invalidation (there is no worker generating this draft;
+                        # it is already cached).
+                        displaced_frozen = True
+                    else:
+                        # Evict the strictly-lower-priority CACHED occupant: clear it
+                        # and bump the epoch (defensive — no in-flight worker here).
+                        self._prefetched_agenda = None
+                        self._prefetch_done.clear()
+                        self._prefetch_epoch += 1
                 else:
                     return False
             self._prefetch_done.clear()
@@ -1907,13 +2069,15 @@ class MotorVocalIA(threading.Thread):
             # lock as the rest of this spawn's bookkeeping).
             self._pregen_retried = False
 
-        if evicted_source is not None:
-            # WU4 4a boundary telemetry: the EVICTED occupant's own turn will
-            # fall back to plain generation when it eventually pops — record
-            # its source, not the new (winning) request's.
+        if displaced_source is not None:
+            # WU4 4a boundary telemetry: the DISPLACED occupant's source, not the
+            # new (winning) request's. draft=evicted means its turn falls back to
+            # plain generation when it eventually pops; draft=frozen (Step 2)
+            # means the draft survives and returns with a connector instead.
             self._log(
-                f"Pregen boundary: draft=evicted source={evicted_source} gap_ms=-1 "
-                f"gen_ms={evicted_gen_ms} speech_ms={self._speech_ms_for_boundary()}"
+                f"Pregen boundary: draft={'frozen' if displaced_frozen else 'evicted'} "
+                f"source={displaced_source} gap_ms=-1 "
+                f"gen_ms={displaced_gen_ms} speech_ms={self._speech_ms_for_boundary()}"
             )
 
         log_prefix = "Agenda prefetch" if is_agenda else "Pregen"
@@ -1999,10 +2163,22 @@ class MotorVocalIA(threading.Thread):
                 # unconditional clear+set here would wipe that successor's
                 # marker and falsely signal _prefetch_done before the
                 # successor has actually finished.
+                slot_released = False
                 with self._prefetch_lock:
                     if self._pregen_inflight is inflight_marker:
                         self._pregen_inflight = None
                         self._prefetch_done.set()
+                        slot_released = True
+                # Step 2 (direct_turn_preemption_20260803): the slot is free and
+                # Ollama is idle again — re-evaluate the queue head, which may
+                # have changed while this worker ran (the direct turn that
+                # arrived mid-flight and whose trigger the GPU-free gate
+                # refused). Outside _prefetch_lock, and only when THIS spawn is
+                # the one that released the slot: if a successor already owns
+                # the marker it is still generating, and pregenerate() would
+                # refuse anyway.
+                if slot_released:
+                    self._retrigger_interactive_pregen((payload, source))
 
         thread = threading.Thread(target=worker, daemon=True)
         with self._prefetch_lock:
@@ -2044,6 +2220,21 @@ class MotorVocalIA(threading.Thread):
         """Return True when queued work should run before a cached agenda draft."""
         with self._pq_lock:
             return any(item[0] < priority for item in self._priority_queue)
+
+    def pending_owner_questions(self) -> int:
+        """Owner questions (typed OR spoken) waiting in the priority queue.
+
+        interruptible_speech_architecture_20260804 §OQ-3. Read-only, one
+        `_pq_lock` acquisition, same shape as `has_pending_priority_before`
+        above. Two readers: Rule 2 in `_maybe_trigger_interactive_pregen` (do
+        not draft a single question a bundle is about to supersede) and the
+        agenda driver's turn gate (do not take the mic while the owner waits).
+        Honest only because Step 1 made both arrival paths drain into this queue
+        at arrival — a question still sitting in `command_queue` is invisible
+        here, which is exactly the gap those hooks close.
+        """
+        with self._pq_lock:
+            return sum(1 for item in self._priority_queue if item[3] in _OWNER_QUESTION_SOURCES)
 
     def clear_prefetched_agenda(self) -> None:
         with self._prefetch_lock:
@@ -2220,8 +2411,9 @@ class MotorVocalIA(threading.Thread):
             # only stall the turn.
             if source in CLAUSE_SANITIZER_SOURCES:
                 san = sanitize_clause_repetition(dialogo)
-                if san.verdict != "clean":
-                    self._log_clause_sanitizer(san, source, stage="pregen_connector")
+                # Logged for every verdict, including "clean" — otherwise the
+                # clean count is unobtainable from the log (ADR-039 gate).
+                self._log_clause_sanitizer(san, source, stage="pregen_connector")
                 dialogo = san.text
         # F1 [v4]: forward the honest history_text (PTT/direct turns) exactly as
         # the foreground path does — else the raw prompt template leaks into
@@ -2466,12 +2658,176 @@ class MotorVocalIA(threading.Thread):
 
             return "\n".join(parts)
 
+    def _take_owner_bundle_prefix(self, head_item) -> list:
+        """Remove a bounded CONTIGUOUS prefix of owner items from _priority_queue.
+
+        interruptible_speech_architecture_20260804 §4 step 10. `head_item` is
+        the tuple ALREADY popped by the caller; it is not re-taken here, only
+        counted against the char cap.
+
+        PREFIX-ONLY on purpose. Because it can never reach past a viewer `chat`
+        or an agenda item, it can never reorder anything relative to one: the
+        split's ordering guarantee stays a property of the existing
+        (priority, timestamp) sort rather than of this function. It is also what
+        makes viewer text structurally unable to enter an owner bundle (§5.1).
+
+        Over cap it DEFERS, it never drops. The remainder is simply not taken —
+        it stays in the queue, still sorted, and forms the next bundle at the
+        next boundary. This is the deliberate divergence from
+        _flush_accumulation's drop-oldest caps: dropping viewer chat is a
+        defensible policy, dropping the host's own question is data loss.
+
+        Caller must NOT hold _pq_lock. Acquires and releases it, and calls
+        nothing while holding it — not _flush_accumulation, not
+        _clear_prefetch_if_matches, not _log — so no new lock edge is created
+        and the "never hold _pq_lock across _prefetch_lock" invariant survives.
+        """
+        taken: list = []
+        chars = len(head_item[2])
+        with self._pq_lock:
+            while (
+                self._priority_queue
+                and self._priority_queue[0][3] in _OWNER_QUESTION_SOURCES
+                and len(taken) + 1 < OWNER_BUNDLE_MAX_ITEMS
+                and chars + len(self._priority_queue[0][2]) <= OWNER_BUNDLE_MAX_CHARS
+            ):
+                nxt = self._priority_queue.pop(0)
+                chars += len(nxt[2])
+                taken.append(nxt)
+        return taken
+
+    def _compose_owner_bundle(self, members: list) -> tuple:
+        """Render queue tuples into one (payload, history_text, stamp).
+
+        Pure: no locks, no I/O. `members` is [head] + whatever
+        _take_owner_bundle_prefix returned, each a full queue tuple.
+
+        Presentation order is the QUEUE TIMESTAMP — chronological, the order the
+        owner asked — not the priority order that decided which turn runs, so a
+        priority-0 PTT question asked second is still presented second.
+
+        `history_text` is built from each member's OWN history_text (tuple index
+        4; both arrival paths supply one) and never from the prompt scaffolding
+        above it: this string is what _commit_history stores as safe_context and
+        therefore what memoria and the digest later recite (§OQ-6).
+
+        The stamp carries the OLDEST member's submitted_at, so [TURN_LATENCY]'s
+        queue_wait_ms reports the WORST real wait in the burst rather than the
+        head's. None when no member was ever submitted through that seam — the
+        same "never fake a wait we didn't measure" rule enqueue() documents.
+        """
+        ordered = sorted(members, key=lambda it: it[1])
+        numbered = "\n".join(f"{i}. {it[2]}" for i, it in enumerate(ordered, 1))
+        payload = i18n_active.owner_bundle_header().format(
+            count=len(ordered), questions=numbered,
+        )
+        recap = "; ".join(
+            (it[4] if len(it) > 4 and it[4] else it[2]) for it in ordered
+        )
+        history_text = i18n_active.owner_bundle_history().format(questions=recap)
+        stamped = [it for it in ordered if len(it) > 5 and it[5] is not None]
+        oldest = min(stamped, key=lambda it: it[5]) if stamped else None
+        stamp = (
+            TurnStamp(
+                submitted_at=oldest[5],
+                submitted_under_provider=(oldest[6] if len(oldest) > 6 else None),
+            )
+            if oldest is not None else None
+        )
+        return payload, history_text, stamp
+
+    def _log_owner_bundle(self, members: list, payload: str) -> None:
+        """One INFO line per bundle (§OQ-8). The owner validates this feature by
+        grepping logs, so this line is a deliverable, not a nicety.
+
+        METADATA ONLY — per-source counts, never text — same rule as
+        [CLAUSE_SANITIZER] and the project's "never expose raw chat in prompts,
+        logs, or persistence".
+
+        `oldest_wait_ms` is deliberately the SUBMIT clock (monotonic, stamped at
+        the API dispatch entry), not the queue-insertion TTL clock: the two
+        start at different moments whenever an item sat in `command_queue`
+        before being drained, and only the submit clock is the honest
+        end-to-end wait. -1 when no member carried a stamp.
+
+        `deferred` counts owner questions still in `_priority_queue` after this
+        bundle closed — the split signal. Slightly broader than "because a cap
+        tripped": a viewer `chat` item between two owner questions also ends the
+        prefix, and those deferred questions are counted too. That is the number
+        the owner actually wants ("how many of mine are still waiting").
+        """
+        stamps = [it[5] for it in members if len(it) > 5 and it[5] is not None]
+        oldest_wait_ms = max(0, int((time.monotonic() - min(stamps)) * 1000)) if stamps else -1
+        sources = ",".join(
+            f"{src}:{n}" for src, n in sorted(Counter(it[3] for it in members).items())
+        )
+        logger.info(
+            "[BUNDLE] count=%d sources=%s chars=%d oldest_wait_ms=%d deferred=%d",
+            len(members), sources, len(payload), oldest_wait_ms,
+            self.pending_owner_questions(),
+        )
+
+    def _requeue_owner_bundle_followers(self, followers: list) -> None:
+        """Put a FAILED bundle's followers back into _priority_queue.
+
+        interruptible_speech_architecture_20260804, closing a hole the design's
+        §7 table does not cover. The bundle is frame-local by construction
+        (§3.4): `_take_owner_bundle_prefix` pops the followers OUT of
+        `_priority_queue` and `members` becomes the only reference to those
+        tuples. That is safe exactly as long as the turn commits — and it does
+        not always. Every non-committing return `_invalidate_pregen_epoch`
+        enumerates (inference-watchdog timeout, exhausted transport retries,
+        empty model body, guardrail-no-fallback, chat-repetition fallback, the
+        outer exception handler) reaches `_ejecutar_inferencia` as a falsy
+        `dialogo`, and without this hook the whole bundle — up to
+        OWNER_BUNDLE_MAX_ITEMS owner questions — evaporates: no answer, no
+        `Item expirado y omitido`, no re-queue, no TTL rescue.
+
+        Not theoretical: logs/opencohost_20260617_175453.log at 18:05:24 —
+        `qwopus` hung, the watchdog fired at 45.00 s, the engine rolled back to
+        `gemma4:e2b` and queue processing continued. Pre-bundling that incident
+        consumed exactly ONE question and the rest were answered on following
+        boundaries. That is the invariant restored here, and §7's "a question
+        can be neither lost nor double-answered" depends on it.
+
+        The HEAD is deliberately NOT re-queued. Each failure still burns exactly
+        one question, so a persistently failing model DRAINS the backlog instead
+        of spinning on it forever.
+
+        ORIGINAL tuples, never rebuilt: original priority and original insertion
+        timestamp, so TTL and ordering behave exactly as if the prefix had never
+        been taken. A rescued question can therefore still TTL-expire on a later
+        sweep — correct, it is the pre-bundling outcome and the sweep logs it.
+
+        Same lock + re-sort discipline as `enqueue`. It deliberately does NOT
+        re-run enqueue's max-items trim: the cap held a moment ago, so it can
+        only be exceeded by arrivals during the failed generation, and the very
+        next `enqueue()` trims back to `_pq_max_items` on its own.
+        """
+        # ponytail: self-healing cap overshoot, the same call the owner-question
+        # `break` in enqueue() already makes. Trim here only if a real session
+        # shows the queue staying over cap.
+        with self._pq_lock:
+            self._priority_queue.extend(followers)
+            self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+        # METADATA ONLY, same rule as [BUNDLE] and [CLAUSE_SANITIZER]. WARNING,
+        # not INFO: a silent recovery is only marginally better than a silent
+        # loss, and this line is how the owner greps that it happened at all.
+        sources = ",".join(
+            f"{src}:{n}" for src, n in sorted(Counter(it[3] for it in followers).items())
+        )
+        logger.warning(
+            "[BUNDLE_FAILED] requeued=%d sources=%s head_consumed=1",
+            len(followers), sources,
+        )
+
     def _process_priority_queue(self) -> None:
         """Process priority-queue items while the motor is idle.
 
         Non-PTT items older than _pq_ttl_seconds are discarded before selection
-        to prevent stale reactions after long delays (kira-agenda* is exempt —
-        see the F2 note in the sweep). After the queue empties, checks the
+        to prevent stale reactions after long delays (kira-agenda* is exempt,
+        and `direct` is bounded by DIRECT_ANSWER_MAX_WAIT_SECONDS instead — see
+        the F2 and Step 1 notes in the sweep). After the queue empties, checks the
         accumulation buffer and sends compacted messages as a single
         consultation.
 
@@ -2507,16 +2863,29 @@ class MotorVocalIA(threading.Thread):
                     # adopted turn (it never speaks) and its orphaned pregen cache
                     # blocks every new prefetch until a mismatching enqueue clears
                     # it. Interactive (chat/PTT) items keep the TTL.
+                    #
+                    # Step 1 (direct_turn_preemption_20260803): `direct` items now
+                    # enter this queue at ARRIVAL (routers/chat.py) instead of at
+                    # the speech boundary, so their age is the real wait — a 71s
+                    # agenda block would age one past 30s and the sweep would
+                    # SILENTLY DISCARD a turn the API already receipted as
+                    # "queued", with Kira never answering. Bound them by the
+                    # contractual DIRECT_ANSWER_MAX_WAIT_SECONDS instead, so the
+                    # documented bound and the mechanical one finally coincide.
+                    # (This also closes the same latent hole on the pre-Step-1
+                    # path: a second direct queued behind a long first answer
+                    # could already TTL-die receipted.)
+                    ttl = DIRECT_ANSWER_MAX_WAIT_SECONDS if source == "direct" else self._pq_ttl_seconds
                     if (
                         prio > 0
                         and not source.startswith("kira-agenda")
-                        and (now - ts) > self._pq_ttl_seconds
+                        and (now - ts) > ttl
                     ):
-                        self._log(f"Item expirado y omitido (TTL {self._pq_ttl_seconds:.0f}s): {source}")
+                        self._log(f"Item expirado y omitido (TTL {ttl:.0f}s): {source}")
                         # Measure-first telemetry seam: record (never alter) chat expiries.
                         # Captured here, emitted below OUTSIDE _pq_lock.
                         if source == "chat":
-                            expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": self._pq_ttl_seconds})
+                            expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": ttl})
                         # F7 [v4]: record the expired item's (payload, source) so its
                         # orphaned pregen draft (if any) can be cleared below — a stale
                         # cache entry must not block the single slot for later prefetches.
@@ -2540,39 +2909,62 @@ class MotorVocalIA(threading.Thread):
             for exp_payload, exp_source in expired_pregen_keys:
                 self._clear_prefetch_if_matches(exp_payload, exp_source)
 
+            queue_empty = False
+            accumulated = None
             with self._pq_lock:
                 if not self._priority_queue:
-                    # No priority items — check accumulation buffer
+                    # No priority items — check accumulation buffer. The FLUSH
+                    # stays under _pq_lock (it is the same critical section that
+                    # observed the queue empty, and it preserves the existing
+                    # _pq_lock -> _accum_lock edge); the TURN it produces does
+                    # not — see below.
+                    queue_empty = True
                     accumulated = self._flush_accumulation()
-                    if accumulated:
-                        self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
-                        with self._lock:
-                            self._processing = True
-                            self._current_processing_source = "accumulated"
-                        self.ui_callback("processing")
-                        try:
-                            self._ejecutar_inferencia(accumulated, source="accumulated")
-                        finally:
-                            self._complete_processing_cycle(process_queue=False)
-                    return
+                else:
+                    item = self._priority_queue.pop(0)
+                    # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
+                    # source, history_text), the 6-tuple that adds submitted_at
+                    # (Unit 4.1), and the current 7-tuple that adds
+                    # submitted_under_provider (Unit 4.2, F12), all produced by
+                    # enqueue().
+                    priority, ts, payload, source, *rest = item
+                    history_text = rest[0] if rest else None
+                    submitted_at = rest[1] if len(rest) > 1 else None
+                    submitted_under_provider = rest[2] if len(rest) > 2 else None
+                    # C1 (refactor_core_api_20260802): build the stamp at unpack —
+                    # enqueue()'s public signature and internal tuple storage stay
+                    # unchanged, only the downstream threading collapses to one object.
+                    stamp = (
+                        TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+                        if submitted_at is not None else None
+                    )
 
-                item = self._priority_queue.pop(0)
-                # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
-                # source, history_text), the 6-tuple that adds submitted_at
-                # (Unit 4.1), and the current 7-tuple that adds
-                # submitted_under_provider (Unit 4.2, F12), all produced by
-                # enqueue().
-                priority, ts, payload, source, *rest = item
-                history_text = rest[0] if rest else None
-                submitted_at = rest[1] if len(rest) > 1 else None
-                submitted_under_provider = rest[2] if len(rest) > 2 else None
-                # C1 (refactor_core_api_20260802): build the stamp at unpack —
-                # enqueue()'s public signature and internal tuple storage stay
-                # unchanged, only the downstream threading collapses to one object.
-                stamp = (
-                    TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
-                    if submitted_at is not None else None
-                )
+            # Step 0 (interruptible_speech_architecture_20260804, design §2b):
+            # the accumulated turn runs OUTSIDE _pq_lock. It used to run inside,
+            # and so did its `finally` -> _complete_processing_cycle ->
+            # _drain_pending_direct_into_priority_queue -> enqueue(), which opens
+            # `with self._pq_lock` (:1754). _pq_lock is a plain Lock (:744), NOT
+            # reentrant: the engine thread blocked on a lock it already held and
+            # Kira went permanently silent with no error. The two-thread variant
+            # was live too — the HTTP arrival drain (api/routers/chat.py:184-191)
+            # takes _direct_drain_lock then wants _pq_lock while this thread held
+            # _pq_lock and wanted _direct_drain_lock (ABBA), hanging
+            # POST /api/chat/turn as well. Milder but constant: holding _pq_lock
+            # across a whole generate-and-speak turn blocked EVERY enqueue() for
+            # 15-100s. Early-return semantics are unchanged — an empty queue still
+            # returns here whether or not there was anything to flush.
+            if queue_empty:
+                if accumulated:
+                    self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
+                    with self._lock:
+                        self._processing = True
+                        self._current_processing_source = "accumulated"
+                    self.ui_callback("processing")
+                    try:
+                        self._ejecutar_inferencia(accumulated, source="accumulated")
+                    finally:
+                        self._complete_processing_cycle(process_queue=False)
+                return
 
             # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
             # popped but _processing is still False here — this is exactly the
@@ -2628,14 +3020,58 @@ class MotorVocalIA(threading.Thread):
                             f"Pregen boundary: draft=none source={source} gap_ms=-1 "
                             f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
                         )
+                    # interruptible_speech_architecture_20260804 §4 step 10 —
+                    # THE BUNDLER. Reached only on a pregen MISS, which is Rule
+                    # 1: the engine was about to pay for a generation anyway, so
+                    # absorbing the owner questions queued behind this one costs
+                    # nothing extra and buys back N-1 spoken answers of ~108s
+                    # each. A draft that exists never gets here (it was spoken
+                    # above), so no paid GPU work is ever discarded.
+                    #
+                    # Frame-local by construction: the bundle is three locals,
+                    # created here and consumed by _ejecutar_inferencia below in
+                    # the same iteration. No window, no TTL, no second store —
+                    # which is precisely why a question can be neither lost nor
+                    # answered twice (§3.4, §7). Do NOT promote it to an
+                    # instance attribute; that reintroduces every pathology
+                    # _accumulation_buffer already has.
+                    #
+                    # N == 1 takes none of this: `taken` is empty, nothing is
+                    # reassigned, and the call below is byte-identical to today.
+                    taken: list = []
+                    if source in _OWNER_QUESTION_SOURCES:
+                        taken = self._take_owner_bundle_prefix(item)
+                        if taken:
+                            members = [item] + taken
+                            payload, history_text, stamp = self._compose_owner_bundle(members)
+                            source = OWNER_BUNDLE_SOURCE
+                            # An absorbed member's orphaned draft must not keep
+                            # holding the single pregen slot. OUTSIDE _pq_lock,
+                            # mirroring the TTL sweep's own cleanup above. A
+                            # no-op in practice — the slot only ever drafts for
+                            # the head — but a stale entry blocks every later
+                            # prefetch until an unrelated enqueue clears it.
+                            for member in taken:
+                                self._clear_prefetch_if_matches(member[2], member[3])
+                            self._log_owner_bundle(members, payload)
                     # C1 (refactor_core_api_20260802): conditional forward (see
                     # _dispatch_command) — a stubbed _ejecutar_inferencia in
                     # existing tests never sees the new kwarg unless a real
-                    # stamp was queued.
-                    if stamp is not None:
-                        self._ejecutar_inferencia(payload, source=source, history_text=history_text, stamp=stamp)
-                    else:
-                        self._ejecutar_inferencia(payload, source=source, history_text=history_text)
+                    # stamp was queued. `bundle_followers` rides the SAME rule:
+                    # it is forwarded only when a bundle actually formed, so a
+                    # non-bundled turn's call is byte-identical to before.
+                    #
+                    # It is forwarded at all because the failure is detected
+                    # THERE (a falsy `dialogo`) while the members only exist
+                    # HERE — and _ejecutar_inferencia's `elif` chain is already
+                    # the house hook for a non-committing return (the agenda
+                    # recovery next to it). See _requeue_owner_bundle_followers.
+                    forward = {"stamp": stamp} if stamp is not None else {}
+                    if taken:
+                        forward["bundle_followers"] = taken
+                    self._ejecutar_inferencia(
+                        payload, source=source, history_text=history_text, **forward
+                    )
             finally:
                 # process_queue=False: the loop (not recursion) drains the next
                 # ready item, keeping the stack flat (F1). The per-item idle
@@ -2727,55 +3163,81 @@ class MotorVocalIA(threading.Thread):
 
         Fix: peek `command_queue`'s FRONT (mirrors `_drain_control_commands`'s
         mutex-peek, called immediately before this at every boundary) and, if
-        it is a `process_context` command with `source=="direct"`, pop it and
-        `enqueue()` it into `_priority_queue` at priority=1 -- the SAME
-        conversion `_dispatch_command`'s busy branch already does for a
-        command read the normal way. Once queued, the priority sort
+        it is a `process_context` command whose source is an owner question
+        (`_OWNER_QUESTION_SOURCES` -- "direct" or "ptt"), pop it and
+        `enqueue()` it into `_priority_queue` at ITS documented priority --
+        the SAME conversion `_dispatch_command`'s busy branch already does for
+        a command read the normal way. Once queued, the priority sort
         guarantees it is served ahead of any further agenda action
         (priority=2), even if an agenda block was already re-queued earlier
         in this same boundary (insertion order does not matter, only the
         sort key does).
 
-        Scoped strictly to an EXPLICIT `source=="direct"` tag (D3) -- the 4th
-        tuple element must literally be "direct", never the tolerant-unpack
+        Scoped strictly to an EXPLICIT owner-question source tag (D3, widened
+        by interruptible_speech_architecture_20260804 Step 1) -- the 4th tuple
+        element must literally be "direct" or "ptt", never the tolerant-unpack
         default `_consume_command` falls back to for a bare/legacy tuple. A
         plain `("process_context", payload)` 2-tuple (the CTK/legacy internal
         dispatch shape, still used by a few call sites/tests) is NOT an API
         turn tagged by `Dispatcher.dispatch` and must stay deferred exactly as
         before (WU1's command-starvation fix, tests/test_command_drain.py) --
         only a real `/api/chat/turn` turn (which always dispatches an
-        explicit 4+ tuple) qualifies. PTT never reaches this path either way
-        (its own interrupt/cut mechanism, WU5, is untouched -- a PTT arrival
-        cuts speech directly instead of waiting for a boundary). Stops at the
-        first non-matching front item so nothing else is reordered. Bounded
-        by a qsize() snapshot, mirroring `_drain_control_commands`, so a
+        explicit 4+ tuple) qualifies. Stops at the first non-matching front
+        item so nothing else is reordered -- notably, a NON-owner item (e.g.
+        `chat`) at the front still stops the scan, same as before. Bounded by
+        a qsize() snapshot, mirroring `_drain_control_commands`, so a
         sustained stream can never loop indefinitely.
+
+        Step 1 (direct_turn_preemption_20260803): this is now called from TWO
+        threads — the engine boundary (unchanged, still the starvation backstop
+        for a non-owner-question command sitting ahead in FIFO) and the HTTP
+        thread right after an accepted /api/chat/turn dispatch, so the turn
+        reaches `_priority_queue` at ARRIVAL and `enqueue()`'s own
+        interactive-pregen trigger can see it as the head while the agenda is
+        still speaking. `_direct_drain_lock` makes each pop->enqueue pair
+        atomic across those callers: the pop (command_queue.mutex) and the
+        enqueue (_pq_lock) are separate critical sections, so two
+        unserialized drains could otherwise pop directs A then B and enqueue
+        them B then A, inverting FIFO.
+
+        Step 1 (interruptible_speech_architecture_20260804): widened from
+        "direct" only to `_OWNER_QUESTION_SOURCES` ("direct" + "ptt"), and the
+        priority is now the item's OWN documented one (0 for ptt, 1 for
+        direct) instead of a hardcoded 1. PTT DOES reach this path now, in the
+        deferred case (a PTT command sitting in `command_queue` because the
+        arrival-time hook in `api/ptt_session.py` missed it or hasn't run
+        yet) -- the earlier claim that "PTT never reaches this path" was true
+        only for the CUT case (WU5's own interrupt mechanism, untouched here
+        and still the only thing that can cut mid-speech). A leading `ptt`
+        item no longer blocks a `direct` sitting right behind it: both are
+        owner questions, so the scan keeps going.
         """
-        for _ in range(self.command_queue.qsize()):
-            with self.command_queue.mutex:
-                if not self.command_queue.queue:
-                    return
-                comando = self.command_queue.queue[0]
-                if (
-                    comando is None
-                    or comando[0] != "process_context"
-                    or len(comando) < 4
-                    or comando[3] != "direct"
-                ):
-                    return
-                _tipo, payload, history_text, _source, *rest = comando
-                submitted_at = rest[0] if rest else None
-                submitted_under_provider = rest[1] if len(rest) > 1 else None
-                self.command_queue.queue.popleft()
-            # C1 (refactor_core_api_20260802): enqueue()'s own signature keeps the
-            # two separate kwargs (public API, unchanged) — both default to None,
-            # so passing them unconditionally is byte-identical to the old
-            # branch-per-presence idiom.
-            self.enqueue(
-                payload, priority=1, source="direct", history_text=history_text,
-                submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
-            )
-            self._log("Boundary drain: turno directo movido a cola prioritaria (D3b).", level="debug")
+        with self._direct_drain_lock:
+            for _ in range(self.command_queue.qsize()):
+                with self.command_queue.mutex:
+                    if not self.command_queue.queue:
+                        return
+                    comando = self.command_queue.queue[0]
+                    if (
+                        comando is None
+                        or comando[0] != "process_context"
+                        or len(comando) < 4
+                        or comando[3] not in _OWNER_QUESTION_SOURCES
+                    ):
+                        return
+                    _tipo, payload, history_text, source, *rest = comando
+                    submitted_at = rest[0] if rest else None
+                    submitted_under_provider = rest[1] if len(rest) > 1 else None
+                    self.command_queue.queue.popleft()
+                # C1 (refactor_core_api_20260802): enqueue()'s own signature keeps the
+                # two separate kwargs (public API, unchanged) — both default to None,
+                # so passing them unconditionally is byte-identical to the old
+                # branch-per-presence idiom.
+                self.enqueue(
+                    payload, priority=0 if source == "ptt" else 1, source=source, history_text=history_text,
+                    submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                )
+                self._log(f"Boundary drain: turno {source} movido a cola prioritaria (D3b).", level="debug")
 
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         if not self._is_local:
@@ -4020,16 +4482,17 @@ class MotorVocalIA(threading.Thread):
         # there is no is_local gate between this point and the return.
         if source in CLAUSE_SANITIZER_SOURCES:
             san = sanitize_clause_repetition(dialogo)
-            if san.verdict != "clean":
-                # A pregen/connector-upgrade worker generates on its own
-                # thread and interleaves into the same log, so the stage must
-                # say which one this was — otherwise the tuning pass cannot
-                # tell a spoken foreground turn from a speculative draft that
-                # may never be spoken at all.
-                self._log_clause_sanitizer(
-                    san, source,
-                    stage="generate" if commit_history else "pregen_draft",
-                )
+            # A pregen/connector-upgrade worker generates on its own
+            # thread and interleaves into the same log, so the stage must
+            # say which one this was — otherwise the tuning pass cannot
+            # tell a spoken foreground turn from a speculative draft that
+            # may never be spoken at all. Logged for every verdict, including
+            # "clean" — otherwise the clean count is unobtainable from the
+            # log (ADR-039 gate).
+            self._log_clause_sanitizer(
+                san, source,
+                stage="generate" if commit_history else "pregen_draft",
+            )
             # Tier 2 (reject -> regenerate) needs an owner for the
             # regeneration, and only agenda has one: the ADR-011 ladder,
             # reached by returning "" — the same idiom the ladder reject
@@ -6320,7 +6783,14 @@ class MotorVocalIA(threading.Thread):
         *,
         history_text: Optional[str] = None,
         stamp: Optional[TurnStamp] = None,
+        bundle_followers: Optional[list] = None,
     ):
+        # `bundle_followers` (interruptible_speech_architecture_20260804): the
+        # ORIGINAL queue tuples absorbed behind this turn's head when an owner
+        # bundle formed, forwarded so a non-committing return can hand them back
+        # to _priority_queue instead of dropping them — they exist nowhere else.
+        # None/empty on every other turn. See _requeue_owner_bundle_followers.
+        #
         # §7 instrument: the request -> TTS-receives-text span. A LOCAL, not an
         # instance slot: _hablar has four callers and two of them run on
         # background threads (play_prefetched_agenda's detached speaker at :1883
@@ -6432,6 +6902,13 @@ class MotorVocalIA(threading.Thread):
             # controller leaves GENERATING and its recovery ladder engages,
             # instead of stalling the autonomous loop silently.
             self._accept_agenda_output("")
+        elif bundle_followers:
+            # The same non-committing return, for an owner bundle: the head is
+            # spent (exactly what a failed single turn spent before bundling)
+            # and the followers go back to the queue rather than dying with this
+            # frame. Mutually exclusive with the branch above by construction —
+            # a bundle is tagged OWNER_BUNDLE_SOURCE, never "kira-agenda*".
+            self._requeue_owner_bundle_followers(bundle_followers)
 
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:

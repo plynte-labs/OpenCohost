@@ -171,6 +171,19 @@ CLOUD_AUTO_RETURN_AMBIGUOUS_429_MAX_ATTEMPTS: int = 6
 # monkeypatch it down instead of actually waiting out the real value.
 CLOUD_PROBER_JOIN_TIMEOUT_SECONDS: float = 2.0
 
+# Owner-question bundling (interruptible_speech_architecture_20260804, §5 /
+# §OQ-2). ONE definition of the synthesized source tag: it is written into
+# `historial` and read back by the digest, and _DIGEST_CAPTURE_SOURCES is
+# fail-closed on unknown values, so renaming it later silently orphans every
+# already-committed entry. The two caps bound genuinely different things —
+# chars bounds the PROMPT (so a bundle does not trip
+# context_budget.apply_char_budget and evict conversation history), items
+# bounds COHERENCE (six questions at ~40 spoken seconds each is already four
+# minutes of monologue). Expect to tune MAX_ITEMS after the first real session.
+OWNER_BUNDLE_SOURCE = "owner-bundle"
+OWNER_BUNDLE_MAX_ITEMS = 6
+OWNER_BUNDLE_MAX_CHARS = 2000
+
 # Intra-sentence clause sanitizer (clause_sanitizer V1, 2026-07-29) — which
 # dialogue sources run repetition_guard.sanitize_clause_repetition() at the
 # shared llm_engine seam.
@@ -182,8 +195,13 @@ CLOUD_PROBER_JOIN_TIMEOUT_SECONDS: float = 2.0
 # sanitizer would silently collapse it. Config is kept per-source so any source
 # can be armed later on real evidence — see
 # docs/deferred-20260729-clause-sanitizer-scope.md.
+# OWNER_BUNDLE_SOURCE is KNOWN but not DEFAULT (interruptible_speech_
+# architecture_20260804 §5.2): arming it is still the owner's call on real
+# evidence, but without the allowlist entry `_parse_clause_sanitizer_sources`
+# would silently drop the token and warn about a "typo" the owner did not make.
 CLAUSE_SANITIZER_KNOWN_SOURCES = frozenset({
     "kira-agenda", "kira-agenda-stop", "chat", "direct", "ptt", "accumulated",
+    OWNER_BUNDLE_SOURCE,
 })
 CLAUSE_SANITIZER_DEFAULT_SOURCES = frozenset({"kira-agenda", "kira-agenda-stop"})
 

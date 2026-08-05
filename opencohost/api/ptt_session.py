@@ -411,11 +411,20 @@ class PttController:
         on_audio_suspect: Optional[Callable[[], None]] = None,
         on_listening: Optional[Callable[[], None]] = None,
         on_flush_precheck: Optional[Callable[[], None]] = None,
+        motor=None,
         **session_kwargs,
     ):
         self._ws_uri = ws_uri
         self._dispatcher = dispatcher
         self._event_log = event_log
+        # Step 1 (interruptible_speech_architecture_20260804): the motor
+        # reference backing the arrival-time drain hook in `_dispatch` below --
+        # mirrors `chat.py`'s `host.motor` access (`:184-191`) exactly, rather
+        # than a narrower single-bound-method seam like the three hooks below,
+        # because the hook needs BOTH the busy check (`is_processing` /
+        # `is_speaking`) and the drain method. Optional so tests / minimal
+        # host doubles need not supply it.
+        self._motor = motor
         self._session_factory = session_factory
         self._session_kwargs = session_kwargs
         # Recovery hook (2026-07-15 PTT voice-death fix): the smallest
@@ -481,6 +490,23 @@ class PttController:
             source="ptt",
             submitted_at=time.monotonic(),
         )
+        # Step 1 (interruptible_speech_architecture_20260804): the same
+        # best-effort arrival-time drain call chat.py:184-191 makes, so a
+        # deferred PTT question is visible in `_priority_queue` at ARRIVAL
+        # (priority 0) instead of sitting invisible in `command_queue` until
+        # the next boundary -- during which the agenda tick thread could read
+        # `pending_owner_questions() == 0` and start a fresh agenda turn.
+        # Best-effort by the same rule as chat.py: a raising drain must never
+        # break the WS flush -- the dispatch above already succeeded, and the
+        # engine-boundary drain remains the backstop this one cannot cover.
+        motor = self._motor
+        if motor is not None and (motor.is_processing or motor.is_speaking):
+            drain = getattr(motor, "_drain_pending_direct_into_priority_queue", None)
+            if callable(drain):
+                try:
+                    drain()
+                except Exception:
+                    logger.exception("PTT arrival-time drain failed; the boundary drain still covers it")
 
     def start(self) -> str:
         with self._lock:
