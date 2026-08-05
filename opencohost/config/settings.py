@@ -109,9 +109,22 @@ LLM_PROVIDER_PRESETS: dict[str, dict] = {
 }
 # Cloud provider HTTP chat timeout (seconds) — distinct from OLLAMA_CHAT_TIMEOUT
 # and the local watchdog timeouts (llm_engine.py); wired at the chat call
-# sites in Phase 4. 90s placeholder per design's Open Questions — tune
-# against real NVIDIA NIM latency during phase-4 runtime validation.
-CLOUD_CHAT_TIMEOUT = 90
+# sites in Phase 4. TUNED 2026-08-04 against real NVIDIA NIM latency, closing
+# the "90s placeholder, tune during phase-4 runtime validation" open question.
+#
+# The whole value is dead air: it is ONE timeout, not retries — the watchdog
+# branch returns on attempt 1 and only CLOUD_ERROR_RATE_LIMITED retries in-turn
+# (llm_engine.py:4143-4147), so a `transient` failure costs exactly this much
+# before the local fallback is even started.
+#
+# Sized off measured successful cloud calls, not guessed. Session
+# logs/opencohost_20260804_191446.log (nvidia_nim, gemma4:e4b): 49.06, 58.81,
+# 49.98, 49.50, 63.84, 33.31, 51.81 s — worst legitimate response 63.84 s. 75
+# leaves ~11 s of headroom above the observed worst case. Do NOT cut further on
+# latency grounds alone: below ~70 s this starts killing answers the cloud was
+# about to return, which is strictly worse than waiting for them. Re-measure
+# before changing — the safe floor is a property of the provider, not of taste.
+CLOUD_CHAT_TIMEOUT = 75
 # Cloud output-token cap (2026-07-24 cloud incident item 3, owner decision):
 # the LOCAL 768-token cap (LLM_MAX_TOKENS) was starving cloud/reasoning
 # models of budget. High ceiling so reasoning models never starve; providers
