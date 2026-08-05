@@ -497,6 +497,33 @@ class _GenerationAttemptOutcome:
     early_return: Optional[str] = None
 
 
+@dataclass
+class SpeechOutcome:
+    """Step 1 (interruptible_speech_architecture_20260804 §3/§8): what one
+    `_hablar_impl` invocation actually did, returned on EVERY exit path
+    (clean completion, interruption, exception). Capture-and-discard only --
+    nothing consumes this yet. `_hablar` propagates it verbatim; every
+    existing caller ignores the return value (verified by grep), so this is
+    purely additive.
+
+    `cursor` is the index of the fragment OWED a full replay: on clean
+    completion `cursor == len(chunks)`; on a mid-audio cut it is the exact
+    in-flight fragment index unpacked from the queue item, NEVER
+    `chunks_played` (that counter increments before the interrupted break and
+    never advances past a failed synthesis -- see the CURSOR TRAP note at the
+    interrupted branch in `_hablar_impl`).
+
+    Every fragment index of `chunks` ends in exactly one of `spoken`,
+    `skipped` (logged via `[SPEECH_LOST]`), or pending (`chunks[cursor:]`).
+    """
+    chunks: list
+    cursor: int
+    spoken: list
+    skipped: list
+    interrupted: bool
+    error: Optional[str] = None
+
+
 class MotorVocalIA(threading.Thread):
     """
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
@@ -1096,6 +1123,28 @@ class MotorVocalIA(threading.Thread):
             self.interrupt_speaking()
             return "cut"
         return "defer"
+
+    def speech_pause_would_fire(self) -> None:
+        """Step 0 telemetry (interruptible_speech_architecture_20260804 §8
+        step 0, §5.1): a read-only probe wired to `PttController.start()`'s
+        press-time precheck -- mirrors `ptt_interrupt_if_agenda_speaking`'s
+        wiring shape, but NEVER cuts anything and has no host-flag gate.
+
+        Logs what a real `pause_speech("ptt")` would look like at this exact
+        instant (design's future step 3), so real press frequency and cut
+        position can be measured before anything is armed. No-op (no log)
+        when not currently speaking. Never mutates `_speaking` or any other
+        engine state.
+        """
+        with self._lock:
+            speaking = self._speaking
+            source = self._current_speech_source
+            progress = dict(self._speech_progress) if self._speech_progress else None
+        if not speaking:
+            return
+        played = progress["played"] if progress else 0
+        total = progress["total"] if progress else 0
+        logger.info(f"[SPEECH_PAUSE] would-fire source={source} played={played} total={total}")
 
     def _freeze_agenda_stash(self) -> bool:
         """WU5 D2: move the cached NEXT-turn agenda draft out of the active pregen
@@ -6986,7 +7035,7 @@ class MotorVocalIA(threading.Thread):
             cancelled = self._cancelled_speech_prefixes
         if cancelled and any(source.startswith(p) for p in cancelled):
             self._log(f"Habla suprimida (cancelada): source={source}", level="warning")
-            return
+            return SpeechOutcome(chunks=[], cursor=0, spoken=[], skipped=[], interrupted=False, error=None)
 
         with self._lock:
             self._speaking = True
@@ -7002,6 +7051,12 @@ class MotorVocalIA(threading.Thread):
                 self._speaking = False
                 self._current_speech_source = None
             logger.exception("UI callback failed during speaking_start")
+            # NOT converted to a returned SpeechOutcome: test_llm_engine_timeouts
+            # ::test_speaking_start_callback_failure_clears_speech_source locks in
+            # that this raise must keep propagating out of _hablar/_hablar_impl.
+            # Zero-audible-behavior-change (design §8 step 1) means this
+            # already-tested contract stays exactly as-is; only exit paths that
+            # already returned/fell through silently gain a SpeechOutcome.
             raise
 
         # WU5 D3 (design-fase2.md §3 WU5): while an interruption ANSWER's TTS
@@ -7056,7 +7111,7 @@ class MotorVocalIA(threading.Thread):
                     self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
                 self._speaking_start_monotonic = None
             self.ui_callback("speaking_end")
-            return
+            return SpeechOutcome(chunks=[], cursor=0, spoken=[], skipped=[], interrupted=False, error=None)
 
         self._log(f"Sintetizando {len(oraciones)} fragmento(s) con pipeline...")
         start_tts = time.time()
@@ -7071,9 +7126,31 @@ class MotorVocalIA(threading.Thread):
 
         cola_audios = queue.Queue(maxsize=3)
         error_count = 0
+        # Step 1 ledgers (design §3/§6 I1): every fragment index ends in
+        # exactly one of spoken/skipped/pending. `skipped` is mutated from
+        # BOTH threads (the producer's _drop below, and the consumer's
+        # playback-exception handler further down) -- safe without an extra
+        # lock because list.append() is a single atomic bytecode op in
+        # CPython, same tolerance the existing unsynchronized `error_count`
+        # counter already relies on.
+        skipped: list = []
 
         def productor():
             nonlocal error_count
+
+            def _drop(i: int, why: str, exc: Optional[Exception] = None) -> None:
+                # Step 0 (design §5.3, §8 step 0): the single collapse point
+                # for every synthesis-side chunk loss. PRIVACY: `why` is a
+                # closed set of short reason tags, never fragment/chat text.
+                # `exc`, when given, restores the traceback for unknown/heavy
+                # failures (design §12 observability) via exc_info -- passing
+                # None is a no-op for logging, so this needs no branch.
+                nonlocal error_count
+                logger.warning(f"[SPEECH_LOST] idx={i} reason={why} source={source}", exc_info=exc)
+                error_count += 1
+                skipped.append(i)
+                cola_audios.put(None)
+
             # Snapshot tts_local_only ONCE at utterance start so a mid-utterance
             # toggle cannot send remaining chunks to Edge-TTS.  The toggle takes
             # effect from the NEXT utterance only.
@@ -7139,19 +7216,9 @@ class MotorVocalIA(threading.Thread):
                         if self._piper.synthesize(oracion, archivo_chunk_wav):
                             cola_audios.put((archivo_chunk_wav, i, oracion))
                         else:
-                            logger.warning(
-                                "TTS local-only: Piper synthesis failed for chunk %d "
-                                "(chunk dropped; Edge-TTS not attempted)", i
-                            )
-                            cola_audios.put(None)
-                            error_count += 1
+                            _drop(i, "piper_synth_failed")
                     else:
-                        logger.warning(
-                            "TTS local-only: Piper unavailable for chunk %d "
-                            "(chunk dropped; Edge-TTS not attempted)", i
-                        )
-                        cola_audios.put(None)
-                        error_count += 1
+                        _drop(i, "piper_unavailable")
                     continue
 
                 # Fast-path: Edge-TTS is known offline for this session (or the
@@ -7166,12 +7233,10 @@ class MotorVocalIA(threading.Thread):
                         if self._piper.synthesize(oracion, archivo_chunk_wav):
                             cola_audios.put((archivo_chunk_wav, i, oracion))
                         else:
-                            cola_audios.put(None)
-                            error_count += 1
+                            _drop(i, "piper_synth_failed")
                     else:
-                        # Piper gone / never loaded — drop chunk silently
-                        cola_audios.put(None)
-                        error_count += 1
+                        # Piper gone / never loaded.
+                        _drop(i, "piper_unavailable")
                     continue
 
                 ext = ".mp3" if effective_motor == "ligero" else ".wav"
@@ -7214,25 +7279,15 @@ class MotorVocalIA(threading.Thread):
                                 except Exception:
                                     pass  # Never break TTS for measurement failure
                         else:
-                            error_detail = "desconocido"
-                            try:
-                                error_detail = respuesta.json().get('error', respuesta.text[:100])
-                            except Exception:
-                                error_detail = respuesta.text[:100]
-                            logger.warning(f"TTS chunk {i} error HTTP {respuesta.status_code}: {error_detail}")
-                            cola_audios.put(None)
-                            error_count += 1
+                            _drop(i, "heavy_http_error")
 
                 except requests.exceptions.ConnectionError:
                     self._log("ERROR: Servidor Qwen3-TTS no disponible.", level="error")
-                    cola_audios.put(None)
-                    error_count += 1
+                    _drop(i, "heavy_connection_error")
                     continue
 
                 except requests.exceptions.Timeout:
-                    logger.warning(f"TTS chunk {i} timeout")
-                    cola_audios.put(None)
-                    error_count += 1
+                    _drop(i, "heavy_timeout")
 
                 except Exception as e:
                     # Connection-error detection: only network-offline errors trigger
@@ -7251,27 +7306,21 @@ class MotorVocalIA(threading.Thread):
                             if self._piper.synthesize(oracion, archivo_chunk_wav):
                                 cola_audios.put((archivo_chunk_wav, i, oracion))
                             else:
-                                cola_audios.put(None)
-                                error_count += 1
+                                _drop(i, "edge_fallback_piper_synth_failed")
                         else:
                             self._log(
                                 "TTS local no disponible: instala piper-tts y "
                                 "configura TTS_LOCAL_MODEL_PATH",
                                 level="warning",
                             )
-                            cola_audios.put(None)
-                            error_count += 1
+                            _drop(i, "edge_fallback_piper_unavailable")
                         continue
 
                     if effective_motor == "ligero":
                         self._log("ERROR: Edge-TTS requiere internet. Si estas offline usa Pesado (Qwen3-TTS).", level="error")
-                        logger.warning(f"TTS ligero fallo; timeout configurado {TTS_LIGHT_TIMEOUT}s: {e}")
-                        cola_audios.put(None)
-                        error_count += 1
+                        _drop(i, "edge_ligero_failed")
                         continue
-                    logger.exception(f"TTS chunk {i} error inesperado")
-                    cola_audios.put(None)
-                    error_count += 1
+                    _drop(i, "heavy_unexpected_error", e)
 
             cola_audios.put("FIN")
 
@@ -7296,6 +7345,18 @@ class MotorVocalIA(threading.Thread):
                 logger.warning(f"No se pudo re-inicializar pygame.mixer: {e}")
 
         chunks_played = 0
+        # Step 1 ledgers (design §3 SpeechOutcome, §6 I1/I4). `cursor` defaults
+        # to clean completion (== len(oraciones)) and is overwritten ONLY at an
+        # actual cut point below -- never derived from `chunks_played`, which
+        # increments before the interrupted break and never advances past a
+        # failed synthesis (the CURSOR TRAP, design §3). `last_idx` lets the
+        # rare pre-dequeue guard (no item in hand yet) still report a sane
+        # best-effort cursor.
+        spoken: list = []
+        cursor = len(oraciones)
+        last_idx = -1
+        was_interrupted = False
+        outcome_error = None
         try:
             while True:
                 # Bug 4 fix: check _speaking before dequeuing the next chunk.
@@ -7304,6 +7365,15 @@ class MotorVocalIA(threading.Thread):
                 # teardown is requested.
                 with self._lock:
                     if not self._speaking:
+                        was_interrupted = True
+                        # ponytail: best-effort cursor -- no item is in hand at
+                        # this guard, so the exact next idx is unknowable
+                        # without dequeuing. Assumes no skip landed exactly in
+                        # this narrow inter-fragment window. Harmless today:
+                        # nothing resumes from cursor until the router lands
+                        # (design §8 step 3+); revisit only if that ever needs
+                        # to be exact.
+                        cursor = last_idx + 1
                         break
 
                 item = cola_audios.get(timeout=TTS_AUDIO_QUEUE_TIMEOUT)
@@ -7317,6 +7387,8 @@ class MotorVocalIA(threading.Thread):
                 # fired while we were blocked on cola_audios.get().
                 with self._lock:
                     if not self._speaking:
+                        was_interrupted = True
+                        cursor = item[1]  # the fragment about to play, never started
                         try:
                             if os.path.exists(item[0]):
                                 os.remove(item[0])
@@ -7325,6 +7397,7 @@ class MotorVocalIA(threading.Thread):
                         break
 
                 archivo_chunk, idx, oracion_texto = item
+                last_idx = idx
 
                 try:
                     if chunks_played == 0:
@@ -7366,7 +7439,14 @@ class MotorVocalIA(threading.Thread):
                             self._speech_progress["played"] = chunks_played
 
                     if interrupted:
+                        # CURSOR TRAP (design §3): this is the cut MID-AUDIO --
+                        # `idx` (never chunks_played) is the fragment owed a
+                        # full replay, so it counts as CUT, NOT spoken.
+                        was_interrupted = True
+                        cursor = idx
+                        logger.info(f"[SPEECH_STACK] would-push source={source} cursor={idx}")
                         break
+                    spoken.append(idx)
 
                 except Exception as e:
                     # Bug fix (2026-07-15 PTT voice-death): a playback
@@ -7379,6 +7459,10 @@ class MotorVocalIA(threading.Thread):
                     error_count += 1
                     logger.warning(f"Error reproduciendo chunk {idx}: {e}")
                     self.mark_audio_suspect()
+                    # Step 1 (design §5.3): a playback exception loses this ONE
+                    # fragment (skipped), never the rest of the job -- no
+                    # control-flow change, the loop continues to the next item.
+                    skipped.append(idx)
                 finally:
                     try:
                         if os.path.exists(archivo_chunk):
@@ -7388,9 +7472,18 @@ class MotorVocalIA(threading.Thread):
 
         except queue.Empty:
             self._log("⚠️ Timeout esperando chunks de audio.", level="warning")
+            outcome_error = "queue_empty_timeout"
+            # Design §12: cursor must stay honest on this exit too -- a
+            # healthy heavy-TTS server dribbling a chunk past the timeout, or
+            # a dead producer, must never report the clean-completion
+            # signature (cursor == len(oraciones)).
+            cursor = last_idx + 1
         except Exception as e:
             self._log(f"ERROR en reproducción: {e}", level="error")
             logger.exception("Error en consumidor de audio")
+            outcome_error = str(e)
+            # Design §12: same honesty requirement as the queue.Empty exit.
+            cursor = last_idx + 1
         finally:
             total_elapsed = time.time() - start_tts
             # Join the producer FIRST so it can no longer enqueue a chunk, THEN
@@ -7435,6 +7528,26 @@ class MotorVocalIA(threading.Thread):
                 self._last_speech_duration_ms = int((now - self._speaking_start_monotonic) * 1000)
             self._speaking_start_monotonic = None
         self.ui_callback("speaking_end")
+        # Step 1 (design §3/§8 step 1): every exit path returns a
+        # SpeechOutcome. capture-and-discard only -- `_hablar` propagates this
+        # verbatim and every existing caller ignores it (verified by grep),
+        # so nothing is stored and nothing resumes yet.
+        # Design §12 (defect 2): the producer can run up to ~4 indices ahead
+        # of the consumer (queue maxsize=3 + in-hand); a drop at an index the
+        # cut never reached must return to PENDING, not double-count as both
+        # skipped AND pending. Snapshot-copy + filter at this single return
+        # site so every exit path (clean/cut/error) gets it. On clean
+        # completion cursor == len(chunks), so every skipped index is
+        # already < cursor and this is a no-op.
+        skipped_final = sorted(i for i in set(skipped) if i < cursor)
+        return SpeechOutcome(
+            chunks=oraciones,
+            cursor=cursor,
+            spoken=spoken,
+            skipped=skipped_final,
+            interrupted=was_interrupted,
+            error=outcome_error,
+        )
 
     def _emit_dialogue(
         self,

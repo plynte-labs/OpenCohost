@@ -326,6 +326,15 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                     "ptt_interrupt_if_agenda_speaking",
                     None,
                 ),
+                # Step 0 (interruptible_speech_architecture_20260804 §5.1, §8
+                # step 0): read-only press-time telemetry -- same
+                # smallest-surface, getattr-guarded idiom as on_flush_precheck
+                # right above, but this one never cuts anything.
+                on_press_precheck=getattr(
+                    getattr(host, "motor", None),
+                    "speech_pause_would_fire",
+                    None,
+                ),
                 # Step 1 (interruptible_speech_architecture_20260804): the
                 # arrival-time drain hook (ptt_session.py:_dispatch) needs the
                 # motor itself, not a single bound method -- it checks

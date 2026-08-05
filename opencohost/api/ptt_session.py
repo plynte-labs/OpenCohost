@@ -411,6 +411,7 @@ class PttController:
         on_audio_suspect: Optional[Callable[[], None]] = None,
         on_listening: Optional[Callable[[], None]] = None,
         on_flush_precheck: Optional[Callable[[], None]] = None,
+        on_press_precheck: Optional[Callable[[], None]] = None,
         motor=None,
         **session_kwargs,
     ):
@@ -446,6 +447,13 @@ class PttController:
         # runs at boundaries). Optional so CTK / minimal host doubles never cut;
         # a raising precheck never blocks the turn.
         self._on_flush_precheck = on_flush_precheck
+        # Step 0 telemetry (interruptible_speech_architecture_20260804 §5.1,
+        # §8 step 0): a NEW read-only probe fired at the exact point a real
+        # pause_speech("ptt") will fire once the router lands (step 3+) --
+        # the gate seam this design moves from flush to press. Never cuts
+        # anything; fail-open like on_flush_precheck. Optional so tests /
+        # minimal host doubles need not supply it.
+        self._on_press_precheck = on_press_precheck
         self._lock = threading.Lock()
         self._session: Optional[PttSession] = None
         # Survives after the session frees the slot so GET /api/ptt/state can
@@ -509,6 +517,16 @@ class PttController:
                     logger.exception("PTT arrival-time drain failed; the boundary drain still covers it")
 
     def start(self) -> str:
+        # Step 0 (design §5.1): fires at the exact top of start(), before the
+        # session-active check or any lock -- the same point a real
+        # pause_speech("ptt") lands once the router ships (step 3+). Fail-open:
+        # a raising/absent callback never blocks or breaks the press path
+        # (same discipline as _dispatch's on_flush_precheck below).
+        if self._on_press_precheck is not None:
+            try:
+                self._on_press_precheck()
+            except Exception:
+                logger.exception("PTT press precheck failed")
         with self._lock:
             if self._session is not None:
                 raise SessionActive()
