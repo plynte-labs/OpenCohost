@@ -1000,9 +1000,14 @@ def test_stack_depth_high_water_logs_at_four(router_motors, caplog):
             if i < 4:
                 assert mixer.entered[i].wait(10.0), f"job {i} never reached the mixer"
 
-    assert any("[SPEECH_STACK] depth=4" in r.message for r in caplog.records), (
-        "the high-water guard never fired at depth 4"
-    )
+    # The push lands before the warning emits (router.py: append at
+    # `_push_suspended`, warning in the `finally`) — the len==4 wait above can
+    # release this thread inside that gap, so wait for the RECORD, never race
+    # the router thread to its own log line.
+    assert _wait_until(
+        lambda: any("[SPEECH_STACK] depth=4" in r.message for r in caplog.records),
+        timeout=10.0,
+    ), "the high-water guard never fired at depth 4"
     assert not any("depth=3" in r.message for r in caplog.records), "threshold is >=4"
 
     for i in range(5):
