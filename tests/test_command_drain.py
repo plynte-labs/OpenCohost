@@ -214,7 +214,12 @@ def test_dispatch_command_process_context_forwards_source_idle_and_busy(monkeypa
     assert infer_calls == [("ptt-wrapped", "ptt", "El streamer dijo (PTT): x")]
     assert seen_processing_source == ["ptt"]
 
-    # Busy branch re-enqueues with the same honest source (priority unchanged).
+    # Busy branch re-enqueues with the same honest source, at the source's
+    # DOCUMENTED priority (step 4 batch 1: 0 for ptt, mirroring
+    # `_drain_pending_direct_into_priority_queue` — the old hardcoded 1 left a
+    # busy-enqueued PTT question TTL-expirable against the sweep's own
+    # "non-PTT" contract; the full pin lives in
+    # test_speech_router_popgate.py::test_a_busy_enqueued_ptt_lands_at_priority_zero_like_the_boundary_drain).
     motor2, _ = _make_motor()
     enqueue_calls: list = []
     monkeypatch.setattr(
@@ -228,7 +233,7 @@ def test_dispatch_command_process_context_forwards_source_idle_and_busy(monkeypa
     motor2._dispatch_command(
         "process_context", "ptt-wrapped", history_text="El streamer dijo (PTT): x", source="ptt"
     )
-    assert enqueue_calls == [("ptt-wrapped", 1, "ptt", "El streamer dijo (PTT): x")]
+    assert enqueue_calls == [("ptt-wrapped", 0, "ptt", "El streamer dijo (PTT): x")]
 
 
 def test_dispatch_command_process_context_forwards_history_text_idle_and_busy(monkeypatch):

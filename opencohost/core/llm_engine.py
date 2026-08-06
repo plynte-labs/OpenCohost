@@ -1362,6 +1362,15 @@ class MotorVocalIA(threading.Thread):
         occupies or is in flight for that slot — so it can never evict or delay a
         real interactive/agenda pregen (AC5.6). Best-effort: a late/rejected/absent
         upgrade just falls back to the pool floor at the return (timeout-0 read).
+
+        Step 4 batch 2 (audit item 3): armed, a priority-0 owner question can
+        pop and GENERATE under this very playback (widened §5.2 gate), so two
+        armed-only refusals below keep the upgrade off the single runner then.
+        Residual: a question arriving AFTER the upgrade's request is in flight
+        still serializes behind it for up to ~CONNECTOR_UPGRADE_TIMEOUT_SECONDS
+        client-side — longer server-side on a stalling model, since the
+        watchdog abandon does not free the runner — unclosable without a
+        cancellable transport.
         """
         # F1 Pregen Cloud Gate (multi_provider_llm_20260723): the connector
         # upgrade is speculative generation — it calls _generar_dialogo directly,
@@ -1380,6 +1389,17 @@ class MotorVocalIA(threading.Thread):
         remaining = self.speech_remaining_estimate()
         if remaining is None or remaining <= CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS:
             return
+        # Step 4 batch 2 (audit item 3): armed, a queued priority-0 owner
+        # question WILL pop under this very playback — spawning the cosmetic
+        # upgrade now would race the owner's answer for the single runner.
+        # Unarmed this gate stays dead: a legacy owner question waits for the
+        # boundary, and playback IS the legacy GPU-free window.
+        if (
+            self._speech_interrupt_enabled
+            and self._speech_router_enabled
+            and self.has_pending_priority_before(1)
+        ):
+            return
         with self._prefetch_lock:
             stash = self._frozen_stash
             if stash is None or stash.get("connector") is not None:
@@ -1396,6 +1416,20 @@ class MotorVocalIA(threading.Thread):
             # the pool floor is an acceptable connector, never queue or retry.
             with self._lock:
                 if self._llm_generating:
+                    return
+                # Step 4 batch 2 (audit item 3): armed, `_processing` True
+                # means a widened pop is dispatching a REAL foreground turn —
+                # including the [pop -> `_llm_generating` set] gap and retry
+                # gaps the flag check above misses. Claiming now would hold
+                # the runner against the owner's priority-0 answer. Unarmed
+                # this branch stays dead: the legacy blocking path holds
+                # `_processing` through the parent turn's whole PLAYBACK, and
+                # refusing on it would disable the upgrade outright.
+                if (
+                    self._speech_interrupt_enabled
+                    and self._speech_router_enabled
+                    and self._processing
+                ):
                     return
                 self._llm_generating = True
             # R4 ownership token: _generar_dialogo self-brackets `_llm_generating`
@@ -1745,13 +1779,44 @@ class MotorVocalIA(threading.Thread):
                 # when a stamp is present, so a caller/test that stubs enqueue()
                 # with the pre-C1 signature (no submitted_at/submitted_under_provider
                 # params) is unaffected by an unstamped turn.
+                #
+                # Step-4 batch-1 blocker (2026-08-05): this branch hardcoded
+                # `priority=1` for EVERY source, including "ptt" — the same
+                # bug class direct_turn_preemption_20260803 Step 1 fixed at
+                # `_drain_pending_direct_into_priority_queue` (:3471,
+                # "the priority is now the item's OWN documented one") and
+                # never mirrored here. At priority 1 a busy-enqueued PTT
+                # question was TTL-expirable (the sweep's `prio > 0` guard,
+                # against its own "Expire stale non-PTT items" contract) and
+                # invisible to the widened §5.2 pop gate. Same expression as
+                # the sibling: PTT 0, everything else its documented 1.
+                # Unarmed consequence, INTENDED (judge pass): at priority 0 a
+                # busy-enqueued PTT is TTL-EXEMPT, so a receipted owner
+                # question stranded behind a long block is now spoken late
+                # rather than silently discarded — matching the boundary
+                # drain's existing behavior and the sweep's own wording.
+                busy_priority = 0 if source == "ptt" else 1
                 if stamp is not None:
                     self.enqueue(
-                        payload, priority=1, source=source, history_text=history_text,
+                        payload, priority=busy_priority, source=source, history_text=history_text,
                         submitted_at=stamp.submitted_at, submitted_under_provider=stamp.submitted_under_provider,
                     )
                 else:
-                    self.enqueue(payload, priority=1, source=source, history_text=history_text)
+                    self.enqueue(payload, priority=busy_priority, source=source, history_text=history_text)
+                # Step 4 (interruptible_speech_architecture_20260804,
+                # step4-plan.md batch 1 item 2): without this, an item
+                # re-enqueued here strands until run()'s 1s idle tick
+                # (command_queue.get(timeout=1.0)) even when the widened
+                # §5.2 gate would admit it immediately. Flat call -- same
+                # depth as run()'s own idle-branch call to this method.
+                # Conjunction-gated (judge pass): unarmed, the widened gate
+                # never admits anything mid-speech, so the only thing an
+                # unconditional call could do is run a full legacy turn
+                # nested here when speech happens to end inside the
+                # check-to-call window — a new unarmed execution path for
+                # zero gain. Legacy keeps run()'s idle tick, byte-identical.
+                if self._speech_interrupt_enabled and self._speech_router_enabled:
+                    self._process_priority_queue()
                 return
             with self._lock:
                 self._processing = True
@@ -2050,16 +2115,46 @@ class MotorVocalIA(threading.Thread):
         # never adds them: a draft that already exists or is in flight is
         # untouched, because paid GPU work is always spoken.
         #
-        # Race-sound while speaking: pops only happen in _process_priority_queue
-        # which returns immediately while _speaking (see its head), so the count
-        # can only GROW during the window this can fire in. Both directions are
-        # benign — 1 becoming 2 right after a spawn means that draft is spoken
-        # and the rest bundle; a 2 read just before speech ends still produces
-        # the right bundle at the boundary. Same TOCTOU posture as the F6
-        # re-check below, with the same backstop.
+        # Race-sound while speaking: the count is a fresh _pq_lock read and the
+        # refusal is stateless, so staleness only matters within THIS call.
+        # Unarmed, pops cannot happen while _speaking and the count only GROWS
+        # in this window. Armed (§5.2 step 4), a priority-0 pop CAN land
+        # mid-speech (and the TTL sweep runs there too), so the count may also
+        # SHRINK — both directions stay benign: a stale-high read refuses a
+        # draft whose burst the pop-time bundler (§4 step 10) absorbs anyway
+        # (the boundary just arrived early); a stale-low read spawns a draft
+        # the pop either consumes (_take_pregen_if_match /
+        # _wait_or_invalidate_pregen) or the F6 still-head re-check refuses.
+        # Same TOCTOU posture as the F6 re-check below, with the same
+        # foreground-commit epoch backstop.
         if source in _OWNER_QUESTION_SOURCES and self.pending_owner_questions() >= 2:
             return
         if not (self.is_speaking and not self.llm_generating):
+            return
+        # Step 4 batch 2 (audit item 2, REAL_DEFECT): armed, a widened §5.2 pop
+        # dispatches a REAL foreground generation UNDER playback, and
+        # `_llm_generating` alone misses its [pop -> flag set] dispatch gap and
+        # every retry gap — a trigger passing there spawns a SECOND concurrent
+        # generation on the single runner (the delayed foreground call can trip
+        # the inference watchdog into a spurious heavy-model rollback).
+        # `_processing` spans the armed foreground turn end to end, so refuse
+        # on it too. Conjunction-gated because the SAME flag means something
+        # else unarmed: the legacy blocking path holds `_processing` through
+        # the parent turn's whole PLAYBACK — exactly WU3's GPU-free window —
+        # so an unconditional check would disable interactive pregen outright.
+        # Residual: the [pop -> `_processing` set] window. When the pop finds
+        # no draft and no in-flight pregen it is a few instructions wide;
+        # when `_wait_or_invalidate_pregen` waits (bounded by the inference
+        # watchdog), the window spans that wait BUT the occupied
+        # `_pregen_inflight` slot makes pregenerate()'s F2 guard and the
+        # connector's own slot check refuse every spawn — the window is
+        # guarded by the SLOT there, not by narrowness. Accepted, same TOCTOU
+        # posture as F6 above.
+        if (
+            self._speech_interrupt_enabled
+            and self._speech_router_enabled
+            and self.is_processing
+        ):
             return
         # Already pregenerating / pregenerated exactly this head -> don't re-trigger.
         # F4 [v4]: occupancy is `_pregen_inflight is not None` (set under the lock
@@ -3009,7 +3104,30 @@ class MotorVocalIA(threading.Thread):
         flat stack.
         """
         while True:
-            if self._processing or self._speech_active:
+            if self._processing:
+                return
+            # §5.2 (interruptible_speech_architecture_20260804 step 4): the
+            # judge-closure conjunction (engram 5589). Either flag off must
+            # reproduce today's combined guard BYTE-IDENTICAL -- no priority-0
+            # item pops early, and the TTL sweep below stays gated exactly as
+            # before. Armed, `_speech_active` alone no longer stops the loop
+            # here: the actual priority-0-only restriction is applied
+            # atomically with the pop, under `_pq_lock` below (no
+            # peek-then-pop TOCTOU on a head that could change).
+            widened_pop_armed = self._speech_interrupt_enabled and self._speech_router_enabled
+            # Judge pass (step 4, convergent): `_speech_active` acquires
+            # `_lock` and then the router's `_sched_lock` — a leaf that must
+            # never be taken under another engine lock (design §4 I10), so
+            # the gate below must NOT read the property while holding
+            # `_pq_lock`. Read ONCE here, outside every lock, and use the
+            # snapshot in the gate. Staleness is benign in both directions
+            # and identical in class to the legacy loop-top read: speech
+            # ending after the read costs one extra restricted iteration
+            # (the completion cycle re-enters); speech starting after the
+            # read lets this iteration pop unrestricted, exactly as the
+            # legacy gate always could.
+            speech_busy = self._speech_active
+            if not widened_pop_armed and speech_busy:
                 return
 
             expired_chat_infos: list = []
@@ -3079,6 +3197,28 @@ class MotorVocalIA(threading.Thread):
             queue_empty = False
             accumulated = None
             with self._pq_lock:
+                if widened_pop_armed and speech_busy and (
+                    not self._priority_queue or self._priority_queue[0][0] != 0
+                ):
+                    # §5.2: only a priority-0 owner item may be SELECTED
+                    # while speech plays. `_priority_queue` stays sorted
+                    # (priority, ts) ascending — every mutation (enqueue(),
+                    # the TTL filter above) preserves it — so the head IS the
+                    # highest-priority item: checking index 0 here is the
+                    # same as "no priority-0 item exists anywhere", and doing
+                    # it INSIDE this lock (not a peek taken before it) is
+                    # what makes the check atomic with the pop below.
+                    # (`speech_busy` is the loop-top snapshot — see the I10
+                    # note there.) Selection, not removal: on a pregen MISS
+                    # the pop-time bundler below absorbs the contiguous
+                    # OWNER-source prefix regardless of priority — a queued
+                    # `direct` at priority 1 rides along DELIBERATELY: the
+                    # press already justified the one D3 preemption and the
+                    # burst is answered in one request (§4 step 10). Pinned by
+                    # test_the_mid_playback_bundle_absorbs_a_queued_direct_question.
+                    # Accumulation is deliberately NOT flushed on this
+                    # return: an accumulated turn is never priority 0.
+                    return
                 if not self._priority_queue:
                     # No priority items — check accumulation buffer. The FLUSH
                     # stays under _pq_lock (it is the same critical section that
@@ -3164,7 +3304,17 @@ class MotorVocalIA(threading.Thread):
             with self._lock:
                 self._processing = True
                 self._current_processing_source = source
-            self.ui_callback("processing")
+            # Judge pass (step 4, BLOCKER): mirror of the §11 B3 idle gate in
+            # _complete_processing_cycle. ObsRuntime maps "processing" to
+            # AvatarState.THINKING + _stop_speaking_alt; a widened pop reaches
+            # this line WHILE the router audibly plays, the D4 inner answer
+            # job never emits speaking_start, and the resumed outer job
+            # (job.started True) never re-emits — so the avatar would freeze
+            # mouth-still on THINKING for the rest of the block, live on
+            # stream. Unarmed this guard is a no-op: the legacy gate never
+            # let this line run while `_speech_active`.
+            if not self._speech_active:
+                self.ui_callback("processing")
             # WU5 (design-fase2.md §3 WU5): an interactive turn spoken during an
             # interruption detour counts toward the return-skip budget (no-op
             # unless a frozen stash is pending; skips agenda sources). The

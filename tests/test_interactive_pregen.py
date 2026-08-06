@@ -981,3 +981,32 @@ def test_finally_marker_ownership_survives_a_successor_takeover_in_the_store_to_
     assert motor._prefetched_agenda is not None
     assert motor._prefetched_agenda["dialogo"] == "NEW_DRAFT"
     assert motor._prefetched_agenda["source"] == "chat"
+
+
+# ── Step-4 judge pass: the armed `is_processing` refusal is conjunction-gated ─
+
+
+def test_trigger_still_fires_during_legacy_blocking_playback_with_processing_true():
+    """PIN (step-4 judge pass, MINOR): the step-4 armed `is_processing`
+    refusal in `_maybe_trigger_interactive_pregen` is CONJUNCTION-gated for
+    the same reason the connector twin is: on the legacy blocking path
+    `_processing` spans the parent turn's whole PLAYBACK (the engine sits
+    inside `_hablar`), which is exactly WU3's GPU-free window. Unarmed, the
+    trigger must still spawn there. This pin goes red if anyone 'simplifies'
+    the refusal into an unconditional `is_processing` check — the connector
+    got its twin pin in test_interruption_connector.py."""
+    motor = _bare_motor()  # both kill switches OFF — legacy
+    motor._speaking = True  # legacy playback in flight...
+    with motor._lock:
+        motor._processing = True  # ...with `_processing` spanning it, as legacy does
+    _seed_queue(motor, [(0, time.time(), "pregunta ptt", "ptt", "hist")])
+    spawned = []
+    motor.pregenerate = lambda payload, priority, source, history_text=None: spawned.append(
+        (payload, priority, source)
+    )
+
+    motor._maybe_trigger_interactive_pregen((0, "pregunta ptt", "ptt", "hist"))
+
+    assert spawned == [("pregunta ptt", 0, "ptt")], (
+        "legacy playback with _processing True IS the WU3 GPU-free window — the trigger must spawn"
+    )

@@ -1137,3 +1137,94 @@ def test_flush_seam_is_unwired_only_when_the_stack_is_armed():
     assert hooks["on_press_precheck"] == motor.pause_speech_for_ptt
     assert hooks["on_release"] == motor.resume_speech_after_ptt
     assert hooks["motor"] is motor
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AC5.6 (step 4 batch 2) — the upgrade yields to a widened-pop foreground turn
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _armed_stash_motor():
+    """Bare motor with the step-3/4 conjunction ON, a frozen stash waiting for
+    its connector, the R3 window comfortably open, slot and GPU free — every
+    pre-existing spawn gate passes, so the assertions isolate the NEW ones."""
+    motor = _bare_motor()
+    motor._speech_interrupt_enabled = True
+    motor._speech_router_enabled = True
+    with motor._prefetch_lock:
+        motor._frozen_stash = {"payload": "AG2", "dialogo": "Siguiente beat.", "connector": None}
+    motor.speech_remaining_estimate = lambda: 30.0
+    motor._preview_accept_agenda_output = lambda d: True
+    return motor
+
+
+def test_ac56_upgrade_yields_to_a_dispatched_foreground_turn_when_armed():
+    """step4-plan.md batch-2 audit item 3 (REAL_DEFECT): armed, `_processing`
+    True means a widened §5.2 pop is dispatching a REAL foreground turn —
+    including the [pop -> `_llm_generating` set] gap and retry gaps, where the
+    F3 flag check alone reads free. Claiming the runner there makes the
+    owner's priority-0 answer serialize behind a COSMETIC generation (and the
+    watchdog abandon does not free the server-side runner). The worker must
+    refuse the claim."""
+    motor = _armed_stash_motor()
+    with motor._lock:
+        motor._processing = True
+    gen = []
+    motor._generar_dialogo = lambda *a, **kw: gen.append(1) or "connector line"
+
+    motor._maybe_generate_connector_upgrade()
+
+    time.sleep(0.05)
+    assert gen == [], "armed + foreground turn in flight: the upgrade must refuse the claim"
+    assert motor._frozen_stash.get("connector") is None
+    assert motor.llm_generating is False, "a refusing worker claims nothing"
+
+
+def test_ac56_upgrade_does_not_spawn_over_a_queued_owner_question_when_armed():
+    """step4-plan.md batch-2 audit item 3, spawn half: armed, a queued
+    priority-0 owner question WILL pop under this very playback (widened
+    gate) — spawning the cosmetic upgrade at speaking_start would race it for
+    the single runner. The spawn gate must skip while such an item is queued.
+    (Unarmed this gate must stay dead: legacy owner questions wait for the
+    boundary, and playback IS the legacy GPU-free window.)"""
+    motor = _armed_stash_motor()
+    _seed_queue(motor, [(0, time.time(), "pregunta del owner", "ptt", None)])
+    gen = []
+    motor._generar_dialogo = lambda *a, **kw: gen.append(1) or "connector line"
+
+    motor._maybe_generate_connector_upgrade()
+
+    time.sleep(0.05)
+    assert gen == [], "armed + queued priority-0: the upgrade must not even spawn"
+    assert motor.llm_generating is False
+
+
+def test_ac56_upgrade_still_generates_during_legacy_blocking_playback():
+    """PIN (batch-2 near-miss, 2026-08-05): on the legacy blocking path
+    `_processing` spans the parent turn's whole PLAYBACK — the engine sits
+    inside `_hablar` with `_processing` True while the GPU is idle. That
+    state IS the upgrade's GPU-free window, so an UNARMED motor must keep
+    generating there. This pin is what fails if anyone 'simplifies' the new
+    refusals into unconditional `_processing` checks."""
+    motor = _bare_motor()  # both switches OFF — legacy
+    with motor._prefetch_lock:
+        motor._frozen_stash = {"payload": "AG2", "dialogo": "Siguiente beat.", "connector": None}
+    motor.speech_remaining_estimate = lambda: 30.0
+    motor._preview_accept_agenda_output = lambda d: True
+    with motor._lock:
+        motor._processing = True  # legacy: engine blocked in _hablar, mid-playback
+
+    def _gen_ok(*a, **kw):
+        # R4 faithful double: the real _generar_dialogo self-brackets
+        # `_llm_generating` and is the sole releaser of the worker's claim.
+        with motor._lock:
+            motor._llm_generating = False
+        return "Bueno, volviendo a lo nuestro,"
+
+    motor._generar_dialogo = _gen_ok
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(
+        lambda: motor._frozen_stash.get("connector") == "Bueno, volviendo a lo nuestro,"
+    ), "legacy blocking playback is the GPU-free window — the upgrade must still generate"
