@@ -557,6 +557,15 @@ class EngineHost:
         # legacy blocking `_hablar`. Flip to False to revert playback to that
         # legacy path — the kill switch for the whole router.
         motor._speech_router_enabled = True
+        # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
+        # step 3), same pattern and same scope: the API host arms it, CTK
+        # never does. Flip to False to revert to step 2 (behavior-preserving:
+        # no stack, no pause/resume, no preemption) — the whole step 3 feature.
+        # Router-off dominates (judge closure 2026-08-05): every step-3
+        # entrypoint requires BOTH flags, and the router reads them LIVE, so
+        # flipping `_speech_router_enabled` alone is a full, safe revert and
+        # these two writes have no ordering requirement between them.
+        motor._speech_interrupt_enabled = True
         # WU4 4b (design-fase2.md §3): surface a preview-guardrail rejection to
         # the operator. Fires on the PREGEN WORKER THREAD — no lock wrapper
         # needed here (EventLogSink.record guards its own append with a lock,

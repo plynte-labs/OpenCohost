@@ -15,6 +15,7 @@ than CTK voice_control.py's ``[:30]`` truncated previews).
 import collections
 import json
 import logging
+import queue
 import threading
 import time
 from unittest.mock import MagicMock
@@ -23,7 +24,8 @@ import pytest
 import websockets
 
 import opencohost.api.ptt_session as ptt_session_mod
-from opencohost.api.ptt_session import PttController, PttSession, PttUnreachable
+from opencohost.api.ptt_session import PttController, PttSession, PttUnreachable, SessionActive
+from opencohost.core.llm_engine import MotorVocalIA
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -616,3 +618,343 @@ def test_transcript_never_appears_in_any_log_record(monkeypatch, caplog):
     # Events are metadata-only literals; never the transcript.
     assert all(isinstance(a, str) and sentinel not in a for a in rec.events)
     assert isinstance(session.buffered_chars, int)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Step 3 (interruptible_speech_architecture_20260804 §5.1, I6): every PTT
+# exit path clears a real router's `_ptt_held`.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _armed_motor() -> MotorVocalIA:
+    """A REAL, un-started MotorVocalIA with the step-3 kill switch on --
+    enough to build a REAL SpeechRouter via `pause_speech_for_ptt`, with no
+    TTS/mixer machinery needed (nothing plays in these tests). BOTH switches,
+    like production (judge closure 2026-08-05): the step-3 entrypoints
+    require the router to be the playback path — router-off dominates."""
+    motor = MotorVocalIA(queue.Queue(), lambda event: None)
+    motor._speech_router_enabled = True
+    motor._speech_interrupt_enabled = True
+    return motor
+
+
+def test_explicit_stop_clears_the_hold(monkeypatch):
+    motor = _armed_motor()
+    motor.pause_speech_for_ptt()
+    router = motor._speech_router
+    assert router._ptt_held is True
+
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, on_release=motor.resume_speech_after_ptt)
+    session.start()
+    session.stop()
+    _wait_state(session, "idle")
+
+    assert router._ptt_held is False
+    router.stop(timeout=5.0)
+
+
+def test_keepalive_starvation_clears_the_hold(monkeypatch):
+    motor = _armed_motor()
+    motor.pause_speech_for_ptt()
+    router = motor._speech_router
+
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, on_release=motor.resume_speech_after_ptt)
+    session.start()
+    # Deliberately NO keepalive -> the watchdog auto-stops.
+    _wait_state(session, "idle")
+
+    assert router._ptt_held is False
+    assert "auto_stopped" in rec.events
+    router.stop(timeout=5.0)
+
+
+def test_ws_drop_clears_the_hold(monkeypatch):
+    motor = _armed_motor()
+    motor.pause_speech_for_ptt()
+    router = motor._speech_router
+
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, on_release=motor.resume_speech_after_ptt)
+    session.start()
+    ws.closed = True  # WhisperLive vanishes mid-listening -> stt_lost
+    _wait_state(session, "idle")
+
+    assert router._ptt_held is False
+    assert session.last_error == "stt_lost"
+    router.stop(timeout=5.0)
+
+
+def test_ptt_unreachable_start_failure_clears_the_hold(monkeypatch):
+    motor = _armed_motor()
+    motor.pause_speech_for_ptt()
+    router = motor._speech_router
+
+    _patch_connect(monkeypatch, fail=True)
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        on_release=motor.resume_speech_after_ptt,
+        grace=0.15, keepalive_timeout=0.3, watchdog_tick=0.03,
+    )
+
+    with pytest.raises(PttUnreachable):
+        controller.start()
+
+    assert router._ptt_held is False
+    router.stop(timeout=5.0)
+
+
+def test_a_raising_session_factory_never_arms_the_hold():
+    """Judge closure (2026-08-05) rewrite of the step-3 "raising factory
+    clears the hold" pin: the precheck now fires only for the press that WON
+    the slot, AFTER the session factory succeeded — so a press that dies in
+    the factory has armed nothing and there is nothing to leak. Pinned via
+    the router itself: a fired precheck would have BUILT one."""
+    motor = _armed_motor()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("factory exploded")
+
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        session_factory=_boom,
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+    )
+
+    with pytest.raises(RuntimeError):
+        controller.start()
+
+    assert motor._speech_router is None, (
+        "a press that failed before winning the mic armed the hold anyway"
+    )
+
+
+class _SlotFakeSession:
+    """Controller-level session fake for the closure tests: no real WS, just
+    the lifecycle surface PttController wires (start / release / close with
+    the controller-provided per-press callbacks)."""
+
+    def __init__(self, ws_uri, on_flush=None, on_event=None, on_close=None,
+                 on_release=None, **kwargs):
+        self._on_close = on_close
+        self._on_release = on_release
+        self.session_id = f"ptt_fake_{id(self):x}"
+        self.state = "idle"
+        self.buffered_chars = 0
+        self.last_error = None
+
+    def start(self):
+        self.state = "listening"
+
+    def release(self):  # PTT_UP -> PttSession._begin_grace's funnel
+        if self._on_release is not None:
+            self._on_release()
+
+    def close(self):  # grace expiry / WS crash -> _notify_close -> on_close
+        self.state = "idle"
+        if self._on_close is not None:
+            self._on_close(None)
+
+
+def _slot_controller(motor):
+    created = []
+
+    def factory(ws_uri, **kwargs):
+        s = _SlotFakeSession(ws_uri, **kwargs)
+        created.append(s)
+        return s
+
+    controller = PttController(
+        "ws://test/whisperlive", MagicMock(), MagicMock(),
+        session_factory=factory,
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+    )
+    return controller, created
+
+
+def test_on_session_closed_backstop_clears_the_hold_after_a_ws_crash():
+    """Closure (vacuous-test finding, 2026-08-05): the old version drove a
+    NORMAL stop first, so the hold was already clear and a DELETED backstop
+    stayed green. The backstop's real job: a `_ws_main` crash never reaches
+    `_begin_grace` (no on_release), only `_notify_close` -> the controller —
+    the hold MUST clear there or `_pick()` returns None forever (permanent
+    silence with no error)."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    try:
+        controller.start()
+        router = motor._speech_router
+        assert router._ptt_held is True
+
+        created[0].close()  # the WS thread crashed: close with NO release
+
+        assert router._ptt_held is False, "the backstop never cleared the hold"
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_a_grace_window_double_tap_releases_its_own_hold():
+    """Closure M5, superseded mechanism (judge closure 2026-08-05): a press
+    that loses the slot no longer arms ANYTHING — the precheck fires only
+    after winning the 409 check — so a grace-window double-tap leaves the
+    hold exactly as PTT_UP left it: clear. (The old fix released on the 409
+    path what its own precheck had armed; the judges proved that same
+    release cleared a LIVE hold when the first session was still
+    listening — see the sibling test below.)"""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    try:
+        controller.start()
+        router = motor._speech_router
+        assert router._ptt_held is True
+        created[0].release()  # PTT_UP: grace begins, slot still occupied
+        assert router._ptt_held is False
+
+        with pytest.raises(SessionActive):  # operator double-tap during grace
+            controller.start()
+
+        assert router._ptt_held is False, "the 409 press left the hold armed"
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_a_409_while_the_first_session_is_still_listening_keeps_the_hold():
+    """Judge closure (2026-08-05, BLOCKER — both blind judges independently,
+    same line): a duplicate `/api/ptt/start` while session 1 was still
+    LISTENING (hotkey auto-repeat, a client retry, a second window — the
+    exact collision `ptt_f10_bridge.py` documents) answered 409 and released
+    session 1's LIVE hold on the way out: `_pick()` unblocked, the suspended
+    turn played into the open microphone, and Kira's own TTS round-tripped
+    through STT to be dispatched as an owner turn. A press that loses the
+    slot now never touches the hold at all."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    try:
+        controller.start()
+        router = motor._speech_router
+        assert router._ptt_held is True
+        assert created[0].state == "listening"  # mic LIVE — no PTT_UP yet
+
+        with pytest.raises(SessionActive):
+            controller.start()
+
+        assert created[0].state == "listening"
+        assert router._ptt_held is True, (
+            "the 409 press cleared a live hold — Kira speaks into the open mic"
+        )
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_a_late_close_from_the_previous_session_cannot_clear_a_new_hold():
+    """Closure M6 (probe-proven): session 1's close callback, descheduled
+    between freeing the slot and releasing the hold, used to clear the hold
+    press 2 armed a moment earlier — Kira plays into an open mic for the
+    whole of hold 2. Each press's callbacks now carry their epoch and the
+    stale check is ATOMIC with the release, so the late clear is a no-op."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    try:
+        controller.start()
+        router = motor._speech_router
+        created[0].release()  # PTT_UP -> hold off, grace running
+
+        # Deschedule session 1's close EXACTLY between "slot freed" and
+        # "hold released" — the probe's window, via the controller seam.
+        entered = threading.Event()
+        gate = threading.Event()
+        real_release = controller._release_hold
+
+        def _gated_release(epoch=None):
+            if threading.current_thread().name == "closer":
+                entered.set()
+                assert gate.wait(5.0)
+            real_release(epoch)
+
+        controller._release_hold = _gated_release
+
+        closer = threading.Thread(target=created[0].close, name="closer", daemon=True)
+        closer.start()
+        assert entered.wait(5.0), "session 1's close never reached the hold release"
+
+        controller.start()  # press 2: slot already free, new epoch, hold armed
+        assert router._ptt_held is True, "press 2 never armed the hold"
+
+        gate.set()
+        closer.join(5.0)
+
+        assert router._ptt_held is True, (
+            "session 1's late close cleared session 2's live hold"
+        )
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_accidental_press_below_min_words_resumes_the_job_exactly_once(monkeypatch):
+    """§5.1 / T4: an honest sub-`_MIN_WORDS` flush must never dispatch (no
+    `_on_flush`, no `_generar_dialogo`) -- but the suspended job still
+    resumes exactly once, from the correct cursor. Resume is not a trigger
+    hung off dispatch; it is `_pick()` finding a stack top with `_ptt_held`
+    clear, and `_begin_grace`'s `on_release` funnel fires regardless of
+    whether the buffer was long enough to dispatch."""
+    from tests.test_speech_router_stack import (
+        _armed, _job_text, _wait_until, _GateMixerMusic, _synth_logger,
+    )
+
+    made: list = []
+    mixer = _GateMixerMusic(block_at=(0,))
+    synth_log: list = []
+    motor, rec, _ = _armed(
+        made, mixer_music=mixer, synthesize=_synth_logger(synth_log), interrupt_enabled=True
+    )
+    fragment_text = _job_text("A", 1)
+    motor._speak_or_submit(fragment_text, source="kira-agenda:a")
+    assert mixer.entered[0].wait(5.0)
+
+    dispatched: list = []
+
+    class _Disp:
+        def dispatch(self, *a, **kw):
+            dispatched.append(a)
+
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        _Disp(),
+        MagicMock(),
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+        grace=0.15, keepalive_timeout=0.3, watchdog_tick=0.03,
+    )
+    controller.start()  # fires on_press_precheck -> pauses the agenda job
+    router = motor._speech_router
+    assert _wait_until(lambda: len(router._stack) == 1), "job never suspended on press"
+
+    ws.feed_text("hola")  # 1 word -- under _MIN_WORDS
+    assert _wait_until(lambda: controller._session.buffered_chars > 0, timeout=2.0), "never buffered"
+    controller.stop()  # begins grace -> honest no-op flush -> on_release
+
+    assert _wait_until(lambda: router._ptt_held is False, timeout=5.0), "the hold never cleared"
+    assert dispatched == [], "an honest sub-2-word flush must never dispatch"
+
+    assert rec.wait_for("speaking_end", 1, timeout=10.0), rec.names()
+    assert synth_log.count(fragment_text) == 2, "the owed fragment must be replayed exactly once"
+
+    for m in made:
+        r = getattr(m, "_speech_router", None)
+        if r is not None:
+            r.stop(timeout=5.0)

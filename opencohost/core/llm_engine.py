@@ -888,6 +888,13 @@ class MotorVocalIA(threading.Thread):
         self._speech_router_enabled: bool = False
         # Built (and its daemon thread started) on the FIRST routed submit.
         self._speech_router = None
+        # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
+        # step 3), same pattern as `_speech_router_enabled` above: EngineHost
+        # turns it ON, CTK never does. OFF reproduces step 2 exactly — no
+        # pause/resume, no preemption. Read by `pause_speech_for_ptt` /
+        # `resume_speech_after_ptt` (no-op when off) and copied onto the
+        # router as `interrupt_enabled` at build time.
+        self._speech_interrupt_enabled: bool = False
 
         # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
         # serializes _hablar so two callers can never share the TTS/audio
@@ -1121,14 +1128,22 @@ class MotorVocalIA(threading.Thread):
         if not progress:
             return None
         played = progress["played"]
-        if played <= 0:
+        # Judge closure (2026-08-05): `played`/`total` are TURN-absolute
+        # (they include a resume's `cursor_base`), but the rate must stay
+        # local to THIS invocation — `first_play`/`start` belong to the
+        # resumed slice, and fragments played before the hold carry no
+        # information about the post-hold playback rate. `base` is 0 on any
+        # non-resume invocation and absent on a test-constructed dict, so
+        # legacy behavior is bit-identical there.
+        played_here = played - progress.get("base", 0)
+        if played_here <= 0:
             return None
         first_play = progress.get("first_play")
         if first_play is not None:
             elapsed = time.monotonic() - first_play
         else:
             elapsed = time.time() - progress["start"]
-        mean_per_fragment = elapsed / played
+        mean_per_fragment = elapsed / played_here
         remaining_fragments = max(0, progress["total"] - played)
         return remaining_fragments * mean_per_fragment
 
@@ -1536,6 +1551,12 @@ class MotorVocalIA(threading.Thread):
         """
         with self._lock:
             self._cancelled_speech_prefixes = tuple(prefixes)
+        # Step 3 (design §4 sweeps): a stack entry at any depth matching one
+        # of these prefixes is discarded too — the emergency stop must not
+        # leave a `kira-agenda*` beat resumable after the token is set.
+        router = self._speech_router
+        if router is not None:
+            router.sweep_sources(prefixes)
 
     def clear_speech_cancel(self) -> None:
         """Clear the speech-cancellation token. Called only on agenda enable."""
@@ -2701,6 +2722,15 @@ class MotorVocalIA(threading.Thread):
             # WU5 D2: a session/emergency stop that drops pending agenda must also
             # drop a pending interruption-return (the stashed beat is now stale).
             self._invalidate_frozen_stash()
+
+        # Step 3 (design §4 sweeps): a SUSPENDED stack entry at any depth is
+        # pending work too, matching this method's own docstring — dropped
+        # the same way, never counted in the dispatch-queue `removed` return
+        # (its own docstring stays honest: pending priority/accumulation
+        # items only).
+        router = self._speech_router
+        if router is not None:
+            router.sweep_sources(prefixes)
 
         if removed:
             self._log(f"Cola: descartados {removed} pendientes de {', '.join(prefixes)}.")
@@ -7155,18 +7185,59 @@ class MotorVocalIA(threading.Thread):
                 except Exception:
                     pass
             return
-        router = self._speech_router
-        if router is None:
-            with self._lock:
-                if self._speech_router is None:
-                    self._speech_router = SpeechRouter(self)
-                router = self._speech_router
-        router.start()  # idempotent
+        router = self._ensure_router()
         router.submit(
             dialogo,
             source,
             priority_for_source(source) if priority is None else priority,
         )
+
+    def _ensure_router(self) -> "SpeechRouter":
+        """Lazy-build-then-start, extracted from `_speak_or_submit` (step 3)
+        so `pause_speech_for_ptt` can arm the router on a press that lands
+        BEFORE any speech this process ever submitted — a hold must block
+        `_pick()` even when nothing is playing yet. Idempotent; copies the
+        step-3 kill switch onto the router at build time.
+        """
+        router = self._speech_router
+        if router is None:
+            with self._lock:
+                if self._speech_router is None:
+                    # No flag copy here (judge closure 2026-08-05): the
+                    # router reads `_speech_interrupt_enabled` LIVE via its
+                    # `interrupt_enabled` property, so the switch can be
+                    # disarmed in-process and the host's two flag writes
+                    # have no ordering requirement.
+                    self._speech_router = SpeechRouter(self)
+                router = self._speech_router
+        router.start()  # idempotent
+        return router
+
+    def pause_speech_for_ptt(self) -> None:
+        """PTT_DOWN entrypoint (design §0 row 1, §5.1): fail-open, a no-op
+        unless BOTH switches are armed. Judge closure (2026-08-05, MAJOR):
+        step 3 requires the router to BE the playback path — with only
+        `_speech_interrupt_enabled` on (the documented router-only revert
+        flips `_speech_router_enabled` alone), a press built a router no
+        job would ever reach, and the closure-B1 re-check then silently
+        deleted every LEGACY turn spoken during the hold (no stack to
+        suspend to, no discard log). Router-off strictly dominates. The
+        hold and the victim's request publish in ONE `_sched_lock`
+        acquisition (`hold_and_pause`) — a press landing before this
+        process ever spoke still blocks `_pick()`."""
+        if not (self._speech_interrupt_enabled and self._speech_router_enabled):
+            return
+        self._ensure_router().hold_and_pause("ptt")
+
+    def resume_speech_after_ptt(self) -> None:
+        """PTT_UP entrypoint (design §5.1's `on_release` funnel): fail-open,
+        a no-op unless BOTH switches are armed (same conjunction as the
+        press — router-off dominates). Idempotent — every PTT exit path may
+        call this, including a double-clear."""
+        if not (self._speech_interrupt_enabled and self._speech_router_enabled):
+            return
+        router = self._ensure_router()
+        router.set_ptt_held(False)
 
     def _speech_cancelled(self, source: str) -> bool:
         """True when an emergency path cancelled this source's speech.
@@ -7178,6 +7249,23 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             cancelled = self._cancelled_speech_prefixes
         return bool(cancelled) and any(source.startswith(p) for p in cancelled)
+
+    def _speech_pause_pending(self) -> bool:
+        """Closure B1 (2026-08-05): a pause/hold requested for the ACTIVE
+        router job. `_hablar_impl` consults this right after (re)arming
+        `_speaking` — an interrupt that landed in the router's pick→arm gap
+        was stomped by that assignment, and this is what un-stomps it.
+        Always False on the legacy path: the conjunction (judge closure
+        2026-08-05) keeps this from cutting a LEGACY `_hablar_impl` call to
+        silence when only the interrupt flag is armed — on the legacy path
+        there is no job, no stack and no resume, so a True here deleted the
+        turn outright."""
+        if not (self._speech_interrupt_enabled and self._speech_router_enabled):
+            return False
+        router = self._speech_router
+        if router is None:
+            return False
+        return router.pause_pending_for_active()
 
     def _speech_boundary_start(self, source: str) -> None:
         """Open a speech boundary: arm the cut flag, publish the source, emit
@@ -7231,7 +7319,8 @@ class MotorVocalIA(threading.Thread):
             self._speaking_start_monotonic = None
         self.ui_callback("speaking_end")
 
-    def _hablar(self, texto_a_generar, source: str = "direct", *, emit_boundary: bool = True):
+    def _hablar(self, texto_a_generar, source: str = "direct", *, emit_boundary: bool = True,
+                pre_split: Optional[list] = None, cursor_base: int = 0):
         """WU2b belt lock (design-fase2.md §2.5): serialize every _hablar caller.
 
         Thin wrapper around _hablar_impl. After WU2 the engine worker is the ONLY
@@ -7247,6 +7336,10 @@ class MotorVocalIA(threading.Thread):
         `speaking_start`/`speaking_end` pair per JOB and would otherwise get a
         second pair per invocation (design §11 B1). Every other caller keeps the
         invocation-scoped pair, which is exactly today's behavior.
+
+        Step 3: `pre_split`, when not None, is forwarded to `_hablar_impl`
+        verbatim — a resume replays the router's own owed slice, never a
+        re-chunked rejoin (design §1 resolution 1).
         """
         if self._speech_cancelled(source):
             # Bug B fix: refuse a turn whose source was cancelled during its
@@ -7269,6 +7362,17 @@ class MotorVocalIA(threading.Thread):
             if emit_boundary:
                 self._speech_boundary_start(source)
             try:
+                # Self-caught: forward `pre_split`/`cursor_base` ONLY when
+                # actually resuming (non-None). tests/test_pregen_pop_cache.py
+                # stubs `_hablar_impl` with the pre-step-3 2-arg signature;
+                # always forwarding `pre_split=None` broke that pre-existing,
+                # unrelated stub with a TypeError. The router is the only
+                # caller that ever passes a non-None slice.
+                if pre_split is not None:
+                    return self._hablar_impl(
+                        texto_a_generar, source=source,
+                        pre_split=pre_split, cursor_base=cursor_base,
+                    )
                 return self._hablar_impl(texto_a_generar, source=source)
             finally:
                 if emit_boundary:
@@ -7276,7 +7380,8 @@ class MotorVocalIA(threading.Thread):
         finally:
             self._hablar_lock.release()
 
-    def _hablar_impl(self, texto_a_generar, source: str = "direct"):
+    def _hablar_impl(self, texto_a_generar, source: str = "direct", *,
+                     pre_split: Optional[list] = None, cursor_base: int = 0):
         # Bug B fix (second line of defence): the token can still be set in the
         # window between the caller's own check and this frame. Mid-playback
         # truncation is handled separately by the _speaking guard in the
@@ -7294,6 +7399,16 @@ class MotorVocalIA(threading.Thread):
             self._speaking = True
             self._current_speech_source = source
 
+        # Closure B1 (2026-08-05): a pause/hold published between the
+        # router's window check and the re-arm above had its
+        # interrupt_speaking() STOMPED by that assignment — the whole
+        # utterance would play into a live mic. Re-honor it here, before any
+        # fragment synthesises; the producer/consumer loop only ever
+        # re-reads `_speaking`, and nothing re-arms it after this point.
+        if self._speech_pause_pending():
+            with self._lock:
+                self._speaking = False
+
         # WU5 D3 (design-fase2.md §3 WU5): while an interruption ANSWER's TTS
         # plays (GPU free — generation already finished), opportunistically
         # generate the return connector. Placed HERE, at playback start, so it
@@ -7304,33 +7419,44 @@ class MotorVocalIA(threading.Thread):
 
         ruta_absoluta_ref = os.path.abspath(self.voz_referencia) if self.voz_referencia else ""
 
-        texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
-        texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
+        if pre_split is not None:
+            # Step 3 (design §1 resolution 1): a RESUME. The chunker is NOT a
+            # fixpoint — re-splitting `' '.join(pre_split)` can silently
+            # re-merge comma-separated fragments across the join (a >25-word
+            # comma-heavy fragment shrinks under the cap once its head is
+            # dropped, so the splitter stops sub-splitting it and merges two
+            # owed chunks into one). The router already knows the exact owed
+            # slice; replay it verbatim, never re-derive it. Skips the
+            # sanitizer/quote-newline scrub/splitter entirely.
+            oraciones = list(pre_split)
+        else:
+            texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
+            texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
 
-        fragmentos_brutos = re.split(r'(?<=[.!?])\s+', texto_limpio)
-        oraciones = []
-        
-        MIN_PALABRAS_POR_CHUNK = 8
-        MAX_PALABRAS_POR_CHUNK = 25
-        
-        for frag in fragmentos_brutos:
-            frag = frag.strip()
-            if not frag: continue
-            
-            if len(frag.split()) > MAX_PALABRAS_POR_CHUNK:
-                sub_frags = re.split(r'(?<=[,;])\s+', frag)
-                temp_chunk = ""
-                for sub in sub_frags:
-                    temp_chunk += sub + " "
-                    if len(temp_chunk.split()) >= MIN_PALABRAS_POR_CHUNK:
+            fragmentos_brutos = re.split(r'(?<=[.!?])\s+', texto_limpio)
+            oraciones = []
+
+            MIN_PALABRAS_POR_CHUNK = 8
+            MAX_PALABRAS_POR_CHUNK = 25
+
+            for frag in fragmentos_brutos:
+                frag = frag.strip()
+                if not frag: continue
+
+                if len(frag.split()) > MAX_PALABRAS_POR_CHUNK:
+                    sub_frags = re.split(r'(?<=[,;])\s+', frag)
+                    temp_chunk = ""
+                    for sub in sub_frags:
+                        temp_chunk += sub + " "
+                        if len(temp_chunk.split()) >= MIN_PALABRAS_POR_CHUNK:
+                            oraciones.append(temp_chunk.strip())
+                            temp_chunk = ""
+                    if temp_chunk.strip():
                         oraciones.append(temp_chunk.strip())
-                        temp_chunk = ""
-                if temp_chunk.strip():
-                    oraciones.append(temp_chunk.strip())
-            else:
-                oraciones.append(frag)
+                else:
+                    oraciones.append(frag)
 
-        oraciones = [o for o in oraciones if len(o) > 3]
+            oraciones = [o for o in oraciones if len(o) > 3]
 
         if not oraciones:
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
@@ -7350,8 +7476,18 @@ class MotorVocalIA(threading.Thread):
         # playing (below), cleared at speaking_end. `first_play` (T2(b)
         # [v5]) is set at the FIRST fragment's actual playback start, below.
         with self._lock:
+            # Judge closure (2026-08-05, convergent): TURN-relative, never
+            # slice-relative. On a resume `oraciones` is only the owed tail;
+            # without `cursor_base` every played/total consumer (the WU5
+            # zone gate, the would-fire telemetry) read a nearly-finished
+            # resumed turn as barely started and un-earned its LATE-zone
+            # defer protection. `base` anchors the slice so
+            # `speech_remaining_estimate`'s per-fragment rate stays local
+            # to THIS invocation (a pre-hold rate is stale after a hold of
+            # unknown length).
             self._speech_progress = {
-                "total": len(oraciones), "played": 0, "start": start_tts, "first_play": None,
+                "total": cursor_base + len(oraciones), "played": cursor_base,
+                "start": start_tts, "first_play": None, "base": cursor_base,
             }
 
         cola_audios = queue.Queue(maxsize=3)
@@ -7666,7 +7802,9 @@ class MotorVocalIA(threading.Thread):
                     chunks_played += 1
                     with self._lock:
                         if self._speech_progress is not None:
-                            self._speech_progress["played"] = chunks_played
+                            # Turn-absolute (judge closure 2026-08-05):
+                            # invocation-local count + the resume offset.
+                            self._speech_progress["played"] = cursor_base + chunks_played
 
                     if interrupted:
                         # CURSOR TRAP (design §3): this is the cut MID-AUDIO --

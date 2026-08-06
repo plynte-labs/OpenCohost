@@ -8,6 +8,13 @@ no preemption of the active job -- jobs run to completion in priority band,
 then arrival order within a band. Divergence from legacy plain call-order is
 bounded to sub-ms simultaneity races between two submitters.
 
+Step 3 (stack, pause/resume, `_ptt_held`, D3-uniform preemption, D4
+outermost-only emission) lives in tests/test_speech_router_stack.py, gated
+behind the SEPARATE `interrupt_enabled`/`_speech_interrupt_enabled` kill
+switch (default False) -- every test in THIS file still runs with that
+switch off and stays a byte-identical pin of step 2's behavior, even though
+the router underneath is now the step-3 implementation.
+
 Section 7 discipline, inherited verbatim from
 tests/test_speech_outcome_capture.py: a real `MotorVocalIA`, a REAL router
 thread, the REAL `_hablar_impl` producer/consumer loop. ONLY Piper synthesis
@@ -893,7 +900,9 @@ def test_speech_job_defaults_match_the_design_field_table():
     assert job.connector is None
     assert isinstance(job.created_at, float)
     assert not hasattr(job, "parent_job_id"), "REJECTED in design §3"
-    assert SpeechJobState.SUSPENDED is not None  # exists, unreachable at step 2
+    # Step 3: SUSPENDED is now reachable (see test_speech_router_stack.py) --
+    # this default-field assertion is unaffected either way.
+    assert SpeechJobState.SUSPENDED is not None
 
 
 def test_job_ids_are_monotonic(router_motors):

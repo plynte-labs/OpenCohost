@@ -265,6 +265,61 @@ def _check_single_worker() -> None:
             raise RuntimeError(f"opencohost.api requires a single worker (found {var}={value!r})")
 
 
+def _ptt_controller_hooks(host) -> dict:
+    """The PttController's engine wiring, extracted from `create_app` so a
+    test can pin the REAL getattr resolution (closure 2026-08-05: the old
+    wiring test re-implemented these getattr calls inline and asserted on
+    its own copy — a typo HERE stayed green while silently disarming the
+    whole PTT interruption path).
+
+    Every hook is the smallest possible surface into the engine — a bound
+    method, never the whole motor (except `motor` itself, which the
+    arrival-time drain needs; see below). getattr fallbacks: a real
+    EngineHost always has `motor`, but minimal host doubles in tests may
+    not — never break app startup.
+
+    - on_audio_suspect: recovery hook (2026-07-15 PTT voice-death fix).
+    - on_listening: mic-live cue (ptt_cue_20260717).
+    - on_flush_precheck: WU5 position-aware agenda cut (ADR-037), fires
+      synchronously at flush — wired ONLY while the speech stack is NOT
+      armed (judge closure 2026-08-05, MAJOR): with the stack armed, the
+      press seam suspends losslessly and D3 preemption makes room when the
+      answer submits, while this seam's bare interrupt_speaking() at grace
+      expiry reached reconcile with no pause request and DISCARDED the
+      resumed filler's tail on the ordinary single-press turn.
+    - on_press_precheck: step 3 (§0 row 1, §5.1) — the REAL pause, fired by
+      the press that wins the slot, before session.start() blocks on the
+      STT connect. Judge closure NIT: this wiring CLOSED the step-0 gate —
+      speech_pause_would_fire is dead code in llm_engine (nothing calls it,
+      so its runtime gate stopped reporting the day the real pause shipped);
+      it awaits its step-6 deletion.
+    - on_release: step 3 (§5.1) — the PTT_UP counterpart, fired from
+      `_begin_grace`, the single funnel every exit from _LISTENING passes
+      through.
+    - motor: step 1 — the arrival-time drain (ptt_session._dispatch) checks
+      is_processing/is_speaking THEN conditionally drains, mirroring
+      chat.py's own gate.
+    """
+    motor = getattr(host, "motor", None)
+    # Same conjunction as the engine's own step-3 entrypoints: either switch
+    # off keeps the WU5 flush seam byte-identical legacy.
+    stack_armed = bool(
+        getattr(motor, "_speech_interrupt_enabled", False)
+        and getattr(motor, "_speech_router_enabled", False)
+    )
+    return {
+        "on_audio_suspect": getattr(motor, "mark_audio_suspect", None),
+        "on_listening": getattr(motor, "play_ptt_cue", None),
+        "on_flush_precheck": (
+            None if stack_armed
+            else getattr(motor, "ptt_interrupt_if_agenda_speaking", None)
+        ),
+        "on_press_precheck": getattr(motor, "pause_speech_for_ptt", None),
+        "on_release": getattr(motor, "resume_speech_after_ptt", None),
+        "motor": motor,
+    }
+
+
 def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -302,46 +357,7 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 load_ptt_ws_uri(),
                 app.state.dispatcher,
                 getattr(host, "event_log", None) or EventLogSink(),
-                # Recovery hook (2026-07-15 PTT voice-death fix): smallest
-                # possible surface into the engine -- a bound method, never
-                # the whole motor. getattr fallback mirrors event_log above:
-                # a real EngineHost always has motor.mark_audio_suspect, but
-                # minimal host doubles in tests may not.
-                on_audio_suspect=getattr(
-                    getattr(host, "motor", None), "mark_audio_suspect", None
-                ),
-                # Listening cue (ptt_cue_20260717): same smallest-surface,
-                # getattr-guarded pattern -- a bound motor.play_ptt_cue fired
-                # when the hold reaches listening, so the operator hears the
-                # mic go live even with the app window unfocused.
-                on_listening=getattr(
-                    getattr(host, "motor", None), "play_ptt_cue", None
-                ),
-                # WU5 (agenda interruption, ADR-037): position-aware PTT cut.
-                # Fires SYNCHRONOUSLY at flush so it can interrupt agenda
-                # speech mid-turn (the queued command path can't -- the engine
-                # thread is inside _hablar). Same guarded bound-method idiom.
-                on_flush_precheck=getattr(
-                    getattr(host, "motor", None),
-                    "ptt_interrupt_if_agenda_speaking",
-                    None,
-                ),
-                # Step 0 (interruptible_speech_architecture_20260804 §5.1, §8
-                # step 0): read-only press-time telemetry -- same
-                # smallest-surface, getattr-guarded idiom as on_flush_precheck
-                # right above, but this one never cuts anything.
-                on_press_precheck=getattr(
-                    getattr(host, "motor", None),
-                    "speech_pause_would_fire",
-                    None,
-                ),
-                # Step 1 (interruptible_speech_architecture_20260804): the
-                # arrival-time drain hook (ptt_session.py:_dispatch) needs the
-                # motor itself, not a single bound method -- it checks
-                # is_processing/is_speaking THEN conditionally drains, mirroring
-                # chat.py:184-191 exactly. getattr fallback mirrors the hooks
-                # above: a minimal host double in tests may not have `motor`.
-                motor=getattr(host, "motor", None),
+                **_ptt_controller_hooks(host),
             )
             yield
         finally:

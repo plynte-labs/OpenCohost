@@ -104,6 +104,12 @@ class PttSession:
                               transcript text.
       - ``on_close(err)``   : (optional) the slot is now free; ``err`` is the
                               final ``last_error`` (None on a clean stop).
+      - ``on_release()``    : (optional, interruptible_speech_architecture_
+                              20260804 §5.1) fired from `_begin_grace`, the
+                              single funnel every exit from `_LISTENING`
+                              passes through (explicit stop, keepalive
+                              starvation, WS drop) -- clears a PTT-held
+                              speech hold at PTT_UP, not after grace.
     """
 
     def __init__(
@@ -113,6 +119,7 @@ class PttSession:
         on_event: Callable[[str], None],
         *,
         on_close: Optional[Callable[[Optional[str]], None]] = None,
+        on_release: Optional[Callable[[], None]] = None,
         grace: float = 5.0,
         keepalive_timeout: float = 3.0,
         watchdog_tick: float = 0.5,
@@ -123,6 +130,7 @@ class PttSession:
         self._on_flush = on_flush
         self._on_event = on_event
         self._on_close = on_close
+        self._on_release = on_release
         self._grace = grace
         self._keepalive_timeout = keepalive_timeout
         self._watchdog_tick = watchdog_tick
@@ -369,6 +377,14 @@ class PttSession:
                 emit = True
         if emit:
             self._emit(action)
+            # Step 3 (design §5.1): PTT_UP, not after grace -- the single
+            # funnel every exit from _LISTENING passes through. Fail-open,
+            # outside `self._lock`, same discipline as `_emit`.
+            if self._on_release is not None:
+                try:
+                    self._on_release()
+                except Exception:
+                    logger.exception("PTT on_release hook failed")
 
     def _emit(self, action: str) -> None:
         try:
@@ -412,6 +428,7 @@ class PttController:
         on_listening: Optional[Callable[[], None]] = None,
         on_flush_precheck: Optional[Callable[[], None]] = None,
         on_press_precheck: Optional[Callable[[], None]] = None,
+        on_release: Optional[Callable[[], None]] = None,
         motor=None,
         **session_kwargs,
     ):
@@ -454,17 +471,61 @@ class PttController:
         # anything; fail-open like on_flush_precheck. Optional so tests /
         # minimal host doubles need not supply it.
         self._on_press_precheck = on_press_precheck
+        # Step 3 (design §5.1, I6): the smallest possible surface into the
+        # engine — a bound ``motor.resume_speech_after_ptt`` callback, fired
+        # at every one of the four PTT exit paths via `_release_hold` below.
+        # Optional so tests / minimal host doubles need not supply it.
+        self._on_release = on_release
         self._lock = threading.Lock()
         self._session: Optional[PttSession] = None
         # Survives after the session frees the slot so GET /api/ptt/state can
         # honestly report the last exit reason (e.g. stt_lost). Cleared on the
         # next successful start.
         self._last_error: Optional[str] = None
+        # Closure M6 (2026-08-05): press generation. Bumped under `_lock` at
+        # every press that BUILDS a session; each session's close/release
+        # callbacks capture their own epoch, so a stale session's LATE close
+        # (descheduled across a newer press) can never clear the hold that
+        # newer press armed.
+        self._press_epoch: int = 0
 
     def _record_event(self, action: str) -> None:
         # PRIVACY: fixed literal action, detail ALWAYS None — the transcript
         # never reaches here.
         self._event_log.record("ptt", action, None)
+
+    def _release_hold(self, epoch: Optional[int] = None) -> None:
+        """Fail-open funnel for every PTT exit path (design §5.1, I6):
+        explicit stop / keepalive starvation / WS drop (via the session's own
+        `on_release`), the two `session.start()` failure paths, and the
+        `_on_session_closed` backstop. Idempotent by construction —
+        `resume_speech_after_ptt` itself is a no-op once already clear.
+
+        `epoch` (closure M6): the press generation the caller belongs to. A
+        stale caller — session N's late close arriving after press N+1
+        armed a new hold — is a no-op instead of clearing the live hold.
+        Every production caller passes its epoch (judge closure 2026-08-05:
+        the epoch-less unconditional form's two callers — the 409 path and
+        the raising-factory path — are gone; those presses never arm, so
+        they have nothing to release). None = unknown generation, treated
+        as stale: fail-safe no-op."""
+        if self._on_release is None:
+            return
+        with self._lock:
+            if epoch != self._press_epoch:
+                return
+            # Fired UNDER the lock: the check must be atomic with the
+            # callback, or the stale caller could pass it and then be
+            # descheduled across a new press — the exact TOCTOU this guard
+            # exists to close. Safe: the motor never calls back into this
+            # controller, so no path re-enters `_lock`.
+            self._fire_release()
+
+    def _fire_release(self) -> None:
+        try:
+            self._on_release()
+        except Exception:
+            logger.exception("PTT on_release hook failed")
 
     def _dispatch(self, text: str) -> None:
         # WU5 D1 (design-fase2.md §3 WU5): the position-aware cut precheck fires
@@ -517,28 +578,52 @@ class PttController:
                     logger.exception("PTT arrival-time drain failed; the boundary drain still covers it")
 
     def start(self) -> str:
-        # Step 0 (design §5.1): fires at the exact top of start(), before the
-        # session-active check or any lock -- the same point a real
-        # pause_speech("ptt") lands once the router ships (step 3+). Fail-open:
-        # a raising/absent callback never blocks or breaks the press path
-        # (same discipline as _dispatch's on_flush_precheck below).
+        with self._lock:
+            if self._session is not None:
+                # Judge closure (2026-08-05, BLOCKER, both blind judges): a
+                # press that loses the slot has armed NOTHING — the precheck
+                # fires below, only for the slot winner — so there is nothing
+                # to release here. The old order (precheck at the top,
+                # unconditional release on 409) cleared the LIVE hold of a
+                # still-LISTENING session on any duplicate press (hotkey
+                # auto-repeat, client retry, second window): `_pick()`
+                # unblocked and Kira played into the open microphone, her own
+                # TTS round-tripping through STT as an owner turn. It also
+                # broke closure M6's own premise in a second interleaving: a
+                # grace expiry landing between press N's precheck and this
+                # lock let press N+1 win and bump the epoch, and press N's
+                # epoch-less 409 release then cleared press N+1's live hold.
+                raise SessionActive()
+            # Closure M6: this press owns the hold from here on. Each
+            # callback captures ITS epoch so a previous session's late close
+            # cannot clear it.
+            self._press_epoch += 1
+            epoch = self._press_epoch
+            # A raising factory needs no release: the precheck has not fired
+            # yet, so this press holds nothing (judge closure — the old
+            # "raising factory escapes with the hold set" hole is now
+            # unreachable by construction, not by a compensating release).
+            session = self._session_factory(
+                self._ws_uri,
+                on_flush=self._dispatch,
+                on_event=self._record_event,
+                on_close=lambda err, _e=epoch: self._on_session_closed(err, _e),
+                on_release=lambda _e=epoch: self._release_hold(_e),
+                **self._session_kwargs,
+            )
+            self._session = session
+            self._last_error = None
+        # Step 3 (design §0 row 1, §5.1): the REAL pause — fired only by the
+        # press that WON the slot, after the 409 check, and still BEFORE
+        # session.start() blocks on the STT connect, so Kira is paused before
+        # the microphone opens. Fail-open: a raising/absent callback never
+        # blocks or breaks the press path (same discipline as _dispatch's
+        # on_flush_precheck).
         if self._on_press_precheck is not None:
             try:
                 self._on_press_precheck()
             except Exception:
                 logger.exception("PTT press precheck failed")
-        with self._lock:
-            if self._session is not None:
-                raise SessionActive()
-            session = self._session_factory(
-                self._ws_uri,
-                on_flush=self._dispatch,
-                on_event=self._record_event,
-                on_close=self._on_session_closed,
-                **self._session_kwargs,
-            )
-            self._session = session
-            self._last_error = None
         try:
             session.start()  # blocks until connect result is known
         except PttUnreachable:
@@ -546,6 +631,18 @@ class PttController:
                 if self._session is session:
                     self._session = None
                 self._last_error = "stt_unreachable"
+            self._release_hold(epoch)
+            raise
+        except BaseException:
+            # Step 3: any OTHER raise from session.start() (e.g. a
+            # Thread.start() RuntimeError) is the same hole — it never
+            # raises PttUnreachable today, so it would otherwise escape with
+            # the hold set and no session left to ever clear it.
+            with self._lock:
+                if self._session is session:
+                    self._session = None
+                self._last_error = "stt_unreachable"
+            self._release_hold(epoch)
             raise
         # Session is now listening (start() returns only on success). Fire the
         # cue AFTER — never on the stt_unreachable path, where nothing listens.
@@ -620,10 +717,18 @@ class PttController:
         except Exception:
             logger.exception("PTT listening hook failed")
 
-    def _on_session_closed(self, last_error: Optional[str]) -> None:
+    def _on_session_closed(self, last_error: Optional[str], epoch: Optional[int] = None) -> None:
         with self._lock:
             self._session = None
             self._last_error = last_error
+        # Step 3 (design §5.1, I6): idempotent backstop -- covers a
+        # `_ws_main` crash that never reached `_begin_grace` (still calls
+        # `_notify_close` -> here). `_release_hold` is itself a no-op when
+        # `_on_release` is unset; `resume_speech_after_ptt` is a no-op once
+        # already clear, so a double-clear (session's own on_release having
+        # already fired) is harmless. `epoch` (closure M6): a STALE session's
+        # late close must not clear a newer press's live hold.
+        self._release_hold(epoch)
         # Recovery hook: EVERY PTT session close (stopped, auto_stopped, or
         # error all route through PttSession._notify_close -> here) flags the
         # shared pygame mixer suspect, regardless of last_error -- WASAPI
