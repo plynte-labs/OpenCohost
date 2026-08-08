@@ -75,10 +75,24 @@ def _wait_until(predicate, *, timeout=1.0):
 
 
 def _time_out_cloud_chat(motor):
-    """Force the single cloud chat attempt to fail as a watchdog timeout."""
-    motor._ollama_chat_with_watchdog = MagicMock(
-        side_effect=TimeoutError(f"watchdog_timeout:{CLOUD_CHAT_TIMEOUT:.2f}s")
-    )
+    """Force the CLOUD chat attempt to fail as a watchdog timeout.
+
+    F1 (interruptible_speech_architecture_20260804, runtime-findings
+    2026-08-07) follows every cloud failure with a one-shot LOCAL retry at
+    `_generar_dialogo`'s funnel when auto-fallback engages. This helper's own
+    invariant is about the CLOUD attempt only, so the retry is left to fail
+    fast with a plain (non-timeout, non-transport) error -- it must NOT
+    itself look like a local watchdog timeout, which would correctly (but
+    differently) route to `_recover_from_stalled_inference`, a separate
+    invariant this helper does not pin. Every existing caller keeps seeing
+    `result == ""`.
+    """
+    def side_effect(*, is_local, **_kwargs):
+        if not is_local:
+            raise TimeoutError(f"watchdog_timeout:{CLOUD_CHAT_TIMEOUT:.2f}s")
+        raise RuntimeError("local retry not exercised by this helper")
+
+    motor._ollama_chat_with_watchdog = MagicMock(side_effect=side_effect)
 
 
 def _transport_fail_cloud_chat(motor, exc=None):

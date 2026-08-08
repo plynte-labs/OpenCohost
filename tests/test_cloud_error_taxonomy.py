@@ -233,6 +233,12 @@ def _make_motor(tmp_path):
 
 def test_cloud_429_with_retry_after_sets_rate_limited_class(tmp_path):
     motor = _make_motor(tmp_path)
+    # F1 (runtime-findings 2026-08-07): a real _handle_cloud_failure engages
+    # auto-fallback and the funnel's one-shot local retry would rescue this
+    # turn (mocked `motor.ollama.chat` answers "local"), clearing the very
+    # classification fields this test pins. No-op it -- this test's scope is
+    # the CLASSIFICATION reaching those fields, not the F1 rescue.
+    motor._handle_cloud_failure = MagicMock()
     exc = CloudLLMResponseError(
         "cloud chat HTTP 429: Too Many Requests", status_code=429, headers={"retry-after": "30"}
     )
@@ -245,6 +251,7 @@ def test_cloud_429_with_retry_after_sets_rate_limited_class(tmp_path):
 
 def test_cloud_401_sets_bad_key_class(tmp_path):
     motor = _make_motor(tmp_path)
+    motor._handle_cloud_failure = MagicMock()  # see F1 note above
     exc = CloudLLMResponseError("cloud chat HTTP 401: Unauthorized", status_code=401)
     with patch(_SEND, side_effect=exc):
         result = motor._generar_dialogo("hola", source="direct", commit_history=False)
@@ -254,6 +261,7 @@ def test_cloud_401_sets_bad_key_class(tmp_path):
 
 def test_cloud_bare_429_sets_ambiguous_class(tmp_path):
     motor = _make_motor(tmp_path)
+    motor._handle_cloud_failure = MagicMock()  # see F1 note above
     exc = CloudLLMResponseError("cloud chat HTTP 429: Too Many Requests", status_code=429)
     with patch(_SEND, side_effect=exc):
         motor._generar_dialogo("hola", source="direct", commit_history=False)
@@ -274,6 +282,7 @@ def test_local_transport_error_never_sets_cloud_failure_class(tmp_path):
 
 def test_cloud_failure_class_cleared_on_next_success(tmp_path):
     motor = _make_motor(tmp_path)
+    motor._handle_cloud_failure = MagicMock()  # see F1 note above -- isolates classification from the rescue
     exc = CloudLLMResponseError("cloud chat HTTP 401: Unauthorized", status_code=401)
     with patch(_SEND, side_effect=exc):
         motor._generar_dialogo("hola", source="direct", commit_history=False)

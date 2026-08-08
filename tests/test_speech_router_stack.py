@@ -1169,3 +1169,57 @@ def test_hold_and_pause_arms_and_stamps_in_one_acquisition(router_motors):
     router2 = motor2._ensure_router()
     router2.hold_and_pause("ptt")
     assert router2._ptt_held is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# (11) F8a/F8b/F8c (runtime_findings_batch_20260807) — cut/push/resume are
+# real, logged telemetry, not a step-1 "would-push" leftover
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_cut_push_and_resume_log_source_cursor_and_depth(router_motors, caplog):
+    """The armed router's cut site logged a step-1 shadow-era 'would-push'
+    even though every cut under it is a REAL push (the S2 protocol grep was
+    unfulfillable without a real push/resume line below depth 4). One flow,
+    three sites: cut (`_hablar_impl`'s interrupt branch), push
+    (`router._push_suspended`), resume (`router._pick`'s stack pop)."""
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    mixer = _GateMixerMusic(block_at=(1,))
+    motor, rec, _ = _armed(router_motors, mixer_music=mixer, interrupt_enabled=True)
+    text = _job_text("A", 3)
+
+    motor._speak_or_submit(text, source="kira-agenda:t1")
+    assert mixer.entered[1].wait(5.0), "producer/consumer never reached fragment 1"
+
+    motor.pause_speech_for_ptt()
+    router = motor._speech_router
+    assert _wait_until(lambda: len(router._stack) == 1), "job never suspended onto the stack"
+
+    # Cut + push both fire off the SUSPEND path, on the router thread -- wait
+    # for the RECORD, never race the thread to its own log line (engram 5605).
+    assert _wait_until(
+        lambda: any(
+            r.getMessage() == "[SPEECH_STACK] cut source=kira-agenda:t1 cursor=1"
+            for r in caplog.records
+        ),
+        timeout=5.0,
+    ), [r.getMessage() for r in caplog.records]
+    assert _wait_until(
+        lambda: any(
+            r.getMessage() == "[SPEECH_STACK] push source=kira-agenda:t1 cursor=1 depth=1"
+            for r in caplog.records
+        ),
+        timeout=5.0,
+    ), [r.getMessage() for r in caplog.records]
+    assert not any("would-push" in r.getMessage() for r in caplog.records)
+
+    motor.resume_speech_after_ptt()
+    assert rec.wait_for("speaking_end", 1, timeout=10.0), rec.names()
+
+    assert _wait_until(
+        lambda: any(
+            r.getMessage() == "[SPEECH_STACK] resume source=kira-agenda:t1 cursor=1 depth=0"
+            for r in caplog.records
+        ),
+        timeout=5.0,
+    ), [r.getMessage() for r in caplog.records]

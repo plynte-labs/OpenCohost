@@ -413,6 +413,7 @@ class SpeechRouter:
                 self._release(job, SpeechJobState.DISCARDED)
 
     def _pick(self) -> Optional[SpeechJob]:
+        resume_log = None
         with self._sched_lock:
             if self._ptt_held:
                 # Contract point 3: while the mic is live, nothing reaches
@@ -438,11 +439,21 @@ class SpeechRouter:
                 # `_reconcile`'s SUSPENDED branch pushes it back
                 # unconditionally, so observable LIFO order is unchanged.
                 job = self._stack.pop()
+                # F8c (runtime_findings_batch_20260807): the resume side of
+                # the same gap -- no line existed here at all, so resumes
+                # had to be inferred from "Sintetizando N fragmento(s)"
+                # arithmetic. Captured here, logged OUTSIDE the lock (same
+                # reason the depth>=4 WARNING below already defers).
+                resume_log = (job.source, job.cursor, len(self._stack))
             else:
                 return None
             job.state = SpeechJobState.ACTIVE
             self._active = job
-            return job
+        if resume_log is not None:
+            logger.info(
+                "[SPEECH_STACK] resume source=%s cursor=%d depth=%d", *resume_log,
+            )
+        return job
 
     def _run_job(self, job: SpeechJob) -> None:
         motor = self._motor
@@ -505,11 +516,17 @@ class SpeechRouter:
         # after it but before `_hablar_impl` arms — is closed by
         # `pause_pending_for_active` inside `_hablar_impl` (closure B1).
         depth_log = 0
+        push_log = None
         with self._sched_lock:
             pending_pause = self._ptt_held or job.pause_requested is not None
             if pending_pause:
                 depth_log = self._push_suspended(job)
+                push_log = (job.source, job.cursor, len(self._stack))
         if pending_pause:
+            if push_log:
+                logger.info(
+                    "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
+                )
             if depth_log:
                 logger.warning("[SPEECH_STACK] depth=%d", depth_log)
             return
@@ -548,7 +565,14 @@ class SpeechRouter:
         when it is a fresh high-water mark at the §4 guard threshold (the
         caller logs it OUTSIDE the lock), else 0 — sampled at the push site
         itself, so a spike that forms and unwinds inside one iteration can
-        no longer dodge the guard (closure NIT)."""
+        no longer dodge the guard (closure NIT).
+
+        F8b (runtime_findings_batch_20260807): the real push is also logged
+        by the CALLER, OUTSIDE the lock — same reason the depth>=4 WARNING
+        already defers. `job.source`/`job.cursor` and `len(self._stack)`
+        read by the caller immediately after this call (still under the
+        lock) are exactly this push's values, since nothing else touches
+        the stack in between."""
         job.pause_requested = None
         job.state = SpeechJobState.SUSPENDED
         job.suspensions += 1
@@ -568,6 +592,7 @@ class SpeechRouter:
         # Read the motor's cancel token BEFORE taking the leaf lock (I10).
         cancelled = self._motor._speech_cancelled(job.source)
         depth_log = 0
+        push_log = None
         try:
             with self._sched_lock:
                 # Closure M4: the pause request is JOB-LOCAL. Read+clear is
@@ -584,6 +609,7 @@ class SpeechRouter:
                     # emergency cancel still wins.
                     if pause_reason in ("ptt", "preempt") and not cancelled:
                         depth_log = self._push_suspended(job)
+                        push_log = (job.source, job.cursor, len(self._stack))
                         return SpeechJobState.SUSPENDED, None
                     # Retry-once, and ONLY when nothing played: there is no
                     # audible-replay-safe retry of a partly-spoken job.
@@ -624,11 +650,16 @@ class SpeechRouter:
                     # overwritten elsewhere, so a job suspended twice resumes
                     # from its LATEST cursor, never its first).
                     depth_log = self._push_suspended(job)
+                    push_log = (job.source, job.cursor, len(self._stack))
                     return SpeechJobState.SUSPENDED, None
             # Bare interruption with no pause request: stop means stop (design
             # §2 [CORRECTED] reconcile default). `error` only relabels the log.
             return SpeechJobState.DISCARDED, ("error" if outcome.error else "interrupted")
         finally:
+            if push_log:
+                logger.info(
+                    "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
+                )
             if depth_log:
                 logger.warning("[SPEECH_STACK] depth=%d", depth_log)
 

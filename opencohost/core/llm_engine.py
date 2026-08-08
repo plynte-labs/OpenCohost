@@ -3322,6 +3322,19 @@ class MotorVocalIA(threading.Thread):
             self._note_detour_turn(source)
             try:
                 if cached is not None:
+                    # F8 optional (runtime_findings_batch_20260807): a pregen
+                    # hit skips _ejecutar_inferencia entirely, so it never hit
+                    # the [TURN_LATENCY] emit above -- 6 of ~15 answers were
+                    # invisible to the metric. `submitted_at` is already in
+                    # hand from the unpack above; this is the tts-handoff
+                    # instant for a cache hit. path=pregen distinguishes it
+                    # from the foreground metric's two-field split (no
+                    # separate generation phase to subtract here).
+                    if submitted_at is not None:
+                        logger.info(
+                            "[TURN_LATENCY] source=%s request_to_tts_total_ms=%d path=pregen",
+                            source, int((time.monotonic() - submitted_at) * 1000),
+                        )
                     self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
                 else:
                     # T1(d) [v5]: the worker's PLAIN foreground fallback for an
@@ -4065,38 +4078,90 @@ class MotorVocalIA(threading.Thread):
         provider_cfg = self._provider_config
         is_local = self._cfg_is_local(provider_cfg) or self._cloud_fallback_active
         self._log(f"Analizando contexto con {request_model}...")
+        # F1 (interruptible_speech_architecture_20260804, runtime-findings
+        # 2026-08-07): a CLOUD attempt failing here used to burn the turn
+        # outright (return ""), even though `_handle_cloud_failure` had just
+        # armed a known-good LOCAL fallback for every SUBSEQUENT turn — the
+        # owner's question was the one turn that never got to use it. This
+        # loop is the generation funnel all three cloud-failure exits pass
+        # through (watchdog timeout / transport error -> outcome.early_return;
+        # well-formed-but-empty 2xx body -> _finalize_generation's own ""),
+        # so ONE retry here covers all three. The burn-the-turn policy for
+        # LOCAL persistent failures (:3055-3057, `_requeue_owner_bundle_
+        # followers`'s docstring) is untouched: `attempt_was_cloud` is only
+        # True when THIS attempt actually dispatched to the cloud transport,
+        # so a local failure never loops. `cloud_fallback_retry_done` bounds
+        # it to exactly one retry per call.
+        cloud_fallback_retry_done = False
         try:
-            setup = self._build_generation_request(
-                contexto,
-                source,
-                is_local=is_local,
-                provider_cfg=provider_cfg,
-                request_model=request_model,
-                watchdog_timeout=watchdog_timeout,
-            )
-            outcome = self._cloud_attempt_loop(
-                setup,
-                source=source,
-                commit_history=commit_history,
-                is_local=is_local,
-                provider_cfg=provider_cfg,
-                request_model=request_model,
-                watchdog_timeout=watchdog_timeout,
-            )
-            if outcome.early_return is not None:
-                return outcome.early_return
-            return self._finalize_generation(
-                setup,
-                outcome,
-                contexto,
-                source=source,
-                commit_history=commit_history,
-                log_prefix=log_prefix,
-                history_text=history_text,
-                is_local=is_local,
-                provider_cfg=provider_cfg,
-                request_model=request_model,
-            )
+            while True:
+                attempt_was_cloud = not is_local
+                setup = self._build_generation_request(
+                    contexto,
+                    source,
+                    is_local=is_local,
+                    provider_cfg=provider_cfg,
+                    request_model=request_model,
+                    watchdog_timeout=watchdog_timeout,
+                )
+                outcome = self._cloud_attempt_loop(
+                    setup,
+                    source=source,
+                    commit_history=commit_history,
+                    is_local=is_local,
+                    provider_cfg=provider_cfg,
+                    request_model=request_model,
+                    watchdog_timeout=watchdog_timeout,
+                )
+                if outcome.early_return is not None:
+                    result = outcome.early_return
+                else:
+                    result = self._finalize_generation(
+                        setup,
+                        outcome,
+                        contexto,
+                        source=source,
+                        commit_history=commit_history,
+                        log_prefix=log_prefix,
+                        history_text=history_text,
+                        is_local=is_local,
+                        provider_cfg=provider_cfg,
+                        request_model=request_model,
+                    )
+                if (
+                    result
+                    or cloud_fallback_retry_done
+                    or not attempt_was_cloud
+                    or not self._cloud_fallback_active
+                    or self._cloud_fallback_reason != cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                ):
+                    return result
+                # The cloud attempt above failed and `_handle_cloud_failure`
+                # engaged auto-fallback (fallback_mode=="manual" leaves
+                # `_cloud_fallback_active` False, which the check above
+                # already excludes) -- retry ONCE on the known-good local
+                # model instead of discarding the question.
+                #
+                # Ceiling (runtime evidence 2026-08-07, F1/F12): retry is
+                # TRANSIENT-ONLY. All three evidenced silent-turn incidents
+                # were watchdog timeouts (class=transient); bad_key and
+                # ambiguous_429 turns still burn (the pre-existing contract).
+                # `_cloud_fallback_reason` is the class `_handle_cloud_failure`
+                # was JUST invoked with for THIS attempt -- set synchronously
+                # under `_lock` before that call's background warm-up thread
+                # even starts (~5230), unlike `_last_cloud_failure_class`,
+                # which the watchdog-timeout branch never touches and which a
+                # rescued LOCAL success on the retry itself clears (finalize,
+                # ~4985) before this gate could read it. Widening this ceiling
+                # to other failure classes needs owner ratification first.
+                cloud_fallback_retry_done = True
+                is_local = True
+                request_model = self._last_known_good_model or self.current_model
+                self._log(
+                    f"cloud_fallback_retry: retrying turn locally with "
+                    f"{request_model} (source={source}).",
+                    level="warning",
+                )
 
         except Exception as e:
             self._log(f"ERROR Ollama: {e}", level="error")
@@ -6820,8 +6885,10 @@ class MotorVocalIA(threading.Thread):
             # (owner mitigation — the existing select_top_k path, untouched).
             if is_meta_recall_query(contexto):
                 lines = build_recency_lines(rows)
+                routing_branch = "meta-recall"
             else:
                 lines = build_injection_lines(rows, contexto)
+                routing_branch = "lexical"
             if not lines:
                 return ""
             # 4R correction round (R1): sanitize (control chars + truncation)
@@ -6831,11 +6898,20 @@ class MotorVocalIA(threading.Thread):
                 _strip_injection_markers(self._sanitize_history_context(line))
                 for line in lines
             ]
-            return (
+            block = (
                 i18n_active.memorias_block_open() + "\n"
                 + "\n".join(sanitized)
                 + "\n" + i18n_active.memorias_block_close()
             )
+            # F11 (runtime_findings_batch_20260807): the only success signal
+            # for this path before this line was the answer content itself —
+            # RC-8 (memoria_store.py:55-56) bars logging the block's text, so
+            # this is counts/routing ONLY, never a line or a char of content.
+            logger.debug(
+                "memorias injection block built: lines=%d branch=%s chars=%d",
+                len(sanitized), routing_branch, len(block),
+            )
+            return block
         except Exception as exc:
             logger.warning(
                 "memoria retrieval failed (fail-open): %s profile_id=%s",
@@ -7261,6 +7337,14 @@ class MotorVocalIA(threading.Thread):
             # frame. Mutually exclusive with the branch above by construction —
             # a bundle is tagged OWNER_BUNDLE_SOURCE, never "kira-agenda*".
             self._requeue_owner_bundle_followers(bundle_followers)
+        elif source in ("ptt", "direct"):
+            # F1 companion (runtime-findings 2026-08-07): a plain ptt/direct
+            # turn matches no branch above when generation still comes back
+            # empty (guardrail block with no fallback line, or both the cloud
+            # attempt AND its one-shot local retry failing) -- tell the owner
+            # the turn was dropped instead of leaving them to infer it from
+            # silence.
+            self.ui_callback("turn_dropped")
 
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:
@@ -7962,7 +8046,7 @@ class MotorVocalIA(threading.Thread):
                         # full replay, so it counts as CUT, NOT spoken.
                         was_interrupted = True
                         cursor = idx
-                        logger.info(f"[SPEECH_STACK] would-push source={source} cursor={idx}")
+                        logger.info(f"[SPEECH_STACK] cut source={source} cursor={idx}")
                         break
                     spoken.append(idx)
 

@@ -118,6 +118,11 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         # probe. Detail stays None -- NOT added to _MOTOR_EVENT_DETAIL_FIELDS
         # (privacy gate, same as cloud_fallback_engaged/cloud_restored).
         "cloud_probe_gave_up",
+        # F1 companion (interruptible_speech_architecture_20260804, runtime-
+        # findings 2026-08-07): a ptt/direct turn came back empty after every
+        # retry -- surfaced so the owner sees it instead of inferring the
+        # loss from silence. Detail stays None (same privacy gate).
+        "turn_dropped",
     }
 )
 

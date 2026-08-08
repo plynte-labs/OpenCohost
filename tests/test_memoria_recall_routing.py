@@ -25,6 +25,7 @@ tests/test_memorias_retrieval.py) and never touch USER_DATA_DIR.
 
 from __future__ import annotations
 
+import logging
 import queue
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -405,3 +406,61 @@ def test_meta_path_strips_injection_markers(monkeypatch, tmp_path):
     assert block
     assert "ignore all previous" not in block.lower()
     assert "dato inocente que sobrevive" in block
+
+
+# ---------------------------------------------------------------------------
+# F11 (runtime_findings_batch_20260807) — success-path debug log, counts only
+# ---------------------------------------------------------------------------
+
+
+def test_meta_recall_success_logs_counts_only_debug_line(monkeypatch, tmp_path, caplog):
+    """The injection path had no success log at all before this line -- an
+    injection could only be inferred from the answer content itself. RC-8
+    (memoria_store.py:55-56) bars the block's content from ever reaching a
+    log line, so this is counts + routing branch, nothing else."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="p")
+    content = "resumen de la sesion pasada sobre monetizacion y sponsors"
+    _seed(tmp_path / "memorias.db", "p", "sum", content=content,
+          status="summary", stable_key=_summary_key("p", _BASE_TS + timedelta(hours=1)),
+          updated_at=_BASE_TS + timedelta(hours=1))
+
+    caplog.set_level(logging.DEBUG, logger="OpenCohost")
+    block = motor._build_memorias_injection_block("p", _OWNER_Q_SELF)
+
+    assert content in block  # sanity: the block itself still carries content
+
+    debug_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("memorias injection block built")
+    ]
+    assert len(debug_lines) == 1, debug_lines
+    line = debug_lines[0]
+    assert "branch=meta-recall" in line
+    assert "lines=1" in line
+    assert "chars=" in line
+    # RC-8: counts/branch/chars only -- never the memoria content or a word of it.
+    assert content not in line
+    assert "monetizacion" not in line
+
+
+def test_lexical_success_logs_counts_only_debug_line(monkeypatch, tmp_path, caplog):
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="p")
+    content = "playlist con musica synthwave para el stream de esta noche"
+    _seed(tmp_path / "memorias.db", "p", "reg", content=content, title="musica synthwave nocturna")
+
+    caplog.set_level(logging.DEBUG, logger="OpenCohost")
+    block = motor._build_memorias_injection_block("p", "quiero musica synthwave")
+
+    assert content in block  # sanity: proves the lexical branch actually matched
+
+    debug_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("memorias injection block built")
+    ]
+    assert len(debug_lines) == 1, debug_lines
+    line = debug_lines[0]
+    assert "branch=lexical" in line
+    assert "chars=" in line
+    assert content not in line

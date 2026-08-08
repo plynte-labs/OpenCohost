@@ -311,6 +311,15 @@ class TestCloudGeneration:
     def test_cloud_timeout_skips_model_rollback(self, tmp_path):
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         motor._recover_from_stalled_inference = MagicMock()
+        # F1 (runtime-findings 2026-08-07): a real _handle_cloud_failure would
+        # engage auto-fallback and the funnel's one-shot local retry would
+        # rescue this turn (mocked `motor.ollama.chat` answers "local"),
+        # which is a genuinely local attempt and would legitimately reach
+        # _recover_from_stalled_inference on its OWN timeout -- a different
+        # invariant than the one this test pins (a CLOUD timeout must never
+        # roll back a local model). No-op the fallback engagement so only the
+        # single cloud attempt is exercised.
+        motor._handle_cloud_failure = MagicMock()
         motor._ollama_chat_with_watchdog = MagicMock(
             side_effect=TimeoutError("watchdog_timeout:90.00s")
         )
@@ -588,6 +597,12 @@ class TestCloudFailureDegrade:
         # Cloud active but no profile configured for the active provider.
         cfg = {"active_provider": "openai", "pregen_enabled": False, "profiles": {}}
         motor, _, _ = _make_motor(tmp_path, provider_config=cfg)
+        # F1 (runtime-findings 2026-08-07): no-op the fallback engagement so
+        # the funnel's one-shot local retry (mocked `motor.ollama.chat`
+        # answers "local") doesn't rescue this turn and clear the very
+        # `_last_llm_failure` attribution this test pins -- see the note in
+        # TestCloudGeneration.test_cloud_timeout_skips_model_rollback above.
+        motor._handle_cloud_failure = MagicMock()
         with patch(_SEND) as mock_send:
             result = motor._generar_dialogo("hola", source="direct", commit_history=False)
         assert result == ""
@@ -601,6 +616,7 @@ class TestCloudFailureDegrade:
         from opencohost.core.providers.cloud.cloud_llm_client import CloudLLMResponseError
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         motor.current_model = "local-tag:7b"  # the LOCAL tag must NOT be recorded
+        motor._handle_cloud_failure = MagicMock()  # see F1 note above
         with patch(_SEND, side_effect=CloudLLMResponseError("boom 401")):
             result = motor._generar_dialogo("hola", source="direct", commit_history=False)
         assert result == ""
@@ -630,6 +646,7 @@ class TestCloudFailureDegrade:
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         motor._recover_from_stalled_inference = MagicMock()
         motor._last_known_good_model = "sentinel-local"
+        motor._handle_cloud_failure = MagicMock()  # see F1 note above
         with patch(_SEND, side_effect=CloudLLMResponseError("401 unauthorized")):
             result = motor._generar_dialogo("hola", source="direct", commit_history=False)
         assert result == ""

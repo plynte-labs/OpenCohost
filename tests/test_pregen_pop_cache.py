@@ -843,6 +843,47 @@ def test_boundary_telemetry_used_gap_ms_minus_one_when_unknown(caplog):
     assert "gap_ms=-1" in lines[0]
 
 
+# ── F8 optional (runtime_findings_batch_20260807): [TURN_LATENCY] for a
+# pregen pop-time cache hit -- this path never ran _ejecutar_inferencia, so
+# it never hit that method's own emit and the metric had a blind spot on
+# every hit (6 of ~15 real-session answers). ───────────────────────────────
+
+
+def test_pregen_hit_emits_turn_latency_marked_path_pregen(caplog):
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 0, "source": "direct"}
+    submitted_at = time.monotonic() - 0.3
+    motor.enqueue("P", priority=0, source="direct", submitted_at=submitted_at)
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[TURN_LATENCY]")]
+    assert len(lines) == 1, lines
+    assert "source=direct" in lines[0]
+    assert "path=pregen" in lines[0]
+    m = re.search(r"request_to_tts_total_ms=(\d+)", lines[0])
+    assert m is not None and int(m.group(1)) >= 250
+
+
+def test_pregen_hit_emits_no_turn_latency_when_submitted_at_unknown(caplog):
+    """An internally-generated item (no submit-time stamp -- e.g. agenda's
+    own turn) must not fabricate a latency figure it never measured, mirrors
+    the foreground path's own `submitted_at is None` handling."""
+    motor = _bare_motor()
+    motor._hablar = lambda texto, source="direct": None
+    motor._commit_history = lambda contexto, dialogo, **kw: None
+    motor._prefetched_agenda = {"payload": "P", "dialogo": "D", "priority": 2, "source": "kira-agenda"}
+    motor.enqueue("P", priority=2, source="kira-agenda")
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor._process_priority_queue()
+
+    assert not any(r.getMessage().startswith("[TURN_LATENCY]") for r in caplog.records)
+
+
 # ── WU4 4a: boundary telemetry — "evicted" (slot eviction at spawn) ─────────
 
 
