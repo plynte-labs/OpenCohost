@@ -17,6 +17,12 @@ tts:
   edge_voice: es-MX-DaliaNeural
   qwen_language: Spanish
   qwen_needs_ref_wav: true   # user-provided reference WAV; no bundled audio
+  # F4 (interruptible_speech_architecture_20260804) — markdown normalization
+  # spoken notices. New slots, no pre-i18n literal to preserve.
+  markdown_code_notice: "Te dejé un bloque de código en el chat."
+  markdown_table_notice: "Te dejé una tabla en el chat con {n} filas."
+  markdown_formula_notice: "Te dejé una fórmula en el chat."
+  markdown_formula_inline: "una fórmula"
 
 llm:
   # Migrated in T3. Byte-identical to settings.SYSTEM_PROMPT (the legacy anchor);

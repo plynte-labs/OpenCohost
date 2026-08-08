@@ -21,6 +21,12 @@ tts:
   edge_voice: en-US-AriaNeural
   qwen_language: English
   qwen_needs_ref_wav: true   # user-provided reference WAV; no bundled audio
+  # F4 (interruptible_speech_architecture_20260804) — markdown normalization
+  # spoken notices. New slots, no pre-i18n literal to preserve.
+  markdown_code_notice: "I left a code block in the chat."
+  markdown_table_notice: "I left a table in the chat with {n} rows."
+  markdown_formula_notice: "I left a formula in the chat."
+  markdown_formula_inline: "a formula"
 
 llm:
   # Added in T3. Mirrors the es persona's character (dry sarcasm, sharp wit) in

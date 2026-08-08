@@ -783,3 +783,36 @@ def qwen_language() -> str:
     -- es legacy default ("Spanish") on any failure, matching the value
     server_qwen.py hard-coded before this migration."""
     return _slot("tts.qwen_language", LEGACY_QWEN_LANGUAGE)
+
+
+# ── TTS markdown normalization notices (F4, interruptible_speech_architecture_20260804) ──
+# _tts_normalize_markdown (tts_sanitizer.py) replaces markdown block/inline
+# structure with a short spoken notice instead of narrating raw syntax. New
+# slots (no pre-i18n literal to preserve) -- es legacy default on any failure,
+# same `tts` domain/pattern as qwen_language() above.
+
+LEGACY_TTS_MARKDOWN_CODE_NOTICE = "Te dejé un bloque de código en el chat."
+LEGACY_TTS_MARKDOWN_TABLE_NOTICE = "Te dejé una tabla en el chat con {n} filas."
+LEGACY_TTS_MARKDOWN_FORMULA_NOTICE = "Te dejé una fórmula en el chat."
+LEGACY_TTS_MARKDOWN_FORMULA_INLINE = "una fórmula"
+
+
+def tts_markdown_code_notice() -> str:
+    """Spoken notice replacing a fenced code block (Stage A1)."""
+    return _slot("tts.markdown_code_notice", LEGACY_TTS_MARKDOWN_CODE_NOTICE)
+
+
+def tts_markdown_table_notice() -> str:
+    """Spoken notice template replacing a markdown table (Stage A2).
+    Placeholder: ``{n}`` (row count)."""
+    return _slot("tts.markdown_table_notice", LEGACY_TTS_MARKDOWN_TABLE_NOTICE)
+
+
+def tts_markdown_formula_notice() -> str:
+    """Spoken notice replacing a display ``$$...$$`` block (Stage A3)."""
+    return _slot("tts.markdown_formula_notice", LEGACY_TTS_MARKDOWN_FORMULA_NOTICE)
+
+
+def tts_markdown_formula_inline() -> str:
+    """Inline phrase substituted for TeX-ish inline ``$...$`` math (Stage B1)."""
+    return _slot("tts.markdown_formula_inline", LEGACY_TTS_MARKDOWN_FORMULA_INLINE)
