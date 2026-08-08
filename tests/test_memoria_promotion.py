@@ -39,6 +39,14 @@ def _make_motor(monkeypatch, tmp_path, *, profile_id="profile-1"):
     calls the real `load_provider_config()`, so without this every gate test
     would silently depend on whichever provider the machine running the suite
     happens to have active.
+
+    `current_model`/`_last_known_good_model` are ALSO pinned explicitly to the
+    same "m" as `_loaded_model`: owner decision 2026-08-08 (F16) makes
+    `_judge_model()` fall back to `_last_known_good_model or current_model`
+    whenever nothing is resident, and both attributes otherwise come from the
+    constructor's real `resolve_startup_model()` call — without this pin, any
+    test exercising that fallback would silently depend on the local disk
+    config of the machine running the suite.
     """
     monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
     monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
@@ -49,6 +57,8 @@ def _make_motor(monkeypatch, tmp_path, *, profile_id="profile-1"):
     motor._cloud_fallback_active = False
     motor._current_profile_id = profile_id
     motor._loaded_model = "m"
+    motor.current_model = "m"
+    motor._last_known_good_model = "m"
     motor._pending_model_switch = None
     motor._awaiting_first_success_after_switch = False
     motor._check_capabilities_reasoning = lambda model: False
@@ -59,7 +69,14 @@ def _go_cloud(motor, *, model="glm-5.2"):
     """Put the motor on the owner's ACTUAL configuration: a cloud provider, and
     therefore NO resident local model for the whole process (`_check_ollama_service`
     returns before `_prepare_model`, and `_prepare_model` returns without ever
-    assigning `_loaded_model`)."""
+    assigning `_loaded_model`).
+
+    Deliberately leaves `current_model`/`_last_known_good_model` at whatever
+    `_make_motor` pinned ("m") — owner decision 2026-08-08 (F16) means the
+    judge must fall back to THAT local model, never to `model` (the active
+    cloud profile's model), which is why every promotion call in these tests
+    keeps requesting "m" even after this call.
+    """
     motor._provider_config = {
         "active_provider": "nvidia_nim",
         "profiles": {"nvidia_nim": {"base_url": "https://x/v1", "model": model}},
@@ -133,17 +150,19 @@ def test_zero_drafts_never_calls_the_model(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("attr,value", [
-    ("_loaded_model", None),
     ("_pending_model_switch", "otro-modelo"),
     ("_awaiting_first_success_after_switch", True),
     ("_current_profile_id", None),
 ])
 def test_engine_gates_skip_the_call_entirely(monkeypatch, tmp_path, attr, value):
-    """NOTE the `_loaded_model` row is LOCAL-only — see
-    test_cloud_provider_sweeps_without_any_resident_local_model, which pins the
-    opposite for the owner's actual configuration. `_make_motor` pins
-    `_provider_config` local precisely so this parametrisation cannot silently
-    become "the feature is dead on cloud"."""
+    """`_make_motor` pins `_provider_config` local precisely so this
+    parametrisation cannot silently become "the feature is dead on cloud".
+
+    NOTE: `_loaded_model=None` is NOT parametrized here anymore — see
+    test_loaded_model_none_alone_no_longer_gates_the_sweep and
+    test_no_local_model_at_all_gates_the_sweep_quietly, which cover its new
+    (post owner decision 2026-08-08, F16) behavior instead.
+    """
     motor = _make_motor(monkeypatch, tmp_path)
     _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
     setattr(motor, attr, value)
@@ -156,47 +175,87 @@ def test_engine_gates_skip_the_call_entirely(monkeypatch, tmp_path, attr, value)
     # Naming the gate is what stops this from also passing against a sweep that
     # simply does nothing — and is what run()'s latch reads.
     assert counts["skipped"] == {
-        "_loaded_model": "no_resident_model",
         "_pending_model_switch": "model_switch_pending",
         "_awaiting_first_success_after_switch": "model_switch_pending",
         "_current_profile_id": "no_profile",
     }[attr]
 
 
-def test_cloud_provider_sweeps_without_any_resident_local_model(monkeypatch, tmp_path):
-    """Owner decision 2: the judge runs on WHATEVER PROVIDER IS ACTIVE.
+def test_loaded_model_none_alone_no_longer_gates_the_sweep(monkeypatch, tmp_path):
+    """Owner decision 2026-08-08 (F16): `_judge_model()` now falls back to
+    `_last_known_good_model or current_model` when nothing is resident, so a
+    bare `_loaded_model=None` (e.g. the local warm-up race, or the owner's
+    cloud provider being active) no longer blocks the sweep by itself — it
+    just requests the fallback local model instead of cold-loading the
+    resident one."""
+    motor = _make_motor(monkeypatch, tmp_path)
+    motor._loaded_model = None
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
 
-    On cloud `_loaded_model` is None for the ENTIRE process — `_check_ollama_service`
-    returns at `if not self._is_local` and never reaches `_prepare_model`, which
-    itself returns without assigning it. A resident-LOCAL-model gate therefore
-    makes the whole feature a permanent, silent no-op on the owner's real
-    configuration, on every launch, forever.
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert len(stub.calls) == 1
+    assert stub.calls[0]["model"] == "m"
+    assert counts["skipped"] == ""
+
+
+def test_no_local_model_at_all_gates_the_sweep_quietly(monkeypatch, tmp_path):
+    """The one case that still gates proactively: no local model name can be
+    resolved from ANY of the three sources (fresh install, nothing ever
+    configured). Fails open BEFORE spending a token, same contract as every
+    other gate."""
+    motor = _make_motor(monkeypatch, tmp_path)
+    motor._loaded_model = None
+    motor._last_known_good_model = None
+    motor.current_model = ""
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls == []
+    assert counts["considered"] == 0
+    assert counts["skipped"] == "no_local_model"
+
+
+def test_cloud_provider_sweeps_using_the_local_fallback_model_not_the_cloud_one(monkeypatch, tmp_path):
+    """Owner decision 2026-08-08 (F16), superseding the earlier "whatever
+    provider is active" decision: the judge is pinned LOCAL always. On cloud
+    `_loaded_model` is None for the ENTIRE process (`_check_ollama_service`
+    returns before `_prepare_model`, which itself never assigns it), so the
+    judge must fall back to `_last_known_good_model`/`current_model` ("m") —
+    NEVER to the active cloud profile's model ("glm-5.2", set by `_go_cloud`).
     """
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path))
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
-    judged = "El streamer corre el juez de memorias sobre GLM en la nube."
+    judged = "El streamer corre el juez de memorias localmente."
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": judged}))
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
     assert len(stub.calls) == 1
+    assert stub.calls[0]["model"] == "m"  # the LOCAL fallback, never "glm-5.2"
     assert _row(tmp_path, row_id)["status"] == "promoted"
     assert counts["kept"] == 1
 
 
-def test_cloud_reasoning_model_is_detected_from_the_active_profile_model(monkeypatch, tmp_path):
-    """`_fetch_show` returns {} outright on cloud, so the capability probe is
-    unconditionally False there — the reasoning branch has to come from the name
-    heuristic, applied to the model the ACTIVE PROFILE will actually run (the
-    local `_loaded_model` is None and would crash the resolver)."""
-    motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="qwen3-235b")
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso Qwen3 remoto para juzgar")
+def test_reasoning_model_is_detected_from_the_resolved_local_fallback_model(monkeypatch, tmp_path):
+    """`_fetch_show`/`_check_capabilities_reasoning` are stubbed to False (older
+    Ollama / no probe) here, so the reasoning branch has to come from the name
+    heuristic applied to the model the judge ACTUALLY requests — the resolved
+    local fallback, even though the active provider is cloud and its profile
+    model ("glm-5.2") carries no such marker."""
+    motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
+    motor._last_known_good_model = "qwen3:8b"
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso Qwen3 en local para juzgar")
     stub = _Recorder(_decisions())
 
     motor.promote_pending_drafts(chat_callable=stub)
 
     assert len(stub.calls) == 1
+    assert stub.calls[0]["model"] == "qwen3:8b"
     assert "num_predict" not in stub.calls[0]["options"]
 
 
@@ -704,15 +763,12 @@ def test_plain_model_keeps_the_num_predict_cap(monkeypatch, tmp_path):
     assert stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
 
 
-def test_the_output_cap_is_sized_for_the_provider_not_for_local(monkeypatch, tmp_path):
-    """A local-sized output cap on cloud truncates the reply and promotes nothing.
-
-    `_PROMOTION_NUM_PREDICT` (1200) is sized for a local runner. A 40-draft batch
-    that keeps ~20 needs roughly 1700 output tokens, so on a cloud provider the
-    flat local cap stops the reply mid-object: the parser returns [], nothing is
-    marked judged, and the identical batch is re-sent and re-paid on every launch
-    forever. `_generar_dialogo` already draws this local/cloud distinction at its
-    own call site; the judge must draw the same one.
+def test_the_output_cap_stays_local_sized_even_under_a_cloud_provider(monkeypatch, tmp_path):
+    """Owner decision 2026-08-08 (F16): the judge transport is pinned local, so
+    sizing `num_predict` off the ACTIVE PROVIDER (the old CLOUD_MAX_TOKENS
+    branch, sized for the cloud model this call no longer reaches) would size
+    the cap for the wrong model. Both configurations must now get the SAME
+    local-sized cap, whether or not the active provider happens to be cloud.
     """
     local = _make_motor(monkeypatch, tmp_path, profile_id="profile-1")
     _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: probando el limite de salida")
@@ -725,28 +781,28 @@ def test_the_output_cap_is_sized_for_the_provider_not_for_local(monkeypatch, tmp
     cloud.promote_pending_drafts(chat_callable=cloud_stub)
 
     assert local_stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
-    assert cloud_stub.calls[0]["options"]["num_predict"] == llm_engine.CLOUD_MAX_TOKENS
-    # The point of the test: they must not be the same number.
-    assert llm_engine.CLOUD_MAX_TOKENS > llm_engine._PROMOTION_NUM_PREDICT
+    assert cloud_stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
 
 
 def test_empty_content_with_thinking_retries_once_uncapped_and_promotes(monkeypatch, tmp_path):
-    """The cloud self-heal `_generar_dialogo` already ships and the judge lacked.
+    """The cloud self-heal `_generar_dialogo` already ships and the judge lacked
+    — still exercised here with the active PROVIDER on cloud (`_go_cloud`) to
+    prove the self-heal keeps working once the judge itself is pinned local
+    (owner decision 2026-08-08, F16): the model requested is the resolved
+    local fallback ("m"), never the active profile's "glm-5.2".
 
-    Reasoning DETECTION is structurally blind on the cloud path: the name
-    heuristic knows a handful of markers and `_fetch_show` returns {} outright
-    when `not self._is_local`. So a thinking-capable cloud model like glm-5.2 is
-    classified "not reasoning", gets `num_predict` (mapped to `max_tokens`),
-    burns the cap inside <think>, and returns empty `content` — the sweep then
-    promotes NOTHING, every launch, forever, paying a full cloud inference each
-    time. The response itself is the evidence, so no detection is needed: empty
-    text + non-empty `thinking` + a cap in the options means drop the cap and
-    re-issue ONCE.
+    Detection is blind regardless of provider now: the name heuristic knows a
+    handful of markers and "m" carries none, so it is classified "not
+    reasoning", gets `num_predict`, burns the cap inside <think>, and returns
+    empty `content` — the sweep then promotes NOTHING, every launch, forever,
+    paying a full local inference each time. The response itself is the
+    evidence, so no detection is needed: empty text + non-empty `thinking` +
+    a cap in the options means drop the cap and re-issue ONCE.
     """
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
-    judged = "El streamer corre el juez de memorias sobre GLM en la nube."
+    judged = "El streamer corre el juez de memorias localmente."
     calls = []
 
     def stub(**kwargs):
@@ -760,7 +816,8 @@ def test_empty_content_with_thinking_retries_once_uncapped_and_promotes(monkeypa
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
     assert len(calls) == 2
-    assert calls[0]["options"]["num_predict"] == llm_engine.CLOUD_MAX_TOKENS
+    assert calls[0]["model"] == "m"
+    assert calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
     assert "num_predict" not in calls[1]["options"]
     assert calls[1]["messages"] == calls[0]["messages"]
     assert counts["kept"] == 1
@@ -841,50 +898,62 @@ def test_judge_budget_is_derived_from_observed_latency_not_a_constant(monkeypatc
     assert motor._judge_timeout_seconds() == llm_engine._JUDGE_BUDGET_CEILING_SECONDS
 
 
-def test_cloud_budget_is_the_cloud_chat_timeout_the_socket_already_enforces(monkeypatch, tmp_path):
-    """`_cloud_chat` resolves its HTTP timeout from CLOUD_CHAT_TIMEOUT, not from
-    this budget. Deriving a shorter one from LOCAL generation latency would make
-    the watchdog fire before the socket and abort every cloud judgment mid-flight
-    with nothing written — the resident-model no-op again, one layer down. No new
-    constant: the cloud budget IS the cloud chat budget."""
-    from opencohost.config.settings import CLOUD_CHAT_TIMEOUT
-
+def test_judge_budget_stays_local_adaptive_even_under_a_cloud_provider(monkeypatch, tmp_path):
+    """Owner decision 2026-08-08 (F16): the judge transport is pinned local, so
+    there is no cloud socket left for CLOUD_CHAT_TIMEOUT to bound — the budget
+    must stay the local adaptive one (`_pregen_last_gen_duration *
+    _JUDGE_BUDGET_FACTOR`, clamped) even when the active provider is cloud.
+    5.0 * 2.0 = 10.0, clamped up to the floor.
+    """
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path))
-    motor._pregen_last_gen_duration = 5.0   # a fast LOCAL turn from a previous session
+    motor._pregen_last_gen_duration = 5.0
 
-    assert motor._judge_timeout_seconds() == float(CLOUD_CHAT_TIMEOUT)
+    assert motor._judge_timeout_seconds() == pytest.approx(llm_engine._JUDGE_BUDGET_FLOOR_SECONDS)
 
 
-def test_cloud_transport_routes_the_judge_through_the_active_profile(monkeypatch, tmp_path):
-    """Closes the last cloud gap: with NO `chat_callable` the sweep goes through
-    the real `_ollama_judge_chat`, whose `if not is_local` branch must reach
-    `_cloud_chat` with the active profile's base_url/model. Only the HTTP call
-    itself is stubbed."""
+def test_cloud_active_provider_never_reaches_a_cloud_client_for_the_judge(monkeypatch, tmp_path):
+    """The core F16 contract, exercised through the REAL undelegated transport
+    (no `chat_callable` override — every other test in this suite bypasses
+    `_ollama_judge_chat` entirely, so none of them actually prove the network
+    boundary). With the active provider on cloud (`_go_cloud`), the judge must
+    still resolve and request the LOCAL fallback model and must NEVER call the
+    cloud client — draft contents (the owner's own conversation excerpts) must
+    never reach it.
+    """
     from opencohost.core.providers.cloud import cloud_llm_client
 
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
-    monkeypatch.setattr(motor, "_cloud_api_key", lambda provider_id: "k")
-    sent = []
+    judged = "El streamer corre el juez de memorias localmente."
 
-    def fake_send(**kwargs):
-        sent.append(kwargs)
-        judged = "El streamer corre el juez de memorias sobre GLM en la nube."
-        return {"message": {"content": _decisions({"i": 1, "keep": True, "text": judged})}}
+    cloud_calls = []
+    monkeypatch.setattr(
+        cloud_llm_client, "send_chat_completion",
+        lambda **kwargs: cloud_calls.append(kwargs) or {"message": {"content": _decisions()}},
+    )
 
-    monkeypatch.setattr(cloud_llm_client, "send_chat_completion", fake_send)
+    fake_ollama_client = MagicMock()
+    fake_ollama_client.chat.return_value = {
+        "message": {"content": _decisions({"i": 1, "keep": True, "text": judged})}
+    }
+    motor._create_ollama_scout_client = lambda *a, **kw: fake_ollama_client
 
     counts = motor.promote_pending_drafts()
 
-    assert len(sent) == 1
-    assert sent[0]["model"] == "glm-5.2"
-    assert sent[0]["base_url"] == "https://x/v1"
+    assert cloud_calls == []  # the network boundary itself: never touched
+    assert fake_ollama_client.chat.call_count == 1
+    assert fake_ollama_client.chat.call_args.kwargs["model"] == "m"
     assert counts["kept"] == 1
     assert _row(tmp_path, row_id)["status"] == "promoted"
 
 
-def test_cloud_sweep_never_builds_a_local_ollama_client(monkeypatch, tmp_path):
+def test_cloud_sweep_still_builds_a_local_ollama_client_for_the_pinned_judge(monkeypatch, tmp_path):
+    """Owner decision 2026-08-08 (F16): the judge transport is pinned local even
+    when the active provider is cloud, so `_run_promotion_judge` must still
+    build the dedicated judge client — the OLD `and self._is_local` gate on
+    this build (which used to skip it on cloud, since `_ollama_judge_chat`
+    used to route to `_cloud_chat` there instead) is gone."""
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path))
     _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
     built = []
@@ -895,7 +964,7 @@ def test_cloud_sweep_never_builds_a_local_ollama_client(monkeypatch, tmp_path):
 
     motor.promote_pending_drafts()
 
-    assert built == []
+    assert len(built) == 1
 
 
 def test_scout_client_factory_takes_a_timeout_and_defaults_to_the_scout_one(monkeypatch, tmp_path):

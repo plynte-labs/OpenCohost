@@ -5693,18 +5693,19 @@ class MotorVocalIA(threading.Thread):
         return client.chat(**kwargs)
 
     def _ollama_judge_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
-        """Transport for the memoria promotion judge — mirrors _ollama_scout_chat.
+        """Transport for the memoria promotion judge — ALWAYS local.
 
-        Provider-agnostic by owner decision 2: whatever backend is active runs
-        the judge. Locally it uses the dedicated short-timeout client built with
-        the adaptive budget, so a timed-out judgment actually releases the single
+        Owner decision 2026-08-08 (F16): memoria draft content stays on this
+        machine; the judge is the only place in the memoria pipeline that could
+        send it over the network, so — unlike ``_ollama_scout_chat`` and
+        ``_ollama_chat`` — this NEVER falls through to ``_cloud_chat``,
+        regardless of the active provider or ``_cloud_fallback_active``. It
+        always uses the dedicated short-timeout client built with the adaptive
+        judge budget, so a timed-out judgment actually releases the single
         Ollama runner instead of leaving it generating into a closed watchdog.
+        ``provider_cfg``/``is_local`` are accepted only to keep the same call
+        signature as the other ``_ollama_*_chat`` transports; both are unused.
         """
-        cfg = provider_cfg if provider_cfg is not None else self._provider_config
-        if is_local is None:
-            is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
-        if not is_local:
-            return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
         client = self._ollama_judge_client or self.ollama
         return client.chat(**kwargs)
 
@@ -5916,20 +5917,26 @@ class MotorVocalIA(threading.Thread):
 
     # ── memoria draft promotion (memory_promotion_20260725) ─────────────────
     def _judge_model(self) -> str:
-        """The model name the judge will ACTUALLY run on, whatever the provider.
+        """The LOCAL model the judge will run on — pinned regardless of the
+        active provider (owner decision 2026-08-08, F16).
 
-        Locally that is the resident model (never the desired one — the sweep
-        must not cold-load). On cloud there is no resident local model at all
-        (``_prepare_model`` returns before assigning ``_loaded_model``), so it is
-        the ACTIVE PROFILE's model — the same one ``_cloud_chat`` resolves for
-        itself and sends. Always a str: ``_resolve_reasoning_classification``
-        lowercases it, so a None here would raise straight into the sweep's
-        catch-all and silently disable the feature on cloud.
+        The once-per-launch promotion sweep sends up to 40 draft contents
+        (excerpts of the owner's own conversation) to whatever model this
+        resolves to. Memory content stays on the machine; the judge is the
+        only place in the memoria pipeline that ever crosses the network, so
+        it must never follow a cloud provider — never the active profile's
+        model, never ``_cloud_chat``.
+
+        Prefers the already-resident model (``_loaded_model``, no cold-load)
+        when Ollama already has one loaded; otherwise falls back to the SAME
+        local-posture resolution the cloud-fallback retry already uses
+        (``llm_engine.py`` F1: ``_last_known_good_model or current_model``) —
+        reused here rather than inventing a second one. Always a str:
+        ``_resolve_reasoning_classification`` lowercases it, so a None would
+        raise straight into the sweep's catch-all and silently disable the
+        feature.
         """
-        if self._is_local:
-            return self._loaded_model or ""
-        profile = self._cfg_active_profile(self._provider_config) or {}
-        return str(profile.get("model") or "")
+        return self._loaded_model or self._last_known_good_model or self.current_model or ""
 
     def _judge_timeout_seconds(self) -> float:
         """The judge's adaptive time budget (owner decision 5).
@@ -5946,15 +5953,12 @@ class MotorVocalIA(threading.Thread):
         rides the capability probe D2 needs anyway (cached ``ollama.show``), so it
         is a per-model MEASUREMENT, not a per-model assumption.
 
-        On CLOUD the budget is ``CLOUD_CHAT_TIMEOUT`` — the codebase's own cloud
-        chat budget, which ``_cloud_chat`` enforces at the socket regardless of
-        what this returns. Deriving a shorter one from local-generation latency
-        would only make the watchdog fire BEFORE the socket, aborting every cloud
-        judgment mid-flight with nothing written: the same permanent no-op the
-        resident-model gate used to cause, one layer down. No new constant.
+        Always the LOCAL adaptive budget now (owner decision 2026-08-08, F16):
+        the judge transport (``_ollama_judge_chat``) is pinned local, so there is
+        no cloud socket for ``CLOUD_CHAT_TIMEOUT`` to bound anymore — deriving
+        the budget from local generation latency is correct in every case, not
+        just when the active provider happens to be local too.
         """
-        if not self._is_local:
-            return float(CLOUD_CHAT_TIMEOUT)
         last = self._pregen_last_gen_duration
         if last is None:
             base = RETRY_MIN_REMAINING_SECONDS * (
@@ -5997,21 +6001,20 @@ class MotorVocalIA(threading.Thread):
         options = {"temperature": LLM_SCOUT_TEMPERATURE}
         judge_model = self._judge_model()
         if not self._resolve_reasoning_classification(judge_model):
-            # Local-sized caps do not transfer to cloud. A 40-draft batch that
-            # keeps ~20 needs ~1700 output tokens (a keep is ~60-67: the index,
-            # the flags and up to 220 chars of rewritten text), so a flat 1200
-            # truncates the reply mid-object -- the parser then returns [],
-            # nothing is marked judged, and the SAME batch is re-sent and
-            # re-paid on the next launch, forever. `_generar_dialogo` already
-            # makes exactly this distinction at its own call site.
-            options["num_predict"] = (
-                _PROMOTION_NUM_PREDICT if self._is_local else CLOUD_MAX_TOKENS
-            )
-        if chat_callable is None and self._is_local:
+            # Always the LOCAL-sized cap now (owner decision 2026-08-08, F16):
+            # the judge transport is pinned local, so the CLOUD_MAX_TOKENS branch
+            # this used to take when the ACTIVE PROVIDER was cloud would size the
+            # cap for a model this call never reaches. A 40-draft batch that keeps
+            # ~20 needs ~1700 output tokens (a keep is ~60-67: the index, the
+            # flags and up to 220 chars of rewritten text), so a flat 1200 can
+            # still truncate a big local batch -- accepted cost of the pin, same
+            # as any other local judge run; the next launch simply retries.
+            options["num_predict"] = _PROMOTION_NUM_PREDICT
+        if chat_callable is None:
             # Rebuilt per sweep because the budget is adaptive; the sweep runs
-            # once per launch, so this costs nothing. Local only — on cloud
-            # `_ollama_judge_chat` never touches the client, and a cloud-only
-            # process has no reason to reach for `self.ollama` at all.
+            # once per launch, so this costs nothing. Unconditional now: the
+            # judge transport (`_ollama_judge_chat`) is pinned local regardless
+            # of the active provider, so it always needs this client.
             self._ollama_judge_client = self._create_ollama_scout_client(
                 self.ollama, timeout=budget,
             )
@@ -6066,20 +6069,22 @@ class MotorVocalIA(threading.Thread):
     def _promotion_gate(self) -> str:
         """Name of the gate blocking a sweep right now, or "" when clear.
 
-        The resident-model check is LOCAL-ONLY, deliberately. ``_loaded_model``
-        is assigned exclusively on the local warm path — ``_check_ollama_service``
-        returns at ``if not self._is_local`` and never reaches ``_prepare_model``,
-        which itself returns without assigning it — so on a CLOUD provider it is
-        None for the entire process. Gating on it unconditionally made the whole
-        feature a permanent, silent no-op on the owner's actual configuration
-        (GLM-5.2 via NVIDIA NIM), contradicting owner decision 2: the judge runs
-        on whatever provider is active. Cloud needs no resident model at all —
-        ``_cloud_chat`` resolves base_url/model/key from the active profile.
+        No longer branches on the active provider (owner decision 2026-08-08,
+        F16 superseding the earlier "whatever provider is active" decision 2):
+        the judge is pinned local always, so this gates only when NO local
+        model name can be resolved at all (``_judge_model()`` empty) — a fresh
+        install with no local model ever configured. An actually-unreachable
+        Ollama, or a model name that IS resolved but not actually installed,
+        cannot be known without a live probe here; both surface later as an
+        ordinary transport failure inside ``_run_promotion_judge``, caught by
+        ``promote_pending_drafts``'s own fail-open ``except Exception`` — the
+        SAME contract every other internal judge failure already gets, so the
+        drafts stay unjudged and the next launch simply retries.
         """
         if not MEMORIAS_ENABLED:
             return "memorias_disabled"
-        if self._is_local and self._loaded_model is None:
-            return "no_resident_model"   # never cold-load: the RESIDENT model, not the desired one
+        if not self._judge_model():
+            return "no_local_model"
         if self._pending_model_switch or self._awaiting_first_success_after_switch:
             return "model_switch_pending"
         if self._current_profile_id is None:
