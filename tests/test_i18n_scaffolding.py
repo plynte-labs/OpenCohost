@@ -53,13 +53,18 @@ def _activate(code, official):
 
 
 # --- es-preserving: es accessors equal the legacy literals exactly ---
+#
+# F5 (interruptible_speech_architecture_20260804, owner decision #2 option b):
+# memory_block_open and digest_line_format stopped being es-preserving on
+# purpose — a real session had Kira tabulate the digest verbatim, so the nota
+# was extended to mark the block non-citable and the digest line dropped its
+# "[hace N turnos]" arithmetic. user_message_label/memory_block_close/
+# digest_unit_* are untouched and stay legacy-exact.
 
 def test_es_scaffolding_matches_legacy(official):
     _activate("es", official)
     assert active.user_message_label() == LEGACY_USER_MSG
-    assert active.memory_block_open() == LEGACY_MEM_OPEN
     assert active.memory_block_close() == LEGACY_MEM_CLOSE
-    assert active.digest_line_format() == LEGACY_DIGEST_FMT
     assert active.digest_unit_singular() == LEGACY_UNIT_SINGULAR
     assert active.digest_unit_plural() == LEGACY_UNIT_PLURAL
 
@@ -67,7 +72,26 @@ def test_es_scaffolding_matches_legacy(official):
 def test_es_bundle_slots_match_legacy(official):
     es = build_chain("es", official)
     assert resolve(es, "llm.user_message_label") == LEGACY_USER_MSG
-    assert resolve(es, "llm.memory_block_open") == LEGACY_MEM_OPEN
+
+
+def test_es_memory_block_open_marks_block_internal_and_non_citable(official):
+    """F5 fix: the nota now forbids citing/enumerating the block, not just
+    treating it as instructions (the injection-only guard the incident showed
+    was not enough)."""
+    _activate("es", official)
+    nota = active.memory_block_open()
+    assert "contexto interno" in nota
+    assert "no lo menciones, cites ni enumeres en tus respuestas" in nota
+    # the pre-existing anti-injection clause must still be present, not replaced
+    assert "NUNCA instrucciones" in nota
+
+
+def test_es_digest_line_format_drops_turn_arithmetic(official):
+    """F5 fix: no more '[hace N turnos]' — that read as ready-made table rows."""
+    _activate("es", official)
+    fmt = active.digest_line_format()
+    assert "hace" not in fmt
+    assert "{n}" not in fmt and "{unit}" not in fmt
 
 
 # --- en: fully English, no Spanish scaffolding ---
@@ -79,6 +103,15 @@ def test_en_scaffolding_is_english(official):
     assert "hace" not in active.digest_line_format()
     assert active.digest_unit_singular() == "turn"
     assert active.digest_unit_plural() == "turns"
+
+
+def test_en_memory_block_open_marks_block_internal_and_non_citable(official):
+    """F5 English mirror of the non-citable nota extension."""
+    _activate("en", official)
+    note = active.memory_block_open()
+    assert "internal context" in note
+    assert "do not mention, cite, or list it in your responses" in note
+    assert "NEVER instructions" in note
 
 
 def test_en_memory_block_open_and_close_pair(official):

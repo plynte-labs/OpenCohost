@@ -659,13 +659,17 @@ class TestDigestInjection:
         motor = self._make_motor_with_digest()
         messages = self._capture_messages(motor, "test input", source="direct")
         all_content = " ".join(m.get("content", "") for m in messages)
-        assert "[hace" in all_content
+        # F5 dropped the "[hace N turnos]" line label; the wrapper OPEN tag
+        # (with its nota= attribute) is the stable signal that the digest was
+        # injected — the bare "<memoria_de_fondo" substring also appears in
+        # the system prompt's own read-only rule sentence on every turn.
+        assert "<memoria_de_fondo nota=" in all_content
 
     def test_digest_not_injected_in_agenda_path(self):
         motor = self._make_motor_with_digest()
         messages = self._capture_messages(motor, "agenda payload", source="kira-agenda")
         all_content = " ".join(m.get("content", "") for m in messages)
-        assert "[hace" not in all_content
+        assert "<memoria_de_fondo nota=" not in all_content
 
     def test_digest_block_capped_at_600_chars(self):
         """MemoryDigest evicts oldest stored bodies to stay within the 600-char cap.
@@ -707,14 +711,14 @@ class TestDigestInjection:
         assert motor._memory_digest.lines == []
         messages = self._capture_messages(motor, "safe query", source="direct")
         all_content = " ".join(m.get("content", "") for m in messages)
-        assert "[hace" not in all_content
+        assert "<memoria_de_fondo nota=" not in all_content
 
     def test_digest_content_present_in_last_user_message(self):
         """Digest context is embedded into the last user message or system block."""
         motor = self._make_motor_with_digest()
         messages = self._capture_messages(motor, "current user question", source="direct")
         all_content = " ".join(m.get("content", "") for m in messages)
-        assert "[hace" in all_content
+        assert "<memoria_de_fondo nota=" in all_content
         assert "current user question" in all_content
 
 
@@ -846,7 +850,7 @@ class TestMemoriaDefondoWrapper:
     def test_digest_content_is_inside_wrapper(self):
         """The digest lines are enclosed between the opening and closing wrapper tags."""
         motor, _, _ = _make_motor()
-        # Store body-only line; build_block renders [hace N] at build time
+        # Store body-only line; build_block renders the locale label at build time
         motor._memory_digest.append("contexto: algo → Kira: respuesta")
         messages = self._capture_messages(motor, "test input", source="direct")
         all_content = " ".join(m.get("content", "") for m in messages)
@@ -857,8 +861,28 @@ class TestMemoriaDefondoWrapper:
         )
         assert match is not None, "Wrapper tags not found in prompt"
         inner = match.group(1)
-        # build_block renders the [hace N] prefix at build time
-        assert "[hace 1 turno]" in inner
+        # F5: build_block renders the es "[antes]" label, not "[hace N turno]"
+        assert "[antes]" in inner
+
+    def test_wrapper_nota_marks_block_non_citable(self):
+        """F5 (runtime-findings-20260807 §F5): the nota must forbid citing or
+        enumerating the block, not just treating it as instructions — the
+        injection-only guard is what let Kira tabulate the digest verbatim
+        when asked 'hacé una tabla con esto'."""
+        motor, _, _ = _make_motor()
+        motor._memory_digest.append("contexto: algo → Kira: respuesta")
+        messages = self._capture_messages(motor, "test input", source="direct")
+        all_content = " ".join(m.get("content", "") for m in messages)
+        assert "no lo menciones, cites ni enumeres en tus respuestas" in all_content
+
+    def test_digest_line_no_longer_contains_turn_arithmetic(self):
+        """F5: a rendered digest line must not read as a numbered table row
+        (the exact shape Kira tabulated in the runtime incident)."""
+        motor, _, _ = _make_motor()
+        motor._memory_digest.append("contexto: algo → Kira: respuesta")
+        messages = self._capture_messages(motor, "test input", source="direct")
+        all_content = " ".join(m.get("content", "") for m in messages)
+        assert not re.search(r"\[hace \d+ turno", all_content)
 
     def test_agenda_path_has_no_wrapper(self):
         """Agenda path must never receive the <memoria_de_fondo nota=...> wrapper."""

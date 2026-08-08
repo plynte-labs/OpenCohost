@@ -545,7 +545,12 @@ def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch
     assert len(messages) < 9  # eviction ran (started at 4 pairs + 1 final = 9)
     final_content = messages[-1]["content"]
     assert "</memorias_guardadas>" in final_content  # injection wrapper survived
-    assert "[hace" in final_content
+    # The digest survived too. Match the wrapper's OPEN TAG WITH ITS ATTRIBUTE:
+    # the bare tag name also appears in the system prompt's own memoria rule, so
+    # `<memoria_de_fondo` alone would pass even with no digest injected. (The old
+    # `[hace` line label is gone — F5 dropped the turn arithmetic, since it read
+    # as ready-made table rows and Kira tabulated it.)
+    assert "<memoria_de_fondo nota=" in final_content
     assert "editorial: dato relevante" in final_content
     # Sanity ceiling: combined stacking (memorias ~700 + digest ~600 +
     # editorial + contexto) does not blow up unbounded. Bumped from 3000 for the
