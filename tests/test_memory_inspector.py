@@ -155,13 +155,18 @@ class TestMemoryInspectorEntryShape:
         assert entries[1]["role"] == "assistant"
 
     def test_turn_index_preserves_historial_order(self):
+        # Fill to HISTORY_MAX_TURNS pairs (not a hardcoded 4) so this stays valid
+        # regardless of the ADR-043 Lever A stopgap tuning of that constant
+        # (opencohost/config/settings.py) — appending more than capacity would
+        # silently evict from the deque before the snapshot is taken.
+        from opencohost.config.settings import HISTORY_MAX_TURNS
         motor = _make_motor()
-        for i in range(4):
+        for i in range(HISTORY_MAX_TURNS):
             motor.historial.append({"role": "user", "content": f"q{i}", "source": "direct"})
             motor.historial.append({"role": "assistant", "content": f"a{i}", "source": "direct"})
         snapshot = motor.memory_inspector_snapshot()
         indices = [e["turn_index"] for e in snapshot["entries"]]
-        assert indices == list(range(8))
+        assert indices == list(range(HISTORY_MAX_TURNS * 2))
 
 
 class TestMemoryInspectorSourceBreakdown:

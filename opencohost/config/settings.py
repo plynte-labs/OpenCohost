@@ -59,7 +59,23 @@ CTX_TELEMETRY_RING_MAXLEN: int = 50
 CHAT_REPEAT_PENALTY = 1.2
 CHAT_PRESENCE_PENALTY = 0.5
 CHAT_FREQUENCY_PENALTY = 0.5
-HISTORY_MAX_TURNS = 10  # Reducido a 10 turnos (20 mensajes) para no desbordar el contexto de 4096
+# ADR-043 Lever A stopgap (2026-08-10, owner-approved same day as the ADR):
+# lowered from 10 to 3 turns (6 messages) so the historial deque reaches its
+# cap - and writes a digest line via _commit_history - sooner in verbose
+# sessions. Evidence: logs/opencohost_20260807_144251.log and
+# logs/opencohost_20260809_200812.log show the byte gate (context_budget,
+# gated on the 4096-token quality-tier ctx cap) steady-state evicting 8-9 of
+# the 10 cached pairs per turn once the deque fills, i.e. only ~1-2 pairs of
+# verbatim history actually survive into the prompt when turns run verbose -
+# the other 8-9 were being silently discarded with no digest trace. This
+# constant narrows that blind window; it does NOT close it, because the
+# deque counts pairs and the byte gate counts bytes and the two clocks can
+# still race on any sufficiently large single turn (see ADR-043 Decision 1).
+# The structural fix - the byte gate itself writing digest lines for what it
+# evicts (ADR-043 Decision 2, scheduled after router steps 5-6) - is what
+# actually closes the window and supersedes further tuning pressure on this
+# knob. Do not re-tune this value as a substitute for that fix.
+HISTORY_MAX_TURNS = 3
 DEFAULT_MODEL = "llama3"
 
 # ──────────────────────────────────────────────

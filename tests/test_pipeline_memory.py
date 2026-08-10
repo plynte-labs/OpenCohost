@@ -145,6 +145,23 @@ class TestMemoryDigest:
 
 
 # ---------------------------------------------------------------------------
+# ADR-043 Lever A stopgap pin
+# ---------------------------------------------------------------------------
+
+def test_history_max_turns_is_adr043_lever_a_stopgap_value():
+    """ADR-043 (2026-08-10) Decision 1 / open-decisions-20260810.md Decision 2,
+    option (3) "both": HISTORY_MAX_TURNS lowered from 10 to 3 as a same-day
+    STOPGAP so the historial deque reaches cap - and writes a digest line -
+    sooner in verbose sessions, narrowing (not closing) the blind window
+    described in ADR-043 "The blind window, drawn out". The structural fix
+    (byte gate writes its own digest lines, ADR-043 Decision 2) is the real
+    fix and supersedes further tuning pressure on this knob.
+    """
+    from opencohost.config.settings import HISTORY_MAX_TURNS
+    assert HISTORY_MAX_TURNS == 3
+
+
+# ---------------------------------------------------------------------------
 # Slice 2 — Eviction capture in _commit_history
 # ---------------------------------------------------------------------------
 
