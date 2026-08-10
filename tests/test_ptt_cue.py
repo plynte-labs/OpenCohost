@@ -9,13 +9,19 @@ The cue plays through ``winsound`` (a separate Windows audio path with ZERO
 pygame/SDL interaction) so it is safe to fire from the HTTP handler thread even
 while the engine thread quits+re-inits its pygame mixer after every PTT close.
 STRICT TDD, RED first. winsound is ALWAYS mocked — no real audio device is
-touched. The load-bearing behaviours under test: the cue fires async+in-memory
-when enabled, no-ops when disabled or off-Windows, never breaks PTT start on
-error, and bakes PTT_CUE_VOLUME into a once-built, cached WAV.
+touched. The load-bearing behaviours under test: the cue fires async from a
+cached temp FILE when enabled, no-ops when disabled or off-Windows, never
+breaks PTT start on error, and bakes PTT_CUE_VOLUME into a once-built WAV.
+
+Regression (2026-08-09): the cue shipped as ``SND_MEMORY | SND_ASYNC``, which
+CPython's winsound hard-rejects ("Cannot play asynchronously from memory")
+before it ever reaches an audio call — the cue had never played once. Mocked
+winsound is exactly why it shipped, so the flag combination is now pinned.
 """
 from __future__ import annotations
 
 import io
+import os
 import queue
 import struct
 import wave
@@ -120,6 +126,7 @@ def _patch_winsound(monkeypatch):
     spy = MagicMock()
     spy.SND_MEMORY = winsound.SND_MEMORY
     spy.SND_ASYNC = winsound.SND_ASYNC
+    spy.SND_FILENAME = winsound.SND_FILENAME
     spy.SND_NODEFAULT = winsound.SND_NODEFAULT
     monkeypatch.setattr(llm, "winsound", spy)
     return spy
@@ -132,11 +139,26 @@ def test_play_ptt_cue_plays_via_winsound_when_enabled(monkeypatch):
     motor.play_ptt_cue()
 
     spy.PlaySound.assert_called_once()
-    buf, flags = spy.PlaySound.call_args.args
-    assert isinstance(buf, (bytes, bytearray))
-    # async + in-memory: fire-and-forget from any thread, no SDL involvement.
-    assert flags & winsound.SND_MEMORY
+    path, flags = spy.PlaySound.call_args.args
+    # async + from a real file on disk: fire-and-forget from any thread, no
+    # SDL involvement — and the only async form winsound actually accepts.
+    assert isinstance(path, str)
+    assert os.path.exists(path)
+    assert flags & winsound.SND_FILENAME
     assert flags & winsound.SND_ASYNC
+
+
+@requires_winsound
+def test_play_ptt_cue_never_asks_for_async_from_memory(monkeypatch):
+    # Regression pin: winsound raises RuntimeError("Cannot play asynchronously
+    # from memory") for SND_MEMORY|SND_ASYNC, so this combination means the cue
+    # is silently dead in production while every mocked test still passes.
+    spy = _patch_winsound(monkeypatch)
+    motor = _make_cue_motor()
+    motor.play_ptt_cue()
+
+    _, flags = spy.PlaySound.call_args.args
+    assert not (flags & winsound.SND_MEMORY and flags & winsound.SND_ASYNC)
 
 
 @requires_winsound
@@ -180,11 +202,14 @@ def test_ptt_cue_wav_generated_once_and_cached(monkeypatch):
     assert isinstance(first, bytes) and len(first) > 44  # RIFF header + PCM data
 
     motor.play_ptt_cue()
-    # Built exactly once: the same cached bytes are handed to winsound twice.
+    # Built exactly once: the same cached bytes, spilled to one cached temp
+    # file, are handed to winsound twice.
     assert motor._ptt_cue_wav_bytes is first
     calls = spy.PlaySound.call_args_list
     assert len(calls) == 2
-    assert calls[0].args[0] is calls[1].args[0]
+    assert calls[0].args[0] == calls[1].args[0] == motor._ptt_cue_wav_path
+    with open(motor._ptt_cue_wav_path, "rb") as f:
+        assert f.read() == first  # the file holds exactly the cached WAV bytes
 
 
 def test_ptt_cue_wav_amplitude_respects_volume():

@@ -146,6 +146,10 @@ class SpeechRouter:
         # While the mic is live, `_pick()` returns None unconditionally --
         # blocks INCOMING as well as STACK (contract point 3).
         self._ptt_held: bool = False
+        # `time.monotonic()` of the last engage, for the release line's
+        # `held_ms` (2026-08-09). None when no hold was armed through
+        # `hold_and_pause` -- the release then reports -1 rather than a lie.
+        self._ptt_hold_started_monotonic: Optional[float] = None
         # D4: the depth-0 job. Only this job ever emits
         # speaking_start/speaking_end; a preempting (inner) job never claims.
         self._boundary_owner: Optional[SpeechJob] = None
@@ -264,12 +268,21 @@ class SpeechRouter:
         stale-cut residual cannot happen here: the hold set in the same
         acquisition blocks `_pick()`, so no successor can arm — a victim
         that finishes before the interrupt lands just finishes, and the
-        stray interrupt clears `_speaking` with nothing active."""
+        stray interrupt clears `_speaking` with nothing active.
+
+        The engage line names WHETHER a victim was cut (2026-08-09 live
+        session): with nothing active this path emits no cut and no push, so
+        `victim=none` is the ONLY record that the hold — not a stall — is
+        what `_pick()` is refusing. Captured under the lock, logged after it
+        (same discipline as the push/resume lines)."""
         with self._sched_lock:
             self._ptt_held = True
+            self._ptt_hold_started_monotonic = time.monotonic()
             victim = self._active
             if victim is not None:
                 victim.pause_requested = reason
+            victim_log = victim.source if victim is not None else "none"
+        logger.info("[SPEECH_STACK] ptt_hold engaged victim=%s", victim_log)
         self._wake.set()
         if victim is not None:
             self._motor.interrupt_speaking()
@@ -320,9 +333,20 @@ class SpeechRouter:
         can reach the mixer. Production ARMS only through `hold_and_pause`
         (hold + request in one acquisition, judge closure 2026-08-05); this
         is the RELEASE side (`resume_speech_after_ptt`), where there is no
-        request to pair and a bare transition is the whole job."""
+        request to pair and a bare transition is the whole job.
+
+        A real True->False transition closes the hold and logs how long
+        `_pick()` stayed refused (2026-08-09) — the idempotent double-clear
+        every PTT exit path performs is not an event and stays silent."""
         with self._sched_lock:
+            released = self._ptt_held and not held
+            started = self._ptt_hold_started_monotonic
             self._ptt_held = held
+            if released:
+                self._ptt_hold_started_monotonic = None
+        if released:
+            held_ms = int((time.monotonic() - started) * 1000) if started is not None else -1
+            logger.info("[SPEECH_STACK] ptt_hold released held_ms=%d", held_ms)
         self._wake.set()
 
     def sweep_sources(self, prefixes: tuple) -> None:

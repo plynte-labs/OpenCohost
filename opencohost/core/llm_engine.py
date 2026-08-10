@@ -809,6 +809,9 @@ class MotorVocalIA(threading.Thread):
         # (immutable bytes, reinit-proof). None until the first play_ptt_cue()
         # builds it from a pure-stdlib sine; see play_ptt_cue / _ptt_cue_wav.
         self._ptt_cue_wav_bytes = None
+        # ...and the temp file those bytes are spilled to once, because
+        # winsound refuses SND_ASYNC from memory (see _ptt_cue_wav_file).
+        self._ptt_cue_wav_path = None
 
         # Priority queue: (priority, timestamp, payload, source)
         # priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest)
@@ -1524,16 +1527,47 @@ class MotorVocalIA(threading.Thread):
         is fire-and-forget (``SND_ASYNC``) and fail-open: ``PTT_CUE_ENABLED``
         gates it off entirely, a non-Windows host (no ``winsound``) no-ops, and
         every error is swallowed — a cue that fails must never break PTT start.
+
+        Bug fix (2026-08-09): this asked for ``SND_MEMORY | SND_ASYNC``, which
+        winsound rejects outright ("Cannot play asynchronously from memory"),
+        so the cue had never played once — the fail-open except swallowed it
+        and every test mocks winsound. Async is the load-bearing half (this
+        runs on the HTTP handler thread, mid PTT start), so the bytes go to a
+        cached temp file and play with ``SND_FILENAME`` instead.
         """
         if not PTT_CUE_ENABLED or winsound is None:
             return
         try:
             winsound.PlaySound(
-                self._ptt_cue_wav(),
-                winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                self._ptt_cue_wav_file(),
+                winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
             )
         except Exception:
             logger.debug("PTT cue playback skipped (fail-open)", exc_info=True)
+
+    def _ptt_cue_wav_file(self) -> str:
+        """Path to the cue WAV on disk, written once from ``_ptt_cue_wav()``.
+
+        winsound can play asynchronously from a FILE or synchronously from
+        MEMORY, never asynchronously from memory — and a synchronous cue would
+        block PTT start for the blip's whole duration. So the cached bytes are
+        spilled to one temp file per process and replayed from there forever.
+        """
+        if self._ptt_cue_wav_path is not None:
+            return self._ptt_cue_wav_path
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".wav", prefix="ptt_cue_")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(self._ptt_cue_wav())
+        except Exception:
+            os.unlink(path)
+            raise
+        # ponytail: never unlinked -- one small WAV per process, reclaimed by
+        # the OS temp sweep. A finalizer would race the async playback.
+        self._ptt_cue_wav_path = path
+        return path
 
     def _ptt_cue_wav(self) -> bytes:
         """Lazily build and cache the PTT blip as an in-memory WAV file.
@@ -7974,11 +8008,13 @@ class MotorVocalIA(threading.Thread):
                         # ponytail: best-effort cursor -- no item is in hand at
                         # this guard, so the exact next idx is unknowable
                         # without dequeuing. Assumes no skip landed exactly in
-                        # this narrow inter-fragment window. Harmless today:
-                        # nothing resumes from cursor until the router lands
-                        # (design §8 step 3+); revisit only if that ever needs
-                        # to be exact.
+                        # this narrow inter-fragment window; the router resumes
+                        # from this cursor, so an off-by-one here replays or
+                        # drops one fragment. Tighten only if that shows up.
                         cursor = last_idx + 1
+                        logger.info(
+                            f"[SPEECH_STACK] cut source={source} cursor={cursor} at=pre_dequeue"
+                        )
                         break
 
                 item = cola_audios.get(timeout=TTS_AUDIO_QUEUE_TIMEOUT)
@@ -7994,6 +8030,9 @@ class MotorVocalIA(threading.Thread):
                     if not self._speaking:
                         was_interrupted = True
                         cursor = item[1]  # the fragment about to play, never started
+                        logger.info(
+                            f"[SPEECH_STACK] cut source={source} cursor={cursor} at=pre_play"
+                        )
                         try:
                             if os.path.exists(item[0]):
                                 os.remove(item[0])

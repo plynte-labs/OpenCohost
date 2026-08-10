@@ -381,3 +381,34 @@ def test_producer_death_yields_honest_cursor(monkeypatch):
     assert skipped == []
     assert pending == [1, 2, 3]
     assert sorted(spoken + skipped + pending) == list(range(4))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# (8) the PRE-PLAY interrupt exits must not be silent — the mid-playback cut
+#     logged [SPEECH_STACK] cut, the two exits before any audio started did
+#     not, so a turn cut in that window left no trace at all in the log
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_pre_dequeue_cut_logs_speech_stack_line(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor, _, _ = _make_motor(mixer_music=_ScriptedMixerMusic())
+    # Closure B1's real lever: a pause pending for the active router job clears
+    # `_speaking` right after _hablar_impl re-arms it, so the consumer hits the
+    # pre-dequeue guard on its very first pass -- before any fragment is
+    # dequeued, let alone played.
+    monkeypatch.setattr(motor, "_speech_pause_pending", lambda: True)
+
+    outcome = motor._hablar_impl(" ".join(_sentences(3)), source="kira-agenda:t9")
+
+    assert outcome.interrupted is True
+    assert outcome.cursor == 0, "nothing was in hand -- last_idx(-1) + 1"
+    assert outcome.spoken == []
+    assert motor.pygame.mixer.music.load_count == 0, "no fragment ever played"
+
+    cut_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[SPEECH_STACK] cut")]
+    assert len(cut_lines) == 1, cut_lines
+    assert re.fullmatch(
+        r"\[SPEECH_STACK\] cut source=kira-agenda:t9 cursor=0 at=pre_dequeue", cut_lines[0]
+    )
+    assert "Fragmento" not in cut_lines[0], "PRIVACY: no fragment text in the telemetry line"

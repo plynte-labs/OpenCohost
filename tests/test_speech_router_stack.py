@@ -1223,3 +1223,80 @@ def test_cut_push_and_resume_log_source_cursor_and_depth(router_motors, caplog):
         ),
         timeout=5.0,
     ), [r.getMessage() for r in caplog.records]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# (12) the PTT hold LIFECYCLE is telemetry too (2026-08-09 live session)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_ptt_hold_engaged_logs_whether_anything_was_cut(router_motors, caplog):
+    """2026-08-09 live session: a 17 s "dead gap" turned out to be CORRECT
+    behavior -- the hold found nothing active (no victim, so no cut and no
+    `[SPEECH_STACK]` line anywhere), `_ptt_held` then refused every `_pick()`
+    (contract point 3), and the queued job simply waited for the release.
+    Diagnosing that took log archaeology because the whole hold path was
+    silent. The engage side now says it directly, including WHETHER a victim
+    was cut -- the two cases are indistinguishable from the cut/push lines
+    alone, since the quiet one emits none of them."""
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+
+    # (a) nothing active -- the silent path the incident had to be inferred.
+    # `hold_and_pause` runs on the CALLER's thread, so the record is already
+    # there: no poll needed (unlike the router-thread lines above).
+    idle_motor, _, _ = _armed(router_motors, interrupt_enabled=True)
+    idle_motor._ensure_router().hold_and_pause("ptt")
+
+    assert "[SPEECH_STACK] ptt_hold engaged victim=none" in [
+        r.getMessage() for r in caplog.records
+    ], [r.getMessage() for r in caplog.records]
+
+    # (b) something active -- the same line names the job it cut.
+    mixer = _GateMixerMusic(block_at=(0,))
+    motor, _, _ = _armed(router_motors, mixer_music=mixer, interrupt_enabled=True)
+    motor._speak_or_submit(_job_text("V", 2), source="kira-agenda:t1")
+    assert mixer.entered[0].wait(5.0), "producer/consumer never reached fragment 0"
+
+    motor.pause_speech_for_ptt()
+
+    assert "[SPEECH_STACK] ptt_hold engaged victim=kira-agenda:t1" in [
+        r.getMessage() for r in caplog.records
+    ], [r.getMessage() for r in caplog.records]
+
+
+def test_ptt_hold_released_logs_the_held_duration(router_motors, caplog):
+    """The other half of the same gap: nothing recorded how long `_pick()`
+    stayed refused, so the ~34 s a queued job spent waiting had to be
+    reconstructed from surrounding timestamps. Both entrypoints run on the
+    CALLER's thread -- synchronous records, no poll."""
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor, _, _ = _armed(router_motors, interrupt_enabled=True)
+    router = motor._ensure_router()
+
+    def _released() -> list:
+        return [
+            r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("[SPEECH_STACK] ptt_hold released")
+        ]
+
+    router.hold_and_pause("ptt")
+    motor.resume_speech_after_ptt()
+
+    assert len(_released()) == 1, _released()
+    match = re.fullmatch(
+        r"\[SPEECH_STACK\] ptt_hold released held_ms=(-?\d+)", _released()[0]
+    )
+    assert match is not None, _released()[0]
+    assert int(match.group(1)) >= 0, "a released hold must report a real duration"
+
+    # Idempotent double-clear (every PTT exit path calls the funnel, and
+    # `resume_speech_after_ptt` documents itself as a safe no-op): only a
+    # real True->False transition is an event.
+    motor.resume_speech_after_ptt()
+    assert len(_released()) == 1, _released()
+
+    # A hold armed WITHOUT the production path (bare `set_ptt_held(True)`)
+    # has no start stamp: the line still emits, with -1 instead of a lie.
+    router.set_ptt_held(True)
+    router.set_ptt_held(False)
+    assert _released()[-1] == "[SPEECH_STACK] ptt_hold released held_ms=-1", _released()
