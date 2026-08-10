@@ -426,7 +426,6 @@ class PttController:
         session_factory=PttSession,
         on_audio_suspect: Optional[Callable[[], None]] = None,
         on_listening: Optional[Callable[[], None]] = None,
-        on_flush_precheck: Optional[Callable[[], None]] = None,
         on_press_precheck: Optional[Callable[[], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         motor=None,
@@ -456,20 +455,11 @@ class PttController:
         # with the app window unfocused. Optional so tests / minimal host
         # doubles need not supply it.
         self._on_listening = on_listening
-        # WU5 D1 cut precheck (agenda_no_dead_air fase 2, design-fase2.md §3 WU5):
-        # the smallest possible surface into the engine — a bound
-        # ``motor.ptt_interrupt_if_agenda_speaking`` fired SYNCHRONOUSLY on the WS
-        # flush thread BEFORE the turn is dispatched. This is the only path that
-        # can cut DURING an agenda turn's speech (the dispatch/command-queue path
-        # runs at boundaries). Optional so CTK / minimal host doubles never cut;
-        # a raising precheck never blocks the turn.
-        self._on_flush_precheck = on_flush_precheck
-        # Step 0 telemetry (interruptible_speech_architecture_20260804 §5.1,
-        # §8 step 0): a NEW read-only probe fired at the exact point a real
-        # pause_speech("ptt") will fire once the router lands (step 3+) --
-        # the gate seam this design moves from flush to press. Never cuts
-        # anything; fail-open like on_flush_precheck. Optional so tests /
-        # minimal host doubles need not supply it.
+        # Step 3 (interruptible_speech_architecture_20260804 §5.1, §8 step 3):
+        # the REAL pause hook — fired by the press that wins the slot, before
+        # session.start() blocks on the STT connect. Fail-open: a raising or
+        # absent callback never blocks the press. Optional so tests / minimal
+        # host doubles need not supply it.
         self._on_press_precheck = on_press_precheck
         # Step 3 (design §5.1, I6): the smallest possible surface into the
         # engine — a bound ``motor.resume_speech_after_ptt`` callback, fired
@@ -528,15 +518,6 @@ class PttController:
             logger.exception("PTT on_release hook failed")
 
     def _dispatch(self, text: str) -> None:
-        # WU5 D1 (design-fase2.md §3 WU5): the position-aware cut precheck fires
-        # FIRST, synchronously on this WS flush thread, so it can interrupt an
-        # in-flight agenda turn BEFORE the answer is dispatched. Fail-open: a
-        # raising/absent precheck never blocks the turn from being spoken.
-        if self._on_flush_precheck is not None:
-            try:
-                self._on_flush_precheck()
-            except Exception:
-                logger.exception("PTT flush precheck failed")
         # Honest history_text (memoria_quality_20260717 A1): the motor commits
         # "El streamer dijo (PTT): ..." to historial instead of the raw
         # "acaba de decir (PTT)" prompt wrapper, so PTT-derived memorias no
@@ -617,8 +598,7 @@ class PttController:
         # press that WON the slot, after the 409 check, and still BEFORE
         # session.start() blocks on the STT connect, so Kira is paused before
         # the microphone opens. Fail-open: a raising/absent callback never
-        # blocks or breaks the press path (same discipline as _dispatch's
-        # on_flush_precheck).
+        # blocks or breaks the press path.
         if self._on_press_precheck is not None:
             try:
                 self._on_press_precheck()

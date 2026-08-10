@@ -1,6 +1,7 @@
 # ADR-037: Agenda Interruption Policy — Position-Aware PTT Cuts (API Host, Fase 2 WU5)
 
 **Status**: Accepted (policy decided; implementation pending — WU5 of ADR-036's plan)
+**Superseded in part**: §2.1 (D1 position-aware cut) retired by ADR-044 (2026-08-10); D2/D3 remain in force
 **Date**: 2026-07-21
 **Track**: [`conductor/tracks/agenda_no_dead_air_20260719/`](../../conductor/tracks/agenda_no_dead_air_20260719/) (`design-fase2.md` §WU5 v3, `tracks.md`)
 **Builds on**: ADR-036 (Fase 2 design — pregenerated-turn cache, priority queue as the

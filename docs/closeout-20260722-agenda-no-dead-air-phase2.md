@@ -126,7 +126,8 @@ visible once the first set was closed.
   fixed structurally.
 - The `main.py` `on_flush_precheck` wiring test replicates the guarded-`getattr`
   idiom rather than exercising `create_app` end-to-end. Follow-up, not a
-  blocker.
+  blocker. (Retired by ADR-044, 2026-08-10 — frozen-stash return and connector
+  floor survive.)
 - Carried from WU4: the unlocked `rejection_log[-1]` diagnostic read in
   `_agenda_rejection_code()` (mislabel-risk only, closed vocabulary keeps
   privacy intact) and the pre-existing `_format_agenda_rejection` 50-char

@@ -280,19 +280,9 @@ def _ptt_controller_hooks(host) -> dict:
 
     - on_audio_suspect: recovery hook (2026-07-15 PTT voice-death fix).
     - on_listening: mic-live cue (ptt_cue_20260717).
-    - on_flush_precheck: WU5 position-aware agenda cut (ADR-037), fires
-      synchronously at flush — wired ONLY while the speech stack is NOT
-      armed (judge closure 2026-08-05, MAJOR): with the stack armed, the
-      press seam suspends losslessly and D3 preemption makes room when the
-      answer submits, while this seam's bare interrupt_speaking() at grace
-      expiry reached reconcile with no pause request and DISCARDED the
-      resumed filler's tail on the ordinary single-press turn.
     - on_press_precheck: step 3 (§0 row 1, §5.1) — the REAL pause, fired by
       the press that wins the slot, before session.start() blocks on the
-      STT connect. Judge closure NIT: this wiring CLOSED the step-0 gate —
-      speech_pause_would_fire is dead code in llm_engine (nothing calls it,
-      so its runtime gate stopped reporting the day the real pause shipped);
-      it awaits its step-6 deletion.
+      STT connect.
     - on_release: step 3 (§5.1) — the PTT_UP counterpart, fired from
       `_begin_grace`, the single funnel every exit from _LISTENING passes
       through.
@@ -301,19 +291,9 @@ def _ptt_controller_hooks(host) -> dict:
       chat.py's own gate.
     """
     motor = getattr(host, "motor", None)
-    # Same conjunction as the engine's own step-3 entrypoints: either switch
-    # off keeps the WU5 flush seam byte-identical legacy.
-    stack_armed = bool(
-        getattr(motor, "_speech_interrupt_enabled", False)
-        and getattr(motor, "_speech_router_enabled", False)
-    )
     return {
         "on_audio_suspect": getattr(motor, "mark_audio_suspect", None),
         "on_listening": getattr(motor, "play_ptt_cue", None),
-        "on_flush_precheck": (
-            None if stack_armed
-            else getattr(motor, "ptt_interrupt_if_agenda_speaking", None)
-        ),
         "on_press_precheck": getattr(motor, "pause_speech_for_ptt", None),
         "on_release": getattr(motor, "resume_speech_after_ptt", None),
         "motor": motor,

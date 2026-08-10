@@ -549,18 +549,10 @@ class EngineHost:
         motor.agenda_output_preview_validator = locked(agenda.preview_accept_output)
         motor.agenda_output_transformer = locked(agenda.enforce_live_safety_cap)
         motor.agenda_controller = agenda
-        # WU5 D1 (design-fase2.md §3 WU5): install the position-aware PTT cut
-        # policy (default OFF on the engine). This is the "host-installed flag" —
-        # the CTK app never constructs an EngineHost, so it keeps its unchanged
-        # no-cut behavior. The cut is TRIGGERED synchronously from the PTT flush
-        # precheck (main.py wires PttController.on_flush_precheck ->
-        # motor.ptt_interrupt_if_agenda_speaking); this flag gates it.
-        motor._ptt_position_cut_enabled = True
         # Speech-router host flag (interruptible_speech_architecture_20260804
-        # §8 step 2), same pattern and same scope as the D1 flag above: the
-        # API host arms it, CTK never constructs an EngineHost and keeps the
-        # legacy blocking `_hablar`. Flip to False to revert playback to that
-        # legacy path — the kill switch for the whole router.
+        # §8 step 2): the API host arms it, CTK never constructs an EngineHost
+        # and keeps the legacy blocking `_hablar`. Flip to False to revert
+        # playback to that legacy path — the kill switch for the whole router.
         motor._speech_router_enabled = True
         # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
         # step 3), same pattern and same scope: the API host arms it, CTK

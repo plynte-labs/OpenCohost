@@ -1,12 +1,11 @@
 """WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 [v3], D1/D2/D3):
 interruption with connector-based return.
 
+D1 (the position-aware cut) was retired at router step 5, ADR-044: the speech
+router suspends and resumes losslessly instead, and the stash is now created
+by the direct-turn pregen slot handover.
+
 Owner-resolved policies:
-  D1  PTT-only, position-aware cut ("1B con margen"): typed NEVER cuts; a PTT
-      arriving while an AGENDA turn speaks applies zones over speech progress —
-      early (<25%) / late (>75%) defer, mid (25-75%) cut iff the remaining
-      estimate exceeds CUT_THRESHOLD_SECONDS. Gated behind a host-installed
-      flag (default off) so CTK never cuts.
   D2  return-by-default with deterministic skips: after the interruption answer
       plays, Kira returns to the STASHED next-turn agenda draft (connector +
       draft) UNLESS topic changed/closing/stopped, the stash was invalidated
@@ -28,9 +27,6 @@ from types import SimpleNamespace
 import pytest
 
 from opencohost.config.settings import (
-    CUT_THRESHOLD_SECONDS,
-    CUT_ZONE_EARLY,
-    CUT_ZONE_LATE,
     FROZEN_STASH_MAX_HOLD_SECONDS,
     RETURN_MAX_DETOUR_TURNS,
 )
@@ -62,191 +58,15 @@ def _seed_queue(motor, items):
         motor._priority_queue = list(items)
 
 
-def _speaking_agenda(motor, *, played, total, remaining=None):
-    """Model an agenda turn mid-speech with a given progress fraction."""
-    motor._ptt_position_cut_enabled = True
-    motor._speaking = True
-    motor._current_speech_source = "kira-agenda"
-    motor._speech_progress = {"total": total, "played": played, "start": time.time() - 5.0, "first_play": None}
-    if remaining is not None:
-        motor.speech_remaining_estimate = lambda: remaining
-
-
 def _agenda_draft():
     return {"payload": "AG2", "dialogo": "Siguiente beat de agenda.", "priority": 2, "source": "kira-agenda", "gen_ms": 500}
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# AC5.1 — typed input never cuts
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def test_ac51_seam_off_by_default_never_cuts():
-    """The host flag is OFF by default (CTK-unchanged): even mid-zone with a
-    long remaining window, the seam must not cut."""
-    motor = _bare_motor()
-    motor._speaking = True
-    motor._current_speech_source = "kira-agenda"
-    motor._speech_progress = {"total": 100, "played": 50, "start": time.time(), "first_play": None}
-    motor.speech_remaining_estimate = lambda: 999.0
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_position_cut_enabled is False
-    assert motor.ptt_interrupt_if_agenda_speaking() == "off"
-    assert cut == [], "policy off by default -> never cut (CTK regression guard)"
-
-
-def test_ac51_never_cuts_a_non_agenda_speech_source():
-    """A chat/direct turn speaking is never cut by the PTT seam — only agenda
-    speech is a cut candidate (typed answers never get cut)."""
-    motor = _bare_motor()
-    motor._ptt_position_cut_enabled = True
-    motor._speaking = True
-    motor._current_speech_source = "chat"
-    motor._speech_progress = {"total": 100, "played": 50, "start": time.time(), "first_play": None}
-    motor.speech_remaining_estimate = lambda: 999.0
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "off"
-    assert cut == []
-
-
-def test_ac51_never_cuts_when_not_speaking():
-    motor = _bare_motor()
-    motor._ptt_position_cut_enabled = True
-    motor._speaking = False
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-    assert motor.ptt_interrupt_if_agenda_speaking() == "off"
-    assert cut == []
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# AC5.2 — PTT zones (early/late defer, mid margin cut both sides)
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def test_ac52_early_zone_defers():
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # 10% progress -> early zone -> defer, never cut.
-    _speaking_agenda(motor, played=10, total=100, remaining=999.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "defer"
-    assert cut == []
-    assert motor._frozen_stash is None, "a deferred PTT must not freeze the draft"
-
-
-def test_ac52_late_zone_defers():
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # 90% progress -> late zone -> defer.
-    _speaking_agenda(motor, played=90, total=100, remaining=999.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "defer"
-    assert cut == []
-
-
-def test_ac52_mid_zone_cuts_when_remaining_exceeds_threshold():
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # 50% progress -> mid zone; remaining above the threshold -> CUT.
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "cut"
-    assert cut == [1], "mid zone with a long remaining window must cut"
-    assert motor._frozen_stash is not None, "a cut must freeze the next-turn agenda draft"
-    assert motor._frozen_stash["payload"] == "AG2"
-    assert motor._prefetched_agenda is None, "the frozen draft leaves the active pregen slot"
-
-
-def test_ac52_mid_zone_defers_when_remaining_below_threshold():
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # 50% progress -> mid zone; remaining BELOW the threshold -> defer (ends soon).
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS - 5.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "defer"
-    assert cut == [], "mid zone below the margin defers (the turn ends soon anyway)"
-    assert motor._frozen_stash is None
-
-
-def test_ac52_zone_bounds_come_from_settings():
-    # The zone boundaries are owner-tunable settings constants, not magic numbers.
-    assert 0.0 < CUT_ZONE_EARLY < CUT_ZONE_LATE < 1.0
-    assert CUT_THRESHOLD_SECONDS > 0
-    assert RETURN_MAX_DETOUR_TURNS >= 1
-
-
-def test_ac52_mid_zone_defers_when_remaining_equals_threshold():
-    """F8a: the margin rule cuts only when remaining STRICTLY exceeds the
-    threshold — equality defers (the turn ends soon anyway)."""
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "defer"
-    assert cut == [], "remaining == threshold defers (strict > is required to cut)"
-    assert motor._frozen_stash is None
-
-
-def test_ac52_mid_zone_no_draft_to_freeze_defers():
-    """F2: a mid-zone PTT with a long remaining window but NOTHING to freeze
-    (no next-turn draft cached) must defer, not cut — cutting with nothing to
-    return to would lose the beat forever."""
-    motor = _bare_motor()
-    motor._prefetched_agenda = None  # no next-turn draft to freeze
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "defer"
-    assert cut == [], "no draft to freeze -> defer, never cut (the beat is not lost)"
-    assert motor._frozen_stash is None
-
-
-def test_ac52_progress_exactly_at_early_bound_is_mid_zone():
-    """F8b: progress == CUT_ZONE_EARLY is INSIDE the mid (cut) band — the defer
-    condition is `frac < CUT_ZONE_EARLY`, so the boundary itself cuts. Pinned
-    deliberately."""
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # frac == CUT_ZONE_EARLY exactly.
-    played = int(round(CUT_ZONE_EARLY * 100))
-    _speaking_agenda(motor, played=played, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "cut"
-    assert cut == [1], "progress exactly at the early bound is in the mid (cut) zone"
-
-
-def test_ac52_progress_exactly_at_late_bound_is_mid_zone():
-    """F8b: progress == CUT_ZONE_LATE is INSIDE the mid (cut) band — the defer
-    condition is `frac > CUT_ZONE_LATE`, so the boundary itself cuts. Pinned
-    deliberately."""
-    motor = _bare_motor()
-    motor._prefetched_agenda = _agenda_draft()
-    # frac == CUT_ZONE_LATE exactly.
-    played = int(round(CUT_ZONE_LATE * 100))
-    _speaking_agenda(motor, played=played, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    cut = []
-    motor.interrupt_speaking = lambda: cut.append(1)
-
-    assert motor.ptt_interrupt_if_agenda_speaking() == "cut"
-    assert cut == [1], "progress exactly at the late bound is in the mid (cut) zone"
+def _freeze_stash(motor):
+    """Create a frozen stash the way the surviving producer does (`pregenerate`'s
+    `source == "direct"` slot handover), without the retired WU5 cut seam."""
+    with motor._prefetch_lock:
+        return motor._freeze_agenda_stash_locked()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -262,18 +82,13 @@ def test_ac53_cut_then_answer_then_connector_resume_in_spoken_order():
     motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
     motor._record_accepted_agenda_output = lambda d: None
 
-    # 1) An agenda turn is mid-speech with the NEXT draft pregenerated.
+    # 1) An agenda turn is mid-speech with the NEXT draft pregenerated; a direct
+    #    turn takes the slot, freezing the draft (the surviving producer).
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-
-    # 2) PTT cut -> freeze the agenda draft, interrupt.
-    motor._speaking_flag_cut = []
-    real_interrupt = motor.interrupt_speaking
-    motor.interrupt_speaking = lambda: (real_interrupt(), motor._speaking_flag_cut.append(1))
-    assert motor.ptt_interrupt_if_agenda_speaking() == "cut"
+    _freeze_stash(motor)
     assert motor.has_frozen_stash() is True
 
-    # 3) The interruption answer P plays (interactive). speech ended after the cut.
+    # 2) The interruption answer P plays (interactive). speech ended after the cut.
     motor._speaking = False
     motor._prefetched_agenda = {"payload": "P", "dialogo": "Respuesta PTT.", "priority": 0, "source": "ptt"}
     _seed_queue(motor, [(0, time.time(), "P", "ptt", None)])
@@ -283,7 +98,7 @@ def test_ac53_cut_then_answer_then_connector_resume_in_spoken_order():
     assert motor._detour_turns == 1, "the interruption answer counts as one detour turn"
     assert motor.has_frozen_stash() is True, "the frozen agenda draft survives the detour"
 
-    # 4) The RETURN: restore the frozen draft (connector resolved), requeue, pop.
+    # 3) The RETURN: restore the frozen draft (connector resolved), requeue, pop.
     key = motor.restore_frozen_stash(tema="modelos de lenguaje")
     assert key is not None and key[0] == "AG2"
     _seed_queue(motor, [(2, time.time(), "AG2", "kira-agenda", None)])
@@ -312,8 +127,7 @@ def test_ac53_resumed_boundary_telemetry_labels_draft_resumed(caplog):
     motor._record_accepted_agenda_output = lambda d: None
 
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    assert motor.ptt_interrupt_if_agenda_speaking() == "cut"
+    _freeze_stash(motor)
     motor._speaking = False
 
     motor.restore_frozen_stash(tema="algo")
@@ -334,8 +148,7 @@ def test_ac53_resumed_boundary_telemetry_labels_draft_resumed(caplog):
 def test_ac54_detour_over_max_suppresses_the_return():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     assert motor.has_frozen_stash() is True
 
     # More than RETURN_MAX_DETOUR_TURNS interactive turns chained since the cut.
@@ -349,8 +162,7 @@ def test_ac54_detour_over_max_suppresses_the_return():
 def test_ac54_within_max_does_not_skip():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
 
     motor._note_detour_turn("chat")  # exactly one detour turn
 
@@ -361,8 +173,7 @@ def test_ac54_within_max_does_not_skip():
 def test_ac54_profile_switch_invalidates_the_frozen_stash():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     assert motor.has_frozen_stash() is True
 
     motor._invalidate_frozen_stash()  # what set_profile / switch_llm_tier call
@@ -374,8 +185,7 @@ def test_ac54_profile_switch_invalidates_the_frozen_stash():
 def test_ac54_session_stop_invalidates_via_drop_pending_sources():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     assert motor.has_frozen_stash() is True
 
     # Emergency/soft stop drops pending agenda -> the frozen stash must go too.
@@ -387,8 +197,7 @@ def test_ac54_session_stop_invalidates_via_drop_pending_sources():
 def test_ac54_discard_resets_detour_counter():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     motor._note_detour_turn("chat")
     assert motor._detour_turns == 1
 
@@ -406,8 +215,7 @@ def test_ac54_discard_resets_detour_counter():
 def test_ac55_pool_floor_plays_when_upgrade_absent():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     # No connector upgrade landed -> the floor must fill it.
     assert motor._frozen_stash.get("connector") is None
 
@@ -430,8 +238,7 @@ def test_ac55_pool_floor_no_immediate_repetition():
 def test_ac55_upgrade_used_when_present_and_clean():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     # A generated upgrade landed during the answer's TTS.
     with motor._prefetch_lock:
         motor._frozen_stash["connector"] = "Che, retomando lo de antes,"
@@ -458,8 +265,7 @@ def test_restore_frozen_stash_bumps_pregen_epoch():
     pre-restore epoch is invalidated and can never overwrite the resumed draft."""
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     assert motor.has_frozen_stash() is True
 
     epoch_before = motor._prefetch_epoch
@@ -478,8 +284,8 @@ def test_restore_frozen_stash_bumps_pregen_epoch():
 def test_ac56_upgrade_does_not_evict_a_cached_real_pregen():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
 
     # A REAL interactive pregen now occupies the active slot (P's answer).
     real = {"payload": "P", "dialogo": "PD", "priority": 0, "source": "ptt", "gen_ms": 10}
@@ -493,12 +299,22 @@ def test_ac56_upgrade_does_not_evict_a_cached_real_pregen():
     assert gen == [], "the connector upgrade must not even spawn while a real pregen occupies the slot"
     assert motor._frozen_stash.get("connector") is None
 
+    # Release: clear the named blocking condition (the real pregen occupying the
+    # slot) and re-drive the same entrypoint — proving THAT check, not something
+    # else, was the decider.
+    motor._prefetched_agenda = None
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(lambda: gen == [1]), (
+        "with the real pregen cleared, the upgrade now proceeds"
+    )
+
 
 def test_ac56_upgrade_does_not_spawn_while_a_pregen_is_inflight():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
 
     with motor._prefetch_lock:
         motor._pregen_inflight = {"payload": "P", "source": "ptt", "priority": 0}
@@ -509,6 +325,17 @@ def test_ac56_upgrade_does_not_spawn_while_a_pregen_is_inflight():
 
     assert gen == [], "the connector upgrade must yield to an in-flight real pregen"
 
+    # Release: clear the named blocking condition (the in-flight pregen) and
+    # re-drive the same entrypoint — proving THAT check, not something else,
+    # was the decider.
+    with motor._prefetch_lock:
+        motor._pregen_inflight = None
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(lambda: gen == [1]), (
+        "with the in-flight pregen cleared, the upgrade now proceeds"
+    )
+
 
 def test_ac56_upgrade_worker_skips_when_llm_generating_held():
     """F3 (CRITICAL): the upgrade worker must not run a SECOND concurrent Ollama
@@ -516,8 +343,8 @@ def test_ac56_upgrade_worker_skips_when_llm_generating_held():
     worker claims occupancy atomically and skips — it must never call the LLM."""
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
     # Slot free, but a generation is already in flight (single-Ollama rule).
     motor._prefetched_agenda = None
     with motor._lock:
@@ -534,6 +361,17 @@ def test_ac56_upgrade_worker_skips_when_llm_generating_held():
     assert motor._frozen_stash.get("connector") is None, "no connector lands when occupancy is held"
     assert motor.llm_generating is True, "the worker never touched the held occupancy flag"
 
+    # Release: clear the named blocking condition (the held occupancy flag) and
+    # re-drive the same entrypoint — proving THAT check, not something else,
+    # was the decider.
+    with motor._lock:
+        motor._llm_generating = False
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(lambda: gen == [1]), (
+        "with the occupancy flag cleared, the upgrade worker now proceeds"
+    )
+
 
 def test_ac56_upgrade_worker_does_not_stamp_a_fresh_stash():
     """F6 (WARNING): a discard+new-freeze between spawn and completion must not
@@ -541,8 +379,8 @@ def test_ac56_upgrade_worker_does_not_stamp_a_fresh_stash():
     frozen stash is still the SAME object it was spawned for."""
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
     motor._prefetched_agenda = None
     motor._preview_accept_agenda_output = lambda d: True
 
@@ -570,12 +408,31 @@ def test_ac56_upgrade_worker_does_not_stamp_a_fresh_stash():
     )
     assert original_stash.get("connector") is None, "the superseded stash was dropped, never written"
 
+    # Release: clear the named blocking condition (the mid-flight stash swap,
+    # which breaks the F6 `self._frozen_stash is stash` identity check) and
+    # re-drive the same entrypoint — proving THAT check, not something else,
+    # was the decider.
+    motor._frozen_stash = original_stash
+
+    def _return_without_swap(*a, **kw):
+        with motor._lock:
+            motor._llm_generating = False
+        return "Bueno, volviendo a lo viejo,"
+
+    motor._generar_dialogo = _return_without_swap
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(
+        lambda: motor._frozen_stash.get("connector") == "Bueno, volviendo a lo viejo,"
+    ), "without the mid-flight swap, the identity check lets the connector land"
+
 
 def test_ac56_upgrade_generates_into_frozen_stash_when_slot_is_free():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
     # Slot free (the answer already popped from cache), GPU free.
     motor._prefetched_agenda = None
     motor._preview_accept_agenda_output = lambda d: True
@@ -592,8 +449,8 @@ def test_ac56_upgrade_generates_into_frozen_stash_when_slot_is_free():
 def test_ac56_upgrade_rejected_by_guardrail_leaves_floor_fallback():
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
     motor._prefetched_agenda = None
     motor._preview_accept_agenda_output = lambda d: False  # rejected
 
@@ -612,6 +469,24 @@ def test_ac56_upgrade_rejected_by_guardrail_leaves_floor_fallback():
     assert _wait_until(lambda: not motor.llm_generating, timeout=1.0)
     time.sleep(0.05)
     assert motor._frozen_stash.get("connector") is None, "a rejected upgrade never lands -> floor fallback"
+
+    # Release: clear the named blocking condition (the guardrail rejection) and
+    # re-drive the same entrypoint — proving THAT check, not something else,
+    # was the decider.
+    motor._preview_accept_agenda_output = lambda d: True
+
+    def _accept(*a, **kw):
+        with motor._lock:
+            motor._llm_generating = False
+        return "linea aceptada"
+
+    motor._generar_dialogo = _accept
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(lambda: motor._frozen_stash.get("connector") == "linea aceptada"), (
+        "with the guardrail accepting, the connector now lands"
+    )
 
 
 def test_upgrade_triggered_at_speaking_start_only_for_non_agenda_turns():
@@ -643,8 +518,7 @@ def test_r3_spawn_gate_skips_below_remaining_estimate_threshold():
 
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
     motor._prefetched_agenda = None
     motor._preview_accept_agenda_output = lambda d: True
     gen = []
@@ -708,8 +582,8 @@ def test_r4_worker_exit_does_not_clobber_a_third_party_claim():
     read False during a live Ollama call and misfire the WU3 GPU-free predicate)."""
     motor = _bare_motor()
     motor._prefetched_agenda = _agenda_draft()
-    _speaking_agenda(motor, played=50, total=100, remaining=CUT_THRESHOLD_SECONDS + 5.0)
-    motor.ptt_interrupt_if_agenda_speaking()
+    _freeze_stash(motor)
+    motor.speech_remaining_estimate = lambda: 25.0
     motor._prefetched_agenda = None
     motor._preview_accept_agenda_output = lambda d: True
 
@@ -960,90 +834,8 @@ def test_driver_return_lost_restore_after_adoption_enqueues_fresh_turn(caplog):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# ptt_session precheck hook (the cut trigger surface) + engine_host flag
+# ptt_session press hook -- main.py wiring to the engine's real pause/resume
 # ══════════════════════════════════════════════════════════════════════════
-
-
-def test_ptt_controller_fires_flush_precheck_before_dispatch():
-    from opencohost.api.ptt_session import PttController
-
-    order = []
-
-    class _Disp:
-        def dispatch(self, *a, **kw):
-            order.append("dispatch")
-
-    ctrl = PttController(
-        "ws://x",
-        _Disp(),
-        SimpleNamespace(record=lambda *a, **kw: None),
-        on_flush_precheck=lambda: order.append("precheck"),
-    )
-    ctrl._dispatch("hola kira que tal")
-
-    assert order == ["precheck", "dispatch"], "the cut precheck fires BEFORE the turn is dispatched"
-
-
-def test_ptt_controller_precheck_none_is_a_safe_noop():
-    from opencohost.api.ptt_session import PttController
-
-    dispatched = []
-
-    class _Disp:
-        def dispatch(self, *a, **kw):
-            dispatched.append(a)
-
-    ctrl = PttController("ws://x", _Disp(), SimpleNamespace(record=lambda *a, **kw: None))
-    ctrl._dispatch("hola kira que tal")  # no precheck wired
-
-    assert dispatched, "with no precheck the flush still dispatches the turn (typed/CTK parity)"
-
-
-def test_ptt_controller_precheck_failure_never_blocks_dispatch():
-    from opencohost.api.ptt_session import PttController
-
-    dispatched = []
-
-    class _Disp:
-        def dispatch(self, *a, **kw):
-            dispatched.append(a)
-
-    def _boom():
-        raise RuntimeError("boom")
-
-    ctrl = PttController(
-        "ws://x", _Disp(), SimpleNamespace(record=lambda *a, **kw: None), on_flush_precheck=_boom
-    )
-    ctrl._dispatch("hola kira que tal")
-
-    assert dispatched, "a raising precheck must never block the turn from dispatching"
-
-
-def test_main_wires_ptt_precheck_to_engine_bound_method():
-    """F8c: the PttController must receive the engine's real
-    ptt_interrupt_if_agenda_speaking bound method via main.py's getattr chain —
-    cheap smoke against a real engine instance, no server spin-up."""
-    from opencohost.api.ptt_session import PttController
-
-    motor = _bare_motor()
-    host = SimpleNamespace(motor=motor)
-    # Replicate main.py's exact wiring idiom.
-    precheck = getattr(getattr(host, "motor", None), "ptt_interrupt_if_agenda_speaking", None)
-
-    class _Disp:
-        def dispatch(self, *a, **kw):
-            pass
-
-    ctrl = PttController(
-        "ws://x", _Disp(), SimpleNamespace(record=lambda *a, **kw: None), on_flush_precheck=precheck
-    )
-
-    assert ctrl._on_flush_precheck is not None, "the precheck resolved to a real callable"
-    assert ctrl._on_flush_precheck == motor.ptt_interrupt_if_agenda_speaking, (
-        "the controller received the engine's own bound cut method"
-    )
-    # The default engine flag is OFF, so the bound method is a safe no-op ("off").
-    assert ctrl._on_flush_precheck() == "off"
 
 
 def test_main_wires_the_press_hook_to_the_real_pause():
@@ -1051,9 +843,8 @@ def test_main_wires_the_press_hook_to_the_real_pause():
     3c): a getattr typo here would silently disarm the whole feature with
     every OTHER test still green -- main.py must resolve `on_press_precheck`
     to `motor.pause_speech_for_ptt` and `on_release` to
-    `motor.resume_speech_after_ptt`, mirroring
-    test_main_wires_ptt_precheck_to_engine_bound_method above. A minimal
-    host double without `motor` must still construct (getattr fallback)."""
+    `motor.resume_speech_after_ptt`. A minimal host double without `motor`
+    must still construct (getattr fallback)."""
     # Closure (vacuous-test finding, 2026-08-05): the old version REPLICATED
     # main.py's getattr idiom inline and asserted on its own local copy — a
     # typo in main.py itself stayed green while silently disarming the whole
@@ -1099,44 +890,6 @@ def test_main_wires_the_press_hook_to_the_real_pause():
         on_press_precheck=bare_hooks["on_press_precheck"],
         on_release=bare_hooks["on_release"],
     )
-
-
-def test_flush_seam_is_unwired_only_when_the_stack_is_armed():
-    """Judge closure (2026-08-05, MAJOR, judge B): with the speech stack
-    armed, BOTH seams fired for one press — PTT_DOWN suspended the agenda
-    turn losslessly, PTT_UP resumed it as filler, then grace expiry ran the
-    WU5 flush precheck whose "cut" is a BARE `interrupt_speaking()`:
-    reconcile saw a cut with no pause request and DISCARDED the resumed
-    tail (probe: 3 of 4 fragments lost on the ordinary single-press turn).
-    The press seam plus D3 preemption when the answer submits supersede the
-    flush-time position cut, so main.py wires `on_flush_precheck` only
-    while the stack is NOT armed — either switch off keeps the legacy
-    wiring byte-identical."""
-    from opencohost.api.main import _ptt_controller_hooks
-
-    motor = _bare_motor()
-    host = SimpleNamespace(motor=motor)
-
-    # Both switches off (CTK / full revert): legacy wiring, untouched.
-    hooks = _ptt_controller_hooks(host)
-    assert hooks["on_flush_precheck"] == motor.ptt_interrupt_if_agenda_speaking
-
-    # Router without step 3: the flush seam is still the only cut there is.
-    motor._speech_router_enabled = True
-    hooks = _ptt_controller_hooks(host)
-    assert hooks["on_flush_precheck"] == motor.ptt_interrupt_if_agenda_speaking
-
-    # Stack armed (both switches): the press seam supersedes the flush cut.
-    motor._speech_interrupt_enabled = True
-    hooks = _ptt_controller_hooks(host)
-    assert hooks["on_flush_precheck"] is None, (
-        "an armed stack must unwire the WU5 flush cut — it discards the "
-        "resumed filler the press seam just preserved"
-    )
-    # The rest of the wiring is untouched by the gate.
-    assert hooks["on_press_precheck"] == motor.pause_speech_for_ptt
-    assert hooks["on_release"] == motor.resume_speech_after_ptt
-    assert hooks["motor"] is motor
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1228,3 +981,34 @@ def test_ac56_upgrade_still_generates_during_legacy_blocking_playback():
     assert _wait_until(
         lambda: motor._frozen_stash.get("connector") == "Bueno, volviendo a lo nuestro,"
     ), "legacy blocking playback is the GPU-free window — the upgrade must still generate"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Router step 5-6 closure — the D1 seam is retired, D2/D3 survive
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_wu5_position_cut_is_retired_and_the_return_survives():
+    """Router step 5 (ADR-044): the D1 position-aware cut is gone — the router's
+    press-time pause supersedes it losslessly, and a second, lossy cut seam beside
+    it is what made one press fire two cuts (step-3 judge MAJOR). D2/D3 (frozen
+    stash, detour, connector return) survive with the direct-turn slot handover as
+    their sole producer."""
+    import inspect
+    from opencohost.config import settings
+    from opencohost.api.main import _ptt_controller_hooks
+    from opencohost.api.ptt_session import PttController
+
+    motor = _bare_motor()
+    for gone in ("ptt_interrupt_if_agenda_speaking", "speech_pause_would_fire",
+                 "ptt_position_cut_enabled", "_ptt_position_cut_enabled",
+                 "_freeze_agenda_stash"):
+        assert not hasattr(motor, gone), gone
+    for gone in ("CUT_ZONE_EARLY", "CUT_ZONE_LATE", "CUT_THRESHOLD_SECONDS"):
+        assert not hasattr(settings, gone), gone
+    assert "on_flush_precheck" not in inspect.signature(PttController.__init__).parameters
+    assert "on_flush_precheck" not in _ptt_controller_hooks(SimpleNamespace(motor=motor))
+
+    # the KEPT half (D2/D3)
+    assert motor._freeze_agenda_stash_locked and motor.restore_frozen_stash
+    assert settings.RETURN_MAX_DETOUR_TURNS and settings.FROZEN_STASH_MAX_HOLD_SECONDS

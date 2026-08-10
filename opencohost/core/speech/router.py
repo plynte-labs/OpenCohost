@@ -566,8 +566,9 @@ class SpeechRouter:
                 # OWN owed slice, never a re-chunked rejoin of the raw text.
                 # `cursor_base` (judge closure 2026-08-05) keeps
                 # `_speech_progress` TURN-relative on a resume — without it
-                # every played/total consumer read the owed slice as the
-                # whole turn and un-earned the WU5 late-zone protection.
+                # every played/total consumer (speech_remaining_estimate and
+                # every other progress reader) read the owed slice as the
+                # whole turn.
                 pre_split=job.chunks[job.cursor:] if job.chunks is not None else None,
                 cursor_base=job.cursor if job.chunks is not None else 0,
             )

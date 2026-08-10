@@ -48,7 +48,7 @@ from opencohost.config.settings import (
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
     RETRY_MIN_REMAINING_SECONDS,
-    CUT_ZONE_EARLY, CUT_ZONE_LATE, CUT_THRESHOLD_SECONDS, RETURN_MAX_DETOUR_TURNS,
+    RETURN_MAX_DETOUR_TURNS,
     CONNECTOR_UPGRADE_MIN_REMAINING_SECONDS, CONNECTOR_UPGRADE_TIMEOUT_SECONDS,
     CLOUD_CHAT_TIMEOUT, CLOUD_CTX_BUDGET, CLOUD_MAX_TOKENS, LLM_KEYS_FILE,
     CLAUSE_SANITIZER_SOURCES,
@@ -863,15 +863,15 @@ class MotorVocalIA(threading.Thread):
         # means at most one writer at a time).
         self._pregen_last_gen_duration: Optional[float] = None
 
-        # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5, D1/D2/D3):
-        # interruption + connector-based return. All guarded by _prefetch_lock.
-        # _frozen_stash holds the NEXT-turn agenda draft moved OUT of the active
-        # _prefetched_agenda slot at a PTT cut, so it survives the interactive
+        # WU5 D2/D3 (ADR-038): interruption detour + connector-based return.
+        # All guarded by _prefetch_lock. _frozen_stash holds the NEXT-turn
+        # agenda draft moved OUT of the active _prefetched_agenda slot when a
+        # direct turn takes the slot, so it survives the interactive
         # detour (exempt from the _commit_history epoch bump and interactive-pregen
         # eviction, which only touch _prefetched_agenda) and the answer's own
         # pregen can use the freed slot. {payload, dialogo, source, priority,
         # gen_ms, connector}. _detour_turns counts interactive turns spoken
-        # since the cut (D2 skip when it exceeds RETURN_MAX_DETOUR_TURNS).
+        # since the freeze (D2 skip when it exceeds RETURN_MAX_DETOUR_TURNS).
         # _connector_last_idx rotates the D3 floor pool without immediate repeats.
         self._frozen_stash: Optional[dict] = None
         self._detour_turns: int = 0
@@ -880,14 +880,9 @@ class MotorVocalIA(threading.Thread):
         # never reaches a _note_detour_turn site. None when no stash is frozen.
         self._frozen_stash_at: Optional[float] = None
         self._connector_last_idx: Optional[int] = None
-        # D1 host flag (default OFF): the position-aware PTT cut is API-host
-        # product behavior. EngineHost sets this True; the CTK app never
-        # constructs EngineHost, so CTK keeps its unchanged no-cut behavior.
-        self._ptt_position_cut_enabled: bool = False
         # Speech-router host flag (interruptible_speech_architecture_20260804
-        # §8 step 2), same pattern as the D1 flag above and the same reason:
-        # EngineHost turns it ON, CTK never does. OFF is the kill switch —
-        # `_speak_or_submit` falls back to a direct, blocking `_hablar`.
+        # §8 step 2): EngineHost turns it ON, CTK never does. OFF is the kill
+        # switch — `_speak_or_submit` falls back to a direct, blocking `_hablar`.
         self._speech_router_enabled: bool = False
         # Built (and its daemon thread started) on the FIRST routed submit.
         self._speech_router = None
@@ -1077,12 +1072,6 @@ class MotorVocalIA(threading.Thread):
         with self._lock:
             return self._current_processing_source
 
-    @property
-    def ptt_position_cut_enabled(self) -> bool:
-        """WU5 D1 host flag: True only when the API host installed the
-        position-aware PTT cut policy. Default False (CTK-unchanged)."""
-        return self._ptt_position_cut_enabled
-
     def interrupt_speaking(self) -> None:
         """Public interrupt: stop the in-flight speech consumer immediately.
 
@@ -1150,93 +1139,20 @@ class MotorVocalIA(threading.Thread):
         remaining_fragments = max(0, progress["total"] - played)
         return remaining_fragments * mean_per_fragment
 
-    # ── WU5 (design-fase2.md §3 WU5): interruption + connector-based return ──
-
-    def ptt_interrupt_if_agenda_speaking(self) -> str:
-        """D1 cut seam (design-fase2.md §3 WU5): a PTT arrived — decide cut vs
-        defer by position over the CURRENT agenda speech. Returns:
-          - "off"   the policy is disabled (host flag off), or the current speech
-                    is not an agenda turn (typed/chat answers are never cut).
-          - "defer" the zones say don't cut (early/late) or the mid-band margin
-                    rule says the turn ends soon anyway — the PTT answer
-                    pregenerates and plays at the boundary.
-          - "cut"   a mid-band turn with a long remaining window: the next-turn
-                    agenda draft is frozen and the current speech is interrupted.
-
-        The engine-level seam self-gates on `kira-agenda*` current_speech_source
-        and the host flag, so a typed/chat source can never trigger a cut and CTK
-        (which never installs the flag) never cuts. Called synchronously from the
-        PTT flush thread (ptt_session's precheck hook), the only path that can cut
-        DURING an agenda turn's speech (the queue path runs at boundaries).
-        """
-        if not self._ptt_position_cut_enabled:
-            return "off"
-        with self._lock:
-            speaking = self._speaking
-            source = self._current_speech_source
-            progress = dict(self._speech_progress) if self._speech_progress else None
-        if not speaking or not (isinstance(source, str) and source.startswith("kira-agenda")):
-            return "off"
-        frac = None
-        if progress:
-            total = progress.get("total") or 0
-            played = progress.get("played") or 0
-            if total > 0:
-                frac = played / total
-        # Unknown progress, early zone, or late zone -> defer (never cut).
-        if frac is None or frac < CUT_ZONE_EARLY or frac > CUT_ZONE_LATE:
-            return "defer"
-        # Mid zone: deterministic margin rule (no LLM).
-        remaining = self.speech_remaining_estimate()
-        if remaining is not None and remaining > CUT_THRESHOLD_SECONDS:
-            # F2: only cut when there is a next-turn draft to freeze — cutting with
-            # nothing to return to would lose the beat forever. No draft -> defer
-            # (the answer plays at the boundary, the current turn finishes).
-            if not self._freeze_agenda_stash():
-                return "defer"
-            self.interrupt_speaking()
-            return "cut"
-        return "defer"
-
-    def speech_pause_would_fire(self) -> None:
-        """Step 0 telemetry (interruptible_speech_architecture_20260804 §8
-        step 0, §5.1): a read-only probe wired to `PttController.start()`'s
-        press-time precheck -- mirrors `ptt_interrupt_if_agenda_speaking`'s
-        wiring shape, but NEVER cuts anything and has no host-flag gate.
-
-        Logs what a real `pause_speech("ptt")` would look like at this exact
-        instant (design's future step 3), so real press frequency and cut
-        position can be measured before anything is armed. No-op (no log)
-        when not currently speaking. Never mutates `_speaking` or any other
-        engine state.
-        """
-        with self._lock:
-            speaking = self._speaking
-            source = self._current_speech_source
-            progress = dict(self._speech_progress) if self._speech_progress else None
-        if not speaking:
-            return
-        played = progress["played"] if progress else 0
-        total = progress["total"] if progress else 0
-        logger.info(f"[SPEECH_PAUSE] would-fire source={source} played={played} total={total}")
-
-    def _freeze_agenda_stash(self) -> bool:
-        """WU5 D2: move the cached NEXT-turn agenda draft out of the active pregen
-        slot into `_frozen_stash`, so the interruption answer can use the freed
-        slot (WU3 pregen) and the agenda draft survives the detour to be resumed.
-        No epoch bump — freezing is not invalidation (there is no in-flight worker
-        for an already-cached draft). Resets the detour counter. Returns True iff
-        a draft was frozen (nothing to return to otherwise — normal flow resumes).
-        """
-        with self._prefetch_lock:
-            return self._freeze_agenda_stash_locked()
+    # ── WU5 D2/D3: frozen-stash detour return + connector (ADR-038; the D1
+    # position cut was retired at router step 5) ──
 
     def _freeze_agenda_stash_locked(self) -> bool:
-        """`_freeze_agenda_stash`'s body, with the caller holding `_prefetch_lock`.
+        """Move the cached NEXT-turn agenda draft out of the active pregen slot
+        into `_frozen_stash`, so a direct-turn slot handover (`pregenerate`'s
+        `source == "direct"` branch) can use the freed slot and the
+        agenda draft survives the detour to be resumed. No epoch bump —
+        freezing is not invalidation (there is no in-flight worker for an
+        already-cached draft). Resets the detour counter. Returns True iff a
+        draft was frozen (nothing to return to otherwise — normal flow resumes).
 
-        Split out for Step 2 (direct_turn_preemption_20260803): `pregenerate`'s
-        slot-handover branch already holds `_prefetch_lock`, and threading.Lock
-        is not reentrant. Same contract, same mutations, no epoch bump.
+        Caller holds `_prefetch_lock` (threading.Lock is not reentrant); the
+        sole production caller is `pregenerate`'s slot-handover branch.
         """
         cached = self._prefetched_agenda
         if cached is None or not str(cached.get("source", "")).startswith("kira-agenda"):
@@ -1267,13 +1183,13 @@ class MotorVocalIA(threading.Thread):
 
     def detour_exceeded(self) -> bool:
         """D2 skip: more than RETURN_MAX_DETOUR_TURNS interactive turns chained
-        since the cut — a real conversation started, so skip the return."""
+        since the freeze — a real conversation started, so skip the return."""
         with self._prefetch_lock:
             return self._detour_turns > RETURN_MAX_DETOUR_TURNS
 
     def detour_started(self) -> bool:
         """F1: True once at least one interactive turn has been noted since the
-        cut. The return must HOLD until then — the interruption answer rides the
+        freeze. The return must HOLD until then — the interruption answer rides the
         command queue (invisible to the driver's return gates), so a speaking_end
         from the cut itself must never fire the connector return BEFORE the answer
         speaks. The detour counter increments as the answer turn is selected."""

@@ -1,6 +1,7 @@
 # ADR-038: Agenda Interruption Implemented — Bounded Frozen-Stash Return with Connector Floor
 
 **Status**: Accepted
+**Superseded in part**: §2.1 (position-cut zone implementation) retired by ADR-044 (2026-08-10); the frozen-stash return (D2) and connector floor (D3) remain in force
 **Date**: 2026-07-22
 **Track**: [`conductor/tracks/agenda_no_dead_air_20260719/`](../../conductor/tracks/agenda_no_dead_air_20260719/) (`design-fase2.md` §WU5 [v3], `tracks.md`)
 **Builds on**: ADR-037 (policy decision: D1 position-aware PTT-only cut, D2

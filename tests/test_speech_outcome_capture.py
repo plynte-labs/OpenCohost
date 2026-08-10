@@ -1,6 +1,6 @@
 """Strict TDD for the speech-router landing sequence, steps 0+1
 (conductor/tracks/interruptible_speech_architecture_20260804/speech-router-design.md
-§8). Telemetry ([SPEECH_LOST], [SPEECH_PAUSE], [SPEECH_STACK]) and
+§8). Telemetry ([SPEECH_LOST], [SPEECH_STACK]) and
 capture-and-discard (`SpeechOutcome`). Zero audible behavior change: these
 tests prove `_hablar_impl`'s REAL producer/consumer loop already does the
 right thing and now REPORTS it accurately -- nothing resumes, nothing is
@@ -258,7 +258,7 @@ def test_synthesis_failure_drops_exactly_one_fragment_and_continues(caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# (4) press telemetry — [SPEECH_PAUSE] would-fire, never interrupts
+# (4) press hook — fail-open, never blocks the press path
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -272,41 +272,6 @@ class _FakeSession:
 
     def start(self):
         pass
-
-
-def test_press_precheck_logs_would_fire_without_interrupting(caplog):
-    caplog.set_level(logging.INFO, logger="OpenCohost")
-    mixer = _ScriptedMixerMusic(block_at=0)
-    motor, _, _ = _make_motor(mixer_music=mixer)
-    text = " ".join(_sentences(3))
-
-    t = threading.Thread(
-        target=lambda: motor._hablar_impl(text, source="kira-agenda:t7"), daemon=True
-    )
-    t.start()
-    assert mixer.entered_block.wait(5.0), "speech never reached mid-playback"
-
-    controller = PttController(
-        "ws://test/whisperlive",
-        MagicMock(),
-        MagicMock(),
-        session_factory=_FakeSession,
-        on_press_precheck=motor.speech_pause_would_fire,
-    )
-    sid = controller.start()
-
-    assert sid == "ptt_fake"
-    assert motor._speaking is True, "press telemetry must never interrupt playback"
-
-    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[SPEECH_PAUSE]")]
-    assert len(lines) == 1, lines
-    assert re.fullmatch(
-        r"\[SPEECH_PAUSE\] would-fire source=kira-agenda:t7 played=0 total=3", lines[0]
-    )
-
-    mixer.release()
-    t.join(5.0)
-    assert not t.is_alive()
 
 
 def test_press_precheck_raising_still_completes_start():
