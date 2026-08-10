@@ -238,6 +238,18 @@ def test_connector_templates_returns_tuple(official):
     assert isinstance(active.connector_templates(), tuple)
 
 
+def test_connector_templates_es_no_rioplatense_markers(official):
+    """Owner decision (neutral_spanish_20260809): Kira must stop speaking
+    Rioplatense/Argentine voseo. The es connector FLOOR pool (agenda-return
+    transitions) must carry neutral Spanish, no voseo/rioplatense markers."""
+    import re
+
+    _activate("es", official)
+    markers = re.compile(r"\bChe\b|\bDale\b|\bposta\b|\bvos\b|\btenés\b|\bmirá\b", re.IGNORECASE)
+    for t in active.connector_templates():
+        assert not markers.search(t), f"connector template carries a rioplatense marker: {t!r}"
+
+
 # ---------------------------------------------------------------------------
 # 4c. grounding_rules() / editorial_card_instruction()
 #     (grounding_authority_temporal_humility)

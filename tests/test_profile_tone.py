@@ -111,6 +111,24 @@ class TestAkiraControlled:
                 f"Akira missing guardrail: {g}"
             )
 
+    def test_akira_default_seed_narration_has_no_voseo_forms(self):
+        """default_profiles.json (the seed, independent of any live perfiles.json)
+        must not narrate the Akira profile in voseo (neutral_spanish_20260809).
+        The ESTILO line's quoted banned-word examples ("vos", "tenés", ...) are
+        documentation of what NOT to say, not narration, so quoted spans are
+        excluded from the scan.
+        """
+        with open(DEFAULT_PROFILES_FILE, "r", encoding="utf-8") as f:
+            profiles = json.load(f)
+        prompt = profiles["Akira"]["prompt"]
+        narration = re.sub(r'"[^"]*"', "", prompt)
+        markers = re.compile(
+            r"\b(sos|tenés|querés|hacés|mirá|acordate|reaccioná|usás|podés)\b",
+            re.IGNORECASE,
+        )
+        match = markers.search(narration)
+        assert not match, f"Akira seed prompt still narrates in voseo: {match.group()!r}"
+
 
 class TestProfileExistence:
     """All expected profiles must exist."""

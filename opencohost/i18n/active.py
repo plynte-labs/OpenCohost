@@ -117,16 +117,20 @@ LEGACY_AGENDA_SANITIZER_FALLBACK = (
     "porque no es tan simple como parece a primera vista."
 )
 # WU5 (agenda_no_dead_air fase 2, design-fase2.md §3 WU5 / D3): connector FLOOR
-# pool — the always-available es-AR transitions Kira prepends when returning to
+# pool — the always-available transitions Kira prepends when returning to
 # a stashed agenda beat after a PTT interruption. Each carries a {tema} slot.
+# Neutral LatAm Spanish (owner decision, neutral_spanish_20260809) — no
+# voseo/rioplatense markers, matching the Akira profile fix. MUST stay in
+# lockstep with locales/es/manifest.yaml's llm.connector_templates
+# (tests/test_i18n_engine_residue.py::test_connector_templates_es_matches_legacy).
 LEGACY_CONNECTOR_TEMPLATES: tuple[str, ...] = (
     "Bueno, volviendo a {tema},",
-    "Che, como te venía diciendo de {tema},",
+    "Como te venía diciendo de {tema},",
     "Retomando lo de {tema},",
     "Ahora sí, sigo con {tema}:",
     "En fin, lo de {tema}:",
     "Volviendo a lo nuestro sobre {tema},",
-    "Dale, seguimos con {tema}:",
+    "Bien, seguimos con {tema}:",
     "Como decía de {tema},",
 )
 # voice_control.py:225,240 (PTT flush, both busy/idle branches) — one slot,
