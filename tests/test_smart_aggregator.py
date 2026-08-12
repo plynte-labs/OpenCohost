@@ -1247,3 +1247,105 @@ class TestAggregatorFilterPolicy:
         assert agg.msg_filter.min_words == 4
         assert agg.msg_filter.min_char_length == 15
         assert agg.msg_filter.min_quality_score == 0.6
+
+
+# --- Input safety floor (tauri_stream_chat_20260812, design.md 3.1/8) ---
+# runtime_screen() now runs at the process_message choke point. A blocked
+# message must never reach on_filtered_message or any downstream buffer.
+
+class TestInputSafetyFloor:
+
+    @pytest.fixture(autouse=True)
+    def _reset_block_throttle(self):
+        """validation.py's per-rule block counters/throttle are module-global
+        -- reset before each test so assertions never depend on what an
+        earlier test (in this file or test_validation.py) already fired."""
+        from opencohost.config import validation
+        validation._reset_block_throttle()
+        yield
+
+    @pytest.mark.parametrize("text", [
+        "Che mi numero personal para contactarme es 555-123-4567 tranquilo",  # no_doxxing
+        "Amigo la verdad es que eres un pendejo tremendo hoy",  # no_hate_speech
+        "Recuerda que mi direccion IP privada es 192.168.1.100 para el juego",  # no_personal_viewer_data
+    ])
+    def test_unsafe_message_dropped_and_callback_never_called(self, text, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        filtered_msgs = []
+        agg.on_filtered_message = lambda m: filtered_msgs.append(m)
+
+        agg.process_message({"user": "viewer1", "text": text, "timestamp": time.time()})
+
+        assert filtered_msgs == []
+
+    def test_link_message_dropped_by_safety_floor_even_when_message_filter_allows_links(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """MessageFilter's own discard_links is a separate, earlier gate --
+        prove the safety floor also catches a link on its own, independent
+        of that config."""
+        cfg = deepcopy(smart_aggregator_config)
+        cfg["filter"]["discard_links"] = False
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        filtered_msgs = []
+        agg.on_filtered_message = lambda m: filtered_msgs.append(m)
+
+        agg.process_message({
+            "user": "viewer1",
+            "text": "mira este stream que subieron en www.evil-site.com de verdad",
+            "timestamp": time.time(),
+        })
+
+        assert filtered_msgs == []
+
+    def test_clean_message_still_reaches_callback(self, smart_aggregator_config, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        filtered_msgs = []
+        agg.on_filtered_message = lambda m: filtered_msgs.append(m)
+
+        agg.process_message({
+            "user": "viewer1",
+            "text": "que buen stream hoy amigos, se ve genial todo",
+            "timestamp": time.time(),
+        })
+
+        assert len(filtered_msgs) == 1
+
+    def test_blocked_message_leaves_no_raw_text_in_any_log(self, smart_aggregator_config, temp_dir, caplog):
+        import logging
+
+        text = "Che mi numero personal para contactarme es 555-123-4567 tranquilo"
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+
+        with caplog.at_level(logging.WARNING):
+            agg.process_message({"user": "viewer1", "text": text, "timestamp": time.time()})
+
+        for record in caplog.records:
+            assert text not in record.getMessage()

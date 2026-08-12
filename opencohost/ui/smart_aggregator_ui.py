@@ -41,6 +41,7 @@ import tkinter.messagebox as messagebox
 
 from opencohost.config.settings import BASE_DIR, LLM_KEEP_ALIVE
 from opencohost.config.logger import get_logger
+from opencohost.smart_aggregator.kira_agenda_controller import wrap_untrusted_chat
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
@@ -483,7 +484,11 @@ class SmartAggregatorUI:
         if highlight:
             highlight_line = (
                 "Referencia opcional privada; NO nombres al autor ni digas que es destacado:\n"
-                f"{highlight}\n\n"
+                # The highlight is raw viewer text too -- _select_highlight returns
+                # "{user}: {text}" verbatim -- and it sits in the instruction region,
+                # above the chat fence. Unfenced it could carry a forged delimiter and
+                # close that fence from trusted ground, so it gets its own fence.
+                f"{wrap_untrusted_chat(highlight)}\n\n"
             )
         anti_repeat = ""
         if last_kira_lines:
@@ -491,7 +496,7 @@ class SmartAggregatorUI:
                 "ÚLTIMAS RESPUESTAS DE KIRA (NO repetir estructura ni fraseo):\n"
                 f"{last_kira_lines}\n\n"
             )
-        return (
+        task = (
             "TAREA: respondé al aire como Kira, co-host del stream con actitud.\n"
             "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.\n"
             "PERSONALIDAD: sarcasmo seco, humor ácido, cero condescendencia. No seas predecible.\n"
@@ -507,10 +512,11 @@ class SmartAggregatorUI:
             "NO repitas el mismo tipo de reacción del turno anterior. Variá entre burla, reflexión, dato curioso.\n\n"
             f"{anti_repeat}"
             f"{highlight_line}"
-            "--- CONTEXTO PRIVADO, NO LEER LITERAL ---\n"
-            f"{chat_context}\n"
-            "--- FIN CONTEXTO PRIVADO ---"
         )
+        # Untrusted viewer chat (raw usernames + text, see on_aggregated_context)
+        # is wrapped in read-only, forgery-resistant data delimiters shared with
+        # the agenda prompt path — see kira_agenda_controller.wrap_untrusted_chat.
+        return task + wrap_untrusted_chat(chat_context)
 
     # ------------------------------------------------------------------
     # Highlight selection

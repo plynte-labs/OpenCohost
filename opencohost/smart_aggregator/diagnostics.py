@@ -18,6 +18,18 @@ class FilterDiagnostics:
         self.rejected += 1
         self.by_reason[reason] = self.by_reason.get(reason, 0) + 1
 
+    def reclassify_accepted_as_rejected(self, reason: str) -> None:
+        """Move a message already counted as accepted into the rejected bucket.
+
+        The input safety floor runs AFTER the quality and spam gates -- on
+        purpose, so the cheap filters shed load before the regex screen -- which
+        means its block lands after record_accepted() has already fired. Without
+        this, `accepted` over-counts and `seen == accepted + rejected` stops
+        holding, so a raid of blocked messages would read as fully accepted.
+        """
+        self.accepted -= 1
+        self.record_rejected(reason)
+
     def get_diagnostics(self) -> dict:
         return {
             "seen": self.seen,

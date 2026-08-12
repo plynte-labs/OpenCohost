@@ -53,7 +53,7 @@ design principles that keep viewer content contained.
 
 | Destination | Direction | Data sent by OpenCohost | Notes |
 |---|---|---|---|
-| `http://127.0.0.1:11434` — Ollama inference | LOCAL loopback | Kira's system prompt + conversation history + compacted viewer-intent summary | Never raw chat text or usernames |
+| `http://127.0.0.1:11434` — Ollama inference | LOCAL loopback | Kira's system prompt + conversation history + a policy-screened chat context (compacted intent summary, curated highlight packet, or recent filtered messages — per streamer configuration) | Loopback only — chat never leaves the machine. Every message is screened (`runtime_screen`) before entering any context; chat text in prompts is wrapped in read-only untrusted-data delimiters. Usernames **are** included in that context today — the `use_usernames` policy that will gate them exists in the config schema but is not enforced yet |
 | `http://127.0.0.1:11434/api/tags` — Ollama health | LOCAL loopback | Empty GET — no user data | Startup probe and periodic health check |
 | Ollama `generate` (warm/unload) | LOCAL loopback | Model name only; dummy prompt string | Model lifecycle management |
 | Ollama `pull` (download) | LOCAL (Ollama→registry) | Model tag string — initiated by Ollama, not by OpenCohost | User triggers via model panel |
@@ -89,9 +89,29 @@ Viewer chat is **untrusted data**, not operator instructions.
 
 The pipeline enforces this at every stage:
 
-1. **Aggregation** — the Smart Aggregator (`aggregator.py`, `message_filter.py`)
-   compacts raw messages into an intent-summary string. Individual messages and
-   usernames are never forwarded downstream as-is.
+1. **Filtering and screening** — the Smart Aggregator (`aggregator.py`,
+   `message_filter.py`) noise-filters raw messages, then screens every
+   surviving message for doxxing, links, hate speech, and personal data
+   (`runtime_screen`, called from `Aggregator.process_message`). A message
+   that fails any of those checks is dropped at that single choke point and
+   never reaches the display, the context buffer, or any prompt.
+
+   Four things can carry surviving chat into a local model: the compacted
+   intent summary, a single highlighted message, the recent filtered messages
+   when no summary is available, and the vibe classifier that reads the last
+   window of messages to estimate the room's mood. **All four wrap that text
+   in read-only untrusted-data delimiters** (`wrap_untrusted_chat`), which
+   also collapses any `=` run in the body so viewer text cannot forge the
+   fence and address the model directly. A fifth path exists in the code — a
+   curated, bounded `ChatContextPacket` — but it is disabled by default
+   (`USE_INPUT_CONTRACT_PROMPT = False`) and reachable only from a debug
+   panel that is itself off.
+
+   Viewer usernames currently travel with that context to the local model.
+   The `use_usernames` policy that will make this the streamer's choice is
+   defined in the configuration schema but is not yet enforced anywhere in
+   the pipeline; until it is, assume usernames are visible to your local
+   model. Nothing here leaves the machine either way.
 
 2. **Context sanitization** — before viewer intent enters the Ollama prompt,
    `_sanitize_history_context()` strips injection-style patterns and caps context

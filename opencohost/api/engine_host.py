@@ -287,6 +287,45 @@ class EventLogSink:
             return {"events": events, "cursor": self._seq, "boot": self.boot}
 
 
+class ChatFeedSink:
+    """Bounded, thread-safe ring buffer for GET /api/stream/chat-live/messages
+    (RF3 -- see conductor/tracks/tauri_stream_chat_20260812/proposal.md 5).
+    Mirrors EventLogSink's shape (deque+lock+monotonic seq+boot) exactly.
+
+    PRIVACY: `record()` is assigned directly as `Aggregator.on_filtered_message`
+    -- it only ever receives a message that already survived MessageFilter,
+    the spam gate, AND the input safety floor (`runtime_screen` at
+    aggregator.py's process_message, design.md 3.1/8). It stores ONLY what the
+    UI needs to render (author, text, timestamp, seq) -- no quality score, no
+    raw platform payload -- and never logs or persists any of it; this is
+    post-filter viewer chat, in memory only, for the lifetime of the process.
+
+    `boot` mirrors EventLogSink.boot: it changes every process restart (when
+    `seq` also resets to 0), so a polling client can tell a smaller `cursor`
+    apart from a stale/empty poll and knows to resync instead of silently
+    missing messages forever.
+    """
+
+    def __init__(self, maxlen: int = 200):
+        self._messages = collections.deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+        self._seq = 0
+        self.boot = time.time()
+
+    def record(self, message: dict) -> None:
+        author = message.get("user", "")
+        text = message.get("text", "")
+        ts = message.get("timestamp") or time.time()
+        with self._lock:
+            self._seq += 1
+            self._messages.append({"seq": self._seq, "author": author, "text": text, "ts": ts})
+
+    def since(self, cursor: int) -> dict:
+        with self._lock:
+            messages = [dict(m) for m in self._messages if m["seq"] > cursor]
+            return {"messages": messages, "cursor": self._seq, "boot": self.boot}
+
+
 class MusicState:
     """Client-side-playback orchestration state (music-orchestration-model).
 
@@ -354,6 +393,11 @@ class EngineHost:
         # for a constructed-but-not-started host).
         self.event_log = EventLogSink()
         self._motor_event_handlers = [log_motor_accion, self._record_motor_event]
+        # RF3: bounded sink for post-filter viewer chat (GET
+        # /api/stream/chat-live/messages), always constructed -- mirrors
+        # event_log/chat_sink above -- so it exists before the Aggregator is
+        # built and can be wired unconditionally at construction time below.
+        self.chat_feed = ChatFeedSink()
         self.aggregator = None
         # RF3 control-plane single-flight guard for POST .../connect —
         # ponytail: one global lock, not per-source, since one process owns
@@ -772,6 +816,12 @@ class EngineHost:
             # brick the engine/profiles/commands surface.
             try:
                 self.aggregator = Aggregator(config_path=_AGGREGATOR_CONFIG_PATH, llm_interface=None)
+                # RF3: wire the chat feed sink directly -- process_message
+                # already runs runtime_screen (design.md 3.1/8, input safety
+                # floor) before this callback fires, so chat_feed only ever
+                # receives screened, filtered messages. See ChatFeedSink
+                # docstring.
+                self.aggregator.on_filtered_message = self.chat_feed.record
             except Exception:
                 self.aggregator = None
                 _logger.exception("Aggregator construction failed; stream chat-live control-plane disabled")

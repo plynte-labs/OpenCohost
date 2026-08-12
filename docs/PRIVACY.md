@@ -43,7 +43,7 @@ All of the following are processed and stored **locally only** and are never tra
 viewer chat → local Ollama (LLM) → Kira's response text → [sentence fragment] → Edge-TTS
 ```
 
-The compaction step that converts viewer chat into a prompt summary, and all LLM inference, happen entirely on your machine before Edge-TTS is involved.
+The screening, filtering, and compaction steps that decide what viewer chat the LLM may see — and all LLM inference — happen entirely on your machine before Edge-TTS is involved.
 
 ### Fully local voice synthesis (optional)
 
@@ -72,7 +72,7 @@ OpenCohost does not post messages, reactions, or any viewer data back to either 
 
 | Service | What is sent | Location |
 |---|---|---|
-| **Ollama** | System prompt + conversation history + compacted chat intent summary | `http://127.0.0.1:11434` (loopback only) |
+| **Ollama** | System prompt + conversation history + screened chat context (a compacted summary by default; may include individual filtered messages, and today also carries viewer usernames) | `http://127.0.0.1:11434` (loopback only) |
 | **OBS WebSocket** | Avatar state name (`"idle"`, `"speaking"`) and local image paths | `localhost:4455` |
 
 ---

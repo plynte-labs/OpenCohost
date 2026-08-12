@@ -21,6 +21,7 @@ from opencohost.config.validation import (
     log_non_negotiable_block,
     output_guard,
     runtime_check,
+    runtime_screen,
     validate_config,
 )
 
@@ -184,6 +185,18 @@ class TestValidateConfig:
 class TestRuntimeCheck:
     """T12: runtime check blocks dangerous messages."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_block_throttle(self):
+        """The per-rule block log is throttled to one line per 10s
+        (validation.py's _block_last_log). Reset it before every test in
+        this class so a test's own assertion on log output never depends on
+        whether an earlier test already fired the same rule within the
+        window."""
+        from opencohost.config import validation
+
+        validation._reset_block_throttle()
+        yield
+
     def test_clean_message_passes(self):
         msg = {"user": "viewer1", "text": "Hola Kira, ¿cómo estás?"}
         assert runtime_check(msg) is True
@@ -244,6 +257,55 @@ class TestRuntimeCheck:
         logged = "".join(r.getMessage() for r in caplog.records)
         assert text not in logged
         assert f"chars={len(text)}" in logged
+
+    def test_runtime_screen_returns_the_rule_id(self):
+        """runtime_screen() is the per-rule-attribution shape runtime_check()
+        now wraps -- stage 1 needs to know WHICH rule fired, not just pass/fail."""
+        assert runtime_screen({"user": "v", "text": "Mi número es 555-123-4567"}) == "no_doxxing"
+        assert runtime_screen({"user": "v", "text": "mira esto https://evil.com/hack"}) == "no_suspicious_links"
+        assert runtime_screen({"user": "v", "text": "eres un pendejo"}) == "no_hate_speech"
+        assert runtime_screen({"user": "v", "text": "mi IP es 192.168.1.100"}) == "no_personal_viewer_data"
+        assert runtime_screen({"user": "v", "text": "qué buen stream!"}) is None
+
+    def test_block_counters_increment_per_rule(self):
+        from opencohost.config import validation
+
+        validation.runtime_screen({"user": "v", "text": "Mi número es 555-123-4567"})
+        validation.runtime_screen({"user": "v", "text": "mira esto https://evil.com/hack"})
+        validation.runtime_screen({"user": "v", "text": "eres un pendejo"})
+        validation.runtime_screen({"user": "v", "text": "mi IP es 192.168.1.100"})
+
+        counters = validation.get_block_counters()
+        assert counters["no_doxxing"] == 1
+        assert counters["no_suspicious_links"] == 1
+        assert counters["no_hate_speech"] == 1
+        assert counters["no_personal_viewer_data"] == 1
+
+    def test_throttle_suppresses_repeat_block_and_reports_suppressed_count(self, monkeypatch, caplog):
+        """At most one log line per rule per throttle window; the next line
+        after the window rolls over reports how many were suppressed."""
+        from opencohost.config import validation
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(validation.time, "monotonic", lambda: clock["t"])
+
+        text1 = "Mi número es 555-123-4567"          # no_doxxing
+        text2 = "otro numero es 555-999-1234 tambien"  # no_doxxing, inside the window
+        text3 = "y otro mas 555-222-3333 despues"       # no_doxxing, after the window
+
+        with caplog.at_level(logging.WARNING, logger="opencohost.config.validation"):
+            assert runtime_check({"user": "v", "text": text1}) is False  # t=0 -> logs
+            clock["t"] = 1.0
+            assert runtime_check({"user": "v", "text": text2}) is False  # t=1, still in window -> suppressed
+            clock["t"] = validation._BLOCK_THROTTLE_WINDOW_S + 1.0
+            assert runtime_check({"user": "v", "text": text3}) is False  # window elapsed -> logs + reports suppressed
+
+        logged = "".join(r.getMessage() for r in caplog.records)
+        for text in (text1, text2, text3):
+            assert text not in logged
+        assert "suppressed" in logged.lower()
+        assert "1 more" in logged
+        assert validation.get_block_counters()["no_doxxing"] == 3
 
 
 # ══════════════════════════════════════════════════════════════════════════════

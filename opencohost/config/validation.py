@@ -17,6 +17,8 @@ import logging
 import logging.handlers
 import os
 import re
+import threading
+import time
 from typing import Any
 
 from opencohost.config import settings
@@ -379,6 +381,99 @@ def validate_config(config: CreatorConfig) -> list[str]:
 # Layer 2: Runtime message check
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Blocked messages cost ~10x a passing one (measured 2026-08-12: ~300us vs
+# 6-58us) and the difference is entirely log_non_negotiable_block -> the
+# rotating file handler -> SensitiveDataFilter's six regex substitutions, not
+# the pattern matching above. A raid of blockable spam would otherwise burn
+# CPU and rotate the log out of usefulness. Fix: log at most once per rule per
+# window; count every block in memory regardless of whether it was logged.
+_BLOCK_THROTTLE_WINDOW_S = 10.0
+_block_counts: dict[str, int] = {}     # lifetime total blocks per rule_id
+_block_last_log: dict[str, float] = {}  # monotonic() of the last emitted line, per rule_id
+_block_suppressed: dict[str, int] = {}  # blocks not logged since that last line, per rule_id
+_block_lock = threading.Lock()
+
+
+def _record_block(rule_id: str, text: str) -> None:
+    """Count a runtime block and log it, throttled to one line per rule per
+    ``_BLOCK_THROTTLE_WINDOW_S``. Never passes the message text to the
+    logger -- only its length, exactly as the un-throttled call sites did."""
+    with _block_lock:
+        _block_counts[rule_id] = _block_counts.get(rule_id, 0) + 1
+        now = time.monotonic()
+        last = _block_last_log.get(rule_id)
+        if last is not None and now - last < _BLOCK_THROTTLE_WINDOW_S:
+            _block_suppressed[rule_id] = _block_suppressed.get(rule_id, 0) + 1
+            return
+        suppressed = _block_suppressed.get(rule_id, 0)
+        _block_last_log[rule_id] = now
+        _block_suppressed[rule_id] = 0
+
+    log_non_negotiable_block(rule_id, "runtime", preview=f"chars={len(text)}")
+    if suppressed:
+        logger.warning(
+            "Non-negotiable BLOCKED [%s] at layer=runtime — %d more messages "
+            "suppressed in the last %.0fs (see counters for the running total)",
+            rule_id, suppressed, _BLOCK_THROTTLE_WINDOW_S,
+        )
+
+
+def get_block_counters() -> dict[str, int]:
+    """Read accessor for the lifetime per-rule block counts. Returns a copy;
+    callers cannot mutate internal state. Stage 4 surfaces this on an API
+    payload -- not built here."""
+    with _block_lock:
+        return dict(_block_counts)
+
+
+def _reset_block_throttle() -> None:
+    """Test-only: clear counters and throttle state.
+
+    ponytail: no production caller -- the throttle window expires on its
+    own. Exists so tests don't depend on execution order or on finishing
+    inside the same 10s window as an earlier test.
+    """
+    with _block_lock:
+        _block_counts.clear()
+        _block_last_log.clear()
+        _block_suppressed.clear()
+
+
+def runtime_screen(message: dict[str, Any]) -> str | None:
+    """Screen a single chat message at decision time.
+
+    Returns:
+        The rule id of the first non-negotiable rule the message violates
+        ("no_doxxing", "no_suspicious_links", "no_hate_speech",
+        "no_personal_viewer_data"), or None if the message is clean.
+    """
+    text = message.get("text", "")
+
+    # R1: No doxxing
+    for pat in _DOXXING_PATTERNS:
+        if pat.search(text):
+            _record_block("no_doxxing", text)
+            return "no_doxxing"
+
+    # R2: No suspicious links
+    if _LINK_PATTERN.search(text):
+        _record_block("no_suspicious_links", text)
+        return "no_suspicious_links"
+
+    # R8: No hate speech
+    for pat in _HATE_SPEECH_PATTERNS:
+        if pat.search(text):
+            _record_block("no_hate_speech", text)
+            return "no_hate_speech"
+
+    # R6: No personal viewer data in chat (flag)
+    for pat in _PERSONAL_DATA_PATTERNS:
+        if pat.search(text):
+            _record_block("no_personal_viewer_data", text)
+            return "no_personal_viewer_data"
+
+    return None
+
 
 def runtime_check(message: dict[str, Any]) -> bool:
     """Check a single chat message at decision time.
@@ -387,44 +482,7 @@ def runtime_check(message: dict[str, Any]) -> bool:
         True if the message passes all non-negotiable checks.
         False if the message must be blocked/ignored.
     """
-    text = message.get("text", "")
-
-    # R1: No doxxing
-    for pat in _DOXXING_PATTERNS:
-        if pat.search(text):
-            log_non_negotiable_block(
-                "no_doxxing", "runtime",
-                preview=f"chars={len(text)}",
-            )
-            return False
-
-    # R2: No suspicious links
-    if _LINK_PATTERN.search(text):
-        log_non_negotiable_block(
-            "no_suspicious_links", "runtime",
-            preview=f"chars={len(text)}",
-        )
-        return False
-
-    # R8: No hate speech
-    for pat in _HATE_SPEECH_PATTERNS:
-        if pat.search(text):
-            log_non_negotiable_block(
-                "no_hate_speech", "runtime",
-                preview=f"chars={len(text)}",
-            )
-            return False
-
-    # R6: No personal viewer data in chat (flag)
-    for pat in _PERSONAL_DATA_PATTERNS:
-        if pat.search(text):
-            log_non_negotiable_block(
-                "no_personal_viewer_data", "runtime",
-                preview=f"chars={len(text)}",
-            )
-            return False
-
-    return True
+    return runtime_screen(message) is None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

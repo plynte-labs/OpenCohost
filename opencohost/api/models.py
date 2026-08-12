@@ -517,6 +517,37 @@ class StreamLimitsRequest(BaseModel):
     filter_policy: Optional[str] = None
 
 
+class ChatLiveMessageOut(BaseModel):
+    """One entry in GET /api/stream/chat-live/messages (RF3).
+
+    Mirrors `ChatFeedSink.record()`'s stored fields (engine_host.py) exactly
+    -- author/text/ts/seq, nothing else. R8-CRITICAL: this is the one place
+    raw viewer chat text and usernames are allowed to reach HTTP at all, and
+    only post-filter (see ChatFeedSink's own docstring).
+    """
+
+    seq: int
+    author: str
+    text: str
+    ts: float
+
+
+class ChatLiveMessagesResponse(BaseModel):
+    """GET /api/stream/chat-live/messages?since=cursor (RF3).
+
+    Same cursor/boot contract as EventLogResponse. `messages` is capped at
+    50 per poll (oldest-after-cursor first); when the sink held more than
+    that, `more_pending` is True and `cursor` advances only to the last
+    message actually returned, so a client polling in a loop catches up
+    gradually instead of skipping the backlog.
+    """
+
+    messages: list[ChatLiveMessageOut]
+    cursor: int
+    boot: float
+    more_pending: bool
+
+
 class ObsConfigResponse(BaseModel):
     """GET/PUT /api/obs/config response (Tier C).
 

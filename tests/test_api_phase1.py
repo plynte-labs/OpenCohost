@@ -405,6 +405,14 @@ class FakeHost:
         from opencohost.api.engine_host import EventLogSink
 
         self.event_log = EventLogSink()
+        # RF3: bounded post-filter chat feed — real ChatFeedSink (not a fake),
+        # always present (mirrors EngineHost, which constructs it before
+        # start() too — engine_host.py's chat_feed docstring/wiring). Tests
+        # that need a different maxlen/instance replace it after construction
+        # (same pattern as aggregator/agenda/music_library above).
+        from opencohost.api.engine_host import ChatFeedSink
+
+        self.chat_feed = ChatFeedSink()
 
     def start(self):
         pass

@@ -19,8 +19,13 @@ One ASGI-level middleware (``auth_middleware``, registered in
    default OFF). Owner decision D2: while the flag is off, a missing/invalid
    token logs one warning per call and the request succeeds unchanged, so the
    shipped Tauri app (which sends no token today) keeps working.
-3. GET (and every non-mutating method) stays open in v1 — the read surface
-   already keeps raw chat off HTTP entirely (R8).
+3. GET (and every non-mutating method) stays open in v1, because the read
+   surface carries state and metadata rather than viewer content.
+   ONE EXCEPTION, and it must stay the only one: ``GET
+   /api/stream/chat-live/messages`` serves raw viewer chat text and usernames,
+   so it does not rely on this rule — it gates itself on the operator token
+   unconditionally (see ``routers/stream.py``). Any future GET that would carry
+   viewer content must do the same; do not read this rule as permission.
 """
 
 from __future__ import annotations

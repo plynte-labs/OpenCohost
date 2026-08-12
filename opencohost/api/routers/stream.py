@@ -14,16 +14,54 @@ router that needs it); reused here for the one warning log in
 No parameterized (`{...}`) path exists in this family -- no CAUTION block
 needed (contrast routers/music.py, routers/perfiles.py, routers/agent.py,
 routers/memoria.py).
+
+`GET .../chat-live/messages` (RF3, tauri_stream_chat_20260812 B3) is new, not
+part of the B6 move -- it self-gates on the operator token (`_operator_role`
+below) since auth_middleware's rule 3 leaves plain GETs open, and this is the
+one GET in the whole API allowed to carry raw viewer chat text.
 """
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from opencohost.api.models import StreamChatLiveResponse, StreamConnectRequest, StreamLimitsRequest
+from opencohost.api.auth import TokenFileError, _bearer_token, _resolve_role
+from opencohost.api.models import (
+    ChatLiveMessageOut,
+    ChatLiveMessagesResponse,
+    StreamChatLiveResponse,
+    StreamConnectRequest,
+    StreamLimitsRequest,
+)
 from opencohost.api.shared import logger
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 router = APIRouter()
+
+# RF3: GET /api/stream/chat-live/messages caps a single poll response so a
+# backlog can't blow up json.dumps cost (measured: 200 msgs = 291us/31KB,
+# 50 = 7.8KB) -- see execution-plan.md 2 "Transport is settled".
+_CHAT_LIVE_PAGE_SIZE = 50
+
+
+def _operator_role(request: Request) -> "str | None":
+    """Fail-closed-to-None token role, mirroring agent.py's
+    `_agent_request_role`. Needed because auth_middleware only ever gates
+    `/api/agent/*` (any method) and mutating verbs elsewhere (auth.py rules
+    1-2) -- a bare GET like this one stays open under rule 3, and this is
+    the one GET that must NOT: it's the sole place raw viewer chat text and
+    usernames are allowed onto HTTP at all (R8 scoping, owner-approved
+    2026-08-12), so it gates itself instead of relying on the middleware.
+
+    TokenFileError propagates rather than collapsing to None: an unreadable
+    token file is a broken server, not a bad credential, and the caller maps
+    it to 503 the way auth_middleware does (auth.py:190, :225). Swallowing it
+    would tell an operator with a corrupt token file that their token is
+    wrong, which sends them looking in the wrong place.
+    """
+    token = _bearer_token(request)
+    if token is None:
+        return None
+    return _resolve_role(token)
 
 
 def _stream_state(agg) -> StreamChatLiveResponse:
@@ -101,6 +139,34 @@ def post_stream_disconnect(request: Request):
     finally:
         host.aggregator_lock.release()
     return _stream_state(agg)
+
+
+@router.get("/api/stream/chat-live/messages", response_model=ChatLiveMessagesResponse)
+def get_stream_chat_live_messages(request: Request, since: int = 0):
+    # R8-CRITICAL: operator token required, unconditionally -- unlike the
+    # other mutating-only operator gate (auth.py rule 2, opt-in behind
+    # API_AUTH_ENFORCED for back-compat with the token-less Tauri app), this
+    # is a brand new surface exposing raw chat, so it is never left open.
+    if _operator_role(request) != "operator":
+        return JSONResponse(status_code=403, content={"detail": "operator token required"})
+    # chat_feed is always constructed in EngineHost.__init__ (unlike
+    # aggregator, which is None until start() succeeds) -- no 503 branch
+    # needed; a disconnected/not-yet-started chat just reads as empty.
+    sink_result = request.app.state.host.chat_feed.since(since)
+    pending = sink_result["messages"]
+    more_pending = len(pending) > _CHAT_LIVE_PAGE_SIZE
+    page = pending[:_CHAT_LIVE_PAGE_SIZE] if more_pending else pending
+    # Cursor advances only to the last message actually returned when
+    # capped, so the next poll resumes right after it instead of skipping
+    # the rest of the backlog; uncapped, it mirrors the sink's own cursor
+    # (still correct on an empty page -- never regresses).
+    cursor = page[-1]["seq"] if more_pending else sink_result["cursor"]
+    return ChatLiveMessagesResponse(
+        messages=[ChatLiveMessageOut(**m) for m in page],
+        cursor=cursor,
+        boot=sink_result["boot"],
+        more_pending=more_pending,
+    )
 
 
 @router.put("/api/stream/chat-live/limits", response_model=StreamChatLiveResponse)

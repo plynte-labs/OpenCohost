@@ -17,6 +17,7 @@ from .chat_input_contract import (
     ChatContextPacketBuilder,
     ChatEventDetector,
 )
+from opencohost.config.validation import runtime_screen
 
 class Aggregator:
     def __init__(self, config_path: str = "config/smart_aggregator.yaml", llm_interface: Optional[Callable] = None):
@@ -303,7 +304,23 @@ class Aggregator:
             self._diagnostics.record_rejected(reason)
             self._emit_decision(stage=FilterStage.MESSAGE_FILTER.value, accepted=False,
                                 reason=reason, text=message.get("text", ""))
-        
+
+        # Input safety floor (design.md 3.1/8): the non-negotiable screen runs
+        # once, here, after MessageFilter/spam accepted the message and before
+        # it reaches ANY consumer -- display callback, context buffer, vibe,
+        # activity. A blocked message is dropped outright, not routed through
+        # _emit_decision: no FilterStage/ReasonCode exists for a content-safety
+        # block, and inventing one is unrequested scope for this stage.
+        # runtime_screen() already counts + throttle-logs the block by rule id
+        # (validation.py) -- never the text.
+        blocked_rule = runtime_screen(filtered) if accepted else None
+        if blocked_rule is not None:
+            accepted = False
+            filtered = None
+            # record_accepted() already fired above; reclassify so the counters
+            # stay consistent instead of reporting a blocked raid as accepted.
+            self._diagnostics.reclassify_accepted_as_rejected(f"safety_floor:{blocked_rule}")
+
         if accepted and self.on_filtered_message:
             try:
                 self.on_filtered_message(filtered)

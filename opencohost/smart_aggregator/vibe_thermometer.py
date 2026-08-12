@@ -3,6 +3,8 @@ import json
 import re
 from typing import Optional, Callable, Dict, Any, List
 
+from .kira_agenda_controller import wrap_untrusted_chat
+
 class VibeThermometer:
     def __init__(self, config: dict, llm_interface: Optional[Callable] = None, is_busy_callback: Optional[Callable[[], bool]] = None):
         self.config = config
@@ -59,7 +61,14 @@ class VibeThermometer:
         self._window_start = None
     
     def _infer_vibe(self) -> Dict[str, Any]:
-        messages_text = "\n".join([f"- {m['user']}: {m['text']}" for m in self._buffer])
+        # Raw viewer usernames and text, going to the LLM: the same containment
+        # the two chat-prompt paths use applies here. Screened upstream by
+        # runtime_screen (the thermometer only ever sees accepted messages), but
+        # screening is not delimiting -- without the fence a viewer could close
+        # the data region and address the vibe classifier directly.
+        messages_text = wrap_untrusted_chat(
+            "\n".join([f"- {m['user']}: {m['text']}" for m in self._buffer])
+        )
         prompt = self.prompt_template.format(window=self.window_seconds, messages=messages_text)
         
         default_emotions = {e: 0.0 for e in self.emotions}

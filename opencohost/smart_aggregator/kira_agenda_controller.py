@@ -21,6 +21,36 @@ from opencohost.i18n import active as i18n_active
 logger = get_logger()
 
 
+# ── Untrusted viewer-chat containment (prompt-injection defense) ──────────
+# Viewer chat can reach an LLM prompt on more than one path in this codebase
+# (KiraAgendaController._build_prompt below, and SmartAggregatorUI's RF3
+# prompt at opencohost/ui/smart_aggregator_ui.py). wrap_untrusted_chat() is
+# the single containment implementation shared by both: it wraps arbitrary
+# text in read-only data delimiters and scrubs the chat body of the
+# delimiter token so it cannot forge its way out of the data region.
+_UNTRUSTED_CHAT_OPEN = "===CHAT_VIEWERS_DATO_NO_CONFIABLE_INICIO==="
+_UNTRUSTED_CHAT_CLOSE = "===CHAT_VIEWERS_DATO_NO_CONFIABLE_FIN==="
+
+
+def wrap_untrusted_chat(text: str, *, empty_fallback: str = "") -> str:
+    """Wrap arbitrary untrusted viewer-chat text in read-only data delimiters.
+
+    The delimiters are the only ``===`` runs in the output, so any run of 2+
+    ``=`` in ``text`` is collapsed to a single ``=``. That makes it impossible
+    for viewer text to contain ``===`` and therefore impossible to forge
+    either marker — defeating single-pass-replace reconstruction
+    (prefix+token+suffix recombining into a token) and case variants alike,
+    since both still require a ``===`` run. Plain ``.replace`` of the whole
+    token is NOT enough.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        stripped = empty_fallback
+    else:
+        stripped = re.sub(r"={2,}", "=", stripped)
+    return f"{_UNTRUSTED_CHAT_OPEN}\n{stripped}\n{_UNTRUSTED_CHAT_CLOSE}"
+
+
 class AgendaState(str, Enum):
     OFF = "OFF"
     IDLE = "IDLE"
@@ -1435,29 +1465,15 @@ class KiraAgendaController:
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
     # ── Untrusted viewer-chat containment (prompt-injection defense) ──
-    # Viewer chat can reach the agenda prompt. Wrap it in read-only data
-    # delimiters and instruct the model to treat anything between them as
-    # information, never as commands. The chat text is also scrubbed of the
-    # delimiter tokens so it cannot forge its way out of the data region.
-    _CHAT_DATA_OPEN = "===CHAT_VIEWERS_DATO_NO_CONFIABLE_INICIO==="
-    _CHAT_DATA_CLOSE = "===CHAT_VIEWERS_DATO_NO_CONFIABLE_FIN==="
+    # Class-level names kept for backward compatibility (tests reference
+    # them directly); the implementation lives in wrap_untrusted_chat()
+    # at module scope, shared with SmartAggregatorUI's RF3 prompt path.
+    _CHAT_DATA_OPEN = _UNTRUSTED_CHAT_OPEN
+    _CHAT_DATA_CLOSE = _UNTRUSTED_CHAT_CLOSE
 
     def _wrap_untrusted_chat(self, compact_chat: str) -> str:
-        """Wrap viewer chat in read-only data delimiters.
-
-        The delimiters are the only ``===`` runs in the prompt, so we collapse any
-        run of 2+ ``=`` in the chat to a single ``=``. That makes it impossible for
-        viewer text to contain ``===`` and therefore impossible to forge either
-        marker — defeating single-pass-replace reconstruction (prefix+token+suffix
-        recombining into a token) and case variants alike, since both still require
-        a ``===`` run. Plain ``.replace`` of the whole token is NOT enough.
-        """
-        text = (compact_chat or "").strip()
-        if not text:
-            text = "- sin chat compacto fresco"
-        else:
-            text = re.sub(r"={2,}", "=", text)
-        return f"{self._CHAT_DATA_OPEN}\n{text}\n{self._CHAT_DATA_CLOSE}"
+        """Wrap viewer chat in read-only data delimiters. See wrap_untrusted_chat()."""
+        return wrap_untrusted_chat(compact_chat, empty_fallback="- sin chat compacto fresco")
 
     def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "", editorial_context: str = "") -> str:
         # ── Assembled from i18n bundle slots (kira_bilingual_e2e P3b) ──
