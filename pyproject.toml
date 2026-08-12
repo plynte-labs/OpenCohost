@@ -55,13 +55,18 @@ cloud-tts = [
     "edge-tts>=6.1.0",
 ]
 # integrations: optional platform integrations; none required for core operation.
-#   pytchat  — YouTube live-chat polling (opencohost/smart_aggregator/chat_source.py)
 #   obsws-python — OBS WebSocket control (opencohost/avatar/obs_client.py)
 #   nvidia-ml-py — NVIDIA VRAM monitoring; installs as the `pynvml` module (opencohost/core/health_monitor.py)
 integrations = [
-    "pytchat>=0.5.5",
     "obsws-python>=1.7.0",
     "nvidia-ml-py>=12.0.0",
+]
+# youtube-chat: DELIBERATELY SEPARATE, opt-in only. pytchat reads YouTube's
+# unofficial live-chat endpoint, which YouTube's Terms of Service do not permit.
+# Twitch is the supported platform and requires no extra. Installing this is an
+# explicit choice to accept that risk on your own channel. See docs/PRIVACY.md.
+youtube-chat = [
+    "pytchat>=0.5.5",
 ]
 dev = [
     "pre-commit>=4.6.0",

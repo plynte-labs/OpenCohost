@@ -65,7 +65,8 @@ uv pip install -e ".[cloud-tts,integrations,dev]"
 |---|---|---|
 | `cloud-tts` | `edge-tts` | Default voice synthesis (Microsoft Edge-TTS, cloud). Required unless you use `local-tts` only. |
 | `local-tts` | `piper-tts`, `onnxruntime` | Fully offline voice synthesis via Piper TTS. |
-| `integrations` | `pytchat`, `obsws-python`, `nvidia-ml-py` | YouTube live chat, OBS WebSocket control, NVIDIA VRAM monitoring. |
+| `integrations` | `obsws-python`, `nvidia-ml-py` | OBS WebSocket control, NVIDIA VRAM monitoring. |
+| `youtube-chat` | `pytchat` | Unofficial YouTube live chat. Opt-in — read [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) before installing. Twitch needs no extra. |
 | `dev` | `pytest`, `pre-commit`, `detect-secrets` | Test runner and pre-commit hooks — required for development. |
 
 You can combine extras:
@@ -141,7 +142,7 @@ Two hooks run on every `git commit`:
 | Hook | What it does |
 |---|---|
 | `detect-secrets` | Scans staged files for secrets against a committed baseline (`.secrets.baseline`). Blocks the commit if new secrets are detected. |
-| `no-abs-paths` | Blocks drive-letter absolute paths (e.g. `C:\Users\...`) from being committed in `.py`, `.md`, `.yaml`, `.toml`, and `.json` files. Use relative paths or environment variables instead. |
+| `no-abs-paths` | Blocks drive-letter absolute paths (e.g. `C:\Users\...`) from being committed in `.py`, `.md`, `.yaml`, `.toml`, and `.json` files. Use relative paths or environment variables instead. A line that genuinely needs one — a documentation example, like this row — opts out with the `path-ok` pragma.<!-- path-ok --> |
 
 Install the hooks after your editable install:
 
@@ -266,8 +267,8 @@ OpenCohost is designed to keep viewer data local. Here is an honest summary of e
 
 | Service | What is transmitted |
 |---|---|
-| **YouTube** via `pytchat` | OpenCohost sends a YouTube video ID to `pytchat`, which polls the YouTube live chat API. OpenCohost receives messages; it does not upload chat or user data to YouTube. |
-| **Twitch IRC** `irc.chat.twitch.tv:6667` | OpenCohost sends an anonymous guest nick, a channel JOIN, and PONG keepalives. No viewer data is transmitted. |
+| **Twitch IRC** `irc.chat.twitch.tv:6667` | Default platform. OpenCohost sends an anonymous guest nick, a channel JOIN, and PONG keepalives. No viewer data is transmitted. |
+| **YouTube** via `pytchat` (opt-in) | Not installed by default. OpenCohost sends a YouTube video ID to `pytchat`, which polls YouTube's *unofficial* live-chat endpoint — not the official Data API, and not permitted by YouTube's Terms of Service. OpenCohost receives messages; it does not upload chat or user data. See [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial). |
 
 **Fully offline (no network, ever):**
 

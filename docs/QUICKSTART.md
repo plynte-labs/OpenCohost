@@ -64,7 +64,8 @@ pip install -e ".[cloud-tts,integrations]"
 |---|---|
 | `cloud-tts` | Microsoft Edge-TTS (free cloud voice — the default) |
 | `local-tts` | Piper TTS — fully offline voice synthesis |
-| `integrations` | YouTube live chat, OBS WebSocket, VRAM monitor |
+| `integrations` | OBS WebSocket, VRAM monitor |
+| `youtube-chat` | Unofficial YouTube live chat — opt-in, [read this first](PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets (contributors only) |
 
 To add offline Piper TTS as well:
@@ -109,8 +110,8 @@ If you hear silence or see a TTS error:
 
 | Feature | What to do |
 |---|---|
-| **YouTube live chat** | Paste your live stream URL or video ID in the Chat Source panel. Requires `integrations` extra. |
-| **Twitch chat** | Enter your channel name. OpenCohost connects anonymously (read-only). |
+| **Twitch chat** (default) | Enter your channel name. OpenCohost connects anonymously (read-only). No extra, no credentials. |
+| **YouTube live chat** (opt-in) | Install the `youtube-chat` extra first, then paste your live stream URL or video ID in the Chat Source panel. It uses an unofficial endpoint that YouTube's Terms of Service do not permit — [read PRIVACY.md](PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) before enabling it. |
 | **OBS avatar** | Install the OBS WebSocket plugin, enable it on port 4455, and enter the password in Settings → OBS. |
 
 ---

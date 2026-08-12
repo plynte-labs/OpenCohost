@@ -659,6 +659,22 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.141.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/02/91e3416a8fdd715abb903a952a6bec7cdd8d14eed55d415fc8595524c319/fastapi-0.141.1.tar.gz", hash = "sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1", size = 425799, upload-time = "2026-07-29T17:18:05.568Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl", hash = "sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3", size = 131954, upload-time = "2026-07-29T17:18:04.364Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.29.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1817,6 +1833,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+api = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
 cloud-tts = [
     { name = "edge-tts" },
 ]
@@ -1833,12 +1853,14 @@ heavy-tts = [
 integrations = [
     { name = "nvidia-ml-py" },
     { name = "obsws-python" },
-    { name = "pytchat" },
 ]
 local-tts = [
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "piper-tts" },
+]
+youtube-chat = [
+    { name = "pytchat" },
 ]
 
 [package.metadata]
@@ -1846,6 +1868,7 @@ requires-dist = [
     { name = "customtkinter", specifier = ">=5.2.0" },
     { name = "detect-secrets", marker = "extra == 'dev'", specifier = "==1.5.0" },
     { name = "edge-tts", marker = "extra == 'cloud-tts'", specifier = ">=6.1.0" },
+    { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.115.0" },
     { name = "flask", marker = "extra == 'heavy-tts'", specifier = ">=3.0.0" },
     { name = "google-api-python-client", specifier = ">=2.128.0" },
     { name = "google-auth", specifier = ">=2.29.0" },
@@ -1860,7 +1883,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.6.0" },
     { name = "pygame", specifier = ">=2.5.2" },
     { name = "pynput", specifier = ">=1.7.6" },
-    { name = "pytchat", marker = "extra == 'integrations'", specifier = ">=0.5.5" },
+    { name = "pytchat", marker = "extra == 'youtube-chat'", specifier = ">=0.5.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "requests", specifier = ">=2.31.0" },
@@ -1868,10 +1891,11 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.12.1" },
     { name = "torch", marker = "extra == 'heavy-tts'", specifier = ">=2.2.0" },
     { name = "transformers", marker = "extra == 'heavy-tts'", specifier = ">=4.40.0" },
+    { name = "uvicorn", marker = "extra == 'api'", specifier = ">=0.32.0" },
     { name = "websocket-client", specifier = ">=1.8.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
-provides-extras = ["cloud-tts", "dev", "heavy-tts", "integrations", "local-tts"]
+provides-extras = ["api", "cloud-tts", "dev", "heavy-tts", "integrations", "local-tts", "youtube-chat"]
 
 [[package]]
 name = "packaging"
@@ -5856,6 +5880,19 @@ wheels = [
 ]
 
 [[package]]
+name = "starlette"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
+]
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -6119,6 +6156,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+]
+
+[[package]]
+name = "uvicorn"
+version = "0.52.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "h11" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/18/ccce41535dee1be77735592bd19965f3972c82e07ee703d324709496b716/uvicorn-0.52.1.tar.gz", hash = "sha256:112ec661814189acbccd3f7b86460147cc065fc92c0821afa78918780e4354dd", size = 100571, upload-time = "2026-08-01T18:19:30.732Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/d5/68e6e9bca63c0badf67002890a46d3784c958de45b65e1275ec583ca1f06/uvicorn-0.52.1-py3-none-any.whl", hash = "sha256:e4403f9d93188cf9d1088e9f40e3acd12630e2df8675316704379a7fc20fff6a", size = 79859, upload-time = "2026-08-01T18:19:29.294Z" },
 ]
 
 [[package]]

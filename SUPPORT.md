@@ -72,7 +72,7 @@ Then select a Piper TTS voice in Settings. See [docs/QUICKSTART.md](docs/QUICKST
 Use the recommended install command with the correct extras for your setup:
 
 ```powershell
-# Default (Edge-TTS voice + OBS/YouTube integrations)
+# Default (Edge-TTS voice + OBS / VRAM integrations)
 pip install -e ".[cloud-tts,integrations]"
 
 # With offline Piper TTS as well

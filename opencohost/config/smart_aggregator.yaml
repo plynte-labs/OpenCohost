@@ -32,7 +32,7 @@ vibe:
     - joy
     - confusion
     - neutral
-  llm_prompt_template: "Analyze these YouTube live chat messages from the last {window}s. Messages may be Spanish, English, slang, memes, or gaming chat. Messages: {messages}. Return ONLY strict JSON with keys: emotions (object with excitement, sadness, anger, joy, confusion, neutral values from 0 to 1) and temperature (number from 0 to 100). No markdown, no explanation."
+  llm_prompt_template: "Analyze these live chat messages from the last {window}s. Messages may be Spanish, English, slang, memes, or gaming chat. Messages: {messages}. Return ONLY strict JSON with keys: emotions (object with excitement, sadness, anger, joy, confusion, neutral values from 0 to 1) and temperature (number from 0 to 100). No markdown, no explanation."
   busy_fallback_temperature: 50.0
   missing_llm_fallback_temperature: 50.0
 
@@ -85,15 +85,20 @@ history:
   retention_hours: 168
   # Production stores only compact Kira contexts. Raw chat persistence is prohibited.
 
-source:
-  platform: youtube
-  reconnect_delay_seconds: 5
-  max_retries: 3
-  interruptable: false
-
+# Twitch is the primary supported platform: anonymous IRC, no credentials,
+# no terms-of-service concerns. The active platform is derived from the URL
+# you connect to, not from this file.
 twitch:
   reconnect_delay_seconds: 10
   max_retries: 3
+
+# Tuning for the optional, unofficial YouTube live-chat reader. Only used when
+# the `youtube-chat` extra is installed and a YouTube URL is supplied.
+# See docs/PRIVACY.md for what that reader actually does.
+source:
+  reconnect_delay_seconds: 5
+  max_retries: 3
+  interruptable: false
 
 youtube_api:
   api_key: "${YOUTUBE_API_KEY}"

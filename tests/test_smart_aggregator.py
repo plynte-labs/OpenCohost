@@ -741,7 +741,7 @@ class TestAggregator:
     # --- Aggregator Factory Tests (T-14, REQ-17..20) ---
 
     def test_factory_creates_youtube_source(self, smart_aggregator_config, mock_llm, temp_dir):
-        """REQ-17/18: connect() with default platform creates YouTubeChatSource."""
+        """REQ-17/18: connect() with platform='youtube' creates YouTubeChatSource."""
         cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
@@ -752,7 +752,7 @@ class TestAggregator:
         agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
 
         with patch.object(YouTubeChatSource, "connect") as mock_connect:
-            agg.connect("test123")
+            agg.connect("test123", platform="youtube")
             assert isinstance(agg.source, YouTubeChatSource)
             mock_connect.assert_called_once_with("test123")
 
@@ -809,8 +809,9 @@ class TestAggregator:
         mock_source.is_connected.return_value = False
         assert agg._should_consider_vibe(1.0) is False
 
-    def test_youtube_backward_compat_still_works(self, smart_aggregator_config, mock_llm, temp_dir):
-        """Backward compat: connect() without platform still works for YouTube."""
+    def test_default_platform_is_twitch(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Twitch is the default platform: connect() without a platform never
+        reaches the unofficial YouTube reader (2026-06-13 compliance ruling)."""
         cfg = deepcopy(smart_aggregator_config)
         config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
         cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
@@ -820,10 +821,26 @@ class TestAggregator:
 
         agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
 
-        with patch.object(YouTubeChatSource, "connect") as mock_connect:
-            agg.connect("dQw4w9WgXcQ")
-            assert isinstance(agg.source, YouTubeChatSource)
-            mock_connect.assert_called_once_with("dQw4w9WgXcQ")
+        with patch.object(TwitchChatSource, "connect") as mock_connect:
+            agg.connect("somechannel")
+            assert isinstance(agg.source, TwitchChatSource)
+            mock_connect.assert_called_once_with("somechannel")
+
+    def test_default_session_platform_is_twitch(self, smart_aggregator_config, mock_llm, temp_dir):
+        """start_session() defaults to twitch, so headless sessions are not
+        recorded as YouTube sessions by accident."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with patch.object(agg.history, "start_session", return_value=1) as mock_start:
+            agg.start_session()
+            mock_start.assert_called_once_with("twitch", "headless")
 
     def test_disconnect_handles_no_source(self, smart_aggregator_config, temp_dir):
         """REQ-17: disconnect() does not crash when no source exists."""

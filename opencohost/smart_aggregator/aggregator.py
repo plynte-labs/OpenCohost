@@ -216,7 +216,7 @@ class Aggregator:
                 return False
         return False
     
-    def connect(self, source_id: str, platform: str = "youtube"):
+    def connect(self, source_id: str, platform: str = "twitch"):
         if self._source is not None:
             self._source.disconnect()
 
@@ -244,7 +244,7 @@ class Aggregator:
         if self._session_id is None:
             self._session_id = self.history.start_session(platform, source_id)
 
-    def start_session(self, platform: str = "youtube", channel: str = "headless") -> int:
+    def start_session(self, platform: str = "twitch", channel: str = "headless") -> int:
         if self._session_id is None:
             self._session_id = self.history.start_session(platform, channel)
         return self._session_id

@@ -82,8 +82,11 @@ class YouTubeChatSource(ChatSource):
         
         if not _PYTCHAT_AVAILABLE:
             raise RuntimeError(
-                "pytchat no esta instalado en flux_env. Consulta antes de instalar "
-                "dependencias, segun docs/AGENT_RF3_INSTRUCTIONS.md."
+                "YouTube chat support is not installed. It is an explicit opt-in: "
+                "install it with `uv sync --extra youtube-chat`. It uses pytchat, "
+                "which reads YouTube's unofficial live-chat endpoint — something "
+                "YouTube's Terms of Service do not permit. Twitch is the supported "
+                "platform and needs no extra."
             )
 
         should_disconnect = False

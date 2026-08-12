@@ -238,7 +238,7 @@ class SmartAggregatorUI:
 
         self._do_connect(platform, source_id)
 
-    def connect_to(self, source_id: str, platform: str = "youtube") -> bool:
+    def connect_to(self, source_id: str, platform: str = "twitch") -> bool:
         """Connect to a chat by source_id and platform. Returns True on success."""
         if not self._smart_agg:
             self._on_log("[SmartAggregator] No inicializado.")

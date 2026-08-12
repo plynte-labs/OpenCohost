@@ -42,9 +42,9 @@ design principles that keep viewer content contained.
           │ EXTERNAL (untrusted / read-only inbound)   │
           │                    │                        │
           ▼                    ▼                        ▼
-   YouTube live chat    Twitch IRC chat       Microsoft Edge-TTS
-   (read-only poll)     (read-only IRC)       ← Kira's speech text
-                                                (OUTBOUND — cloud TTS)
+   Twitch IRC chat      YouTube live chat     Microsoft Edge-TTS
+   (read-only IRC)      (read-only poll,      ← Kira's speech text
+    DEFAULT              OPT-IN, unofficial)    (OUTBOUND — cloud TTS)
 ```
 
 ---
@@ -58,8 +58,8 @@ design principles that keep viewer content contained.
 | Ollama `generate` (warm/unload) | LOCAL loopback | Model name only; dummy prompt string | Model lifecycle management |
 | Ollama `pull` (download) | LOCAL (Ollama→registry) | Model tag string — initiated by Ollama, not by OpenCohost | User triggers via model panel |
 | **Microsoft Edge-TTS** (cloud) | **OUTBOUND** | **Kira's synthesized response text — sentence fragments only** | Default TTS engine; see Local TTS Option below |
-| YouTube live chat via `pytchat` | REMOTE inbound | YouTube video ID (from user config) | OpenCohost receives messages; no user content uploaded |
-| Twitch IRC `irc.chat.twitch.tv:6667` | REMOTE inbound | Anonymous `justinfan{random}` NICK, JOIN and PONG keepalives only | Read-only; no user content transmitted |
+| Twitch IRC `irc.chat.twitch.tv:6667` | REMOTE inbound | Anonymous `justinfan{random}` NICK, JOIN and PONG keepalives only | Read-only; no user content transmitted. **Default platform.** |
+| YouTube live chat via `pytchat` | REMOTE inbound | YouTube video ID (from user config) | OpenCohost receives messages; no user content uploaded. **Opt-in only** (`youtube-chat` extra, not installed by default). Reads YouTube's *unofficial* live-chat endpoint, not the official Data API — YouTube's Terms of Service do not permit it. See [PRIVACY.md](PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial). |
 | OBS WebSocket `localhost:4455` | LOCAL loopback | Avatar state name (`"idle"`, `"speaking"`) and local file paths | No chat content, no LLM output |
 
 **Summary:** the only data that leaves the user's machine under the default

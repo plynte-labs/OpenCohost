@@ -26,7 +26,8 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 | Personality profiles (editable from UI) | Stable |
 | LLM model catalog with one-click switching | Stable |
 | Ollama lifecycle management from the UI | Stable |
-| Smart Chat Aggregator (YouTube Live) | Stable |
+| Smart Chat Aggregator (Twitch) | Stable |
+| Smart Chat Aggregator (YouTube) | Opt-in, unofficial — see [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | Health monitor with TTS fallback gate | Stable |
 | Compact mode for second-monitor streaming | Stable |
 
@@ -69,7 +70,8 @@ pip install -e ".[cloud-tts,integrations,local-tts]"
 |---|---|
 | `cloud-tts` | Edge-TTS — Microsoft free cloud voice (default) |
 | `local-tts` | Piper offline TTS — fully local, no cloud calls |
-| `integrations` | YouTube chat (pytchat), OBS WebSocket, NVIDIA VRAM monitor |
+| `integrations` | OBS WebSocket, NVIDIA VRAM monitor |
+| `youtube-chat` | Unofficial YouTube live chat (pytchat) — opt-in, [read this first](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets |
 
 ### Run
@@ -107,7 +109,7 @@ opencohost/
 ├── ui/
 │   ├── app_shell.py      # Main UI shell (thread-safe UIState observer)
 │   └── model_panel.py    # Model management panel
-└── smart_aggregator/     # YouTube Live Chat aggregator
+└── smart_aggregator/     # Live chat aggregator (Twitch; YouTube opt-in)
 ```
 
 ## Personality Profiles

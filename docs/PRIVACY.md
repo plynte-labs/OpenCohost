@@ -17,7 +17,7 @@ All of the following are processed and stored **locally only** and are never tra
 
 | Data | Notes |
 |---|---|
-| Viewer chat messages | Read from YouTube/Twitch APIs; never forwarded anywhere |
+| Viewer chat messages | Read from Twitch's anonymous IRC gateway (or, if you opt in, YouTube's unofficial live-chat endpoint — see below); never forwarded anywhere |
 | Viewer usernames | Same as above — used locally for context aggregation |
 | Prompts sent to the LLM | Sent to your local Ollama instance over loopback (`127.0.0.1`) |
 | Conversation history / background memory digest | Held in RAM only; never written to disk; cleared on restart or profile switch |
@@ -61,8 +61,8 @@ These connections are **read-only** from OpenCohost's perspective — no viewer 
 
 | Service | What OpenCohost sends | What it receives |
 |---|---|---|
-| **YouTube Live Chat** (via `pytchat`) | Your stream's video ID | Incoming chat messages |
-| **Twitch IRC** (`irc.chat.twitch.tv:6667`) | An anonymous IRC nick (`justinfan{random}`), channel JOIN, and PONG keepalives | Incoming chat messages |
+| **Twitch IRC** (`irc.chat.twitch.tv:6667`) — default | An anonymous IRC nick (`justinfan{random}`), channel JOIN, and PONG keepalives | Incoming chat messages |
+| **YouTube live chat** (via `pytchat`) — opt-in, unofficial | Your stream's video ID | Incoming chat messages |
 
 OpenCohost does not post messages, reactions, or any viewer data back to either platform.
 
@@ -81,7 +81,7 @@ OpenCohost does not post messages, reactions, or any viewer data back to either 
 
 All persistent data is stored under your user data directory:
 
-- **Windows:** `%APPDATA%\OpenCohost\` (e.g. `C:\Users\YourName\AppData\Roaming\OpenCohost\`)
+- **Windows:** `%APPDATA%\OpenCohost\` (e.g. `C:\Users\YourName\AppData\Roaming\OpenCohost\`)<!-- path-ok -->
 - **Linux/macOS:** `~/.local/share/OpenCohost/` (or equivalent)
 
 | What | Path (relative to user data dir) |
@@ -135,13 +135,39 @@ Crash information is written exclusively to local files (`logs/crash.log`, `logs
 | Service | Operator | Data sent by OpenCohost | Purpose |
 |---|---|---|---|
 | Edge-TTS | Microsoft | Kira's generated response text (sentence fragments) | Cloud voice synthesis (default TTS) |
-| YouTube Live Chat API | Google | Video ID | Receive viewer chat (read-only) |
-| Twitch IRC | Twitch Interactive | Anonymous IRC nick, channel name, PONG | Receive viewer chat (read-only) |
+| Twitch IRC | Twitch Interactive | Anonymous IRC nick, channel name, PONG | Receive viewer chat (read-only). Default platform. |
+| YouTube live chat (unofficial endpoint, via `pytchat`) | Google | Video ID | Receive viewer chat (read-only). **Opt-in only** — see the warning below. |
 | Ollama | Local process | LLM prompt (local only, loopback) | Language model inference |
 
 For Microsoft's data practices regarding Edge-TTS requests, refer to [Microsoft's Privacy Statement](https://privacy.microsoft.com/en-us/privacystatement).
 
 For YouTube's data practices, refer to [Google's Privacy Policy](https://policies.google.com/privacy).
+
+### YouTube live chat is opt-in and unofficial
+
+Twitch is OpenCohost's supported chat platform. It connects to Twitch's public
+anonymous IRC gateway, which Twitch documents and permits, and it needs no
+credentials and no extra install.
+
+YouTube support is different, and you should read this before enabling it:
+
+- It uses [`pytchat`](https://pypi.org/project/pytchat/), which reads the same
+  unofficial live-chat endpoint the YouTube web player uses. **It is not
+  Google's official YouTube Data API, and YouTube's Terms of Service do not
+  permit accessing the service by automated means outside the published API.**
+- It is therefore **not installed by default**. You have to ask for it
+  explicitly — `pip install -e ".[youtube-chat]"`, or `uv sync --extra
+  youtube-chat` if you use uv. Without it, connecting to a YouTube URL simply
+  fails; the app shows a generic connection error and the reason above is
+  written to the log file.
+- The risk, if any, falls on your own YouTube channel. OpenCohost cannot
+  accept that risk on your behalf, which is why it is a separate, deliberate
+  install step rather than a default.
+- Nothing about this changes where the data goes: chat read this way is still
+  processed locally and still never leaves your machine.
+
+An officially-compliant YouTube path — the YouTube Data API v3 with your own
+API key — is the intended replacement. It is not implemented yet.
 
 For Twitch's data practices, refer to [Twitch's Privacy Notice](https://www.twitch.tv/p/en/legal/privacy-notice/).
 

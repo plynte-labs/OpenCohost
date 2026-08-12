@@ -26,7 +26,8 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 | Perfiles de personalidad (editables desde la UI) | Estable |
 | Catálogo de modelos LLM con cambio de modelo en un clic | Estable |
 | Gestión del ciclo de vida de Ollama desde la UI | Estable |
-| Agregador de chat inteligente (YouTube Live) | Estable |
+| Agregador de chat inteligente (Twitch) | Estable |
+| Agregador de chat inteligente (YouTube) | Opcional, no oficial — ver [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | Monitor de salud con fallback de TTS | Estable |
 | Modo compacto para streaming en monitor secundario | Estable |
 
@@ -69,7 +70,8 @@ pip install -e ".[cloud-tts,integrations,local-tts]"
 |---|---|
 | `cloud-tts` | Edge-TTS — voz en la nube gratuita de Microsoft (predeterminado) |
 | `local-tts` | Piper TTS offline — completamente local, sin llamadas a la nube |
-| `integrations` | Chat de YouTube (pytchat), OBS WebSocket, monitor de VRAM NVIDIA |
+| `integrations` | OBS WebSocket, monitor de VRAM NVIDIA |
+| `youtube-chat` | Chat de YouTube no oficial (pytchat) — opcional, [leer esto primero](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets |
 
 ### Ejecutar
@@ -107,7 +109,7 @@ opencohost/
 ├── ui/
 │   ├── app_shell.py      # Shell principal de UI (UIState observer thread-safe)
 │   └── model_panel.py    # Panel de gestión de modelos
-└── smart_aggregator/     # Agregador de YouTube Live Chat
+└── smart_aggregator/     # Agregador de chat en vivo (Twitch; YouTube opcional)
 ```
 
 ## Perfiles de personalidad
