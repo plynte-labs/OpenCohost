@@ -18,7 +18,7 @@ from collections import Counter
 # args, class attributes). Those run during llm_engine's PARTIAL import, so they
 # see only the names bound above its `import ScoutPromotionMixin` line: measured
 # 2026-08-11, `_eng.SYSTEM_PROMPT` (llm_engine.py:30) resolves while
-# `_eng.TTS_AUDIO_QUEUE_TIMEOUT` (llm_engine.py:105) raises
+# `_eng.TTS_AUDIO_QUEUE_TIMEOUT` (llm_engine.py:111) raises
 # "AttributeError: partially initialized module". Which side of that line a name
 # falls on is not something a mixin can track -- and the line moves -- so the rule
 # is scope, not the name. `mixin_freevar_audit.py` enforces it.
