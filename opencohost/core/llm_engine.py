@@ -1001,8 +1001,6 @@ class MotorVocalIA(
         with self._lock:
             return self._llm_generating
 
-    
-
     @property
     def current_speech_source(self):
         with self._lock:
