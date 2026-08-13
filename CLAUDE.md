@@ -25,12 +25,23 @@ Product direction: **OpenCohost** (`opencohost_launch_readiness_20260605` track)
 - Goal is runtime validation and release readiness for OpenCohost launch.
 - Active local checkpoints (NOT yet merged):
   - `dynamic_model_management_20260608` — Phase 1 + 2 done locally, 154 passed
-  - `heavy_model_inference_recovery_20260609` — implemented AND **runtime-validated
-    2026-06-17** against a real stalling model. Evidence: `logs/opencohost_20260617_175453.log`
-    at 18:05:24 — `qwopus` hung, the inference watchdog fired at 45.00s, automatic rollback to
-    `gemma4:e2b`, queue processing continued without restart. This line previously read "needs
-    real runtime validation" for six weeks after the log existed; do not reintroduce that claim
-    without citing a log that contradicts this one.
+  - `heavy_model_inference_recovery_20260609` — **the watchdog is validated; the rollback was
+    not.** Split the claim, because the two halves have different evidence.
+    - Watchdog: validated 2026-06-17 (`logs/opencohost_20260617_175453.log` at 18:05:24) and
+      again 2026-08-13 — fires at exactly 45.00s on a hung `qwopus`, both times.
+    - Rollback: **FAILED twice on 2026-08-13** (`logs/opencohost_20260813_114819.log` lines
+      195-222, at 12:57 and 13:03). The watchdog fired, the rollback to `gemma4:e4b` was
+      attempted, and both attempts died 150s later with `target_model_unavailable`. Root cause:
+      the chat client's HTTP timeout was pinned at 180s while the watchdog budget was 45s, so
+      the abandoned request kept Ollama's single runner busy and the rollback could not get one.
+      Owner turns queued during that window were never served.
+    - Fixed in `a8830bb` (chat client timeout now tracks the watchdog budget, so the socket
+      close actually frees the runner). **The fix is NOT runtime-validated yet** — it needs a
+      real stalling model, same class of evidence as 2026-06-17. Until then this is a code-level
+      fix with unit coverage, not a closed gate.
+    - The 2026-06-17 run rolled back to `gemma4:e2b` and succeeded; 2026-08-13 rolled back to
+      the larger `gemma4:e4b` and failed. Do not assume one successful rollback generalises to
+      another target model.
 - Deferred (do not touch): knowledge cards, packaging, hardening suite, first-run wizard
 
 Always read `AGENT_HANDOFF.md` first. It holds the latest operating mode and gate status.
@@ -59,12 +70,17 @@ These aliases map to Agent tool `model` param values.
 
 Priority order for the next sessions:
 
-1. ~~**Runtime validation** — validate `heavy_model_inference_recovery` against a real
-   heavy/stalling model.~~ **SATISFIED 2026-06-17** — see the checkpoint note above for the log
-   evidence. It is no longer a release gate and no longer blocks starting a track. The open
-   runtime gate is now the **clause sanitizer** (ADR-039): the owner must run a real agenda
-   session and report `[CLAUSE_SANITIZER]` verdict counts and `[TURN_LATENCY]` medians split by
-   verdict.
+1. **Runtime validation — REOPENED 2026-08-13.** The 2026-06-17 evidence covers the watchdog
+   only; the rollback failed twice on 2026-08-13 and was fixed in `a8830bb` (see the checkpoint
+   note above). The fix needs its own runtime evidence: a real stalling model, the watchdog
+   firing, and the rollback **completing** — plus confirmation that the Ollama runner is
+   actually freed on socket close. This is a release gate again.
+   Two other open runtime gates:
+   - **Clause sanitizer** (ADR-039): run a real agenda session and report `[CLAUSE_SANITIZER]`
+     verdict counts and `[TURN_LATENCY]` medians split by verdict.
+   - **Chat ingestion** (new, `0768d25`): a live session must show whether the stream dies by
+     filter or by disconnect. Grep `[CHAT_CONN]` and `[CHAT_INGEST] rollup`. High `arrived`
+     with near-zero `survived` means the filters; `[CHAT_CONN] disconnected` means the socket.
 2. **UI rendering track** — `ui_rendering_optimization_20260609` is the active branch (`audit/ui-rendering-analysis`). ADR-006 and ADR-007 are already written.
 3. **OpenCohost launch readiness** — reconcile docs, validate all runtime claims, confirm smoke harness passes.
 4. **Packaging** — only after runtime gates pass. Track exists at `conductor/tracks/packaging_deploy_20260510/`.
