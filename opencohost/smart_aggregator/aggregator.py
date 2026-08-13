@@ -1,3 +1,4 @@
+import logging
 import os
 import yaml
 import time
@@ -18,6 +19,15 @@ from .chat_input_contract import (
     ChatEventDetector,
 )
 from opencohost.config.validation import runtime_screen
+
+logger = logging.getLogger("OpenCohost")
+
+# [CHAT_CONN]/[CHAT_INGEST] rollup cadence -- ponytail: fixed cadence, no
+# config knob until a real session shows a fixed cadence isn't enough.
+# Whichever threshold hits first triggers the rollup.
+_CHAT_INGEST_ROLLUP_EVERY_N = 50
+_CHAT_INGEST_ROLLUP_EVERY_SECONDS = 30.0
+
 
 class Aggregator:
     def __init__(self, config_path: str = "config/smart_aggregator.yaml", llm_interface: Optional[Callable] = None):
@@ -88,6 +98,17 @@ class Aggregator:
             ring=int(_diag_cfg.get("ring_size", 512)),
         )
         self._filter_policy_name: str = "balanced"
+
+        # [CHAT_CONN]/[CHAT_INGEST] observability state -- metadata only. See
+        # connect()/_on_source_connect/_on_source_error/_on_source_disconnect
+        # and _log_chat_ingest_received/_log_chat_ingest_rollup below.
+        self._chat_ingest_platform: Optional[str] = None
+        self._chat_ingest_source_id: Optional[str] = None
+        self._chat_ingest_connect_seq = 0
+        self._chat_ingest_last_error: Optional[str] = None
+        self._chat_ingest_msg_count = 0
+        self._chat_ingest_last_rollup_ts = time.monotonic()
+
         self._load_spam_config()
         self._load_live_safety_config()
     
@@ -225,7 +246,13 @@ class Aggregator:
         return False
     
     def connect(self, source_id: str, platform: str = "twitch"):
+        logger.info("[CHAT_CONN] connect attempt platform=%s source=%s", platform, source_id)
+
         if self._source is not None:
+            # Fires _on_source_disconnect for the OLD source below, BEFORE
+            # self._chat_ingest_platform/source_id are overwritten with the
+            # new identity -- so that disconnect line reports the channel
+            # that actually went down, not the one we're about to join.
             self._source.disconnect()
 
         source_cls = self._source_factory.get(platform)
@@ -237,6 +264,11 @@ class Aggregator:
             if platform == "youtube"
             else self.config.get("twitch", {})
         )
+
+        self._chat_ingest_platform = platform
+        self._chat_ingest_source_id = source_id
+        self._chat_ingest_connect_seq = 0
+        self._chat_ingest_last_error = None
 
         self._source = source_cls(
             source_config,
@@ -323,10 +355,44 @@ class Aggregator:
         except Exception:
             pass
     
+    def _log_chat_ingest_received(self) -> None:
+        """DEBUG per-message receipt marker -- platform/source identity only,
+        never text or user. Per-message INFO would spam a busy channel;
+        _log_chat_ingest_rollup below is the INFO-level signal instead."""
+        self._chat_ingest_msg_count += 1
+        logger.debug(
+            "[CHAT_INGEST] received platform=%s source=%s",
+            self._chat_ingest_platform, self._chat_ingest_source_id,
+        )
+
+    def _log_chat_ingest_rollup(self) -> None:
+        """Periodic INFO rollup: arrived vs survived the filter/spam/safety
+        chain, plus the top rejection reasons -- the datum that settles
+        "is the filter eating everything or is the socket dropping".
+        Surfaces FilterDiagnostics' own cumulative counters (diagnostics.py)
+        -- no separate counter is kept here. Gated to
+        _CHAT_INGEST_ROLLUP_EVERY_N messages or _CHAT_INGEST_ROLLUP_EVERY_SECONDS,
+        whichever comes first, so a busy channel doesn't spam the log."""
+        now = time.monotonic()
+        due_by_count = self._chat_ingest_msg_count % _CHAT_INGEST_ROLLUP_EVERY_N == 0
+        due_by_time = (now - self._chat_ingest_last_rollup_ts) >= _CHAT_INGEST_ROLLUP_EVERY_SECONDS
+        if not (due_by_count or due_by_time):
+            return
+        self._chat_ingest_last_rollup_ts = now
+        diag = self._diagnostics.get_diagnostics()
+        top_reasons = sorted(diag["by_reason"].items(), key=lambda kv: kv[1], reverse=True)[:3]
+        reasons_str = ",".join(f"{r}:{n}" for r, n in top_reasons) if top_reasons else "none"
+        logger.info(
+            "[CHAT_INGEST] rollup platform=%s source=%s arrived=%d survived=%d rejected=%d top_reasons=%s",
+            self._chat_ingest_platform, self._chat_ingest_source_id,
+            diag["seen"], diag["accepted"], diag["rejected"], reasons_str,
+        )
+
     def process_message(self, message: dict):
         now = self._message_timestamp(message)
         self._note_seen_message(now)
         self._diagnostics.record_seen()
+        self._log_chat_ingest_received()
         filtered = self.msg_filter.filter(message)
         accepted = False
         if filtered is not None:
@@ -375,6 +441,11 @@ class Aggregator:
             # record_accepted() already fired above; reclassify so the counters
             # stay consistent instead of reporting a blocked raid as accepted.
             self._diagnostics.reclassify_accepted_as_rejected(f"safety_floor:{blocked_rule}")
+
+        # Diagnostics are fully settled for this message at this point
+        # (including a possible safety-floor reclassify above) -- the right
+        # moment to check whether a periodic [CHAT_INGEST] rollup is due.
+        self._log_chat_ingest_rollup()
 
         if accepted and self.on_filtered_message:
             try:
@@ -604,20 +675,52 @@ class Aggregator:
         return message
     
     def _on_source_error(self, error: str):
+        # `error` is str(Exception) from a socket/pytchat failure -- a
+        # connection error message, never chat content. Kept as the pending
+        # disconnect reason (below) so the operator can see WHY the socket
+        # dropped, not just that it did.
+        self._chat_ingest_last_error = error
+        logger.warning(
+            "[CHAT_CONN] error platform=%s source=%s msg=%s",
+            self._chat_ingest_platform, self._chat_ingest_source_id, error,
+        )
         if self.on_source_error:
             try:
                 self.on_source_error(error)
             except Exception:
                 pass
-    
+
     def _on_source_connect(self, info: dict):
+        self._chat_ingest_connect_seq += 1
+        if self._chat_ingest_connect_seq == 1:
+            logger.info(
+                "[CHAT_CONN] connected platform=%s source=%s",
+                info.get("platform"), info.get("source_id"),
+            )
+        else:
+            # chat_source.py's _run() retries in place after on_error, WITHOUT
+            # an intervening on_disconnect -- so a 2nd+ on_connect in the same
+            # source lifetime IS the reconnect outcome.
+            logger.info(
+                "[CHAT_CONN] reconnected platform=%s source=%s attempt=%d",
+                info.get("platform"), info.get("source_id"), self._chat_ingest_connect_seq,
+            )
+        self._chat_ingest_last_error = None
         if self.on_source_connect:
             try:
                 self.on_source_connect(info)
             except Exception:
                 pass
-    
+
     def _on_source_disconnect(self):
+        # "if available" per the observability spec: chat_source.py's
+        # on_disconnect carries no reason, so the best available signal is
+        # whatever on_error last reported for this source lifetime.
+        reason = self._chat_ingest_last_error or "clean"
+        logger.info(
+            "[CHAT_CONN] disconnected platform=%s source=%s reason=%s",
+            self._chat_ingest_platform, self._chat_ingest_source_id, reason,
+        )
         self.end_session()
         if self.on_source_disconnect:
             try:

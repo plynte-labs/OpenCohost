@@ -1481,3 +1481,185 @@ class TestInputSafetyFloor:
 
         for record in caplog.records:
             assert text not in record.getMessage()
+
+
+# --- Chat ingestion observability (owner report: chat "disconnects", Kira
+# never activates, messages trickle in -- but aggregator.py had zero logging
+# calls, so neither hypothesis was testable). Covers connection lifecycle,
+# ingestion volume rollup, and filter attrition -- all metadata-only, per the
+# project's "never expose raw chat in prompts, logs, or persistence" rule.
+class TestChatIngestObservability:
+
+    def _agg(self, smart_aggregator_config, temp_dir) -> Aggregator:
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        return Aggregator(config_path=config_path)
+
+    # --- connection lifecycle ---
+
+    def test_connect_attempt_and_success_log_channel_identity(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"), \
+                patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            # The background reader thread normally fires this; drive it
+            # directly since TwitchChatSource.connect is stubbed above.
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[CHAT_CONN]" in m and "connect attempt" in m
+            and "platform=twitch" in m and "source=canalA" in m
+            for m in messages
+        )
+        assert any(
+            "[CHAT_CONN]" in m and "connected" in m and "reconnected" not in m
+            and "platform=twitch" in m and "source=canalA" in m
+            for m in messages
+        )
+
+    def test_disconnect_logs_last_error_as_reason(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"), \
+                patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+            agg._on_source_error("connection reset by peer")
+            agg._on_source_disconnect()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[CHAT_CONN]" in m and "disconnected" in m
+            and "reason=connection reset by peer" in m
+            for m in messages
+        )
+
+    def test_disconnect_without_prior_error_logs_clean_reason(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"), \
+                patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+            agg._on_source_disconnect()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[CHAT_CONN]" in m and "disconnected" in m and "reason=clean" in m
+            for m in messages
+        )
+
+    def test_reconnect_after_connect_logs_attempt_number(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"), \
+                patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+            # Simulates chat_source.py's own internal retry loop reconnecting
+            # without an intervening disconnect (_run()'s error-then-retry path).
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "[CHAT_CONN]" in m and "reconnected" in m and "attempt=2" in m
+            for m in messages
+        )
+
+    # --- ingestion volume + filter attrition rollup ---
+
+    def test_rollup_reports_arrived_survived_and_top_reasons(
+        self, smart_aggregator_config, temp_dir, caplog, monkeypatch
+    ):
+        import logging
+        from opencohost.smart_aggregator import aggregator as aggregator_mod
+
+        monkeypatch.setattr(aggregator_mod, "_CHAT_INGEST_ROLLUP_EVERY_N", 3)
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            agg.process_message({"user": "u1", "text": "Kira que juego estas jugando ahora", "timestamp": time.time()})
+            agg.process_message({"user": "u2", "text": "hola", "timestamp": time.time()})  # too short -> rejected
+            agg.process_message({"user": "u3", "text": "gg", "timestamp": time.time()})  # too short -> rejected
+
+        rollups = [r.getMessage() for r in caplog.records if "[CHAT_INGEST] rollup" in r.getMessage()]
+        assert rollups, "expected a rollup line by the 3rd message"
+        line = rollups[-1]
+        assert "arrived=3" in line
+        assert "survived=1" in line
+        assert "rejected=2" in line
+        assert "top_reasons=" in line
+
+    def test_no_per_message_line_at_info_level(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        """INFO (the owner's default level) must not carry one line per
+        message -- only DEBUG does. Regression guard for the "unusable spam"
+        the task explicitly rules out."""
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            for i in range(5):
+                agg.process_message({
+                    "user": f"u{i}",
+                    "text": "Kira que opinas de este juego tan bueno",
+                    "timestamp": time.time(),
+                })
+
+        received_at_info = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "[CHAT_INGEST] received" in r.getMessage()
+        ]
+        assert received_at_info == []
+
+    # --- privacy regression guard ---
+
+    def test_sentinel_chat_text_and_user_never_reach_any_log(
+        self, smart_aggregator_config, temp_dir, caplog
+    ):
+        """Model: tests/test_direct_bounded_wait.py:143-168 -- a decoy string
+        must never reach a log line. Exercises connect/error/disconnect AND
+        process_message so both new log families are covered."""
+        import logging
+
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        sentinel_text = "SENTINEL-CHAT-TEXT-do-not-leak-9f3a"  # pragma: allowlist secret
+        sentinel_user = "sentinel_viewer_do_not_leak"
+
+        with caplog.at_level(logging.DEBUG, logger="OpenCohost"), \
+                patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            agg._on_source_connect({"platform": "twitch", "source_id": "canalA"})
+            agg.process_message({"user": sentinel_user, "text": sentinel_text, "timestamp": time.time()})
+            agg._on_source_error("connection reset by peer")
+            agg._on_source_disconnect()
+
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert sentinel_text not in log_text
+        assert sentinel_user not in log_text
