@@ -3198,12 +3198,22 @@ class MotorVocalIA(
             # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
             _prefill_ms = (getattr(respuesta, "prompt_eval_duration", 0) or 0) / 1e6
             _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
+            # llm_output_streaming_20260813: Ollama reports the COLD MODEL LOAD
+            # separately from prefill, and this line never read it -- so a slow
+            # turn was one undifferentiated lump with no way to tell "the model
+            # had to be loaded" from "the model stalled". That distinction is
+            # what the streaming stall detector has to be built on: with
+            # LLM_KEEP_ALIVE="7m" and `_prepare_model` called ONLY at startup,
+            # on a switch and on cloud fallback (never on the turn path), any
+            # idle gap over 7 minutes makes the NEXT turn pay a cold load
+            # inside the chat call itself. Measure it before choosing a timeout.
+            _load_ms = (getattr(respuesta, "load_duration", 0) or 0) / 1e6
             _ec_final = getattr(respuesta, "eval_count", 0) or 0
             logger.info(
                 "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
-                "prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
+                "load_ms=%.0f prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
                 request_model, _pec_final, _native_ctx, _effective_ctx, _util,
-                _prefill_ms, _decode_ms, _ec_final, source,
+                _load_ms, _prefill_ms, _decode_ms, _ec_final, source,
             )
             # Unit 2.3 (runtime_findings_batch_20260731 F10): stash the SAME
             # numbers the line above just logged, per request, in the bounded
@@ -3228,6 +3238,7 @@ class MotorVocalIA(
                 "effective_ctx": _effective_ctx,
                 "ratio": _util,
                 "prompt_eval_count": _pec_final,
+                "load_ms": _load_ms,
                 "prefill_ms": _prefill_ms,
                 "decode_ms": _decode_ms,
                 "eval_count": _ec_final,
