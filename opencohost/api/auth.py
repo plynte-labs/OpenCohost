@@ -172,8 +172,16 @@ def _resolve_role(token: str) -> str | None:
     Propagates TokenFileError so callers decide between 503 (enforced
     surfaces) and warn-and-pass (D2 warn-only mode).
     """
-    # ponytail: per-request file read — the file is tiny and only mutating
-    # requests reach here; cache per-app if it ever shows up in profiles.
+    # ponytail: per-request file read. This is NO LONGER a mutating-only path:
+    # the Tauri client polls GET /api/stream/chat-live/messages every 1.5s from
+    # app launch, whether or not a stream is ever connected, and that GET gates
+    # itself here (routers/stream.py). Each poll resolves twice — once for the
+    # gate, once for observability._audit_role — so a token-holding client
+    # costs ~80 reads/min, ~38k over an 8-hour session.
+    # Left uncached deliberately: the file is ~150 bytes, served from the OS
+    # page cache, and it has not shown up in a profile. Cache per-app (and
+    # invalidate on mtime, so deleting the file to rotate still works) only
+    # once it does.
     tokens = load_tokens()
     for role in _TOKEN_ROLES:
         if verify_token(token, tokens[role]):

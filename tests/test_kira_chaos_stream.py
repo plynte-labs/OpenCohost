@@ -114,12 +114,14 @@ class TestCT001PttWinsUnderFullQueue:
 class TestCT002StaleChatExpiry:
     """Expired chat items must be silently discarded — no accumulation."""
 
-    def test_expired_chat_not_moved_to_accumulation(self):
+    def test_expired_chat_not_moved_to_accumulation(self, monkeypatch):
+        # Tier split (tauri_stream_chat_20260812): the stream discard window
+        # is turn_priority.STREAM_TTL_SECONDS now, not _pq_ttl_seconds.
+        monkeypatch.setattr(llm_engine.turn_priority, "STREAM_TTL_SECONDS", 0.01)
         motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
-        motor._pq_ttl_seconds = 0.01
         motor._ejecutar_inferencia = MagicMock()
 
-        motor.enqueue("old chat", priority=1, source="chat")
+        motor.enqueue("old chat", source="chat")
         time.sleep(0.02)
 
         motor._processing = False
@@ -548,14 +550,14 @@ class TestCT007ChatBackpressure:
         # PTT and some chat should survive; agenda may or may not
         assert len(motor._priority_queue) <= 5
 
-    def test_ttl_prevents_stale_chat_reaction_after_flood(self):
+    def test_ttl_prevents_stale_chat_reaction_after_flood(self, monkeypatch):
         """After flood, expired chat items must not trigger late reactions."""
+        monkeypatch.setattr(llm_engine.turn_priority, "STREAM_TTL_SECONDS", 0.01)
         motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
-        motor._pq_ttl_seconds = 0.01
         motor._ejecutar_inferencia = MagicMock()
 
         for i in range(5):
-            motor.enqueue(f"old flood {i}", priority=1, source="chat")
+            motor.enqueue(f"old flood {i}", source="chat")
 
         time.sleep(0.02)  # Let TTL expire
 
@@ -624,7 +626,7 @@ class TestChaosStreamIntegration:
         assert len(motor._priority_queue) <= motor._pq_max_items
         assert len(motor._accumulation_buffer) <= motor._accum_max_items
 
-    def test_ptt_never_expires_even_after_long_delay(self):
+    def test_ptt_never_expires_even_after_long_delay(self, monkeypatch):
         """PTT items must survive TTL checks even with very short TTL.
 
         [F2, judgment-day WU2] kira-agenda* is now also TTL-exempt, so the stale
@@ -632,13 +634,15 @@ class TestChaosStreamIntegration:
         PTT item (priority 0 sorts first). Chat still expires. The PTT guarantee
         is the point: it survives and is processed first.
         """
+        # 1ms stream window - extremely aggressive (tier split: the stream
+        # TTL is the module setting; priorities resolve from source).
+        monkeypatch.setattr(llm_engine.turn_priority, "STREAM_TTL_SECONDS", 0.001)
         motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
-        motor._pq_ttl_seconds = 0.001  # 1ms - extremely aggressive
         motor._ejecutar_inferencia = MagicMock()
 
-        motor.enqueue("streamer says something", priority=0, source="ptt")
-        motor.enqueue("chat that expires", priority=1, source="chat")
-        motor.enqueue("agenda that expires", priority=2, source="kira-agenda")
+        motor.enqueue("streamer says something", source="ptt")
+        motor.enqueue("chat that expires", source="chat")
+        motor.enqueue("agenda that expires", source="kira-agenda")
 
         time.sleep(0.01)  # Let non-PTT TTL expire (chat only; agenda is exempt)
 

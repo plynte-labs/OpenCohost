@@ -16,6 +16,9 @@ from uuid import uuid4
 
 from opencohost.config.logger import get_logger
 from opencohost.core.context.repetition_guard import detect_repetition
+# Module import, not from-import: stream/agenda tiers are resolved LIVE from
+# the streamer's STREAM_OVER_AGENDA setting at mint time (see turn_priority).
+from opencohost.core import turn_priority
 from opencohost.i18n import active as i18n_active
 
 logger = get_logger()
@@ -1414,7 +1417,7 @@ class KiraAgendaController:
             editorial_context=self._consume_editorial_context_block(),
         )
         self.state = AgendaState.GENERATING
-        return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=self._pending_turns_spoken)
+        return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda", priority=turn_priority.agenda_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=self._pending_turns_spoken)
 
     def _preview_topic_action(self, instruction: str, *, source: str, turns: int) -> AgendaAction:
         previous_turns = self._pending_turns_spoken
@@ -1423,7 +1426,7 @@ class KiraAgendaController:
             prompt = self._build_prompt(instruction=instruction)
         finally:
             self._pending_turns_spoken = previous_turns
-        return AgendaAction(kind="enqueue", prompt=prompt, source=source, priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=max(1, turns))
+        return AgendaAction(kind="enqueue", prompt=prompt, source=source, priority=turn_priority.agenda_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=max(1, turns))
 
     def _chat_action(self, compact_chat: str) -> AgendaAction:
         self._pending_turns_spoken = 1
@@ -1433,7 +1436,12 @@ class KiraAgendaController:
             compact_chat=compact_chat,
         )
         self.state = AgendaState.GENERATING
-        return AgendaAction(kind="enqueue", prompt=prompt, source="chat", priority=1, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
+        # Failure mode 4 (tauri_stream_chat_20260812 §3.2): this used to mint
+        # priority=1 — the DIRECT tier — so the agenda's own chat replies
+        # skipped its tier and outranked a typed owner question. Viewer chat
+        # answered from agenda mode is stream content: it takes the stream
+        # tier, wherever the streamer ordered it relative to agenda.
+        return AgendaAction(kind="enqueue", prompt=prompt, source="chat", priority=turn_priority.stream_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
     def _streamer_action(self, ptt_text: str) -> AgendaAction:
         self._pending_turns_spoken = 1
@@ -1452,7 +1460,7 @@ class KiraAgendaController:
         # next_action() with a guaranteed non-empty ptt_text.strip() (see the
         # `if ptt_text.strip():` guard above) — no empty-text fallback needed.
         history_text = i18n_active.ptt_history_wrapper().format(text=ptt_text)
-        return AgendaAction(kind="enqueue", prompt=prompt, source="ptt", priority=0, topic_id=self.active_topic.id if self.active_topic else None, turns=1, history_text=history_text)
+        return AgendaAction(kind="enqueue", prompt=prompt, source="ptt", priority=turn_priority.PRIORITY_PTT, topic_id=self.active_topic.id if self.active_topic else None, turns=1, history_text=history_text)
 
     def _closing_action(self) -> AgendaAction:
         if self.active_topic:
@@ -1462,7 +1470,7 @@ class KiraAgendaController:
         self._pending_action_source = "kira-agenda-stop"
         prompt = self._build_prompt(instruction=i18n_active.agenda_instructions()["closing"])
         self.state = AgendaState.GENERATING
-        return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=2, topic_id=self.active_topic.id if self.active_topic else None, turns=1)
+        return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda-stop", priority=turn_priority.agenda_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=1)
 
     # ── Untrusted viewer-chat containment (prompt-injection defense) ──
     # Class-level names kept for backward compatibility (tests reference

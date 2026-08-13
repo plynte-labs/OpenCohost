@@ -137,6 +137,10 @@ def test_get_stream_state_disconnected_shape():
             "cooldown_seconds",
             "max_messages_per_user",
             "filter_policy",
+            "input_contract",
+            "stream_over_agenda",
+            "stream_ttl_seconds",
+            "effective_stream_ttl_seconds",
         }
         assert body["connected"] is False
         assert body["platform"] is None
@@ -145,6 +149,7 @@ def test_get_stream_state_disconnected_shape():
         assert body["cooldown_seconds"] == 10.0
         assert body["max_messages_per_user"] == 10
         assert body["filter_policy"] == "balanced"
+        assert body["input_contract"] is False  # module flag ships OFF
 
 
 def test_get_stream_state_connected_reflects_source():
@@ -403,6 +408,129 @@ def test_limits_503_when_aggregator_none():
     with TestClient(app) as client:
         resp = client.put("/api/stream/chat-live/limits", json={"threshold_per_second": 1.0})
         assert resp.status_code == 503
+
+
+def test_limits_input_contract_toggles_module_flag(monkeypatch):
+    """PUT input_contract flips chat_input_contract.USE_INPUT_CONTRACT_PROMPT --
+    the same process-global module flag the CTK toggle writes
+    (stream_admin_ui.py _toggle_input_contract). It is NOT aggregator state."""
+    import opencohost.smart_aggregator.chat_input_contract as ic
+
+    monkeypatch.setattr(ic, "USE_INPUT_CONTRACT_PROMPT", False)
+    agg = FakeAggregator()
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"input_contract": True})
+        assert resp.status_code == 200
+        assert ic.USE_INPUT_CONTRACT_PROMPT is True
+        assert resp.json()["input_contract"] is True
+
+        resp = client.put("/api/stream/chat-live/limits", json={"input_contract": False})
+        assert resp.status_code == 200
+        assert ic.USE_INPUT_CONTRACT_PROMPT is False
+        assert resp.json()["input_contract"] is False
+
+
+def test_limits_omitting_input_contract_leaves_flag_and_get_reflects_it(monkeypatch):
+    """Omitted field never writes the flag; GET reads the LIVE module value
+    (a from-import would freeze the boot value -- the CTK reader precedent is
+    module-attribute access, agenda_audio_controller's `import ... as _ic`)."""
+    import opencohost.smart_aggregator.chat_input_contract as ic
+
+    monkeypatch.setattr(ic, "USE_INPUT_CONTRACT_PROMPT", True)
+    agg = FakeAggregator()
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"threshold_per_second": 2.0})
+        assert resp.status_code == 200
+        assert ic.USE_INPUT_CONTRACT_PROMPT is True  # untouched
+        assert resp.json()["input_contract"] is True
+
+        resp = client.get("/api/stream/chat-live")
+        assert resp.json()["input_contract"] is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Tier split settings on PUT/GET (tauri_stream_chat_20260812 §3.2 phase 1)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_get_stream_state_tier_setting_defaults(monkeypatch):
+    """GET carries the two process-global tier settings plus the DERIVED
+    effective TTL -- module state (turn_priority), NOT aggregator state,
+    same mechanism as input_contract."""
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_OVER_AGENDA", True)
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 120.0)
+    app = _app(_host_with_aggregator(FakeAggregator()))
+    with TestClient(app) as client:
+        body = client.get("/api/stream/chat-live").json()
+        assert body["stream_over_agenda"] is True
+        assert body["stream_ttl_seconds"] == 120.0
+        assert body["effective_stream_ttl_seconds"] == 120.0
+
+
+def test_limits_stream_order_and_ttl_roundtrip(monkeypatch):
+    """PUT writes the turn_priority module attributes; the response's
+    effective TTL exposes THE TRAP guard: agenda-first floors the window so
+    the streamer can SEE their 45s became 300s instead of debugging a mute
+    co-host."""
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_OVER_AGENDA", True)
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 120.0)
+    app = _app(_host_with_aggregator(FakeAggregator()))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"stream_over_agenda": False, "stream_ttl_seconds": 45.0},
+        )
+        assert resp.status_code == 200
+        assert turn_priority.STREAM_OVER_AGENDA is False
+        assert turn_priority.STREAM_TTL_SECONDS == 45.0
+        body = resp.json()
+        assert body["stream_over_agenda"] is False
+        assert body["stream_ttl_seconds"] == 45.0
+        assert (
+            body["effective_stream_ttl_seconds"]
+            == turn_priority.AGENDA_FIRST_STREAM_TTL_FLOOR_SECONDS
+        )
+
+        resp = client.put("/api/stream/chat-live/limits", json={"stream_over_agenda": True})
+        assert resp.status_code == 200
+        assert resp.json()["effective_stream_ttl_seconds"] == 45.0
+
+
+def test_limits_stream_ttl_out_of_bounds_is_422(monkeypatch):
+    """Trust boundary: a nonsense TTL (0, negative, sub-floor, absurd) is
+    refused and the module value stays untouched -- a 0s window would expire
+    every stream item instantly, the mute failure from the other side."""
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 120.0)
+    app = _app(_host_with_aggregator(FakeAggregator()))
+    with TestClient(app) as client:
+        for bad in (0, -5, 9.9, 3601):
+            resp = client.put(
+                "/api/stream/chat-live/limits", json={"stream_ttl_seconds": bad}
+            )
+            assert resp.status_code == 422, bad
+            assert resp.json()["detail"] == "invalid_stream_ttl"
+            assert turn_priority.STREAM_TTL_SECONDS == 120.0
+
+
+def test_limits_omitting_tier_fields_leaves_them(monkeypatch):
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_OVER_AGENDA", False)
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 77.0)
+    app = _app(_host_with_aggregator(FakeAggregator()))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"threshold_per_second": 2.0})
+        assert resp.status_code == 200
+        assert turn_priority.STREAM_OVER_AGENDA is False
+        assert turn_priority.STREAM_TTL_SECONDS == 77.0
 
 
 # ──────────────────────────────────────────────────────────────────────────

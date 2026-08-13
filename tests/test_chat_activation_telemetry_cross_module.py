@@ -23,6 +23,7 @@ import queue
 import time
 from unittest.mock import MagicMock
 
+from opencohost.core import turn_priority
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.smart_aggregator.aggregator import Aggregator
 from opencohost.smart_aggregator.filter_telemetry import FilterStage, ReasonCode
@@ -61,11 +62,13 @@ def test_default_seam_callbacks_are_none():
     assert motor.on_chat_turn_spoken is None
 
 
-def test_chat_item_ttl_expiry_fires_callback():
+def test_chat_item_ttl_expiry_fires_callback(monkeypatch):
+    # Tier split (tauri_stream_chat_20260812): the stream discard window is
+    # the turn_priority module setting now, not the engine's _pq_ttl_seconds.
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 0.01)
     motor = _chat_motor()
-    motor._pq_ttl_seconds = 0.01
     stale_ts = time.time() - 5.0
-    motor._priority_queue = [(1, stale_ts, "hola chat", "chat")]  # prio 1 = chat
+    motor._priority_queue = [(2, stale_ts, "hola chat", "chat")]  # prio 2 = stream tier
     captured: list = []
     motor.on_chat_item_expired = lambda info: captured.append(info)
 
@@ -92,11 +95,11 @@ def test_non_chat_ttl_expiry_does_not_fire_chat_seam():
     assert motor._priority_queue == []  # still expired — gating did not change lifetime
 
 
-def test_ttl_expiry_with_no_callback_is_safe():
+def test_ttl_expiry_with_no_callback_is_safe(monkeypatch):
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 0.01)
     motor = _chat_motor()
-    motor._pq_ttl_seconds = 0.01
     stale_ts = time.time() - 5.0
-    motor._priority_queue = [(1, stale_ts, "hola chat", "chat")]
+    motor._priority_queue = [(2, stale_ts, "hola chat", "chat")]
     assert motor.on_chat_item_expired is None
 
     motor._process_priority_queue()  # must not raise

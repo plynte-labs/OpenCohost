@@ -867,6 +867,138 @@ class TestAggregator:
         agg = Aggregator(config_path=config_path)
         assert agg.source is None
 
+    # --- on_source_changed (source-switch signal for per-source consumers) ---
+
+    def _agg(self, smart_aggregator_config, temp_dir) -> Aggregator:
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        return Aggregator(config_path=config_path)
+
+    def test_on_source_changed_defaults_to_none(self, smart_aggregator_config, temp_dir):
+        assert self._agg(smart_aggregator_config, temp_dir).on_source_changed is None
+
+    def test_connect_fires_on_source_changed_every_time(self, smart_aggregator_config, temp_dir):
+        """Both connect paths (API POST .../connect and the CTK UI's
+        _do_connect) funnel through connect(), so this one hook covers both.
+        A reconnect is still a source change: it fires again."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        calls = []
+        agg.on_source_changed = lambda: calls.append(1)
+
+        with patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+            assert len(calls) == 1
+            agg.connect("canalB", platform="twitch")
+            assert len(calls) == 2
+            agg.connect("canalB", platform="twitch")  # reconnect, same channel
+            assert len(calls) == 3
+
+    def test_on_source_changed_raising_does_not_break_connect(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """Guarded exactly like on_filtered_message: a bad listener must never
+        take the connect down with it."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+
+        def _boom():
+            raise RuntimeError("listener exploded")
+
+        agg.on_source_changed = _boom
+
+        with patch.object(TwitchChatSource, "connect") as mock_connect:
+            agg.connect("canalA", platform="twitch")
+
+        assert isinstance(agg.source, TwitchChatSource)
+        mock_connect.assert_called_once_with("canalA")
+
+    def test_disconnect_does_not_fire_on_source_changed(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """DELIBERATE ASYMMETRY: only connect signals a source change. The
+        operator who just ended a stream keeps their scrollback; the next
+        connect is what wipes it."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        calls = []
+
+        with patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+        agg.on_source_changed = lambda: calls.append(1)
+
+        agg.disconnect()
+
+        assert calls == []
+
+    # --- WHERE the signal fires inside connect() is load-bearing ---
+
+    def test_fires_after_the_previous_source_was_disconnected(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """Ordering guard. If the signal fired before the old source's
+        disconnect(), a message still in flight from the OLD channel could be
+        stamped into the NEW session -- the exact silent channel-mix this
+        signal exists to prevent. It must also fire BEFORE the new source's
+        connect(), which is what starts the reader thread; firing after would
+        wipe the new session's own first messages."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        # Plain functions, not Mocks: connect() truth-tests the callback
+        # (`if self.on_source_changed:`), and a Mock would record that
+        # __bool__ into its own call log.
+        order = []
+
+        with patch.object(TwitchChatSource, "connect",
+                          lambda self, source_id: order.append(f"connect:{source_id}")), \
+                patch.object(TwitchChatSource, "disconnect",
+                             lambda self: order.append("disconnect")):
+            agg.on_source_changed = lambda: order.append("session_changed")
+            agg.connect("canalA", platform="twitch")
+            agg.connect("canalB", platform="twitch")
+
+        assert order == [
+            "session_changed",   # first connect: no old source to tear down
+            "connect:canalA",
+            "disconnect",        # canalB: old source down FIRST...
+            "session_changed",   # ...then the signal...
+            "connect:canalB",    # ...then the new reader thread starts.
+        ]
+
+    def test_unsupported_platform_does_not_fire_on_source_changed(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """A typo'd URL (API maps this ValueError to 422) must not destroy the
+        operator's scrollback: the platform lookup raises before the signal."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        calls = []
+        agg.on_source_changed = lambda: calls.append(1)
+
+        with pytest.raises(ValueError):
+            agg.connect("canalA", platform="kick")
+
+        assert calls == []
+
+    def test_source_construction_failure_does_not_fire_on_source_changed(
+        self, smart_aggregator_config, temp_dir
+    ):
+        """Same protection for a connector that is unavailable at build time
+        (API maps this RuntimeError to 503): the buffer survives the failure."""
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        calls = []
+        agg.on_source_changed = lambda: calls.append(1)
+
+        class _UnavailableSource:
+            def __init__(self, config, callbacks):
+                raise RuntimeError("chat connector unavailable")
+
+        agg._source_factory["twitch"] = _UnavailableSource
+
+        with pytest.raises(RuntimeError):
+            agg.connect("canalA", platform="twitch")
+
+        assert calls == []
+
 
 # --- TC3.7 — YouTube API (placeholder) ---
 

@@ -504,6 +504,24 @@ class StreamChatLiveResponse(BaseModel):
     cooldown_seconds: float
     max_messages_per_user: int
     filter_policy: str
+    # Required, not Optional (ChatLiveMessagesResponse.session precedent):
+    # absent-vs-False must be indistinguishable to no client. Mirrors the
+    # PROCESS-GLOBAL chat_input_contract.USE_INPUT_CONTRACT_PROMPT module
+    # flag — NOT aggregator state, despite living in this response.
+    input_contract: bool
+    # Tier-split settings (tauri_stream_chat_20260812 §3.2 phase 1). Same
+    # input_contract mechanism: PROCESS-GLOBAL turn_priority module state,
+    # not aggregator state. `stream_over_agenda` True (default) = the
+    # co-host serves the audience before the planned topics.
+    stream_over_agenda: bool
+    # The CONFIGURED stream discard window...
+    stream_ttl_seconds: float
+    # ...and the window the engine ACTUALLY applies (READ-ONLY, derived):
+    # agenda-first floors it (turn_priority.effective_stream_ttl) so the
+    # order setting can never silently expire every stream item into a mute
+    # co-host. Exposed so the UI can show the floor instead of the streamer
+    # debugging why their 30s setting "doesn't work" under agenda-first.
+    effective_stream_ttl_seconds: float
 
 
 class StreamConnectRequest(BaseModel):
@@ -515,6 +533,14 @@ class StreamLimitsRequest(BaseModel):
     cooldown_seconds: Optional[float] = None
     max_messages_per_user: Optional[int] = None
     filter_policy: Optional[str] = None
+    input_contract: Optional[bool] = None
+    # Tier-split settings — omitted fields leave the process-global values
+    # untouched (input_contract precedent). `stream_ttl_seconds` outside
+    # [STREAM_TTL_MIN_SECONDS, STREAM_TTL_MAX_SECONDS] is refused with 422
+    # `invalid_stream_ttl` (validated in the router, where the turn_priority
+    # bounds are in scope).
+    stream_over_agenda: Optional[bool] = None
+    stream_ttl_seconds: Optional[float] = None
 
 
 class ChatLiveMessageOut(BaseModel):
@@ -540,11 +566,17 @@ class ChatLiveMessagesResponse(BaseModel):
     that, `more_pending` is True and `cursor` advances only to the last
     message actually returned, so a client polling in a loop catches up
     gradually instead of skipping the backlog.
+
+    `session` changes on every chat-source connect (ChatFeedSink.new_session)
+    and is REQUIRED, not optional: absent, it would be indistinguishable from
+    session 0, and a client would keep appending #canalB's chat onto
+    #canalA's. `cursor` does NOT reset with it -- see that docstring.
     """
 
     messages: list[ChatLiveMessageOut]
     cursor: int
     boot: float
+    session: int
     more_pending: bool
 
 

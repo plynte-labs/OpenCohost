@@ -488,13 +488,15 @@ def test_overflow_drops_agenda_before_chat():
     assert sources.count("kira-agenda") <= 1
 
 
-def test_stale_chat_expires_before_processing():
+def test_stale_chat_expires_before_processing(monkeypatch):
     """Expired chat should be discarded, not reacted to later as accumulation."""
+    # Tier split (tauri_stream_chat_20260812): stream discard window is the
+    # turn_priority module setting now, not _pq_ttl_seconds.
+    monkeypatch.setattr(llm_engine.turn_priority, "STREAM_TTL_SECONDS", 0.01)
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
-    motor._pq_ttl_seconds = 0.01  # 10ms TTL for fast test
     motor._ejecutar_inferencia = MagicMock()
 
-    motor.enqueue("old chat", priority=1, source="chat")
+    motor.enqueue("old chat", source="chat")
     time.sleep(0.02)  # Wait for TTL to expire
 
     motor._processing = False

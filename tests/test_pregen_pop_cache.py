@@ -410,7 +410,11 @@ def test_ttl_sweep_exempts_kira_agenda_but_still_expires_chat():
     motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
     motor._commit_history = lambda contexto, dialogo, **kw: None
 
-    old = time.time() - (motor._pq_ttl_seconds + 60.0)
+    # Tier split (tauri_stream_chat_20260812): the stream window is the
+    # turn_priority module setting (default 120s); age past it.
+    from opencohost.core import turn_priority
+
+    old = time.time() - (turn_priority.effective_stream_ttl() + 60.0)
     # Raw queue items (priority, ts, payload, source, history_text), both older
     # than the TTL. kira-agenda is priority 2 (>0), so pre-fix it also expires.
     with motor._pq_lock:

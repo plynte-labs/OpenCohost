@@ -32,9 +32,21 @@ from opencohost.core.profiles.profiles import cargar_perfiles
 from opencohost.core.music.music_library import MusicLibrary
 from opencohost.core.providers.local.ollama_startup import OllamaStartupManager
 from opencohost.avatar.obs_runtime import ObsRuntime
-from opencohost.api.agenda_driver import AgendaDriver, route_motor_event_to_agenda
+from opencohost.api.agenda_driver import (
+    AgendaDriver,
+    enqueue_agenda_action,
+    route_motor_event_to_agenda,
+)
 from opencohost.api.observability import log_motor_accion
 from opencohost.smart_aggregator.aggregator import Aggregator
+# chat_reaction is the CTK routing extracted to neutral ground precisely so
+# this package can reuse it without breaking its never-imports-opencohost.ui
+# contract (see main.py's module docstring and _MOTOR_EVENT_WHITELIST below).
+from opencohost.smart_aggregator.chat_reaction import (
+    ChatReactionCore,
+    kira_agenda_consume_pending_chat_if_due,
+    on_smart_aggregated_context,
+)
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, KiraAgendaController
 
 try:
@@ -304,6 +316,11 @@ class ChatFeedSink:
     `seq` also resets to 0), so a polling client can tell a smaller `cursor`
     apart from a stale/empty poll and knows to resync instead of silently
     missing messages forever.
+
+    `session` is the same signal one level down: it changes every time the
+    aggregator connects to a chat source (see `new_session`), so the operator
+    switching from #canalA to #canalB does not get one continuous list that
+    silently mixes both channels.
     """
 
     def __init__(self, maxlen: int = 200):
@@ -311,6 +328,30 @@ class ChatFeedSink:
         self._lock = threading.Lock()
         self._seq = 0
         self.boot = time.time()
+        self.session = 0
+
+    def new_session(self) -> None:
+        """Drop the buffered chat and bump `session`. Wired as
+        `Aggregator.on_source_changed`, so it fires on every connect --
+        including a reconnect to the SAME channel, which is still a new
+        session because the buffer from before the disconnect is not
+        guaranteed to be contiguous with what follows.
+
+        `seq` is deliberately NOT reset: it stays monotonic for the life of
+        the process. Resetting it would make a client still polling with
+        `since=150` skip the new channel's first 150 messages -- silently, and
+        forever. `session` carries the reset signal instead, exactly the role
+        `boot` already plays for a process restart: a client that sees it
+        change clears its rendered list instead of appending to it.
+
+        DELIBERATE ASYMMETRY: `Aggregator.disconnect()` does NOT call this.
+        The operator who just ended a stream can still scroll back over the
+        last 200 messages; only the next connect wipes them. Do not "fix"
+        this into symmetry.
+        """
+        with self._lock:
+            self._messages.clear()
+            self.session += 1
 
     def record(self, message: dict) -> None:
         author = message.get("user", "")
@@ -323,7 +364,12 @@ class ChatFeedSink:
     def since(self, cursor: int) -> dict:
         with self._lock:
             messages = [dict(m) for m in self._messages if m["seq"] > cursor]
-            return {"messages": messages, "cursor": self._seq, "boot": self.boot}
+            return {
+                "messages": messages,
+                "cursor": self._seq,
+                "boot": self.boot,
+                "session": self.session,
+            }
 
 
 class MusicState:
@@ -407,6 +453,15 @@ class EngineHost:
         # KiraAgendaController is plain lists/attrs, not thread-safe — one
         # global lock, mirrors aggregator_lock (one process, one controller).
         self.agenda_lock = threading.Lock()
+        # Chat feeder (the missing CTK mirror that left Kira deaf to viewer
+        # chat in this host): the RF3 reaction core is built in start() once
+        # the motor exists; the pending compact-chat stash mirrors the CTK
+        # shell's _kira_agenda_pending_compact_chat and is read/written ONLY
+        # under agenda_lock (writers live on the chat source reader thread
+        # AND the motor speaking_end thread — unguarded, one would clobber
+        # the other's stash).
+        self._chat_reactor = None
+        self._pending_compact_chat = ""
         # FIX-C: the daemon thread that actually drives the passive controller
         # (CTK's _kira_agenda_tick has no headless equivalent). None until
         # start() wires it; stays None if agenda construction/wiring fails.
@@ -746,11 +801,27 @@ class EngineHost:
         # Lock safety: the emitting thread takes agenda_lock (here) THEN motor
         # locks (in replace_pending) — the SAME order the driver tick uses; no
         # inversion. The router holds NO router lock while emitting (§11 B6).
-        consume = (
-            (lambda: driver._maybe_consume_prefetch(agenda, self.motor))
-            if driver is not None
-            else None
-        )
+        def consume() -> None:
+            # CTK parity (motor_event_handlers.py:409-415): at an agenda
+            # speaking_end the stashed chat signal outranks the prefetched
+            # draft — otherwise a compact_chat stashed while the motor was
+            # busy would rot until the next activity spike overwrote it,
+            # and Kira would ignore the very chat burst that triggered it.
+            # Runs inside route_motor_event_to_agenda's callback, so the
+            # caller already holds agenda_lock (the stash's only guard).
+            if kira_agenda_consume_pending_chat_if_due(
+                kira_agenda=agenda,
+                get_pending_compact_chat=lambda: self._pending_compact_chat,
+                set_pending_compact_chat=self._set_pending_compact_chat,
+                enqueue_kira_agenda_action=(
+                    lambda action: enqueue_agenda_action(self.motor, action, driver=driver)
+                ),
+                kira_agenda_update_status=lambda: None,
+            ):
+                return
+            if driver is not None:
+                driver._maybe_consume_prefetch(agenda, self.motor)
+
         with self.agenda_lock:
             route_motor_event_to_agenda(
                 agenda,
@@ -773,6 +844,82 @@ class EngineHost:
                         driver.nudge()
                 except Exception:
                     _logger.exception("frozen-return nudge check failed")
+
+    def _set_pending_compact_chat(self, value: str) -> None:
+        """Callers MUST hold agenda_lock — see the stash comment in __init__."""
+        self._pending_compact_chat = value
+
+    def _on_aggregated_context(self, data: dict) -> None:
+        """Route an aggregated chat context into Kira (the missing CTK mirror
+        of app_shell._on_smart_aggregated_context).
+
+        THREADING: fires on the chat SOURCE reader thread —
+        Aggregator.process_message is the source's on_message callback and
+        _on_activity_trigger runs inline in it — never the engine thread. The
+        whole routed call therefore takes agenda_lock (the controller is not
+        thread-safe), exactly like _wire_agenda_driver's guardrails; the
+        motor enqueue inside happens agenda_lock->motor-locks, the SAME order
+        the driver tick uses, so no inversion.
+
+        Adapters, and why each is shaped this way:
+        - enqueue_kira_agenda_action -> agenda_driver.enqueue_agenda_action
+          (this host's one agenda->motor enqueue path; caller-holds-lock is
+          its documented contract and we do).
+        - kira_agenda_update_status -> no-op: it repaints CTK status labels;
+          agenda state itself is served by GET /api/agenda.
+        - log_accion -> _log_chat_reaction, an ALLOWLIST (see there). Only one
+          of chat_reaction's two InputContract lines is chat-derived; dropping
+          both would cost the operator the only signal that distinguishes
+          "Kira stayed silent on purpose" from "nothing reached Kira at all".
+
+        The outer try/except mirrors _dispatch_motor_event's guard: a routing
+        failure must never break the source reader loop that feeds the chat
+        UI. (Aggregator._on_activity_trigger also swallows, but that is its
+        insurance, not ours to lean on.)
+        """
+        if self._chat_reactor is None:
+            return  # start() has not wired the feeder (or aggregator failed)
+        try:
+            with self.agenda_lock:
+                on_smart_aggregated_context(
+                    data=data,
+                    kira_agenda=self.agenda,
+                    motor_ia=self.motor,
+                    smart_agg_ui=self._chat_reactor,
+                    enqueue_kira_agenda_action=(
+                        lambda action: enqueue_agenda_action(
+                            self.motor, action, driver=self._agenda_driver
+                        )
+                    ),
+                    kira_agenda_update_status=lambda: None,
+                    set_pending_compact_chat=self._set_pending_compact_chat,
+                    log_accion=self._log_chat_reaction,
+                )
+        except Exception:
+            _logger.exception("aggregated-context routing failed")
+
+    # ALLOWLIST, not a denylist -- an unrecognized line is DROPPED, so a future
+    # log_accion() call added to chat_reaction.py cannot start leaking through
+    # here by default. It has to be allowed in deliberately, after someone
+    # checks what it interpolates.
+    #
+    # chat_reaction emits exactly two InputContract lines and only ONE is safe:
+    #   stay_silent  -> msgs/users/event/confidence. Pure metadata: two ints, a
+    #                   fixed enum from CHAT_EVENTS, a float. No viewer text.
+    #   using packet -> interpolates `old_compact[:80]!r`, which is
+    #                   intent_summary["prompt"] -- viewer-DERIVED. Never
+    #                   logged here (project rule: no raw chat in logs).
+    #
+    # stay_silent is the line worth keeping: when Input Contract is ON, a quiet
+    # Kira is the CORRECT outcome for low-signal chat, and without this the
+    # operator cannot tell that apart from a dead pipeline. Same metadata-only
+    # precedent as runtime_screen(), which counts and logs blocks by rule id
+    # and never the text (aggregator.py's safety-floor comment).
+    _CHAT_REACTION_LOG_ALLOWED = ("[InputContract] stay_silent:",)
+
+    def _log_chat_reaction(self, message: str) -> None:
+        if message.startswith(self._CHAT_REACTION_LOG_ALLOWED):
+            _logger.info("%s", message)
 
     def start(self) -> None:
         self._acquire_lock()
@@ -822,6 +969,37 @@ class EngineHost:
                 # receives screened, filtered messages. See ChatFeedSink
                 # docstring.
                 self.aggregator.on_filtered_message = self.chat_feed.record
+                # Source-change signal: every connect (a different channel OR
+                # a reconnect to the same one) clears the feed and bumps
+                # `session`, so #canalA's messages never render as a silent
+                # prefix of #canalB's. Plain attribute assignment of a bound
+                # method -- re-running this block (aggregator rebuild) just
+                # rebinds the same callable, so it is idempotent.
+                self.aggregator.on_source_changed = self.chat_feed.new_session
+                # Chat->Kira feeder: without this the aggregator built its
+                # context payloads and dropped them on a None callback, so
+                # viewer chat rendered in the UI but never reached the motor
+                # (the bug this wiring fixes). on_log stays the default no-op:
+                # the CTK lines it would carry ("Tema dominante: <label>")
+                # embed viewer-derived text, and this host's log discipline
+                # (EventLogSink whitelist / "never expose raw chat in logs")
+                # has no sink that may take free text. on_joyita stays no-op:
+                # the OBS highlight overlay is a desktop-shell feature.
+                self._chat_reactor = ChatReactionCore(self.motor)
+                self.aggregator.on_aggregated_context = self._on_aggregated_context
+                # Deliberately NOT wired (smallest change that fixes the bug):
+                # - set_llm_interface stays None, so the Vibe thermometer can
+                #   never call an LLM here and every vibe resolves to the
+                #   neutral fallback. Wiring it is a separate feature (the CTK
+                #   uses its own busy-gated ollama call), not part of this fix.
+                # - set_busy_callback only feeds that same thermometer's
+                #   busy-fallback branch; with no LLM interface both branches
+                #   produce the identical neutral vibe, so wiring it would
+                #   change nothing observable.
+                # - on_vibe_update / on_activity_trigger / on_live_safety_log /
+                #   on_source_error|connect|disconnect drive CTK UI log lines;
+                #   Kira reacting does not need them, and EventLogSink's closed
+                #   whitelist forbids the free text they carry.
             except Exception:
                 self.aggregator = None
                 _logger.exception("Aggregator construction failed; stream chat-live control-plane disabled")

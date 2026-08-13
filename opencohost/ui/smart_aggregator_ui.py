@@ -41,7 +41,7 @@ import tkinter.messagebox as messagebox
 
 from opencohost.config.settings import BASE_DIR, LLM_KEEP_ALIVE
 from opencohost.config.logger import get_logger
-from opencohost.smart_aggregator.kira_agenda_controller import wrap_untrusted_chat
+from opencohost.smart_aggregator.chat_reaction import ChatReactionCore
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 from opencohost.ui.state import UIState
 from opencohost.ui.protocols import CallbackDispatcher
@@ -94,6 +94,18 @@ class SmartAggregatorUI:
         self._manual_disconnect: bool = False
         self._default_activity: dict[str, Any] = {}
         self._observer_id: Optional[int] = None
+
+        # Chat-reaction core extracted to opencohost.smart_aggregator.chat_reaction
+        # so the headless API host can share it (its package must never import
+        # opencohost.ui). Lambdas are late-bound on purpose: a test (or the
+        # shell) that replaces `self.is_busy` / `self._on_log` / `self._on_joyita`
+        # on the instance must keep intercepting the core's calls.
+        self._reaction_core = ChatReactionCore(
+            motor_ia,
+            is_busy=lambda: self.is_busy(),
+            on_log=lambda msg: self._on_log(msg),
+            on_joyita=lambda text: self._on_joyita(text),
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -420,292 +432,27 @@ class SmartAggregatorUI:
     # ------------------------------------------------------------------
 
     def on_aggregated_context(self, data: dict) -> None:
-        """Handle aggregated chat context — prompts Kira to react."""
-        intent_summary = data.get("intent_summary") or {}
-        intent_prompt = intent_summary.get("prompt")
-        top_intents = intent_summary.get("top_intents") or []
-        if self.is_busy():
-            # Motor busy — enqueue to priority queue instead of dropping
-            context = data.get("context", [])[-12:]
-            if not context and not intent_prompt:
-                return
-            lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-            chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
-            last_lines = self._recent_kira_lines(3)
-            prompt = self._build_kira_chat_prompt(chat_context, last_kira_lines=last_lines)
-            self._motor_ia.enqueue(prompt, priority=1, source="chat")
-            self._on_log("[SmartAggregator] Kira ocupada — contexto encolado en cola prioritaria.")
-            return
+        """Handle aggregated chat context — prompts Kira to react.
 
-        context = data.get("context", [])[-12:]
-        if not context and not intent_prompt:
-            return
-
-        highlight = self._select_highlight(context)
-        if highlight:
-            lowered = highlight.lower()
-            has_question = "?" in highlight or "¿" in highlight
-            has_emoji = any(ord(c) > 0x1F000 for c in highlight)
-            has_humor = any(m in lowered for m in ("jaja", "jeje", "lol", "xd", "😂", "🤣"))
-            score = self._joyita_score_raw(highlight)
-            if (has_question or has_emoji or has_humor) and score >= 100:
-                formatted = self._format_joyita_for_obs(highlight)
-                self._on_joyita(formatted)
-        lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-        chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
-        last_lines = self._recent_kira_lines(3)
-        prompt = self._build_kira_chat_prompt(chat_context, highlight, last_lines)
-        self._motor_ia.enqueue(prompt, priority=1, source="chat")
-        if top_intents:
-            top = top_intents[0]
-            self._on_log(
-                f"[SmartAggregator] Tema dominante: {top.get('label')} ({top.get('count')} msgs)."
-            )
-        self._on_log("[SmartAggregator] Contexto agregado enviado a Kira.")
-
-    def _recent_kira_lines(self, count: int = 3) -> str:
-        """Extract Kira's last N responses from motor IA history for anti-repeat."""
-        if not self._motor_ia:
-            return ""
-        historial = getattr(self._motor_ia, "historial", None)
-        if not historial:
-            return ""
-        items = list(historial)
-        kira_msgs = [
-            m.get("content", "") for m in items[-20:]
-            if isinstance(m, dict) and m.get("role") == "assistant"
-        ][-count:]
-        return "\n".join(f"- {msg[:120]}" for msg in kira_msgs if msg)
-
-    @staticmethod
-    def _build_kira_chat_prompt(chat_context: str, highlight: str = "", last_kira_lines: str = "") -> str:
-        """Build a chat prompt that prevents internal summaries leaking on air."""
-        highlight_line = ""
-        if highlight:
-            highlight_line = (
-                "Referencia opcional privada; NO nombres al autor ni digas que es destacado:\n"
-                # The highlight is raw viewer text too -- _select_highlight returns
-                # "{user}: {text}" verbatim -- and it sits in the instruction region,
-                # above the chat fence. Unfenced it could carry a forged delimiter and
-                # close that fence from trusted ground, so it gets its own fence.
-                f"{wrap_untrusted_chat(highlight)}\n\n"
-            )
-        anti_repeat = ""
-        if last_kira_lines:
-            anti_repeat = (
-                "ÚLTIMAS RESPUESTAS DE KIRA (NO repetir estructura ni fraseo):\n"
-                f"{last_kira_lines}\n\n"
-            )
-        task = (
-            "TAREA: respondé al aire como Kira, co-host del stream con actitud.\n"
-            "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.\n"
-            "PERSONALIDAD: sarcasmo seco, humor ácido, cero condescendencia. No seas predecible.\n"
-            "Si el chat repite lo mismo de siempre, señalalo con ironía, no con queja genérica.\n"
-            "No expliques el resumen, no listes datos y no describas tu proceso.\n"
-            "PROHIBIDO mencionar cantidades de mensajes, autores, ejemplos, 'temas/personas', "
-            "'intención dominante', 'contexto privado', 'resumen', 'mensaje destacado' o 'el chat dice'.\n"
-            "PROHIBIDO empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', "
-            "'Tengo que', 'El chat esta', 'energia del flujo' o 'mantener la energia'.\n"
-            "PROHIBIDO usar fórmulas repetitivas como 'es como decir que', 'es como si', 'eso es como'. NUNCA uses símiles forzados.\n"
-            "Si el contexto interno es confuso o pobre, hacé una reacción general corta sin inventar detalles.\n"
-            "Respondé en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.\n"
-            "NO repitas el mismo tipo de reacción del turno anterior. Variá entre burla, reflexión, dato curioso.\n\n"
-            f"{anti_repeat}"
-            f"{highlight_line}"
-        )
-        # Untrusted viewer chat (raw usernames + text, see on_aggregated_context)
-        # is wrapped in read-only, forgery-resistant data delimiters shared with
-        # the agenda prompt path — see kira_agenda_controller.wrap_untrusted_chat.
-        return task + wrap_untrusted_chat(chat_context)
+        Body moved VERBATIM to ChatReactionCore (chat_reaction.py) so the
+        headless API host can run the same reaction without importing this
+        CTk-bound module. Behavior is unchanged: busy/normal enqueue paths,
+        joyita gating, anti-repeat, and the untrusted-chat fence all live in
+        the core now.
+        """
+        self._reaction_core.on_aggregated_context(data)
 
     # ------------------------------------------------------------------
-    # Highlight selection
+    # Highlight selection / prompt building — moved to ChatReactionCore
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _select_highlight(context: list[dict]) -> str:
-        """Pick the best 'joyita' message to highlight from recent context.
-
-        Scoring prefers: questions, humor/emoji, unusual/out-of-context
-        messages, then falls back to longest valid-length text.
-        Deterministic and cheap — no LLM calls.
-        """
-        if not context:
-            return ""
-
-        candidates = []
-        for msg in context:
-            text = msg.get("text", "").strip()
-            if not text:
-                continue
-            candidates.append(msg)
-
-        if not candidates:
-            return ""
-
-        def _joyita_score(msg: dict) -> int:
-            text = msg.get("text", "")
-            length = len(text)
-            if length < 10 or length > 180:
-                return -1  # disqualify too short or too long
-
-            lowered = text.lower()
-
-            # ---- Content safety gates: reject immediately ----
-            if SmartAggregatorUI._is_joyita_unsafe(text, lowered):
-                return -1
-
-            score = 0
-
-            # Questions get highest priority
-            if "?" in text or "¿" in text:
-                score += 100
-
-            # Humor / emoji signals
-            emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
-            score += min(emoji_count * 10, 30)
-            for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "😆", "jajaja"):
-                if marker in lowered:
-                    score += 15
-                    break
-
-            # Unusual / out-of-context: numbers mixed with text, rare chars
-            has_digits = any(c.isdigit() for c in text)
-            has_alpha = any(c.isalpha() for c in text)
-            if has_digits and has_alpha:
-                score += 8
-
-            for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
-                if marker in lowered:
-                    score += 5
-
-            # Small bonus for being in the sweet-spot length range
-            if 30 <= length <= 120:
-                score += 3
-
-            return score
-
-        best = max(candidates, key=_joyita_score)
-        return f"{best.get('user', '')}: {best.get('text', '')}"
-
-    @staticmethod
-    def _is_joyita_unsafe(text: str, lowered: str) -> bool:
-        """Reject messages containing links, @mentions, or advertising.
-
-        These signals indicate the message is promotional, a call-to-action,
-        or otherwise inappropriate for on-stream highlighting.
-        """
-        # URLs / links — any protocol, bare domain, or tld
-        url_patterns = (
-            "http://", "https://", "www.", ".com", ".net", ".org",
-            ".gg/", ".tv/", ".live/", "youtu.be/", "twitch.tv/",
-            "discord.gg/", "tiktok.com/",
-        )
-        if any(p in lowered for p in url_patterns):
-            return True
-
-        # @mentions — directing viewers to another account
-        if "@" in text:
-            words = lowered.split()
-            for w in words:
-                # Only treat as mention if @ is followed by a letter/number
-                if w.startswith("@") and len(w) > 1 and w[1].isalnum():
-                    return True
-
-        # Payment / advertising / hidden promotion
-        ad_patterns = (
-            "paga", "pagá", "pagame", "donación", "donacion", "dona",
-            "subscribe", "suscribete", "suscríbete", "follow",
-            "sígueme", "sigueme", "regalame", "regálame",
-            "compra", "comprá", "vendo", "vendes", "barato",
-            "promo", "sorteo", "giveaway", "sponsor",
-            "bit.ly", "linktr.ee", "onlyfans",
-        )
-        if any(p in lowered for p in ad_patterns):
-            return True
-
-        return False
-
-    @staticmethod
-    def _joyita_score_raw(highlight: str) -> int:
-        """Re-compute the joyita score from a formatted highlight string.
-
-        Used by the OBS gateway to enforce the score ≥100 threshold without
-        re-parsing the raw context dicts.
-        """
-        # highlight format: "user: text"
-        if ":" in highlight:
-            text = highlight.split(":", 1)[1].strip()
-        else:
-            text = highlight
-
-        length = len(text)
-        if length < 10 or length > 180:
-            return -1
-
-        lowered = text.lower()
-        if SmartAggregatorUI._is_joyita_unsafe(text, lowered):
-            return -1
-
-        score = 0
-        if "?" in text or "¿" in text:
-            score += 100
-        emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
-        score += min(emoji_count * 10, 30)
-        for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "jajaja"):
-            if marker in lowered:
-                score += 15
-                break
-        has_digits = any(c.isdigit() for c in text)
-        has_alpha = any(c.isalpha() for c in text)
-        if has_digits and has_alpha:
-            score += 8
-        for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
-            if marker in lowered:
-                score += 5
-        if 30 <= length <= 120:
-            score += 3
-        return score
-
-    @staticmethod
-    def _format_joyita_for_obs(highlight: str) -> str:
-        """Format a joyita for OBS display: word-wrap into 2–3 lines.
-
-        Without wrapping, OBS renders long text in a single line, forcing
-        the streamer to use huge font sizes that blow up the scene layout.
-        """
-        # Already clean: strip control chars, null bytes
-        text = highlight.replace("\x00", "").strip()
-        if not text:
-            return ""
-
-        MAX_CHARS_PER_LINE = 38
-        MIN_CHARS_TO_WRAP = 42
-
-        if len(text) <= MIN_CHARS_TO_WRAP:
-            return text
-
-        # Try to split on word boundaries
-        words = text.split()
-        lines = []
-        current = ""
-        for word in words:
-            if current and len(current) + 1 + len(word) > MAX_CHARS_PER_LINE:
-                lines.append(current)
-                current = word
-            else:
-                current = f"{current} {word}".strip()
-        if current:
-            lines.append(current)
-
-        # Cap at 3 lines — drop excess words
-        if len(lines) > 3:
-            lines = lines[:3]
-            # Add "…" to last line to indicate truncation
-            if not lines[-1].endswith("…"):
-                lines[-1] = lines[-1].rstrip()[:-3].rstrip() + "…"
-
-        return "\n".join(lines)
+    # Static aliases, not copies: tests and ADR-001 pin these by their
+    # SmartAggregatorUI.<name> spelling, and keeping two implementations
+    # is exactly the drift the extraction exists to prevent.
+    _build_kira_chat_prompt = staticmethod(ChatReactionCore._build_kira_chat_prompt)
+    _select_highlight = staticmethod(ChatReactionCore._select_highlight)
+    _is_joyita_unsafe = staticmethod(ChatReactionCore._is_joyita_unsafe)
+    _joyita_score_raw = staticmethod(ChatReactionCore._joyita_score_raw)
+    _format_joyita_for_obs = staticmethod(ChatReactionCore._format_joyita_for_obs)
 
     # ------------------------------------------------------------------
     # Internal helpers

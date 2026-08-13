@@ -66,6 +66,10 @@ from opencohost.config.settings import (
     OWNER_BUNDLE_SOURCE, OWNER_BUNDLE_MAX_ITEMS, OWNER_BUNDLE_MAX_CHARS,
 )
 from opencohost.core.context import context_budget
+# Module import, never a from-import of the values: STREAM_OVER_AGENDA /
+# STREAM_TTL_SECONDS are runtime-mutable (PUT /api/stream/chat-live/limits
+# rebinds them), and the functions read the module globals live.
+from opencohost.core import turn_priority
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
 from opencohost.core.scheduling.turn_stamp import TurnStamp
@@ -170,6 +174,26 @@ _MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 # a burst merges (§5.1) — the bundle must not answer them memory-blind.
 _DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 _EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
+
+# tauri_stream_chat_20260812 §3.2 phase 2 (owner Q3): sources whose prompt
+# keeps ONLY the assistant slots of `historial` — Kira's own last replies —
+# and drops the user slots. Unlike the five allowlists above, this is a
+# DENY-list of exactly the evidenced source: in the 2026-08-12 42-turn Twitch
+# session (logs/opencohost_20260812_194539.log) every chat prompt carried
+# ~2400 chars of stored user slots that were pure waste — a chat user slot is
+# _sanitize_history_context's 800-char cut of the ~1200-char RF3 task
+# template, so the chat fence and all viewer content fall past the cut — and
+# the source-mixed deque made chat replies continue agenda monologues instead
+# of the chat (22:07:04, 22:13:52, at 2838-2906 prompt tokens). Assistant
+# slots MUST stay: FIX 2 (_finalize_generation's chat repetition guard) and
+# the model's own don't-repeat-yourself signal both live on them — gate the
+# APPEND, never the history_snapshot in _GenerationSetup.
+# NOT widened to "accumulated" (also viewer chat) or unknown sources: the
+# owner ruled on stream turns only, and a mutating gate ships armed only
+# where the incident evidence is. A plain constant, not a turn_priority-style
+# runtime knob: stream-vs-agenda order is a streamer preference; what history
+# a chat prompt carries is a settled engine decision with no live-tuning ask.
+_HISTORY_ASSISTANT_ONLY_SOURCES = frozenset({"chat"})
 
 # interruptible_speech_architecture_20260804 §3.1 — the single definition of
 # "a question the owner asked" (typed OR spoken), used by the drain guard
@@ -833,11 +857,16 @@ class MotorVocalIA(
         self._ptt_cue_wav_path = None
 
         # Priority queue: (priority, timestamp, payload, source)
-        # priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest)
+        # priority tiers (turn_priority module, tauri_stream_chat_20260812):
+        #   0 = PTT/voice, 1 = direct (always above stream), 2/3 = stream vs
+        #   agenda — their relative order is the STREAM_OVER_AGENDA setting.
         self._priority_queue: list = []
         self._pq_lock = threading.Lock()
         self._pq_max_items: int = 5
-        self._pq_ttl_seconds: float = 30.0  # non-PTT items expire after this delay
+        # Base TTL for non-exempt sources. Stream ("chat") items do NOT use
+        # this any more — their window is turn_priority.effective_stream_ttl()
+        # (configurable + agenda-first floor); direct has its own bound.
+        self._pq_ttl_seconds: float = 30.0
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -1209,7 +1238,13 @@ class MotorVocalIA(
                 # question stranded behind a long block is now spoken late
                 # rather than silently discarded — matching the boundary
                 # drain's existing behavior and the sweep's own wording.
-                busy_priority = 0 if source == "ptt" else 1
+                #
+                # Tier split (tauri_stream_chat_20260812): the sibling
+                # expression was `0 if ptt else 1`, which promoted ANY
+                # non-ptt source (chat included) into the direct tier.
+                # Resolve the item's OWN documented tier instead — same
+                # principle the Step-4 fix above established for PTT.
+                busy_priority = turn_priority.dispatch_priority_for_source(source)
                 if stamp is not None:
                     self.enqueue(
                         payload, priority=busy_priority, source=source, history_text=history_text,
@@ -1385,7 +1420,7 @@ class MotorVocalIA(
     def enqueue(
         self,
         payload: str,
-        priority: int = 1,
+        priority: Optional[int] = None,
         source: str = "chat",
         history_text: Optional[str] = None,
         submitted_at: Optional[float] = None,
@@ -1395,7 +1430,14 @@ class MotorVocalIA(
 
         Args:
             payload: The text to process.
-            priority: 0 = PTT/streamer (highest), 1 = chat (normal), 2 = agenda (lowest).
+            priority: Dispatch tier. 0 = PTT/voice, 1 = direct (always above
+                stream), 2/3 = stream vs agenda — their relative order is the
+                streamer's STREAM_OVER_AGENDA setting (turn_priority module).
+                None (the default) resolves from `source` AT ENQUEUE TIME via
+                turn_priority.dispatch_priority_for_source, so the live
+                setting is honored. The old default (`priority=1`) predates
+                stream and put viewer chat in the direct tier — a typed owner
+                question then queued FIFO behind viewer reactions.
             source: Origin identifier for logging.
             history_text: Honest text to commit to historial for this turn
                 (agenda_ptt_commit_raw_text). None (default) commits `payload`
@@ -1412,14 +1454,22 @@ class MotorVocalIA(
                 the reply instead of silently answering under a different
                 provider. None for every internally-generated item.
         """
+        if priority is None:
+            # Resolved per item at enqueue time. A mid-session flip of
+            # STREAM_OVER_AGENDA leaves already-queued items with their old
+            # numbers until served — bounded by _pq_max_items (5) and one or
+            # two pops, so the misorder is transient; retagging the queue
+            # under _pq_lock for that window is not worth the machinery.
+            priority = turn_priority.dispatch_priority_for_source(source)
         with self._pq_lock:
             self._priority_queue.append(
                 (priority, time.time(), payload, source, history_text, submitted_at, submitted_under_provider)
             )
             self._priority_queue.sort(key=lambda x: (x[0], x[1]))
             # Enforce max items — drop lowest priority (highest number) first,
-            # breaking ties by newest timestamp. PTT (0) is always preserved over
-            # chat (1) and agenda (2). interruptible_speech_architecture_20260804
+            # breaking ties by newest timestamp. PTT (0) and direct (1) are
+            # always preserved over stream/agenda (2/3, whichever way the
+            # streamer ordered them). interruptible_speech_architecture_20260804
             # §6 Step 2: an owner question (_OWNER_QUESTION_SOURCES) must never be
             # demoted into _accumulation_buffer — it would be answered under
             # source="accumulated", excluded from all five privacy/personalization
@@ -1452,7 +1502,7 @@ class MotorVocalIA(
             head_snapshot = self._head_snapshot_locked()
         self._maybe_trigger_interactive_pregen(head_snapshot)
 
-    def replace_pending(self, payload: str, priority: int = 1, source: str = "chat") -> None:
+    def replace_pending(self, payload: str, priority: Optional[int] = None, source: str = "chat") -> None:
         """Replace stale pending items from the same source and enqueue a fresh one.
 
         This keeps product features such as Agenda Mode from stacking old
@@ -1861,7 +1911,21 @@ class MotorVocalIA(
                     # (This also closes the same latent hole on the pre-Step-1
                     # path: a second direct queued behind a long first answer
                     # could already TTL-die receipted.)
-                    ttl = DIRECT_ANSWER_MAX_WAIT_SECONDS if source == "direct" else self._pq_ttl_seconds
+                    #
+                    # Stream ("chat") items read the LIVE configurable window
+                    # (turn_priority.effective_stream_ttl), not the static
+                    # _pq_ttl_seconds. The effective value is FLOORED when the
+                    # streamer selects agenda-first — without that floor, the
+                    # "agenda first + short TTL" combination expires every
+                    # stream item that waits out an agenda monologue and the
+                    # co-host goes MUTE toward its audience with no visible
+                    # error anywhere (the §3.2 TRAP). See turn_priority.
+                    if source == "direct":
+                        ttl = DIRECT_ANSWER_MAX_WAIT_SECONDS
+                    elif source == "chat":
+                        ttl = turn_priority.effective_stream_ttl()
+                    else:
+                        ttl = self._pq_ttl_seconds
                     if (
                         prio > 0
                         and not source.startswith("kira-agenda")
@@ -2221,7 +2285,9 @@ class MotorVocalIA(
         `source=direct` command sitting in `command_queue` (put there by
         `Dispatcher.dispatch`, api/dispatch.py) is never even looked at for
         as long as agenda content keeps flowing. `_priority_queue`'s own
-        priority sort (0=PTT, 1=chat/direct, 2=agenda; see `enqueue()`) is
+        priority sort (0=PTT, 1=direct, 2/3=stream-vs-agenda per the
+        streamer's STREAM_OVER_AGENDA setting; see `enqueue()` and the
+        turn_priority module) is
         completely correct once an item actually reaches it -- the 2026-07-30
         defect (four direct questions waiting 13.8-29.1 minutes) was a direct
         item that never got there at all, not a sort-order bug.
@@ -2234,7 +2300,7 @@ class MotorVocalIA(
         the SAME conversion `_dispatch_command`'s busy branch already does for
         a command read the normal way. Once queued, the priority sort
         guarantees it is served ahead of any further agenda action
-        (priority=2), even if an agenda block was already re-queued earlier
+        (the agenda tier), even if an agenda block was already re-queued earlier
         in this same boundary (insertion order does not matter, only the
         sort key does).
 
@@ -2299,7 +2365,11 @@ class MotorVocalIA(
                 # so passing them unconditionally is byte-identical to the old
                 # branch-per-presence idiom.
                 self.enqueue(
-                    payload, priority=0 if source == "ptt" else 1, source=source, history_text=history_text,
+                    # Only _OWNER_QUESTION_SOURCES reach here (guard above), so
+                    # this resolves to ptt=0 / direct=1 — same numbers as the
+                    # old `0 if ptt else 1`, now via the single tier resolver.
+                    payload, priority=turn_priority.dispatch_priority_for_source(source),
+                    source=source, history_text=history_text,
                     submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
                 )
                 self._log(f"Boundary drain: turno {source} movido a cola prioritaria (D3b).", level="debug")
@@ -2604,7 +2674,17 @@ class MotorVocalIA(
         # reference and never pop/mutate — so the stored `source` tag
         # (history_source_tag_20260629) is projected away before the dicts
         # reach ollama.chat, and the live deque entries keep their tag.
+        #
+        # §3.2 phase 2 gate: a stream turn appends assistant slots only (see
+        # _HISTORY_ASSISTANT_ONLY_SOURCES for the evidence). The filter lives
+        # HERE and not on history_snapshot: the snapshot rides to
+        # _finalize_generation, where FIX 2 derives recent_outputs from its
+        # assistant entries — filtering the snapshot itself would blind the
+        # guard that exists precisely because chat reactions repeat.
+        history_assistant_only = source in _HISTORY_ASSISTANT_ONLY_SOURCES
         for msg in history_snapshot:
+            if history_assistant_only and msg['role'] != 'assistant':
+                continue
             messages.append({'role': msg['role'], 'content': msg['content']})
 
         # Slice 5 (R9): memorias retrieval + injection for direct and ptt

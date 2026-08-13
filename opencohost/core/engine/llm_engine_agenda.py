@@ -111,7 +111,9 @@ class AgendaStashMixin:
             self._frozen_stash_at = None
             self._detour_turns = 0
             self._prefetch_done.set()
-        return (restored["payload"], restored.get("source", "kira-agenda"), restored.get("priority", 2))
+        # The stash always stores its real priority; the fallback is only for a
+        # legacy dict shape and must track the LIVE agenda tier, not literal 2.
+        return (restored["payload"], restored.get("source", "kira-agenda"), restored.get("priority", _eng.turn_priority.agenda_priority()))
 
     def _pick_connector_floor(self, tema: str) -> str:
         """D3 floor: the next es-AR connector template, rotated without immediate

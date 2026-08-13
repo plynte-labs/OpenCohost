@@ -106,8 +106,12 @@ def test_pregen_without_connector_is_byte_identical():
 # Per-source activation
 # ---------------------------------------------------------------------------
 
-def test_default_arms_agenda_only():
-    assert CLAUSE_SANITIZER_SOURCES == frozenset({"kira-agenda", "kira-agenda-stop"})
+def test_default_arms_agenda_and_chat():
+    """ADR-039 gate (2026-08-12): chat joined the default after a real session
+    showed 42 unsanitized chat replies against 6 checked agenda replies — see
+    docs/deferred-20260729-clause-sanitizer-scope.md §2.1 and the rationale at
+    settings.py:217-235. `direct`/`ptt`/`accumulated` stay disarmed."""
+    assert CLAUSE_SANITIZER_SOURCES == frozenset({"kira-agenda", "kira-agenda-stop", "chat"})
     assert CLAUSE_SANITIZER_SOURCES == CLAUSE_SANITIZER_DEFAULT_SOURCES
     assert le.CLAUSE_SANITIZER_SOURCES == CLAUSE_SANITIZER_DEFAULT_SOURCES
 
@@ -122,10 +126,12 @@ def test_armed_agenda_sources_are_repaired(source):
     assert out == INCIDENT_REPAIRED
 
 
-@pytest.mark.parametrize("source", ["chat", "direct", "ptt", "accumulated"])
+@pytest.mark.parametrize("source", ["direct", "ptt", "accumulated"])
 def test_disarmed_sources_pass_raw_text_through(source, caplog):
-    """These sources have no observed defect and DO have a real false positive
-    (an operator can ask for a literal repeat) — they ship disarmed."""
+    """These operator-facing sources have a real false positive (an operator
+    can ask for a literal repeat) and no observed defect — they ship disarmed.
+    `chat` moved to the armed-by-default group (ADR-039, see
+    test_default_arms_agenda_and_chat and test_clause_sanitizer_chat_default.py)."""
     motor = _motor()
     motor._ollama_chat = MagicMock(return_value=_resp(INCIDENT))
 

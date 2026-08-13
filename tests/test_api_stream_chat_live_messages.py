@@ -27,6 +27,8 @@ import os
 import threading
 import time
 from copy import deepcopy
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -36,6 +38,7 @@ import opencohost.api.auth as auth
 import opencohost.api.engine_host as engine_host_mod
 import opencohost.api.main as main_mod
 from opencohost.smart_aggregator.aggregator import Aggregator
+from opencohost.smart_aggregator.chat_source import TwitchChatSource
 from tests.test_api_phase1 import FakeHost
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
@@ -127,15 +130,46 @@ def test_messages_agent_token_is_403(agent_headers):
     assert resp.status_code == 403
 
 
+def test_messages_corrupt_token_file_is_503_not_500(operator_headers):
+    """An unreadable/corrupt token file is a broken server, not a bad
+    credential. `_operator_role` deliberately lets TokenFileError propagate
+    (unlike agent.py's fail-closed-to-None, which is safe only because
+    auth_middleware already gated the request); the endpoint catches it and
+    returns the same 503 `auth_unavailable` auth_middleware returns.
+
+    Two things are asserted at once: it is not a 500 traceback, and it is not
+    a 403 that would send the operator hunting for a token that is fine.
+    Fail-closed either way -- buffered chat is never served."""
+    from opencohost.config import settings
+
+    sink = engine_host_mod.ChatFeedSink()
+    sink.record({"user": "viewer", "text": "hola", "timestamp": 1.0})
+    app = _app(_host_with_chat_feed(sink))
+
+    # operator_headers already minted a valid file; corrupt it in place. The
+    # lifespan's ensure_tokens() is a no-op once the path exists, so the token
+    # in the header stays the "right" one -- only the file is broken.
+    Path(settings.API_TOKENS_FILE).write_text("{ not json at all", encoding="utf-8")
+
+    with TestClient(app) as client:
+        resp = client.get(_URL, params={"since": 0}, headers=operator_headers)
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body == {"detail": "auth_unavailable"}
+    assert "messages" not in body
+
+
 def test_messages_operator_token_is_200(operator_headers):
     app = _app(FakeHost)
     with TestClient(app) as client:
         resp = client.get(_URL, headers=operator_headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"messages", "cursor", "boot", "more_pending"}
+    assert set(body.keys()) == {"messages", "cursor", "boot", "session", "more_pending"}
     assert body["messages"] == []
     assert body["cursor"] == 0
+    assert body["session"] == 0
     assert body["more_pending"] is False
 
 
@@ -258,6 +292,84 @@ def test_boot_change_is_visible_through_the_endpoint(operator_headers, monkeypat
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# SOURCE CHANGE -- connecting to a second channel bumps `session` and drops
+# the first channel's chat, without ever rewinding the cursor
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_session_change_is_visible_through_the_endpoint(operator_headers):
+    sink = engine_host_mod.ChatFeedSink(maxlen=1000)
+    for i in range(120):
+        sink.record({"user": "canalA_viewer", "text": f"a{i}", "timestamp": float(i)})
+    app = _app(_host_with_chat_feed(sink))
+
+    with TestClient(app) as client:
+        before = client.get(_URL, params={"since": 0}, headers=operator_headers).json()
+        assert before["session"] == 0
+        assert before["cursor"] == 50  # capped page, client is mid-backlog
+
+        sink.new_session()  # operator disconnects #canalA and connects #canalB
+        sink.record({"user": "canalB_viewer", "text": "b0", "timestamp": 900.0})
+
+        # The client polls on with its STALE cursor from the old session.
+        after = client.get(
+            _URL, params={"since": before["cursor"]}, headers=operator_headers
+        ).json()
+        assert after["session"] == 1  # the "clear your list" signal
+        assert after["session"] != before["session"]
+        assert after["boot"] == before["boot"]  # same process -- only the source changed
+        assert [m["text"] for m in after["messages"]] == ["b0"]  # nothing from #canalA
+        assert after["cursor"] == 121  # seq kept climbing; b0 was NOT skipped
+
+
+def test_real_aggregator_channel_switch_never_mixes_two_channels(
+    smart_aggregator_config, temp_dir, operator_headers
+):
+    """End-to-end through a real Aggregator with the exact production wiring
+    (engine_host.py): disconnect leaves the scrollback intact, the NEXT
+    connect is what wipes it and bumps `session`.
+
+    The FIRST connect bumps too (0 -> 1) -- it is a source change like any
+    other, and a client that sees it just clears an already-empty list."""
+    agg = _real_aggregator(smart_aggregator_config, temp_dir)
+    host = FakeHost()
+    host.aggregator = agg
+    agg.on_filtered_message = host.chat_feed.record
+    agg.on_source_changed = host.chat_feed.new_session
+    app = _app(lambda: host)
+
+    canal_a = "que buen stream hoy amigos, se ve genial todo"
+    canal_b = "buenas noches gente, primera vez en este canal"
+
+    with patch.object(TwitchChatSource, "connect"):
+        agg.connect("canalA", platform="twitch")
+        agg.process_message({"user": "viewerA", "text": canal_a, "timestamp": time.time()})
+
+        # Disconnect alone: the operator can still scroll back over #canalA.
+        agg.disconnect()
+        with TestClient(app) as client:
+            after_disconnect = client.get(
+                _URL, params={"since": 0}, headers=operator_headers
+            ).json()
+        assert [m["text"] for m in after_disconnect["messages"]] == [canal_a]
+        assert after_disconnect["session"] == 1  # unchanged by the disconnect
+
+        # The next connect is what wipes it.
+        agg.connect("canalB", platform="twitch")
+        agg.process_message({"user": "viewerB", "text": canal_b, "timestamp": time.time()})
+
+    with TestClient(app) as client:
+        body = client.get(
+            _URL, params={"since": after_disconnect["cursor"]}, headers=operator_headers
+        ).json()
+
+    assert body["session"] == 2
+    texts = [m["text"] for m in body["messages"]]
+    assert canal_b in texts
+    assert canal_a not in texts
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # CONCURRENCY -- real writer threads racing real reader threads through the
 # actual HTTP endpoint (not the sink directly): no lost messages, no
 # corrupted responses, no deadlock
@@ -293,7 +405,7 @@ def test_concurrent_writers_and_http_readers_no_lost_messages_no_deadlock(operat
                     errors.append(f"unexpected status {resp.status_code}")
                     return
                 body = resp.json()
-                if set(body.keys()) != {"messages", "cursor", "boot", "more_pending"}:
+                if set(body.keys()) != {"messages", "cursor", "boot", "session", "more_pending"}:
                     errors.append(f"malformed body {body!r}")
                     return
                 if body["cursor"] < cursor:

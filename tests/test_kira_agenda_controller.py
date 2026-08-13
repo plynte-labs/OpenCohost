@@ -83,7 +83,9 @@ def test_first_queued_topic_enqueues_short_agenda_prompt():
 
     assert action.kind == "enqueue"
     assert action.source == "kira-agenda"
-    assert action.priority == 2
+    # Tier split (tauri_stream_chat_20260812): agenda tier under the default
+    # stream-over-agenda order. 2 was the pre-split constant.
+    assert action.priority == 3
     assert action.topic_id == topic.id
     assert "TEMA APROBADO: Minecraft en la industria gaming" in action.prompt
     assert "SALIDA PERMITIDA" in action.prompt
@@ -707,7 +709,9 @@ def test_compact_chat_can_steer_waiting_topic():
     action = controller.next_action(compact_chat="El chat filtrado pregunta por mods.")
 
     assert action.source == "chat"
-    assert action.priority == 1
+    # Tier split: the agenda-minted chat reply takes the STREAM tier (2 under
+    # the default order), no longer the direct tier (the pre-split 1).
+    assert action.priority == 2
     assert "El chat filtrado pregunta por mods" in action.prompt
 
 

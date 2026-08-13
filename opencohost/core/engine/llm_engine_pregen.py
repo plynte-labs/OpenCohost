@@ -159,16 +159,23 @@ class PregenCacheMixin:
             return
         self.pregenerate(payload, priority, source, history_text=history_text)
         
-    def prefetch_agenda(self, payload: str, priority: int = 2, source: str = "kira-agenda") -> bool:
+    def prefetch_agenda(self, payload: str, priority: Optional[int] = None, source: str = "kira-agenda") -> bool:
         """Generate agenda text in the background without starting TTS.
 
         WU3 (design-fase2.md §2.1): thin alias over the generalized `pregenerate`
         after the kira-agenda source guard. CTK callers
         (agenda_audio_controller.py) are untouched — the guard + agenda-vs-agenda
         equal-priority refusal preserve the exact pre-WU3 behavior.
+
+        `priority=None` resolves the LIVE agenda tier (turn_priority): the old
+        hardcoded 2 would mismatch queue items minted at 3 under the default
+        stream-over-agenda order, corrupting the strictly-lower-priority
+        eviction compare in `pregenerate`.
         """
         if not payload or not source.startswith("kira-agenda"):
             return False
+        if priority is None:
+            priority = _eng.turn_priority.agenda_priority()
         return self.pregenerate(payload, priority, source)
 
     def pregenerate(

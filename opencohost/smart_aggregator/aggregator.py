@@ -71,6 +71,13 @@ class Aggregator:
         self.on_source_error: Optional[Callable] = None
         self.on_source_connect: Optional[Callable] = None
         self.on_source_disconnect: Optional[Callable] = None
+        # Fired by connect() once the old source is down and the new one is
+        # built, immediately before the new one starts delivering. Declared
+        # with on_filtered_message and the other source callbacks above;
+        # consumers use it to drop per-source state (see
+        # ChatFeedSink.new_session). The call site's position is load-bearing
+        # -- see the comment there before moving it.
+        self.on_source_changed: Optional[Callable] = None
         
         self._session_id: Optional[int] = None
         self._busy_callback: Optional[Callable[[], bool]] = None
@@ -240,6 +247,54 @@ class Aggregator:
                 "on_disconnect": self._on_source_disconnect,
             },
         )
+
+        # Every connect starts a NEW chat session -- including a reconnect to
+        # the same channel, since the teardown above is unconditional and
+        # nothing after this point is guaranteed contiguous with what came
+        # before. Guarded exactly like on_filtered_message in process_message:
+        # a listener that raises must never break a connect.
+        #
+        # THIS POSITION IS LOAD-BEARING. Do not move it. It is the only point
+        # that satisfies all four constraints at once:
+        #   1. AFTER the old source's disconnect() -- the old reader thread has
+        #      been told to stop and joined, so an old-channel message can no
+        #      longer travel process_message -> on_filtered_message -> the
+        #      consumer and get stamped into the NEW session. That silent
+        #      channel-mix is exactly what this signal exists to prevent, so
+        #      firing at the top of connect() (where it used to be) defeats it.
+        #   2. AFTER the platform lookup -- an unsupported platform raises
+        #      before this line, so a typo'd URL (422) leaves the consumer's
+        #      buffer intact instead of destroying the operator's scrollback.
+        #   3. AFTER source construction -- same reason, for a connector that
+        #      is unavailable at build time (503).
+        #   4. BEFORE self._source.connect() -- that call starts the reader
+        #      thread, so anything later could wipe the new session's own first
+        #      messages.
+        #
+        # TWO RESIDUALS, both deliberately left alone:
+        #   a) disconnect() joins its reader thread with timeout=2.0
+        #      (chat_source.py) and can return with the thread still alive, so
+        #      a straggler from the old channel can still land in the new
+        #      session. That window is narrow and only opens on an
+        #      already-degraded source; a generation counter to close it is
+        #      more machinery than the failure is worth.
+        #   b) constraint 3 covers failures raised by __init__ only. Today
+        #      YouTubeChatSource does its pytchat-missing RuntimeError and its
+        #      empty-source_id ValueError inside connect(), not __init__, so
+        #      those two still wipe the buffer before failing. Fixing that
+        #      means moving the checks up into __init__ (chat_source.py), not
+        #      moving this call -- there is nowhere left to move it to that
+        #      does not reopen constraint 4.
+        #
+        # No un-bumping on failure: the session counter is the client's "clear
+        # your list" signal, and rewinding it would make a poll that already
+        # observed the new value silently stop clearing.
+        if self.on_source_changed:
+            try:
+                self.on_source_changed()
+            except Exception:
+                pass
+
         self._source.connect(source_id)
 
         if self._session_id is None:

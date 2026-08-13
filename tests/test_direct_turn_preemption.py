@@ -207,9 +207,14 @@ def test_direct_item_just_under_the_documented_bound_still_answers():
     assert answered == ["pregunta"]
 
 
-def test_chat_item_keeps_the_30s_ttl():
+def test_chat_item_keeps_a_real_ttl(monkeypatch):
     """The exemption is scoped to source=="direct" only — a viewer `chat` item
-    keeps the stale-reaction guard the TTL exists for."""
+    keeps the stale-reaction guard the TTL exists for. Tier split
+    (tauri_stream_chat_20260812): the window is the configurable
+    turn_priority.STREAM_TTL_SECONDS (default 120s), no longer a fixed 30s."""
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 30.0)
     motor = _bare_motor()
     answered = []
     motor._ejecutar_inferencia = lambda payload, **kw: answered.append(payload)

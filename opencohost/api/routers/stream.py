@@ -33,6 +33,14 @@ from opencohost.api.models import (
     StreamLimitsRequest,
 )
 from opencohost.api.shared import logger
+# Module import, not `from ... import USE_INPUT_CONTRACT_PROMPT`: a from-import
+# would freeze the boot value, and both live readers (the CTK toggle in
+# stream_admin_ui and chat_reaction's RF3 gate) go through the module
+# attribute so a flip is seen everywhere.
+import opencohost.smart_aggregator.chat_input_contract as chat_input_contract
+# Same module-attribute discipline for the tier-split settings: the engine's
+# TTL sweep and the agenda controller's mint sites read these live.
+from opencohost.core import turn_priority
 from opencohost.smart_aggregator.url_parser import parse_chat_url
 
 router = APIRouter()
@@ -53,10 +61,13 @@ def _operator_role(request: Request) -> "str | None":
     2026-08-12), so it gates itself instead of relying on the middleware.
 
     TokenFileError propagates rather than collapsing to None: an unreadable
-    token file is a broken server, not a bad credential, and the caller maps
-    it to 503 the way auth_middleware does (auth.py:190, :225). Swallowing it
-    would tell an operator with a corrupt token file that their token is
-    wrong, which sends them looking in the wrong place.
+    token file is a broken server, not a bad credential. Swallowing it would
+    tell an operator with a corrupt token file that their token is wrong,
+    which sends them looking in the wrong place. This is where it diverges
+    from `_agent_request_role`, whose fail-closed-to-None is fine because
+    auth_middleware rule 1 already gated the request before it runs.
+    `get_stream_chat_live_messages` -- the only caller -- catches it and
+    returns the same 503 `auth_unavailable` auth_middleware returns.
     """
     token = _bearer_token(request)
     if token is None:
@@ -78,6 +89,17 @@ def _stream_state(agg) -> StreamChatLiveResponse:
         cooldown_seconds=agg.activity.cooldown_seconds,
         max_messages_per_user=agg._spam_max_messages,
         filter_policy=agg.get_filter_policy(),
+        # NOT read off `agg`: this is process-global module state (the same
+        # flag the CTK Input Contract switch toggles), see the write site in
+        # put_stream_limits below.
+        input_contract=chat_input_contract.USE_INPUT_CONTRACT_PROMPT,
+        # Also process-global module state (turn_priority), not `agg` state.
+        stream_over_agenda=turn_priority.STREAM_OVER_AGENDA,
+        stream_ttl_seconds=turn_priority.STREAM_TTL_SECONDS,
+        # Derived, read-only: agenda-first floors the window (THE TRAP guard,
+        # see turn_priority.effective_stream_ttl) — surfaced so the UI can
+        # show the streamer the window actually in force.
+        effective_stream_ttl_seconds=turn_priority.effective_stream_ttl(),
     )
 
 
@@ -147,7 +169,18 @@ def get_stream_chat_live_messages(request: Request, since: int = 0):
     # other mutating-only operator gate (auth.py rule 2, opt-in behind
     # API_AUTH_ENFORCED for back-compat with the token-less Tauri app), this
     # is a brand new surface exposing raw chat, so it is never left open.
-    if _operator_role(request) != "operator":
+    try:
+        role = _operator_role(request)
+    except TokenFileError:
+        # An unreadable/corrupt token file is a broken server, not a bad
+        # credential: same 503 + detail auth_middleware returns (auth.py
+        # rules 1-2), never a 500 traceback and never a 403 that would send
+        # the operator hunting for a token that is fine. There is no
+        # exception handler registered on this app, so without this catch it
+        # would escape as a 500 -- and 500 is not fail-closed by accident,
+        # it just happens not to serve messages.
+        return JSONResponse(status_code=503, content={"detail": "auth_unavailable"})
+    if role != "operator":
         return JSONResponse(status_code=403, content={"detail": "operator token required"})
     # chat_feed is always constructed in EngineHost.__init__ (unlike
     # aggregator, which is None until start() succeeds) -- no 503 branch
@@ -165,6 +198,7 @@ def get_stream_chat_live_messages(request: Request, since: int = 0):
         messages=[ChatLiveMessageOut(**m) for m in page],
         cursor=cursor,
         boot=sink_result["boot"],
+        session=sink_result["session"],
         more_pending=more_pending,
     )
 
@@ -186,4 +220,31 @@ def put_stream_limits(request: Request, body: StreamLimitsRequest):
             agg.set_filter_policy(body.filter_policy)
         except ValueError:
             return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
+    if body.input_contract is not None:
+        # PROCESS-GLOBAL module flag, not aggregator state — a future reader
+        # will look for it on `agg` and it is not there. Same mechanism as the
+        # CTK toggle (stream_admin_ui.py _toggle_input_contract): rebind the
+        # module attribute so the RF3 gate (chat_reaction, running on the chat
+        # source reader thread) sees the flip on its next live read. A bare
+        # bool rebind is atomic under the GIL; no lock needed, matching the
+        # lockless CTK writer.
+        chat_input_contract.USE_INPUT_CONTRACT_PROMPT = bool(body.input_contract)
+    # Tier-split settings (tauri_stream_chat_20260812 §3.2). PROCESS-GLOBAL
+    # turn_priority module attributes, same rebind idiom as input_contract
+    # above (atomic under the GIL, read live by the engine's TTL sweep, the
+    # agenda controller's mint sites and enqueue()'s per-source default).
+    # Validate BEFORE writing either so a bad TTL never half-applies a body
+    # that also flips the order.
+    if body.stream_ttl_seconds is not None and not (
+        turn_priority.STREAM_TTL_MIN_SECONDS
+        <= body.stream_ttl_seconds
+        <= turn_priority.STREAM_TTL_MAX_SECONDS
+    ):
+        # A ~0s window would expire every stream item before it can be
+        # popped — the mute-co-host failure from the other direction.
+        return JSONResponse(status_code=422, content={"detail": "invalid_stream_ttl"})
+    if body.stream_over_agenda is not None:
+        turn_priority.STREAM_OVER_AGENDA = bool(body.stream_over_agenda)
+    if body.stream_ttl_seconds is not None:
+        turn_priority.STREAM_TTL_SECONDS = float(body.stream_ttl_seconds)
     return _stream_state(agg)

@@ -58,8 +58,12 @@ logger = logging.getLogger("OpenCohost")
 # consumed by run()'s normal read, never applied by the boundary control drain.
 SPEECH_BOUNDARY_COMMAND = "speech_boundary"
 
-# Priority bands (design §3): 0 owner, 1 chat, 2 agenda. Same ordering the
-# dispatch `_priority_queue` already uses — this one orders PLAYBACK.
+# Priority bands (design §3): 0 owner, 1 chat, 2 agenda. This orders PLAYBACK
+# only. The dispatch `_priority_queue` moved to its own 4-tier model
+# (core/turn_priority: PTT, direct, then stream vs agenda per streamer
+# setting) — deliberately NOT mirrored here: two generated replies rarely
+# coexist in the router, and direct-over-chat-over-agenda playback already
+# matches the dispatch model's fixed part.
 PRIORITY_OWNER = 0
 PRIORITY_CHAT = 1
 PRIORITY_AGENDA = 2

@@ -112,6 +112,93 @@ def test_chat_feed_sink_record_falls_back_to_wall_clock_when_timestamp_missing(m
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# new_session() -- source change clears the ring and bumps `session`, but
+# NEVER rewinds `seq` (a client polling with an old cursor must not have the
+# new channel's first messages silently skipped)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_new_session_clears_buffer_and_increments_session():
+    sink = engine_host_mod.ChatFeedSink()
+    assert sink.session == 0
+
+    sink.record({"user": "canalA_viewer", "text": "hola", "timestamp": 111.0})
+    sink.record({"user": "canalA_viewer2", "text": "que tal", "timestamp": 222.0})
+    assert sink.since(0)["session"] == 0
+
+    sink.new_session()
+
+    after = sink.since(0)
+    assert after["messages"] == []  # #canalA's chat is gone
+    assert after["session"] == 1
+    assert sink.session == 1
+
+    sink.new_session()
+    assert sink.since(0)["session"] == 2  # every connect bumps, not just the first
+
+
+def test_new_session_does_not_reset_seq():
+    """ANTI-REGRESSION: `seq` is monotonic for the life of the process. Reset
+    it and a client polling with since=N would silently skip the new
+    channel's first N messages -- the exact bug `session` exists to signal."""
+    sink = engine_host_mod.ChatFeedSink()
+    for i in range(3):
+        sink.record({"user": "canalA", "text": f"a{i}", "timestamp": float(i)})
+    assert sink.since(0)["cursor"] == 3
+
+    sink.new_session()
+    assert sink.since(0)["cursor"] == 3  # cursor does not regress on the reset
+
+    sink.record({"user": "canalB", "text": "b0", "timestamp": 9.0})
+    fresh = sink.since(0)
+    assert [m["seq"] for m in fresh["messages"]] == [4]  # keeps climbing
+    assert fresh["cursor"] == 4
+
+
+def test_stale_since_from_old_session_never_returns_an_old_channel_message():
+    sink = engine_host_mod.ChatFeedSink()
+    for i in range(150):
+        sink.record({"user": "canalA", "text": f"a{i}", "timestamp": float(i)})
+
+    sink.new_session()  # operator switches to #canalB
+    sink.record({"user": "canalB", "text": "b0", "timestamp": 900.0})
+    sink.record({"user": "canalB", "text": "b1", "timestamp": 901.0})
+
+    # A client still polling with its pre-switch cursor gets BOTH new-session
+    # messages (nothing skipped) and NO #canalA message (nothing mixed in).
+    stale = sink.since(150)
+    assert [m["text"] for m in stale["messages"]] == ["b0", "b1"]
+    assert [m["seq"] for m in stale["messages"]] == [151, 152]
+    assert stale["session"] == 1  # the "clear your list" signal
+
+    # Even a full backfill can only see the new session's chat.
+    assert [m["author"] for m in sink.since(0)["messages"]] == ["canalB", "canalB"]
+
+
+def test_new_session_is_thread_safe_against_concurrent_records():
+    """The clear runs under the same lock as record(), so a racing writer
+    never leaves a torn entry or a duplicate seq behind."""
+    sink = engine_host_mod.ChatFeedSink(maxlen=1000)
+
+    def _hammer():
+        for _ in range(50):
+            sink.record({"user": "u", "text": "t", "timestamp": 1.0})
+
+    threads = [threading.Thread(target=_hammer) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for _ in range(20):
+        sink.new_session()
+    for t in threads:
+        t.join()
+
+    seqs = [m["seq"] for m in sink.since(0)["messages"]]
+    assert seqs == sorted(set(seqs))  # no duplicates, still ordered
+    assert sink.since(0)["cursor"] == 300  # every write counted despite the clears
+    assert sink.session == 20
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # EngineHost wiring (B2) -- chat_feed exists pre-start, callback is wired
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -147,5 +234,6 @@ def test_engine_host_wires_chat_feed_record_as_on_filtered_message(tmp_path, mon
     try:
         assert host.aggregator is not None
         assert host.aggregator.on_filtered_message == host.chat_feed.record
+        assert host.aggregator.on_source_changed == host.chat_feed.new_session
     finally:
         host.stop()

@@ -95,8 +95,9 @@ LLM_SCOUT_NUM_PREDICT = 64        # hard token cap for scout titles
 LLM_SCOUT_TEMPERATURE = 0.6
 LLM_SCOUT_MIN_DIGEST_LINES = 2    # need at least one recent exchange to scout
 LLM_SCOUT_HISTORY_MSGS = 6        # most-recent historial messages fed to the scout
-# Priority floor above EVERY real queue priority (PTT=0, chat=1, agenda=2) so any
-# pending real item aborts the scout (has_pending_priority_before(SCOUT_QUEUE_FLOOR)).
+# Priority floor above EVERY real queue priority (PTT=0, direct=1, stream/agenda=2/3
+# per turn_priority.STREAM_OVER_AGENDA) so any pending real item aborts the scout
+# (has_pending_priority_before(SCOUT_QUEUE_FLOOR)).
 SCOUT_QUEUE_FLOOR = 99
 DEFAULT_LLM_TIERS = {
     "quality": "gemma4:e4b",
@@ -217,13 +218,19 @@ OWNER_BUNDLE_MAX_CHARS = 2000
 # dialogue sources run repetition_guard.sanitize_clause_repetition() at the
 # shared llm_engine seam.
 #
-# Armed for the agenda sources ONLY. The single confirmed incident is an agenda
-# response, and absence of a guard on the other sources describes the code, not
-# a defect. Arming the operator-facing sources would also buy a real false
-# positive: an operator can ask Kira to repeat a line three times, and the
-# sanitizer would silently collapse it. Config is kept per-source so any source
-# can be armed later on real evidence — see
-# docs/deferred-20260729-clause-sanitizer-scope.md.
+# Armed for agenda AND chat (ADR-039 gate, evidence 2026-08-12). A real Twitch
+# session (logs/opencohost_20260812_194539.log) showed 42 chat replies going
+# out with zero [CLAUSE_SANITIZER] records, against 6 agenda replies that were
+# all checked (verdict=clean every time) — chat is the busiest path to the
+# audience and was the only unprotected one. The 6-sample agenda evidence is
+# thin and says nothing about chat output directly, but leaving the busiest
+# path unsanitized was the larger exposure. `direct`/`ptt`/`accumulated` stay
+# disarmed: they are operator-facing, and an operator can ask Kira to repeat a
+# line three times inside one sentence, which the sanitizer would silently
+# collapse (docs/deferred-20260729-clause-sanitizer-scope.md §2.1) — a viewer
+# does not get that kind of turn-taking control over one generated reply.
+# Config is kept per-source so any of those can still be armed later on real
+# evidence.
 # OWNER_BUNDLE_SOURCE is KNOWN but not DEFAULT (interruptible_speech_
 # architecture_20260804 §5.2): arming it is still the owner's call on real
 # evidence, but without the allowlist entry `_parse_clause_sanitizer_sources`
@@ -232,7 +239,7 @@ CLAUSE_SANITIZER_KNOWN_SOURCES = frozenset({
     "kira-agenda", "kira-agenda-stop", "chat", "direct", "ptt", "accumulated",
     OWNER_BUNDLE_SOURCE,
 })
-CLAUSE_SANITIZER_DEFAULT_SOURCES = frozenset({"kira-agenda", "kira-agenda-stop"})
+CLAUSE_SANITIZER_DEFAULT_SOURCES = frozenset({"kira-agenda", "kira-agenda-stop", "chat"})
 
 
 def _parse_clause_sanitizer_sources(raw: Optional[str]) -> frozenset:

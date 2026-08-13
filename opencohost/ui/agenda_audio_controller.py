@@ -31,7 +31,15 @@ import threading
 from typing import Any, Callable
 
 from opencohost.smart_aggregator import AgendaAction, AgendaState, ErrorCode, RecoveryPolicy
-from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
+# Re-exports, not moves-with-rename: the shell dispatches by getattr on THIS
+# module (_agenda_audio_call), so the names must stay importable here. The
+# bodies moved VERBATIM to opencohost.smart_aggregator.chat_reaction because
+# the headless API host needs the same routing and its package must never
+# import opencohost.ui (api/main.py module docstring).
+from opencohost.smart_aggregator.chat_reaction import (  # noqa: F401
+    kira_agenda_consume_pending_chat_if_due,
+    on_smart_aggregated_context,
+)
 from opencohost.config.logger import get_logger
 
 logger = get_logger()
@@ -290,27 +298,8 @@ def kira_agenda_has_non_agenda_audio_work(
     return False
 
 
-def kira_agenda_consume_pending_chat_if_due(
-    *,
-    kira_agenda: Any,
-    get_pending_compact_chat: Callable[[], str],
-    set_pending_compact_chat: Callable[[str], None],
-    enqueue_kira_agenda_action: Callable[..., None],
-    kira_agenda_update_status: Callable[[], None],
-    **_: Any,
-) -> bool:
-    compact_chat = get_pending_compact_chat().strip()
-    if not compact_chat or kira_agenda is None:
-        return False
-    if not hasattr(kira_agenda, "chat_signal_due") or not kira_agenda.chat_signal_due():
-        return False
-    action = kira_agenda.next_action(compact_chat=compact_chat)
-    if action.kind != "enqueue":
-        return False
-    set_pending_compact_chat("")
-    enqueue_kira_agenda_action(action)
-    kira_agenda_update_status()
-    return True
+# kira_agenda_consume_pending_chat_if_due: moved to
+# opencohost.smart_aggregator.chat_reaction (re-exported above).
 
 
 def kira_agenda_prefetch_while_speaking(
@@ -711,98 +700,5 @@ def kira_agenda_update_status(
     set_agenda_was_paused(is_paused)
 
 
-def on_smart_aggregated_context(
-    *,
-    data: dict,
-    kira_agenda: Any,
-    motor_ia: Any,
-    smart_agg_ui: Any,
-    enqueue_kira_agenda_action: Callable[..., None],
-    kira_agenda_update_status: Callable[[], None],
-    set_pending_compact_chat: Callable[[str], None],
-    log_accion: Callable[[str], None],
-    **_: Any,
-) -> None:
-    """Route compact chat either to Agenda Mode or the existing RF3 reaction."""
-    # When the controller is PAUSED_NEEDS_OPERATOR, chat must fall
-    # through to the standalone RF3 reaction path — otherwise chat
-    # responses are silently dropped while the operator sees a frozen UI.
-    if (
-        kira_agenda
-        and kira_agenda.state not in {AgendaState.OFF, AgendaState.PAUSED_NEEDS_OPERATOR, AgendaState.HARD_PAUSED}
-        # When IDLE with no active topic and nothing queued, co-host has
-        # exhausted all planned topics.  Let chat fall through to the
-        # standalone RF3 reaction path instead of being silently consumed
-        # by next_action() which returns none() in IDLE+empty state.
-        and not (
-            kira_agenda.state == AgendaState.IDLE
-            and kira_agenda.active_topic is None
-            and not kira_agenda.queued_topics()
-        )
-    ):
-        intent_summary = data.get("intent_summary") or {}
-        compact_chat = intent_summary.get("prompt") or ""
-        if not compact_chat:
-            # SECURITY: this fallback joins UNSUMMARIZED viewer chat. It is
-            # contained downstream by _build_prompt's read-only data delimiters
-            # (KiraAgendaController._wrap_untrusted_chat), which make prompt
-            # injection structurally inert. The full fix — routing this path
-            # through the structured ChatContextPacket so RAW chat never reaches
-            # the prompt — is the "Raw-Chat Prompt Exposure" track in
-            # conductor/tracks.md. Do not remove the downstream delimiters.
-            context = data.get("context", [])[-6:]
-            compact_chat = "\n".join(m.get("text", "") for m in context if m.get("text"))
-        if getattr(motor_ia, "is_processing", False) or getattr(motor_ia, "is_speaking", False):
-            set_pending_compact_chat(compact_chat.strip())
-            kira_agenda_update_status()
-            return
-        action = kira_agenda.next_action(
-            motor_busy=getattr(motor_ia, "is_processing", False),
-            kira_speaking=getattr(motor_ia, "is_speaking", False),
-            compact_chat=compact_chat,
-        )
-        enqueue_kira_agenda_action(action)
-        kira_agenda_update_status()
-        return
-    # ── Standalone RF3 path ─────────────────────────────────────────
-    # Phase B: use ChatContextPacket instead of defective compact_chat
-    import opencohost.smart_aggregator.chat_input_contract as _ic
-    if _ic.USE_INPUT_CONTRACT_PROMPT:
-        try:
-            context = data.get("context", [])
-            intent_summary = data.get("intent_summary", {})
-            old_compact = intent_summary.get("prompt", "")
-
-            builder = ChatContextPacketBuilder()
-            packet = builder.build(context)
-
-            if not packet.should_call_llm:
-                # No useful signal — stay silent instead of generating
-                # "qué paz", "qué silencio", etc.
-                log_accion(
-                    f"[InputContract] stay_silent: "
-                    f"msgs={packet.total_messages} users={packet.unique_users} "
-                    f"event={packet.primary_event} confidence={packet.confidence:.2f}"
-                )
-                return
-
-            # Valid signal: use packet context as prompt source
-            new_context = packet.to_prompt_context()
-            # Inject into data dict for smart_agg_ui
-            data["intent_summary"]["prompt"] = new_context
-            data["_source_used"] = "input_contract"
-
-            log_accion(
-                f"[InputContract] using packet: "
-                f"event={packet.primary_event} goal={packet.response_goal} "
-                f"highlight={'yes' if packet.selected_highlight else 'no'} "
-                f"clusters={len(packet.topic_clusters)} "
-                f"old_compact={old_compact[:80]!r}"
-            )
-        except Exception:
-            # Fallback: use old compact_chat on any error
-            data["_source_used"] = "fallback_old_compact"
-    else:
-        data["_source_used"] = "old_compact"
-
-    smart_agg_ui.on_aggregated_context(data)
+# on_smart_aggregated_context: moved to
+# opencohost.smart_aggregator.chat_reaction (re-exported above).
