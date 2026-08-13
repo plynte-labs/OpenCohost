@@ -17,6 +17,7 @@ Warm+speak run on a background daemon thread (mirrors
 with ``_wait_until`` rather than asserted synchronously.
 """
 
+import logging
 import queue
 import time
 from unittest.mock import MagicMock, patch
@@ -529,3 +530,155 @@ class TestGuardrailRetryWithNudge:
         motor._generar_dialogo("hola", source="direct", commit_history=False)
 
         assert motor._ollama_chat_with_watchdog.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. Guardrail vs. TTS-sanitizer ordering leak (P0). output_guard runs on the
+#    RAW LLM text, but _sanitize_tts_text_for_playback strips markdown
+#    emphasis (`*x*`) LATER, only inside _hablar_impl. R9/R4's patterns join
+#    tokens with `\s+`, and `*` is not whitespace, so a markdown-wrapped
+#    violation ('Como *IA*, no puedo opinar.') passes the raw-text guard and
+#    is then spoken clean on air once the sanitizer strips the asterisks.
+#    Fix: guard BOTH the raw text and the TTS-sanitized copy, at the initial
+#    check and at the retry re-check a few lines below it.
+# ---------------------------------------------------------------------------
+
+_MARKDOWN_R9_TEXT = "Como *IA*, no puedo opinar."
+_MARKDOWN_R4_TEXT = "Listo, *ya lo hice* sin problema."
+_MARKDOWN_CLEAN_TEXT = "Eso estuvo *buenisimo*, che."
+
+
+class TestGuardrailTtsSanitizedLeak:
+    def test_markdown_wrapped_self_id_blocked_then_clean_retry_spoken(self, tmp_path):
+        """R9 regression case (broadcast on production at 2026-08-13 16:10:13
+        for a raw-text hit; this is the markdown-wrapped bypass of that same
+        rule). Pre-fix, output_guard(raw) allows this text outright, so the
+        retry never fires and the unsanitized markdown text is returned."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_MARKDOWN_R9_TEXT),
+                _content_response(_CLEAN_TEXT),
+            ]
+        )
+
+        result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result == _CLEAN_TEXT
+        assert motor._ollama_chat_with_watchdog.call_count == 2
+
+    def test_markdown_wrapped_confirmation_blocked_then_clean_retry_spoken(self, tmp_path):
+        """R4 case: Kira claiming she did something she did not, wrapped in
+        emphasis markers."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_MARKDOWN_R4_TEXT),
+                _content_response(_CLEAN_TEXT),
+            ]
+        )
+
+        result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result == _CLEAN_TEXT
+        assert motor._ollama_chat_with_watchdog.call_count == 2
+
+    def test_harmless_markdown_is_not_a_false_positive(self, tmp_path):
+        """Guarding the sanitized copy must not become a markdown ban --
+        emphasis around otherwise-clean content stays allowed, no retry."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            return_value=_content_response(_MARKDOWN_CLEAN_TEXT)
+        )
+
+        result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result == _MARKDOWN_CLEAN_TEXT
+        assert motor._ollama_chat_with_watchdog.call_count == 1
+
+    def test_raw_violation_no_markdown_still_blocks_unchanged(self, tmp_path):
+        """No behavior change on the pre-existing raw-text-only path (same
+        fixture as TestGuardrailRetryWithNudge.
+        test_local_block_then_blocked_retry_returns_canned_line)."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_BLOCKED_TEXT),
+                _content_response(_BLOCKED_TEXT),
+            ]
+        )
+
+        result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result in i18n_active.guardrail_fallback_lines()
+        assert motor._ollama_chat_with_watchdog.call_count == 2
+
+    def test_retry_recheck_also_catches_markdown_wrapped_violation(self, tmp_path):
+        """The retry re-check (a SEPARATE output_guard call a few lines below
+        the initial one) must apply the same raw+sanitized check -- a retry
+        that comes back markdown-wrapped must not slip through the hole the
+        initial check just closed."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_BLOCKED_TEXT),      # raw-blocked, triggers retry
+                _content_response(_MARKDOWN_R9_TEXT),  # retry: markdown-wrapped R9
+            ]
+        )
+
+        result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result in i18n_active.guardrail_fallback_lines()
+        assert motor._ollama_chat_with_watchdog.call_count == 2
+
+    def test_blocked_markdown_turn_never_logs_dialogue_text(self, tmp_path, caplog):
+        """Metadata-only logging (owner privacy rule, mirrors CLAUSE_SANITIZER
+        and test_direct_bounded_wait.py:143-168): the guard call site's own
+        log line (`_log`, the "OpenCohost" logger) must never put the raw or
+        sanitized dialogue text in any log record. Scoped to "OpenCohost" --
+        `output_guard`'s own `log_non_negotiable_block` preview logging (a
+        separate, pre-existing, deliberate feature on the
+        "opencohost.config.validation" logger, guardrail_tuning_20260724
+        item 0) is untouched by this fix and out of scope."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_MARKDOWN_R9_TEXT),
+                _content_response(_MARKDOWN_R9_TEXT),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+            result = motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert result in i18n_active.guardrail_fallback_lines()
+        for record in caplog.records:
+            if record.name != "OpenCohost":
+                continue
+            message = record.getMessage()
+            assert _MARKDOWN_R9_TEXT not in message
+            assert "Como IA, no puedo opinar" not in message
+
+    def test_sanitized_only_block_reason_is_distinguishable_in_log(self, tmp_path, caplog):
+        """A block that only the sanitized pass caught must be legible as
+        such in the log line -- otherwise the next person debugging this
+        sees a rule fire on text that 'isn't in the response' (raw passes)."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_MARKDOWN_R9_TEXT),
+                _content_response(_CLEAN_TEXT),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        blocked_lines = [
+            r.getMessage() for r in caplog.records
+            if "Salida bloqueada por guardrail" in r.getMessage()
+        ]
+        assert len(blocked_lines) == 1
+        assert "no_ai_self_identification" in blocked_lines[0]
+        # Distinguishable from a raw-text block, which carries no such marker.
+        assert "tts-sanitized" in blocked_lines[0]

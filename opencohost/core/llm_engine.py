@@ -476,6 +476,32 @@ def _strip_injection_markers(text: str) -> str:
             idx = lowered.find(marker)
     return " ".join(text.split())
 
+
+def _output_guard_with_tts_check(text: str, source: str) -> tuple[bool, str]:
+    """output_guard runs on the RAW LLM text, but `_sanitize_tts_text_for_
+    playback` strips markdown emphasis (`*x*`) LATER, only inside
+    `_hablar_impl`. R9/R4's patterns join tokens with `\\s+`, and `*` is not
+    whitespace, so a markdown-wrapped violation ('Como *IA*, no puedo
+    opinar.') passes the raw-text guard and is then spoken clean once the
+    sanitizer strips the asterisks. Guard BOTH surfaces: raw text is what
+    reaches `historial`/`/api/chat/last-reply`, the sanitized copy is what
+    actually reaches TTS.
+
+    The sanitized pass only runs when the raw pass already allowed the text
+    (cheap: no double-sanitizing, no sanitizing when raw already blocked). A
+    block only the sanitized pass caught is tagged `[tts-sanitized]` so it
+    reads as distinct from a raw-text block in the log line.
+    """
+    allowed, reason = output_guard(text, source=source)
+    if not allowed:
+        return allowed, reason
+    sanitized = _sanitize_tts_text_for_playback(text)
+    allowed, reason = output_guard(sanitized, source=source)
+    if not allowed:
+        return allowed, f"[tts-sanitized] {reason}"
+    return True, ""
+
+
 # Control commands safe to apply at a turn boundary (see
 # MotorVocalIA._drain_control_commands). All are plain setters or a model
 # prepare/switch — none dispatches a turn or recurses into the processing
@@ -3374,7 +3400,7 @@ class MotorVocalIA(
                     self._invalidate_pregen_epoch()
                 return ""
             dialogo = san.text
-        allowed, guard_reason = output_guard(dialogo, source=source)
+        allowed, guard_reason = _output_guard_with_tts_check(dialogo, source=source)
         if not allowed:
             self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
             # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
@@ -3400,7 +3426,7 @@ class MotorVocalIA(
                     except Exception:
                         logger.exception("Agenda output transformer failed (guardrail retry)")
             if retry_content:
-                retry_allowed, _ = output_guard(retry_content, source=source)
+                retry_allowed, _ = _output_guard_with_tts_check(retry_content, source=source)
                 if retry_allowed:
                     self._log("Guardrail retry: respuesta corregida aceptada tras un intento adicional.")
                     dialogo = retry_content
