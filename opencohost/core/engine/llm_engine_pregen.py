@@ -635,12 +635,17 @@ class PregenCacheMixin:
         self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
         # WU3 interactive parity (design-fase2.md §3 WU3): mirror the foreground
         # _ejecutar_inferencia post-generation steps for non-agenda sources — the
-        # emit relabels to "kira" (agenda keeps its own source) and a chat turn
-        # advances the spoken clock. The dialogo already passed every transform/
-        # veto INSIDE _generar_dialogo (sanitizer, output_guard, chat repetition
-        # guard), so nothing is re-applied here.
-        emit_source = source if source.startswith("kira-agenda") else "kira"
-        self._emit_dialogue(dialogo, emit_source)
+        # emit forwards the TRUE source and a chat turn advances the spoken
+        # clock. The dialogo already passed every transform/veto INSIDE
+        # _generar_dialogo (sanitizer, output_guard, chat repetition guard), so
+        # nothing is re-applied here.
+        #
+        # Parity is the whole point of this line: it emits the source unrelabeled
+        # exactly like the foreground path now does. A pregenerated chat reply and
+        # a foreground one are the same turn to every consumer, so if one of these
+        # two sites ever relabels and the other does not, a cache hit and a cache
+        # miss start reporting different origins for identical work.
+        self._emit_dialogue(dialogo, source)
         if not already_reported_boundary:
             # WU4 4a boundary telemetry: an immediate pop-time cache hit is a
             # "used" draft. gap_ms = ms since the PREVIOUS turn's speaking_end;

@@ -104,7 +104,8 @@ def test_pop_time_miss_falls_back_to_generation():
     motor._process_priority_queue()
 
     assert gen_calls == [("hola kira", "chat")]
-    # _hablar receives the RAW source ("chat"); the "kira" relabel is _emit_dialogue-only.
+    # _hablar receives the RAW source ("chat") — as does _emit_dialogue now that
+    # the "kira" relabel lives at the sink, not in the engine.
     assert hablar_calls == [("Respuesta generada en vivo.", "chat")]
 
 

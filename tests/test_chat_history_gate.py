@@ -159,6 +159,93 @@ def test_agenda_turn_keeps_full_history():
     assert _CHAT_BOILERPLATE in blob
 
 
+# ── the agenda collapse (owner ruling 2026-08-13) ───────────────────────────
+
+
+_AGENDA_REPLY_3 = "Tercer bloque de agenda: y por eso el limite se dibuja antes, no despues."
+
+
+def _seed_agenda_heavy_history(motor: MotorVocalIA) -> None:
+    """The 22:07:04 shape: Kira has been running the agenda and one viewer
+    comment arrives. Before the ruling, every inherited monologue rode into the
+    chat prompt and drowned the comment she was answering.
+
+    Exactly 3 pairs — `historial` is `deque(maxlen=HISTORY_MAX_TURNS * 2)` = 6
+    entries, so a 4th pair silently evicts the head and a test written against
+    it asserts on a window that never existed.
+
+    The last agenda pair is NOT the newest entry, and it uses the
+    `kira-agenda-stop` source: that makes the two collapse properties
+    independent — picking the newest AGENDA line is not the same as picking the
+    newest line, and the source test is a prefix test, not an equality one."""
+    pairs = [
+        ("kira-agenda", _AGENDA_SENTINEL, _AGENDA_REPLY),
+        ("kira-agenda-stop", _AGENDA_SENTINEL, _AGENDA_REPLY_3),
+        ("chat", _CHAT_BOILERPLATE, _CHAT_REPLY),
+    ]
+    for source, user_content, asst_content in pairs:
+        motor.historial.append(
+            {"role": "user", "content": user_content, "source": source, "private": False}
+        )
+        motor.historial.append(
+            {"role": "assistant", "content": asst_content, "source": source, "private": False}
+        )
+
+
+def test_chat_turn_collapses_agenda_replies_to_the_last():
+    """Owner ruling: only the most recent agenda line survives into a stream
+    turn — it is what Kira just said out loud. The earlier ones are the
+    contamination that made her keep monologuing at a viewer."""
+    motor = _bare_motor()
+    _seed_agenda_heavy_history(motor)
+
+    setup = _build(motor, "chat")
+
+    asst_contents = [m["content"] for m in setup.messages if m["role"] == "assistant"]
+    assert asst_contents == [_AGENDA_REPLY_3, _CHAT_REPLY], (
+        f"expected last agenda line + chat reply only, got {asst_contents}"
+    )
+    # The dropped one is the older agenda monologue, and `kira-agenda-stop`
+    # survived as agenda — the collapse matches the source PREFIX, so a
+    # membership check against the bare 'kira-agenda' string (which would let
+    # the stop-variant pass as if it were a chat reply) fails here.
+    blob = "\n".join(m["content"] for m in setup.messages)
+    assert _AGENDA_REPLY not in blob
+
+
+def test_chat_turn_keeps_untagged_assistant_slots():
+    """Fail-open pin: `stream_admin_ui.py:1340` appends an entry with no
+    `source` key. Untagged is not proven-agenda, so it must survive — dropping
+    it would shrink the window on a shape nobody audited. Seeded alone (3
+    entries total) so the 6-entry deque cannot evict the very slot under test."""
+    motor = _bare_motor()
+    motor.historial.append({"role": "assistant", "content": "linea sin source tag"})
+    motor.historial.append(
+        {"role": "user", "content": _AGENDA_SENTINEL, "source": "kira-agenda", "private": False}
+    )
+    motor.historial.append(
+        {"role": "assistant", "content": _AGENDA_REPLY, "source": "kira-agenda", "private": False}
+    )
+
+    setup = _build(motor, "chat")
+
+    blob = "\n".join(m["content"] for m in setup.messages)
+    assert "linea sin source tag" in blob
+
+
+def test_agenda_collapse_does_not_leak_onto_owner_turns():
+    """Scope pin, same reason as the gate's: an owner turn still sees the full
+    agenda thread. Widening this has to be a deliberate act."""
+    motor = _bare_motor()
+    _seed_agenda_heavy_history(motor)
+
+    setup = _build(motor, "direct")
+
+    blob = "\n".join(m["content"] for m in setup.messages)
+    for reply in (_AGENDA_REPLY, _AGENDA_REPLY_3):
+        assert reply in blob
+
+
 # ── the FIX 2 coupling ──────────────────────────────────────────────────────
 
 

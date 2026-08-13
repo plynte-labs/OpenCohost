@@ -224,12 +224,29 @@ class ChatReplySink:
         submitted_under_provider: Optional[str] = None,
         provider_changed_while_queued: Optional[bool] = None,
     ) -> None:
+        # `source` arrives as the TRUE generating source ("chat", "direct",
+        # "ptt", "accumulated", "kira-agenda", "kira-agenda-stop"). The uniform
+        # "kira" attribution the published `source` field has always carried is
+        # derived HERE, at the only boundary that publishes it — the engine used
+        # to relabel before emitting, which meant nothing downstream could ever
+        # tell a chat reply from a direct one.
+        #
+        # R8 holds: every value in that set is a fixed internal label, never
+        # viewer/operator text, so `origin` discloses which SURFACE spoke and
+        # never one character of what it said.
+        #
+        # A literal "kira" means the origin was already destroyed upstream (a
+        # legacy or hand-rolled caller), so it reports null rather than laundering
+        # the placeholder into a fake origin.
+        display_source = source if source.startswith("kira-agenda") else "kira"
+        origin = source if source and source != "kira" else None
         with self._lock:
             self._turn_id += 1
             self._replies.append(
                 {
                     "text": text,
-                    "source": source,
+                    "source": display_source,
+                    "origin": origin,
                     "turn_id": self._turn_id,
                     "ts": time.time(),
                     # Unit 4.1 (runtime_findings_batch_20260731, F5): the queue wait
@@ -921,6 +938,26 @@ class EngineHost:
         if message.startswith(self._CHAT_REACTION_LOG_ALLOWED):
             _logger.info("%s", message)
 
+    def _on_chat_source_changed(self) -> None:
+        """Wired as `Aggregator.on_source_changed` (fires on every connect,
+        including a reconnect to the same channel -- see the call-site
+        comment in aggregator.py). Two independent per-source resets live
+        behind this one signal:
+
+        1. The display buffer (`ChatFeedSink.new_session`, pre-existing).
+        2. The motor's OWN pending queue (judgment day 2026-08-13, Finding
+           2): without this, a `source="chat"` reaction queued against the
+           OLD channel could still pop and speak minutes later -- after the
+           operator switched channels -- and the Tauri UI would route that
+           reply into the NEW channel's Stream tab. `drop_pending_sources`
+           matches by PREFIX; "chat" cannot prefix-match any other live
+           source tag (ptt, direct, kira-agenda*), so this cannot reach past
+           its own queue slice.
+        """
+        self.chat_feed.new_session()
+        if self.motor is not None and hasattr(self.motor, "drop_pending_sources"):
+            self.motor.drop_pending_sources(("chat",))
+
     def start(self) -> None:
         self._acquire_lock()
         try:
@@ -972,10 +1009,13 @@ class EngineHost:
                 # Source-change signal: every connect (a different channel OR
                 # a reconnect to the same one) clears the feed and bumps
                 # `session`, so #canalA's messages never render as a silent
-                # prefix of #canalB's. Plain attribute assignment of a bound
-                # method -- re-running this block (aggregator rebuild) just
-                # rebinds the same callable, so it is idempotent.
-                self.aggregator.on_source_changed = self.chat_feed.new_session
+                # prefix of #canalB's -- AND drops any pending source="chat"
+                # reaction still queued in the motor from the old channel
+                # (see _on_chat_source_changed). Plain attribute assignment
+                # of a bound method -- re-running this block (aggregator
+                # rebuild) just rebinds the same callable, so it is
+                # idempotent.
+                self.aggregator.on_source_changed = self._on_chat_source_changed
                 # Chat->Kira feeder: without this the aggregator built its
                 # context payloads and dropped them on a None callback, so
                 # viewer chat rendered in the UI but never reached the motor

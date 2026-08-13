@@ -190,7 +190,7 @@ def test_screen_keeps_glyphs_speech_strips_them():
     motor._ejecutar_inferencia("hola", source="chat")
 
     # Screen: _emit_dialogue got the untouched original string.
-    spy.assert_called_once_with(dialogo, "kira")
+    spy.assert_called_once_with(dialogo, "chat")
 
     # Speech: Piper never saw the CJK glyphs.
     synth_texts = [c.args[0] for c in motor._piper.synthesize.call_args_list]

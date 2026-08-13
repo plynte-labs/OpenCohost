@@ -42,8 +42,10 @@ def test_main_turn_invokes_dialogue_callback():
 
     motor._ejecutar_inferencia("hola", source="chat")
 
-    # Emission happens at the speak site, exactly once, attributed to "kira".
-    spy.assert_called_once_with("Che, que buena jugada.", "kira")
+    # Emission happens at the speak site, exactly once, carrying the TRUE
+    # source. The uniform "kira" attribution is derived at the sink that
+    # publishes it (ChatReplySink.record), not destroyed here.
+    spy.assert_called_once_with("Che, que buena jugada.", "chat")
 
 
 def test_spoken_guardrail_fallback_updates_last_reply(monkeypatch):
@@ -63,7 +65,7 @@ def test_spoken_guardrail_fallback_updates_last_reply(monkeypatch):
     # Kira audibly spoke the fallback...
     motor._hablar.assert_called_once_with(fallback, source="chat")
     # ...and last-reply now reflects THAT fallback, emitted exactly once.
-    spy.assert_called_once_with(fallback, "kira")
+    spy.assert_called_once_with(fallback, "chat")
 
 
 def test_guardrail_blocked_turn_commits_user_and_fallback_to_history(monkeypatch):
@@ -93,7 +95,7 @@ def test_spoken_normal_turn_emits_exactly_once():
 
     motor._ejecutar_inferencia("hola", source="chat")
 
-    spy.assert_called_once_with("Todo firme por acá.", "kira")
+    spy.assert_called_once_with("Todo firme por acá.", "chat")
 
 
 def test_agenda_prefetch_invokes_dialogue_callback():

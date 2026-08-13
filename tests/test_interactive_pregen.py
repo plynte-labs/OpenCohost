@@ -486,10 +486,10 @@ def test_trigger_does_not_fire_while_not_speaking():
 # ── interactive parity: _speak_pregenerated mirrors _ejecutar_inferencia ────
 
 
-def test_interactive_parity_emit_relabels_chat_source_to_kira():
-    # Foreground _ejecutar_inferencia emits a non-agenda reply with source
-    # "kira" (not the raw "chat"). A pregenerated chat reply spoken at pop must
-    # match that relabel — else the UI dialogue line is mislabeled.
+def test_interactive_parity_emit_keeps_true_chat_source():
+    # Foreground _ejecutar_inferencia emits a non-agenda reply with its TRUE
+    # source. A pregenerated chat reply spoken at pop must match — else a cache
+    # hit and a cache miss report different origins for identical work.
     motor = _bare_motor()
     motor._commit_history = lambda *a, **kw: None
     emitted = []
@@ -503,7 +503,7 @@ def test_interactive_parity_emit_relabels_chat_source_to_kira():
     motor._process_priority_queue()
 
     assert spoke == [("Respuesta.", "chat")], "_hablar receives the RAW source (foreground parity)"
-    assert emitted == [("Respuesta.", "kira")], "emit must relabel non-agenda to 'kira' (foreground parity)"
+    assert emitted == [("Respuesta.", "chat")], "emit must carry the true source (foreground parity)"
 
 
 def test_interactive_parity_agenda_emit_keeps_agenda_source():

@@ -38,9 +38,9 @@ def test_live_contract_agenda_turn(live_motor, live_posture, caplog):
 
     # ── The three destinations agree byte-for-byte ──────────────────────────
     motor._dialogue_spy.assert_called_once()
-    emitted, emit_source = motor._dialogue_spy.call_args[0]
+    emitted, emitted_source = motor._dialogue_spy.call_args[0]
     assert emitted == spoken
-    assert emit_source == "kira-agenda"
+    assert emitted_source == "kira-agenda"
     assert motor.historial[-1]["content"] == spoken
 
     # ── Provider selection is the configured one ────────────────────────────
@@ -78,7 +78,7 @@ def test_live_auth_failure_is_a_contract_failure(live_posture):
     with pytest.raises(Exception):
         cloud_llm_client.send_chat_completion(
             base_url=live_posture["base_url"],
-            api_key="nvapi-DEFINITELY-NOT-A-VALID-KEY",
+            api_key="nvapi-DEFINITELY-NOT-A-VALID-KEY",  # pragma: allowlist secret
             model=live_posture["model"],
             messages=[{"role": "user", "content": "hola"}],
             options={"num_predict": 16},

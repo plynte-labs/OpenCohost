@@ -145,7 +145,11 @@ def test_direct_over_bound_wait_logs_warning_metadata_only(monkeypatch, caplog):
     monkeypatch.setattr("opencohost.core.llm_engine.time.monotonic", lambda: clock["t"])
 
     motor = _motor()
-    secret_text = "el usuario conto un secreto ultra confidencial"
+    # The OPPOSITE of a secret: a decoy the test asserts must NOT reach the log
+    # line. detect-secrets trips on the variable name, and this file had never
+    # been scanned before — the baseline predates the first time this batch
+    # touched it.
+    secret_text = "el usuario conto un secreto ultra confidencial"  # pragma: allowlist secret
     motor._ollama_chat = MagicMock(return_value=_resp("respuesta generica"))
 
     submitted_at = clock["t"]
@@ -239,7 +243,7 @@ def test_direct_turn_discloses_provider_change_while_queued(monkeypatch):
     motor._process_priority_queue()
 
     emitted.assert_called_once_with(
-        "todo tranquilo", "kira", queue_wait_ms=5000,
+        "todo tranquilo", "direct", queue_wait_ms=5000,
         answered_by_provider="local", answered_by_transport="local",
         submitted_under_provider="nvidia_nim",
         provider_changed_while_queued=True,
@@ -274,7 +278,7 @@ def test_direct_turn_same_provider_carries_no_mismatch(monkeypatch):
     motor._process_priority_queue()
 
     emitted.assert_called_once_with(
-        "todo tranquilo", "kira", queue_wait_ms=2000,
+        "todo tranquilo", "direct", queue_wait_ms=2000,
         answered_by_provider="local", answered_by_transport="local",
         submitted_under_provider="local",
         provider_changed_while_queued=False,
@@ -291,4 +295,4 @@ def test_untagged_turn_carries_no_provider_disclosure_kwargs():
 
     motor._ejecutar_inferencia("hola", source="chat")
 
-    emitted.assert_called_once_with("che, todo bien", "kira")
+    emitted.assert_called_once_with("che, todo bien", "chat")

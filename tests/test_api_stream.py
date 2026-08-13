@@ -403,6 +403,53 @@ def test_limits_unknown_filter_preset_422():
         assert agg.get_filter_policy() == "balanced"  # unchanged
 
 
+def test_limits_invalid_ttl_applies_nothing_else(monkeypatch):
+    """Regression (judgment day 2026-08-13, Finding 3): a bad
+    stream_ttl_seconds must reject the WHOLE PUT, not just refuse the TTL
+    field while quietly applying the rest of the body. Concrete failure from
+    the finding: threshold_per_second must NOT land alongside a rejected
+    stream_ttl_seconds. FakeAggregator's default threshold_per_second is 5.0
+    (see _FakeActivity), so the body deliberately asks for a DIFFERENT value
+    (42.5) — an unchanged default would silently pass the same assertion
+    either way."""
+    from opencohost.core import turn_priority
+
+    monkeypatch.setattr(turn_priority, "STREAM_TTL_SECONDS", 120.0)
+    agg = FakeAggregator()
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"threshold_per_second": 42.5, "stream_ttl_seconds": 5},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "invalid_stream_ttl"
+        assert agg.activity.threshold_per_second == 5.0, (
+            "threshold_per_second was applied even though the same PUT was "
+            "rejected for an invalid stream_ttl_seconds"
+        )
+        assert turn_priority.STREAM_TTL_SECONDS == 120.0
+
+
+def test_limits_invalid_filter_policy_applies_nothing_else():
+    """Same atomicity gap, the other fallible field: an unknown filter_policy
+    must not leave threshold_per_second applied either (see the sibling test
+    above for why 42.5, not the FakeAggregator default 5.0)."""
+    agg = FakeAggregator()
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"threshold_per_second": 42.5, "filter_policy": "does_not_exist"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "invalid_filter_policy"
+        assert agg.activity.threshold_per_second == 5.0, (
+            "threshold_per_second was applied even though the same PUT was "
+            "rejected for an unknown filter_policy"
+        )
+
+
 def test_limits_503_when_aggregator_none():
     app = _app(_host_with_aggregator(None))
     with TestClient(app) as client:

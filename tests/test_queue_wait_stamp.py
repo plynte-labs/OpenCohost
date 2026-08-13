@@ -119,7 +119,7 @@ def test_unstamped_turn_dialogue_callback_gets_no_queue_wait_kwarg():
 
     motor._ejecutar_inferencia("hola", source="chat")
 
-    emitted.assert_called_once_with("Che, todo bien.", "kira")
+    emitted.assert_called_once_with("Che, todo bien.", "chat")
 
 
 # ---------------------------------------------------------------------------
@@ -178,4 +178,4 @@ def test_direct_turn_end_to_end_carries_queue_wait_from_dispatch_to_sink(monkeyp
     # Unit 4.1's seam for 4.2: queue_wait_ms reaches dialogue_callback
     # (ChatReplySink.record in production), which is exactly where
     # GET /api/chat/last-reply reads it from.
-    emitted.assert_called_once_with("todo tranquilo", "kira", queue_wait_ms=60000)
+    emitted.assert_called_once_with("todo tranquilo", "direct", queue_wait_ms=60000)

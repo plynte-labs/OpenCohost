@@ -18,6 +18,7 @@ in LLM prompts, logs, or persistence).
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Callable
 
 from opencohost.config.logger import get_logger
@@ -127,7 +128,24 @@ class ChatReactionCore:
         historial = getattr(self._motor_ia, "historial", None)
         if not historial:
             return ""
-        items = list(historial)
+        # RACE (judgment day 2026-08-13, Finding 1): this reads the LIVE deque
+        # from a thread the engine does not control (chat source reader), while
+        # _commit_history (llm_engine_memorias.py) and _build_generation_request
+        # (llm_engine.py ~:2651) both append/iterate it under _history_lock from
+        # the engine/agenda-speaker threads. An unguarded `list(historial)` here
+        # can land mid-append and raise "RuntimeError: deque mutated during
+        # iteration" -- swallowed by engine_host._on_aggregated_context's outer
+        # except, silently dropping the whole reaction. Reaching into the
+        # engine's own lock (rather than adding a new public accessor) keeps
+        # this a one-file fix and matches how every other historial reader in
+        # this codebase already synchronizes -- see llm_engine.py:2651's
+        # identical `with self._history_lock: history_snapshot = list(self.historial)`.
+        # getattr-guarded: several tests build a MotorVocalIA via `__new__`
+        # (never running __init__, so _history_lock does not exist) and this
+        # must still degrade to the old unlocked read instead of raising.
+        lock = getattr(self._motor_ia, "_history_lock", None)
+        with lock if lock is not None else contextlib.nullcontext():
+            items = list(historial)
         kira_msgs = [
             m.get("content", "") for m in items[-20:]
             if isinstance(m, dict) and m.get("role") == "assistant"

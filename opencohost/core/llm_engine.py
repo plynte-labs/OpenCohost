@@ -2681,10 +2681,31 @@ class MotorVocalIA(
         # _finalize_generation, where FIX 2 derives recent_outputs from its
         # assistant entries — filtering the snapshot itself would blind the
         # guard that exists precisely because chat reactions repeat.
+        #
+        # Owner ruling 2026-08-13: of those assistant slots, the AGENDA-sourced
+        # ones collapse to the most recent one. Symptom it fixes (log
+        # opencohost_20260812_194539, 22:07:04): Kira answers a viewer and then
+        # keeps monologuing the agenda topic without ever mentioning the chat,
+        # because three inherited agenda turns outweighed the one comment she
+        # was actually replying to. Keeping the LAST one — not zero — is
+        # deliberate: it is what she just said out loud on stream, so she stays
+        # coherent with it instead of contradicting herself mid-segment.
+        #
+        # Entries without a `source` key (stream_admin_ui.py:1340 appends one
+        # such shape) fail OPEN and are kept: an untagged slot is not proven to
+        # be agenda, and dropping it would silently shrink the window.
         history_assistant_only = source in _HISTORY_ASSISTANT_ONLY_SOURCES
-        for msg in history_snapshot:
-            if history_assistant_only and msg['role'] != 'assistant':
-                continue
+        last_agenda_idx = -1
+        if history_assistant_only:
+            for idx, msg in enumerate(history_snapshot):
+                if msg['role'] == 'assistant' and str(msg.get('source', '')).startswith('kira-agenda'):
+                    last_agenda_idx = idx
+        for idx, msg in enumerate(history_snapshot):
+            if history_assistant_only:
+                if msg['role'] != 'assistant':
+                    continue
+                if idx != last_agenda_idx and str(msg.get('source', '')).startswith('kira-agenda'):
+                    continue
             messages.append({'role': msg['role'], 'content': msg['content']})
 
         # Slice 5 (R9): memorias retrieval + injection for direct and ptt
@@ -3541,7 +3562,16 @@ class MotorVocalIA(
             # in sync with what Kira actually says. Agenda prefetch playback
             # emits from its own speaker (play_prefetched_agenda). Guarded, so a
             # raising callback never blocks speech. R8: Kira's own text only.
-            emit_source = source if source.startswith("kira-agenda") else "kira"
+            #
+            # The TRUE source travels — this used to relabel every non-agenda
+            # source to "kira" right here, which destroyed the only record of
+            # whether a reply answered chat, direct or PTT before any consumer
+            # could read it. The uniform "kira" attribution is a PRESENTATION
+            # concern of the one thing that surfaces it, so it now lives at that
+            # boundary (ChatReplySink.record, api/engine_host.py) where the
+            # published `source` field is still byte-identical. Anything wired
+            # here that wants uniform attribution must derive it the same way,
+            # NOT push the relabel back up into the engine.
             # C1 (refactor_core_api_20260802): _emit_dialogue's OWN branching
             # (kept, see its docstring) is entirely value-based — gated on
             # `queue_wait_ms is not None` / `submitted_under_provider is not
@@ -3552,7 +3582,7 @@ class MotorVocalIA(
             # a pinned dialogue_callback spy assertion (2 positional args)
             # never sees a surprise kwarg.
             self._emit_dialogue(
-                dialogo, emit_source, queue_wait_ms=queue_wait_ms,
+                dialogo, source, queue_wait_ms=queue_wait_ms,
                 answered_by_provider=answered_by_provider,
                 answered_by_transport=answered_by_transport,
                 submitted_under_provider=submitted_under_provider,

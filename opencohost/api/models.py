@@ -296,13 +296,23 @@ class ChatLastReplyResponse(BaseModel):
     `ChatReplySink` privacy contract in engine_host.py. This is NOT the
     viewer/operator chat that triggered the reply; that text never crosses
     HTTP (R8). Before any turn: `{text: null, source: null, turn_id: 0,
-    ts: null, queue_wait_ms: null}`.
+    ts: null, queue_wait_ms: null, origin: null}`.
     """
 
     text: Optional[str]
     source: Optional[str]
     turn_id: int
     ts: Optional[float]
+    # The TRUE generating source of this reply — "chat", "direct", "ptt",
+    # "accumulated", "kira-agenda", "kira-agenda-stop". `source` above collapses
+    # every non-agenda turn to "kira" for uniform on-screen attribution, so it
+    # cannot answer "did Kira just reply to a viewer or to the streamer?";
+    # `origin` is the field that can. Null before any turn, and null for a reply
+    # recorded by a caller that supplied no origin.
+    #
+    # R8-safe by construction: a fixed internal surface label, never a word of
+    # the viewer/operator text that triggered the reply.
+    origin: Optional[str] = None
     # Unit 4.1 (runtime_findings_batch_20260731, F5): how long a front-originated
     # (direct/chat/ptt) turn sat in the queue before the engine dequeued it, in
     # ms. Null for a turn with no submitted_at stamp (agenda, accumulated) —

@@ -208,6 +208,36 @@ def put_stream_limits(request: Request, body: StreamLimitsRequest):
     agg = getattr(request.app.state.host, "aggregator", None)
     if agg is None:
         return JSONResponse(status_code=503, content={"detail": "stream_unavailable"})
+
+    # Validate everything that CAN fail BEFORE applying anything (judgment
+    # day 2026-08-13, Finding 3). threshold_per_second/cooldown_seconds/
+    # max_messages_per_user/input_contract/stream_over_agenda are typed by
+    # StreamLimitsRequest and can never raise once Pydantic has parsed the
+    # body -- their applies below are unconditionally safe. Only these two
+    # fields can fail, so both run first, in this order:
+    #   1. stream_ttl_seconds bounds check -- pure, no side effect either way.
+    #   2. filter_policy -- Aggregator has no side-effect-free preset lookup,
+    #      so its own validate+apply (set_filter_policy) are fused. It still
+    #      raises BEFORE mutating anything on an unknown name (see
+    #      Aggregator._get_filter_preset), so running it here, before any
+    #      other field is touched, keeps the whole PUT atomic: a caller that
+    #      sends {"threshold_per_second": 5, "stream_ttl_seconds": 5} now
+    #      gets a 422 with NOTHING applied, instead of threshold_per_second
+    #      silently landing while the TTL write is refused.
+    if body.stream_ttl_seconds is not None and not (
+        turn_priority.STREAM_TTL_MIN_SECONDS
+        <= body.stream_ttl_seconds
+        <= turn_priority.STREAM_TTL_MAX_SECONDS
+    ):
+        # A ~0s window would expire every stream item before it can be
+        # popped — the mute-co-host failure from the other direction.
+        return JSONResponse(status_code=422, content={"detail": "invalid_stream_ttl"})
+    if body.filter_policy is not None:
+        try:
+            agg.set_filter_policy(body.filter_policy)
+        except ValueError:
+            return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
+
     if body.threshold_per_second is not None or body.cooldown_seconds is not None:
         agg.set_activity_limits(
             threshold_per_second=body.threshold_per_second,
@@ -215,11 +245,6 @@ def put_stream_limits(request: Request, body: StreamLimitsRequest):
         )
     if body.max_messages_per_user is not None:
         agg.set_spam_limits(max_messages_per_user=body.max_messages_per_user)
-    if body.filter_policy is not None:
-        try:
-            agg.set_filter_policy(body.filter_policy)
-        except ValueError:
-            return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
     if body.input_contract is not None:
         # PROCESS-GLOBAL module flag, not aggregator state — a future reader
         # will look for it on `agg` and it is not there. Same mechanism as the
@@ -233,16 +258,8 @@ def put_stream_limits(request: Request, body: StreamLimitsRequest):
     # turn_priority module attributes, same rebind idiom as input_contract
     # above (atomic under the GIL, read live by the engine's TTL sweep, the
     # agenda controller's mint sites and enqueue()'s per-source default).
-    # Validate BEFORE writing either so a bad TTL never half-applies a body
-    # that also flips the order.
-    if body.stream_ttl_seconds is not None and not (
-        turn_priority.STREAM_TTL_MIN_SECONDS
-        <= body.stream_ttl_seconds
-        <= turn_priority.STREAM_TTL_MAX_SECONDS
-    ):
-        # A ~0s window would expire every stream item before it can be
-        # popped — the mute-co-host failure from the other direction.
-        return JSONResponse(status_code=422, content={"detail": "invalid_stream_ttl"})
+    # stream_ttl_seconds was already bounds-checked above, before anything
+    # else was applied.
     if body.stream_over_agenda is not None:
         turn_priority.STREAM_OVER_AGENDA = bool(body.stream_over_agenda)
     if body.stream_ttl_seconds is not None:

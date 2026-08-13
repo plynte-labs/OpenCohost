@@ -250,4 +250,5 @@ def test_unstamped_turn_threads_stamp_none_end_to_end(monkeypatch):
 
     motor._consume_command(("process_context", "hola"))  # legacy 2-tuple, no stamp
 
-    emitted.assert_called_once_with("che, todo bien", "kira")
+    # Legacy 2-tuple -> _consume_command's "direct" source default.
+    emitted.assert_called_once_with("che, todo bien", "direct")

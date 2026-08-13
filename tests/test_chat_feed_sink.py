@@ -234,6 +234,13 @@ def test_engine_host_wires_chat_feed_record_as_on_filtered_message(tmp_path, mon
     try:
         assert host.aggregator is not None
         assert host.aggregator.on_filtered_message == host.chat_feed.record
-        assert host.aggregator.on_source_changed == host.chat_feed.new_session
+        # judgment day 2026-08-13 Finding 2: on_source_changed is now
+        # host._on_chat_source_changed, a thin wrapper that ALSO drops
+        # pending source="chat" motor items on a channel switch -- calling
+        # it must still clear the feed exactly like the old direct binding.
+        assert host.aggregator.on_source_changed == host._on_chat_source_changed
+        host.chat_feed.record({"user": "a", "text": "hi", "timestamp": 1.0})
+        host.aggregator.on_source_changed()
+        assert host.chat_feed.since(0)["messages"] == []
     finally:
         host.stop()

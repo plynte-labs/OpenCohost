@@ -166,10 +166,12 @@ def test_endpoint_empty_before_any_turn():
         # a real wait) — the sink's own empty-state dict is unchanged, but the
         # pydantic model always serializes its declared fields.
         # Unit 4.2 (F12 closure): four more provider-disclosure fields, all
-        # null before any turn, for the same reason.
+        # null before any turn, for the same reason. `origin` joins them on the
+        # same terms — the sink's empty dict never grew a key.
         assert resp.json() == {
             "text": None,
             "source": None,
+            "origin": None,
             "turn_id": 0,
             "ts": None,
             "queue_wait_ms": None,
@@ -203,3 +205,120 @@ def test_endpoint_surfaces_queue_wait_ms_for_a_stamped_turn():
         app.state.host.chat_sink.record("respuesta directa", "kira", queue_wait_ms=125000)
         body = client.get("/api/chat/last-reply").json()
         assert body["queue_wait_ms"] == 125000
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# `origin` — the TRUE generating source (chat_reply_origin_20260813)
+#
+# `source` collapses every non-agenda turn to "kira" so on-screen attribution
+# stays uniform, which made a viewer reply and a streamer reply byte-identical
+# by the time they reached the API. `origin` is the field that tells them
+# apart. It is a fixed internal surface label, never a word of the text that
+# triggered the reply, so R8 is untouched.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("origin", ["chat", "direct", "ptt", "accumulated"])
+def test_sink_keeps_true_origin_while_source_stays_collapsed(origin):
+    sink = ChatReplySink()
+    sink.record("respuesta", origin)
+    last = sink.last()
+    # The published attribution is unchanged for every one of these...
+    assert last["source"] == "kira"
+    # ...and the thing that used to be destroyed upstream survives.
+    assert last["origin"] == origin
+
+
+@pytest.mark.parametrize("origin", ["kira-agenda", "kira-agenda-stop"])
+def test_sink_agenda_origin_survives_in_both_fields(origin):
+    # Agenda was never collapsed, so `source` keeps carrying it — `origin` must
+    # agree rather than reporting null for the one family that always worked.
+    sink = ChatReplySink()
+    sink.record("bloque", origin)
+    last = sink.last()
+    assert last["source"] == origin
+    assert last["origin"] == origin
+
+
+def test_sink_reports_null_origin_for_an_already_collapsed_source():
+    # A caller handing over the literal "kira" has already destroyed the origin.
+    # Reporting "kira" would launder that placeholder into a fake origin, so the
+    # contract says null: genuinely unknown.
+    sink = ChatReplySink()
+    sink.record("respuesta", "kira")
+    assert sink.last()["origin"] is None
+
+
+def test_endpoint_surfaces_origin_for_a_viewer_chat_reply():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.chat_sink.record("respuesta a un viewer", "chat")
+        body = client.get("/api/chat/last-reply").json()
+        assert body["origin"] == "chat"
+        assert body["source"] == "kira"
+
+
+def test_endpoint_origin_distinguishes_consecutive_chat_and_direct_replies():
+    # The regression this whole field exists for: two turns that were previously
+    # indistinguishable at the API must now differ.
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.chat_sink.record("para el chat", "chat")
+        first = client.get("/api/chat/last-reply").json()
+        app.state.host.chat_sink.record("para el streamer", "direct")
+        second = client.get("/api/chat/last-reply").json()
+
+    assert first["source"] == second["source"] == "kira"
+    assert (first["origin"], second["origin"]) == ("chat", "direct")
+
+
+def test_origin_never_carries_the_text_that_triggered_the_reply():
+    # R8 guard with teeth: whatever a caller passes as the source, `origin` is
+    # only ever the label — the endpoint must never become a back door for the
+    # viewer text itself.
+    sink = ChatReplySink()
+    sink.record("respuesta de Kira", "chat")
+    last = sink.last()
+    assert last["origin"] == "chat"
+    assert last["text"] == "respuesta de Kira"
+    assert "respuesta de Kira" not in (last["origin"] or "")
+
+
+def test_engine_to_sink_wire_delivers_the_true_origin_end_to_end():
+    """The regression guard for the whole seam: a REAL MotorVocalIA turn wired
+    to a REAL ChatReplySink, exactly as EngineHost wires it.
+
+    Every unit test above can pass while the engine still collapses the source
+    before the sink ever sees it — that is precisely the bug this field exists
+    to fix, and only running the real emit path can catch its return.
+    """
+    import queue as _queue
+    from unittest.mock import MagicMock
+
+    from opencohost.core.llm_engine import MotorVocalIA
+
+    sink = ChatReplySink()
+    motor = MotorVocalIA(_queue.Queue(), lambda event: None, dialogue_callback=sink.record)
+    motor.ollama = MagicMock()
+    motor.pygame = MagicMock()
+    motor.is_ready = True
+    motor.current_model = "llama3"
+    motor._reasoning_model_cache["llama3"] = False
+    motor._hablar = MagicMock()
+    motor._ollama_chat = MagicMock(return_value={"message": {"content": "Che, buena esa."}})
+
+    motor._ejecutar_inferencia("hola", source="chat")
+    chat_turn = sink.last()
+    assert chat_turn["text"] == "Che, buena esa."
+    assert chat_turn["source"] == "kira"
+    assert chat_turn["origin"] == "chat"
+
+    motor._ejecutar_inferencia("hola", source="direct")
+    direct_turn = sink.last()
+    assert direct_turn["source"] == "kira"
+    assert direct_turn["origin"] == "direct"
+
+    # Same collapsed attribution, different origin — the two turns are no
+    # longer indistinguishable by the time they reach the API consumer.
+    assert chat_turn["source"] == direct_turn["source"]
+    assert chat_turn["origin"] != direct_turn["origin"]
