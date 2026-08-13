@@ -1052,6 +1052,11 @@ class MotorVocalIA(
         self.pygame = pygame
         self.ollama = ollama
         self._ollama_chat_client = self._create_ollama_chat_client(ollama)
+        # Pre-warm the post-switch watchdog's 45s client too (memoized by
+        # timeout in `_ollama_chat_clients`) so `_ollama_chat` never falls
+        # back to the 180s default during the post-switch window -- see
+        # `_create_ollama_chat_client`'s docstring for the root cause.
+        self._create_ollama_chat_client(ollama, timeout=self._post_switch_watchdog_timeout)
         self._ollama_scout_client = self._create_ollama_scout_client(ollama)
 
         try:

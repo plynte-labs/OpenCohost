@@ -2,6 +2,7 @@ import concurrent.futures  # not bare `concurrent`: the submodule attribute only
                            # exists because llm_engine.py:15 imports it, so a bare
                            # import works today by side effect and AttributeErrors
                            # the day that line goes away.
+import httpx
 import requests
 import socket
 import threading
@@ -370,15 +371,39 @@ class ModelManagementMixin:
         finally:
             self._downloading = False
             
-    def _create_ollama_chat_client(self, ollama_module):
+    def _create_ollama_chat_client(self, ollama_module, timeout: float = None):
+        """Build (or reuse) the chat client whose HTTP timeout is *timeout*.
+
+        Memoized by timeout value in ``self._ollama_chat_clients`` -- never
+        builds a fresh ``ollama.Client`` for a timeout already seen. In
+        practice there are only two distinct callers: the steady-state
+        default (``OLLAMA_CHAT_TIMEOUT``, 180s) built here with no argument,
+        and the post-switch watchdog budget (45s) pre-warmed once in
+        ``run()``. Root cause fix (heavy_model_inference_recovery follow-up):
+        a chat client pinned at 180s regardless of a 45s watchdog budget kept
+        Ollama's single runner busy well past the watchdog giving up, so a
+        rollback right after could not get a runner. See
+        ``_resolve_chat_watchdog_timeout`` / ``_ollama_chat``.
+        """
+        if timeout is None:
+            timeout = _eng.OLLAMA_CHAT_TIMEOUT
+        cache = getattr(self, "_ollama_chat_clients", None)
+        if cache is None:
+            cache = {}
+            self._ollama_chat_clients = cache
+        cached = cache.get(timeout)
+        if cached is not None:
+            return cached
         client_factory = getattr(ollama_module, "Client", None)
         if client_factory is None:
             return None
         try:
-            return client_factory(timeout=_eng.OLLAMA_CHAT_TIMEOUT)
+            client = client_factory(timeout=timeout)
         except TypeError as e:
             self._log(f"Ollama Client no soporta timeout de chat; usando cliente por defecto: {e}", level="warning")
             return None
+        cache[timeout] = client
+        return client
 
     def _create_ollama_scout_client(self, ollama_module, *, timeout: float = LLM_SCOUT_TIMEOUT):
         """Dedicated short-timeout client for auxiliary, non-persona generations.
@@ -403,7 +428,7 @@ class ModelManagementMixin:
             self._log(f"Ollama Client no soporta timeout de scout; usando cliente por defecto: {e}", level="warning")
             return None
 
-    def _ollama_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
+    def _ollama_chat(self, *, provider_cfg=None, is_local=None, chat_timeout=None, **kwargs):
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
         # F2: honor the EFFECTIVE posture threaded from `_generar_dialogo`'s
         # entry snapshot; only stand-alone callers (is_local=None) re-derive it
@@ -412,8 +437,23 @@ class ModelManagementMixin:
             is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
         if not is_local:
             return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
-        client = self._ollama_chat_client or self.ollama
+        client = self._select_ollama_chat_client(chat_timeout)
         return client.chat(**kwargs)
+
+    def _select_ollama_chat_client(self, chat_timeout):
+        """Pick the client memoized for *chat_timeout* (the resolved watchdog
+        budget this call is running under), falling back to the steady-state
+        default client / raw ``self.ollama`` when none was pre-built for it.
+
+        Deliberately a pure lookup -- never builds a client here. Building
+        happens only in ``_create_ollama_chat_client`` (called from ``run()``),
+        so a test double standing in for ``self.ollama`` (a plain MagicMock,
+        not the real module) is never silently routed through an unrelated
+        auto-mocked ``self.ollama.Client()``.
+        """
+        cache = getattr(self, "_ollama_chat_clients", None)
+        client = cache.get(chat_timeout) if cache and chat_timeout is not None else None
+        return client or self._ollama_chat_client or self.ollama
 
     def _ollama_scout_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
@@ -456,6 +496,15 @@ class ModelManagementMixin:
         def worker() -> None:
             try:
                 result["response"] = call(**kwargs)
+            except httpx.TimeoutException:
+                # The chat client's HTTP timeout can now fire at ~the same
+                # moment as the watchdog (both are derived from the same
+                # budget). Translate it into the SAME contract the pure
+                # wait-based timeout below raises, so `_is_watchdog_timeout_error`
+                # still recognizes it and automatic recovery still fires --
+                # otherwise this raw transport exception would propagate
+                # instead and silently kill the whole recovery path.
+                result["error"] = TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
             except Exception as exc:
                 result["error"] = exc
             finally:
@@ -474,9 +523,12 @@ class ModelManagementMixin:
         return result.get("response")
 
     def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
-        return self._call_with_watchdog(
-            chat_callable or self._ollama_chat, timeout=timeout, **kwargs
-        )
+        # Thread the resolved watchdog budget into `_ollama_chat`'s own client
+        # selection (as `chat_timeout`), but ONLY for the default transport --
+        # an explicit `chat_callable` (scout/judge) already carries its own
+        # dedicated timeout-scoped client and must stay byte-identical.
+        call = chat_callable or (lambda **kw: self._ollama_chat(chat_timeout=timeout, **kw))
+        return self._call_with_watchdog(call, timeout=timeout, **kwargs)
 
     def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
         cfg = provider_cfg if provider_cfg is not None else self._provider_config

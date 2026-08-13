@@ -6,6 +6,7 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from opencohost.core import llm_engine
@@ -91,6 +92,162 @@ def test_ollama_chat_client_uses_configured_timeout():
 
     assert client is not None
     assert created == {"timeout": llm_engine.OLLAMA_CHAT_TIMEOUT}
+
+
+# ---------------------------------------------------------------------------
+# P0 fix (heavy_model_inference_recovery follow-up): the chat client's HTTP
+# timeout must track the watchdog budget it is used under, instead of being
+# pinned at OLLAMA_CHAT_TIMEOUT (180s). Root cause: with a 45s post-switch
+# watchdog but a 180s HTTP timeout, the watchdog stops WAITING at 45s but the
+# HTTP request (and Ollama's single runner) stays busy for up to 180s, so a
+# rollback attempt right after cannot get a runner and fails with
+# target_model_unavailable. See logs/opencohost_20260813_114819.log:195-222.
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_chat_client_is_memoized_by_timeout():
+    """Two calls with the same timeout must not build two ollama.Client objects."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    calls = []
+
+    class FakeOllamaModule:
+        @staticmethod
+        def Client(**kwargs):
+            calls.append(kwargs)
+            return MagicMock()
+
+    first = motor._create_ollama_chat_client(FakeOllamaModule, timeout=45.0)
+    second = motor._create_ollama_chat_client(FakeOllamaModule, timeout=45.0)
+
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_post_switch_watchdog_budget_builds_45s_chat_client():
+    """The chat client for the post-switch (45s) watchdog budget must be built
+    with an HTTP timeout of 45s, not the steady-state 180s."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    created = {}
+
+    class FakeOllamaModule:
+        @staticmethod
+        def Client(**kwargs):
+            created.setdefault(kwargs["timeout"], MagicMock())
+            return created[kwargs["timeout"]]
+
+    assert motor._post_switch_watchdog_timeout == 45.0
+
+    client_45 = motor._create_ollama_chat_client(
+        FakeOllamaModule, timeout=motor._post_switch_watchdog_timeout
+    )
+
+    assert 45.0 in created
+    assert 180 not in created and 180.0 not in created
+    assert client_45 is created[45.0]
+
+
+def test_ollama_chat_selects_client_matching_resolved_watchdog_timeout():
+    """`_ollama_chat` must route to the client memoized for its `chat_timeout`,
+    not the steady-state default -- this is the fix itself: the transport used
+    for a call must match the HTTP timeout the watchdog budget for that call
+    was resolved with."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.ollama = MagicMock()  # steady-state fallback -- must NOT be used here
+    default_client = MagicMock()
+    fast_client = MagicMock()
+    fast_client.chat.return_value = {"message": {"content": "ok"}}
+    motor._ollama_chat_client = default_client
+    motor._ollama_chat_clients = {180.0: default_client, 45.0: fast_client}
+
+    result = motor._ollama_chat(model="qwopus", messages=[], chat_timeout=45.0)
+
+    assert result == {"message": {"content": "ok"}}
+    fast_client.chat.assert_called_once()
+    default_client.chat.assert_not_called()
+    motor.ollama.chat.assert_not_called()
+
+
+def test_ollama_chat_falls_back_to_default_client_for_steady_state_timeout():
+    """The steady-state 180s path is unchanged: the 180s timeout resolves to
+    the same default client as before this fix."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    default_client = MagicMock()
+    default_client.chat.return_value = {"message": {"content": "steady"}}
+    motor._ollama_chat_client = default_client
+
+    result = motor._ollama_chat(model="llama3", messages=[], chat_timeout=180.0)
+
+    assert result == {"message": {"content": "steady"}}
+    default_client.chat.assert_called_once()
+
+
+def test_ollama_chat_with_watchdog_threads_resolved_timeout_to_client_selection():
+    """`_ollama_chat_with_watchdog` must thread its `timeout` into `_ollama_chat`
+    as `chat_timeout`, so client selection actually receives the watchdog's
+    resolved budget end-to-end (not just when `_ollama_chat` is called directly)."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    fast_client = MagicMock()
+    fast_client.chat.return_value = {"message": {"content": "fast"}}
+    motor._ollama_chat_client = MagicMock()
+    motor._ollama_chat_clients = {45.0: fast_client}
+
+    result = motor._ollama_chat_with_watchdog(
+        timeout=45.0, model="qwopus", messages=[], keep_alive=-1, options={},
+    )
+
+    assert result == {"message": {"content": "fast"}}
+    fast_client.chat.assert_called_once()
+
+
+def test_transport_read_timeout_surfaces_as_watchdog_timeout_error():
+    """A transport-level read timeout raised by the worker thread (the real
+    exception httpx/ollama raise when the HTTP timeout expires) must surface
+    as the SAME `TimeoutError('watchdog_timeout:...')` contract the pure
+    wait-based watchdog timeout uses. This is the regression guard: once the
+    HTTP timeout can fire at ~the same moment as the watchdog, an unconverted
+    httpx exception would propagate instead and `_is_watchdog_timeout_error`
+    would return False, silently killing automatic recovery."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    def blows_up(**kwargs):
+        raise httpx.ReadTimeout("the read operation timed out")
+
+    with pytest.raises(TimeoutError) as excinfo:
+        motor._call_with_watchdog(blows_up, timeout=45.0, model="qwopus")
+
+    assert str(excinfo.value).startswith("watchdog_timeout:")
+    assert motor._is_watchdog_timeout_error(excinfo.value) is True
+
+
+def test_non_timeout_exception_propagates_unchanged():
+    """A genuine (non-timeout) transport error must NOT be converted into a
+    fake watchdog timeout -- that would swallow real errors and trigger a
+    bogus rollback."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    def blows_up(**kwargs):
+        raise ValueError("not a timeout at all")
+
+    with pytest.raises(ValueError, match="not a timeout at all"):
+        motor._call_with_watchdog(blows_up, timeout=45.0, model="qwopus")
+
+
+def test_watchdog_still_times_out_when_worker_never_returns():
+    """Existing watchdog behavior (no response within budget -> watchdog_timeout)
+    must still hold after adding the transport-exception translation."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    release = threading.Event()
+
+    def blocks_forever(**kwargs):
+        release.wait(timeout=5.0)
+        return {"message": {"content": "too late"}}
+
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            motor._call_with_watchdog(blocks_forever, timeout=0.1, model="qwopus")
+        assert str(excinfo.value).startswith("watchdog_timeout:")
+    finally:
+        release.set()
 
 
 def test_non_reasoning_models_use_configured_token_cap():
