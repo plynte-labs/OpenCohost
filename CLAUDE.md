@@ -24,6 +24,16 @@ Product direction: **OpenCohost** (`opencohost_launch_readiness_20260605` track)
 - Do NOT start new feature tracks without explicit user approval.
 - Goal is runtime validation and release readiness for OpenCohost launch.
 - Active local checkpoints (NOT yet merged):
+  - `llm_output_streaming_20260813` — **PARKED 2026-08-13, code-complete, not runtime-validated.**
+    Branch `feat/llm-streaming`, pushed to `origin`, 10 commits, 43 failed / 5523 passed
+    (the 43 are the usual `locale.json = "en"` false red). Phases 0, 1 and 2 done: local
+    `direct`/`ptt`/owner-bundle turns speak each sentence as it closes, cutting time-to-first-audio.
+    `LLM_STREAMING_ENABLED` defaults **OFF**, so the running product is unchanged.
+    Do NOT flip it on before the blocking gate passes: force a stall mid-stream and confirm the
+    rollback fires, the spoken prefix commits, **the Ollama runner is freed on socket close**, and
+    the queue continues. That third item is the last UNVERIFIED in the track. Streamed turns log
+    `watchdog_timeout:40.00s`; the buffered path still logs `45.00s` and both coexist by design.
+    Full state: `conductor/tracks/llm_output_streaming_20260813/design.md`.
   - `dynamic_model_management_20260608` — Phase 1 + 2 done locally, 154 passed
   - `heavy_model_inference_recovery_20260609` — **CLOSED 2026-08-13.** Watchdog and rollback are
     both runtime-validated now, but they were validated separately and the history matters.
