@@ -34,7 +34,11 @@ class FakePlayback:
         self.events.append(("speak", sentence, self.llm.completed))
 
 
-def test_speaks_first_completed_sentence_before_llm_stream_finishes():
+def test_speaks_each_completed_sentence_as_soon_as_confirmed():
+    """A sentence with a confirming trailing space is spoken mid-stream.
+    The last one has no such confirmation — its terminator sits at the
+    edge of the stream — so it can only be released by flush() once the
+    LLM stream has actually finished."""
     llm = FakeLLM()
     playback = FakePlayback(llm)
     pipeline = StreamingSpeechPipeline(llm=llm, playback=playback)
@@ -43,7 +47,7 @@ def test_speaks_first_completed_sentence_before_llm_stream_finishes():
 
     assert playback.events == [
         ("speak", "Hola mundo.", False),
-        ("speak", "Después seguimos.", False),
+        ("speak", "Después seguimos.", True),
     ]
     assert llm.completed is True
 
@@ -74,7 +78,11 @@ def test_long_burst_of_sentences_in_single_delta():
     for i, event in enumerate(playback.events, 1):
         assert event[0] == "speak"
         assert event[1] == f"Oración número {i}."
-        assert event[2] is False  # LLM not yet completed when spoken
+    # Sentences 1-19 have a confirming trailing space and are spoken
+    # mid-delta; #20 has none (end of the joined text) and is only
+    # released by flush(), after the LLM stream has signalled completion.
+    assert [e[2] for e in playback.events[:-1]] == [False] * 19
+    assert playback.events[-1][2] is True
 
 
 def test_char_by_char_delivery():

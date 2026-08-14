@@ -17,3 +17,5 @@ class StreamingSpeechPipeline:
         for delta in self._llm.stream(prompt):
             for sentence in self._splitter.feed(delta):
                 self._playback.speak(sentence)
+        for sentence in self._splitter.flush():
+            self._playback.speak(sentence)
