@@ -1,0 +1,3 @@
+[submodule "OpenCohost_UI"]
+	path = OpenCohost_UI
+	url = https://github.com/FranGuh/OpenCohost_UI.git

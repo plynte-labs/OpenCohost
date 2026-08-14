@@ -63,6 +63,18 @@ The product UI (`pnpm tauri:debug`) needs a Rust/Node toolchain on top of the ab
 
 ## Setup
 
+Clone with submodules — the Tauri front end is its own repository, wired in at
+`OpenCohost_UI/`. A plain `git clone` leaves that directory empty and the Run
+section below has nothing to `cd` into.
+
+```powershell
+git clone --recursive https://github.com/plynte-labs/opencohost.git
+cd opencohost
+
+# already cloned without it?
+git submodule update --init --recursive
+```
+
 > These commands assume your Python environment is already activated. Replace `python` with the path to your environment's interpreter if you are not in an activated shell.
 
 ```powershell

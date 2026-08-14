@@ -117,8 +117,12 @@ docs/reportar_falso_positivo.md
 # Local UI prototype
 OpenCohost_TAURI/
 
-# React/Tauri frontend — versioned in its own git repo (migration; separate from the Python repo)
-OpenCohost_UI/
+# React/Tauri frontend — its own git repo, wired in as a SUBMODULE (2026-08-14).
+# It used to be ignored outright, which meant a clone of this repo contained no
+# OpenCohost_UI directory at all while every document said `cd OpenCohost_UI &&
+# pnpm tauri:debug`. Nobody hit it because only the owner had ever cloned this.
+# Do NOT re-add an ignore rule here: the submodule entry in .gitmodules is what
+# carries the frontend now, and an ignore rule would silently shadow it.
 
 # Runtime user config (contains api_tokens.json — secrets must never land in git).
 # Anchored to the repo root: an unanchored `config/` also swallowed the tracked

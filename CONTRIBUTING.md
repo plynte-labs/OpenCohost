@@ -52,8 +52,17 @@ Suggested starter models from the built-in catalog: `llama3`, `qwen3:4b`, `phi4-
 Clone the repo and install in editable mode with the extras you need:
 
 ```shell
-git clone https://github.com/plynte-labs/opencohost.git
+git clone --recursive https://github.com/plynte-labs/opencohost.git
 cd opencohost
+```
+
+`--recursive` matters: the Tauri front end lives in its own repository and is
+wired in as a submodule at `OpenCohost_UI/`. A plain `git clone` leaves that
+directory empty, and every `pnpm tauri:debug` instruction below then fails on a
+path that does not exist. If you already cloned without it:
+
+```shell
+git submodule update --init --recursive
 ```
 
 **Recommended install for local development:**
