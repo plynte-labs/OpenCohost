@@ -247,6 +247,43 @@ def test_recency_puts_session_summaries_first_then_newest_regular(tmp_path):
     assert lines[3] == "regular viejo dos"
 
 
+def test_recency_ranks_judge_kept_rows_above_never_judged_drafts(tmp_path):
+    """Adversarial review 2026-08-14: "¿qué recordás de mí?" was answering with
+    tonight's unjudged trivia instead of the memories the judge kept.
+
+    It was structural, not luck. The sweep writes keeps with
+    `touch_updated_at=False` — deliberately, because bumping the stamp would
+    make three-week-old drafts look like last session's memories (pinned by
+    test_confident_keep_leaves_updated_at_untouched). So a promoted row keeps
+    its ORIGINAL capture time while every raw draft captured tonight carries a
+    newer one, and a pure `updated_at DESC` sort put the trivia on top every
+    single time.
+
+    A draft is a row nothing has vouched for; a promoted row survived six
+    criteria and was rewritten. Recency still orders WITHIN each group — this
+    only says an unvouched row never outranks a vouched one.
+    """
+    db_path = tmp_path / "memorias.db"
+    # The judge-kept memory is OLDER than the raw drafts, which is the normal
+    # case: it was captured earlier and promotion did not touch its stamp.
+    _seed(db_path, "p", "kept", content="el streamer usa Ollama para inferencia local",
+          status="promoted", updated_at=_BASE_TS + timedelta(hours=1))
+    _seed(db_path, "p", "junk-new", content="charla trivial de esta noche",
+          updated_at=_BASE_TS + timedelta(hours=9))
+    _seed(db_path, "p", "junk-old", content="otra charla trivial de esta noche",
+          updated_at=_BASE_TS + timedelta(hours=8))
+
+    rows = MemoriaStore(db_path).list_injection_candidates("p")
+    lines = build_recency_lines(rows)
+
+    assert lines[0] == "el streamer usa Ollama para inferencia local", (
+        "a judge-kept memory must outrank raw drafts even when they are newer"
+    )
+    # Drafts are not excluded — they still appear, and still newest-first.
+    assert lines[1] == "charla trivial de esta noche"
+    assert lines[2] == "otra charla trivial de esta noche"
+
+
 def test_recency_caps_at_meta_recall_k(tmp_path):
     db_path = tmp_path / "memorias.db"
     _seed(db_path, "p", "sum", content="resumen sesion",

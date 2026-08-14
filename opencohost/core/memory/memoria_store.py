@@ -651,8 +651,10 @@ def build_recency_lines(
     durable tier) newest first but capped at _META_RECALL_MAX_SUMMARIES so they
     never starve live rows, then at most _META_RECALL_MAX_IMPORTED newest
     IMPORTED rows (found by _IMPORT_MARKER in stable_key — memoria_import D5, so
-    a fresh bulk import never drowns live session context), then the newest
-    regular rows — *k* rows total,
+    a fresh bulk import never drowns live session context), then the regular
+    rows, VOUCHED ones first (promoted/curated/judged — see
+    `_vouched_then_recency`) and newest-first within each group — *k* rows
+    total,
     assembled under the SAME *max_chars* budget (_append_within_budget; a
     non-pinned over-budget row is clipped into the remainder, or skipped when
     the remainder is below _MIN_CLIP_REMAINDER_CHARS). Pure, no I/O, never
@@ -684,9 +686,42 @@ def build_recency_lines(
     def _recency(row):
         return (row["updated_at"] or "", row["id"] or "")
 
+    def _field(row, name):
+        """Tolerant read — sqlite3.Row raises IndexError on a missing column,
+        and this function is documented as pure over any row-like mapping."""
+        try:
+            return row[name]
+        except (IndexError, KeyError):
+            return None
+
+    def _vouched_then_recency(row):
+        """Vouched rows outrank raw drafts; recency still orders within each.
+
+        A raw draft is a row NOTHING has vouched for. A promoted row survived
+        the six promotion criteria and was rewritten; a curated one carries an
+        explicit operator action; an uncertain keep stays `draft` but has
+        `judged_at` set and its text rewritten, so it counts too.
+
+        This exists because the sweep deliberately does NOT bump `updated_at`
+        on a keep (pinned by test_confident_keep_leaves_updated_at_untouched:
+        bumping it would stamp three-week-old drafts with launch time and make
+        "de qué hablamos la sesión pasada" answer with the wrong session). The
+        consequence is that a kept memory always LOOKS older than tonight's raw
+        captures, so a pure recency sort buried it every single time —
+        "¿qué recordás de mí?" recited trivia while the judged memories sat
+        below the k-cap. Found by adversarial review 2026-08-14.
+
+        Judge-REJECTED drafts never reach here: they carry inactive=1 and
+        `list_injection_candidates` already filters them out.
+        """
+        status = _field(row, "status") or ""
+        judged_at = _field(row, "judged_at") or ""
+        vouched = 1 if (status != "draft" or judged_at) else 0
+        return (vouched,) + _recency(row)
+
     summaries.sort(key=_recency, reverse=True)
     imported.sort(key=_recency, reverse=True)
-    regular.sort(key=_recency, reverse=True)
+    regular.sort(key=_vouched_then_recency, reverse=True)
 
     lines: list[str] = []
     used = 0
