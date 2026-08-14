@@ -5,10 +5,26 @@ it takes effect on the NEXT startup. No runtime switch (owner decision).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from opencohost.i18n import state
 from opencohost.i18n.cli import main as cli_main
+
+
+@pytest.fixture(autouse=True)
+def _isolate_profiles_file(tmp_path, monkeypatch):
+    """set_locale() now additively seeds locale profiles as a side effect
+    (kira_english_default_locale reachability fix, Judgment Day Finding 1,
+    judge-confirmed 2026-08-14) -- redirect PROFILES_FILE so these tests
+    never touch the real on-disk perfiles.json (USER_DATA_DIR resolves to
+    the repo root in dev mode, so an unpatched PROFILES_FILE IS the
+    developer's real file)."""
+    import opencohost.core.profiles.profiles as prof_mod
+
+    monkeypatch.setattr(prof_mod, "PROFILES_FILE", str(tmp_path / "perfiles.json"))
 
 
 # --- state -----------------------------------------------------------------
@@ -43,6 +59,51 @@ def test_atomic_write_leaves_no_tmp(tmp_path):
     f = tmp_path / "locale.json"
     state.set_locale("en", f)
     assert not (tmp_path / "locale.json.tmp").exists()
+
+
+def test_set_locale_seeds_missing_locale_profiles_additively(tmp_path, monkeypatch):
+    """Judgment Day Finding 1 (CRITICAL, 2026-08-14): the ONLY locale switch
+    is set_locale() (via PUT /api/i18n), and it needs the backend already
+    running -- i.e. already past first-run profile seeding. Without this
+    fix, the six English personas ship but are permanently unreachable.
+    End-to-end proof through the real integration point, with a controlled
+    defaults file so this test doesn't depend on default_profiles.json's
+    exact contents."""
+    import opencohost.core.profiles.profiles as prof_mod
+
+    # Simulate the real flow: first boot already seeded the Spanish set.
+    prof_mod.guardar_perfiles({"Akira": {"prompt": "es default", "use_system": True}})
+
+    defaults_file = tmp_path / "default_profiles.json"
+    defaults_file.write_text(json.dumps({
+        "Akira": {"prompt": "es default", "use_system": True, "locale": "es"},
+        "Kira": {"prompt": "en default", "use_system": True, "locale": "en"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(prof_mod, "DEFAULT_PROFILES_FILE", str(defaults_file))
+
+    locale_file = tmp_path / "locale.json"
+    state.set_locale("en", locale_file)
+
+    on_disk = json.loads(Path(prof_mod.PROFILES_FILE).read_text(encoding="utf-8"))
+    assert "Kira" in on_disk  # the English default is now reachable
+    assert on_disk["Kira"]["prompt"] == "en default"
+    assert on_disk["Akira"]["prompt"] == "es default"  # untouched
+
+
+def test_set_locale_never_raises_when_seeding_fails(tmp_path, monkeypatch):
+    """Seeding is a convenience, not a gate: if it blows up for any reason,
+    the locale write itself must still succeed."""
+    import opencohost.core.profiles.profiles as prof_mod
+
+    def _boom(locale_code):
+        raise RuntimeError("simulated seeding failure")
+
+    monkeypatch.setattr(prof_mod, "seed_locale_profiles", _boom)
+
+    locale_file = tmp_path / "locale.json"
+    state.set_locale("en", locale_file)  # must not raise
+
+    assert state.get_locale(locale_file) == "en"
 
 
 # --- CLI -------------------------------------------------------------------
