@@ -177,9 +177,18 @@ class MemoriaCaptureMixin:
         — so it is never itself re-summarized.
         """
         if not profile_id:
+            _eng.logger.info("memoria session-summary skipped: no active profile")
             return
         clean = [t for t in titles if t and t.strip()]
         if len(clean) < _eng.MEMORIAS_SUMMARY_MIN_TITLES:
+            # Paired with the success line below so a session close always
+            # leaves EXACTLY ONE trace. Absence of all three then means this
+            # method was never called at all — which is the hypothesis the
+            # instrumentation exists to test.
+            _eng.logger.info(
+                "memoria session-summary skipped: titles=%d < min=%d",
+                len(clean), _eng.MEMORIAS_SUMMARY_MIN_TITLES,
+            )
             return
         content = "; ".join(clean)
         title = _eng.build_title(content) or "session summary"
@@ -191,6 +200,18 @@ class MemoriaCaptureMixin:
             _eng.logger.warning(
                 "memoria session-summary write failed (fail-open): %s profile_id=%s",
                 type(exc).__name__, profile_id,
+            )
+        else:
+            # Success used to be SILENT, which is why a six-week-old store with
+            # 145 rows had ZERO status='summary' rows and nobody could tell
+            # which of three things was happening: never called (teardown never
+            # runs), called and failing, or called with too few titles. The
+            # early returns above now have a matching negative line, so one
+            # real session close answers it. Metadata only — the summary text
+            # is derived memoria content and never goes to the log.
+            _eng.logger.info(
+                "memoria session-summary written: profile_id=%s titles=%d chars=%d",
+                profile_id, len(clean), len(content),
             )
     
     def _commit_history(

@@ -154,21 +154,50 @@ def test_record_motor_event_drops_hostile_status_never_forwards_verbatim():
     assert stub.event_log.since(0)["events"] == []
 
 
-def test_memoria_captured_reaches_event_log_with_none_detail():
-    """E1 (memoria_quality_20260717): the engine emits ui_callback("memoria_captured")
-    on a FRESH memoria insert (revision==1). It must be whitelisted so it reaches
-    event_log (GET /api/events -> the Tauri chat-panel feed), and -- like every
-    motor event -- carries detail=None (the whitelist is the only data that
-    reaches EventLogSink; no free text may ever ride along)."""
+def test_memoria_captured_is_recorded_once_by_its_dedicated_handler():
+    """`memoria_captured` now carries a numeric `kept` count, so it follows the
+    same dedicated-handler contract as ctx_pressure_high / cloud_probe_scheduled:
+    `_record_motor_event` SKIPS it (or the event would be recorded twice, once
+    without detail), and `_on_memoria_promoted` records it with the count.
+
+    History: until 2026-08-14 the engine emitted this on every FRESH memoria
+    insert and it carried detail=None. The notice then moved to the promotion
+    sweep — a capture is an unjudged draft — and a sweep keeping 20 rendered
+    identically to one keeping 1, so the count had to ride a dedicated hook
+    (`_dispatch_motor_event` drops extra args by design).
+
+    The privacy contract is unchanged: only whitelisted NUMERIC keys survive,
+    and the event still says nothing about WHICH memorias.
+    """
     stub = SimpleNamespace(event_log=engine_host_mod.EventLogSink())
 
+    # The shared ui_callback path must NOT record it — that is what keeps the
+    # event single, with real detail.
     engine_host_mod.EngineHost._record_motor_event(stub, "memoria_captured")
+    assert stub.event_log.since(0)["events"] == []
+
+    engine_host_mod.EngineHost._on_memoria_promoted(stub, {"kept": 7})
 
     events = stub.event_log.since(0)["events"]
     assert len(events) == 1
     assert events[0]["source"] == "motor"
     assert events[0]["action"] == "memoria_captured"
-    assert events[0]["detail"] is None
+    assert events[0]["detail"] == {"kept": 7}
+
+
+def test_memoria_captured_detail_drops_non_numeric_values():
+    """Same numeric-only privacy gate as ctx_pressure_high: a text (or
+    malicious) value for `kept` drops the key rather than forwarding it, and a
+    bool is not a count."""
+    stub = SimpleNamespace(event_log=engine_host_mod.EventLogSink())
+
+    engine_host_mod.EngineHost._on_memoria_promoted(stub, {"kept": "muchas"})
+    engine_host_mod.EngineHost._on_memoria_promoted(stub, {"kept": True})
+    engine_host_mod.EngineHost._on_memoria_promoted(stub, {"titulo": "secreto"})
+
+    events = stub.event_log.since(0)["events"]
+    assert len(events) == 3
+    assert all(event["detail"] is None for event in events)
 
 
 def test_cloud_llm_error_reaches_event_log_with_none_detail():

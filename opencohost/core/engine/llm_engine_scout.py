@@ -400,7 +400,21 @@ class ScoutPromotionMixin:
                 # observable (owner decision 8) without a log line every second.
                 if gate != self._promotion_last_gate:
                     self._promotion_last_gate = gate
-                    _eng.logger.info("memoria promotion sweep gated: %s", gate)
+                    # `no_local_model` is PERMANENT for this install, not a
+                    # phase: `_judge_model()` resolves nothing, so no sweep will
+                    # ever run, nothing is ever judged, and — since the owner
+                    # notice moved to the sweep on 2026-08-14 — the owner also
+                    # never hears about memorias again while drafts keep
+                    # accumulating. That deserves a WARNING; the other gates are
+                    # transient (a model switch settles, a profile gets picked)
+                    # and stay INFO. Raised after adversarial review flagged the
+                    # cloud-primary-with-no-local-model install as silently
+                    # losing the whole subsystem.
+                    level = (
+                        _eng.logger.warning if gate == "no_local_model"
+                        else _eng.logger.info
+                    )
+                    level("memoria promotion sweep gated: %s", gate)
                 return counts
             self._promotion_last_gate = ""
             profile_id = self._current_profile_id
@@ -535,12 +549,24 @@ class ScoutPromotionMixin:
                 # memoria" after almost every turn for rows the judge later
                 # threw away ~86% of the time.
                 #
-                # Deliberately reuses the existing `memoria_captured` event
-                # name so the Tauri feed needs no change; the count is not
-                # passed because `EngineHost._dispatch_motor_event` drops
-                # extra args, so it would be silently lost. Guarded like every
-                # notice on this fail-open path: it must never break a sweep
-                # that already did its work.
+                # Reuses the existing `memoria_captured` event name so surfaces
+                # that only listen for the bare status need no change.
+                #
+                # The COUNT rides a dedicated hook, not `ui_callback`: that one
+                # lands in `EngineHost._dispatch_motor_event`, which drops extra
+                # args by design (CTk's concrete callback takes exactly one
+                # argument). Same shape as `on_ctx_pressure_high` and
+                # `on_cloud_probe_scheduled`. Without it a sweep keeping 20
+                # rendered identically to one keeping 1.
+                #
+                # Both are guarded: this is a fail-open path and a notice must
+                # never break a sweep that already did its work.
+                hook = getattr(self, "on_memoria_promoted", None)
+                if hook is not None:
+                    try:
+                        hook({"kept": counts["kept"]})
+                    except Exception:
+                        _eng.logger.exception("on_memoria_promoted callback failed")
                 try:
                     self.ui_callback("memoria_captured")
                 except Exception:

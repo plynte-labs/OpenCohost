@@ -267,6 +267,34 @@ def test_the_sweep_announces_a_kept_memoria_to_the_owner(monkeypatch, tmp_path):
     assert events.count("memoria_captured") == 1
 
 
+def test_the_sweep_hook_carries_the_kept_count(monkeypatch, tmp_path):
+    """Adversarial review 2026-08-14: a sweep keeping 20 memorias rendered the
+    same singular "Kira guardó una memoria" as one keeping 1, because
+    `ui_callback` reaches `EngineHost._dispatch_motor_event`, which drops extra
+    args by design (CTk's concrete callback takes exactly one).
+
+    So the count rides the established dedicated-hook path instead — the same
+    shape `on_ctx_pressure_high` and `on_cloud_probe_scheduled` already use.
+    The plain event still fires for any surface without the hook.
+    """
+    motor = _make_motor(monkeypatch, tmp_path)
+    payloads: list = []
+    motor.on_memoria_promoted = payloads.append
+    store = _store(tmp_path)
+    for i in range(3):
+        _seed_draft(store, "profile-1", f"k{i}", f"streamer: dato numero {i} sobre synthwave")
+    stub = _Recorder(_decisions(
+        {"i": 1, "keep": True, "text": "El streamer escucha synthwave uno."},
+        {"i": 2, "keep": True, "text": "El streamer escucha synthwave dos."},
+        {"i": 3, "keep": True, "text": "El streamer escucha synthwave tres."},
+    ))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert counts["kept"] == 3
+    assert payloads == [{"kept": 3}], "one call per sweep, carrying the real count"
+
+
 def test_a_sweep_that_keeps_nothing_stays_silent(monkeypatch, tmp_path):
     """The other half of the contract: no keep, no notice. Without this the
     move would just relocate the same lie — announcing a sweep that threw

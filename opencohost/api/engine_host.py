@@ -148,6 +148,12 @@ _MOTOR_EVENT_DETAIL_FIELDS: dict = {
     "ctx_pressure_high": ("ratio", "effective_ctx", "native_ctx", "evicted_pairs"),
     # Unit 2.2: numeric seconds-until-next-probe, same numeric-only gate.
     "cloud_probe_scheduled": ("seconds",),
+    # 2026-08-14: how many drafts the promotion sweep KEPT. The notice moved
+    # from per-capture to per-sweep, and without a count a sweep keeping 20
+    # rendered exactly like one keeping 1. Numeric-only gate as above; the
+    # event still says nothing about WHICH memorias, so the privacy contract
+    # is unchanged.
+    "memoria_captured": ("kept",),
 }
 
 
@@ -608,6 +614,25 @@ class EngineHost:
         }
         self.event_log.record("motor", "ctx_pressure_high", detail or None)
 
+    def _on_memoria_promoted(self, payload: dict) -> None:
+        """Record memoria_captured with the sweep's kept COUNT, mirroring
+        `_on_ctx_pressure_high` exactly. Wired as `motor.on_memoria_promoted`
+        in start().
+
+        The notice moved from per-capture to per-sweep on 2026-08-14 (a capture
+        is an unjudged draft), and `_dispatch_motor_event` drops extra args, so
+        the count could not ride the shared `ui_callback`. Without this a sweep
+        keeping 20 memorias rendered identically to one keeping 1."""
+        fields = _MOTOR_EVENT_DETAIL_FIELDS.get("memoria_captured", ())
+        detail = {
+            key: payload[key]
+            for key in fields
+            if key in payload
+            and isinstance(payload[key], (int, float))
+            and not isinstance(payload[key], bool)
+        }
+        self.event_log.record("motor", "memoria_captured", detail or None)
+
     def _on_cloud_probe_scheduled(self, payload: dict) -> None:
         """Unit 2.2 (runtime_findings_batch_20260731): record
         cloud_probe_scheduled with a numeric-only detail payload, mirroring
@@ -987,6 +1012,10 @@ class EngineHost:
             # unconditionally, a pure cloud/fallback concern independent of
             # agenda construction.
             self.motor.on_cloud_probe_scheduled = self._on_cloud_probe_scheduled
+            # 2026-08-14: same rationale again -- the promotion sweep is a pure
+            # memoria concern, unrelated to agenda construction. Carries the
+            # kept COUNT, which cannot ride the shared ui_callback.
+            self.motor.on_memoria_promoted = self._on_memoria_promoted
             self.monitor = HealthMonitor()
             self.motor.health_monitor = self.monitor  # mirrors app_shell.py:196-197
             self.motor.start()
