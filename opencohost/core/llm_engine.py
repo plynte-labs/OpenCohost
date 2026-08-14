@@ -3410,6 +3410,22 @@ class MotorVocalIA(
             raise
         if state.abort_reason is not None and state.job is not None and not state.handled:
             self._stream_partial_exit(state, reason=state.abort_reason)
+        if state.job is not None:
+            # The closing bookend to [STREAM_TTFA]. Without it a clean streamed
+            # turn logs when it STARTED speaking and never logs when it stopped,
+            # so the one comparison this whole track exists to make — audible at
+            # N ms against the buffered path's audible-at-total — is not
+            # computable from the log. `sentences` also turns TTFA into a rate.
+            # The exception paths are covered by [STREAM_PARTIAL_EXIT] instead;
+            # a pre-submit revert never creates a job and is a buffered turn,
+            # already covered by [TURN_LATENCY].
+            logger.info(
+                "[STREAM_DONE] source=%s sentences=%d total_ms=%d outcome=%s",
+                source,
+                len(state.appended_sentences),
+                max(0, int((time.time() - setup.start_llm) * 1000)),
+                "trip" if state.trip else ("abort" if state.abort_reason else "clean"),
+            )
         respuesta = self._rebuild_stream_response(
             final_chunk, accumulated, accumulated_thinking
         )
@@ -3477,10 +3493,19 @@ class MotorVocalIA(
                 state.abort_reason = "append_refused"
                 return "abort"
             state.appended_sentences.append(sanitized)
+            # Size travels WITH the timing or the timing is unreadable: 1.5s
+            # to first audio on a four-word opener and 1.5s on a forty-word one
+            # are different systems, and only the second is evidence that the
+            # sentence boundary is where the latency actually lands. Metadata
+            # only — counts, never the text.
             logger.info(
-                "[STREAM_TTFA] source=%s first_audio_submit_ms=%d sentences=1",
+                "[STREAM_TTFA] source=%s first_audio_submit_ms=%d "
+                "first_sentence_words=%d first_sentence_chars=%d fragments=%d",
                 source,
                 max(0, int((time.time() - setup.start_llm) * 1000)),
+                len(sanitized.split()),
+                len(sanitized),
+                len(fragments),
             )
             return "continue"
         if not state.router.append_chunks(state.job, fragments):
