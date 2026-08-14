@@ -608,6 +608,70 @@ EXPERIMENTAL_HEAVY_TTS_ENABLED: bool = _resolve_experimental_heavy_tts()
 
 
 # ──────────────────────────────────────────────
+# LLM output streaming (llm_output_streaming_20260813)
+# ──────────────────────────────────────────────
+
+
+def _resolve_llm_streaming() -> bool:
+    """Return whether local direct/ptt turns stream their LLM output to TTS.
+
+    llm_output_streaming_20260813 — the single revert lever for the whole
+    track (design.md §3 eligibility, §10 phasing):
+      - The flag is True IFF OPENCOHOST_LLM_STREAMING=1, in every environment.
+      - Default OFF. Phase 1 ships behind it and the blocking gate is the
+        interruptibility runtime validation (§9 decision 5), not TTFA: if a
+        forced mid-stream stall leaves the Ollama runner held, the spoken
+        prefix stands but cannot be recalled, so the flag goes back off.
+      - An ineligible or flag-off turn takes the existing buffered path
+        byte-identically.
+    """
+    return os.environ.get("OPENCOHOST_LLM_STREAMING", "") == "1"
+
+
+LLM_STREAMING_ENABLED: bool = _resolve_llm_streaming()
+
+# Per-read (idle) budget for a streamed chat request, in seconds. Under
+# stream=True every chunk is one httpx read — including the first — so this one
+# knob covers both the first-chunk wait (model load + prefill) and the
+# inter-chunk wait, and phase 1 sets it to the larger of the two regimes.
+#
+# NOT a patience setting — a VERDICT threshold. Exceeding it raises
+# TimeoutError("watchdog_timeout:...") out of `_ollama_chat_streaming`, which
+# lands in the attempt loop's existing handler and routes to
+# `_recover_from_stalled_inference`: the model is declared hung and ROLLED BACK.
+# So the floor is not "how long am I willing to wait", it is the worst
+# LEGITIMATE first-chunk wait; every value below it turns healthy behavior into
+# a false model downgrade.
+#
+# Owner decision 2026-08-13 (design.md §9 decision 2), sized off the measured
+# session, not guessed:
+#   load_ms=15073  keep-alive-expiry cold load, inside the chat call   2.65x
+#   gemma4:e4b     _prepare_model 16.12s                               2.48x
+#   qwopus         _prepare_model 24.36s                               1.64x  <- binding
+# Rejected on the record: 5s and 10s are MEASURED-UNSAFE (both below the 15.07s
+# cold load, so every return-from-break turn would be diagnosed as a hang, and
+# the fallback model's own 8.57–16.12s cold load would blow the same budget and
+# cascade the downgrade); 30s was dropped for giving only 1.23x over qwopus, and
+# becomes viable only if qwopus leaves the rotation.
+#
+# Scope: the STREAMING path only. The buffered path keeps
+# `_resolve_chat_watchdog_timeout` (45s post-switch / 180s steady) untouched, so
+# the 2026-06-17 and 2026-08-13 runtime-validated recoveries are preserved
+# exactly. On a streamed post-switch turn 40s fires 5s BEFORE the 45s total cap
+# — earlier detection on the same path, never later. Owner-tunable.
+STREAM_IDLE_TIMEOUT_SECONDS = 40
+
+# Log-only observability threshold, in seconds: when the wait for the FIRST
+# chunk exceeds this, the seam emits one `[STREAM_IDLE_PROBE]` WARNING with the
+# measured duration (metadata only — never prompt or response text). It NEVER
+# aborts anything; the only enforcement threshold is
+# STREAM_IDLE_TIMEOUT_SECONDS above. It exists so any future tightening of that
+# constant is argued from the owner's own distribution of legitimate
+# first-chunk waits instead of from the three-row table above.
+STREAM_IDLE_PROBE_SECONDS = 10
+
+
+# ──────────────────────────────────────────────
 # Health Monitor configuration
 # ──────────────────────────────────────────────
 QWEN_IDLE_TTL = 300          # seconds of idle before auto-shutdown

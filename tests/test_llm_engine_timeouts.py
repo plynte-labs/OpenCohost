@@ -4,12 +4,15 @@ import logging
 import queue
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from opencohost.core import llm_engine
+from opencohost.core.engine import llm_engine_models
+from opencohost.config import settings
 from opencohost.config.settings import CLOUD_CHAT_TIMEOUT, TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
 from opencohost.i18n import active as i18n_active
 
@@ -1217,3 +1220,311 @@ def test_productor_no_ref_with_passing_health_gate_logs_single_coherent_fallback
         "Log must not claim effective=pesado when the engine falls back, got: "
         + repr(log_messages)
     )
+
+
+# ---------------------------------------------------------------------------
+# llm_output_streaming_20260813 -- the streaming transport seam and its budgets
+# (design.md section 4 "Watchdog redesign", section 9 decision 2).
+# ---------------------------------------------------------------------------
+
+
+def test_llm_streaming_flag_defaults_off():
+    """The whole track's revert lever ships OFF: nothing consumes the seam yet."""
+    assert settings.LLM_STREAMING_ENABLED is False
+
+
+def test_stream_idle_timeout_clears_every_measured_legitimate_load():
+    """`STREAM_IDLE_TIMEOUT_SECONDS` is a VERDICT threshold, not a patience knob:
+    exceeding it routes to `_recover_from_stalled_inference` and rolls the model
+    back, so any value below the worst LEGITIMATE first-chunk wait converts
+    healthy behavior into a false model downgrade. The 2026-08-13 measurements
+    (design.md section 9 decision 2) are the floor."""
+    assert settings.STREAM_IDLE_TIMEOUT_SECONDS == 40
+    # Every measured legitimate load must fit, worst one (qwopus) included.
+    for measured_load_seconds in (15.073, 16.12, 24.36):
+        assert settings.STREAM_IDLE_TIMEOUT_SECONDS > measured_load_seconds
+    # The rejected values, kept as a regression guard against re-tuning down:
+    # 5s and 10s sit BELOW the measured 15.07s cold load (measured-unsafe), and
+    # 30s gives only 1.23x over qwopus.
+    assert settings.STREAM_IDLE_TIMEOUT_SECONDS / 24.36 > 1.6
+
+
+def test_stream_idle_probe_threshold_is_below_the_verdict_threshold():
+    """The probe is log-only observability; it must fire well before the verdict
+    threshold or it would never produce the distribution it exists to collect."""
+    assert settings.STREAM_IDLE_PROBE_SECONDS == 10
+    assert settings.STREAM_IDLE_PROBE_SECONDS < settings.STREAM_IDLE_TIMEOUT_SECONDS
+
+
+class _FakeClock:
+    """Deterministic monotonic clock -- the seam's only time source."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _install_fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(llm_engine_models, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return clock
+
+
+class _FakeStream:
+    """Stand-in for the generator `ollama.Client.chat(stream=True)` returns.
+
+    A plain item is yielded as-is; a callable item is invoked instead and its
+    return value (if any) is yielded -- that is how a test advances the fake
+    clock or raises a transport error at a chosen point mid-stream.
+    `closed` records the socket-level abort the seam owes on every exit path.
+    """
+
+    def __init__(self, *items):
+        self._items = items
+        self.closed = False
+
+    def __iter__(self):
+        for item in self._items:
+            if callable(item):
+                produced = item()
+                if produced is not None:
+                    yield produced
+            else:
+                yield item
+
+    def close(self):
+        self.closed = True
+
+
+def _tick(clock, seconds, chunk=None):
+    """A stream item that burns `seconds` of wall clock, then yields `chunk`."""
+
+    def advance_then_yield():
+        clock.advance(seconds)
+        return chunk
+
+    return advance_then_yield
+
+
+def _raises(exc):
+    def blow_up():
+        raise exc
+
+    return blow_up
+
+
+class _FakeOllamaModule:
+    """Module-shaped double -- `_create_ollama_chat_client` reads `.Client`.
+
+    Deliberately NOT a MagicMock: an auto-mocked `self.ollama.Client()` would
+    make every client-selection assertion vacuous.
+    """
+
+    def __init__(self, chat_result):
+        self.built_timeouts = []
+        self.chat_calls = []
+        self._chat_result = chat_result
+
+    def Client(self, **kwargs):
+        self.built_timeouts.append(kwargs.get("timeout"))
+        client = MagicMock()
+        client.chat.side_effect = self._chat
+        return client
+
+    def _chat(self, **kwargs):
+        self.chat_calls.append(kwargs)
+        result = self._chat_result
+        return result() if callable(result) else result
+
+
+def _streaming_motor(chat_result):
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    module = _FakeOllamaModule(chat_result)
+    motor.ollama = module
+    return motor, module
+
+
+def test_streaming_seam_yields_chunks_in_order_and_closes_the_stream(monkeypatch):
+    """The happy path: raw chunks pass through untouched, in order, and the
+    stream is closed at the end -- closing the socket is the only real
+    server-side abort for Ollama and is what frees the single runner slot."""
+    _install_fake_clock(monkeypatch)
+    stream = _FakeStream("hola", " mundo", ".")
+    motor, module = _streaming_motor(stream)
+
+    chunks = list(motor._ollama_chat_streaming(timeout=45.0, model="llama3", messages=[]))
+
+    assert chunks == ["hola", " mundo", "."]
+    assert stream.closed is True
+    assert module.chat_calls == [{"stream": True, "model": "llama3", "messages": []}]
+
+
+def test_streaming_seam_translates_a_mid_stream_read_timeout_into_the_watchdog_contract(monkeypatch):
+    """A per-read (idle) transport timeout must surface as the SAME
+    `TimeoutError('watchdog_timeout:...')` contract `_is_watchdog_timeout_error`
+    keys on -- streaming bypasses `_call_with_watchdog`'s worker, where that
+    translation lives today, so an unconverted httpx exception would propagate
+    and silently kill automatic recovery. The budget in the string is the IDLE
+    budget, not the total: the idle threshold is what fired."""
+    _install_fake_clock(monkeypatch)
+    stream = _FakeStream("primera", _raises(httpx.ReadTimeout("the read operation timed out")))
+    motor, _module = _streaming_motor(stream)
+
+    generation = motor._ollama_chat_streaming(timeout=180.0, model="qwopus", messages=[])
+    assert next(generation) == "primera"
+
+    with pytest.raises(TimeoutError) as excinfo:
+        next(generation)
+
+    assert str(excinfo.value) == f"watchdog_timeout:{settings.STREAM_IDLE_TIMEOUT_SECONDS:.2f}s"
+    assert motor._is_watchdog_timeout_error(excinfo.value) is True
+    assert stream.closed is True
+
+
+def test_streaming_seam_translates_a_first_chunk_read_timeout_before_any_chunk(monkeypatch):
+    """Same contract when the transport times out before a single chunk exists
+    -- the 2026-06-17 shape: a hung model emits ZERO chunks."""
+    _install_fake_clock(monkeypatch)
+    motor, _module = _streaming_motor(_raises(httpx.ReadTimeout("no first chunk")))
+
+    with pytest.raises(TimeoutError) as excinfo:
+        list(motor._ollama_chat_streaming(timeout=45.0, model="qwopus", messages=[]))
+
+    assert str(excinfo.value) == f"watchdog_timeout:{settings.STREAM_IDLE_TIMEOUT_SECONDS:.2f}s"
+    assert motor._is_watchdog_timeout_error(excinfo.value) is True
+
+
+def test_streaming_seam_enforces_the_total_wall_clock_cap_on_a_slow_but_not_idle_stream(monkeypatch):
+    """A stream that keeps delivering just fast enough to never trip the idle
+    budget must still be stopped by the total cap. This is the hard ceiling on
+    runaway generation, which matters precisely because `num_predict` is popped
+    for reasoning-classified models like gemma4 -- an idle-only watchdog would
+    let an infinite decode run forever."""
+    clock = _install_fake_clock(monkeypatch)
+    gap = 20.0  # below STREAM_IDLE_TIMEOUT_SECONDS: no transport timeout fires
+    assert gap < settings.STREAM_IDLE_TIMEOUT_SECONDS
+    stream = _FakeStream(
+        _tick(clock, gap, "uno"),
+        _tick(clock, gap, "dos"),
+        _tick(clock, gap, "tres"),
+    )
+    motor, _module = _streaming_motor(stream)
+
+    seen = []
+    with pytest.raises(TimeoutError) as excinfo:
+        for chunk in motor._ollama_chat_streaming(timeout=45.0, model="gemma4:e4b", messages=[]):
+            seen.append(chunk)
+
+    assert seen == ["uno", "dos"]  # 20s and 40s are inside the 45s cap; 60s is not
+    assert str(excinfo.value) == "watchdog_timeout:45.00s"
+    assert motor._is_watchdog_timeout_error(excinfo.value) is True
+    assert stream.closed is True
+
+
+def test_streaming_seam_closes_the_stream_when_the_consumer_abandons_it(monkeypatch):
+    """The consumer aborting the turn early (guard trip, cancel token) must
+    still free the runner. Abandonment raises GeneratorExit at the yield, so
+    the close has to sit in a `finally`, not after the loop."""
+    _install_fake_clock(monkeypatch)
+    stream = _FakeStream("uno", "dos", "tres")
+    motor, _module = _streaming_motor(stream)
+
+    generation = motor._ollama_chat_streaming(timeout=45.0, model="llama3", messages=[])
+    assert next(generation) == "uno"
+    assert stream.closed is False
+
+    generation.close()
+
+    assert stream.closed is True
+
+
+def test_streaming_seam_propagates_a_non_timeout_error_unchanged_and_still_closes(monkeypatch):
+    """A genuine (non-timeout) transport error must NOT be laundered into a fake
+    watchdog timeout -- that would swallow real errors and trigger a bogus
+    rollback -- but the stream still has to be closed on the way out."""
+    _install_fake_clock(monkeypatch)
+    stream = _FakeStream("uno", _raises(ValueError("not a timeout at all")))
+    motor, _module = _streaming_motor(stream)
+
+    with pytest.raises(ValueError, match="not a timeout at all"):
+        list(motor._ollama_chat_streaming(timeout=45.0, model="llama3", messages=[]))
+
+    assert stream.closed is True
+
+
+def test_streaming_seam_builds_and_memoizes_the_client_at_the_idle_budget(monkeypatch):
+    """The seam rides the production-validated memoized-client machinery
+    (`a8830bb`) at the IDLE budget -- that transport timeout IS the idle
+    enforcement. `run()` pre-warms only the 180s and 45s clients, so the seam
+    must build once and reuse, never fall through to the steady-state client
+    (which would leave the idle budget unenforced at the transport)."""
+    _install_fake_clock(monkeypatch)
+    streams = [_FakeStream("a"), _FakeStream("b")]
+    motor, module = _streaming_motor(lambda: streams.pop(0))
+    steady_state_client = MagicMock()
+    motor._ollama_chat_client = steady_state_client
+
+    assert list(motor._ollama_chat_streaming(timeout=180.0, model="llama3", messages=[])) == ["a"]
+    assert list(motor._ollama_chat_streaming(timeout=180.0, model="llama3", messages=[])) == ["b"]
+
+    assert module.built_timeouts == [float(settings.STREAM_IDLE_TIMEOUT_SECONDS)]
+    assert float(settings.STREAM_IDLE_TIMEOUT_SECONDS) in motor._ollama_chat_clients
+    steady_state_client.chat.assert_not_called()
+
+
+def test_stream_idle_probe_warns_once_on_a_slow_first_chunk(monkeypatch, caplog):
+    """Log-only observability, measured AFTER the fact on the calling thread --
+    no timer thread, so zero false-positive risk. It reports the first-chunk
+    wait only, once per stream, and never aborts anything."""
+    clock = _install_fake_clock(monkeypatch)
+    slow_first = 12.0
+    assert settings.STREAM_IDLE_PROBE_SECONDS < slow_first < settings.STREAM_IDLE_TIMEOUT_SECONDS
+    stream = _FakeStream(
+        _tick(clock, slow_first, "uno"),
+        _tick(clock, 11.0, "dos"),
+        _tick(clock, 11.0, "tres"),
+    )
+    motor, _module = _streaming_motor(stream)
+
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+        chunks = list(motor._ollama_chat_streaming(timeout=45.0, model="qwopus", messages=[]))
+
+    assert chunks == ["uno", "dos", "tres"]  # log-only: nothing was aborted
+    probes = [r for r in caplog.records if "[STREAM_IDLE_PROBE]" in r.getMessage()]
+    assert len(probes) == 1
+    assert "12.00" in probes[0].getMessage()
+    assert probes[0].levelno == logging.WARNING
+
+
+def test_stream_idle_probe_stays_silent_below_the_threshold(monkeypatch, caplog):
+    clock = _install_fake_clock(monkeypatch)
+    stream = _FakeStream(_tick(clock, 3.0, "uno"), _tick(clock, 30.0, "dos"))
+    motor, _module = _streaming_motor(stream)
+
+    with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
+        list(motor._ollama_chat_streaming(timeout=45.0, model="llama3", messages=[]))
+
+    assert not [r for r in caplog.records if "[STREAM_IDLE_PROBE]" in r.getMessage()]
+
+
+def test_streaming_seam_never_logs_response_text(monkeypatch, caplog):
+    """Repo rule: raw dialogue never reaches the logs. The probe line is
+    metadata only."""
+    clock = _install_fake_clock(monkeypatch)
+    secret = "cardumen-de-lubinas-42"
+    stream = _FakeStream(_tick(clock, 12.0, secret), _tick(clock, 12.0, secret.upper()))
+    motor, _module = _streaming_motor(stream)
+
+    with caplog.at_level(logging.DEBUG, logger="OpenCohost"):
+        list(motor._ollama_chat_streaming(timeout=45.0, model="llama3", messages=[]))
+
+    assert [r for r in caplog.records if "[STREAM_IDLE_PROBE]" in r.getMessage()]
+    for record in caplog.records:
+        assert secret.lower() not in record.getMessage().lower()
+    for line in list(motor.log_queue.queue):
+        assert secret.lower() not in str(line).lower()

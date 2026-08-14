@@ -10,7 +10,11 @@ import time
 import uuid
 from typing import Optional
 
-from opencohost.config.settings import LLM_SCOUT_TIMEOUT
+from opencohost.config.settings import (
+    LLM_SCOUT_TIMEOUT,
+    STREAM_IDLE_PROBE_SECONDS,
+    STREAM_IDLE_TIMEOUT_SECONDS,
+)
 from opencohost.core.providers.llm_tiers import LLMTierConfig
 
 # These three are imported directly, not via `_eng`, because they appear where the
@@ -19,6 +23,10 @@ from opencohost.core.providers.llm_tiers import LLMTierConfig
 # for names bound above llm_engine's mixin-import line. Nothing patches any of
 # them, and the default arg was ALREADY frozen at class-definition time before the
 # split, so this is behaviour-identical -- see llm_engine_memorias.py.
+# The two STREAM_* budgets are read inside a method body, so `_eng.X` would be
+# timing-safe -- but llm_engine.py does not re-export them, so it would also be an
+# AttributeError. They are read live from this module's globals on every call, so
+# a test (or a future settings reload) can rebind them here.
 from opencohost.core import llm_engine as _eng
 
 class ModelManagementMixin:
@@ -545,6 +553,98 @@ class ModelManagementMixin:
         # dedicated timeout-scoped client and must stay byte-identical.
         call = chat_callable or (lambda **kw: self._ollama_chat(chat_timeout=timeout, **kw))
         return self._call_with_watchdog(call, timeout=timeout, **kwargs)
+
+    def _ollama_chat_streaming(self, *, timeout: float, **kwargs):
+        """Yield raw chunks from a local ``ollama.chat(stream=True)``, bounded.
+
+        The streaming counterpart of ``_ollama_chat_with_watchdog``, and
+        deliberately NOT routed through ``_call_with_watchdog`` -- which refuses
+        ``stream=True`` outright, because that watchdog measures "did the call
+        return within budget" and a generator-returning call returns WITHOUT
+        executing its body, so it would bless an un-started generator. This seam
+        iterates on the CALLING thread instead: no daemon thread exists to
+        orphan, and every abort is an exception or return in the consumer's own
+        frame.
+
+        Two budgets, both raising the SAME
+        ``TimeoutError("watchdog_timeout:<budget>s")`` string the buffered path
+        raises, so ``_is_watchdog_timeout_error`` still recognises them, they
+        land in the attempt loop's existing handler unchanged, and automatic
+        recovery (``_recover_from_stalled_inference``) still fires:
+
+        1. *Idle / per-read* -- ``STREAM_IDLE_TIMEOUT_SECONDS``, enforced by the
+           transport itself. Under ``stream=True`` the httpx timeout is a
+           per-read timeout and every chunk is one read (the first included), so
+           riding the client memoized at that value IS the idle watchdog. Client
+           construction is left entirely to ``_create_ollama_chat_client`` /
+           ``_select_ollama_chat_client`` (``a8830bb``, production-validated on
+           2026-08-13); the httpx -> ``watchdog_timeout:`` translation is
+           replicated from ``_call_with_watchdog``'s worker because streaming
+           bypasses that worker.
+        2. *Total wall clock* -- ``timeout``, the budget
+           ``_resolve_chat_watchdog_timeout`` already resolves (45s post-switch,
+           180s steady, 75s cloud), re-checked per chunk. This is the hard
+           ceiling on runaway generation, which matters precisely because
+           ``num_predict`` is popped for reasoning-classified models like
+           gemma4: an idle-only watchdog would let an infinite decode run
+           forever.
+
+        On a streamed post-switch turn the 40s idle budget fires 5s BEFORE the
+        45s total cap -- earlier detection on the same path, never later.
+
+        ``finally: stream.close()`` on EVERY exit path -- normal completion,
+        either timeout, a consumer that abandons the generator (guard trip,
+        cancel token, any raise downstream). Closing the socket is the ONLY real
+        server-side abort for Ollama and is what frees the single runner slot
+        (see ``_create_ollama_scout_client``); ``a8830bb`` measured exactly that
+        for the non-streaming case -- the rollback's ``_prepare_model`` got a
+        runner in 8.57s right after the timed-out call's socket closed.
+
+        Local transport only: phase 1 does not stream the cloud path.
+        """
+        idle_budget = float(STREAM_IDLE_TIMEOUT_SECONDS)
+        # Build-then-select, not a bare lookup: `run()` pre-warms only the 180s
+        # and 45s clients, so a pure lookup would always miss and fall back to
+        # the steady-state client -- leaving the idle budget unenforced at the
+        # transport, which is the one place it can be enforced at all.
+        self._create_ollama_chat_client(self.ollama, timeout=idle_budget)
+        client = self._select_ollama_chat_client(idle_budget)
+
+        started = time.monotonic()
+        first_chunk_pending = True
+        stream = None
+        try:
+            stream = client.chat(stream=True, **kwargs)
+            for chunk in stream:
+                if first_chunk_pending:
+                    first_chunk_pending = False
+                    waited = time.monotonic() - started
+                    if waited > STREAM_IDLE_PROBE_SECONDS:
+                        # Log-only, never an abort. Measured after the fact on
+                        # this thread rather than armed on a timer: same
+                        # information one probe-interval late, with no extra
+                        # thread and no way to false-positive on a stream that
+                        # was merely slow to start. METADATA ONLY -- raw
+                        # dialogue never reaches the logs.
+                        _eng.logger.warning(
+                            "[STREAM_IDLE_PROBE] first_chunk_wait_s=%.2f threshold_s=%.2f "
+                            "idle_budget_s=%.2f total_budget_s=%.2f",
+                            waited,
+                            float(STREAM_IDLE_PROBE_SECONDS),
+                            idle_budget,
+                            float(timeout),
+                        )
+                if time.monotonic() - started > timeout:
+                    # Checked BEFORE handing the chunk over: a chunk released
+                    # after the budget blew could still close a sentence and put
+                    # audio on air for a turn that is already being declared dead.
+                    raise TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
+                yield chunk
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f"watchdog_timeout:{idle_budget:.2f}s") from exc
+        finally:
+            if stream is not None:
+                stream.close()
 
     def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
