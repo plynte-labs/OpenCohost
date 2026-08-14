@@ -300,6 +300,74 @@ class SpeechPipelineMixin:
         """
         return _eng._sanitize_tts_text_for_playback(text)
 
+    @staticmethod
+    def _split_for_tts(texto_a_generar: str) -> list:
+        """Sanitize `texto_a_generar`, then fragment it into TTS-ready chunks.
+
+        Two distinct stages, not one expression -- `_sanitize_for_tts` then
+        `_fragment_for_tts` -- because the streaming design needs to run
+        output_guard BETWEEN them, at sentence granularity:
+
+          - guarding the RAW (pre-sanitize) text reproduces the
+            markdown-evasion bug fixed in f07b360 (asterisk-wrapped
+            violations survive the guard, then the sanitizer strips the
+            asterisks and speaks the violation clean);
+          - guarding the final TTS FRAGMENT (post comma-sub-split) is also
+            wrong -- the sub-split lands inside R4's `listo,\\s+ya\\s+lo\\s+hice`
+            pattern and between R3's discourse marker and its outcome, so
+            both rules miss at fragment granularity and hit at sentence
+            granularity (measured).
+
+        So the correct order is sanitize -> guard(sentence) -> fragment.
+        This method only makes that order expressible; it does not call the
+        guard itself.
+        """
+        return SpeechPipelineMixin._fragment_for_tts(
+            SpeechPipelineMixin._sanitize_for_tts(texto_a_generar)
+        )
+
+    @staticmethod
+    def _sanitize_for_tts(texto_a_generar: str) -> list:
+        """Stage 1: strip markdown/quotes/newlines, then split into
+        sentences on terminator+whitespace (B_ws -- the same boundary
+        production TTS ships today, `re.split(r'(?<=[.!?])\\s+', ...)`).
+
+        Returns the sentence list: the granularity the output_guard is
+        meant to run at, once that seam is wired.
+        """
+        texto_limpio = SpeechPipelineMixin._sanitize_tts_text_for_playback(texto_a_generar)
+        texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
+        return re.split(r'(?<=[.!?])\s+', texto_limpio)
+
+    @staticmethod
+    def _fragment_for_tts(oraciones_saneadas: list) -> list:
+        """Stage 2: sub-split any sentence over 25 words on internal
+        commas/semicolons, regrouping at >=8 words, producing the final
+        TTS-synthesizable chunks."""
+        oraciones = []
+
+        MIN_PALABRAS_POR_CHUNK = 8
+        MAX_PALABRAS_POR_CHUNK = 25
+
+        for frag in oraciones_saneadas:
+            frag = frag.strip()
+            if not frag: continue
+
+            if len(frag.split()) > MAX_PALABRAS_POR_CHUNK:
+                sub_frags = re.split(r'(?<=[,;])\s+', frag)
+                temp_chunk = ""
+                for sub in sub_frags:
+                    temp_chunk += sub + " "
+                    if len(temp_chunk.split()) >= MIN_PALABRAS_POR_CHUNK:
+                        oraciones.append(temp_chunk.strip())
+                        temp_chunk = ""
+                if temp_chunk.strip():
+                    oraciones.append(temp_chunk.strip())
+            else:
+                oraciones.append(frag)
+
+        return [o for o in oraciones if len(o) > 3]
+
     def _sanitize_agenda_output(self, text: str) -> str:
         """Last line of defense for autonomous agenda speech."""
         clean = " ".join((text or "").strip().split())
@@ -607,33 +675,7 @@ class SpeechPipelineMixin:
             # sanitizer/quote-newline scrub/splitter entirely.
             oraciones = list(pre_split)
         else:
-            texto_limpio = self._sanitize_tts_text_for_playback(texto_a_generar)
-            texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
-
-            fragmentos_brutos = re.split(r'(?<=[.!?])\s+', texto_limpio)
-            oraciones = []
-
-            MIN_PALABRAS_POR_CHUNK = 8
-            MAX_PALABRAS_POR_CHUNK = 25
-
-            for frag in fragmentos_brutos:
-                frag = frag.strip()
-                if not frag: continue
-
-                if len(frag.split()) > MAX_PALABRAS_POR_CHUNK:
-                    sub_frags = re.split(r'(?<=[,;])\s+', frag)
-                    temp_chunk = ""
-                    for sub in sub_frags:
-                        temp_chunk += sub + " "
-                        if len(temp_chunk.split()) >= MIN_PALABRAS_POR_CHUNK:
-                            oraciones.append(temp_chunk.strip())
-                            temp_chunk = ""
-                    if temp_chunk.strip():
-                        oraciones.append(temp_chunk.strip())
-                else:
-                    oraciones.append(frag)
-
-            oraciones = [o for o in oraciones if len(o) > 3]
+            oraciones = self._split_for_tts(texto_a_generar)
 
         if not oraciones:
             self._log("⚠️ No se generaron oraciones válidas para sintetizar.", level="warning")
