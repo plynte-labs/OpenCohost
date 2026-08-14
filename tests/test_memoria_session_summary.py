@@ -220,7 +220,10 @@ def test_summary_emits_no_memoria_captured_notice(monkeypatch, tmp_path):
 
     _capture(motor, _USER_1, _ASST_1)
     _capture(motor, _USER_2, _ASST_2)
-    ui_events.clear()  # drop the two real capture notices
+    # Defensive only: captures have been silent since the notice moved to the
+    # promotion sweep (2026-08-14), so there is nothing to drop. Kept so the
+    # assertion below stays about the SUMMARY write and nothing else.
+    ui_events.clear()
 
     motor.flush_memorias()
 

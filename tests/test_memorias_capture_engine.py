@@ -419,16 +419,21 @@ def test_user_side_below_2_significant_tokens_skips_capture(monkeypatch, tmp_pat
     assert _store(tmp_path).list_for_profile("profile-1") == []
 
 
-def test_meta_recall_question_never_becomes_a_memoria(monkeypatch, tmp_path):
-    """Owner report 2026-08-14: asking Kira what she remembers CREATED a
-    memoria — even on the turns where she answered that she knew nothing.
-    Seven such rows existed in the live store; the promotion judge later
-    rejected five of them, so each had burned a capture, a judge slot and an
-    owner-facing notice to store a question about the store itself.
+def test_a_recall_question_is_captured_but_never_announced(monkeypatch, tmp_path):
+    """The owner's complaint ("guarda memorias de casi todo insignificantes")
+    is fixed by the NOTICE, not by refusing to capture.
 
-    A recall question is a READ of memory, never new memory. The predicate
-    already existed (`is_meta_recall_query`, used by the injection block to
-    pick its recency branch) and was simply not consulted on the write side.
+    A meta-recall veto was tried here on 2026-08-14 and removed the same day
+    after two blind reviews: `is_meta_recall_query` is an injection ROUTER,
+    and using it as a write-side kill destroys durable facts with no
+    arbitration — "quiero que recuerdes que mi cumpleaños es el 3 de mayo"
+    matches it, and no length threshold separates that from a bare question
+    (8 tokens against 2-5 for the bare forms).
+
+    So the row is still written and still goes to the promotion judge, which
+    is the right arbiter — of the 7 meta-recall rows in the live store it kept
+    2. What changed is that the owner is no longer TOLD at capture time, so a
+    question about the store no longer announces itself as a memory.
     """
     motor, _, ui_events = _make_motor()
     _enable_memorias(monkeypatch, motor, tmp_path)
@@ -439,8 +444,47 @@ def test_meta_recall_question_never_becomes_a_memoria(monkeypatch, tmp_path):
         "Que es lo recuerdas de mi?", _ELIGIBLE_ASST, source="direct",
     )
 
-    assert _store(tmp_path).list_for_profile("profile-1") == []
-    assert "memoria_captured" not in ui_events
+    assert len(_store(tmp_path).list_for_profile("profile-1")) == 1, (
+        "capture must stay unarbitrated — the judge decides, not a regex"
+    )
+    assert "memoria_captured" not in ui_events, (
+        "and the owner must not be told about it until the judge keeps it"
+    )
+
+
+def test_a_recall_question_that_also_carries_a_new_fact_is_still_captured(monkeypatch, tmp_path):
+    """Adversarial review 2026-08-14: the first version of the gate above
+    vetoed ANY turn matching a recall pattern, which silently and permanently
+    destroyed mixed turns — the pattern `no me acuerdo` fires on "No me acuerdo
+    si te lo conté, pero me mudé a Córdoba el mes pasado", and the move to
+    Córdoba is exactly the EXPLICIT/DURABLE/SPECIFIC fact the promotion judge
+    exists to keep.
+
+    The two sides of `is_meta_recall_query` have asymmetric costs. On the READ
+    side a false positive costs one turn's injection quality. On the WRITE side
+    it costs the memory forever — all three capture paths (commit, eviction,
+    flush) route through this builder, so a vetoed pair never reaches the judge
+    at all. The store's own history agreed: of 7 meta-recall rows, the judge
+    kept 2.
+
+    So the veto is narrowed to BARE recall questions. Measured separation on
+    real phrasings: bare questions score 2-5 significant tokens, mixed turns
+    score 12 — the threshold sits in the gap with margin on both sides.
+    """
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    motor._commit_history(
+        "No me acuerdo si te lo conte, pero me mude a Cordoba el mes pasado.",
+        "Mira vos, mudanza. Anotado.",
+        source="direct",
+    )
+
+    rows = _store(tmp_path).list_for_profile("profile-1")
+    assert len(rows) == 1, (
+        "a recall phrase that also states a new durable fact must reach the "
+        "judge — vetoing it here destroys the fact with no arbitration"
+    )
 
 
 def test_a_normal_turn_still_captures_after_the_meta_recall_gate(monkeypatch, tmp_path):

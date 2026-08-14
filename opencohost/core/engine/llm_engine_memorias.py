@@ -80,16 +80,32 @@ class MemoriaCaptureMixin:
         # drag a contentless "hola" into a stored memoria.
         if _eng.significant_token_count(user_content) < 2:
             return None
-        # A recall QUESTION is a read of memory, never new memory. Owner report
-        # 2026-08-14: "¿qué recordás de mí?" created a memoria even on the turns
-        # where Kira answered that she knew nothing — seven such rows were in
-        # the live store, and the promotion judge later rejected five of them.
-        # Each had burned a capture, a judge slot and an owner-facing notice to
-        # store a question ABOUT the store. The predicate is the same one the
-        # injection block below uses to pick its recency branch; it was simply
-        # never consulted on the write side.
-        if _eng.is_meta_recall_query(user_content):
-            return None
+        # NO meta-recall veto here, deliberately — do not re-add one.
+        #
+        # It was added and then removed on 2026-08-14. The idea was that a
+        # recall question is a READ of memory and should not become memory, so
+        # `is_meta_recall_query` was consulted here. Two blind reviews killed
+        # it, and the measurements agreed: that predicate was written as an
+        # INJECTION ROUTER, where a false positive costs one turn's retrieval
+        # quality. Here it costs the memory FOREVER — all three capture paths
+        # (commit, eviction, close-flush) share this builder, so a vetoed pair
+        # never reaches the promotion judge at all.
+        #
+        # It over-matched badly, and no length threshold rescues it:
+        #   "quiero que recuerdes que mi cumpleaños es el 3 de mayo"  8 tokens
+        #   "el juego que hablamos ayer lo compro mañana"             7 tokens
+        #   "no me acuerdo si te lo conté, pero firmé con el sponsor" 10 tokens
+        # The first is an EXPLICIT request to remember. All three carry durable
+        # facts, and all three matched. Bare questions score 2-5, so any cut
+        # that catches them also catches the request-to-remember.
+        #
+        # The owner's actual complaint ("guarda memorias de casi todo") was
+        # never about the row — it was about being TOLD. That is fixed where it
+        # belongs, by moving the notice to the promotion sweep. A recall
+        # question still gets captured, still goes to the judge, and the judge
+        # still rejects it silently; the owner simply never hears about it.
+        # The judge is the right arbiter: of the 7 meta-recall rows in the live
+        # store it kept 2, which a regex would have destroyed.
         # C1: skip canned guardrail-fallback assistant lines. D4 commits
         # guardrail-blocked exchanges to history so they are not lost, but the
         # fallback line itself carries zero memory signal. Literal match against
@@ -153,10 +169,12 @@ class MemoriaCaptureMixin:
         separately by MemoriaStore._prune_summaries. Fewer than
         MEMORIAS_SUMMARY_MIN_TITLES captured memorias -> no summary.
 
-        Silent by construction: unlike _capture_memoria it emits NO
-        'memoria_captured' notice (this fires at teardown / off the Tk thread),
-        and the summary row is written via insert_summary — never re-entering
-        _session_memoria_titles — so it is never itself re-summarized.
+        Silent by construction: it emits NO 'memoria_captured' notice, because
+        this runs at teardown / off the Tk thread. (It used to say "unlike
+        _capture_memoria" — stale since 2026-08-14: capture is silent too now,
+        and the only emitter is the promotion sweep.) The summary row is
+        written via insert_summary — never re-entering _session_memoria_titles
+        — so it is never itself re-summarized.
         """
         if not profile_id:
             return

@@ -739,8 +739,13 @@ class MemoriaStore:
         *return_created* (E1, memoria_quality_20260717) is an OPT-IN widening:
         when True, returns ``(row_id, created)`` where ``created`` is True only
         for a genuine fresh INSERT (revision==1), False for a refresh/no-op.
-        Off by default so the ~50 existing callers keep the bare-id contract —
-        only the engine's memoria.captured notice needs the flag.
+        Off by default so every caller keeps the bare-id contract.
+
+        It currently has NO production caller. Its one user was the engine's
+        per-capture `memoria_captured` notice, which moved to the promotion
+        sweep on 2026-08-14 (a capture is an unjudged draft, so announcing it
+        was announcing a decision nothing had made yet). Kept because the
+        distinction is real and cheap, but do not assume it is exercised.
 
         D3b (memory_promotion_20260725): the DO UPDATE clause also CLEARS
         ``judged_at`` on a revision bump — a judgment is about a SPECIFIC
