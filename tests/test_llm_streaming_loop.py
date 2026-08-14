@@ -7,6 +7,9 @@ sides of the lazy first submit, the partial-turn exit on mid-stream failures,
 generator close on every abort path, [STREAM_TTFA] telemetry, the
 reconstructed `respuesta` keeping ctx telemetry alive, and the no-dialogue-in-
 logs rule for every stream-tagged log line.
+
+Phase 2 (§9 decision 1, §10) extends it to owner bundles: eligibility, and the
+requeue-AND-emit contract for a bundle that dies after its first submit.
 """
 
 import logging
@@ -16,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from opencohost.config.settings import OWNER_BUNDLE_SOURCE
 from opencohost.core import llm_engine
 
 
@@ -141,30 +145,6 @@ def test_ineligible_turn_takes_buffered_path_byte_identically(
     assert motor._ollama_chat_with_watchdog.call_count == 1
     assert motor._fake_router.jobs == []
     assert motor._fake_router.appends == []
-
-
-def test_bundle_turn_is_not_stream_eligible(motor):
-    """Phase 1 excludes owner bundles (§7): a turn carrying bundle_followers
-    must stay buffered even when every other gate condition holds. The
-    followers ride the per-turn handoff attribute, never a _generar_dialogo
-    kwarg."""
-    motor._ollama_chat_with_watchdog = MagicMock(
-        return_value={"message": {"content": "Hola tranquila respuesta."}}
-    )
-    motor._ollama_chat_streaming = MagicMock(
-        side_effect=AssertionError("a bundle turn must not stream in phase 1")
-    )
-    motor._speak_or_submit = MagicMock()
-
-    motor._ejecutar_inferencia(
-        "hola", source="direct", bundle_followers=[(0, 0.0, "pregunta", "direct")]
-    )
-
-    assert motor._ollama_chat_with_watchdog.call_count == 1
-    assert motor._fake_router.jobs == []
-    motor._speak_or_submit.assert_called_once()
-    # the handoff attribute never leaks past the turn
-    assert motor._turn_bundle_followers is None
 
 
 def test_cloud_turn_is_not_stream_eligible(motor):
@@ -678,4 +658,173 @@ def test_a_genuinely_silent_direct_turn_still_reports_turn_dropped(motor):
 
     assert motor._fake_router.jobs == []
     assert "turn_dropped" in seen
+    motor._emit_dialogue.assert_not_called()
+
+
+def test_an_empty_agenda_turn_still_signals_accept_agenda_output(motor):
+    """The other branch the streamed-prefix handling must never shadow: an
+    agenda source is not stream-eligible, so an empty generation still has to
+    reach the ADR-011 recovery ladder through _accept_agenda_output("")."""
+    motor._ollama_chat_with_watchdog = MagicMock(return_value={"message": {"content": ""}})
+    motor._accept_agenda_output = MagicMock(return_value=True)
+
+    motor._ejecutar_inferencia("temita", source="kira-agenda")
+
+    assert motor._fake_router.jobs == []
+    motor._accept_agenda_output.assert_called_once_with("")
+
+
+# --------------------------------------------- phase 2: streamed owner bundles
+
+
+def _follower(text, source="direct", priority=0, ts=1.0):
+    """A `_priority_queue` tuple: (priority, insertion_ts, text, source)."""
+    return (priority, ts, text, source)
+
+
+def test_bundle_turn_is_stream_eligible(motor):
+    """Phase 2 (§10): owner bundles stream like any other owner turn.
+
+    Phase 1 excluded them twice over — the source allow-list AND a
+    `_turn_bundle_followers` check — and a bundle is relabelled to
+    OWNER_BUNDLE_SOURCE before `_ejecutar_inferencia` ever sees it, so the
+    source alone was already doing the excluding.
+    """
+    motor._ollama_chat_with_watchdog = MagicMock(
+        side_effect=AssertionError("a bundle turn must stream in phase 2")
+    )
+    _arm_stream(motor, [FakeChunk("Primera frase limpia. "), FakeChunk("", done=True)])
+    motor._speak_or_submit = MagicMock()
+
+    motor._ejecutar_inferencia(
+        "1. pregunta uno\n2. pregunta dos",
+        source=OWNER_BUNDLE_SOURCE,
+        bundle_followers=[_follower("pregunta dos", ts=2.0)],
+    )
+
+    router = motor._fake_router
+    assert len(router.jobs) == 1
+    job, job_source, priority = router.jobs[0]
+    assert job_source == OWNER_BUNDLE_SOURCE
+    assert priority == 0  # same D3 priority-0 band as direct/ptt
+    assert router.appends == [(job, ["Primera frase limpia."])]
+    motor._speak_or_submit.assert_not_called()
+
+
+def test_streamed_bundle_completing_cleanly_never_requeues(motor):
+    """The other side of owner decision 1: a turn that reaches `seal` answered
+    what it was going to answer, so the followers stay consumed. Requeuing
+    here would double-answer on EVERY bundle, not just on a death."""
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Primera frase limpia. "),
+            FakeChunk("Segunda frase tranquila."),
+            FakeChunk("", done=True),
+        ],
+    )
+    followers = [_follower("pregunta dos", ts=2.0)]
+
+    motor._ejecutar_inferencia(
+        "1. pregunta uno\n2. pregunta dos",
+        source=OWNER_BUNDLE_SOURCE,
+        bundle_followers=followers,
+    )
+
+    router = motor._fake_router
+    assert router.sealed == [router.jobs[0][0]]
+    assert motor._priority_queue == []
+    assert (
+        motor.historial[-1]["content"]
+        == "Primera frase limpia. Segunda frase tranquila."
+    )
+
+
+def test_streamed_bundle_death_requeues_every_follower_and_emits_the_prefix(
+    motor, caplog
+):
+    """Owner decision 1 (§9, ratified 2026-08-13) and the branch collision it
+    exposes.
+
+    A streamed bundle that dies mid-stream has BOTH a spoken prefix AND
+    followers. Phase 1's `elif streamed_prefix:` swallowed the requeue branch,
+    so the followers died silently — exactly the incident-grade loss
+    `_requeue_owner_bundle_followers` exists to prevent. Both must happen: the
+    audience heard the head (emit + commit it) and every absorbed question goes
+    back with its ORIGINAL tuple, accepting a possible double answer on air.
+    """
+    followers = [
+        _follower("pregunta dos", ts=2.0),
+        _follower("pregunta tres", "ptt", ts=3.0),
+    ]
+    seen = []
+    motor.ui_callback = lambda event, *a, **k: seen.append(event)
+    motor._emit_dialogue = MagicMock()
+    motor._recover_from_stalled_inference = MagicMock()
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Primera frase limpia. "),
+            TimeoutError("watchdog_timeout:45.00s"),
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+        motor._ejecutar_inferencia(
+            "1. pregunta uno\n2. pregunta dos\n3. pregunta tres",
+            source=OWNER_BUNDLE_SOURCE,
+            bundle_followers=followers,
+        )
+
+    # never lost: the ORIGINAL tuples, so TTL and ordering survive
+    assert motor._priority_queue == followers
+    assert motor._priority_queue[0] is followers[0]
+    assert motor._priority_queue[1] is followers[1]
+    assert any("[BUNDLE_FAILED]" in r.getMessage() for r in caplog.records)
+    # and the head that DID air is emitted and committed, not reported dropped
+    motor._emit_dialogue.assert_called_once_with(
+        "Primera frase limpia.", OWNER_BUNDLE_SOURCE
+    )
+    assert motor.historial[-1]["content"] == "Primera frase limpia."
+    assert "turn_dropped" not in seen
+    router = motor._fake_router
+    assert router.sealed == [router.jobs[0][0]]
+
+
+def test_streamed_bundle_death_before_any_audio_requeues_with_no_emit(motor):
+    """Pre-first-submit the legacy semantics are untouched: nothing aired, so
+    the requeue happens alone — no prefix to emit, no double-answer risk."""
+    followers = [_follower("pregunta dos", ts=2.0)]
+    motor._emit_dialogue = MagicMock()
+    motor._recover_from_stalled_inference = MagicMock()
+    _arm_stream(motor, [TimeoutError("watchdog_timeout:40.00s")])
+
+    motor._ejecutar_inferencia(
+        "1. pregunta uno\n2. pregunta dos",
+        source=OWNER_BUNDLE_SOURCE,
+        bundle_followers=followers,
+    )
+
+    assert motor._fake_router.jobs == []
+    assert motor._priority_queue == followers
+    motor._emit_dialogue.assert_not_called()
+    assert list(motor.historial) == []
+
+
+def test_non_streamed_bundle_requeues_exactly_as_before(motor, monkeypatch):
+    """The buffered path keeps the ORIGINAL invariant: an empty bundle turn
+    spends its head and hands every follower back, with nothing emitted."""
+    monkeypatch.setattr(llm_engine, "LLM_STREAMING_ENABLED", False)
+    motor._ollama_chat_with_watchdog = MagicMock(return_value={"message": {"content": ""}})
+    motor._emit_dialogue = MagicMock()
+    followers = [_follower("pregunta dos", ts=2.0)]
+
+    motor._ejecutar_inferencia(
+        "1. pregunta uno\n2. pregunta dos",
+        source=OWNER_BUNDLE_SOURCE,
+        bundle_followers=followers,
+    )
+
+    assert motor._fake_router.jobs == []
+    assert motor._priority_queue == followers
     motor._emit_dialogue.assert_not_called()

@@ -1030,15 +1030,6 @@ class MotorVocalIA(
         # case apart from a genuinely silent drop. Same single-thread
         # write/read-and-clear discipline as `_streamed_turn_job`.
         self._streamed_turn_prefix: Optional[str] = None
-        # llm_output_streaming_20260813 §3: the OTHER per-turn handoff, in the
-        # opposite direction — _ejecutar_inferencia publishes this turn's
-        # bundle_followers so the eligibility gate in _cloud_attempt_loop can
-        # exclude bundle turns (phase 1 sidesteps the §7 requeue-vs-double-
-        # answer fork). An attribute, NOT a _generar_dialogo kwarg, because
-        # existing tests pin that signature with exact-shape doubles (the C1
-        # conditional-forward lesson). Single engine thread; always cleared
-        # in _ejecutar_inferencia's finally.
-        self._turn_bundle_followers: Optional[list] = None
         # Orphan belt (§7): the live _StreamAttemptState while a streamed
         # attempt runs. If an exception escapes after the first submit but
         # before finalize handled the job, _generar_dialogo's catch-all uses
@@ -1927,6 +1918,20 @@ class MotorVocalIA(
         consumed exactly ONE question and the rest were answered on following
         boundaries. That is the invariant restored here, and §7's "a question
         can be neither lost nor double-answered" depends on it.
+
+        AMENDED for streamed bundle turns (llm_output_streaming_20260813 phase
+        2, owner decision 1, ratified 2026-08-13). On a bundle that STREAMS and
+        dies after its first `submit_streaming`, the composed answer may have
+        addressed a follower inside the already-spoken prefix, so requeuing it
+        can answer that question twice on air. The owner ruled: requeue anyway.
+        For those turns the invariant reads "a question can never be LOST; it
+        may be double-answered on a partially-spoken streamed bundle death."
+        Rationale on the record — loss is the incident-grade failure this
+        function exists to prevent, a double answer is recoverable social
+        awkwardness on air, and a mid-stream death implies a short spoken
+        prefix. Scope is strictly streamed bundle turns: on the buffered path
+        nothing was spoken before the failure, so "neither lost nor
+        double-answered" holds there exactly as written above.
 
         The HEAD is deliberately NOT re-queued. Each failure still burns exactly
         one question, so a persistently failing model DRAINS the backlog instead
@@ -3038,20 +3043,26 @@ class MotorVocalIA(
 
         # llm_output_streaming_20260813 §3 eligibility gate. `commit_history`
         # already tags every speculative path (pregen worker, connector
-        # upgrade) False, so those stay buffered by construction; bundles are
-        # phase 2 (§7); cloud is phase 4 (§8); `_speech_router_enabled` is the
-        # CTk/kill-switch gate and LLM_STREAMING_ENABLED the revert lever. An
-        # ineligible turn takes the buffered call below byte-identically.
-        # `_turn_bundle_followers` is the per-turn handoff attribute
-        # _ejecutar_inferencia publishes (getattr-guarded: several tests
-        # build a MotorVocalIA via __new__ and never run __init__).
+        # upgrade) False, so those stay buffered by construction; agenda is
+        # phase 3 and chat is never (§8); cloud is phase 4 (§8);
+        # `_speech_router_enabled` is the CTk/kill-switch gate and
+        # LLM_STREAMING_ENABLED the revert lever. An ineligible turn takes the
+        # buffered call below byte-identically.
+        #
+        # Phase 2 (§10) adds OWNER_BUNDLE_SOURCE. `_process_priority_queue`
+        # relabels a bundled turn to that source before calling
+        # _ejecutar_inferencia, so the allow-list is the ONLY thing that ever
+        # gated bundles — the phase-1 `_turn_bundle_followers` check beside it
+        # was redundant and is gone with the attribute. A bundle that dies
+        # after its first submit requeues every follower (owner decision 1);
+        # the fork is resolved in _ejecutar_inferencia, which still has the
+        # followers as a local parameter.
         stream_eligible = (
             is_local
-            and source in ("direct", "ptt")
+            and source in ("direct", "ptt", OWNER_BUNDLE_SOURCE)
             and commit_history
             and self._speech_router_enabled
             and LLM_STREAMING_ENABLED
-            and not getattr(self, "_turn_bundle_followers", None)
         )
 
         for intento in range(max_intentos):
@@ -4014,22 +4025,15 @@ class MotorVocalIA(
             answered_by_transport = _answer_state["transport"]
             provider_changed_while_queued = submitted_under_provider != answered_by_provider
         # llm_output_streaming_20260813: fresh turn — clear the streamed-turn
-        # handoff BEFORE generating so a stale value from a direct
+        # handoffs BEFORE generating so a stale value from a direct
         # _generar_dialogo call (tests, future callers) can never leak into
-        # this turn's speak decision, and publish this turn's followers for
-        # the eligibility gate (an attribute, never a _generar_dialogo kwarg
-        # — existing tests pin that signature with exact-shape doubles).
-        # Single engine thread, so the write/read pair cannot interleave
-        # with another turn.
+        # this turn's speak decision. Single engine thread, so the write/read
+        # pair cannot interleave with another turn.
         self._streamed_turn_job = None
         self._streamed_turn_prefix = None
-        self._turn_bundle_followers = bundle_followers or None
-        try:
-            dialogo = self._generar_dialogo(
-                contexto, source=source, commit_history=True, history_text=history_text
-            )
-        finally:
-            self._turn_bundle_followers = None
+        dialogo = self._generar_dialogo(
+            contexto, source=source, commit_history=True, history_text=history_text
+        )
         streamed_job = self._streamed_turn_job
         self._streamed_turn_job = None
         streamed_prefix = self._streamed_turn_prefix
@@ -4102,45 +4106,56 @@ class MotorVocalIA(
             # full text again would speak the whole turn twice.
             if streamed_job is None:
                 self._speak_or_submit(dialogo, source=source)
-        elif streamed_prefix:
-            # llm_output_streaming_20260813 §7 partial-turn exit: generation
-            # returned "" but this turn's head ALREADY went out through the
-            # router's growing job, and `_stream_partial_exit` already sealed
-            # it and committed the prefix to history.
-            #
-            # Every branch below assumes an empty return means SILENCE — the
-            # `turn_dropped` toast says so in its own comment ("instead of
-            # leaving them to infer it from silence"). That premise is false
-            # here: the audience heard the head. Firing the toast would tell
-            # the owner nothing aired while it audibly did, and skipping
-            # `_emit_dialogue` would leave the transcript blank for words the
-            # stream already carried. So emit what was actually spoken and
-            # take no drop/requeue branch. Streamed sources are ptt/direct
-            # only, so this can never shadow the agenda or bundle branches.
-            self._emit_dialogue(streamed_prefix, source)
-        elif source.startswith("kira-agenda"):
-            # Empty or guardrail-blocked agenda generation: _generar_dialogo
-            # returned "", so _hablar never runs and no speaking_start event
-            # fires. Signal the failure through the SAME validator hook the
-            # success path uses (_accept_agenda_output at line ~1156) so the
-            # controller leaves GENERATING and its recovery ladder engages,
-            # instead of stalling the autonomous loop silently.
-            self._accept_agenda_output("")
-        elif bundle_followers:
-            # The same non-committing return, for an owner bundle: the head is
-            # spent (exactly what a failed single turn spent before bundling)
-            # and the followers go back to the queue rather than dying with this
-            # frame. Mutually exclusive with the branch above by construction —
-            # a bundle is tagged OWNER_BUNDLE_SOURCE, never "kira-agenda*".
-            self._requeue_owner_bundle_followers(bundle_followers)
-        elif source in ("ptt", "direct"):
-            # F1 companion (runtime-findings 2026-08-07): a plain ptt/direct
-            # turn matches no branch above when generation still comes back
-            # empty (guardrail block with no fallback line, or both the cloud
-            # attempt AND its one-shot local retry failing) -- tell the owner
-            # the turn was dropped instead of leaving them to infer it from
-            # silence.
-            self.ui_callback("turn_dropped")
+        else:
+            # llm_output_streaming_20260813 §7. `streamed_prefix` is NOT part
+            # of the chain below — phase 2 (owner decision 1) proved it must
+            # not be. A streamed BUNDLE that partial-exits has both a spoken
+            # prefix and followers, and as an `elif` the prefix branch
+            # swallowed the requeue and lost every absorbed owner question
+            # silently: the exact incident-grade failure
+            # `_requeue_owner_bundle_followers` exists to prevent. Emitting
+            # and requeueing are independent facts about the same turn, so
+            # they are independent statements.
+            if streamed_prefix:
+                # Partial-turn exit: generation returned "" but this turn's
+                # head ALREADY went out through the router's growing job, and
+                # `_stream_partial_exit` already sealed it and committed the
+                # prefix to history.
+                #
+                # The chain below was written on the premise that an empty
+                # return means SILENCE — the `turn_dropped` toast says so in
+                # its own comment ("instead of leaving them to infer it from
+                # silence"). That premise is false here: the audience heard
+                # the head, so the transcript must show what was spoken.
+                self._emit_dialogue(streamed_prefix, source)
+            if source.startswith("kira-agenda"):
+                # Empty or guardrail-blocked agenda generation: _generar_dialogo
+                # returned "", so _hablar never runs and no speaking_start event
+                # fires. Signal the failure through the SAME validator hook the
+                # success path uses (_accept_agenda_output at line ~1156) so the
+                # controller leaves GENERATING and its recovery ladder engages,
+                # instead of stalling the autonomous loop silently.
+                self._accept_agenda_output("")
+            elif bundle_followers:
+                # The same non-committing return, for an owner bundle: the head
+                # is spent (exactly what a failed single turn spent before
+                # bundling) and the followers go back to the queue rather than
+                # dying with this frame. Mutually exclusive with the branch
+                # above by construction — a bundle is tagged
+                # OWNER_BUNDLE_SOURCE, never "kira-agenda*".
+                #
+                # Phase 2: this now ALSO runs when the bundle streamed and died
+                # after its first submit, on top of the emit above. Owner
+                # decision 1, 2026-08-13 — see `_requeue_owner_bundle_followers`.
+                self._requeue_owner_bundle_followers(bundle_followers)
+            elif source in ("ptt", "direct") and not streamed_prefix:
+                # F1 companion (runtime-findings 2026-08-07): a plain ptt/direct
+                # turn matches no branch above when generation still comes back
+                # empty (guardrail block with no fallback line, or both the cloud
+                # attempt AND its one-shot local retry failing) -- tell the owner
+                # the turn was dropped instead of leaving them to infer it from
+                # silence. Not when a prefix aired: it audibly did not drop.
+                self.ui_callback("turn_dropped")
 
 
     def _emit_dialogue(
