@@ -241,6 +241,48 @@ def test_cloud_provider_sweeps_using_the_local_fallback_model_not_the_cloud_one(
     assert counts["kept"] == 1
 
 
+def test_the_sweep_announces_a_kept_memoria_to_the_owner(monkeypatch, tmp_path):
+    """The owner-facing "Kira guardó una memoria" notice lives HERE, not at
+    capture (moved 2026-08-14).
+
+    Capture writes an UNJUDGED draft; this sweep is the first moment anything
+    is known to be worth keeping. Announcing at capture told the owner a
+    memoria was saved after almost every turn — in their live store 84 of 98
+    drafts were later judge-rejected and hidden, so the claim was wrong ~86%
+    of the time, separated from the truth by an app restart.
+
+    The event NAME is deliberately unchanged so the Tauri feed needs no edit.
+    """
+    motor = _make_motor(monkeypatch, tmp_path)
+    events: list = []
+    motor.ui_callback = lambda status, *a, **k: events.append(status)
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: prefiere synthwave calmo")
+    stub = _Recorder(_decisions(
+        {"i": 1, "keep": True, "text": "El streamer prefiere synthwave calmo."}
+    ))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert counts["kept"] == 1
+    assert events.count("memoria_captured") == 1
+
+
+def test_a_sweep_that_keeps_nothing_stays_silent(monkeypatch, tmp_path):
+    """The other half of the contract: no keep, no notice. Without this the
+    move would just relocate the same lie — announcing a sweep that threw
+    everything away is no more honest than announcing an unjudged draft."""
+    motor = _make_motor(monkeypatch, tmp_path)
+    events: list = []
+    motor.ui_callback = lambda status, *a, **k: events.append(status)
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: dijo algo vago")
+    stub = _Recorder(_decisions({"i": 1, "keep": False, "reason": "vague"}))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert counts["kept"] == 0
+    assert "memoria_captured" not in events
+
+
 def test_reasoning_model_is_detected_from_the_resolved_local_fallback_model(monkeypatch, tmp_path):
     """`_fetch_show`/`_check_capabilities_reasoning` are stubbed to False (older
     Ollama / no probe) here, so the reasoning branch has to come from the name

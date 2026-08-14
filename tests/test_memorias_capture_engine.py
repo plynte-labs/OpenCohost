@@ -419,6 +419,42 @@ def test_user_side_below_2_significant_tokens_skips_capture(monkeypatch, tmp_pat
     assert _store(tmp_path).list_for_profile("profile-1") == []
 
 
+def test_meta_recall_question_never_becomes_a_memoria(monkeypatch, tmp_path):
+    """Owner report 2026-08-14: asking Kira what she remembers CREATED a
+    memoria — even on the turns where she answered that she knew nothing.
+    Seven such rows existed in the live store; the promotion judge later
+    rejected five of them, so each had burned a capture, a judge slot and an
+    owner-facing notice to store a question about the store itself.
+
+    A recall question is a READ of memory, never new memory. The predicate
+    already existed (`is_meta_recall_query`, used by the injection block to
+    pick its recency branch) and was simply not consulted on the write side.
+    """
+    motor, _, ui_events = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    # The owner's verbatim turn. Accent-insensitive, so the missing tilde on
+    # "mi" is irrelevant — this is what a real user types.
+    motor._commit_history(
+        "Que es lo recuerdas de mi?", _ELIGIBLE_ASST, source="direct",
+    )
+
+    assert _store(tmp_path).list_for_profile("profile-1") == []
+    assert "memoria_captured" not in ui_events
+
+
+def test_a_normal_turn_still_captures_after_the_meta_recall_gate(monkeypatch, tmp_path):
+    """Companion to the gate above: it must reject recall QUESTIONS only, not
+    any turn that happens to mention memory. Without this, the gate could be
+    silently widened later and stop capturing real memories."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    motor._commit_history(_ELIGIBLE_USER, _ELIGIBLE_ASST, source="direct")
+
+    assert len(_store(tmp_path).list_for_profile("profile-1")) == 1
+
+
 def test_canned_guardrail_fallback_pair_skips_capture(monkeypatch, tmp_path):
     """C1 + D4 interplay: a pair whose Kira side is a canned guardrail-fallback
     line (D4 commits blocked exchanges to history) carries no memory signal and
@@ -475,23 +511,30 @@ def test_capture_fires_at_commit_not_only_at_eviction(monkeypatch, tmp_path):
     assert rows[0]["content"] != ""
 
 
-def test_fresh_insert_emits_memoria_captured_ui_callback(monkeypatch, tmp_path):
+def test_fresh_insert_is_silent_because_the_draft_is_not_judged_yet(monkeypatch, tmp_path):
     """E1 (memoria_quality_20260717): a FRESH memoria capture fires
-    ui_callback("memoria_captured") exactly once. Re-committing the same pair
-    (same stable_key -> a refresh/revision bump, not a new memoria) emits
-    nothing more, so the chat-panel feed never announces a memoria Kira
-    already saved."""
+    ui_callback("memoria_captured") on every fresh draft INSERT, which the
+    owner UI rendered as "Kira guardó una memoria" after almost every turn.
+
+    That notice was a LIE by timing. A capture is an unjudged DRAFT; the
+    keep/reject decision is `promote_pending_drafts`, which runs once on the
+    NEXT launch. In the owner's live store 84 of 98 drafts were judge-rejected
+    and hidden — so the feed announced "saved" for rows that were thrown away
+    ~86% of the time, with an app restart separating the claim from the truth.
+
+    The draft is still written here (nothing about capture changed); only the
+    announcement moved to the sweep, where the outcome is actually known."""
     motor, _, ui_events = _make_motor()
     _enable_memorias(monkeypatch, motor, tmp_path)
 
     # Empty history -> B1 capture-at-commit, no eviction. A brand-new memoria.
     motor._commit_history(_ELIGIBLE_USER, _ELIGIBLE_ASST, source="direct")
-    assert ui_events.count("memoria_captured") == 1
-    assert len(_store(tmp_path).list_for_profile("profile-1")) == 1
-
-    # Re-commit the identical pair -> same stable_key -> refresh, not insert.
-    motor._commit_history(_ELIGIBLE_USER, _ELIGIBLE_ASST, source="direct")
-    assert ui_events.count("memoria_captured") == 1  # still one -- refresh is silent
+    assert len(_store(tmp_path).list_for_profile("profile-1")) == 1, (
+        "capture itself must be unchanged — only the notice moved"
+    )
+    assert "memoria_captured" not in ui_events, (
+        "capture must be SILENT: at this point nothing has judged the draft"
+    )
 
 
 def test_tic_only_kira_reply_stores_user_side_without_dangling_kira_label():

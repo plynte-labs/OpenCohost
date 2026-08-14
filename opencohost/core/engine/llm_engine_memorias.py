@@ -80,6 +80,16 @@ class MemoriaCaptureMixin:
         # drag a contentless "hola" into a stored memoria.
         if _eng.significant_token_count(user_content) < 2:
             return None
+        # A recall QUESTION is a read of memory, never new memory. Owner report
+        # 2026-08-14: "¿qué recordás de mí?" created a memoria even on the turns
+        # where Kira answered that she knew nothing — seven such rows were in
+        # the live store, and the promotion judge later rejected five of them.
+        # Each had burned a capture, a judge slot and an owner-facing notice to
+        # store a question ABOUT the store. The predicate is the same one the
+        # injection block below uses to pick its recency branch; it was simply
+        # never consulted on the write side.
+        if _eng.is_meta_recall_query(user_content):
+            return None
         # C1: skip canned guardrail-fallback assistant lines. D4 commits
         # guardrail-blocked exchanges to history so they are not lost, but the
         # fallback line itself carries zero memory signal. Literal match against
@@ -377,10 +387,19 @@ class MemoriaCaptureMixin:
         or content — RC-8) and swallowed. A memorias write must never crash
         the calling thread (engine worker loop / agenda speaker daemon).
         """
+        # E1 (memoria_quality_20260717) used to fire
+        # ui_callback("memoria_captured") here, on every fresh INSERT (hence
+        # the `return_created` flag, now unused). Removed 2026-08-14: a
+        # capture is an UNJUDGED DRAFT, and the keep/reject decision is
+        # `promote_pending_drafts`, which runs once on the NEXT launch. In the
+        # owner's live store 84 of 98 drafts were judge-rejected and hidden,
+        # so the feed announced "Kira guardó una memoria" for rows that were
+        # thrown away ~86% of the time, with an app restart between the claim
+        # and the truth. The notice now lives at the sweep, where the outcome
+        # is actually known.
         try:
-            _row_id, created = self._get_memoria_store().upsert_draft(
+            self._get_memoria_store().upsert_draft(
                 profile_id, stable_key, title, content, signature=signature,
-                return_created=True,
             )
         except Exception as exc:
             _eng.logger.warning(
@@ -388,23 +407,6 @@ class MemoriaCaptureMixin:
                 type(exc).__name__, profile_id, stable_key,
             )
             return False
-        if created:
-            # E1 (memoria_quality_20260717): chat-panel notice, fresh INSERT
-            # only (revision==1). Runs on the engine thread at commit-time
-            # (before TTS); ui_callback -> EngineHost._dispatch_motor_event,
-            # whose handler chain includes the audit-log file append
-            # (log_motor_accion) BEFORE the in-memory event ring — the same
-            # bounded per-event cost every whitelisted motor status already
-            # pays several times per turn, so one extra event is marginal but
-            # NOT free. A refresh/re-upsert (created False) stays silent so
-            # the feed never re-announces a memoria Kira already saved.
-            # Guarded here (not the bare-callback idiom used elsewhere)
-            # because this whole method is a fail-open boundary: the notice
-            # must never crash the engine worker thread.
-            try:
-                self.ui_callback("memoria_captured")
-            except Exception:
-                pass
         # W2a (memoria_recall_20260718): record this session's captured title
         # for the mechanical session summary. Brief _history_lock (no I/O — the
         # store write above already released it) keeps this append consistent

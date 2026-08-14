@@ -527,6 +527,24 @@ class ScoutPromotionMixin:
                 counts["considered"], counts["kept"], counts["rejected"],
                 counts["stale"], counts["unjudged_remaining"], dict(reasons),
             )
+            if counts["kept"]:
+                # The owner-facing notice lives HERE now, not at capture
+                # (moved 2026-08-14, see `_capture_memoria`): this sweep is
+                # the first moment anything is KNOWN to be worth keeping.
+                # Announcing at capture told the owner "Kira guardó una
+                # memoria" after almost every turn for rows the judge later
+                # threw away ~86% of the time.
+                #
+                # Deliberately reuses the existing `memoria_captured` event
+                # name so the Tauri feed needs no change; the count is not
+                # passed because `EngineHost._dispatch_motor_event` drops
+                # extra args, so it would be silently lost. Guarded like every
+                # notice on this fail-open path: it must never break a sweep
+                # that already did its work.
+                try:
+                    self.ui_callback("memoria_captured")
+                except Exception:
+                    pass
         except Exception as exc:
             # Total isolation: nothing was marked judged, so the next launch
             # retries. Type only — never a message that could carry row text.
