@@ -232,6 +232,44 @@ def test_non_timeout_exception_propagates_unchanged():
         motor._call_with_watchdog(blows_up, timeout=45.0, model="qwopus")
 
 
+def test_call_with_watchdog_rejects_streaming_calls():
+    """A streaming call routed through this seam is a SILENT no-op, so the seam
+    must refuse it loudly instead.
+
+    `_call_with_watchdog` measures "did `call(**kwargs)` return within budget".
+    Calling a function that returns a generator returns WITHOUT executing its
+    body, so `done.wait()` succeeds in microseconds and the watchdog blesses an
+    un-started generator: the stall recovery validated on 2026-06-17 (qwopus
+    hung, watchdog fired at 45.00s, automatic rollback) would degrade into a
+    guaranteed false success, and a genuinely hung model would never be
+    detected. Streaming gets its own seam that iterates on the calling thread;
+    this tripwire makes the wrong route a loud failure at the first call rather
+    than a watchdog that quietly stops working.
+    """
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    def never_runs(**kwargs):  # pragma: no cover - the guard fires before this
+        raise AssertionError("the streaming call must not reach the worker thread")
+
+    with pytest.raises(ValueError, match="stream=True"):
+        motor._call_with_watchdog(never_runs, timeout=45.0, model="qwopus", stream=True)
+
+
+def test_call_with_watchdog_allows_explicit_stream_false():
+    """Only `stream=True` is rejected. An explicit `stream=False` is the normal
+    buffered call and must pass through untouched -- the tripwire must not
+    become a blanket ban on the keyword."""
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+
+    def buffered(**kwargs):
+        return {"message": {"content": "ok"}, "stream": kwargs.get("stream")}
+
+    response = motor._call_with_watchdog(buffered, timeout=45.0, model="llama3", stream=False)
+
+    assert response["message"]["content"] == "ok"
+    assert response["stream"] is False
+
+
 def test_watchdog_still_times_out_when_worker_never_returns():
     """Existing watchdog behavior (no response within budget -> watchdog_timeout)
     must still hold after adding the transport-exception translation."""

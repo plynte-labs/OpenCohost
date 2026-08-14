@@ -489,7 +489,23 @@ class ModelManagementMixin:
         swapping it must NOT also swap the ``ollama.show`` metadata probe, which
         is a different call with a different budget. Sharing one seam for both
         made the probe return chat-shaped responses.
+
+        Streaming calls are refused outright. This watchdog measures "did
+        ``call(**kwargs)`` return within budget", and calling a function that
+        returns a generator returns WITHOUT executing its body -- the wait
+        succeeds in microseconds and the watchdog blesses an un-started
+        generator. The stall recovery validated on 2026-06-17 and again on
+        2026-08-13 would become a guaranteed false success, silently. Streaming
+        has its own seam that iterates on the calling thread; routing it here
+        instead must fail loudly at the first call, not degrade the watchdog.
         """
+        if kwargs.get("stream"):
+            raise ValueError(
+                "_call_with_watchdog cannot supervise stream=True: a generator-returning "
+                "call returns before its body runs, so the watchdog would always succeed. "
+                "Use the dedicated streaming seam, which iterates on the calling thread."
+            )
+
         result = {}
         done = threading.Event()
 
