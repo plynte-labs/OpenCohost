@@ -1,14 +1,31 @@
-# UI Shell Module
+# UI Shell Module — LEGACY (CustomTkinter)
 
-This module document explains the current UI shell boundary for OpenCohost. It
+> **DEPRECATED as of 2026-08-13. This document describes the FROZEN legacy
+> surface.**
+>
+> OpenCohost's product UI is **Tauri + React** (`OpenCohost_UI/`) over the
+> FastAPI host (`opencohost/api/`, composition root `api/engine_host.py`). The
+> migration is complete: every panel described below has an API router behind
+> it. Launch with `pnpm tauri:debug`, which spawns the backend itself.
+>
+> Do not add features to `opencohost/ui/`, refactor it, or restyle it. Behavior
+> that exists only here is a missing API feature, not a reason to work here.
+> Note especially that host flags armed by `EngineHost` — the speech router, and
+> therefore LLM output streaming — are permanently inert under this shell.
+>
+> See the "Surfaces" section of `CLAUDE.md` for the full policy. Everything
+> below is retained as an accurate description of the legacy shell, not as
+> guidance for new work.
+
+This module document explains the legacy UI shell boundary for OpenCohost. It
 is intentionally scoped to the desktop composition layer, Tk mainloop ownership,
 panel wiring, and UI-state coordination.
 
 ## Current State
 
-OpenCohost is currently a CustomTkinter desktop application. The root UI shell
-still uses existing internal VoiceAI/VocalAI identifiers, but it now represents
-the OpenCohost product direction in public-facing copy.
+The legacy shell is a CustomTkinter desktop application. Its root still uses
+internal VoiceAI/VocalAI identifiers, but it represents the OpenCohost product
+direction in public-facing copy.
 
 The UI shell is not a pure presentation layer. It is the composition root that
 connects panels, the speech motor, SmartAggregator, Stream Admin, avatar/OBS,

@@ -82,25 +82,33 @@ pip install -e ".[cloud-tts,local-tts,integrations,dev]"
 
 ## Running the App
 
-```shell
-python -m opencohost
-```
-
-If the package is installed into an environment whose `Scripts/` directory is on your `PATH`, the registered GUI script also works:
+The product is the Tauri shell. It spawns the Python backend itself — nothing
+else needs to be started:
 
 ```shell
-opencohost
+cd OpenCohost_UI
+pnpm tauri:debug
 ```
 
-Enable verbose logging with:
+That script also sets `OPENCOHOST_DEBUG=1`. It warns you if a backend is already
+listening on 8765/8770, because Tauri will reuse that one instead of spawning a
+managed child, and your debug env var will not reach it.
+
+To run the backend on its own (headless, or against a separately served front
+end), use `run-api.bat`, or:
 
 ```shell
-# Windows PowerShell
-$env:OPENCOHOST_DEBUG = "1"; python -m opencohost
-
-# bash / zsh
-OPENCOHOST_DEBUG=1 python -m opencohost
+uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 ```
+
+### Legacy CustomTkinter shell
+
+`python -m opencohost` still launches the old CTk desktop app. It is **frozen
+legacy** — superseded 2026-08-13, retained but not maintained. Do not add
+features to `opencohost/ui/`. Note that host flags armed by `EngineHost` (the
+speech router, and therefore LLM output streaming) never engage under it, so it
+is not a valid surface for runtime validation. See the "Surfaces" section of
+`CLAUDE.md`.
 
 Log files are written to `%APPDATA%\OpenCohost\logs\` on Windows and `~/.local/share/OpenCohost/logs/` on Linux/macOS.
 
@@ -171,7 +179,7 @@ git add .secrets.baseline
 - **Formatter:** no project-wide formatter is enforced yet. Keep diffs clean — do not reformat lines unrelated to your change.
 - **Type hints:** preferred on all new public functions and method signatures.
 - **Comments and docstrings:** English. Explain *why*, not just what.
-- **Thread safety:** the UI runs on CustomTkinter's main thread. All background-to-UI updates MUST go through `UIState` observer callbacks or `root.after()`. Do not call CTk widgets directly from threads.
+- **Thread safety:** the engine is multi-threaded and the host owns the boundary. In the product surface, background-to-UI updates leave the engine as events through `EngineHost` and reach the front end over HTTP/SSE — never touch UI state from an engine thread. In the legacy CTk shell the equivalent rule is `UIState` observer callbacks or `root.after()`; never call CTk widgets directly from threads.
 - **No absolute paths in source:** use `settings.py` path helpers (`USER_DATA_DIR`, `LOGS_DIR`, etc.) for any file I/O. The `no-abs-paths` hook enforces this.
 - **No raw chat in logs or prompts:** viewer usernames and raw chat text must never be passed to external services. The Smart Aggregator compacts them locally into an intent summary before anything reaches the LLM.
 

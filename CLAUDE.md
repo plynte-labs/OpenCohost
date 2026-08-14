@@ -10,12 +10,54 @@ that runs entirely on the user's hardware using Ollama + Qwen3-TTS/F5-TTS.
 
 Key subsystems (all app code lives in the `opencohost/` package):
 - `opencohost/core/` — LLM engine, TTS engine, speech pipeline, health monitor
-- `opencohost/ui/` — CustomTkinter shell; thread-safe via UIState observer pattern
+- `opencohost/api/` — FastAPI host (`EngineHost`); owns the engine. **The product surface.**
+- `OpenCohost_UI/` — Tauri + React front end. Launches the API itself.
+- `opencohost/ui/` — **FROZEN LEGACY** CustomTkinter shell. See "Surfaces" below.
 - `conductor/` — Spec-Driven Development tracks and product guidelines
 - `opencohost/config/` — YAML-based settings, storage, and model registry
 
 Target: streamers who want a supervised AI co-host without cloud subscriptions.
 Product direction: **OpenCohost** (`opencohost_launch_readiness_20260605` track).
+
+## Surfaces — Tauri is the product, CTk is frozen legacy
+
+OpenCohost has two composition roots. Only one is maintained.
+
+| | Tauri + API | CustomTkinter |
+|---|---|---|
+| Launch | `pnpm tauri:debug` in `OpenCohost_UI/` | `python -m opencohost` |
+| Composition root | `opencohost/api/engine_host.py` | `opencohost/ui/app_shell.py` |
+| Status | **The product.** All new work goes here. | **Frozen legacy.** |
+
+`pnpm tauri:debug` needs nothing else running: `src-tauri/src/backend.rs` probes
+ports 8765/8770 and spawns `python -m uvicorn opencohost.api.main:app` itself
+(`spawn: true` in `src-tauri/backend.config.json`). `run-api.bat` exists only for
+running the backend standalone.
+
+**The migration is complete** (verified 2026-08-13). Every CTk panel has an API
+router behind it — avatar, chat, stream, obs, music, perfiles, personalization,
+memoria, llm_provider, ptt, agenda, i18n_tts, status, events. The last gap,
+viewer chat reaching Kira, closed in `4ffb3e3`. The only CTk module with no API
+counterpart is `ui/inspector_cards.py` (knowledge cards), which is on the
+deferred list and never shipped — a deferred feature, not a migration gap.
+
+Rules:
+- Do NOT add features to `opencohost/ui/`, refactor it, or restyle it. Fix a bug
+  there only if the owner is actively hitting it.
+- Behavior that exists only in CTk is a MISSING API feature, not a reason to work
+  in CTk.
+- **Flags armed by `EngineHost` are permanently inert under CTk.** The live
+  example: `_speech_router_enabled` defaults `False` (`core/llm_engine.py:1017`)
+  and is set `True` in exactly one place, `api/engine_host.py:672`. So the speech
+  router — and therefore `LLM_STREAMING_ENABLED`, which gates on it — never
+  engages under CTk. Do not "fix" this by arming the router in CTk; that is
+  `interruptible_speech_architecture_20260804` §8, a separate gated track.
+- Any runtime validation that measures an `EngineHost`-gated feature MUST be run
+  on the Tauri surface, or it measures nothing.
+- Qwen3-TTS is the one thing outside this migration: it is being removed
+  (`qwen_tts_extirpation_20260627`), not ported. Env-opt-in only.
+- Historical ADRs and `docs/audit/` describe CTk as current because it WAS when
+  they were written. Do not rewrite them — they are a dated record.
 
 ## Current operating mode
 
@@ -121,11 +163,13 @@ Do not invert this order without a user decision.
 | `AGENT_HANDOFF.md` | Latest operating mode and active checkpoints — read first |
 | `conductor/tracks.md` | All tracks and their status (`[x]` done, `[~]` in progress, `[ ]` pending) |
 | `conductor/product.md` | Product vision and non-goals |
-| `conductor/tech-stack.md` | Full stack: Python 3.13, CustomTkinter, Ollama, Qwen3-TTS, F5-TTS |
+| `conductor/tech-stack.md` | Full stack: Python 3.13, FastAPI, Tauri + React, Ollama, Piper |
 | `opencohost/config/settings.py` | Central settings and feature flags |
 | `opencohost/core/llm_engine.py` | LLM orchestration and tier switching |
-| `opencohost/ui/app_shell.py` | Main UI shell — thread-safety boundary |
-| `opencohost/ui/model_panel.py` | Model management panel |
+| `opencohost/api/engine_host.py` | **Composition root of the product** — arms every host flag |
+| `opencohost/api/routers/` | One router per product surface |
+| `OpenCohost_UI/src/features/` | Tauri front end, one folder per surface |
+| `opencohost/ui/app_shell.py` | Legacy CTk composition root — frozen, do not extend |
 | `docs/adr/` | Architectural Decision Records |
 
 ## Test commands

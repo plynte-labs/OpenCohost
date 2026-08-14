@@ -94,8 +94,16 @@ storage:
 ## Architecture
 
 ```
+OpenCohost_UI/            # Product UI — Tauri + React (pnpm tauri:debug)
+├── src/features/         # One folder per surface: agenda, stream, musica, ...
+└── src-tauri/backend.rs  # Spawns the Python backend if none is listening
+
 opencohost/
-├── __main__.py           # Entry point (python -m opencohost)
+├── __main__.py           # Legacy entry point (python -m opencohost)
+├── api/                  # FastAPI host — the product's engine surface
+│   ├── engine_host.py    # Composition root: owns the motor, arms host flags
+│   ├── main.py           # App factory
+│   └── routers/          # One router per surface (chat, agenda, ptt, obs, ...)
 ├── config/
 │   ├── logger.py         # Structured logging (console + rotating files)
 │   ├── settings.py       # Constants, model catalog, system prompt
@@ -106,9 +114,7 @@ opencohost/
 │   ├── llm_engine.py     # LLM orchestration, memory, TTS pipeline
 │   ├── health_monitor.py # Service health, TTS fallback gate
 │   └── profiles.py       # Personality profile load/save
-├── ui/
-│   ├── app_shell.py      # Main UI shell (thread-safe UIState observer)
-│   └── model_panel.py    # Model management panel
+├── ui/                   # LEGACY CustomTkinter shell — frozen, not maintained
 └── smart_aggregator/     # Live chat aggregator (Twitch; YouTube opt-in)
 ```
 
@@ -139,12 +145,14 @@ The app validates Ollama at startup and disables actions that depend on the LLM 
 
 The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing, model switching, and downloads until the service responds again.
 
-## HTTP API (experimental)
+## HTTP API
 
-`opencohost/api/` is a **standalone** FastAPI process that owns its own Kira
-engine — it is never shared with, or imported by, the Tk app. It exists so a
-future web/Tauri frontend can read status and switch profiles over HTTP.
-Install the optional extra, then run:
+`opencohost/api/` is a FastAPI process that owns its own Kira engine — it is
+never shared with, or imported by, the legacy Tk app. **It is the product's
+engine surface:** the Tauri front end in `OpenCohost_UI/` drives Kira entirely
+through it, and `pnpm tauri:debug` starts it for you. Run it standalone only if
+you want a headless backend or are serving the front end separately. Install the
+optional extra, then run:
 
 ```powershell
 pip install -e ".[api]"

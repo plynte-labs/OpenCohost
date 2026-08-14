@@ -32,7 +32,9 @@
 - Existing OpenCohost-specific skill remains available and should not be overwritten:
 - `vocalai-ui-ux-architect`
 - `visual-interface-engineering` — systematic UI polish from the Visual Interface Engineering PDF:
-  spacing, hierarchy, reduction of noise, faithful CustomTkinter refinement without behavior changes.
+  spacing, hierarchy, reduction of noise, without behavior changes. Apply it to the
+  Tauri front end (`OpenCohost_UI/src/`). Its original CustomTkinter framing is
+  obsolete: `opencohost/ui/` is frozen legacy and must not be restyled.
 
 ## OpenCohost Engineering Skills
 

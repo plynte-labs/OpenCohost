@@ -76,9 +76,19 @@ pip install -e ".[cloud-tts,integrations,local-tts]"
 
 ### Ejecutar
 
+La UI del producto es Tauri, y levanta el backend de Python por su cuenta:
+
 ```powershell
-python -m opencohost
+cd OpenCohost_UI
+pnpm tauri:debug
 ```
+
+Para un backend suelto (headless, o con el front servido aparte), `run-api.bat` o
+`uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1`.
+
+`python -m opencohost` todavía abre la shell vieja de CustomTkinter, que quedó
+**congelada como legacy** el 2026-08-13: se conserva, no se mantiene. Los flags
+que arma `EngineHost` no se activan ahí, así que no sirve para validar en runtime.
 
 ### Configurar rutas de almacenamiento
 
@@ -94,8 +104,16 @@ storage:
 ## Arquitectura
 
 ```
+OpenCohost_UI/            # UI del producto — Tauri + React (pnpm tauri:debug)
+├── src/features/         # Una carpeta por superficie: agenda, stream, musica, ...
+└── src-tauri/backend.rs  # Levanta el backend de Python si no hay ninguno escuchando
+
 opencohost/
-├── __main__.py           # Punto de entrada (python -m opencohost)
+├── __main__.py           # Punto de entrada legacy (python -m opencohost)
+├── api/                  # Host FastAPI — la superficie del motor del producto
+│   ├── engine_host.py    # Composition root: dueño del motor, arma los host flags
+│   ├── main.py           # App factory
+│   └── routers/          # Un router por superficie (chat, agenda, ptt, obs, ...)
 ├── config/
 │   ├── logger.py         # Logging estructurado (consola + archivos rotativos)
 │   ├── settings.py       # Constantes, catálogo de modelos, system prompt
@@ -106,9 +124,7 @@ opencohost/
 │   ├── llm_engine.py     # Orquestación LLM, memoria, pipeline TTS
 │   ├── health_monitor.py # Salud de servicios, fallback de TTS
 │   └── profiles.py       # Carga/guardado de perfiles de personalidad
-├── ui/
-│   ├── app_shell.py      # Shell principal de UI (UIState observer thread-safe)
-│   └── model_panel.py    # Panel de gestión de modelos
+├── ui/                   # Shell CustomTkinter LEGACY — congelada, no se mantiene
 └── smart_aggregator/     # Agregador de chat en vivo (Twitch; YouTube opcional)
 ```
 
