@@ -41,6 +41,18 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 - **Python 3.10+** (entorno conda o venv activado)
 - **[Ollama](https://ollama.com/) instalado y en ejecución** — Kira no puede iniciar sin él
 
+### Requisitos de Tauri
+
+La UI del producto (`pnpm tauri:debug`) necesita un toolchain de Rust/Node además de lo anterior:
+
+| Requisito | Notas |
+|---|---|
+| [Node.js](https://nodejs.org/) | Cualquier LTS actual |
+| [pnpm](https://pnpm.io/) `11.5.2` | Versión fijada vía `packageManager` en `package.json`; `corepack enable` la detecta automáticamente |
+| [Rust + Cargo](https://rustup.rs/) | No hay `rust-toolchain.toml` en este repo — la versión de Rust no está fijada, cualquier toolchain estable reciente funciona |
+| [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) | Windows 11 lo incluye por defecto; instalar manualmente en Windows 10 |
+| MSVC Build Tools (workload de C++) | Necesario para el target MSVC de `rustc` en Windows — instalar vía [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+
 ### Hardware
 
 | Nivel | VRAM de GPU | Caso de uso |
@@ -54,14 +66,14 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 > Estos comandos asumen que tu entorno Python ya está activado. Reemplaza `python` con la ruta al intérprete de tu entorno si no estás en una shell activada.
 
 ```powershell
-# Instalar el paquete con los extras predeterminados (Edge-TTS + integraciones de plataforma)
-pip install -e ".[cloud-tts,integrations]"
+# Instalar el paquete con los extras predeterminados (Edge-TTS + integraciones de plataforma + API HTTP)
+pip install -e ".[cloud-tts,integrations,api]"
 
 # Equivalente con uv
-uv pip install -e ".[cloud-tts,integrations]"
+uv pip install -e ".[cloud-tts,integrations,api]"
 
 # Opcional: agregar soporte de TTS offline con Piper (sin llamadas a la nube para síntesis de voz)
-pip install -e ".[cloud-tts,integrations,local-tts]"
+pip install -e ".[cloud-tts,integrations,api,local-tts]"
 ```
 
 **Referencia de extras:**
@@ -71,6 +83,7 @@ pip install -e ".[cloud-tts,integrations,local-tts]"
 | `cloud-tts` | Edge-TTS — voz en la nube gratuita de Microsoft (predeterminado) |
 | `local-tts` | Piper TTS offline — completamente local, sin llamadas a la nube |
 | `integrations` | OBS WebSocket, monitor de VRAM NVIDIA |
+| `api` | FastAPI + uvicorn — la API HTTP que usa el front end Tauri para manejar a Kira. Necesaria para correr el producto (`pnpm tauri:debug` la levanta) y para recolectar la suite de tests. |
 | `youtube-chat` | Chat de YouTube no oficial (pytchat) — opcional, [leer esto primero](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets |
 
@@ -82,6 +95,8 @@ La UI del producto es Tauri, y levanta el backend de Python por su cuenta:
 cd OpenCohost_UI
 pnpm tauri:debug
 ```
+
+Ver [Requisitos de Tauri](#requisitos-de-tauri) arriba si es tu primera vez — necesita Node.js, pnpm y un toolchain de Rust además de la configuración de Python.
 
 Para un backend suelto (headless, o con el front servido aparte), `run-api.bat` o
 `uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1`.
@@ -130,7 +145,9 @@ opencohost/
 
 ## Perfiles de personalidad
 
-En el primer arranque, OpenCohost genera un conjunto de perfiles de personalidad predeterminados en tu `perfiles.json` local (ignorado por git):
+En el primer arranque, OpenCohost genera un conjunto de perfiles de personalidad predeterminados en tu `perfiles.json` local (ignorado por git). Cada perfil incluido está etiquetado por idioma, y el conjunto que se genera sigue tu idioma configurado — `opencohost/config/default_profiles.json` incluye ambos:
+
+**Español (`es`)**
 
 | Perfil | Persona |
 |---|---|
@@ -140,6 +157,17 @@ En el primer arranque, OpenCohost genera un conjunto de perfiles de personalidad
 | Calmado | Modo calmado — ritmo más lento, tono sereno |
 | Técnico | Modo técnico — preciso, seco, cínico |
 | Show | Modo alto impacto — enérgico y performático |
+
+**Inglés (`en`)**
+
+| Perfil | Persona |
+|---|---|
+| Kira | Co-host por defecto — equilibrada y afilada |
+| Kira (Learn) | Modo aprendizaje — educativo y alentador |
+| Community | Modo comunidad — cálido e inclusivo |
+| Calm | Modo calmado — ritmo más lento, tono sereno |
+| Technical | Modo técnico — preciso, seco, cínico |
+| Showtime | Modo alto impacto — enérgico y performático |
 
 El nombre Kira y la personalidad base se preservan en todos los perfiles.
 
@@ -154,6 +182,36 @@ La aplicación valida Ollama al iniciar y desactiva las acciones que dependen de
 - **Instalar dependencia Python** — avisa cuando falta el paquete `ollama` en el entorno Python activo
 
 El servicio se verifica en `http://127.0.0.1:11434/api/tags`. Si Ollama deja de estar disponible durante una sesión, el motor se marca como no listo y bloquea el procesamiento, el cambio de modelo y las descargas hasta que el servicio vuelva a responder.
+
+## API HTTP
+
+`opencohost/api/` es un proceso FastAPI dueño de su propio motor de Kira —
+nunca se comparte con la app Tk legacy, ni esta lo importa. **Es la
+superficie del motor del producto:** el front end Tauri en `OpenCohost_UI/`
+maneja a Kira enteramente a través de esta API, y `pnpm tauri:debug` la
+levanta por ti. Ejecútalo por separado solo si quieres un backend headless o
+si estás sirviendo el front end aparte. El extra `api` de
+[Configuración](#configuración) ya lo cubre; si instalaste sin él:
+
+```powershell
+pip install -e ".[api]"
+uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
+```
+
+**`--workers` DEBE quedar en 1.** Un segundo worker significa un segundo
+motor — el doble de carga de VRAM/Ollama y una segunda toma del dispositivo
+de audio. `EngineHost` se niega a iniciar una segunda vez en la misma
+máquina mediante un lockfile.
+
+**No hagas bind a `--host 0.0.0.0`.** Eso expone la superficie de control
+del motor a tu LAN. CORS solo restringe a quien llama desde un navegador —
+no hace nada contra un script o `curl` que golpee el puerto directamente.
+Mantén esto en loopback salvo que pongas un proxy con autenticación
+delante.
+
+Endpoints: `GET /api/status` (snapshot de salud/motor, solo lectura) y
+`POST /api/perfiles/switch` (cambia el perfil de personalidad activo,
+idempotente vía el header `Idempotency-Key`).
 
 ## Tests
 

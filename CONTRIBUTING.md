@@ -27,6 +27,13 @@ Thank you for your interest in contributing. This guide covers everything you ne
 | [Ollama](https://ollama.com/) | Required for LLM features; install and run `ollama serve` |
 | Git | Any recent version |
 | `uv` or `pip` | Either works; examples use both |
+| [Node.js](https://nodejs.org/) | Any current LTS — needed to run the Tauri front end |
+| [pnpm](https://pnpm.io/) `11.5.2` | Version pinned via `packageManager` in `OpenCohost_UI/package.json`; `corepack enable` picks it up automatically |
+| [Rust + Cargo](https://rustup.rs/) | No `rust-toolchain.toml` in this repo — the Rust version is unpinned, any recent stable toolchain works |
+| [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) | Windows 11 ships it by default; install manually on Windows 10 |
+| MSVC Build Tools (C++ workload) | Required for the `rustc` MSVC target on Windows — install via [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+
+The last five rows are only needed to build/run `OpenCohost_UI/` (`pnpm tauri:debug`) — see [Running the App](#running-the-app) below.
 
 Windows is the primary supported platform. Linux and macOS are in progress — contributions that improve cross-platform support are welcome.
 
@@ -53,10 +60,10 @@ cd opencohost
 
 ```shell
 # pip
-pip install -e ".[cloud-tts,integrations,dev]"
+pip install -e ".[cloud-tts,integrations,api,dev]"
 
 # uv
-uv pip install -e ".[cloud-tts,integrations,dev]"
+uv pip install -e ".[cloud-tts,integrations,api,dev]"
 ```
 
 **Available extras:**
@@ -66,14 +73,15 @@ uv pip install -e ".[cloud-tts,integrations,dev]"
 | `cloud-tts` | `edge-tts` | Default voice synthesis (Microsoft Edge-TTS, cloud). Required unless you use `local-tts` only. |
 | `local-tts` | `piper-tts`, `onnxruntime` | Fully offline voice synthesis via Piper TTS. |
 | `integrations` | `obsws-python`, `nvidia-ml-py` | OBS WebSocket control, NVIDIA VRAM monitoring. |
+| `api` | `fastapi`, `uvicorn` | The HTTP API — required to run the Tauri product surface (`pnpm tauri:debug`). Also required just to *collect* the test suite: 40+ test modules import fastapi at module scope. |
 | `youtube-chat` | `pytchat` | Unofficial YouTube live chat. Opt-in — read [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) before installing. Twitch needs no extra. |
 | `dev` | `pytest`, `pre-commit`, `detect-secrets` | Test runner and pre-commit hooks — required for development. |
 
 You can combine extras:
 
 ```shell
-# Both cloud and local TTS, plus integrations and dev tools
-pip install -e ".[cloud-tts,local-tts,integrations,dev]"
+# Both cloud and local TTS, plus integrations, API, and dev tools
+pip install -e ".[cloud-tts,local-tts,integrations,api,dev]"
 ```
 
 > **Note on TTS:** `cloud-tts` (Edge-TTS) is the default. If you install only `local-tts`, the app automatically uses Piper. If you install neither, TTS synthesis is unavailable. See [Trust Model](#trust-model--what-leaves-the-machine) for what data each option sends over the network.
@@ -110,7 +118,7 @@ speech router, and therefore LLM output streaming) never engage under it, so it
 is not a valid surface for runtime validation. See the "Surfaces" section of
 `CLAUDE.md`.
 
-Log files are written to `%APPDATA%\OpenCohost\logs\` on Windows and `~/.local/share/OpenCohost/logs/` on Linux/macOS.
+Running from source — the normal case for every contributor — logs are written to `<repo>/logs/`: outside a frozen build, `USER_DATA_DIR` resolves to the repo root (`opencohost/config/storage.py`). Only a frozen/packaged build writes to `%APPDATA%\OpenCohost\logs\` on Windows or `~/.config/OpenCohost/logs/` on Linux/macOS.
 
 ---
 
@@ -295,7 +303,7 @@ Please open an issue at [github.com/plynte-labs/opencohost/issues](https://githu
 Include:
 - Your OS and Python version.
 - Ollama version and the model you were using.
-- The relevant log excerpt from `%APPDATA%\OpenCohost\logs\` (Windows) or `~/.local/share/OpenCohost/logs/` (Linux/macOS).
+- The relevant log excerpt from `<repo>/logs/` (running from source — the normal case) or `%APPDATA%\OpenCohost\logs\` / `~/.config/OpenCohost/logs/` (frozen build only).
 - Steps to reproduce.
 
 If you believe you have found a security issue, please do **not** open a public issue. Contact the maintainers directly via the email listed on the GitHub profile.

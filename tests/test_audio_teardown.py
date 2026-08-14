@@ -951,11 +951,12 @@ class TestFR1InterruptSpeaking:
         """
         import pathlib
 
-        app_shell = pathlib.Path(
-            "E:/VoiceAI/opencohost/ui/app_shell.py"
-        ).read_text(encoding="utf-8")
-        controller = pathlib.Path(
-            "E:/VoiceAI/opencohost/ui/agenda_audio_controller.py"
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        app_shell = (repo_root / "opencohost" / "ui" / "app_shell.py").read_text(
+            encoding="utf-8"
+        )
+        controller = (
+            repo_root / "opencohost" / "ui" / "agenda_audio_controller.py"
         ).read_text(encoding="utf-8")
 
         assert "motor_ia.interrupt_speaking()" in controller, (

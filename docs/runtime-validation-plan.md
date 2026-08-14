@@ -18,7 +18,7 @@ Legend: **[GATE]** blocks GO · **[DOC]** evidence only.
 
 1. Launch `run-api.bat`; confirm the banner shows `--host 127.0.0.1 --workers 1`.
 2. Single-worker backstop: in a second shell run
-   `E:\Miniconda\envs\flux_env\python.exe -m uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8766 --workers 2`.
+   `python -m uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8766 --workers 2`.
    - **PASS:** the extra worker(s) die on the `EngineHost` msvcrt lockfile
      (`RuntimeError`, not a clean `_check_single_worker` message). Confirms the
      lockfile — not the env-var check — is the real guard (audit P3 / contract §2).

@@ -41,6 +41,18 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 - **Python 3.10+** (conda or venv environment activated)
 - **[Ollama](https://ollama.com/) installed and running** — Kira cannot start without it
 
+### Tauri prerequisites
+
+The product UI (`pnpm tauri:debug`) needs a Rust/Node toolchain on top of the above:
+
+| Requirement | Notes |
+|---|---|
+| [Node.js](https://nodejs.org/) | Any current LTS |
+| [pnpm](https://pnpm.io/) `11.5.2` | Version pinned via `packageManager` in `package.json`; `corepack enable` picks it up automatically |
+| [Rust + Cargo](https://rustup.rs/) | No `rust-toolchain.toml` in this repo — the Rust version is unpinned, any recent stable toolchain works |
+| [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) | Windows 11 ships it by default; install manually on Windows 10 |
+| MSVC Build Tools (C++ workload) | Required for the `rustc` MSVC target on Windows — install via [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+
 ### Hardware
 
 | Tier | GPU VRAM | Use case |
@@ -54,14 +66,14 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 > These commands assume your Python environment is already activated. Replace `python` with the path to your environment's interpreter if you are not in an activated shell.
 
 ```powershell
-# Install the package with default extras (Edge-TTS + platform integrations)
-pip install -e ".[cloud-tts,integrations]"
+# Install the package with default extras (Edge-TTS + platform integrations + HTTP API)
+pip install -e ".[cloud-tts,integrations,api]"
 
 # uv equivalent
-uv pip install -e ".[cloud-tts,integrations]"
+uv pip install -e ".[cloud-tts,integrations,api]"
 
 # Optional: add offline Piper TTS support (no cloud calls for voice synthesis)
-pip install -e ".[cloud-tts,integrations,local-tts]"
+pip install -e ".[cloud-tts,integrations,api,local-tts]"
 ```
 
 **Extras reference:**
@@ -71,14 +83,28 @@ pip install -e ".[cloud-tts,integrations,local-tts]"
 | `cloud-tts` | Edge-TTS — Microsoft free cloud voice (default) |
 | `local-tts` | Piper offline TTS — fully local, no cloud calls |
 | `integrations` | OBS WebSocket, NVIDIA VRAM monitor |
+| `api` | FastAPI + uvicorn — the HTTP API the Tauri front end drives Kira through. Required to run the product (`pnpm tauri:debug` spawns it) and to collect the test suite. |
 | `youtube-chat` | Unofficial YouTube live chat (pytchat) — opt-in, [read this first](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets |
 
 ### Run
 
+The product UI is Tauri, which spawns the Python backend on its own:
+
 ```powershell
-python -m opencohost
+cd OpenCohost_UI
+pnpm tauri:debug
 ```
+
+See [Tauri prerequisites](#tauri-prerequisites) above if this is your first run — it needs Node.js, pnpm, and a Rust toolchain on top of the Python setup.
+
+For a standalone backend (headless, or with the front end served separately), use `run-api.bat` or
+`uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1`.
+
+`python -m opencohost` still opens the old CustomTkinter shell, which was
+**frozen as legacy** on 2026-08-13: it is kept around but not maintained. The
+flags armed by `EngineHost` never engage there, so it is not a valid surface
+for runtime validation.
 
 ### Configure storage paths
 
@@ -120,7 +146,9 @@ opencohost/
 
 ## Personality Profiles
 
-On first run, OpenCohost seeds a set of default personality profiles into your local `perfiles.json` (ignored by git):
+On first run, OpenCohost seeds a set of default personality profiles into your local `perfiles.json` (ignored by git). Each shipped profile is language-tagged, and the seeded set follows your configured language — `opencohost/config/default_profiles.json` ships both:
+
+**Spanish (`es`)**
 
 | Profile | Persona |
 |---|---|
@@ -130,6 +158,17 @@ On first run, OpenCohost seeds a set of default personality profiles into your l
 | Calmado | Calm mode — slower pace, grounded tone |
 | Técnico | Technical mode — precise, dry, cynical |
 | Show | High-energy performance mode |
+
+**English (`en`)**
+
+| Profile | Persona |
+|---|---|
+| Kira | Default co-host — balanced and sharp |
+| Kira (Learn) | Learning mode — educational and encouraging |
+| Community | Community mode — warm and inclusive |
+| Calm | Calm mode — slower pace, grounded tone |
+| Technical | Technical mode — precise, dry, cynical |
+| Showtime | High-energy performance mode |
 
 Kira's name and base personality are preserved across all profiles.
 
@@ -151,8 +190,8 @@ The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes u
 never shared with, or imported by, the legacy Tk app. **It is the product's
 engine surface:** the Tauri front end in `OpenCohost_UI/` drives Kira entirely
 through it, and `pnpm tauri:debug` starts it for you. Run it standalone only if
-you want a headless backend or are serving the front end separately. Install the
-optional extra, then run:
+you want a headless backend or are serving the front end separately. The `api`
+extra from [Setup](#setup) already covers this; if you installed without it:
 
 ```powershell
 pip install -e ".[api]"

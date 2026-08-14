@@ -442,7 +442,8 @@ def test_autouse_fixture_isolates_log_dir_and_acciones_file(tmp_path):
     for EVERY test -- not just the ones that opt in with their own
     monkeypatch -- so a real EngineHost/TestClient run in an unrelated test
     (e.g. test_engine_host_agenda_load.py, test_obs_runtime.py) never writes
-    into the developer's real E:/VoiceAI/logs/."""
+    into the checkout's own logs/ directory, which outside a frozen build is a
+    live developer log directory rather than a scratch one."""
     from opencohost.config import settings as settings_mod
 
     assert settings_mod.LOG_DIR == str(tmp_path / "logs")

@@ -300,9 +300,10 @@ def _isolate_api_log_dir(tmp_path, monkeypatch):
     from ``settings.LOG_DIR`` / ``settings.ACCIONES_LOG_FILE`` at call time
     (same lazy-read pattern as ``API_TOKENS_FILE`` etc. above), so any test
     that drives a real ``TestClient`` or a real ``EngineHost._dispatch_motor_event``
-    without this isolation writes into the developer's real
-    ``E:/VoiceAI/logs/`` (opencohost_api.log, api_audit.jsonl,
-    acciones.jsonl) -- same repo-root hazard as the fixtures above.
+    without this isolation writes into the checkout's own ``logs/``
+    (opencohost_api.log, api_audit.jsonl, acciones.jsonl) -- outside a frozen
+    build ``USER_DATA_DIR`` IS the repo root, so that is a live developer log
+    directory, not a scratch one. Same repo-root hazard as the fixtures above.
     """
     from opencohost.config import settings as settings_mod
 

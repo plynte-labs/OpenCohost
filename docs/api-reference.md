@@ -163,5 +163,8 @@ Backing: OBS client + `avatar.yaml` (shared file; writes under `_config_lock`).
 Run:
 
 ```powershell
-E:\Miniconda\envs\flux_env\python.exe -m pytest tests/test_api_*.py -q -p no:cacheprovider --basetemp=E:/VoiceAI/temp/pytest-piper-clean
+python -m pytest tests/test_api_*.py -q -p no:cacheprovider --basetemp=temp/pytest-api
 ```
+
+`--basetemp` is explicit because pytest's default lands under the system temp
+directory, which some Windows setups lock down; any writable path works.
