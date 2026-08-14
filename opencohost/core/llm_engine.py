@@ -1,6 +1,7 @@
 """
 opencohost/core/llm_engine.py
 """
+import contextlib
 import os
 import re
 import hashlib
@@ -23,7 +24,7 @@ try:
 except ImportError:
     winsound = None  # non-Windows: the PTT cue is a silent no-op
 from collections import deque, Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from opencohost.config.settings import (
@@ -77,9 +78,11 @@ from opencohost.core.scheduling.turn_stamp import TurnStamp
 from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
 from opencohost.core.speech.router import (
     SPEECH_BOUNDARY_COMMAND,
+    SpeechJob,
     SpeechRouter,
     priority_for_source,
 )
+from opencohost.core.speech.sentence_splitter import SentenceSplitter
 from opencohost.core.context.ctx_telemetry import CtxTelemetryRing
 from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
@@ -99,7 +102,7 @@ from opencohost.core.context.repetition_guard import (
     DEFAULT_CONFIG as REPETITION_CONFIG,
 )
 from opencohost.config.logger import get_logger, _debug_enabled
-from opencohost.config.validation import output_guard
+from opencohost.config.validation import log_non_negotiable_block, output_guard
 from opencohost.core.engine.llm_engine_scout import ScoutPromotionMixin
 from opencohost.core.engine.llm_engine_memorias import MemoriaCaptureMixin
 from opencohost.core.engine.llm_engine_agenda import AgendaStashMixin
@@ -503,6 +506,18 @@ def _output_guard_with_tts_check(text: str, source: str) -> tuple[bool, str]:
     return True, ""
 
 
+# output_guard's reason strings carry the rule id in brackets
+# ("Non-negotiable violation [no_ai_self_identification]: ..."). The character
+# class deliberately excludes "-" so the "[tts-sanitized]" tag a
+# _output_guard_with_tts_check block prepends is never mistaken for a rule id.
+_GUARD_RULE_ID_RE = re.compile(r"\[([a-z0-9_]+)\]")
+
+
+def _guard_rule_id(reason: str) -> str:
+    match = _GUARD_RULE_ID_RE.search(reason or "")
+    return match.group(1) if match else "unknown_rule"
+
+
 # Control commands safe to apply at a turn boundary (see
 # MotorVocalIA._drain_control_commands). All are plain setters or a model
 # prepare/switch — none dispatches a turn or recurses into the processing
@@ -556,6 +571,42 @@ class _GenerationSetup:
 
 
 @dataclass
+class _StreamAttemptState:
+    """Per-attempt state of the streaming loop (llm_output_streaming_20260813
+    design §3/§5/§7). Carries everything the divergence points downstream need:
+    the lazily-created job (None until the first clean sentence closes — which
+    is what keeps every pre-commit failure path byte-identical to the buffered
+    path), the appended-sentence prefix (what Kira is owed to have said on
+    air), and the trip/abort verdicts the finalize divergence gates on.
+
+    `contexto`/`history_text` ride here because the partial-turn exit (§7)
+    commits the spoken prefix to history from exception paths that never reach
+    `_finalize_generation`.
+    """
+    source: str
+    contexto: object = None
+    history_text: Optional[str] = None
+    router: object = None
+    job: Optional[SpeechJob] = None
+    appended_sentences: list = field(default_factory=list)
+    sentence_index: int = 0
+    # Pre-submit guard trip (§5 "before anything is spoken"): silently revert
+    # to buffered semantics — keep consuming the stream, never append.
+    consume_only: bool = False
+    # Post-submit guard trip (§5 "after audio is out"):
+    # (rule_id, tripping sentence index, spoken_upto).
+    trip: Optional[tuple] = None
+    # Cancel token / append_chunks refusal (§6): the turn is dead.
+    abort_reason: Optional[str] = None
+    # True once the partial-turn exit (or the finalize divergence) ran, so the
+    # orphan belt in _generar_dialogo's catch-all never double-commits.
+    handled: bool = False
+
+    def spoken_prefix(self) -> str:
+        return " ".join(self.appended_sentences).strip()
+
+
+@dataclass
 class _GenerationAttemptOutcome:
     """_cloud_attempt_loop's result. `early_return` mirrors the original
     method's own control flow: every early `return` inside the retry loop
@@ -564,10 +615,15 @@ class _GenerationAttemptOutcome:
     the orchestrator needs to reproduce that identically -- it is NOT a
     truthiness check, since `""` itself is a valid (falsy) early-return
     value that must still short-circuit finalize.
+
+    `stream` is None for every buffered attempt; a stream-eligible attempt
+    carries its `_StreamAttemptState` so `_finalize_generation` can gate the
+    §5/§7 divergence points on `stream.job` (llm_output_streaming_20260813).
     """
     raw_content: str = ""
     respuesta: object = None
     early_return: Optional[str] = None
+    stream: Optional["_StreamAttemptState"] = None
 
 
 @dataclass
@@ -961,6 +1017,34 @@ class MotorVocalIA(
         self._speech_router_enabled: bool = False
         # Built (and its daemon thread started) on the FIRST routed submit.
         self._speech_router = None
+        # llm_output_streaming_20260813 §3: per-turn handoff between
+        # _finalize_generation and _ejecutar_inferencia — the SpeechJob of a
+        # turn whose audio already went through submit_streaming/append, so
+        # _speak_or_submit must NOT run again for it. Single engine thread:
+        # written by finalize, read-and-cleared by _ejecutar_inferencia.
+        self._streamed_turn_job: Optional[SpeechJob] = None
+        # llm_output_streaming_20260813 §7: the spoken prefix of a turn that
+        # took the partial exit. Streaming creates a state that could not
+        # exist before -- generation returned "" and yet audio ALREADY went
+        # out -- so the two consumers of an empty return need to tell that
+        # case apart from a genuinely silent drop. Same single-thread
+        # write/read-and-clear discipline as `_streamed_turn_job`.
+        self._streamed_turn_prefix: Optional[str] = None
+        # llm_output_streaming_20260813 §3: the OTHER per-turn handoff, in the
+        # opposite direction — _ejecutar_inferencia publishes this turn's
+        # bundle_followers so the eligibility gate in _cloud_attempt_loop can
+        # exclude bundle turns (phase 1 sidesteps the §7 requeue-vs-double-
+        # answer fork). An attribute, NOT a _generar_dialogo kwarg, because
+        # existing tests pin that signature with exact-shape doubles (the C1
+        # conditional-forward lesson). Single engine thread; always cleared
+        # in _ejecutar_inferencia's finally.
+        self._turn_bundle_followers: Optional[list] = None
+        # Orphan belt (§7): the live _StreamAttemptState while a streamed
+        # attempt runs. If an exception escapes after the first submit but
+        # before finalize handled the job, _generar_dialogo's catch-all uses
+        # this to seal + commit the spoken prefix instead of leaving the
+        # router starving forever on an unsealed job.
+        self._live_stream_state: Optional["_StreamAttemptState"] = None
         # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
         # step 3), same pattern as `_speech_router_enabled` above: EngineHost
         # turns it ON, CTK never does. OFF reproduces step 2 exactly — no
@@ -2556,6 +2640,8 @@ class MotorVocalIA(
                     provider_cfg=provider_cfg,
                     request_model=request_model,
                     watchdog_timeout=watchdog_timeout,
+                    contexto=contexto,
+                    history_text=history_text,
                 )
                 if outcome.early_return is not None:
                     result = outcome.early_return
@@ -2571,6 +2657,9 @@ class MotorVocalIA(
                         is_local=is_local,
                         provider_cfg=provider_cfg,
                         request_model=request_model,
+                        streamed_job=(
+                            outcome.stream.job if outcome.stream is not None else None
+                        ),
                     )
                 if (
                     result
@@ -2610,6 +2699,19 @@ class MotorVocalIA(
         except Exception as e:
             self._log(f"ERROR Ollama: {e}", level="error")
             logger.exception("Error en inferencia LLM")
+            # llm_output_streaming_20260813 §7 orphan belt: if a streamed turn
+            # created a job and the exception escaped every closer hook (e.g.
+            # finalize itself raised), the job must still be sealed and the
+            # spoken prefix committed — an unsealed ACTIVE job would starve
+            # the router forever (no idle, mouth stuck "speaking").
+            _orphan = self._live_stream_state
+            if _orphan is not None and _orphan.job is not None and not _orphan.handled:
+                try:
+                    self._stream_partial_exit(
+                        _orphan, reason=f"engine_error:{type(e).__name__}"
+                    )
+                except Exception:
+                    logger.exception("stream orphan belt failed")
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
@@ -2910,6 +3012,8 @@ class MotorVocalIA(
         provider_cfg: dict,
         request_model: str,
         watchdog_timeout: Optional[float],
+        contexto=None,
+        history_text: Optional[str] = None,
     ) -> "_GenerationAttemptOutcome":
         """Phase 2 of _generar_dialogo (refactor_core_api_20260802 B7): the
         max_intentos retry loop, including the cloud transport-failure
@@ -2917,6 +3021,11 @@ class MotorVocalIA(
         piece with its comments intact. Every early `return ""` here becomes
         `early_return=""` on the outcome -- the orchestrator propagates it
         identically via `if outcome.early_return is not None: return ...`.
+
+        `contexto`/`history_text` exist only for the streaming path
+        (llm_output_streaming_20260813): they ride to the §7 partial-turn
+        exit, which commits the spoken prefix from exception paths that never
+        reach finalize. A buffered turn never reads them.
         """
         messages = setup.messages
         opciones_llm = setup.opciones_llm
@@ -2925,6 +3034,25 @@ class MotorVocalIA(
         _effective_ctx = setup.effective_ctx
         raw_content = ""
         respuesta = None
+        stream_state: Optional["_StreamAttemptState"] = None
+
+        # llm_output_streaming_20260813 §3 eligibility gate. `commit_history`
+        # already tags every speculative path (pregen worker, connector
+        # upgrade) False, so those stay buffered by construction; bundles are
+        # phase 2 (§7); cloud is phase 4 (§8); `_speech_router_enabled` is the
+        # CTk/kill-switch gate and LLM_STREAMING_ENABLED the revert lever. An
+        # ineligible turn takes the buffered call below byte-identically.
+        # `_turn_bundle_followers` is the per-turn handoff attribute
+        # _ejecutar_inferencia publishes (getattr-guarded: several tests
+        # build a MotorVocalIA via __new__ and never run __init__).
+        stream_eligible = (
+            is_local
+            and source in ("direct", "ptt")
+            and commit_history
+            and self._speech_router_enabled
+            and LLM_STREAMING_ENABLED
+            and not getattr(self, "_turn_bundle_followers", None)
+        )
 
         for intento in range(max_intentos):
             # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
@@ -2932,15 +3060,34 @@ class MotorVocalIA(
             with self._lock:
                 self._llm_generating = True
             try:
-                respuesta = self._ollama_chat_with_watchdog(
-                    timeout=chat_timeout,
-                    model=request_model,
-                    messages=messages,
-                    keep_alive=LLM_KEEP_ALIVE,
-                    options=opciones_llm,
-                    provider_cfg=provider_cfg,
-                    is_local=is_local,
-                )
+                if stream_eligible:
+                    respuesta, stream_state = self._run_streaming_attempt(
+                        setup,
+                        source=source,
+                        request_model=request_model,
+                        contexto=contexto,
+                        history_text=history_text,
+                    )
+                    if stream_state.abort_reason is not None:
+                        # §6: cancel token or append refusal — the turn is
+                        # dead. Post-submit, _run_streaming_attempt already
+                        # sealed and committed the spoken prefix; pre-submit
+                        # nothing was spoken and nothing committed. Either
+                        # way this is a non-committing return for the
+                        # pregen epoch, same idiom as the watchdog branch.
+                        if commit_history:
+                            self._invalidate_pregen_epoch()
+                        return _GenerationAttemptOutcome(early_return="")
+                else:
+                    respuesta = self._ollama_chat_with_watchdog(
+                        timeout=chat_timeout,
+                        model=request_model,
+                        messages=messages,
+                        keep_alive=LLM_KEEP_ALIVE,
+                        options=opciones_llm,
+                        provider_cfg=provider_cfg,
+                        is_local=is_local,
+                    )
             except Exception as e:
                 if self._is_watchdog_timeout_error(e):
                     # R3: a bounded connector-upgrade call (watchdog_timeout set)
@@ -3162,7 +3309,268 @@ class MotorVocalIA(
             self._log(f"⚠️ Intento {intento+1}: {request_model} devolvió respuesta vacía. Reintentando...", level="warning")
             time.sleep(0.5)
 
-        return _GenerationAttemptOutcome(raw_content=raw_content, respuesta=respuesta)
+        return _GenerationAttemptOutcome(
+            raw_content=raw_content, respuesta=respuesta, stream=stream_state
+        )
+
+    def _run_streaming_attempt(
+        self,
+        setup: "_GenerationSetup",
+        *,
+        source: str,
+        request_model: str,
+        contexto,
+        history_text: Optional[str],
+    ) -> tuple:
+        """One stream-eligible generation attempt (llm_output_streaming_20260813
+        §3): iterate `_ollama_chat_streaming` synchronously on the engine
+        thread, close sentences with the B_ws-parity SentenceSplitter, and run
+        each closed sentence through the load-bearing order cancel → sanitize →
+        guard(sanitized, sentence granularity) → fragment → lazy submit/append.
+
+        Returns `(respuesta, state)`: `respuesta` is the final (done=true)
+        chunk with `message.content` substituted by the accumulated text so
+        every downstream telemetry read works unchanged, and `state` carries
+        the job/trip/abort verdicts for the §5/§7 divergence points.
+
+        The generator is closed on EVERY exit path via contextlib.closing —
+        the socket close is the only real server-side abort for Ollama (§6),
+        so it must never be left to garbage collection. Any exception after
+        the first submit takes the §7 partial-turn exit (seal, commit the
+        spoken prefix, one metadata log line) and then re-raises unchanged, so
+        the attempt loop's watchdog/transport classification — including
+        `_recover_from_stalled_inference` — still runs exactly as today.
+        """
+        state = _StreamAttemptState(
+            source=source, contexto=contexto, history_text=history_text
+        )
+        self._live_stream_state = state
+        splitter = SentenceSplitter()
+        accumulated = ""
+        accumulated_thinking = ""
+        final_chunk = None
+        stream = self._ollama_chat_streaming(
+            timeout=setup.chat_timeout,
+            model=request_model,
+            messages=setup.messages,
+            keep_alive=LLM_KEEP_ALIVE,
+            options=setup.opciones_llm,
+        )
+        try:
+            with contextlib.closing(stream):
+                stopped = False
+                for chunk in stream:
+                    final_chunk = chunk
+                    msg = getattr(chunk, "message", None)
+                    delta = (getattr(msg, "content", "") or "") if msg is not None else ""
+                    accumulated += delta
+                    accumulated_thinking += (
+                        (getattr(msg, "thinking", "") or "") if msg is not None else ""
+                    )
+                    if state.consume_only:
+                        # §5 pre-submit trip: buffered semantics — keep
+                        # consuming to completion, never append.
+                        continue
+                    for sentence in splitter.feed(delta):
+                        action = self._handle_stream_sentence(sentence, state, setup)
+                        if action == "revert":
+                            state.consume_only = True
+                            break
+                        if action != "continue":
+                            stopped = True
+                            break
+                    if stopped:
+                        # §5/§6: abort the stream — closing() closes the
+                        # socket, which frees the single Ollama runner.
+                        break
+                if not stopped and not state.consume_only:
+                    for sentence in splitter.flush():
+                        action = self._handle_stream_sentence(sentence, state, setup)
+                        if action != "continue":
+                            break
+        except BaseException as exc:
+            # §7: after the first submit the turn can no longer "not have
+            # happened" — seal at the last appended sentence and commit the
+            # spoken prefix BEFORE re-raising into the attempt loop's
+            # unchanged watchdog/transport handling. Pre-submit (no job),
+            # every failure keeps its exact legacy semantics: re-raise only.
+            if state.job is not None and not state.handled:
+                self._stream_partial_exit(state, reason=type(exc).__name__)
+            raise
+        if state.abort_reason is not None and state.job is not None and not state.handled:
+            self._stream_partial_exit(state, reason=state.abort_reason)
+        respuesta = self._rebuild_stream_response(
+            final_chunk, accumulated, accumulated_thinking
+        )
+        return respuesta, state
+
+    def _handle_stream_sentence(
+        self, sentence: str, state: "_StreamAttemptState", setup: "_GenerationSetup"
+    ) -> str:
+        """One closed sentence through the §3 loop, in EXACTLY this order:
+
+        1. cancel-token check (§6) — set ⇒ abort the turn;
+        2. sanitize, THEN guard — the guard MUST see the SANITIZED sentence
+           (guarding raw text reproduces the markdown evasion: 'Como *IA*, no
+           puedo opinar.' passes the raw guard, the sanitizer strips the
+           asterisks, and the broadcast line is the one R9 exists to block),
+           and at SENTENCE granularity, never fragment granularity (the
+           >25-word comma sub-split cuts inside R4/R3-discourse patterns);
+        3. fragment — the `_fragment_for_tts` stage only;
+        4. lazy submit / append — the first clean sentence creates the job
+           (which is the instant the turn becomes committing, §7).
+
+        Returns "continue" | "revert" | "truncate" | "abort".
+        """
+        source = state.source
+        if self._speech_cancelled(source):
+            state.abort_reason = "speech_cancelled"
+            return "abort"
+        state.sentence_index += 1
+        pieces = [p for p in self._sanitize_for_tts(sentence) if p.strip()]
+        sanitized = " ".join(p.strip() for p in pieces)
+        if not sanitized:
+            return "continue"
+        # BOTH forms, exactly like the buffered path (`f07b360`) and the
+        # full-text backstop below: raw-only misses the markdown evasion
+        # ('Como *IA*, no puedo opinar.' passes R9 because its tokens join on
+        # `\s+` and `*` is not whitespace), and sanitized-only would miss
+        # anything the sanitizer happens to mangle out of a pattern. Guarding
+        # only the sanitized form would leave the streamed path WEAKER than
+        # the buffered one on that second axis, which is exactly the kind of
+        # asymmetry this track must not introduce.
+        allowed, reason = _output_guard_with_tts_check(sentence, source=source)
+        if not allowed:
+            if state.job is None:
+                # §5 "before anything is spoken": silently revert the whole
+                # turn to buffered semantics. No job is ever created;
+                # _finalize_generation then runs exactly as today (full
+                # guard, retry nudge, canned fallback, non-committing "").
+                return "revert"
+            state.trip = (
+                _guard_rule_id(reason),
+                state.sentence_index,
+                len(state.appended_sentences),
+            )
+            return "truncate"
+        fragments = self._fragment_for_tts(pieces)
+        if not fragments:
+            # Clean but unspeakable (len<=3 filter): nothing owed to the air.
+            return "continue"
+        if state.job is None:
+            state.router = self._ensure_router()
+            state.job = state.router.submit_streaming(
+                source, priority_for_source(source)
+            )
+            if not state.router.append_chunks(state.job, fragments):
+                state.abort_reason = "append_refused"
+                return "abort"
+            state.appended_sentences.append(sanitized)
+            logger.info(
+                "[STREAM_TTFA] source=%s first_audio_submit_ms=%d sentences=1",
+                source,
+                max(0, int((time.time() - setup.start_llm) * 1000)),
+            )
+            return "continue"
+        if not state.router.append_chunks(state.job, fragments):
+            state.abort_reason = "append_refused"
+            return "abort"
+        state.appended_sentences.append(sanitized)
+        return "continue"
+
+    def _stream_partial_exit(self, state: "_StreamAttemptState", *, reason: str) -> None:
+        """§7 partial-turn exit for a streamed turn that dies AFTER its first
+        submit: seal the job at the last appended sentence and commit the
+        spoken prefix to history — Kira said it on air; the next prompt must
+        know. Never regenerates, never retries. Metadata-only log line."""
+        try:
+            state.router.seal(state.job)
+        except Exception:
+            logger.exception("stream partial exit: seal failed")
+        prefix = state.spoken_prefix()
+        if prefix:
+            self._commit_history(
+                state.contexto, prefix, source=state.source,
+                history_text=state.history_text,
+            )
+            # Publish it for `_ejecutar_inferencia`: this turn returns "" but
+            # its head ALREADY aired, so the owner must not be told the turn
+            # was dropped and the transcript must show what the audience
+            # actually heard.
+            self._streamed_turn_prefix = prefix
+        logger.warning(
+            "[STREAM_PARTIAL_EXIT] source=%s reason=%s spoken_upto=%d "
+            "sentences_closed=%d committed=%s",
+            state.source, reason, len(state.appended_sentences),
+            state.sentence_index, bool(prefix),
+        )
+        state.handled = True
+        self._live_stream_state = None
+
+    @staticmethod
+    def _rebuild_stream_response(final_chunk, accumulated: str, accumulated_thinking: str):
+        """§3 'at stream end': the final (done=true) chunk carries eval_count /
+        eval_duration / prompt_eval_* (earlier chunks have them as None), so
+        keep that chunk and substitute `message.content` with the accumulated
+        text. Every downstream `getattr(respuesta, "prompt_eval_count", 0)`
+        and the ctx_utilization / prefill-decode / load_ms telemetry then
+        work unchanged. A zero-chunk stream degrades to a dict-shaped empty
+        response, which the attempt loop's empty-retry branch already handles.
+        """
+        if final_chunk is None:
+            return {"message": {"content": accumulated, "thinking": accumulated_thinking}}
+        if isinstance(final_chunk, dict):
+            msg = final_chunk.setdefault("message", {})
+        else:
+            msg = getattr(final_chunk, "message", None)
+        if isinstance(msg, dict):
+            msg["content"] = accumulated
+            msg["thinking"] = accumulated_thinking
+        elif msg is not None:
+            msg.content = accumulated
+            msg.thinking = accumulated_thinking
+        return final_chunk
+
+    def _apply_stream_guard_verdict(
+        self, state: "_StreamAttemptState", dialogo: str, source: str
+    ) -> str:
+        """The §5/§7 finalize divergence for a turn whose audio is already on
+        air (a job exists). Two cases:
+
+        - No in-loop trip: run the unchanged full-text backstop. Allowed ⇒
+          success — seal the job (chunks are final) and return the full text.
+        - In-loop trip, or the backstop tripped: truncation protocol — one
+          metadata-only log line (rule id, tripping sentence index,
+          spoken_upto) via log_non_negotiable_block, seal at the last clean
+          sentence, and return the spoken prefix for the normal commit flow.
+          NO `_retry_after_guard_block` (its output has no relationship to the
+          spoken prefix — an audible non-sequitur) and NO canned fallback line
+          (the head already filled the air).
+        """
+        trip = state.trip
+        if trip is None:
+            allowed, reason = _output_guard_with_tts_check(dialogo, source=source)
+            if allowed:
+                state.router.seal(state.job)
+                state.handled = True
+                self._live_stream_state = None
+                self._streamed_turn_job = state.job
+                return dialogo
+            # Backstop trip at finalize: the sentence index is unknown by
+            # construction (the per-sentence pass allowed every sentence).
+            trip = (_guard_rule_id(reason), -1, len(state.appended_sentences))
+        rule_id, sentence_index, spoken_upto = trip
+        # Metadata only in `preview` — deliberately never the blocked text.
+        log_non_negotiable_block(
+            rule_id,
+            "stream_truncation",
+            preview=f"sentence_index={sentence_index} spoken_upto={spoken_upto}",
+        )
+        state.router.seal(state.job)
+        state.handled = True
+        self._live_stream_state = None
+        self._streamed_turn_job = state.job
+        return state.spoken_prefix()
 
     def _finalize_generation(
         self,
@@ -3177,6 +3585,7 @@ class MotorVocalIA(
         is_local: bool,
         provider_cfg: dict,
         request_model: str,
+        streamed_job: Optional[SpeechJob] = None,
     ) -> str:
         """Phase 3 of _generar_dialogo (refactor_core_api_20260802 B7):
         post-process the raw completion (ctx telemetry, MODEL_TRACE, agenda
@@ -3184,6 +3593,13 @@ class MotorVocalIA(
         agenda acceptance) and commit/return. The ctx-telemetry snapshot
         block keeps reading only THIS call's own locals/params (never a
         shared attribute) -- same documented design as before the split.
+
+        `streamed_job` (llm_output_streaming_20260813 §5/§7): non-None only
+        when this turn's audio already went out through the router's growing
+        job. It gates exactly the streamed divergence points — clause
+        sanitizer verdict-log-only, guard-trip truncation instead of
+        retry/fallback, seal-on-success — and NOTHING else; a buffered turn
+        (streamed_job=None) runs this method byte-identically to before.
         """
         raw_content = outcome.raw_content
         respuesta = outcome.respuesta
@@ -3409,8 +3825,21 @@ class MotorVocalIA(
                 if commit_history:
                     self._invalidate_pregen_epoch()
                 return ""
-            dialogo = san.text
-        allowed, guard_reason = _output_guard_with_tts_check(dialogo, source=source)
+            if streamed_job is None:
+                dialogo = san.text
+            # else: verdict-log-only (§5) — the ADR-039 counters accrued in
+            # the _log_clause_sanitizer call above, but _repair_sentence
+            # mutations are never applied to a turn that is already speaking.
+        if streamed_job is not None:
+            # §5/§7: the per-sentence guard already ran on every sanitized
+            # sentence in the streaming loop; this applies the full-text
+            # backstop / truncation protocol and seals the job. It never
+            # returns an empty string (a job implies >=1 appended sentence),
+            # so the retry/fallback blocks below are structurally skipped.
+            dialogo = self._apply_stream_guard_verdict(outcome.stream, dialogo, source)
+            allowed, guard_reason = True, ""
+        else:
+            allowed, guard_reason = _output_guard_with_tts_check(dialogo, source=source)
         if not allowed:
             self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
             # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
@@ -3584,7 +4013,27 @@ class MotorVocalIA(
             answered_by_provider = _answer_state["provider"]
             answered_by_transport = _answer_state["transport"]
             provider_changed_while_queued = submitted_under_provider != answered_by_provider
-        dialogo = self._generar_dialogo(contexto, source=source, commit_history=True, history_text=history_text)
+        # llm_output_streaming_20260813: fresh turn — clear the streamed-turn
+        # handoff BEFORE generating so a stale value from a direct
+        # _generar_dialogo call (tests, future callers) can never leak into
+        # this turn's speak decision, and publish this turn's followers for
+        # the eligibility gate (an attribute, never a _generar_dialogo kwarg
+        # — existing tests pin that signature with exact-shape doubles).
+        # Single engine thread, so the write/read pair cannot interleave
+        # with another turn.
+        self._streamed_turn_job = None
+        self._streamed_turn_prefix = None
+        self._turn_bundle_followers = bundle_followers or None
+        try:
+            dialogo = self._generar_dialogo(
+                contexto, source=source, commit_history=True, history_text=history_text
+            )
+        finally:
+            self._turn_bundle_followers = None
+        streamed_job = self._streamed_turn_job
+        self._streamed_turn_job = None
+        streamed_prefix = self._streamed_turn_prefix
+        self._streamed_turn_prefix = None
         if dialogo:
             engine_ms = int((time.monotonic() - request_start) * 1000)
             if queue_wait_ms is not None:
@@ -3646,7 +4095,29 @@ class MotorVocalIA(
             # the job is still QUEUED, so nothing after this line may assume
             # speech completed — see `_complete_processing_cycle`'s idle gate
             # and `_drain_control_commands`' `_speech_active` gate.
-            self._speak_or_submit(dialogo, source=source)
+            #
+            # llm_output_streaming_20260813 §3: a turn that STREAMED already
+            # owes its audio to the router's growing job (submitted lazily at
+            # the first clean sentence, sealed at finalize) — submitting the
+            # full text again would speak the whole turn twice.
+            if streamed_job is None:
+                self._speak_or_submit(dialogo, source=source)
+        elif streamed_prefix:
+            # llm_output_streaming_20260813 §7 partial-turn exit: generation
+            # returned "" but this turn's head ALREADY went out through the
+            # router's growing job, and `_stream_partial_exit` already sealed
+            # it and committed the prefix to history.
+            #
+            # Every branch below assumes an empty return means SILENCE — the
+            # `turn_dropped` toast says so in its own comment ("instead of
+            # leaving them to infer it from silence"). That premise is false
+            # here: the audience heard the head. Firing the toast would tell
+            # the owner nothing aired while it audibly did, and skipping
+            # `_emit_dialogue` would leave the transcript blank for words the
+            # stream already carried. So emit what was actually spoken and
+            # take no drop/requeue branch. Streamed sources are ptt/direct
+            # only, so this can never shadow the agenda or bundle branches.
+            self._emit_dialogue(streamed_prefix, source)
         elif source.startswith("kira-agenda"):
             # Empty or guardrail-blocked agenda generation: _generar_dialogo
             # returned "", so _hablar never runs and no speaking_start event
