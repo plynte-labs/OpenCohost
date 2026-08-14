@@ -1228,9 +1228,26 @@ def test_productor_no_ref_with_passing_health_gate_logs_single_coherent_fallback
 # ---------------------------------------------------------------------------
 
 
-def test_llm_streaming_flag_defaults_off():
-    """The whole track's revert lever ships OFF: nothing consumes the seam yet."""
-    assert settings.LLM_STREAMING_ENABLED is False
+def test_llm_streaming_defaults_on_and_env_zero_is_the_kill_switch(monkeypatch):
+    """Default ON (owner decision 2026-08-13). The track shipped default-OFF
+    pending a runtime gate, but that gate's own numbers -- TTFA, the
+    first-sentence size that makes TTFA readable, and the interruptibility
+    behaviour -- are unobservable while the feature never runs.
+
+    The kill switch is the load-bearing half of that decision and is pinned
+    here: OPENCOHOST_LLM_STREAMING=0 must turn the whole track off in one step,
+    and only the literal "0" may do it -- a typo must not silently disable the
+    feature the way a `== "1"` opt-in would silently fail to enable it.
+    """
+    monkeypatch.delenv("OPENCOHOST_LLM_STREAMING", raising=False)
+    assert settings._resolve_llm_streaming() is True
+
+    monkeypatch.setenv("OPENCOHOST_LLM_STREAMING", "0")
+    assert settings._resolve_llm_streaming() is False
+
+    for still_on in ("1", "", "true", "off"):
+        monkeypatch.setenv("OPENCOHOST_LLM_STREAMING", still_on)
+        assert settings._resolve_llm_streaming() is True, still_on
 
 
 def test_stream_idle_timeout_clears_every_measured_legitimate_load():

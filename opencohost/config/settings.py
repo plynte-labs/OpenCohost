@@ -617,15 +617,33 @@ def _resolve_llm_streaming() -> bool:
 
     llm_output_streaming_20260813 — the single revert lever for the whole
     track (design.md §3 eligibility, §10 phasing):
-      - The flag is True IFF OPENCOHOST_LLM_STREAMING=1, in every environment.
-      - Default OFF. Phase 1 ships behind it and the blocking gate is the
-        interruptibility runtime validation (§9 decision 5), not TTFA: if a
-        forced mid-stream stall leaves the Ollama runner held, the spoken
-        prefix stands but cannot be recalled, so the flag goes back off.
-      - An ineligible or flag-off turn takes the existing buffered path
-        byte-identically.
+      - Default ON (owner decision 2026-08-13). The track shipped default-OFF
+        pending a runtime gate, but the gate's own measurements — TTFA, the
+        first-sentence size that makes TTFA readable, and the interruptibility
+        behaviour — are UNOBSERVABLE while the feature never runs. Shipping it
+        on is what produces the evidence the gate asks for.
+      - OFF iff OPENCOHOST_LLM_STREAMING=0. That is the kill switch: an
+        ineligible or flag-off turn takes the existing buffered path
+        byte-identically, so reverting is one env var and a restart.
+
+    Failure envelope, verified against `_run_streaming_attempt`:
+      - BEFORE the first sentence is submitted (`state.job is None`) there is
+        no observable difference from the buffered path. A guard trip sets
+        `consume_only` and `_finalize_generation` runs exactly as today (full
+        guard, retry nudge, canned fallback); any exception re-raises into the
+        unchanged watchdog / transport handling, `_recover_from_stalled_
+        inference` included. Nothing was spoken, so nothing is owed.
+      - AFTER the first submit the turn is committing and cannot be un-said:
+        `_stream_partial_exit` seals the job at the last appended sentence,
+        commits the spoken prefix to history so the next prompt knows what the
+        audience heard, then re-raises. Kira stops mid-turn. This is the
+        irreducible cost of the feature, not a defect.
+      - A mid-stream guard trip truncates BEFORE the offending sentence is
+        appended, so the violating line is never spoken — but whatever already
+        aired stays aired. That single property is what the runtime gate is
+        really about, and it is why the kill switch stays one env var away.
     """
-    return os.environ.get("OPENCOHOST_LLM_STREAMING", "") == "1"
+    return os.environ.get("OPENCOHOST_LLM_STREAMING", "") != "0"
 
 
 LLM_STREAMING_ENABLED: bool = _resolve_llm_streaming()
