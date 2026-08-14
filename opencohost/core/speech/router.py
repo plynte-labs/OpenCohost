@@ -799,6 +799,44 @@ class SpeechRouter:
                     # JOB, not with this slice.
                     job.pause_requested = pause_reason
                     return SpeechJobState.ACTIVE, None
+                if outcome.cursor >= len(outcome.chunks) and not outcome.interrupted:
+                    # The job GREW while this slice played (live-fire fix,
+                    # 2026-08-13). `_run_job` hands `_hablar` a SNAPSHOT
+                    # (`job.chunks[job.cursor:]`), so once the producer appends
+                    # during playback the test above compares a cursor against
+                    # a MOVING target and fails even though nothing went wrong
+                    # — the slice drained, `_hablar` reports no interruption
+                    # (it sets that flag ONLY from its `not self._speaking`
+                    # cut guards), and there is simply a tail left. Without
+                    # this branch that clean completion fell through to the
+                    # `interrupted` default below and the whole tail was
+                    # discarded: `[SPEECH_DISCARD] from_idx=1 lost=9
+                    # reason=interrupted` on EVERY streamed turn, because
+                    # generation always outruns playback.
+                    #
+                    # ACTIVE (never FINISHED — chunks are still owed) routes to
+                    # `_starved_wait`, which re-applies the full
+                    # cancel > pause > new-chunks > sealed precedence and
+                    # returns immediately when a tail is already waiting.
+                    #
+                    # An EMPTY `outcome.chunks` must take this branch too, and
+                    # guarding against it was a bug of its own (adversarial
+                    # review, 2026-08-14): the router can pick a streaming job
+                    # while `chunks` is still `[]` — `submit_streaming` wakes
+                    # the loop before the producer's first `append_chunks` —
+                    # so `_hablar` returns an empty outcome, the first append
+                    # lands before this lock, and the job died at birth with
+                    # the same `[SPEECH_DISCARD] ... reason=interrupted`.
+                    # Re-slicing forever is not a risk: reaching here at all
+                    # means `job.cursor < len(job.chunks)`, so the NEXT slice
+                    # is non-empty; a truly idle job is caught by the drained
+                    # branch above and parks on `_wake`. Refused invocations
+                    # keep their terminals — a cancelled one is claimed above
+                    # at the `not outcome.chunks` check, and anything else
+                    # reaches `_starved_wait`, which re-reads the cancel token
+                    # before it waits.
+                    job.pause_requested = pause_reason
+                    return SpeechJobState.ACTIVE, None
                 if cancelled:
                     return SpeechJobState.DISCARDED, "cancelled"
                 if pause_reason in ("ptt", "preempt"):

@@ -29,7 +29,7 @@ from opencohost.core.speech.router import (
     SpeechJob,
     SpeechJobState,
 )
-from tests.test_speech_outcome_capture import _make_motor
+from tests.test_speech_outcome_capture import _make_motor, _write_wav
 from tests.test_speech_router import _GateMixerMusic, _Recorder
 from tests.test_speech_router_stack import _synth_logger, _wait_until
 
@@ -141,6 +141,120 @@ def test_streaming_job_plays_across_multiple_slice_invocations(router_motors):
         except queue.Empty:
             break
     assert [cmd for cmd, _ in drained].count(SPEECH_BOUNDARY_COMMAND) == 1, drained
+
+
+def test_chunks_appended_during_the_first_slice_are_played_not_discarded(
+    router_motors, caplog
+):
+    """REGRESSION, live-fire 2026-08-13 (`logs/opencohost_20260813_235357.log`):
+    every streamed turn spoke ONLY its first sentence.
+
+    The test above appends the second batch AFTER waiting for slice 1 to
+    drain, so it only ever exercises drained -> starved -> new chunks. The
+    real producer never does that: it appends WHILE the slice is still
+    playing, because generation is always faster than playback (measured
+    `decode_ms=11595` against a first fragment that played in 0.46s). That
+    ordering is the one the router got wrong.
+
+    `_run_job` hands `_hablar` a SNAPSHOT slice (`job.chunks[job.cursor:]`).
+    When more chunks land during playback, `_hablar` still drains everything
+    it was HANDED and returns clean — but `_reconcile`'s drained test is
+    `job.cursor >= len(job.chunks)` against a list that GREW, so it failed,
+    fell past the cancel/pause branches, and classified a clean slice
+    completion as `DISCARDED "interrupted"`. Log signature:
+    `[SPEECH_DISCARD] job=1 from_idx=1 lost=9 reason=interrupted`.
+    """
+    synth_log: list = []
+    box: dict = {}
+
+    def _synth(text, out_path):
+        synth_log.append(text)
+        if text == box["chunks"][0]:
+            # Mid-slice append, on the producer thread — exactly what
+            # `_handle_stream_sentence` does when the next sentence closes.
+            box["router"].append_chunks(box["job"], box["chunks"][1:])
+        return _write_wav(out_path)
+
+    motor, rec, _ = _armed(router_motors, synthesize=_synth)
+    router = motor._ensure_router()
+    chunks = _stream_chunks("G", 4)
+    box["router"], box["chunks"] = router, chunks
+
+    job = router.submit_streaming("direct", PRIORITY_OWNER)
+    box["job"] = job
+    assert router.append_chunks(job, [chunks[0]]) is True
+
+    assert _wait_until(lambda: job.cursor == 4, timeout=10.0), (
+        f"cursor stalled at {job.cursor} of {len(job.chunks)} (state={job.state}, "
+        f"spoken={job.spoken}) — the grown tail was dropped instead of played"
+    )
+    assert job.state is SpeechJobState.ACTIVE, (
+        f"drained-but-unsealed must stay ACTIVE, got {job.state}"
+    )
+    assert not any("[SPEECH_DISCARD]" in r.getMessage() for r in caplog.records), (
+        "a clean slice completion must never be logged as a discard"
+    )
+
+    router.seal(job)
+    assert _wait_until(lambda: job.state is SpeechJobState.FINISHED, timeout=10.0)
+    assert synth_log == chunks, "every appended chunk must be spoken, in order"
+    assert sorted(job.spoken) == [0, 1, 2, 3]
+
+
+def test_first_chunks_landing_after_an_empty_pick_are_played_not_discarded(
+    router_motors, caplog
+):
+    """Same P0, second door — found by adversarial review 2026-08-14.
+
+    `submit_streaming` wakes the router loop BEFORE the producer's first
+    `append_chunks` (the producer only appends once its first sentence
+    closes, which is seconds later). So the router can legitimately pick a
+    streaming job while `chunks` is still `[]`, hand `_hablar` an empty
+    `pre_split`, and get an empty outcome back. If the first append then
+    lands before `_reconcile` takes the lock, `job.cursor(0)` is below
+    `len(job.chunks)` and the turn died at birth with the same signature the
+    live-fire bug produced — `[SPEECH_DISCARD] from_idx=0 reason=interrupted`
+    — every later append refused.
+
+    The first fix guarded its new branch on `outcome.chunks` being truthy,
+    which excluded exactly this case. Empty is drained: reaching the branch
+    at all proves a tail exists, so the next slice is non-empty.
+    """
+    motor, rec, _ = _armed(router_motors)
+    router = motor._ensure_router()
+    chunks = _stream_chunks("E", 2)
+    real_hablar = motor._hablar
+    saw_empty_pick: list = []
+    box: dict = {}
+
+    def _spy(texto, source="direct", **kw):
+        pre = list(kw.get("pre_split") or [])
+        outcome = real_hablar(texto, source=source, **kw)
+        if not pre and not saw_empty_pick:
+            # The append lands AFTER `_hablar` returned its empty outcome and
+            # BEFORE `_reconcile` runs — the exact interleaving.
+            saw_empty_pick.append(True)
+            router.append_chunks(box["job"], chunks)
+        return outcome
+
+    motor._hablar = _spy
+
+    job = router.submit_streaming("direct", PRIORITY_OWNER)
+    box["job"] = job
+
+    assert _wait_until(lambda: bool(saw_empty_pick), timeout=10.0), (
+        "the router never picked the job while its chunks were still empty, "
+        "so this test did not exercise the race it exists for"
+    )
+    assert _wait_until(lambda: job.cursor == 2, timeout=10.0), (
+        f"cursor stalled at {job.cursor} (state={job.state}) — the turn was "
+        f"discarded at birth instead of playing its first chunks"
+    )
+    assert not any("[SPEECH_DISCARD]" in r.getMessage() for r in caplog.records)
+
+    router.seal(job)
+    assert _wait_until(lambda: job.state is SpeechJobState.FINISHED, timeout=10.0)
+    assert sorted(job.spoken) == [0, 1]
 
 
 # ──────────────────────────────────────────────────────────────────────────
