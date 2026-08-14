@@ -388,7 +388,7 @@ class ScoutPromotionMixin:
         """
         reasons: Counter = Counter()
         counts = {
-            "considered": 0, "kept": 0, "rejected": 0, "stale": 0,
+            "considered": 0, "decided": 0, "kept": 0, "rejected": 0, "stale": 0,
             "unjudged_remaining": 0, "reasons": reasons, "skipped": "",
         }
         try:
@@ -438,9 +438,21 @@ class ScoutPromotionMixin:
             if batch:
                 kept: list[tuple[str, int]] = []
                 rejected: list[tuple[str, int]] = []
-                for index, judged_text, uncertain, reason in self._run_promotion_judge(
+                # _parse_promotion_decisions drops every unusable entry in
+                # silence (a `keep` the model wrote as "yes" instead of true is
+                # skipped by a bare `continue`), so a batch can come back
+                # part-answered with nothing to show for the gap. Those rows
+                # keep no judged_at and return on the next launch, where they
+                # can fail the same way forever -- which is what accumulating
+                # unjudged drafts looks like from the operator's side. Naming
+                # the answer rate makes that visible; kept+rejected does not,
+                # because an applied decision can still lose its update_row
+                # revision race below and never land in either bucket.
+                decisions = self._run_promotion_judge(
                     batch, chat_callable=chat_callable,
-                ):
+                )
+                counts["decided"] = len(decisions)
+                for index, judged_text, uncertain, reason in decisions:
                     row = batch[index - 1]
                     if judged_text is None:
                         reasons[reason] += 1
@@ -536,10 +548,11 @@ class ScoutPromotionMixin:
                 store.list_unjudged_drafts(profile_id, limit=_eng.MEMORIAS_PROFILE_CAP)
             )
             _eng.logger.info(
-                "memoria promotion sweep: considered=%d kept=%d rejected=%d stale=%d "
-                "remaining=%d reasons=%s",
-                counts["considered"], counts["kept"], counts["rejected"],
-                counts["stale"], counts["unjudged_remaining"], dict(reasons),
+                "memoria promotion sweep: considered=%d decided=%d kept=%d rejected=%d "
+                "stale=%d remaining=%d reasons=%s",
+                counts["considered"], counts["decided"], counts["kept"],
+                counts["rejected"], counts["stale"], counts["unjudged_remaining"],
+                dict(reasons),
             )
             if counts["kept"]:
                 # The owner-facing notice lives HERE now, not at capture

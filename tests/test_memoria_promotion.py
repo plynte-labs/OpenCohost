@@ -753,7 +753,7 @@ def test_promote_pending_drafts_never_raises_on_a_store_failure(monkeypatch, tmp
 
     monkeypatch.setattr(motor, "_get_memoria_store", boom)
     assert motor.promote_pending_drafts(chat_callable=_Recorder(_decisions())) == {
-        "considered": 0, "kept": 0, "rejected": 0, "stale": 0,
+        "considered": 0, "decided": 0, "kept": 0, "rejected": 0, "stale": 0,
         "unjudged_remaining": 0, "reasons": llm_engine.Counter(), "skipped": "",
     }
 
@@ -784,6 +784,52 @@ def test_logs_carry_counts_but_never_memory_text(monkeypatch, tmp_path, caplog):
     assert "SENTINELADRAFT" not in blob
     assert "sentineladraft" not in blob
     assert "SENTINELAJUZGADA" not in blob
+
+
+def test_a_part_answered_batch_reports_how_many_the_judge_actually_decided(
+    monkeypatch, tmp_path, caplog
+):
+    """Live sweep 2026-08-14 10:15:52 read `considered=12 kept=3 rejected=0
+    remaining=9`. Nine drafts came back with no verdict at all, because
+    _parse_promotion_decisions drops every unusable entry in silence — here a
+    `keep` written as the string "yes" instead of a bool. Those rows keep no
+    judged_at, so they return next launch and can fail the same way forever,
+    which is what a pile of unjudged drafts looks like from the outside.
+
+    kept+rejected cannot stand in for this: a decision can be applied and still
+    lose the update_row revision race, landing in neither bucket. `decided` is
+    the judge's own answer rate, and the gap against `considered` is the bug.
+    """
+    motor = _make_motor(monkeypatch, tmp_path)
+    store = _store(tmp_path)
+    for i in range(3):
+        store.upsert_draft(
+            "profile-1", f"profile-1|k{i}", f"titulo{i}",
+            f"streamer: colecciona sintetizadores modulares del tipo {i}",
+            signature="firma",
+        )
+
+    reply = _decisions(
+        {"i": 1, "keep": True, "text": "El streamer colecciona sintetizadores modulares."},
+        {"i": 2, "keep": "yes"},   # not a bool -> skipped without a trace
+        {"i": 3, "keep": "true"},  # ditto
+    )
+
+    with caplog.at_level(logging.INFO):
+        counts = motor.promote_pending_drafts(chat_callable=_Recorder(reply))
+
+    assert counts["considered"] == 3
+    assert counts["decided"] == 1
+    assert counts["kept"] == 1
+    assert counts["rejected"] == 0
+    # The two undecided rows are still unjudged, not quietly rejected.
+    assert counts["unjudged_remaining"] == 2
+
+    line = [
+        r.getMessage() for r in caplog.records
+        if "memoria promotion sweep: considered=" in r.getMessage()
+    ][-1]
+    assert "considered=3 decided=1" in line, line
 
 
 # ---------------------------------------------------------------------------
