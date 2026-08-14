@@ -114,6 +114,11 @@ class SpeechJob:
     # or reconcile. It dies with the job — a request landing after the
     # job's reconcile can never leak into whatever `_pick()` finds next.
     pause_requested: Optional[str] = None
+    # Streaming (llm_output_streaming_20260813 design §2): False only for a
+    # `submit_streaming` job whose `chunks` are still growing; True means
+    # the chunk list is final. Defaulting True keeps every job built
+    # anywhere else byte-identical in behavior.
+    sealed: bool = True
 
 
 def priority_for_source(source: str) -> int:
@@ -241,6 +246,63 @@ class SpeechRouter:
             # preemptor's own answer (audible stutter + spurious suspension).
             self.pause_speech("preempt", target=victim)
         return job
+
+    def submit_streaming(self, source: str, priority: int) -> SpeechJob:
+        """Streaming entry (llm_output_streaming_20260813 design §2): one
+        growing job for the whole turn. Mirrors `submit` — including the
+        single D3 priority-0 preempt — but the job is born UNSEALED with
+        `chunks=[]` (non-None, so every activation takes the pre_split path
+        and `_reconcile` never overwrites the list from an outcome) and
+        `text=""` (chunks are the payload; there is no full text yet).
+        The producer feeds it via `append_chunks` and closes it via `seal`.
+        """
+        with self._sched_lock:
+            self._next_job_id += 1
+            job = SpeechJob(
+                job_id=self._next_job_id, text="", source=source,
+                priority=priority, chunks=[], sealed=False,
+            )
+            self._incoming.append(job)
+            victim = self._active
+            preempt = (
+                self.interrupt_enabled
+                and priority == PRIORITY_OWNER
+                and victim is not None
+            )
+        self._wake.set()
+        if preempt:
+            self.pause_speech("preempt", target=victim)
+        return job
+
+    def append_chunks(self, job: SpeechJob, chunks: list) -> bool:
+        """Grow a streaming job (design §2). Leaf-lock only: no event, no
+        callback. Returns False — dropping the chunks, with a log line —
+        when the job is DISCARDED/FINISHED: the producer's cheap "is my
+        turn still alive" signal. Appends touch `chunks`, never `cursor`,
+        so a SUSPENDED job keeps growing on the stack and owes the new
+        chunks on resume."""
+        with self._sched_lock:
+            refused = job.state in (SpeechJobState.DISCARDED, SpeechJobState.FINISHED)
+            if not refused:
+                job.chunks.extend(chunks)
+            state_log = job.state.value
+        if refused:
+            # Privacy: counts only, never chunk text.
+            logger.info(
+                "[SPEECH_STREAM] append refused job=%d source=%s state=%s dropped=%d",
+                job.job_id, job.source, state_log, len(chunks),
+            )
+            return False
+        self._wake.set()
+        return True
+
+    def seal(self, job: SpeechJob) -> None:
+        """Mark a streaming job's chunks as final (design §2). Idempotent;
+        leaf-lock only. A starved job exits its wait and finishes once
+        drained; a suspended one finishes after its resume drains."""
+        with self._sched_lock:
+            job.sealed = True
+        self._wake.set()
 
     def has_work(self) -> bool:
         """ACTIVE ∨ INCOMING ∨ STACK ∨ an owed boundary end (design §11 B2).
@@ -559,34 +621,91 @@ class SpeechRouter:
                 logger.warning("[SPEECH_STACK] depth=%d", depth_log)
             return
 
-        outcome = None
-        exc: Optional[BaseException] = None
-        try:
-            outcome = motor._hablar(
-                job.text,
-                source=job.source,
-                emit_boundary=False,
-                # Step 3 (design §1 resolution 1): resume with the router's
-                # OWN owed slice, never a re-chunked rejoin of the raw text.
-                # `cursor_base` (judge closure 2026-08-05) keeps
-                # `_speech_progress` TURN-relative on a resume — without it
-                # every played/total consumer (speech_remaining_estimate and
-                # every other progress reader) read the owed slice as the
-                # whole turn.
-                pre_split=job.chunks[job.cursor:] if job.chunks is not None else None,
-                cursor_base=job.cursor if job.chunks is not None else 0,
-            )
-        except Exception as e:  # noqa: BLE001 — reconcile decides, never the caller
-            exc = e
-            logger.exception("speech job raised out of _hablar")
+        while True:
+            outcome = None
+            exc: Optional[BaseException] = None
+            try:
+                outcome = motor._hablar(
+                    job.text,
+                    source=job.source,
+                    emit_boundary=False,
+                    # Step 3 (design §1 resolution 1): resume with the router's
+                    # OWN owed slice, never a re-chunked rejoin of the raw text.
+                    # `cursor_base` (judge closure 2026-08-05) keeps
+                    # `_speech_progress` TURN-relative on a resume — without it
+                    # every played/total consumer (speech_remaining_estimate and
+                    # every other progress reader) read the owed slice as the
+                    # whole turn.
+                    pre_split=job.chunks[job.cursor:] if job.chunks is not None else None,
+                    cursor_base=job.cursor if job.chunks is not None else 0,
+                )
+            except Exception as e:  # noqa: BLE001 — reconcile decides, never the caller
+                exc = e
+                logger.exception("speech job raised out of _hablar")
 
-        state, reason = self._reconcile(job, outcome, exc)
-        if state in (SpeechJobState.QUEUED, SpeechJobState.SUSPENDED):
-            # QUEUED: retried, requeued at the front, still `started`.
-            # SUSPENDED: pushed back on the stack; no boundary end at a
-            # pause (D4 terminal-only) — `_finish` never runs for this pick.
+            state, reason = self._reconcile(job, outcome, exc)
+            if state in (SpeechJobState.QUEUED, SpeechJobState.SUSPENDED):
+                # QUEUED: retried, requeued at the front, still `started`.
+                # SUSPENDED: pushed back on the stack; no boundary end at a
+                # pause (D4 terminal-only) — `_finish` never runs for this pick.
+                return
+            if state is SpeechJobState.ACTIVE:
+                # Streaming (design §2): drained but UNSEALED — starved, not
+                # finished. Wait for chunks/seal/cancel/hold; a None state
+                # means "new chunks: next slice invocation".
+                state, reason = self._starved_wait(job)
+                if state is None:
+                    continue
+                if state is SpeechJobState.SUSPENDED:
+                    return
+            self._finish(job, state, reason=reason)
             return
-        self._finish(job, state, reason=reason)
+
+    def _starved_wait(self, job: SpeechJob):
+        """Streaming starved state (llm_output_streaming_20260813 design §2):
+        the job has played every chunk it has but is not sealed — more may
+        arrive. Block THIS (router) thread on `_wake` in a bounded loop
+        (0.25 s tick, mirroring `_loop`) — not a regression: it blocks
+        inside `_hablar` for the whole utterance today. The job stays
+        ACTIVE, so `has_work()` holds, no `idle` fires, and the boundary
+        pair stays open (D4: no end at a pause, none at a starve either).
+
+        Precedence per tick, re-checked under `_sched_lock`:
+          1. cancel token        -> (DISCARDED, "cancelled") for `_finish`
+          2. `_ptt_held`/pause   -> `_push_suspended`; (SUSPENDED, None)
+          3. new chunks          -> (None, None): next slice invocation
+          4. sealed and drained  -> (FINISHED, None) for `_finish`
+        """
+        motor = self._motor
+        while True:
+            # I10: the cancel token lives behind the motor's `_lock` — read
+            # it BEFORE taking the leaf lock, same as `_reconcile`.
+            cancelled = motor._speech_cancelled(job.source)
+            depth_log = 0
+            push_log = None
+            with self._sched_lock:
+                if cancelled:
+                    return SpeechJobState.DISCARDED, "cancelled"
+                if self._ptt_held or job.pause_requested is not None:
+                    depth_log = self._push_suspended(job)
+                    push_log = (job.source, job.cursor, len(self._stack))
+                elif job.cursor < len(job.chunks):
+                    return None, None
+                elif job.sealed:
+                    return SpeechJobState.FINISHED, None
+            if push_log:
+                logger.info(
+                    "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
+                )
+                if depth_log:
+                    logger.warning("[SPEECH_STACK] depth=%d", depth_log)
+                return SpeechJobState.SUSPENDED, None
+            self._wake.wait(0.25)
+            self._wake.clear()
+            if self._stop.is_set():
+                # `stop()` must not hang behind a producer that never seals:
+                # unlike playback, starvation has no natural end.
+                return SpeechJobState.DISCARDED, "stopped"
 
     def _push_suspended(self, job: SpeechJob) -> int:
         """Push-back on pause (design §4): unconditional, same object,
@@ -669,7 +788,17 @@ class SpeechRouter:
                 job.skipped.extend(base + i for i in outcome.skipped)
                 job.cursor = base + outcome.cursor
                 if job.cursor >= len(job.chunks):
-                    return SpeechJobState.FINISHED, None
+                    if job.sealed:
+                        return SpeechJobState.FINISHED, None
+                    # Streaming (design §2): drained but UNSEALED is the
+                    # STARVED state, not completion — ACTIVE tells `_run_job`
+                    # to enter the starved wait. A pause request consumed
+                    # above is re-published for the wait's precedence check:
+                    # the cancel token is level-triggered and re-read there,
+                    # but the request is edge-consumed and must die with the
+                    # JOB, not with this slice.
+                    job.pause_requested = pause_reason
+                    return SpeechJobState.ACTIVE, None
                 if cancelled:
                     return SpeechJobState.DISCARDED, "cancelled"
                 if pause_reason in ("ptt", "preempt"):
