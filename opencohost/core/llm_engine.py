@@ -3779,6 +3779,24 @@ class MotorVocalIA(
             f"provider={trace_provider} transport={trace_transport} "
             f"fallback_active={trace_fallback_active}"
         )
+        # `generation` is the ENGINE's model label and stays that on a cloud
+        # turn -- logs/opencohost_20260804_191446.log reads
+        # `generation=gemma4:e4b provider=nvidia_nim transport=cloud`, which
+        # names the tier, not what NVIDIA actually ran. That made the 49-64s
+        # latencies CLOUD_CHAT_TIMEOUT was sized against (settings.py:137-143)
+        # unattributable two weeks later, when a provider-model swap to
+        # z-ai/glm-5.2 pushed a measured call to 123.69s and there was no way
+        # to say what the old number had been measured on.
+        # Cloud-only, because on a local turn `generation` already IS the model.
+        # A model id is a public name, never a credential -- the key lives in
+        # LLM_KEYS_FILE and never comes near this string.
+        if trace_transport == "cloud":
+            profiles = provider_cfg.get("profiles")
+            profile_cfg = profiles.get(trace_provider) if isinstance(profiles, dict) else None
+            cloud_model = (
+                profile_cfg.get("model") if isinstance(profile_cfg, dict) else None
+            ) or "unknown"
+            trace_msg += f" cloud_model={cloud_model}"
         # Root cause confirmed against logs/opencohost_20260730_162650.log:
         # `_prepare_model` short-circuits without ever setting `_loaded_model`
         # while cloud is the effective transport (`:2683-2687` — see

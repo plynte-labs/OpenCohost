@@ -566,6 +566,57 @@ class TestModelTrace:
             f"cloud-by-design generation must not warn: {logs}"
         )
 
+    def test_cloud_turn_names_the_provider_model_local_turn_does_not(self, tmp_path, caplog):
+        """`generation` is the ENGINE's label and stays that on a cloud turn --
+        the test above spells out why (`request_model` is always the local
+        alias). So until now a cloud turn logged WHICH provider answered but
+        never WHICH model, and logs/opencohost_20260804_191446.log reads
+        `generation=gemma4:e4b provider=nvidia_nim transport=cloud`.
+
+        That cost a real answer: CLOUD_CHAT_TIMEOUT was sized at 75s against
+        that session's 49-64s latencies (settings.py:137-143), and when a
+        measured call came back at 123.69s on 2026-08-14 there was no way to
+        say what the original number had been measured on.
+
+        Local turns must NOT carry the field: there `generation` already is the
+        model, and a second copy would drift.
+        """
+        import logging
+
+        motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+        motor._provider_config = {
+            "active_provider": "nvidia_nim",
+            "fallback_mode": "auto",
+            "pregen_enabled": False,
+            "profiles": {"nvidia_nim": {"base_url": "https://example.test/v1", "model": "z-ai/glm-5.2"}},
+        }
+
+        with caplog.at_level(logging.INFO):
+            with patch(
+                "opencohost.core.llm_engine.cloud_llm_client.send_chat_completion",
+                return_value={"message": {"content": "cloud reply", "thinking": ""}, "usage": {}},
+            ):
+                motor._generar_dialogo("test cloud", source="direct", commit_history=False)
+
+        cloud_trace = [r.message for r in caplog.records if "MODEL_TRACE" in r.message]
+        assert cloud_trace, "expected a MODEL_TRACE on the cloud turn"
+        assert "transport=cloud" in cloud_trace[-1], cloud_trace[-1]
+        assert "cloud_model=z-ai/glm-5.2" in cloud_trace[-1], cloud_trace[-1]
+
+        # The local half needs the mocked ollama.chat that _setup_motor_for_generation
+        # installs; the cloud half above must NOT have it, or the turn would
+        # never take the cloud branch. Hence a second motor rather than
+        # reconfiguring this one.
+        caplog.clear()
+        local_motor, _, _ = self._setup_motor_for_generation(tmp_path)
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            local_motor._generar_dialogo("test local", source="direct", commit_history=False)
+
+        local_trace = [r.message for r in caplog.records if "MODEL_TRACE" in r.message]
+        assert local_trace, "expected a MODEL_TRACE on the local turn"
+        assert "transport=local" in local_trace[-1], local_trace[-1]
+        assert "cloud_model=" not in local_trace[-1], local_trace[-1]
+
     def test_reply_preview_shown_in_debug_mode(self, tmp_path, caplog, monkeypatch):
         """Candidate 8C: OPENCOHOST_DEBUG=1 keeps the cleartext reply preview
         in the response(...) log line."""
