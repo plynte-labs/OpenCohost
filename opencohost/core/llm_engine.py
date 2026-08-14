@@ -64,6 +64,7 @@ from opencohost.config.settings import (
     CLOUD_PROBER_JOIN_TIMEOUT_SECONDS,
     DIRECT_ANSWER_MAX_WAIT_SECONDS,
     OWNER_BUNDLE_SOURCE, OWNER_BUNDLE_MAX_ITEMS, OWNER_BUNDLE_MAX_CHARS,
+    LLM_STREAMING_ENABLED,
 )
 from opencohost.core.context import context_budget
 # Module import, never a from-import of the values: STREAM_OVER_AGENDA /
@@ -1094,6 +1095,15 @@ class MotorVocalIA(
         self._check_ollama_service()
         if TTS_LOCAL_MODEL_PATH:
             self._piper.load()
+        # llm_output_streaming_20260813 (design.md §1 non-goals, §10): pay
+        # Piper's 2.25s first-synthesis cost off-air now instead of on the
+        # session's first turn. Same neighbourhood as the a8830bb chat-client
+        # pre-warm above, but on a daemon thread -- that one is a cheap object
+        # construction while this one is real inference, and the "Motor IA
+        # inicializado" line below must not wait 2.25s for it. `_prewarm_tts`
+        # no-ops when Piper never loaded, so this needs no TTS_LOCAL_MODEL_PATH
+        # guard of its own.
+        threading.Thread(target=self._prewarm_tts, name="TTSPrewarm", daemon=True).start()
         self._log(f"Modelo inicial: {self.current_model} (fuente: {self._model_source})")
         self._log("Motor IA inicializado. Esperando comandos...")
 

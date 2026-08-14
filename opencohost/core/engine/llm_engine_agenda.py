@@ -189,6 +189,27 @@ class AgendaStashMixin:
             and self.has_pending_priority_before(1)
         ):
             return
+        # llm_output_streaming_20260813 §7: streaming breaks the "the GPU is
+        # free during playback" premise every gate above was built on — decode
+        # now overlaps the first sentences' playback on the single Ollama
+        # runner, so an upgrade spawned here would queue behind, and compete
+        # with, the very generation whose tokens are being spoken.
+        #
+        # Flag-gated because this refusal is NOT inert on the buffered path.
+        # Armed, `_hablar_impl` runs on the router's playback thread while the
+        # engine worker can already have popped a widened priority-0 turn and
+        # started its FOREGROUND generation: `has_pending_priority_before(1)`
+        # no longer sees it (it popped) and `_pregen_inflight` never covered it
+        # (it is not a pregen), so `_llm_generating` can be True right here
+        # today — and today the spawn still happens, with only the worker's own
+        # claim below standing between it and the LLM. Refusing unconditionally
+        # would close the spawn->worker window on a working buffered gate,
+        # which is out of this unit's scope. Flag OFF keeps that byte-identical.
+        # Flag ON the refusal is slightly wider than "streamed turns only" — a
+        # streaming-INELIGIBLE direct/ptt turn gets it too — which costs at most
+        # a cosmetic upgrade that falls back to the pool floor.
+        if _eng.LLM_STREAMING_ENABLED and self.llm_generating:
+            return
         with self._prefetch_lock:
             stash = self._frozen_stash
             if stash is None or stash.get("connector") is not None:

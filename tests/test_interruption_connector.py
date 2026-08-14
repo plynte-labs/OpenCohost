@@ -30,6 +30,8 @@ from opencohost.config.settings import (
     FROZEN_STASH_MAX_HOLD_SECONDS,
     RETURN_MAX_DETOUR_TURNS,
 )
+import opencohost.core.llm_engine as llm_engine  # must precede the mixin import (circular)
+import opencohost.core.engine.llm_engine_agenda as agenda_mod
 from opencohost.core.llm_engine import MotorVocalIA
 
 
@@ -1012,3 +1014,116 @@ def test_the_wu5_position_cut_is_retired_and_the_return_survives():
     # the KEPT half (D2/D3)
     assert motor._freeze_agenda_stash_locked and motor.restore_frozen_stash
     assert settings.RETURN_MAX_DETOUR_TURNS and settings.FROZEN_STASH_MAX_HOLD_SECONDS
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# llm_output_streaming_20260813 §7 — the upgrade must not race a foreground
+# generator once decode overlaps playback.
+#
+# Streaming breaks the "the GPU is free during playback" premise this gate was
+# built on: decode now overlaps the first sentences' playback on the single
+# Ollama runner, so an upgrade spawned at playback start would queue behind —
+# and compete with — the very generation whose tokens are being spoken.
+#
+# The refusal is NOT inert on the buffered path, so it is gated. With the
+# router armed, `_hablar_impl` runs on the router's playback thread while the
+# engine worker can already have popped a widened priority-0 turn and started
+# its foreground generation (`_maybe_generate_connector_upgrade`'s own
+# docstring, "armed, a priority-0 owner question can pop and GENERATE under
+# this very playback"). `has_pending_priority_before(1)` no longer sees it (it
+# popped) and `_pregen_inflight` never covered it (it is foreground), so
+# `_llm_generating` CAN be True at the spawn site today — and today the spawn
+# still happens, with only the worker's own check standing between it and the
+# LLM. Making that refusal unconditional would therefore change live buffered
+# behaviour in the spawn->worker window, which this unit does not own.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _SpawnRecorder:
+    """Captures `threading.Thread(target=...)` without starting it, so a spawn
+    REFUSED at the gate is distinguishable from one refused inside the worker
+    (both leave `gen == []`)."""
+
+    def __init__(self):
+        self.targets = []
+
+    def Thread(self, target=None, daemon=None, **kw):
+        self.targets.append(target)
+        return SimpleNamespace(start=lambda: None)
+
+
+def _armed_upgrade_motor():
+    motor = _bare_motor()
+    motor._prefetched_agenda = _agenda_draft()
+    _freeze_stash(motor)
+    motor._prefetched_agenda = None
+    motor.speech_remaining_estimate = lambda: 25.0
+    motor._preview_accept_agenda_output = lambda d: True
+    return motor
+
+
+def test_streaming_upgrade_refuses_to_spawn_while_llm_generating(monkeypatch):
+    motor = _armed_upgrade_motor()
+    monkeypatch.setattr(llm_engine, "LLM_STREAMING_ENABLED", True)
+    recorder = _SpawnRecorder()
+    monkeypatch.setattr(agenda_mod, "threading", recorder)
+    with motor._lock:
+        motor._llm_generating = True
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert recorder.targets == [], (
+        "under streaming the upgrade must not even spawn while a generation is in flight"
+    )
+
+    # Release: clear the named blocking condition and re-drive the same
+    # entrypoint — proving THAT check, not something else, was the decider.
+    with motor._lock:
+        motor._llm_generating = False
+    motor._maybe_generate_connector_upgrade()
+
+    assert len(recorder.targets) == 1, "with the runner free the upgrade spawns again"
+
+
+def test_buffered_upgrade_spawn_is_untouched_by_the_streaming_refusal(monkeypatch):
+    """Flag OFF keeps today's behaviour byte-identical, including the window the
+    new refusal would close: the spawn still happens with `_llm_generating`
+    True, and a worker whose generation clears before it takes the lock still
+    lands its connector."""
+    motor = _armed_upgrade_motor()
+    monkeypatch.setattr(llm_engine, "LLM_STREAMING_ENABLED", False)
+    recorder = _SpawnRecorder()
+    monkeypatch.setattr(agenda_mod, "threading", recorder)
+    gen = []
+    motor._generar_dialogo = lambda *a, **kw: gen.append(1) or "connector line"
+    with motor._lock:
+        motor._llm_generating = True
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert len(recorder.targets) == 1, "the buffered path still spawns the worker"
+
+    # The spawn->worker window: the foreground generation finishes before the
+    # worker takes the lock, so today the upgrade proceeds.
+    with motor._lock:
+        motor._llm_generating = False
+    recorder.targets[0]()
+
+    assert gen == [1]
+    assert motor._frozen_stash.get("connector") == "connector line"
+
+
+def test_streaming_upgrade_still_lands_when_the_runner_is_free(monkeypatch):
+    """The accept path is unchanged: runner free, the upgrade generates and the
+    connector lands on the stash exactly as before."""
+    motor = _armed_upgrade_motor()
+    monkeypatch.setattr(llm_engine, "LLM_STREAMING_ENABLED", True)
+    gen = []
+    motor._generar_dialogo = lambda *a, **kw: gen.append(1) or "connector line"
+
+    motor._maybe_generate_connector_upgrade()
+
+    assert _wait_until(lambda: motor._frozen_stash.get("connector") == "connector line"), (
+        "with the runner free the upgrade generates and lands"
+    )
+    assert gen == [1]

@@ -288,7 +288,64 @@ class SpeechPipelineMixin:
                 level="warning",
             )
             self.ui_callback(_eng.i18n_coherence.PIPER_VOICE_LOCALE_MISMATCH)
-            
+
+    # Fixed, non-dialogue text for the startup pre-warm below. A constant, never
+    # model output and never spoken — see `_prewarm_tts`.
+    _TTS_PREWARM_TEXT = "OpenCohost."
+
+    def _prewarm_tts(self) -> None:
+        """Pay Piper's first-synthesis cost at startup instead of on turn 1.
+
+        Measured (`logs/opencohost_20260813_154829.log:36` against `:46, :55,
+        :67, :86, :94, :108, :125, :142`): the FIRST Piper synthesis of a
+        session costs 2.25s where every later one costs 0.08-0.43s. Without
+        this the first turn of every session pays ~2s of TTFA for a reason that
+        has nothing to do with the LLM
+        (`conductor/tracks/llm_output_streaming_20260813/design.md` §1, §10).
+
+        Off-air by construction: it drives the SAME `self._piper.synthesize`
+        seam `_hablar_impl` uses, at the lowest level that produces a synthesis
+        WITHOUT playback, into a throwaway file under TEMP_DIR that is deleted
+        again. No speech router job, no dialogue, no `historial`, no
+        boundary/UI event.
+
+        Never fatal: a TTS engine that cannot pre-warm must still be able to
+        serve turns, so every failure is a WARNING and startup continues. The
+        one INFO line carries the measured duration so the pre-warm's own cost
+        stays visible — metadata only.
+
+        Called from `run()` on a daemon thread so it never delays the moment
+        the engine reports ready. Piper's own lock serialises it against a real
+        turn landing inside the window, which then waits at most the cost that
+        turn would have paid anyway.
+        """
+        if not self._piper.is_available():
+            self._log("[TTS_PREWARM] skipped reason=piper_unavailable")
+            return
+        destino = os.path.join(_eng.TEMP_DIR, f"tts_prewarm_{uuid.uuid4().hex[:8]}.wav")
+        inicio = time.monotonic()
+        try:
+            ok = self._piper.synthesize(self._TTS_PREWARM_TEXT, destino)
+            elapsed_ms = int((time.monotonic() - inicio) * 1000)
+            if ok:
+                self._log(f"[TTS_PREWARM] ok ms={elapsed_ms}")
+            else:
+                self._log(
+                    f"[TTS_PREWARM] failed ms={elapsed_ms} reason=synthesize_returned_false",
+                    level="warning",
+                )
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - inicio) * 1000)
+            self._log(
+                f"[TTS_PREWARM] failed ms={elapsed_ms} reason={type(exc).__name__}",
+                level="warning",
+            )
+        finally:
+            try:
+                os.remove(destino)
+            except OSError:
+                pass
+
     @staticmethod
     def _sanitize_tts_text_for_playback(text: str) -> str:
         """Strip Markdown emphasis markers and non-Latin script glyphs, without

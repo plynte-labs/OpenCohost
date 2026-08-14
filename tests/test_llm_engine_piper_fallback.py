@@ -295,3 +295,116 @@ class TestPesadoPathUnaffected:
 
         assert motor._edge_tts_offline is False, "pesado path must not touch the flag"
         mock_piper_engine.synthesize.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# llm_output_streaming_20260813 — startup TTS pre-warm
+#
+# Measured (logs/opencohost_20260813_154829.log:36 vs :46,:55,:67,:86,:94,:108,
+# :125,:142): the FIRST Piper synthesis of a session costs 2.25s, every later
+# one 0.08-0.43s. Without a pre-warm the first turn of every session blows the
+# phase-1 TTFA target by ~2s for a reason that has nothing to do with the LLM.
+# ---------------------------------------------------------------------------
+
+def _drain(log_queue):
+    lines = []
+    while not log_queue.empty():
+        lines.append(log_queue.get_nowait())
+    return lines
+
+
+class TestStartupTtsPrewarm:
+    def test_prewarm_synthesizes_once_off_air_and_reports_its_cost(self):
+        """One throwaway synthesis through the SAME `_piper.synthesize` seam
+        `_hablar_impl` drives — no playback, no dialogue, no historial, no UI
+        event — plus one INFO line carrying the measured duration."""
+        motor, log_queue, ui_events = _make_motor()
+        motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
+        motor.pygame = MagicMock()
+        historial_before = list(motor.historial)
+
+        motor._prewarm_tts()
+
+        assert motor._piper.synthesize.call_count == 1
+        text, path = motor._piper.synthesize.call_args.args
+        assert text == motor._TTS_PREWARM_TEXT and text, (
+            "the pre-warm speaks a fixed constant, never model output"
+        )
+        motor.pygame.mixer.music.load.assert_not_called()
+        motor.pygame.mixer.music.play.assert_not_called()
+        assert ui_events == [], "the pre-warm fires no UI/boundary event"
+        assert list(motor.historial) == historial_before
+        assert not os.path.exists(path), "the throwaway wav is removed"
+
+        lines = _drain(log_queue)
+        assert any("[TTS_PREWARM] ok ms=" in line for line in lines), lines
+
+    def test_prewarm_never_kills_startup_when_the_engine_raises(self):
+        """A TTS engine that cannot pre-warm must still be able to serve turns:
+        the exception is swallowed and reported at WARNING."""
+        motor, log_queue, _ = _make_motor()
+        motor._piper = _make_mock_piper(available=True)
+        motor._piper.synthesize.side_effect = RuntimeError("onnx exploded")
+
+        motor._prewarm_tts()  # must not raise
+
+        lines = _drain(log_queue)
+        assert any("[TTS_PREWARM] failed" in line for line in lines), lines
+
+    def test_prewarm_skips_when_piper_is_not_loaded(self):
+        motor, log_queue, _ = _make_motor()
+        motor._piper = _make_mock_piper(available=False)
+
+        motor._prewarm_tts()
+
+        motor._piper.synthesize.assert_not_called()
+        lines = _drain(log_queue)
+        assert any("[TTS_PREWARM] skipped" in line for line in lines), lines
+
+    def test_run_prewarms_at_startup_without_delaying_readiness(self):
+        """The pre-warm is wired into run()'s existing startup warm-up block and
+        runs OFF the startup path: a 5s pre-warm must not hold run() for 5s."""
+        import queue as q
+        import threading
+        import time
+
+        motor, _, _ = _make_motor()
+
+        class _EmptyQueue:
+            def __init__(self, ticks):
+                self._remaining = ticks
+
+            def get(self, timeout=None):
+                if self._remaining > 0:
+                    self._remaining -= 1
+                    raise q.Empty
+                return None
+
+            def qsize(self):
+                return 0
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_prewarm():
+            started.set()
+            release.wait(5.0)
+
+        motor._prewarm_tts = slow_prewarm
+        motor.command_queue = _EmptyQueue(1)
+        motor._piper = MagicMock()
+        motor._check_ollama_service = lambda: None
+        motor._process_priority_queue = lambda: None
+        motor._check_pending_model_switch = lambda: None
+        motor.promote_pending_drafts = lambda **kw: {"skipped": "test"}
+
+        t0 = time.monotonic()
+        try:
+            motor.run()
+            elapsed = time.monotonic() - t0
+            assert started.wait(2.0), "run() never triggered the TTS pre-warm"
+            assert elapsed < 2.0, (
+                f"run() blocked {elapsed:.2f}s on the pre-warm; it must not delay readiness"
+            )
+        finally:
+            release.set()
