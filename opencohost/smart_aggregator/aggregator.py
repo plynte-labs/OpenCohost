@@ -372,7 +372,21 @@ class Aggregator:
         Surfaces FilterDiagnostics' own cumulative counters (diagnostics.py)
         -- no separate counter is kept here. Gated to
         _CHAT_INGEST_ROLLUP_EVERY_N messages or _CHAT_INGEST_ROLLUP_EVERY_SECONDS,
-        whichever comes first, so a busy channel doesn't spam the log."""
+        whichever comes first, so a busy channel doesn't spam the log.
+
+        The activation half (peak_rate/threshold/fired) answers the question
+        surviving the filter does NOT answer: whether Kira ever woke up.
+        Session 2026-08-14 10:43-10:54 had survived=65 and fired=0, and the
+        log said nothing at all, because ActivityTrigger's below-threshold
+        branch only feeds telemetry that is off by default. peak_rate against
+        threshold also separates the two ways a live channel stays silent:
+        peak below threshold is the rate gate, peak at-or-above it with
+        fired=0 is the cooldown or a swallowed callback.
+
+        The activation half trails the filter half by one message -- this is
+        called before process_message feeds the trigger. At the real cadence
+        (50 messages or 30s) that is invisible, and it is not worth reordering
+        a live path on which the trigger enqueues a turn."""
         now = time.monotonic()
         due_by_count = self._chat_ingest_msg_count % _CHAT_INGEST_ROLLUP_EVERY_N == 0
         due_by_time = (now - self._chat_ingest_last_rollup_ts) >= _CHAT_INGEST_ROLLUP_EVERY_SECONDS
@@ -383,9 +397,12 @@ class Aggregator:
         top_reasons = sorted(diag["by_reason"].items(), key=lambda kv: kv[1], reverse=True)[:3]
         reasons_str = ",".join(f"{r}:{n}" for r, n in top_reasons) if top_reasons else "none"
         logger.info(
-            "[CHAT_INGEST] rollup platform=%s source=%s arrived=%d survived=%d rejected=%d top_reasons=%s",
+            "[CHAT_INGEST] rollup platform=%s source=%s arrived=%d survived=%d "
+            "rejected=%d top_reasons=%s peak_rate=%.2f threshold=%.2f fired=%d",
             self._chat_ingest_platform, self._chat_ingest_source_id,
             diag["seen"], diag["accepted"], diag["rejected"], reasons_str,
+            self.activity.peak_rate, self.activity.threshold_per_second,
+            self.activity.trigger_count,
         )
 
     def process_message(self, message: dict):

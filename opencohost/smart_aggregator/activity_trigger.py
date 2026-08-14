@@ -17,6 +17,18 @@ class ActivityTrigger:
         self._timestamps: deque = deque()
         self._last_trigger_time: Optional[float] = None
         self._lock = False
+
+        # Cumulative-since-reset diagnostics, read by the [CHAT_INGEST] rollup.
+        # Without them the rate gate is invisible: the `rate_below_threshold`
+        # branch in on_message routes to _emit_decision, whose callback is None
+        # unless injected, so a channel that never reaches threshold_per_second
+        # produces ZERO log output while looking perfectly connected.
+        # peak_rate (not the instantaneous rate) is what answers the operator's
+        # real question -- "did this channel EVER come close to waking Kira" --
+        # because get_current_rate() sampled at rollup time reads whatever the
+        # last 5 seconds happened to hold, which is usually nothing.
+        self.peak_rate = 0.0
+        self.trigger_count = 0
     
     def on_message(self, message: dict):
         now = message.get("timestamp", time.time())
@@ -29,9 +41,12 @@ class ActivityTrigger:
         self._prune(now)
         
         current_rate = self.get_current_rate()
+        if current_rate > self.peak_rate:
+            self.peak_rate = current_rate
         if current_rate >= self.threshold_per_second:
             if self._last_trigger_time is None or (now - self._last_trigger_time) >= self.cooldown_seconds:
                 self._last_trigger_time = now
+                self.trigger_count += 1
                 self._trigger(current_rate)
                 self._emit_decision("trigger_fired", current_rate)
             else:
@@ -68,6 +83,12 @@ class ActivityTrigger:
     def reset(self):
         self._timestamps.clear()
         self._last_trigger_time = None
+        # Only reached from set_activity_limits(reset=True), i.e. the operator
+        # just changed the threshold. The counters describe how the OLD one
+        # behaved, so carrying them forward would report the previous setting's
+        # verdict as the new one's. Earlier rollups keep the history in the log.
+        self.peak_rate = 0.0
+        self.trigger_count = 0
     
     def _trigger(self, rate: float):
         payload = {

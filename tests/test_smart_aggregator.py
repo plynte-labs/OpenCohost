@@ -1613,6 +1613,69 @@ class TestChatIngestObservability:
         assert "rejected=2" in line
         assert "top_reasons=" in line
 
+    def test_rollup_reports_a_live_channel_that_never_wakes_kira(
+        self, smart_aggregator_config, temp_dir, caplog, monkeypatch
+    ):
+        """The 2026-08-14 10:43-10:54 session: connected, 65 messages through
+        the filter, zero reactions, and NOTHING in the log for eleven minutes.
+        ActivityTrigger's below-threshold branch feeds only _emit_decision,
+        whose callback is None unless injected, so the one gate that was
+        actually shut was the only one that never spoke. `survived` alone reads
+        as success; survived-with-fired=0 is the real state."""
+        import logging
+        from opencohost.smart_aggregator import aggregator as aggregator_mod
+
+        monkeypatch.setattr(aggregator_mod, "_CHAT_INGEST_ROLLUP_EVERY_N", 3)
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        # 5.0/s over the 5s window == 25 accepted messages in five seconds.
+        agg.set_activity_limits(threshold_per_second=5.0, reset=True)
+
+        now = time.time()
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            for i, text in enumerate((
+                "Kira que juego estas jugando ahora mismo",
+                "Kira puedes explicar como funciona ese combo",
+                "Kira donde conseguiste ese arma tan rara",
+            )):
+                agg.process_message({"user": f"u{i}", "text": text, "timestamp": now})
+
+        line = [r.getMessage() for r in caplog.records if "[CHAT_INGEST] rollup" in r.getMessage()][-1]
+        assert "survived=3" in line, line
+        assert "threshold=5.00" in line, line
+        # 0.40, not 0.60: process_message emits the rollup before it feeds the
+        # trigger, so the activation half trails the filter half by exactly one
+        # message. Pinned deliberately — at the real cadence (50 messages or
+        # 30s) the lag is invisible, and reordering a live path where the
+        # trigger enqueues a turn is not worth a cosmetic off-by-one.
+        assert "peak_rate=0.40" in line, line
+        assert "fired=0" in line, line
+
+    def test_rollup_reports_the_trigger_firing_when_the_rate_is_reached(
+        self, smart_aggregator_config, temp_dir, caplog, monkeypatch
+    ):
+        """The other half: peak_rate at or above threshold with fired=0 would
+        mean the cooldown or a swallowed callback, not the rate gate. Pinning
+        the firing case is what makes that distinction readable."""
+        import logging
+        from opencohost.smart_aggregator import aggregator as aggregator_mod
+
+        monkeypatch.setattr(aggregator_mod, "_CHAT_INGEST_ROLLUP_EVERY_N", 3)
+        agg = self._agg(smart_aggregator_config, temp_dir)
+        agg.set_activity_limits(threshold_per_second=0.4, reset=True)  # 2 in 5s
+
+        now = time.time()
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            for i, text in enumerate((
+                "Kira que juego estas jugando ahora mismo",
+                "Kira puedes explicar como funciona ese combo",
+                "Kira donde conseguiste ese arma tan rara",
+            )):
+                agg.process_message({"user": f"u{i}", "text": text, "timestamp": now})
+
+        line = [r.getMessage() for r in caplog.records if "[CHAT_INGEST] rollup" in r.getMessage()][-1]
+        assert "threshold=0.40" in line, line
+        assert "fired=1" in line, line  # once; the 45s cooldown holds the rest
+
     def test_no_per_message_line_at_info_level(
         self, smart_aggregator_config, temp_dir, caplog
     ):
