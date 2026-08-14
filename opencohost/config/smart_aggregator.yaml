@@ -40,6 +40,17 @@ activity:
   window_seconds: 5
   threshold_per_second: 1.0
   cooldown_seconds: 45.0
+  # Opt-in adaptive activation (adaptive_chat_activation, 2026-08-14 incident
+  # design): periodically retunes threshold_per_second to the channel's own
+  # recent accepted-message rate instead of the one fixed number above.
+  # OFF by default -- the owner opts in per-session via the Tauri switch, or
+  # flips `enabled: true` here for an always-on default. `interval_seconds`
+  # and `burst_factor` are real calibration knobs (channels differ) and are
+  # deliberately NOT exposed in the API/UI -- nobody should tune them live.
+  adaptive:
+    enabled: false
+    interval_seconds: 120
+    burst_factor: 2.0
   actions:
     auto_reply:
       enabled: false

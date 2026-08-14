@@ -64,6 +64,7 @@ class Aggregator:
             callbacks={
                 "on_trigger": self._on_activity_trigger,
                 "on_decision": self._on_activity_decision,
+                "on_adaptive_retune": self._on_adaptive_retune,
             }
         )
         self.intent_aggregator = IntentAggregator(self.config.get("intent", {}))
@@ -130,13 +131,58 @@ class Aggregator:
         if user_window_seconds is not None:
             self._spam_user_window = max(1.0, float(user_window_seconds))
 
-    def set_activity_limits(self, threshold_per_second: Optional[float] = None, cooldown_seconds: Optional[float] = None, reset: bool = False):
+    def set_activity_limits(self, threshold_per_second: Optional[float] = None, cooldown_seconds: Optional[float] = None,
+                             reset: bool = False, *, suppress_adaptive_auto_off: bool = False):
+        """Every manual threshold_per_second write routes through here (the
+        Tauri PUT /limits router AND every CTk caller alike) -- Finding 5,
+        judge-confirmed 2026-08-14: the router previously carried this
+        auto-off invariant itself, so any caller that skipped the router
+        (or a future one) could leave adaptive silently in force while the
+        UI showed a manual value. Moved here so it holds for every caller.
+
+        By default, writing a threshold while adaptive is enabled turns
+        adaptive back OFF (owner override, 2026-08-14 -- "a manual preset
+        wins"). ``suppress_adaptive_auto_off`` exists for exactly one caller:
+        the router, for the one request shape where adaptive_activation and
+        threshold_per_second arrive in the SAME body (Finding 4) -- there,
+        the explicit adaptive_activation value already applied moments ago
+        must win outright, with no second contradictory auto-off and no
+        second [ADAPTIVE_ACT] log line.
+
+        Does NOT affect the adaptive retune itself: ActivityTrigger.
+        _maybe_resample writes self.threshold_per_second directly on the
+        ActivityTrigger instance, bypassing this method entirely -- there is
+        nothing here for it to trip.
+        """
         if threshold_per_second is not None:
+            if not suppress_adaptive_auto_off and self.activity.adaptive_enabled:
+                self.set_adaptive_activation(False)
             self.activity.threshold_per_second = max(0.01, float(threshold_per_second))
         if cooldown_seconds is not None:
             self.activity.cooldown_seconds = max(0.0, float(cooldown_seconds))
         if reset:
             self.activity.reset()
+
+    def set_adaptive_activation(self, enabled: bool) -> None:
+        """PUT .../limits `adaptive_activation` passthrough, and the same
+        write a manual threshold PUT falls back to (owner override,
+        2026-08-14 -- see routers/stream.py::put_stream_limits). Logs one
+        INFO enable/disable line; every subsequent per-interval retune line
+        comes from _on_adaptive_retune below."""
+        enabled = bool(enabled)
+        self.activity.set_adaptive(enabled)
+        if enabled:
+            logger.info(
+                "[ADAPTIVE_ACT] enabled interval=%.0f factor=%.1f holding threshold=%.2f",
+                self.activity.adaptive_interval_seconds,
+                self.activity.adaptive_burst_factor,
+                self.activity.threshold_per_second,
+            )
+        else:
+            logger.info(
+                "[ADAPTIVE_ACT] disabled keeping threshold=%.2f",
+                self.activity.threshold_per_second,
+            )
 
     def set_filter_policy(self, preset_name: str) -> None:
         preset = self._get_filter_preset(preset_name)
@@ -190,6 +236,21 @@ class Aggregator:
             reason=reason, score=data.get("rate"), threshold=data.get("threshold"),
             msg_len=0, msg_category=MsgCategory.NA.value,
             chat_rate=float(data.get("rate", 0.0)),
+        )
+
+    def _on_adaptive_retune(self, data: dict) -> None:
+        """ActivityTrigger sampler callback (design.md Q6): one INFO line per
+        sample point (~30/hour at the 120s default interval) -- 'unchanged'
+        logs too, so "adaptive decided not to retune" is as visible as an
+        actual retune. Metadata only: rate/count numbers, never chat text or
+        usernames (data is exactly what
+        ActivityTrigger._emit_adaptive_retune emits)."""
+        logger.info(
+            "[ADAPTIVE_ACT] sampled_rate=%.3f accepted=%d elapsed=%.1f target_count=%d "
+            "threshold %.2f -> %.2f verdict=%s",
+            data["sampled_rate"], data["accepted"], data["elapsed"],
+            data["target_count"], data["old_threshold"], data["new_threshold"],
+            data["verdict"],
         )
 
     @property
@@ -269,6 +330,12 @@ class Aggregator:
         self._chat_ingest_source_id = source_id
         self._chat_ingest_connect_seq = 0
         self._chat_ingest_last_error = None
+        # Adaptive sampler (design.md Q7): a new channel's rate says nothing
+        # about the old one -- restart the sampler's clock, but keep
+        # activity.threshold_per_second (the best available prior; the first
+        # interval on the new source corrects it) and adaptive_enabled itself
+        # untouched.
+        self.activity.reset_adaptive_sampler()
 
         self._source = source_cls(
             source_config,
@@ -386,7 +453,13 @@ class Aggregator:
         The activation half trails the filter half by one message -- this is
         called before process_message feeds the trigger. At the real cadence
         (50 messages or 30s) that is invisible, and it is not worth reordering
-        a live path on which the trigger enqueues a turn."""
+        a live path on which the trigger enqueues a turn.
+
+        `adaptive=on|off` (adaptive_chat_activation, 2026-08-14) is the one
+        added token: with the threshold now potentially live-tuned, the
+        existing peak_rate/threshold/fired trio already IS the adaptive
+        mode's report card -- this just says whether that retuning was
+        active for the window being reported."""
         now = time.monotonic()
         due_by_count = self._chat_ingest_msg_count % _CHAT_INGEST_ROLLUP_EVERY_N == 0
         due_by_time = (now - self._chat_ingest_last_rollup_ts) >= _CHAT_INGEST_ROLLUP_EVERY_SECONDS
@@ -398,11 +471,12 @@ class Aggregator:
         reasons_str = ",".join(f"{r}:{n}" for r, n in top_reasons) if top_reasons else "none"
         logger.info(
             "[CHAT_INGEST] rollup platform=%s source=%s arrived=%d survived=%d "
-            "rejected=%d top_reasons=%s peak_rate=%.2f threshold=%.2f fired=%d",
+            "rejected=%d top_reasons=%s peak_rate=%.2f threshold=%.2f fired=%d adaptive=%s",
             self._chat_ingest_platform, self._chat_ingest_source_id,
             diag["seen"], diag["accepted"], diag["rejected"], reasons_str,
             self.activity.peak_rate, self.activity.threshold_per_second,
             self.activity.trigger_count,
+            "on" if self.activity.adaptive_enabled else "off",
         )
 
     def process_message(self, message: dict):

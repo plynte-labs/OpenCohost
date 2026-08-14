@@ -12,6 +12,7 @@ Preserves all 7 test categories:
 
 import os
 import json
+import logging
 import sqlite3
 import time
 from copy import deepcopy
@@ -267,6 +268,350 @@ class TestActivityTrigger:
             activity.on_message({"user": f"u{i}", "text": "msg", "timestamp": base + (i * 0.2)})
         assert triggered[-1]["actions"]["auto_reply"] == "Chat en pico"
         assert triggered[-1]["actions"]["behavior_change"]["parameter"] == "excitement_multiplier"
+
+
+# --- TC3.3c — Adaptive Chat Activation (2026-08-14 incident design) ---
+
+class TestAdaptiveActivation:
+    """Message-driven sampler that periodically retunes
+    ActivityTrigger.threshold_per_second to the channel's own recent
+    accepted-message rate. All synthetic timestamps, zero sleeps."""
+
+    def _activity(self, smart_aggregator_config, *, threshold=1.0, interval=120.0,
+                   burst_factor=2.0, callbacks=None):
+        cfg = deepcopy(smart_aggregator_config["activity"])
+        cfg["threshold_per_second"] = threshold
+        cfg["cooldown_seconds"] = 0.0
+        cfg["adaptive"] = {"enabled": True, "interval_seconds": interval, "burst_factor": burst_factor}
+        return ActivityTrigger(cfg, callbacks=callbacks or {})
+
+    def test_disabled_by_default_ignores_rate_and_holds_threshold(self, smart_aggregator_config):
+        """YAML ships `adaptive.enabled: false` -- the sampler must be
+        byte-identical no-op behavior until opted in."""
+        cfg = deepcopy(smart_aggregator_config["activity"])
+        cfg["threshold_per_second"] = 1.0
+        cfg["cooldown_seconds"] = 0.0
+        activity = ActivityTrigger(cfg, callbacks={})
+        assert activity.adaptive_enabled is False
+        base = time.time()
+        for i in range(50):
+            activity.on_message({"timestamp": base + i * 0.1})
+        assert activity.threshold_per_second == 1.0
+
+    def test_cold_start_holds_manual_threshold_until_first_interval(self, smart_aggregator_config):
+        """Q4: no guess, no jump to the floor on enable -- the threshold in
+        effect at enable time holds until a full interval has elapsed."""
+        activity = self._activity(smart_aggregator_config, threshold=1.0)
+        base = time.time()
+        activity.on_message({"timestamp": base})  # starts the sampler's clock
+        assert activity.threshold_per_second == 1.0
+        activity.on_message({"timestamp": base + 60})  # still inside interval 1
+        assert activity.threshold_per_second == 1.0
+
+    def test_quiet_channel_converges_to_floor(self, smart_aggregator_config):
+        """Incident shape (2026-08-14): a channel averaging ~0.03 accepted
+        msg/s converges to the Small Stream floor (0.2 msg/s)."""
+        activity = self._activity(smart_aggregator_config, threshold=1.0)
+        base = time.time()
+        for i in range(20):  # 30s spacing -> mean ~0.033 accepted/s
+            activity.on_message({"timestamp": base + i * 30})
+        assert activity.threshold_per_second == pytest.approx(0.2)
+
+    def test_half_rate_channel_reproduces_yaml_default(self, smart_aggregator_config):
+        """A channel running comfortably inside the (0.4, 0.5] mean-rate
+        bucket retunes to target_count=5 -- the hand-tuned YAML default."""
+        activity = self._activity(smart_aggregator_config, threshold=0.2)
+        base = time.time()
+        t = 0.0
+        while t <= 130:
+            activity.on_message({"timestamp": base + t})
+            t += 2.2  # ~0.45 accepted/s
+        assert activity.threshold_per_second == pytest.approx(1.0)
+
+    def test_raid_clamps_at_ceiling(self, smart_aggregator_config):
+        """A mean far above the ceiling bucket clamps to target_count=5
+        (1.0 msg/s) with verdict=ceilinged, never higher."""
+        retunes = []
+        activity = self._activity(
+            smart_aggregator_config, threshold=0.2,
+            callbacks={"on_adaptive_retune": retunes.append},
+        )
+        base = time.time()
+        for i in range(250):  # 0.5s spacing -> mean ~2/s, well past the ceiling
+            activity.on_message({"timestamp": base + i * 0.5})
+        assert activity.threshold_per_second == pytest.approx(1.0)
+        assert retunes and retunes[0]["verdict"] == "ceilinged"
+
+    def test_quantization_deadband_logs_unchanged(self, smart_aggregator_config):
+        """Already at the floor: successive intervals at the same low mean
+        must retune to the SAME target_count -- verdict=unchanged, no drift."""
+        retunes = []
+        activity = self._activity(
+            smart_aggregator_config, threshold=0.2,
+            callbacks={"on_adaptive_retune": retunes.append},
+        )
+        base = time.time()
+        for i in range(20):
+            activity.on_message({"timestamp": base + i * 30})
+        assert retunes
+        assert all(r["verdict"] == "unchanged" for r in retunes)
+        assert activity.threshold_per_second == pytest.approx(0.2)
+
+    def test_dead_hour_then_message_resamples_before_gate_and_fires(self, smart_aggregator_config):
+        """Q7: resample runs BEFORE the gate -- a message arriving after a
+        long silent gap corrects its own threshold (down to the floor) and
+        then fires against that corrected value in the same call."""
+        triggered = []
+        activity = self._activity(
+            smart_aggregator_config, threshold=1.0,
+            callbacks={"on_trigger": triggered.append},
+        )
+        base = time.time()
+        activity.on_message({"timestamp": base})  # cold start
+        activity.on_message({"timestamp": base + 3700})  # dead hour, then one message
+        assert activity.threshold_per_second == pytest.approx(0.2)
+        assert triggered
+
+    def test_retune_callback_payload_is_metadata_only(self, smart_aggregator_config):
+        """R8: the payload is numbers and a verdict string only -- never the
+        message text or username that arrived alongside it."""
+        retunes = []
+        activity = self._activity(
+            smart_aggregator_config, threshold=1.0,
+            callbacks={"on_adaptive_retune": retunes.append},
+        )
+        base = time.time()
+        allowed_keys = {"verdict", "sampled_rate", "accepted", "elapsed", "target_count", "old_threshold", "new_threshold"}
+        for i in range(20):
+            activity.on_message({"user": f"secretuser{i}", "text": f"secret chat text {i}", "timestamp": base + i * 30})
+        assert retunes
+        for r in retunes:
+            assert set(r.keys()) == allowed_keys
+            assert "secret chat text" not in str(r)
+            assert "secretuser" not in str(r)
+
+    def test_disable_keeps_last_adaptive_threshold(self, smart_aggregator_config):
+        """Q5: disabling keeps the last adaptive-chosen value -- restoring
+        the pre-enable value would resurrect a stale manual setting."""
+        activity = self._activity(smart_aggregator_config, threshold=1.0)
+        base = time.time()
+        for i in range(20):
+            activity.on_message({"timestamp": base + i * 30})
+        assert activity.threshold_per_second == pytest.approx(0.2)
+
+        activity.set_adaptive(False)
+        assert activity.threshold_per_second == pytest.approx(0.2)
+
+        # Re-enabling is a fresh cold start: the very next message must not
+        # retune immediately, and the held value is still the last one.
+        activity.set_adaptive(True)
+        activity.on_message({"timestamp": base + 20 * 30 + 1})
+        assert activity.threshold_per_second == pytest.approx(0.2)
+
+    def test_reset_clears_sampler_state(self, smart_aggregator_config):
+        """ActivityTrigger.reset() also clears the adaptive sampler (Q7) --
+        one method, both states."""
+        activity = self._activity(smart_aggregator_config, threshold=1.0)
+        activity.on_message({"timestamp": time.time()})
+        assert activity._adaptive_last_sample_ts is not None
+
+        activity.reset()
+        assert activity._adaptive_accepted_since_sample == 0
+        assert activity._adaptive_last_sample_ts is None
+
+    def test_connect_resets_sampler_keeps_threshold(self, smart_aggregator_config, temp_dir):
+        """Q7: a reconnect restarts the sampler's clock (a new channel's rate
+        says nothing about the old one) but keeps the current threshold and
+        the adaptive_enabled flag -- the first interval on the new source
+        corrects it."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        cfg["activity"]["adaptive"] = {"enabled": True, "interval_seconds": 120, "burst_factor": 2.0}
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+
+        agg = Aggregator(config_path=config_path)
+        agg.activity._adaptive_accepted_since_sample = 7
+        agg.activity._adaptive_last_sample_ts = time.time() - 30
+
+        with patch.object(TwitchChatSource, "connect"):
+            agg.connect("canalA", platform="twitch")
+
+        assert agg.activity._adaptive_accepted_since_sample == 0
+        assert agg.activity._adaptive_last_sample_ts is None
+        assert agg.activity.threshold_per_second == 1.0
+        assert agg.activity.adaptive_enabled is True
+
+    def test_accepted_only_counting(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Q1: the sampler only ever sees post-filter (accepted) messages --
+        drive Aggregator.process_message with messages MessageFilter rejects
+        and confirm the sampler never sees them."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        cfg["activity"]["adaptive"] = {"enabled": True, "interval_seconds": 120, "burst_factor": 2.0}
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        agg.start_session("youtube", "headless_test")
+
+        base = time.time()
+        for i in range(10):
+            agg.process_message({"user": f"u{i}", "text": "hola", "timestamp": base + i})  # rejected: too short
+        assert agg.activity._adaptive_accepted_since_sample == 0
+
+    def test_on_adaptive_retune_logs_adaptive_act_line(self, smart_aggregator_config, mock_llm, temp_dir, caplog):
+        """Aggregator._on_adaptive_retune formats the [ADAPTIVE_ACT] line."""
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        cfg["activity"]["adaptive"] = {"enabled": True, "interval_seconds": 120, "burst_factor": 2.0}
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        base = time.time()
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            for i in range(20):
+                agg.activity.on_message({"timestamp": base + i * 30})
+
+        lines = [r.message for r in caplog.records if "[ADAPTIVE_ACT]" in r.message]
+        assert lines
+        assert "verdict=" in lines[0]
+        assert "target_count=" in lines[0]
+        assert "threshold" in lines[0] and "->" in lines[0]
+
+    def test_set_adaptive_activation_logs_enable_and_disable_lines(self, smart_aggregator_config, mock_llm, temp_dir, caplog):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            agg.set_adaptive_activation(True)
+            agg.set_adaptive_activation(False)
+
+        lines = [r.message for r in caplog.records if "[ADAPTIVE_ACT]" in r.message]
+        assert any("enabled" in line for line in lines)
+        assert any("disabled" in line for line in lines)
+
+    def test_zero_window_seconds_does_not_raise_zerodivisionerror(self, smart_aggregator_config):
+        """Judgment Day Finding 2 (both judges, 2026-08-14): a YAML
+        `activity.window_seconds: 0` (or negative) must not crash the chat
+        reader thread inside on_message. get_current_rate() already guards
+        this non-positive-window case (line ~117) -- the retune write in
+        _maybe_resample must be consistent with that same guard."""
+        cfg = deepcopy(smart_aggregator_config["activity"])
+        cfg["window_seconds"] = 0
+        cfg["threshold_per_second"] = 1.0
+        cfg["cooldown_seconds"] = 0.0
+        cfg["adaptive"] = {"enabled": True, "interval_seconds": 0, "burst_factor": 2.0}
+        activity = ActivityTrigger(cfg, callbacks={})
+        base = time.time()
+        activity.on_message({"timestamp": base})       # cold start, arms the sampler
+        activity.on_message({"timestamp": base + 1})    # elapsed(1) >= interval(0) -> retune fires, must not raise
+
+    def test_disable_during_inflight_retune_discards_stale_write(self, smart_aggregator_config):
+        """Judgment Day Finding 3 (2026-08-14): a retune already past
+        on_message's `if self.adaptive_enabled` gate must not clobber a
+        manual value applied by a concurrent PUT /limits that disabled
+        adaptive in between. Simulated without real threads (the interleave
+        that matters is "adaptive_enabled flips False, then a still-in-flight
+        _maybe_resample reaches its write"): call _maybe_resample directly,
+        exactly as if on_message's earlier check had already let it through,
+        after the flag flip and the manual write already landed."""
+        activity = self._activity(smart_aggregator_config, threshold=1.0, interval=0.0)
+        base = time.time()
+        activity.on_message({"timestamp": base})  # cold start, arms the sampler; accepted_since_sample=1
+
+        # The race: a FastAPI worker thread disables adaptive and writes the
+        # operator's manual value AFTER on_message's gate already let this
+        # in-flight retune through, but BEFORE _maybe_resample's own write.
+        activity.adaptive_enabled = False
+        activity.threshold_per_second = 7.0  # the operator's manual value
+
+        activity._maybe_resample(base + 1)  # elapsed(1) >= interval(0) -> would retune
+
+        assert activity.threshold_per_second == 7.0  # manual value survives, not clobbered
+
+    def test_chat_ingest_rollup_includes_adaptive_token(self, smart_aggregator_config, mock_llm, temp_dir, caplog):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        cfg["activity"]["threshold_per_second"] = 1.0
+        cfg["activity"]["cooldown_seconds"] = 0.0
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        agg = Aggregator(config_path=config_path, llm_interface=mock_llm)
+        agg.set_adaptive_activation(True)
+        agg._chat_ingest_platform = "twitch"
+        agg._chat_ingest_source_id = "kira"
+        agg._chat_ingest_msg_count = 50  # lands exactly on the every-50 rollup boundary
+
+        with caplog.at_level(logging.INFO, logger="OpenCohost"):
+            agg._log_chat_ingest_rollup()
+
+        lines = [r.message for r in caplog.records if "[CHAT_INGEST] rollup" in r.message]
+        assert lines
+        assert "adaptive=on" in lines[-1]
+
+    def _real_aggregator(self, smart_aggregator_config, mock_llm, temp_dir):
+        cfg = deepcopy(smart_aggregator_config)
+        config_path = os.path.join(temp_dir, "smart_aggregator.yaml")
+        cfg["history"]["db_path"] = os.path.join(temp_dir, "sessions.db")
+        cfg["history"]["jsonl_path"] = os.path.join(temp_dir, "chat_log.jsonl")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True)
+        return Aggregator(config_path=config_path, llm_interface=mock_llm)
+
+    def test_set_activity_limits_auto_disables_adaptive_by_default(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Judgment Day Finding 5 (2026-08-14): the auto-off invariant now
+        lives in Aggregator.set_activity_limits itself, not only in the
+        router -- so it holds for EVERY caller (the CTk callers included)."""
+        agg = self._real_aggregator(smart_aggregator_config, mock_llm, temp_dir)
+        agg.set_adaptive_activation(True)
+
+        agg.set_activity_limits(threshold_per_second=3.0)
+
+        assert agg.activity.adaptive_enabled is False
+        assert agg.activity.threshold_per_second == 3.0
+
+    def test_set_activity_limits_suppress_flag_keeps_adaptive_on(self, smart_aggregator_config, mock_llm, temp_dir):
+        """suppress_adaptive_auto_off=True is the router's escape hatch for
+        the one same-body request shape where an explicit adaptive_activation
+        must win (Finding 4) -- verify the aggregator-level primitive."""
+        agg = self._real_aggregator(smart_aggregator_config, mock_llm, temp_dir)
+        agg.set_adaptive_activation(True)
+
+        agg.set_activity_limits(threshold_per_second=3.0, suppress_adaptive_auto_off=True)
+
+        assert agg.activity.adaptive_enabled is True
+        assert agg.activity.threshold_per_second == 3.0
+
+    def test_set_activity_limits_no_threshold_write_leaves_adaptive_alone(self, smart_aggregator_config, mock_llm, temp_dir):
+        """Cooldown-only writes never touch adaptive_enabled -- there is no
+        threshold field to auto-off over."""
+        agg = self._real_aggregator(smart_aggregator_config, mock_llm, temp_dir)
+        agg.set_adaptive_activation(True)
+
+        agg.set_activity_limits(cooldown_seconds=30.0)
+
+        assert agg.activity.adaptive_enabled is True
+        assert agg.activity.cooldown_seconds == 30.0
 
 
 # --- TC3.3b — Intent Aggregation ---

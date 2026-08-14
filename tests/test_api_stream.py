@@ -38,6 +38,9 @@ class _FakeActivity:
     def __init__(self, threshold=5.0, cooldown=10.0):
         self.threshold_per_second = threshold
         self.cooldown_seconds = cooldown
+        # Adaptive Chat Activation (2026-08-14) -- mirrors
+        # ActivityTrigger.adaptive_enabled, OFF by default like the real YAML.
+        self.adaptive_enabled = False
 
 
 class _FakeSource:
@@ -67,6 +70,13 @@ class FakeAggregator:
         self.block_connect = None  # threading.Event
         # optional exception a test injects to exercise connect error mapping
         self.raise_on_connect = None  # Exception instance
+        # Records of every set_adaptive_activation()/set_activity_limits()
+        # call this fake received -- lets a test assert on the ROUTER's own
+        # contract (how many times it toggled adaptive, what suppress flag it
+        # passed) now that the auto-off invariant itself lives one layer down
+        # in the real Aggregator.set_activity_limits (Finding 5, 2026-08-14).
+        self.adaptive_activation_calls = []
+        self.set_activity_limits_calls = []
 
     def connect(self, source_id, platform="youtube"):
         self.connect_calls.append((source_id, platform))
@@ -82,11 +92,27 @@ class FakeAggregator:
             self._source.disconnect()
         self._source = None
 
-    def set_activity_limits(self, threshold_per_second=None, cooldown_seconds=None, reset=False):
+    def set_activity_limits(self, threshold_per_second=None, cooldown_seconds=None, reset=False,
+                             *, suppress_adaptive_auto_off=False):
+        # Mirrors the real Aggregator.set_activity_limits invariant (Finding
+        # 5): a manual threshold write turns adaptive off unless the caller
+        # (the router, for one same-body request shape -- Finding 4)
+        # explicitly suppresses it.
+        self.set_activity_limits_calls.append({
+            "threshold_per_second": threshold_per_second,
+            "cooldown_seconds": cooldown_seconds,
+            "suppress_adaptive_auto_off": suppress_adaptive_auto_off,
+        })
         if threshold_per_second is not None:
+            if not suppress_adaptive_auto_off and self.activity.adaptive_enabled:
+                self.set_adaptive_activation(False)
             self.activity.threshold_per_second = threshold_per_second
         if cooldown_seconds is not None:
             self.activity.cooldown_seconds = cooldown_seconds
+
+    def set_adaptive_activation(self, enabled):
+        self.adaptive_activation_calls.append(bool(enabled))
+        self.activity.adaptive_enabled = bool(enabled)
 
     def set_spam_limits(self, max_messages_per_user=None, user_window_seconds=None):
         if max_messages_per_user is not None:
@@ -141,6 +167,7 @@ def test_get_stream_state_disconnected_shape():
             "stream_over_agenda",
             "stream_ttl_seconds",
             "effective_stream_ttl_seconds",
+            "adaptive_activation",
         }
         assert body["connected"] is False
         assert body["platform"] is None
@@ -150,6 +177,7 @@ def test_get_stream_state_disconnected_shape():
         assert body["max_messages_per_user"] == 10
         assert body["filter_policy"] == "balanced"
         assert body["input_contract"] is False  # module flag ships OFF
+        assert body["adaptive_activation"] is False  # YAML default ships OFF
 
 
 def test_get_stream_state_connected_reflects_source():
@@ -495,6 +523,144 @@ def test_limits_omitting_input_contract_leaves_flag_and_get_reflects_it(monkeypa
 
         resp = client.get("/api/stream/chat-live")
         assert resp.json()["input_contract"] is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Adaptive Chat Activation (2026-08-14) -- PUT/GET contract + owner override
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_put_adaptive_activation_toggles_flag_and_get_reflects_it():
+    """Explicit switch write: ActivityTrigger state (agg.activity), unlike
+    input_contract/stream_over_agenda which live on process-global modules."""
+    agg = FakeAggregator()
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"adaptive_activation": True})
+        assert resp.status_code == 200
+        assert agg.activity.adaptive_enabled is True
+        assert resp.json()["adaptive_activation"] is True
+
+        resp = client.get("/api/stream/chat-live")
+        assert resp.json()["adaptive_activation"] is True
+
+        resp = client.put("/api/stream/chat-live/limits", json={"adaptive_activation": False})
+        assert resp.status_code == 200
+        assert agg.activity.adaptive_enabled is False
+        assert resp.json()["adaptive_activation"] is False
+
+
+def test_put_threshold_while_adaptive_on_silently_disables_it_no_422():
+    """OWNER OVERRIDE (2026-08-14): a manual threshold_per_second write while
+    adaptive is on must NOT be refused with a 422 -- it silently turns
+    adaptive off and applies the value in the same PUT."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = True
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"threshold_per_second": 3.0})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["threshold_per_second"] == 3.0
+        assert body["adaptive_activation"] is False
+        assert agg.activity.adaptive_enabled is False
+
+
+def test_put_small_stream_values_while_adaptive_on_disables_it():
+    """Small Stream ON always sends threshold_per_second alongside
+    cooldown_seconds/max_messages_per_user in one PUT -- the owner-override
+    disable path must fire for that combined body too, not just a bare
+    threshold_per_second-only PUT."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = True
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"threshold_per_second": 0.2, "cooldown_seconds": 20, "max_messages_per_user": 30},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["threshold_per_second"] == 0.2
+        assert body["cooldown_seconds"] == 20
+        assert body["max_messages_per_user"] == 30
+        assert body["adaptive_activation"] is False
+
+
+def test_put_cooldown_only_does_not_disable_adaptive():
+    """Adaptive never touches cooldown_seconds (design.md Q3/alternatives),
+    so a cooldown-only write has no field to fight over and must leave
+    adaptive untouched."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = True
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"cooldown_seconds": 30})
+        assert resp.status_code == 200
+        assert resp.json()["cooldown_seconds"] == 30
+        assert resp.json()["adaptive_activation"] is True
+        assert agg.activity.adaptive_enabled is True
+
+
+def test_put_explicit_adaptive_true_then_threshold_same_body_stays_enabled():
+    """Judgment Day Finding 4 (2026-08-14, judge-confirmed): an EXPLICIT
+    adaptive_activation in the same body must win over the implicit
+    manual-write auto-off -- the client said what it wanted. Previously this
+    body shape enabled adaptive, then immediately re-disabled it via the
+    implicit auto-off path (which only checked "is adaptive on right now",
+    not "did THIS request already decide"), logging two contradictory
+    [ADAPTIVE_ACT] lines for one request. Only an ABSENT adaptive_activation
+    plus a threshold write should trigger the implicit disable."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = False
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"adaptive_activation": True, "threshold_per_second": 2.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["adaptive_activation"] is True
+        assert resp.json()["threshold_per_second"] == 2.0
+        assert agg.activity.adaptive_enabled is True
+        # Exactly one enable/disable decision for this request -- the real
+        # Aggregator.set_adaptive_activation logs exactly one [ADAPTIVE_ACT]
+        # line per call, so one call == one log line.
+        assert agg.adaptive_activation_calls == [True]
+        assert agg.set_activity_limits_calls[-1]["suppress_adaptive_auto_off"] is True
+
+
+def test_put_explicit_adaptive_false_then_threshold_same_body_one_call_only():
+    """Same Finding 4 shape but the explicit value is False: the implicit
+    auto-off path must not ALSO call set_adaptive_activation (which would be
+    harmless here since both agree, but would still be a second
+    [ADAPTIVE_ACT] log line for one request)."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = True
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/stream/chat-live/limits",
+            json={"adaptive_activation": False, "threshold_per_second": 2.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["adaptive_activation"] is False
+        assert agg.adaptive_activation_calls == [False]
+        assert agg.set_activity_limits_calls[-1]["suppress_adaptive_auto_off"] is True
+
+
+def test_put_threshold_only_implicit_disable_calls_adaptive_once():
+    """The ORIGINAL owner-override shape (no adaptive_activation in the
+    body): the implicit auto-off must still fire exactly once."""
+    agg = FakeAggregator()
+    agg.activity.adaptive_enabled = True
+    app = _app(_host_with_aggregator(agg))
+    with TestClient(app) as client:
+        resp = client.put("/api/stream/chat-live/limits", json={"threshold_per_second": 3.0})
+        assert resp.status_code == 200
+        assert resp.json()["adaptive_activation"] is False
+        assert agg.adaptive_activation_calls == [False]
+        assert agg.set_activity_limits_calls[-1]["suppress_adaptive_auto_off"] is False
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -532,6 +532,12 @@ class StreamChatLiveResponse(BaseModel):
     # co-host. Exposed so the UI can show the floor instead of the streamer
     # debugging why their 30s setting "doesn't work" under agenda-first.
     effective_stream_ttl_seconds: float
+    # Adaptive Chat Activation (2026-08-14 incident design). Required, not
+    # Optional -- same input_contract precedent (line ~521 above):
+    # absent-vs-False must be indistinguishable to no client. Mirrors
+    # agg.activity.adaptive_enabled (ActivityTrigger state, unlike
+    # input_contract/stream_over_agenda which are process-global modules).
+    adaptive_activation: bool
 
 
 class StreamConnectRequest(BaseModel):
@@ -551,6 +557,12 @@ class StreamLimitsRequest(BaseModel):
     # bounds are in scope).
     stream_over_agenda: Optional[bool] = None
     stream_ttl_seconds: Optional[float] = None
+    # Adaptive Chat Activation (2026-08-14). Owner override: this is an
+    # explicit switch write. It does NOT gate threshold_per_second below --
+    # a manual threshold_per_second write while adaptive is on silently
+    # disables adaptive instead of being refused (see put_stream_limits in
+    # routers/stream.py). No 422 exists for this field.
+    adaptive_activation: Optional[bool] = None
 
 
 class ChatLiveMessageOut(BaseModel):

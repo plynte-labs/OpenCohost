@@ -100,6 +100,11 @@ def _stream_state(agg) -> StreamChatLiveResponse:
         # see turn_priority.effective_stream_ttl) — surfaced so the UI can
         # show the streamer the window actually in force.
         effective_stream_ttl_seconds=turn_priority.effective_stream_ttl(),
+        # Adaptive Chat Activation (2026-08-14): ActivityTrigger state (not a
+        # process-global module) -- the source of truth the Tauri switch
+        # polls, including the "off" it can reach on its own (see the
+        # owner-override write below).
+        adaptive_activation=agg.activity.adaptive_enabled,
     )
 
 
@@ -238,10 +243,36 @@ def put_stream_limits(request: Request, body: StreamLimitsRequest):
         except ValueError:
             return JSONResponse(status_code=422, content={"detail": "invalid_filter_policy"})
 
+    # Adaptive Chat Activation (2026-08-14, owner override): an explicit
+    # switch write applies first...
+    if body.adaptive_activation is not None:
+        agg.set_adaptive_activation(body.adaptive_activation)
+
     if body.threshold_per_second is not None or body.cooldown_seconds is not None:
+        # ...then a manual threshold_per_second write -- whether from the
+        # reaction Select/Segmented preset or Small Stream (which always
+        # sends threshold_per_second) -- SILENTLY turns adaptive back off and
+        # applies the value. No 422: the owner chose "a manual preset wins"
+        # over the originally-proposed "manual writes are refused while
+        # adaptive owns the field" (design.md §5, superseded). Cooldown-only
+        # writes never trigger the disable path because adaptive itself
+        # never sets cooldown_seconds (design.md Q3/alternatives) -- there is
+        # no field to fight over.
+        #
+        # The auto-off invariant itself now lives one layer down, in
+        # Aggregator.set_activity_limits (Finding 5, judge-confirmed
+        # 2026-08-14) so it holds for every caller, not just this router.
+        # suppress_adaptive_auto_off=True exactly when THIS body already gave
+        # an explicit adaptive_activation above -- Finding 4: an explicit
+        # choice in the same request must win outright, never get silently
+        # re-disabled by the implicit manual-write path a few lines later,
+        # and never log two contradictory [ADAPTIVE_ACT] lines for one
+        # request. Only an ABSENT adaptive_activation plus a threshold write
+        # triggers the implicit disable.
         agg.set_activity_limits(
             threshold_per_second=body.threshold_per_second,
             cooldown_seconds=body.cooldown_seconds,
+            suppress_adaptive_auto_off=body.adaptive_activation is not None,
         )
     if body.max_messages_per_user is not None:
         agg.set_spam_limits(max_messages_per_user=body.max_messages_per_user)
