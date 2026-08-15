@@ -66,15 +66,19 @@ Rules:
 - Do NOT start new feature tracks without explicit user approval.
 - Goal is runtime validation and release readiness for OpenCohost launch.
 - Active local checkpoints (NOT yet merged):
-  - `llm_output_streaming_20260813` — **PARKED 2026-08-13, code-complete, not runtime-validated.**
-    Branch `feat/llm-streaming`, pushed to `origin`, 10 commits, 43 failed / 5523 passed
-    (the 43 are the usual `locale.json = "en"` false red). Phases 0, 1 and 2 done: local
-    `direct`/`ptt`/owner-bundle turns speak each sentence as it closes, cutting time-to-first-audio.
-    `LLM_STREAMING_ENABLED` defaults **OFF**, so the running product is unchanged.
-    Do NOT flip it on before the blocking gate passes: force a stall mid-stream and confirm the
-    rollback fires, the spoken prefix commits, **the Ollama runner is freed on socket close**, and
-    the queue continues. That third item is the last UNVERIFIED in the track. Streamed turns log
+  - `llm_output_streaming_20260813` — **LIVE. `LLM_STREAMING_ENABLED` defaults ON**
+    (owner decision 2026-08-13, `config/settings.py::_resolve_llm_streaming`). It shipped
+    default-OFF, but the gate's own measurements — TTFA, first-sentence size, interruptibility —
+    are unobservable while the feature never runs, so shipping it on is what produces the
+    evidence. Kill switch: `OPENCOHOST_LLM_STREAMING=0` plus a restart; an ineligible or
+    flag-off turn takes the buffered path byte-identically.
+    Local `direct`/`ptt`/owner-bundle turns speak each sentence as it closes. Streamed turns log
     `watchdog_timeout:40.00s`; the buffered path still logs `45.00s` and both coexist by design.
+    **Still UNVERIFIED — the adverse path.** Every observation so far is happy-path: the
+    2026-08-14 session logged 6 `STREAM_DONE` turns, all `outcome=clean`, zero watchdog/rollback/
+    abort events. The open gate is unchanged: force a stall mid-stream and confirm the rollback
+    fires, the spoken prefix commits, **the Ollama runner is freed on socket close**, and the
+    queue continues. Do not read "default ON" as "validated".
     Full state: `conductor/tracks/llm_output_streaming_20260813/design.md`.
   - `dynamic_model_management_20260608` — Phase 1 + 2 done locally, 154 passed
   - `heavy_model_inference_recovery_20260609` — **CLOSED 2026-08-13.** Watchdog and rollback are
