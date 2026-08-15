@@ -377,8 +377,8 @@ Mode `"a"`, no rotation, no truncation, no size cap. Wired from `api/engine_host
 
 ```
 $ ls -la logs/ | grep ollama_startup
--rw-r--r-- 1 tavo_ 197609 10471867 Jul 30 04:42 ollama_startup_stderr.log
--rw-r--r-- 1 tavo_ 197609 11263522 Jul 30 01:32 ollama_startup_stdout.log
+-rw-r--r-- 1 user  197609 10471867 Jul 30 04:42 ollama_startup_stderr.log
+-rw-r--r-- 1 user  197609 11263522 Jul 30 01:32 ollama_startup_stdout.log
 ```
 
 **21.7 MB combined, already.** Growth rate is Ollama's own verbosity per model load/unload:

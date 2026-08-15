@@ -77,7 +77,10 @@ def test_invalid_audio_is_rejected_on_import(tmp_path: Path):
     source.write_bytes(b"nope")
     library = MusicLibrary(library_dir=tmp_path / "library", config_file=tmp_path / "music_library.json")
 
-    with pytest.raises(ValueError):
+    # The message is not prose: routers/music.py passes it through verbatim as
+    # a 422 `detail`, so it must stay a machine-readable token in English like
+    # its sibling `music_write_failed`. It used to be a Spanish sentence.
+    with pytest.raises(ValueError, match=r"^music_unsupported_format$"):
         library.add_file(source, "normal")
 
 

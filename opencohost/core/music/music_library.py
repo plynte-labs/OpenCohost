@@ -133,7 +133,12 @@ class MusicLibrary:
         register_staged; the on-disk name stays mood-free."""
         source_path = Path(source)
         if not is_supported_audio_path(source_path):
-            raise ValueError("Solo se aceptan archivos .mp3 o .wav válidos.")
+            # Machine-readable token, not prose: the API handler passes this
+            # straight through as a 422 `detail` (routers/music.py), so a
+            # Spanish sentence here surfaced verbatim in an English-facing
+            # release. Matches the sibling `music_write_failed` convention;
+            # the caller owns the wording the user actually reads.
+            raise ValueError("music_unsupported_format")
         self.library_dir.mkdir(parents=True, exist_ok=True)
         staged = self.library_dir / f"{uuid.uuid4().hex}{source_path.suffix.lower()}"
         shutil.copy2(source_path, staged)
