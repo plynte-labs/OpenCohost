@@ -100,10 +100,16 @@ OpenCohost does not post messages, reactions, or any viewer data back to either 
 
 ## Local data storage
 
-All persistent data is stored under your user data directory:
+All persistent data is stored under your user data directory. Where that is depends on
+how OpenCohost was installed — `get_user_data_dir()` in `opencohost/config/storage.py`
+branches on whether the process is a frozen build:
 
-- **Windows:** `%APPDATA%\OpenCohost\` (e.g. `C:\Users\YourName\AppData\Roaming\OpenCohost\`)<!-- path-ok -->
-- **Linux/macOS:** `~/.local/share/OpenCohost/` (or equivalent)
+- **Editable install** (`pip install -e`, the documented setup): the **repository root**.
+  Nothing is written outside the folder you cloned into.
+- **Packaged (frozen) build, Windows:** `%APPDATA%\OpenCohost\` (e.g. `C:\Users\YourName\AppData\Roaming\OpenCohost\`)<!-- path-ok -->
+- **Packaged (frozen) build, Linux/macOS:** `~/.config/OpenCohost/`
+
+Either way it is a local directory on your own disk; nothing below is uploaded anywhere.
 
 | What | Path (relative to user data dir) |
 |---|---|
@@ -129,12 +135,25 @@ All persistent data is stored under your user data directory:
 | Memorias disclosure-banner dismiss state | `config/memorias_notice.json` |
 | Streamer personalization (nickname, occupation, interests, custom instructions) | `config/personalization.json` |
 
+Three rows above are anchored somewhere else, which only becomes visible in a packaged
+build — in an editable install they all resolve to the same repository root:
+
+- **TTS audio chunks** go to `STORAGE_PATHS.temp_root` (the app directory's `temp/`),
+  redirectable via `opencohost/config/storage.yaml`.
+- **Smart Aggregator files** use the relative `data/smart_aggregator/...` paths from the
+  aggregator config, resolved against the working directory.
+- **`logs/crash.log` and `logs/fatal.log`** are written only by the frozen legacy
+  CustomTkinter shell (`opencohost/ui/crash_reporting.py`), relative to the working
+  directory, and can be moved with `OPENCOHOST_CRASH_LOG` / `OPENCOHOST_FATAL_LOG`.
+
+All of them are still local files; none introduces a network destination.
+
 **Conversation memory** (the in-session history and background digest Kira uses for context) is RAM-only. It is never written to disk and is gone when the app closes, when you switch profiles, or when you use Clear History.
 
 **Kira's saved memorias** are different: short, host-distilled extracts of your own direct/voice turns (never viewer chat) that Kira captures automatically and you can edit, pin, mark private, or delete from the "Memoria de Kira" window. They are written to a local, per-profile SQLite database (`data/memorias/memorias.db`) and persist across app restarts and profile switches — the one exception to the RAM-only rule above. This is a local-only write; no new network destination is introduced.
 
 - **Pausing memorias capture is disk-only.** It stops new memorias from being written going forward. It does not retroactively delete anything already captured, and it does not block the RAM-only conversation/digest above from continuing to operate normally — a turn already tagged as capturable before you paused may still be written to disk.
-- **A hard crash or force-kill can lose the current live window** (at most the last ~10 exchanges) that had not yet flushed to disk — the same way Clear History, a model switch, or a model download clears the live window without flushing it first. A clean app close attempts to flush first (best-effort, time-bounded — a very slow disk can still drop the tail on close).
+- **A hard crash or force-kill can lose the current live window** (at most the last `HISTORY_MAX_TURNS` exchanges — 3 today, `opencohost/config/settings.py`) that had not yet flushed to disk — the same way Clear History, a model switch, or a model download clears the live window without flushing it first. A clean app close attempts to flush first (best-effort, time-bounded — a very slow disk can still drop the tail on close).
 - **To purge memorias**, open "Memoria de Kira" and use the per-profile delete action. It is explicit-only and scoped to the active profile; there is no automatic expiry.
 
 **Streamer personalization** is a small, operator-authored form (nickname, occupation, interests, custom instructions) that you fill in yourself from the "Personalización..." panel — it is never inferred or auto-captured from chat. Unlike per-profile memorias, this store is global (shared across all Kira profiles/personas) and is read directly into Kira's prompt for your own direct/voice turns only; it is never applied to viewer chat processing. It is written in plaintext to a local file (`config/personalization.json`) under your user data directory and is never transmitted anywhere. You can disable it at any time with the "Habilitar personalización" checkbox, or permanently erase it with the panel's "Limpiar" (Clear) action — both take effect immediately, with no automatic expiry otherwise.

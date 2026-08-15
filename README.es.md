@@ -28,7 +28,7 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 | TTS offline opcional (Piper, extra `local-tts`) | Estable |
 | Feed de transcripción en vivo por WebSocket | Estable |
 | Pipeline TTS por fragmentos (Kira habla antes de que termine el LLM) | Estable |
-| Memoria conversacional (ventana deslizante de 10 turnos) | Estable |
+| Memoria conversacional (ventana deslizante de `HISTORY_MAX_TURNS` turnos — 3 hoy, `opencohost/config/settings.py`) | Estable |
 | Perfiles de personalidad (editables desde la UI) | Estable |
 | Catálogo de modelos LLM con cambio de modelo en un clic | Estable |
 | Gestión del ciclo de vida de Ollama desde la UI | Estable |
@@ -193,15 +193,9 @@ El nombre Kira y la personalidad base se preservan en todos los perfiles.
 
 ## Integración con Ollama
 
-La aplicación valida Ollama al iniciar y desactiva las acciones que dependen del LLM si el servicio no está disponible. El panel de modelos ofrece un único botón contextual:
+El motor valida Ollama al iniciar y desactiva las acciones que dependen del LLM mientras el servicio no esté disponible. El servicio se verifica en `http://127.0.0.1:11434/api/tags`. Si Ollama deja de estar disponible durante una sesión, el motor se marca como no listo y bloquea el procesamiento y el cambio de modelo hasta que el servicio vuelva a responder.
 
-- **Instalar Ollama** — abre la página oficial de descarga cuando no se encuentra el binario
-- **Iniciar Ollama** — ejecuta `ollama serve` cuando está instalado pero no responde
-- **Descargar modelo** — descarga el modelo seleccionado cuando Ollama está listo pero el modelo no existe localmente
-- **Activar modelo** — cambia al modelo seleccionado cuando ya está instalado
-- **Instalar dependencia Python** — avisa cuando falta el paquete `ollama` en el entorno Python activo
-
-El servicio se verifica en `http://127.0.0.1:11434/api/tags`. Si Ollama deja de estar disponible durante una sesión, el motor se marca como no listo y bloquea el procesamiento, el cambio de modelo y las descargas hasta que el servicio vuelva a responder.
+**Los modelos se instalan y se eliminan con Ollama** (`ollama pull` / `ollama rm`). La tarjeta **Controls → Model** del producto lista lo que Ollama reporta y cambia el modelo activo — nunca descarga uno, y `POST /api/commands` solo habilita `switch_model` / `switch_llm_tier` para esto. El panel legacy de CustomTkinter, ya congelado, sí ofrecía botones de instalación/inicio/descarga dentro de la app; esa superficie no se mantiene (ver [Ejecutar](#ejecutar)).
 
 ## API HTTP
 

@@ -28,7 +28,7 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 | Optional offline TTS (Piper, `local-tts` extra) | Stable |
 | WebSocket live transcription feed | Stable |
 | Streaming TTS pipeline (speaks before LLM finishes) | Stable |
-| Conversational memory (10-turn sliding window) | Stable |
+| Conversational memory (sliding window of `HISTORY_MAX_TURNS` turns — 3 today, `opencohost/config/settings.py`) | Stable |
 | Personality profiles (editable from UI) | Stable |
 | LLM model catalog with one-click switching | Stable |
 | Ollama lifecycle management from the UI | Stable |
@@ -191,15 +191,9 @@ Kira's name and base personality are preserved across all profiles.
 
 ## Ollama Integration
 
-The app validates Ollama at startup and disables actions that depend on the LLM if the service is unavailable. The model panel provides a single contextual button:
+The engine validates Ollama at startup and disables LLM-dependent actions while the service is unavailable. The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing and model switching until the service responds again.
 
-- **Install Ollama** — opens the official download page when the binary is not found
-- **Start Ollama** — runs `ollama serve` when installed but not responding
-- **Download model** — pulls the selected model when Ollama is ready but the model is missing locally
-- **Activate model** — switches to the selected model when already installed
-- **Install Python dependency** — alerts when the `ollama` Python package is missing from the active environment
-
-The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes unavailable during a session, the engine marks itself as not ready and blocks processing, model switching, and downloads until the service responds again.
+**Models are installed and removed with Ollama itself** (`ollama pull` / `ollama rm`). The product's **Controls → Model** card lists what Ollama reports and switches the active model — it never downloads one, and `POST /api/commands` whitelists only `switch_model` / `switch_llm_tier` for this. The frozen legacy CustomTkinter panel did offer in-app install/start/download buttons; that surface is not maintained (see [Run](#run)).
 
 ## HTTP API
 

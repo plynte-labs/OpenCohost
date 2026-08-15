@@ -156,7 +156,17 @@ python -m pytest -m "not slow" -q
 python -m pytest -m "not integration" -q
 ```
 
-The test suite uses `pytest` with `testpaths = tests`, `-v --tb=short` defaults, and the markers `slow`, `integration`, and `offline`. No network access or running Ollama instance is required to run the offline-marked tests.
+The test suite uses `pytest` with `testpaths = tests` and `-v --tb=short` defaults. Five markers are defined in `pytest.ini`:
+
+| Marker | Meaning |
+|---|---|
+| `slow` | Slow tests — deselect with `-m "not slow"`. |
+| `integration` | Requires external services. |
+| `offline` | Runs without network access. |
+| `realenv` | Real Ollama + a real model. Opt-in via `OPENCOHOST_REALENV_TESTS=1`; auto-skipped otherwise. |
+| `live_cloud` | Real cloud provider, real API key, real network. Opt-in via `OPENCOHOST_LIVE_CLOUD_TESTS=1`; auto-skipped otherwise. |
+
+No network access or running Ollama instance is required to run the offline-marked tests. The two env-gated markers skip themselves, so a plain `python -m pytest -q` never hits Ollama or a cloud provider unless you set those variables.
 
 ---
 
@@ -198,7 +208,7 @@ git add .secrets.baseline
 - **Comments and docstrings:** English. Explain *why*, not just what.
 - **Thread safety:** the engine is multi-threaded and the host owns the boundary. In the product surface, background-to-UI updates leave the engine as events through `EngineHost` and reach the front end over HTTP/SSE — never touch UI state from an engine thread. In the legacy CTk shell the equivalent rule is `UIState` observer callbacks or `root.after()`; never call CTk widgets directly from threads.
 - **No absolute paths in source:** use `settings.py` path helpers (`USER_DATA_DIR`, `LOGS_DIR`, etc.) for any file I/O. The `no-abs-paths` hook enforces this.
-- **No raw chat in logs or prompts:** viewer usernames and raw chat text must never be passed to external services. The Smart Aggregator compacts them locally into an intent summary before anything reaches the LLM.
+- **Raw chat is contained, not redacted.** Viewer usernames and raw chat text must never be written to logs or handed to a third-party service. They *do* reach the local LLM: the Smart Aggregator compacts chat into an intent summary when one is available, but the highlighted message is passed verbatim as `{user}: {text}`, and the fallback context is a raw `- {user}: {text}` list (`smart_aggregator/chat_reaction.py`). Every such path must route the text through `wrap_untrusted_chat()` (`smart_aggregator/kira_agenda_controller.py`), which fences it in read-only data delimiters and collapses any `===` run in the body so viewer text cannot forge its way out of the fence. If you add a path that puts chat in a prompt, wrap it. Remember that enabling a cloud LLM provider sends that same prompt off the machine — see [Trust Model](#trust-model--what-leaves-the-machine).
 
 ---
 
@@ -272,19 +282,20 @@ Keep the summary line under 72 characters. Add a body paragraph if the change ne
 
 ## Trust Model — What Leaves the Machine
 
-OpenCohost is designed to keep viewer data local. Here is an honest summary of every network connection the application makes:
+OpenCohost is designed to keep viewer data local. Here is an honest summary of every network connection the application makes. OpenCohost also *listens* on one port — the FastAPI engine surface on `127.0.0.1:8765` — which is covered in [SECURITY.md](SECURITY.md#local-attack-surface) rather than here.
 
 **Outbound (data leaves your machine):**
 
 | Service | What is sent | When |
 |---|---|---|
 | **Microsoft Edge-TTS** (cloud) | Kira's synthesized spoken text only — sentence-sized fragments of the AI's generated response. No viewer chat, no usernames, no prompts, no conversation history. | Every time Kira speaks, when `cloud-tts` is installed and `local-tts` is not set as exclusive. |
+| **An OpenAI-compatible LLM provider** (cloud) — **opt-in, off by default** | The **entire** message array that would otherwise go to Ollama: system prompt, active persona, saved memorias, personalization block, and the viewer-chat context that survived filtering — usernames included. Strictly more than Edge-TTS receives. POSTed to `{base_url}/chat/completions` (`core/providers/cloud/cloud_llm_client.py`). | Only when you set `active_provider` to something other than `"local"`. It defaults to `"local"`, and an absent or corrupt `config/llm_provider.json` resolves back to local-only. Retention is the provider's policy, not ours. |
 
 **Local loopback only (nothing leaves the machine):**
 
 | Service | What is sent |
 |---|---|
-| **Ollama** `127.0.0.1:11434` | Kira's system prompt + conversation history + a compacted intent summary produced by the Smart Aggregator from viewer chat. Viewer usernames and raw chat text are never forwarded to Ollama directly. |
+| **Ollama** `127.0.0.1:11434` | Kira's system prompt + conversation history + viewer-chat context. The Smart Aggregator compacts chat into an intent summary when one is available, but raw usernames and message text still reach the model — the highlighted message goes in verbatim as `{user}: {text}`, and the fallback context is a raw `- {user}: {text}` list. All of it is fenced by `wrap_untrusted_chat()` first. Containment, not redaction. **This is also exactly the payload that leaves the machine if you enable a cloud provider (see above).** |
 | **OBS WebSocket** `localhost:4455` | Avatar state name (`"idle"`, `"speaking"`) and local image paths only. |
 | **Piper TTS server** `127.0.0.1` | Kira's sentence fragments — same as Edge-TTS, but processed entirely on your machine. |
 

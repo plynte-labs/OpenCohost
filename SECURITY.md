@@ -22,7 +22,7 @@ We will coordinate a fix and disclosure timeline with you before publishing anyt
 
 | Version | Supported |
 |---------|-----------|
-| Latest release (`main`/`master`) | Yes |
+| Latest release (`master`) | Yes |
 | Older releases | No — please upgrade |
 
 ---
@@ -33,24 +33,27 @@ We will coordinate a fix and disclosure timeline with you before publishing anyt
 
 OpenCohost is designed to keep **your data on your machine**. Specifically:
 
-- Viewer chat messages, LLM prompts, conversation context, and memory **never leave your machine**.
-- Your locally installed Ollama instance handles all LLM inference locally.
+- **Under the shipped defaults**, viewer chat messages, LLM prompts, conversation context, and memory stay on your machine. Your locally installed Ollama instance handles all inference over loopback. There is exactly one opt-in exception, below.
 - **Kira's outgoing spoken text is sent to Microsoft Edge-TTS** (a cloud service) for voice synthesis. This is the default TTS engine. If you install the `local-tts` extra (Piper TTS), you can switch to a fully offline voice and eliminate this outbound request.
+- **A cloud LLM provider is the opt-in exception, and it is off by default.** `active_provider` defaults to `"local"` (`opencohost/config/llm_provider.py`), and an absent, unreadable, or corrupt provider config all resolve back to local-only. If you deliberately point OpenCohost at an OpenAI-compatible endpoint, the **complete prompt** — system prompt, active persona, saved memorias, personalization block, **and the filtered viewer-chat context** — is sent to that endpoint on every turn. That is strictly more than Edge-TTS ever receives, and the provider's retention and training policy, not this one, governs what happens to it. See [PRIVACY.md](docs/PRIVACY.md#optional-cloud-llm-providers-opt-in).
+
+So: one cloud destination by default (Edge-TTS), and a second only if you turn it on.
 
 There is **no telemetry, no analytics, and no crash reporting** built into OpenCohost. The application does not phone home.
 
 ### Viewer chat is untrusted input
 
-Viewer chat messages (from platforms such as YouTube Live) are treated as **untrusted external data** throughout the pipeline. They are processed by the LLM co-host under a system prompt that includes anti-injection guardrails. Do not assume the LLM will resist every adversarial prompt, especially when running smaller local models. OpenCohost is supervised software — a human operator is expected to be present at all times.
+Viewer chat messages (from Twitch, the supported default platform — or from YouTube's unofficial endpoint if you opt into it) are treated as **untrusted external data** throughout the pipeline. They are processed by the LLM co-host under a system prompt that includes anti-injection guardrails. Do not assume the LLM will resist every adversarial prompt, especially when running smaller local models. OpenCohost is supervised software — a human operator is expected to be present at all times.
 
 ### Local attack surface
 
-Because OpenCohost is a local desktop application:
+**OpenCohost opens an inbound port.** The product surface is a local HTTP server: the Tauri shell spawns `uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1` (`OpenCohost_UI/src-tauri/src/backend.rs`) and drives Kira's engine through it. Treat that port as part of the attack surface:
 
-- The HTTP server used to communicate with Ollama listens on `localhost` only (`127.0.0.1:11434`).
-- OBS WebSocket connections are made to a locally configured host (default `localhost`).
-- No inbound network ports are opened by OpenCohost itself.
-- Settings and logs are stored in the user's application-data directory; no data is written outside of that directory or the project folder.
+- **It binds loopback only (`127.0.0.1:8765`) in every documented run form.** Nothing outside the machine can reach it as shipped.
+- **It is not authenticated by default.** Bearer-token auth exists (`opencohost/api/auth.py`), but enforcement for mutating `/api/*` calls is behind `OPENCOHOST_API_AUTH`, which is **off** by default, and read-only `GET` requests are open in v1. The one exception is `GET /api/stream/chat-live/messages`, which serves raw viewer chat and requires the operator token unconditionally. In practice, any process running as any user on the same machine can drive the engine.
+- **Binding `--host 0.0.0.0` exposes that control surface to your LAN.** Do not do it. CORS only restricts browser callers — it does nothing against `curl` or a script hitting the port directly. If you need remote access, put an authenticating proxy in front of it. This warning is also carried in `README.md` and in the `opencohost/api/main.py` module docstring.
+- Outbound local connections: the Ollama client talks to `127.0.0.1:11434`, and OBS WebSocket connects to a locally configured host (default `localhost:4455`).
+- Settings and logs are stored under the user data directory — the repo root when running from source, the platform application-data directory in a frozen build. No data is written outside of that directory.
 
 ### Credentials and secrets
 
