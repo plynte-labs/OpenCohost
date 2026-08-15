@@ -33,6 +33,7 @@ Por qué decidí que el LLM no ejecutara tareas —abrir un juego, organizar tus
 OpenCohost Kira es la opción si quieres irte a hacer algo de fondo mientras escuchas e interactúas sobre un tema que tú le propusiste. Puede seguir la agenda programada, y puedes añadirle cards con conceptos actuales para que ella los cite.
 
 En el futuro espero refinar el concepto. Muchas gracias por apoyar; feedback y contribuciones son aceptados. Actualmente el proyecto funciona en español; en inglés aún faltan algunos ajustes. Disfruta e interactúa con OpenCohost.
+[[PREGUNTAS]]
 
 #### Etapas importantes por las que ha pasado el proyecto.
 ![Etapas del desarrollo](images/stages.png)
@@ -63,3 +64,4 @@ En el futuro espero refinar el concepto. Muchas gracias por apoyar; feedback y c
 [-] Hacer i18n, que el LLM hable en inglés.
 [-] Ser resiliente ante fallas del motor o proveedor LLM.
 [-] Empaquetar el producto.
+
