@@ -249,3 +249,8 @@ See [docs/TESTING.md](docs/TESTING.md) for the full test surface.
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
+
+MIT covers this repository's code, not its dependencies. Two optional extras
+pull in GPL-licensed packages at install time, and `local-tts` is installed by
+default by the launcher. If you plan to redistribute a bundled build — or sell
+one — read [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) first.

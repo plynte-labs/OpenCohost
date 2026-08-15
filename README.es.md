@@ -254,3 +254,8 @@ Ver [docs/TESTING.md](docs/TESTING.md) para la superficie completa de tests.
 ## Licencia
 
 Este proyecto está bajo la Licencia MIT. Ver [LICENSE](LICENSE) para el texto completo.
+
+MIT cubre el código de este repositorio, no sus dependencias. Dos extras
+opcionales instalan paquetes con licencia GPL, y el launcher instala `local-tts`
+por defecto. Si vas a redistribuir un build empaquetado — o venderlo — leé antes
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
