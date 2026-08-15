@@ -3142,6 +3142,14 @@ class MotorVocalIA(
                 # assertions keep passing. Full MODEL_TRACE attribution is
                 # deferred (residual).
                 _cloud_class = None
+                # Cloud-only attribution for the structured log below.
+                # MODEL_TRACE only ever fires on a SUCCESSFUL turn, so before
+                # this a failed cloud turn named neither the provider nor the
+                # model -- the 2026-08-14 session had to infer which provider
+                # returned a 429 by elimination against the surrounding
+                # successes. Empty string on the local branch keeps that log
+                # line byte-identical there.
+                _cloud_attr = ""
                 if is_local:
                     self._last_llm_failure = {
                         "model": self.current_model,
@@ -3167,18 +3175,24 @@ class MotorVocalIA(
                         "message": str(e),
                         "clase": _cloud_class,
                     }
+                    _cloud_attr = " provider={} cloud_model={} error_code={}".format(
+                        provider_cfg.get("active_provider") or "unknown",
+                        _fail_profile.get("model") or "unknown",
+                        cloud_llm_client.extract_error_code(e) or "n/a",
+                    )
                 _clase_suffix = f" clase={_cloud_class}" if _cloud_class else ""
                 self._log(
                     f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}{_clase_suffix}: {e}",
                     level="error",
                 )
                 logger.warning(
-                    "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s",
+                    "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s%s",
                     request_model,
                     source,
                     intento + 1,
                     max_intentos,
                     _cloud_class or "n/a",
+                    _cloud_attr,
                     exc_info=True,
                 )
                 # Unit 2.1 (runtime_findings_batch_20260731): `rate_limited`

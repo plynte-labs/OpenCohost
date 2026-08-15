@@ -15,6 +15,8 @@ graph (``raise_for_status()``'s ``HTTPError`` is caught and re-raised as a
 response/request-free ``CloudLLMResponseError`` via ``raise ... from None``).
 """
 
+import json
+
 import requests
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
@@ -41,10 +43,13 @@ class CloudLLMResponseError(requests.exceptions.RequestException):
     - ``status_code``: the HTTP status, or ``None`` for a malformed-2xx body.
     - ``headers``: a bounded, lower-cased subset (``retry-after`` and any
       ``x-ratelimit-*``) -- never the full header dict.
-    - ``body_excerpt``: the first ~500 chars of the response body. Stored for
-      future use; ``classify_cloud_error`` below never reads it -- parsing
-      body content would mean guessing a provider-specific error shape,
-      which is exactly what this taxonomy refuses to do.
+    - ``body_excerpt``: the first ~500 chars of the response body.
+      ``classify_cloud_error`` below never reads it -- letting retry POLICY
+      hinge on body content would mean guessing a provider-specific error
+      shape, which is exactly what this taxonomy refuses to do. Only
+      ``extract_error_code`` reads it, and only for a log line: it takes
+      ``error.code``/``error.type`` and never ``error.message``. The raw
+      excerpt itself still never reaches a log.
     """
 
     def __init__(self, message, *, status_code=None, headers=None, body_excerpt=None):
@@ -214,6 +219,41 @@ def classify_cloud_error(exc: Exception) -> str:
             return CLOUD_ERROR_RATE_LIMITED
         return CLOUD_ERROR_AMBIGUOUS_429
     return CLOUD_ERROR_TRANSIENT
+
+
+def extract_error_code(exc: Exception) -> str | None:
+    """The provider's own machine-readable error code -- for LOGGING only.
+
+    Runtime gap found 2026-08-14: a real OpenAI 429 logged as bare
+    ``cloud chat HTTP 429: Too Many Requests``, which is the SAME line for
+    "you are sending requests too fast" (transient, waiting fixes it) and
+    "you have no credits" (permanent, waiting never fixes it). The provider
+    already says which in ``error.code``; ``body_excerpt`` was carrying it
+    and nothing ever read it.
+
+    Reads ONLY ``error.code`` / ``error.type`` from the OpenAI-shaped error
+    envelope this client already targets (see ``map_options_to_openai``) --
+    never ``error.message``, which some providers populate with echoed
+    request content that must not reach a log.
+
+    ``classify_cloud_error`` above still refuses to read the body at all,
+    and that stays true: retry POLICY must not hinge on a provider-specific
+    shape. Naming a failure in a log line may.
+
+    Returns ``None`` for no body, a non-JSON body (including one the 500-char
+    excerpt truncated mid-object), or any other envelope shape.
+    """
+    excerpt = getattr(exc, "body_excerpt", None)
+    if not excerpt:
+        return None
+    try:
+        error = json.loads(excerpt).get("error")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code") or error.get("type")
+    return str(code)[:64] if code else None
 
 
 def parse_retry_after_seconds(headers: dict) -> int | None:

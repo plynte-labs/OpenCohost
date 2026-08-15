@@ -5,7 +5,9 @@ response into a string-only exception, discarding the status code and never
 reading `resp.headers`. This pins:
 
 - the exception now carries `status_code` / `headers` (bounded subset) /
-  `body_excerpt` (bounded, classification-only, never logged);
+  `body_excerpt` (bounded; never logged raw -- only `extract_error_code`
+  reads it, yielding `error.code`/`error.type` for attribution, never
+  `error.message`);
 - `classify_cloud_error` sorts a failure into exactly four classes --
   `bad_key` / `rate_limited` / `ambiguous_429` / `transient` -- reading only
   status_code/headers, never a guessed provider-specific body shape;
@@ -18,7 +20,10 @@ reading `resp.headers`. This pins:
 No provider-specific error-code table: only NVIDIA NIM has been exercised.
 `quota_exhausted` is deliberately NOT a class (owner ruling) -- an exhausted
 quota is indistinguishable from a bare rate limit today and correctly lands
-in `ambiguous_429`.
+in `ambiguous_429`. That stays true for retry POLICY; since 2026-08-14 the
+provider's own `error.code` is nonetheless reported in the failure log line,
+so a human reading the log can tell the two apart even though the engine
+still treats them identically.
 """
 
 import logging
@@ -37,6 +42,7 @@ from opencohost.core.providers.cloud.cloud_llm_client import (
     CLOUD_ERROR_TRANSIENT,
     CloudLLMResponseError,
     classify_cloud_error,
+    extract_error_code,
     parse_retry_after_seconds,
     send_chat_completion,
 )
@@ -309,6 +315,87 @@ def test_log_line_reports_class_name(tmp_path, caplog):
             motor._generar_dialogo("hola", source="direct", commit_history=False)
     assert any("clase=rate_limited" in item for item in list(motor.log_queue.queue))
     assert any("clase=rate_limited" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# extract_error_code -- tells an exhausted quota apart from a real rate limit
+# in the LOG, without letting either one change retry policy.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # The 2026-08-14 case: a real OpenAI 429 that waiting will never fix.
+        ('{"error": {"message": "You exceeded your current quota.", '
+         '"type": "insufficient_quota", "code": "insufficient_quota"}}', "insufficient_quota"),
+        # The other 429, which waiting DOES fix. Same status, same `clase`.
+        ('{"error": {"message": "Rate limit reached", "type": "requests", '
+         '"code": "rate_limit_exceeded"}}', "rate_limit_exceeded"),
+        # `type` is the fallback when a provider omits `code`.
+        ('{"error": {"message": "nope", "type": "invalid_request_error"}}', "invalid_request_error"),
+        ('{"error": {"message": "nope", "code": null, "type": "server_error"}}', "server_error"),
+        # Nothing usable -> None, never a guess.
+        ('{"error": {"message": "just a message"}}', None),
+        ('{"error": "a bare string, not an envelope"}', None),
+        ('{"detail": "some other provider shape"}', None),
+        ("not json at all", None),
+        # A body long enough that the 500-char excerpt cut it mid-object.
+        ('{"error": {"message": "' + "x" * 600, None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_extract_error_code(body, expected):
+    exc = CloudLLMResponseError("cloud chat HTTP 429: Too Many Requests", status_code=429, body_excerpt=body)
+    assert extract_error_code(exc) == expected
+
+
+def test_extract_error_code_never_returns_the_provider_message():
+    """`error.message` is the one field a provider may fill with echoed
+    request content, so it must never be what this returns."""
+    exc = CloudLLMResponseError(
+        "cloud chat HTTP 400: Bad Request",
+        status_code=400,
+        body_excerpt='{"error": {"message": "ECHOED_PROMPT_TEXT", "code": "context_length_exceeded"}}',
+    )
+    assert extract_error_code(exc) == "context_length_exceeded"
+
+
+def test_extract_error_code_none_for_a_non_cloud_exception():
+    # A local Ollama transport error carries no body_excerpt attribute at all.
+    assert extract_error_code(requests.exceptions.ConnectionError("boom")) is None
+
+
+def test_error_code_does_not_change_the_class():
+    """Attribution is observability only -- an exhausted quota still lands in
+    `ambiguous_429` (owner ruling), exactly as before."""
+    exc = CloudLLMResponseError(
+        "cloud chat HTTP 429: Too Many Requests",
+        status_code=429,
+        body_excerpt='{"error": {"code": "insufficient_quota"}}',
+    )
+    assert classify_cloud_error(exc) == CLOUD_ERROR_AMBIGUOUS_429
+
+
+def test_cloud_failure_log_names_provider_and_error_code(tmp_path, caplog):
+    """The gap this closes: MODEL_TRACE only fires on a SUCCESSFUL turn, so a
+    failed cloud turn named neither the provider nor why it failed."""
+    motor = _make_motor(tmp_path)
+    exc = CloudLLMResponseError(
+        "cloud chat HTTP 429: Too Many Requests",
+        status_code=429,
+        body_excerpt='{"error": {"message": "You exceeded your current quota.", '
+        '"code": "insufficient_quota"}}',
+    )
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+        with patch(_SEND, side_effect=exc):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+    assert any("error_code=insufficient_quota" in record.message for record in caplog.records)
+    assert any("provider=" in record.message for record in caplog.records)
+    # The message the code came from still must not be anywhere in the log.
+    assert not any("You exceeded your current quota" in record.message for record in caplog.records)
 
 
 def test_body_excerpt_and_headers_never_appear_in_logs(tmp_path, caplog):
