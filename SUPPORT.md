@@ -1,6 +1,6 @@
 # Support
 
-OpenCohost is a community-maintained open-source project. There is no commercial support, guaranteed response time, or SLA. Help comes from contributors and other users on a best-effort basis.
+OpenCohost is an open-beta project built and maintained by one developer. There is no commercial support, guaranteed response time, or SLA. Help arrives on a best-effort basis, from me and from whoever else in the community has hit the same thing.
 
 ---
 
@@ -98,14 +98,15 @@ Log files are named `opencohost_<YYYYMMDD_HHMMSS>.log`. For verbose output, set 
 
 ## Honest expectations
 
-OpenCohost is a community project maintained by volunteers. Please keep this in mind:
+One developer maintains this, across LLM orchestration, TTS, live chat, OBS and a
+desktop UI. That is the honest constraint behind everything below:
 
-- **No guaranteed response time.** Issues and discussions are reviewed when contributors have capacity.
+- **No guaranteed response time.** Issues get read, but they are reviewed when I have capacity.
 - **No SLA.** This is not a commercial product.
-- **Best effort.** Contributors will try to help, but some issues may remain open if they are hard to reproduce or outside current scope.
-- **Pull requests are welcome.** If you can fix a bug or improve the docs, opening a PR is often the fastest path to a resolution.
+- **Best effort.** Some issues will stay open if they are hard to reproduce or outside current scope. An issue left open is a backlog entry, not a dismissal.
+- **Pull requests are welcome.** If you can fix a bug or improve the docs, a PR is usually the fastest path to a resolution — and for front-end, styling, or design work, the UI lives in its own repository and is an easy place to start.
 
-We appreciate your patience and your contributions.
+Thanks for your patience, and for anything you report.
 
 ---
 

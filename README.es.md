@@ -6,7 +6,9 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 > English version: [README.md](README.md)
 > Nota sin AI: [README.note.md](README.note.md)
 
-[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI)
+[Website](https://opencohost.com) | [Tauri App](https://github.com/FranGuh/OpenCohost_UI) | [LiveAudio](https://liveaudio.opencohost.com)
+
+> **Beta abierta.** OpenCohost es un solo desarrollador cubriendo mucha superficie — orquestación LLM, TTS, chat en vivo, OBS, una UI de escritorio — así que habrá cosas que todavía no funcionen bien. Corre en mi propio equipo todos los días; el núcleo aguanta. Pero «Estable» en la tabla de abajo significa publicado y sólido en uso normal, no probado ante cada fallo: Windows es la única plataforma validada por completo hasta ahora, y la ruta de streaming e interrupción y el sanitizador de cláusulas aún no han enfrentado un caso adverso en vivo. Si algo se comporta mal, repórtalo — ese feedback es exactamente para lo que existe esta beta. Los bugs y las ideas van a [Issues](https://github.com/plynte-labs/opencohost/issues); hay una plantilla para cada caso.
 
 ## Qué hace Kira
 

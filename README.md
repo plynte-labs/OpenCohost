@@ -6,7 +6,9 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 > Spanish version: [README.es.md](README.es.md)
 > Spanish Note without AI: [README.note.md](README.note.md)
 
-[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI)
+[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI) | [LiveAudio](https://liveaudio.opencohost.com)
+
+> **Open beta.** OpenCohost is one developer covering a lot of surface — LLM orchestration, TTS, live chat, OBS, a desktop UI — so some things will not work well yet. It runs on my own hardware every day; the core holds up. But "Stable" in the table below means shipped and solid in normal use, not proven under every failure: Windows is the only fully validated platform so far, and the streaming/interruption path and the clause sanitizer have not yet faced a live adverse case. If something misbehaves, report it — that feedback is exactly what this beta is for. Bugs and ideas both go to [Issues](https://github.com/plynte-labs/opencohost/issues); there is a template for each.
 
 ## What Kira Does
 
