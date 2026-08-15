@@ -6,17 +6,22 @@ notes, superseded specs, or descriptions of the frozen legacy CustomTkinter
 shell are flagged as historical on their line — that flag is the one thing a
 filename cannot tell you.
 
-> These documents have not yet had a full public documentation audit.
-> Individual files may still reference internal working artifacts (agent
-> handoff notes, `conductor/` track files, private branch names) that do not
-> ship with the public repository. Historical documents are kept as a dated
-> record and are deliberately not rewritten.
+> **Some paths cited below do not ship.** `conductor/` (the internal
+> Spec-Driven Development tracks) and `AGENT_HANDOFF.md` are both excluded by
+> `.gitignore`, so every reference to them — concentrated in `adr/` and the
+> dated working notes — is a dead link once you clone. They were real paths
+> when those documents were written; historical records are kept as a dated
+> record and deliberately not rewritten.
+>
+> [`QUICKSTART.md`](QUICKSTART.md), [`PRIVACY.md`](PRIVACY.md), and
+> [`api-reference.md`](api-reference.md) were re-verified against the code on
+> 2026-08-14. The rest of this tree has not been through that pass.
 
 ## Getting Kira running
 
 | Document | What it answers |
 |---|---|
-| [`QUICKSTART.md`](QUICKSTART.md) | From zero to Kira speaking in about ten minutes: prerequisites (Ollama, Python), install, first launch, and the one privacy note you should read before starting. |
+| [`QUICKSTART.md`](QUICKSTART.md) | From zero to Kira speaking: prerequisites (Ollama, Python, and the Node/Rust toolchain the desktop app needs), cloning with submodules, installing, launching the Tauri app, and the privacy note to read before you start. |
 | [`GUIA_USUARIO.md`](GUIA_USUARIO.md) | How to actually drive Kira as a streamer — PTT buffering, what happens when chat and your voice collide, small-stream mode — with a symptom/cause/fix table per feature. In Spanish. |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Root-cause journal of every known bug: why Kira used to talk to herself, Tk threading crashes, and the layered fixes that stopped them. In Spanish; fixes are described against the legacy shell paths where they were found. |
 
@@ -44,7 +49,7 @@ The pair a cautious reader should check first.
 | Document | What it answers |
 |---|---|
 | [`architecture.md`](architecture.md) | Which entry point is the product (Tauri + FastAPI) and which is frozen legacy, plus the system map and module ownership boundaries. |
-| [`api-reference.md`](api-reference.md) | All 46 backend endpoints and the conventions behind them: the error contract, the no-raw-exposure rule, locking, and verb whitelists. |
+| [`api-reference.md`](api-reference.md) | The backend HTTP surface and the conventions behind it: the error contract, the no-raw-exposure rule, locking, and verb whitelists. Covers 46 of the 72 method+path pairs the app actually serves, and says which are still missing — `GET /openapi.json` on a running backend is the authoritative list. |
 | [`modules/runtime-speech.md`](modules/runtime-speech.md) | How direct speech, agenda speech, TTS generation, and priority arbitration share a single speech owner inside the runtime motor. |
 | [`modules/ui-shell.md`](modules/ui-shell.md) | How the legacy CustomTkinter composition root wires panels, motor, and shutdown — historical: marked deprecated 2026-08-13, kept as an accurate record of the frozen shell. |
 | [`UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) | The module diagram of the legacy CustomTkinter UI after its God-class breakup — historical: marked deprecated 2026-08-13; the product UI is Tauri + React. |

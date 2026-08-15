@@ -4,11 +4,24 @@ Local-first HTTP API that the Tauri app (and any client) uses to drive Kira.
 The API **orchestrates**; it holds state and manages data. Audio playback and
 UI rendering live in the client.
 
-- **Base URL:** `http://127.0.0.1:8000`
-- **Router:** `opencohost/api/main.py`
+- **Base URL:** `http://127.0.0.1:8765`, falling back to `8770` if 8765 is already
+  taken (`OpenCohost_UI/src-tauri/backend.config.default.json`, `run-api.bat`)
+- **App factory:** `opencohost/api/main.py` (`create_app`) — it mounts routers and
+  holds no routes of its own
+- **Routes:** `opencohost/api/routers/`, one module per product surface
 - **Models:** `opencohost/api/models.py`
 - **Host state:** `opencohost/api/engine_host.py` (`EngineHost`)
-- **Total endpoints:** 46
+
+> **The running app is the authority on the endpoint list.** Fetch
+> `GET /openapi.json`, or open the interactive schema at `/docs`. As measured at
+> the time of writing, that is **72 method+path pairs across 60 paths**.
+>
+> **This file documents 46 of those 72.** Still to be written up here: the
+> `/api/agent/*` gateway (8 — see [`AGENT_GATEWAY.md`](AGENT_GATEWAY.md)),
+> `/api/ptt/*` (6), `/api/personalization` (3), `/api/llm/provider` and
+> `/api/llm/provider/probe` (3), `/api/i18n` (2), `/api/memoria/row/{row_id}`,
+> `/api/memoria/import`, `/api/stream/chat-live/messages`, and `/api/events`.
+> Until they land, read them from `/openapi.json`.
 
 > **Status:** all endpoints pass the automated test suites (`flux_env`), but the
 > parity endpoints added in fase 1/2/3 are **not yet runtime-validated** against
@@ -48,7 +61,7 @@ UI rendering live in the client.
 
 ## Perfiles — LLM personas
 
-Backing: `opencohost/core/profiles.py` (`cargar_perfiles` / `guardar_perfiles`).
+Backing: `opencohost/core/profiles/profiles.py` (`cargar_perfiles` / `guardar_perfiles`).
 
 | Method | Path | Description |
 |---|---|---|
@@ -61,7 +74,7 @@ Backing: `opencohost/core/profiles.py` (`cargar_perfiles` / `guardar_perfiles`).
 
 ## Memoria — Kira's memory
 
-Backing: `opencohost/core/memoria_store.py` (`MemoriaStore`), `opencohost/config/settings.py`
+Backing: `opencohost/core/memory/memoria_store.py` (`MemoriaStore`), `opencohost/config/settings.py`
 (notice flag), raw SQLite over `MEMORIAS_DB` for reads/purge.
 
 | Method | Path | Description |
@@ -77,7 +90,7 @@ Backing: `opencohost/core/memoria_store.py` (`MemoriaStore`), `opencohost/config
 
 ## Música — orchestration (client plays audio)
 
-Backing: `opencohost/core/music_library.py` (`MusicLibrary`) + `MusicState` on
+Backing: `opencohost/core/music/music_library.py` (`MusicLibrary`) + `MusicState` on
 `EngineHost`. The API never drives backend audio; the Tauri client plays.
 
 | Method | Path | Description |
@@ -93,7 +106,7 @@ Backing: `opencohost/core/music_library.py` (`MusicLibrary`) + `MusicState` on
 ## Agenda — Kira's co-host agenda
 
 Backing: `opencohost/smart_aggregator/kira_agenda_controller.py` +
-`opencohost/core/cohost_profiles.py`. All mutations under `host.agenda_lock`.
+`opencohost/core/profiles/cohost_profiles.py`. All mutations under `host.agenda_lock`.
 
 | Method | Path | Description |
 |---|---|---|
@@ -141,14 +154,17 @@ Backing: OBS client + `avatar.yaml` (shared file; writes under `_config_lock`).
 
 | File | Role |
 |---|---|
-| `opencohost/api/main.py` | All route handlers + helpers (whitelists, guards, response builders, locks). |
+| `opencohost/api/main.py` | App factory, middleware, lifespan, router mounting. No route handlers. |
+| `opencohost/api/routers/` | One module per product surface — every route handler lives here. |
+| `opencohost/api/shared.py` | Cross-cutting helpers: locks, response builders, logger. |
+| `opencohost/api/deps.py` | Call-time accessors routers use instead of importing `main`. |
 | `opencohost/api/models.py` | Pydantic request/response models. |
 | `opencohost/api/engine_host.py` | `EngineHost`: motor, monitor, agenda, `music_library`, `MusicState`, `music_lock`, `agenda_lock`. |
 | `opencohost/api/dispatch.py` | Command dispatcher (idempotency, `state_version`). |
-| `opencohost/core/profiles.py` | LLM persona persistence (`cargar_perfiles` / `guardar_perfiles`). |
-| `opencohost/core/memoria_store.py` | `MemoriaStore` — flags/update/delete with the F5 freeze rule. |
-| `opencohost/core/cohost_profiles.py` | Agenda co-host profile persistence. |
-| `opencohost/core/music_library.py` | `MusicLibrary` (`add_file`, `remove`, validation) + `AudioBedEngine`. |
+| `opencohost/core/profiles/profiles.py` | LLM persona persistence (`cargar_perfiles` / `guardar_perfiles`). |
+| `opencohost/core/memory/memoria_store.py` | `MemoriaStore` — flags/update/delete with the F5 freeze rule. |
+| `opencohost/core/profiles/cohost_profiles.py` | Agenda co-host profile persistence. |
+| `opencohost/core/music/music_library.py` | `MusicLibrary` (`add_file`, `remove`, validation) + `AudioBedEngine`. |
 | `opencohost/smart_aggregator/kira_agenda_controller.py` | Agenda controller (topics, session, `reject_topic`). |
 | `opencohost/config/settings.py` | Feature flags and config (TTS, memoria notice, gates). |
 
