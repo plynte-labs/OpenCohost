@@ -24,7 +24,6 @@ public documentation audit before being treated as final OpenCohost docs.
 |---|---|
 | UI architecture | [`architecture.md`](architecture.md), [`UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) |
 | Runtime smoke validation | [`RUNTIME_SMOKE_HARNESS.md`](RUNTIME_SMOKE_HARNESS.md) |
-| Security/privacy audit notes | [`SECURITY_PRIVACY_PENTEST_AUDIT.md`](SECURITY_PRIVACY_PENTEST_AUDIT.md) |
 | Test suite audit notes | [`test_suite_audit_full.md`](test_suite_audit_full.md) |
 | Cohost agenda mode | [`KIRA_COHOST_AGENDA_MODE.md`](KIRA_COHOST_AGENDA_MODE.md) |
 | Live safety controls | [`LIVE_SAFETY_CONTROLS.md`](LIVE_SAFETY_CONTROLS.md) |
