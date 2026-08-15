@@ -1,8 +1,12 @@
 # OpenCohost — Co-host de IA para streaming, local-first
-
-OpenCohost es una plataforma de co-host de IA para streaming. El producto central es **Kira**, una co-host de IA con personalidad definida (sarcasmo seco, humor afilado). Kira utiliza un **motor LLM local mediante Ollama** y **voz en la nube gratuita (Microsoft Edge-TTS) en v1**. El chat de espectadores, los prompts y la memoria conversacional nunca salen de tu equipo — solo el texto hablado de salida de Kira se envía a Edge-TTS para la síntesis de voz. La voz local de alta fidelidad está planificada como opción avanzada en una versión futura.
+__________________
+![Intro Opencohost](images/introOpencohost.png)
+OpenCohost es una plataforma de co-host de IA para streaming. El producto central es **Kira**, una co-host de IA con personalidad definida (sarcasmo seco, humor afilado). Kira utiliza un **motor LLM local mediante Ollama** y **voz en la nube gratuita (Microsoft Edge-TTS) en v1**. Con la configuración por defecto, el chat de espectadores, los prompts y la memoria conversacional nunca salen de tu equipo — solo el texto hablado de salida de Kira se envía a Edge-TTS para la síntesis de voz. La inferencia puede apuntarse opcionalmente a un proveedor LLM en la nube, lo que sí envía el prompt fuera del equipo; viene desactivado y se detalla en [Privacidad](#privacidad). La voz local de alta fidelidad está planificada como opción avanzada en una versión futura.
 
 > English version: [README.md](README.md)
+> Nota sin AI: [README.note.md](README.note.md)
+
+[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI)
 
 ## Qué hace Kira
 
@@ -26,7 +30,9 @@ OpenCohost es una plataforma de co-host de IA para streaming. El producto centra
 | Perfiles de personalidad (editables desde la UI) | Estable |
 | Catálogo de modelos LLM con cambio de modelo en un clic | Estable |
 | Gestión del ciclo de vida de Ollama desde la UI | Estable |
+| Proveedores LLM en la nube opcionales (compatibles con OpenAI) con fallback local automático | Estable — desactivado por defecto, ver [Privacidad](#privacidad) |
 | Agregador de chat inteligente (Twitch) | Estable |
+| Activación de chat adaptativa (ajusta el umbral al ritmo real del canal) | Estable |
 | Agregador de chat inteligente (YouTube) | Opcional, no oficial — ver [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | Monitor de salud con fallback de TTS | Estable |
 | Modo compacto para streaming en monitor secundario | Estable |
@@ -114,8 +120,7 @@ Para un backend suelto (headless, o con el front servido aparte), `run-api.bat` 
 `uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1`.
 
 `python -m opencohost` todavía abre la shell vieja de CustomTkinter, que quedó
-**congelada como legacy** el 2026-08-13: se conserva, no se mantiene. Los flags
-que arma `EngineHost` no se activan ahí, así que no sirve para validar en runtime.
+**congelada como legacy** el 2026-08-13: se conserva, no se mantiene. Los flags que arma `EngineHost` no se activan ahí, así que no sirve para validar en runtime.
 
 ### Configurar rutas de almacenamiento
 
@@ -131,9 +136,9 @@ storage:
 ## Arquitectura
 
 ```
-OpenCohost_UI/            # UI del producto — Tauri + React (pnpm tauri:debug)
-├── src/features/         # Una carpeta por superficie: agenda, stream, musica, ...
-└── src-tauri/backend.rs  # Levanta el backend de Python si no hay ninguno escuchando
+OpenCohost_UI/                # UI del producto — Tauri + React (pnpm tauri:debug)
+├── src/features/             # Una carpeta por superficie: agenda, stream, musica, ...
+└── src-tauri/src/backend.rs  # Levanta el backend de Python si no hay ninguno escuchando
 
 opencohost/
 ├── __main__.py           # Punto de entrada legacy (python -m opencohost)
@@ -149,15 +154,16 @@ opencohost/
 │   └── default_profiles.json  # Perfiles de personalidad predeterminados
 ├── core/
 │   ├── llm_engine.py     # Orquestación LLM, memoria, pipeline TTS
-│   ├── health_monitor.py # Salud de servicios, fallback de TTS
-│   └── profiles.py       # Carga/guardado de perfiles de personalidad
+│   ├── observability/    # Salud de servicios, estado, fallback de TTS
+│   ├── profiles/         # Carga/guardado de perfiles de personalidad
+│   └── providers/cloud/  # Cliente LLM en la nube compatible con OpenAI
 ├── ui/                   # Shell CustomTkinter LEGACY — congelada, no se mantiene
 └── smart_aggregator/     # Agregador de chat en vivo (Twitch; YouTube opcional)
 ```
 
 ## Perfiles de personalidad
 
-En el primer arranque, OpenCohost genera un conjunto de perfiles de personalidad predeterminados en tu `perfiles.json` local (ignorado por git). Cada perfil incluido está etiquetado por idioma, y el conjunto que se genera sigue tu idioma configurado — `opencohost/config/default_profiles.json` incluye ambos:
+En el primer arranque, OpenCohost genera un conjunto de perfiles de personalidad predeterminados en tu `perfiles.json` local (ignorado por git).Cada perfil incluido está etiquetado por idioma, y el conjunto que se genera sigue tu idioma configurado — `opencohost/config/default_profiles.json` incluye ambos:
 
 **Español (`es`)**
 
@@ -197,12 +203,7 @@ El servicio se verifica en `http://127.0.0.1:11434/api/tags`. Si Ollama deja de 
 
 ## API HTTP
 
-`opencohost/api/` es un proceso FastAPI dueño de su propio motor de Kira —
-nunca se comparte con la app Tk legacy, ni esta lo importa. **Es la
-superficie del motor del producto:** el front end Tauri en `OpenCohost_UI/`
-maneja a Kira enteramente a través de esta API, y `pnpm tauri:debug` la
-levanta por ti. Ejecútalo por separado solo si quieres un backend headless o
-si estás sirviendo el front end aparte. El extra `api` de
+`opencohost/api/` es un proceso FastAPI dueño de su propio motor de Kira — nunca se comparte con la app Tk legacy, ni esta lo importa. **Es la superficie del motor del producto:** el front end Tauri en `OpenCohost_UI/` maneja a Kira enteramente a través de esta API, y `pnpm tauri:debug` la levanta por ti. Ejecútalo por separado solo si quieres un backend headless o si estás sirviendo el front end aparte. El extra `api` de
 [Configuración](#configuración) ya lo cubre; si instalaste sin él:
 
 ```powershell
@@ -210,20 +211,34 @@ pip install -e ".[api]"
 uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 ```
 
-**`--workers` DEBE quedar en 1.** Un segundo worker significa un segundo
-motor — el doble de carga de VRAM/Ollama y una segunda toma del dispositivo
-de audio. `EngineHost` se niega a iniciar una segunda vez en la misma
-máquina mediante un lockfile.
+**`--workers` DEBE quedar en 1.** Un segundo worker significa un segundo motor — el doble de carga de VRAM/Ollama y una segunda toma del dispositivo de audio. `EngineHost` se niega a iniciar una segunda vez en la misma máquina mediante un lockfile.
 
-**No hagas bind a `--host 0.0.0.0`.** Eso expone la superficie de control
-del motor a tu LAN. CORS solo restringe a quien llama desde un navegador —
-no hace nada contra un script o `curl` que golpee el puerto directamente.
-Mantén esto en loopback salvo que pongas un proxy con autenticación
-delante.
+**No hagas bind a `--host 0.0.0.0`.** Eso expone la superficie de control del motor a tu LAN. CORS solo restringe a quien llama desde un navegador — no hace nada contra un script o `curl` que golpee el puerto directamente.
+Mantén esto en loopback salvo que pongas un proxy con autenticación delante.
 
-Endpoints: `GET /api/status` (snapshot de salud/motor, solo lectura) y
-`POST /api/perfiles/switch` (cambia el perfil de personalidad activo,
-idempotente vía el header `Idempotency-Key`).
+Un router por superficie del producto, bajo `opencohost/api/routers/`: `agenda`,
+`agent`, `avatar`, `chat`, `events`, `i18n_tts`, `llm_provider`, `memoria`,
+`music`, `obs`, `perfiles`, `personalization`, `ptt`, `status`, `stream`.
+
+Dos que vale la pena destacar: `GET /api/status` es un snapshot de salud/motor
+de solo lectura, y `POST /api/perfiles/switch` es idempotente vía el header
+`Idempotency-Key`. Referencia completa:
+[docs/api-reference.md](docs/api-reference.md).
+
+## Privacidad
+
+La versión corta, con la configuración por defecto:
+
+| | A dónde va |
+|---|---|
+| Chat de espectadores, nombres de usuario, memoria conversacional | Nunca salen de tu equipo |
+| Inferencia LLM | Ollama local por loopback |
+| Texto hablado de Kira | Microsoft Edge-TTS (se evita del todo con el extra `local-tts`) |
+
+**Una sola opción cambia esto.** OpenCohost puede correr la inferencia contra un endpoint en la nube compatible con OpenAI en lugar de Ollama. Al activarlo, el prompt completo — persona, memorias guardadas **y el contexto de chat ya filtrado** — se envía a ese proveedor, y aplica su política de retención, no la nuestra. Viene desactivado (`active_provider` es `"local"`), y una configuración de proveedor ausente o corrupta vuelve a local.
+
+Detalle completo, incluida la salvedad de YouTube:
+[docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Tests
 

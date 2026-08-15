@@ -1,7 +1,7 @@
 # Privacy & Data Policy
 
-**OpenCohost Lite** — local-first AI co-host platform  
-Last updated: 2026-07-02
+**OpenCohost** — local-first AI co-host platform  
+Last updated: 2026-08-14
 
 ---
 
@@ -19,10 +19,10 @@ All of the following are processed and stored **locally only** and are never tra
 |---|---|
 | Viewer chat messages | Read from Twitch's anonymous IRC gateway (or, if you opt in, YouTube's unofficial live-chat endpoint — see below); never forwarded anywhere |
 | Viewer usernames | Same as above — used locally for context aggregation |
-| Prompts sent to the LLM | Sent to your local Ollama instance over loopback (`127.0.0.1`) |
+| Prompts sent to the LLM | Sent to your local Ollama instance over loopback (`127.0.0.1`) — **unless you enable an optional cloud LLM provider**, which is off by default. See ["Optional cloud LLM providers"](#optional-cloud-llm-providers-opt-in) below |
 | Conversation history / background memory digest | Held in RAM only; never written to disk; cleared on restart or profile switch |
 | Kira's saved memorias (auto-captured + curated highlights) | Written to a local, per-profile SQLite database (`data/memorias/memorias.db`); persists across sessions until you purge them |
-| LLM-generated responses | Processed locally; only the voice-synthesis step involves a remote call (see below) |
+| LLM-generated responses | Generated locally by Ollama; only the voice-synthesis step involves a remote call (see below). Same cloud-provider caveat as prompts, above |
 | Smart Aggregator session data | Stored in a local SQLite database (`data/smart_aggregator/sessions.db`) |
 | Cohost profiles and settings | Stored in local config files under your user data directory |
 | Action and runtime logs | Written to local log files only; no remote reporting |
@@ -31,19 +31,40 @@ All of the following are processed and stored **locally only** and are never tra
 
 ## What leaves your machine
 
-**One service. One direction.**
+**One service by default. A second one only if you opt in.**
 
 | Service | What is sent | Why |
 |---|---|---|
 | **Microsoft Edge-TTS** (cloud) | Kira's synthesized spoken text — sentence-sized fragments of her generated response | Voice synthesis: the default TTS engine is a free Microsoft cloud service |
+| **An OpenAI-compatible LLM provider** (cloud) — **opt-in, off by default** | The complete LLM prompt: system prompt, active persona, saved memorias, personalization block, **and the filtered viewer-chat context** | You chose a cloud model instead of local Ollama. See the dedicated section below |
 
-**Important:** Only Kira's outgoing *generated speech text* reaches Edge-TTS. Viewer chat, usernames, raw prompts, conversation history, and LLM context are **never** part of this request. The data flow is:
+**Important:** Only Kira's outgoing *generated speech text* reaches Edge-TTS. Viewer chat, usernames, raw prompts, conversation history, and LLM context are **never** part of an Edge-TTS request. With the default local LLM, the data flow is:
 
 ```
 viewer chat → local Ollama (LLM) → Kira's response text → [sentence fragment] → Edge-TTS
 ```
 
-The screening, filtering, and compaction steps that decide what viewer chat the LLM may see — and all LLM inference — happen entirely on your machine before Edge-TTS is involved.
+The screening, filtering, and compaction steps that decide what viewer chat the LLM may see — and, by default, all LLM inference — happen entirely on your machine before Edge-TTS is involved.
+
+### Optional cloud LLM providers (opt-in)
+
+OpenCohost can run inference against any OpenAI-compatible endpoint (OpenAI, NVIDIA NIM, or a custom `base_url`) instead of local Ollama. **This is off by default and you must configure it deliberately**: `active_provider` defaults to `"local"`, and an absent, unreadable, or corrupt provider config all resolve back to local-only.
+
+Understand what changes when you turn it on:
+
+```
+viewer chat → [filtering] → PROMPT → your chosen cloud provider → response → Edge-TTS
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        the filtered chat context leaves your machine here
+```
+
+- **What is sent:** the entire message array — system prompt, the active cohost persona, the saved-memorias block, the personalization block, and the viewer-chat context that survived filtering. This is strictly more than Edge-TTS ever receives.
+- **Whose data:** the chat context is derived from your viewers' messages. Filtering and compaction reduce and reshape it, but it is not anonymised, and usernames may appear in the context Kira is given.
+- **Retention and training are the provider's policy, not ours.** OpenCohost cannot control how your chosen provider stores or uses what it receives. Read their terms before enabling this on a live stream.
+- **Automatic fallback:** if the provider errors or times out, the turn falls back to local Ollama. The failed request had already been sent.
+- **API keys** live in a separate store (`config/llm_keys.json`), never in `config/llm_provider.json`, so the provider config stays safe to inspect or share. Neither file is committed to git.
+
+To stay fully local for inference, simply leave this off — that is the shipped default.
 
 ### Fully local voice synthesis (optional)
 
@@ -137,9 +158,12 @@ Crash information is written exclusively to local files (`logs/crash.log`, `logs
 | Edge-TTS | Microsoft | Kira's generated response text (sentence fragments) | Cloud voice synthesis (default TTS) |
 | Twitch IRC | Twitch Interactive | Anonymous IRC nick, channel name, PONG | Receive viewer chat (read-only). Default platform. |
 | YouTube live chat (unofficial endpoint, via `pytchat`) | Google | Video ID | Receive viewer chat (read-only). **Opt-in only** — see the warning below. |
-| Ollama | Local process | LLM prompt (local only, loopback) | Language model inference |
+| Ollama | Local process | LLM prompt (local only, loopback) | Language model inference. **Default.** |
+| Any OpenAI-compatible LLM endpoint (OpenAI, NVIDIA NIM, custom `base_url`) | Whoever you point it at | The full LLM prompt, **including the filtered viewer-chat context**, persona, and saved memorias | Language model inference. **Opt-in, off by default** — see ["Optional cloud LLM providers"](#optional-cloud-llm-providers-opt-in). |
 
 For Microsoft's data practices regarding Edge-TTS requests, refer to [Microsoft's Privacy Statement](https://privacy.microsoft.com/en-us/privacystatement).
+
+If you enable a cloud LLM provider, its operator's policy — not this document — governs what happens to the prompts it receives. OpenCohost neither controls nor can audit that.
 
 For YouTube's data practices, refer to [Google's Privacy Policy](https://policies.google.com/privacy).
 

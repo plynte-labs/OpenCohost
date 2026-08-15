@@ -1,8 +1,12 @@
 # OpenCohost — Local-First AI Streaming Co-Host
-
-OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor). Kira uses a **local LLM brain via Ollama** and **free cloud voice (Microsoft Edge-TTS) in v1**. Your viewer chat, prompts, and conversation memory never leave your machine — only Kira's outgoing spoken text is sent to Edge-TTS for synthesis. High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
+__________________
+![Intro Opencohost](images/introOpencohost.png)
+OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor). Kira uses a **local LLM brain via Ollama** and **free cloud voice (Microsoft Edge-TTS) in v1**. With the shipped defaults, your viewer chat, prompts, and conversation memory never leave your machine — only Kira's outgoing spoken text is sent to Edge-TTS for synthesis. Inference can optionally be pointed at a cloud LLM provider instead, which does send the prompt off-machine; that is off by default and covered in [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
 > Spanish version: [README.es.md](README.es.md)
+> Spanish Note without AI: [README.note.md](README.note.md)
+
+[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI)
 
 ## What Kira Does
 
@@ -26,7 +30,9 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 | Personality profiles (editable from UI) | Stable |
 | LLM model catalog with one-click switching | Stable |
 | Ollama lifecycle management from the UI | Stable |
+| Optional cloud LLM providers (OpenAI-compatible) with automatic local fallback | Stable — off by default, see [Privacy](#privacy) |
 | Smart Chat Aggregator (Twitch) | Stable |
+| Adaptive chat activation (tunes the wake threshold to the channel's own rate) | Stable |
 | Smart Chat Aggregator (YouTube) | Opt-in, unofficial — see [PRIVACY.md](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | Health monitor with TTS fallback gate | Stable |
 | Compact mode for second-monitor streaming | Stable |
@@ -63,9 +69,8 @@ The product UI (`pnpm tauri:debug`) needs a Rust/Node toolchain on top of the ab
 
 ## Setup
 
-Clone with submodules — the Tauri front end is its own repository, wired in at
-`OpenCohost_UI/`. A plain `git clone` leaves that directory empty and the Run
-section below has nothing to `cd` into.
+Clone with submodules — the Tauri front end is its own repository, wired in at `OpenCohost_UI/`.
+A plain `git clone` leaves that directory empty and the Run section below has nothing to `cd` into.
 
 ```powershell
 git clone --recursive https://github.com/plynte-labs/opencohost.git
@@ -113,10 +118,7 @@ See [Tauri prerequisites](#tauri-prerequisites) above if this is your first run 
 For a standalone backend (headless, or with the front end served separately), use `run-api.bat` or
 `uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1`.
 
-`python -m opencohost` still opens the old CustomTkinter shell, which was
-**frozen as legacy** on 2026-08-13: it is kept around but not maintained. The
-flags armed by `EngineHost` never engage there, so it is not a valid surface
-for runtime validation.
+`python -m opencohost` still opens the old CustomTkinter shell, which was **frozen as legacy** on 2026-08-13: it is kept around but not maintained. The flags armed by `EngineHost` never engage there, so it is not a valid surface for runtime validation.
 
 ### Configure storage paths
 
@@ -132,9 +134,9 @@ storage:
 ## Architecture
 
 ```
-OpenCohost_UI/            # Product UI — Tauri + React (pnpm tauri:debug)
-├── src/features/         # One folder per surface: agenda, stream, musica, ...
-└── src-tauri/backend.rs  # Spawns the Python backend if none is listening
+OpenCohost_UI/                # Product UI — Tauri + React (pnpm tauri:debug)
+├── src/features/             # One folder per surface: agenda, stream, musica, ...
+└── src-tauri/src/backend.rs  # Spawns the Python backend if none is listening
 
 opencohost/
 ├── __main__.py           # Legacy entry point (python -m opencohost)
@@ -150,8 +152,9 @@ opencohost/
 │   └── default_profiles.json  # Seeded personality profiles
 ├── core/
 │   ├── llm_engine.py     # LLM orchestration, memory, TTS pipeline
-│   ├── health_monitor.py # Service health, TTS fallback gate
-│   └── profiles.py       # Personality profile load/save
+│   ├── observability/    # Health monitor, service state, TTS fallback gate
+│   ├── profiles/         # Personality profile load/save
+│   └── providers/cloud/  # OpenAI-compatible cloud LLM client
 ├── ui/                   # LEGACY CustomTkinter shell — frozen, not maintained
 └── smart_aggregator/     # Live chat aggregator (Twitch; YouTube opt-in)
 ```
@@ -198,30 +201,39 @@ The service is checked at `http://127.0.0.1:11434/api/tags`. If Ollama becomes u
 
 ## HTTP API
 
-`opencohost/api/` is a FastAPI process that owns its own Kira engine — it is
-never shared with, or imported by, the legacy Tk app. **It is the product's
-engine surface:** the Tauri front end in `OpenCohost_UI/` drives Kira entirely
-through it, and `pnpm tauri:debug` starts it for you. Run it standalone only if
-you want a headless backend or are serving the front end separately. The `api`
-extra from [Setup](#setup) already covers this; if you installed without it:
+`opencohost/api/` is a FastAPI process that owns its own Kira engine — it is never shared with, or imported by, the legacy Tk app. **It is the product's engine surface:** the Tauri front end in `OpenCohost_UI/` drives Kira entirely through it, and `pnpm tauri:debug` starts it for you. Run it standalone only if you want a headless backend or are serving the front end separately. The `api` extra from [Setup](#setup) already covers this; if you installed without it:
 
 ```powershell
 pip install -e ".[api]"
 uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 ```
 
-**`--workers` MUST stay at 1.** A second worker means a second engine —
-double VRAM/Ollama load and a second audio device grab. `EngineHost` refuses
-to start a second time on the same machine via a lockfile.
+**`--workers` MUST stay at 1.** A second worker means a second engine — double VRAM/Ollama load and a second audio device grab. `EngineHost` refuses to start a second time on the same machine via a lockfile.
 
-**Do not bind `--host 0.0.0.0`.** That exposes the engine control surface to
-your LAN. CORS only restricts browser callers — it does nothing against a
-script or `curl` hitting the port directly. Keep this on loopback unless you
+**Do not bind `--host 0.0.0.0`.** That exposes the engine control surface to your LAN. CORS only restricts browser callers — it does nothing against a script or `curl` hitting the port directly. Keep this on loopback unless you
 put an authenticating proxy in front of it.
 
-Endpoints: `GET /api/status` (read-only health/engine snapshot) and
-`POST /api/perfiles/switch` (switch the active personality profile,
-idempotent via the `Idempotency-Key` header).
+One router per product surface, under `opencohost/api/routers/`: `agenda`,
+`agent`, `avatar`, `chat`, `events`, `i18n_tts`, `llm_provider`, `memoria`,
+`music`, `obs`, `perfiles`, `personalization`, `ptt`, `status`, `stream`.
+
+Two worth calling out: `GET /api/status` is a read-only health/engine snapshot, and `POST /api/perfiles/switch` is idempotent via the `Idempotency-Key` header.
+Full reference: [docs/api-reference.md](docs/api-reference.md).
+
+## Privacy
+
+The short version, with the shipped defaults:
+
+| | Where it goes |
+|---|---|
+| Viewer chat, usernames, conversation memory | Never leave your machine |
+| LLM inference | Local Ollama over loopback |
+| Kira's spoken text | Microsoft Edge-TTS (bypass entirely with the `local-tts` extra) |
+
+**One opt-in changes this.** OpenCohost can run inference against an OpenAI-compatible cloud endpoint instead of Ollama. When you enable it, the full prompt — persona, saved memorias, **and the filtered viewer-chat context** — is sent to that provider, and their retention policy applies, not ours. It is off by default (`active_provider` is `"local"`), and a missing or corrupt provider config resolves back to local-only.
+
+Full detail, including the YouTube opt-in caveat:
+[docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Testing
 
