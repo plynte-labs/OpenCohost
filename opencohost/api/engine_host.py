@@ -54,7 +54,18 @@ try:
 except ImportError:  # pragma: no cover - Phase 1 targets Windows only
     msvcrt = None
 
-_LOCK_PATH = os.path.join(tempfile.gettempdir(), "opencohost_api_engine.lock")
+def _resolve_lock_path() -> str:
+    explicit_root = os.environ.get("OPENCOHOST_DATA_ROOT", "").strip()
+    if explicit_root:
+        return os.path.join(
+            os.path.abspath(os.path.expanduser(os.path.expandvars(explicit_root))),
+            "state",
+            "opencohost_api_engine.lock",
+        )
+    return os.path.join(tempfile.gettempdir(), "opencohost_api_engine.lock")
+
+
+_LOCK_PATH = _resolve_lock_path()
 
 # opencohost/api/engine_host.py -> opencohost/ -> opencohost/config/smart_aggregator.yaml
 _AGGREGATOR_CONFIG_PATH = os.path.join(
@@ -438,8 +449,8 @@ class MusicState:
 class EngineHost:
     """Owns a standalone MotorVocalIA + HealthMonitor pair for this process."""
 
-    def __init__(self, lock_path: str = _LOCK_PATH):
-        self._lock_path = lock_path
+    def __init__(self, lock_path: str | None = None):
+        self._lock_path = lock_path or _resolve_lock_path()
         self._lock_fd = None
         self.motor = None
         self.monitor = None
@@ -1191,6 +1202,9 @@ class EngineHost:
         self._release_lock()
 
     def _acquire_lock(self) -> None:
+        parent = os.path.dirname(self._lock_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)

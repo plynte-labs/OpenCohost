@@ -31,13 +31,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Sync dependencies (dev + api + integrations + youtube-chat)
-        # api provides fastapi/uvicorn: 40 test modules import fastapi at module
-        # scope, so without this extra pytest fails at COLLECTION, not at a test.
+      - name: Sync dependencies (dev + legacy-ui + integrations + youtube-chat)
+        # FastAPI/uvicorn are core dependencies; legacy-ui provides CTk/input/audio
+        # dependencies needed by the full legacy-inclusive test suite.
         # youtube-chat provides pytchat — chat_source raises from connect() when
         # pytchat is absent, and its tests exercise that integration with the
         # package importable. CI installs it to cover the opt-in path; users do not.
-        run: uv sync --locked --extra dev --extra api --extra integrations --extra youtube-chat
+        run: uv sync --locked --extra dev --extra legacy-ui --extra integrations --extra youtube-chat
 
       - name: Tests
         run: uv run pytest tests/ -q

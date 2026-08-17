@@ -18,6 +18,33 @@ from opencohost.config.storage import (
 )
 
 
+def test_explicit_data_root_controls_owned_paths_and_supports_unicode(tmp_path):
+    data_root = tmp_path / "Open Cohost \u00fcnicode"
+    with patch.dict(os.environ, {"OPENCOHOST_DATA_ROOT": str(data_root)}, clear=False):
+        paths = resolve_storage_paths({"cache_root": "auto", "temp_root": "auto", "ollama_models": "auto"})
+
+    assert paths.cache_root == data_root / "cache"
+    assert paths.temp_root == data_root / "temp"
+    assert paths.hf_home == data_root / "cache"
+    assert paths.hf_hub_cache == data_root / "cache" / "hub"
+    assert paths.torch_home == data_root / "cache" / "torch"
+    assert paths.ollama_models != data_root / "cache" / "ollama_models"
+
+
+def test_explicit_data_root_does_not_take_ownership_of_ollama_models(tmp_path):
+    data_root = tmp_path / "data"
+    ollama_root = tmp_path / "ollama-owned-by-user"
+    with patch.dict(
+        os.environ,
+        {"OPENCOHOST_DATA_ROOT": str(data_root), "OLLAMA_MODELS": str(ollama_root)},
+        clear=False,
+    ):
+        paths = resolve_storage_paths({"cache_root": "auto", "temp_root": "auto", "ollama_models": "auto"})
+
+    assert paths.ollama_models == ollama_root.resolve()
+    assert not str(paths.ollama_models).startswith(str(data_root.resolve()))
+
+
 def test_storage_paths_custom_disk_overrides():
     """Custom cache, temp and ollama_models paths are resolved correctly."""
     config = {
@@ -80,6 +107,7 @@ def test_storage_env_isolation_sets_expected_vars(tmp_path):
     original_temp = os.environ.get("TEMP")
     original_hf = os.environ.get("HF_HOME")
     original_ollama = os.environ.get("OLLAMA_MODELS")
+    original_data_root = os.environ.get("OPENCOHOST_DATA_ROOT")
 
     try:
         result = apply_storage_environment(paths)
@@ -92,19 +120,37 @@ def test_storage_env_isolation_sets_expected_vars(tmp_path):
         assert os.environ["TORCH_HOME"] == str(result.torch_home)
         assert os.environ["OLLAMA_MODELS"] == str(result.ollama_models)
 
-        # Directories were created
+        # OpenCohost-owned directories were created; Ollama remains external
+        # and user-owned, so this seam must never mkdir it.
         assert result.temp_root.exists()
         assert result.cache_root.exists()
-        assert result.ollama_models.exists()
+        assert not result.ollama_models.exists()
     finally:
         # Restore to avoid contaminating other tests
         for var, val in [
             ("TEMP", original_temp),
             ("HF_HOME", original_hf),
             ("OLLAMA_MODELS", original_ollama),
+            ("OPENCOHOST_DATA_ROOT", original_data_root),
         ]:
             if val is not None:
                 os.environ[var] = val
+            else:
+                os.environ.pop(var, None)
+
+
+def test_apply_storage_environment_never_creates_external_ollama_models(tmp_path):
+    data_root = tmp_path / "Open Cohost \u00fcnicode"
+    ollama_root = tmp_path / "ollama-user-owned"
+    with patch.dict(os.environ, {"OPENCOHOST_DATA_ROOT": str(data_root)}, clear=False):
+        paths = resolve_storage_paths({
+            "cache_root": "auto",
+            "temp_root": "auto",
+            "ollama_models": str(ollama_root),
+        })
+        apply_storage_environment(paths)
+    assert not ollama_root.exists()
+    assert (data_root / "cache").exists()
 
 
 def test_storage_paths_ollama_env_var_respected():
