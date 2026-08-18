@@ -1,11 +1,12 @@
 name: Release
 
-on:
+"on":
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 defaults:
   run:
@@ -13,20 +14,18 @@ defaults:
 
 env:
   UV_VERSION: "0.11.6"
-  # SHA256 of uv-x86_64-pc-windows-msvc.zip for UV_VERSION; verified before
-  # the binary is vendored into the launcher exe. Update together.
-  UV_WINDOWS_ZIP_SHA256: "99aa60edd017a256dbf378f372d1cff3292dbc6696e0ea01716d9158d773ab77"
 
 jobs:
-  build-src:
-    name: Build source zip
+  build-engine-payload:
+    name: Build engine payload
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-      src_url: ${{ steps.version.outputs.src_url }}
-      src_sha256: ${{ steps.zip.outputs.src_sha256 }}
+      payload_sha256: ${{ steps.payload.outputs.payload_sha256 }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
@@ -42,68 +41,59 @@ jobs:
           import re
           import sys
 
-          tag = sys.argv[1]
-          tag_version = tag[1:] if tag.startswith("v") else tag
+          tag = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
           text = open("opencohost/__init__.py", encoding="utf-8").read()
           pkg_version = re.search(
               r"__version__\s*=\s*[\"']([^\"']+)[\"']", text
           ).group(1)
-          if tag_version != pkg_version:
-              sys.exit(
-                  "Tag %s does not match opencohost.__version__ == %s"
-                  % (tag, pkg_version)
-              )
-          repo = os.environ["GITHUB_REPOSITORY"]
-          url = (
-              "https://github.com/%s/releases/download/"
-              "v%s/opencohost-src-%s.zip" % (repo, pkg_version, pkg_version)
-          )
+          if tag and tag.startswith("v"):
+              tag_version = tag[1:]
+              if tag_version != pkg_version:
+                  sys.exit(f"Tag {tag} does not match opencohost.__version__ == {pkg_version}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write("version=%s\n" % pkg_version)
-              fh.write("src_url=%s\n" % url)
-          print("Release version: %s" % pkg_version)
+              fh.write(f"version={pkg_version}\n")
+          print(f"Release version: {pkg_version}")
           EOF
 
-      - name: Create source zip
-        id: zip
+      - name: Build immutable engine payload zip
+        id: payload
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          STAGING="opencohost-src-${VERSION}"
-          ZIP="build_artifacts/opencohost-src-${VERSION}.zip"
-          mkdir -p build_artifacts
-          # Build a zip with a single top-level folder; unpack_src_zip strips it.
-          mkdir -p "${STAGING}"
-          cp pyproject.toml uv.lock README.md LICENSE "${STAGING}/"
-          cp -r opencohost "${STAGING}/opencohost"
-          zip -r "${ZIP}" "${STAGING}" \
-            -x "*__pycache__*" -x "*.pyc"
-          rm -rf "${STAGING}"
-          SHA="$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "${ZIP}")"
-          echo "src_sha256=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Source zip SHA256: ${SHA}"
+          mkdir -p build_artifacts/payloads
+          python3 packaging/build_engine_payload.py --output-dir build_artifacts/payloads
+          PAYLOAD_FILE="build_artifacts/payloads/engine-${VERSION}.zip"
+          SHA="$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "${PAYLOAD_FILE}")"
+          echo "payload_sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Engine payload SHA256: ${SHA}"
 
-      - name: Upload source artifacts
+      - name: Upload engine payload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: src-dist
-          path: build_artifacts/*
+          name: engine-payload
+          path: build_artifacts/payloads/*
           if-no-files-found: error
 
-  build-launcher:
-    name: Build launcher (windows)
-    needs: build-src
+  build-tauri-installer:
+    name: Build Tauri Windows NSIS Installer
     runs-on: windows-latest
-    env:
-      # Use the setup-python interpreter (best-supported by PyInstaller)
-      # instead of a uv-managed build.
-      UV_PYTHON_PREFERENCE: only-system
+    needs: build-engine-payload
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Python 3.11
-        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
@@ -111,99 +101,32 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Vendor pinned uv binary into packaging/vendor/
+      - name: Install UI dependencies
+        working-directory: OpenCohost_UI
+        run: pnpm install --frozen-lockfile
+
+      - name: Build UI and Tauri NSIS installer
+        working-directory: OpenCohost_UI
         run: |
-          python - <<'EOF'
-          import hashlib
-          import io
-          import os
-          import ssl
-          import sys
-          import zipfile
-          import urllib.request
+          pnpm build
+          pnpm exec tauri build
 
-          version = os.environ["UV_VERSION"]
-          expected_sha256 = os.environ["UV_WINDOWS_ZIP_SHA256"]
-          asset = "uv-x86_64-pc-windows-msvc.zip"
-          url = "https://github.com/astral-sh/uv/releases/download/%s/%s" % (
-              version,
-              asset,
-          )
-          data = urllib.request.urlopen(
-              url, context=ssl.create_default_context()
-          ).read()
-          actual = hashlib.sha256(data).hexdigest()
-          if actual != expected_sha256:
-              sys.exit(
-                  "uv zip checksum mismatch: expected %s got %s"
-                  % (expected_sha256, actual)
-              )
-          exe = "uv.exe"
-          os.makedirs(os.path.join("packaging", "vendor"), exist_ok=True)
-          target = os.path.join("packaging", "vendor", exe)
-          with zipfile.ZipFile(io.BytesIO(data)) as zf:
-              member = next(n for n in zf.namelist() if n.endswith(exe))
-              with zf.open(member) as src, open(target, "wb") as dst:
-                  dst.write(src.read())
-          print("Vendored %s (uv %s)" % (target, version))
-          EOF
-
-      - name: Generate release metadata
+      - name: Collect Windows Installer
         run: |
-          python packaging/build_release_meta.py \
-            --version "${{ needs.build-src.outputs.version }}" \
-            --url "${{ needs.build-src.outputs.src_url }}" \
-            --sha256 "${{ needs.build-src.outputs.src_sha256 }}"
-
-      - name: Bundle CA certificates for clean-Windows SSL verification
-        run: |
-          python - <<'EOF'
-          # Install certifi, then copy its bundled cacert.pem into packaging/vendor/
-          # so the frozen launcher can verify HTTPS downloads on machines where the
-          # Windows AuthRoot CTL has not been lazily populated by a browser yet.
-          import subprocess
-          import sys
-          import shutil
-          import os
-
-          subprocess.check_call(
-              [sys.executable, "-m", "pip", "install", "--quiet", "certifi==2026.5.20"],
-              stdout=subprocess.DEVNULL,
-          )
-          import certifi
-          os.makedirs(os.path.join("packaging", "vendor"), exist_ok=True)
-          dest = os.path.join("packaging", "vendor", "cacert.pem")
-          shutil.copy(certifi.where(), dest)
-          print("Bundled cacert.pem from certifi %s -> %s" % (certifi.__version__, dest))
-          EOF
-
-      - name: Install build tooling (PyInstaller)
-        run: uv pip install --system pyinstaller
-
-      - name: Build launcher executable
-        run: |
-          pyinstaller packaging/launcher.spec \
-            --noconfirm \
-            --distpath build_artifacts/launcher \
-            --workpath build_artifacts/pyi-build
-
-      - name: Collect Windows asset
-        run: |
-          VERSION="${{ needs.build-src.outputs.version }}"
+          VERSION="${{ needs.build-engine-payload.outputs.version }}"
           mkdir -p release_assets
-          mv "build_artifacts/launcher/OpenCohost-Setup.exe" \
-            "release_assets/OpenCohost-Setup-${VERSION}.exe"
+          cp OpenCohost_UI/src-tauri/target/release/bundle/nsis/*.exe "release_assets/OpenCohost-${VERSION}-x64-setup.exe"
 
-      - name: Upload launcher artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
-          name: launcher-windows
+          name: installer-windows
           path: release_assets/*
           if-no-files-found: error
 
   publish:
-    name: Publish draft release
-    needs: [build-src, build-launcher]
+    name: Publish GitHub draft release
+    needs: [build-engine-payload, build-tauri-installer]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -224,9 +147,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          TAG="${GITHUB_REF_NAME:-v${{ needs.build-engine-payload.outputs.version }}}"
+          gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
-            --title "OpenCohost $GITHUB_REF_NAME" \
+            --prerelease \
+            --title "OpenCohost $TAG" \
             --generate-notes \
             release_assets/*
