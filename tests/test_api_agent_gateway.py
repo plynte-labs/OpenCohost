@@ -404,11 +404,14 @@ class TestD1AgendaIsolation:
         operator notice surface, and the read-only status probe. If this
         set ever grows an agenda route, that is a trust-model regression."""
         app = _app()
-        agent_paths = {
-            getattr(route, "path", "")
-            for route in app.routes
-            if getattr(route, "path", "").startswith("/api/agent/")
-        }
+        agent_paths = set()
+        for route in app.routes:
+            if hasattr(route, "path") and route.path.startswith("/api/agent/"):
+                agent_paths.add(route.path)
+            if hasattr(route, "original_router"):
+                for sub in route.original_router.routes:
+                    if hasattr(sub, "path") and sub.path.startswith("/api/agent/"):
+                        agent_paths.add(sub.path)
         assert agent_paths == {
             "/api/agent/topics",
             "/api/agent/status",

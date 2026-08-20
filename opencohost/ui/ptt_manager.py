@@ -28,9 +28,12 @@ _PTT_KB_MAP.update({
     "Insert": keyboard.Key.insert,
     "Pause": keyboard.Key.pause,
 })
+_mouse_x1 = getattr(mouse.Button, "x1", getattr(mouse.Button, "button8", mouse.Button.unknown))
+_mouse_x2 = getattr(mouse.Button, "x2", getattr(mouse.Button, "button9", mouse.Button.unknown))
+
 _PTT_MOUSE_MAP = {
-    "Mouse4": mouse.Button.x2,
-    "Mouse5": mouse.Button.x1,
+    "Mouse4": _mouse_x2,
+    "Mouse5": _mouse_x1,
 }
 
 # ── Physical Win32 VK codes for the GetAsyncKeyState probe ──
@@ -40,8 +43,8 @@ _PTT_MOUSE_MAP = {
 # the Button (x1 -> 0x05, x2 -> 0x06) sidesteps the inverted display labels in
 # `_PTT_MOUSE_MAP`, which only affect UI text.
 _PTT_MOUSE_VK_MAP = {
-    mouse.Button.x1: 0x05,  # VK_XBUTTON1
-    mouse.Button.x2: 0x06,  # VK_XBUTTON2
+    _mouse_x1: 0x05,  # VK_XBUTTON1
+    _mouse_x2: 0x06,  # VK_XBUTTON2
 }
 
 # Mapa inverso: pynput key → display name

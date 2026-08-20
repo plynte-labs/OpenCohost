@@ -369,11 +369,11 @@ class TestQwenProcessManager:
                 with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     with patch.object(mgr, "_check_health", return_value=True):
                         mock_popen.return_value.poll.return_value = None
-
                         assert mgr.start() is True
 
         flags = mock_popen.call_args.kwargs["creationflags"]
-        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+        c_new_grp = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        assert flags & c_new_grp
 
     def test_start_redirects_qwen_output_to_dedicated_logs(self, tmp_path):
         """Qwen startup tracebacks must be preserved in logs, not swallowed."""
