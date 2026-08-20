@@ -124,7 +124,9 @@ def _tts_cleanup_punctuation(text: str) -> str:
     """
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"\.{2}(?!\.)", ".", text)  # exactly two dots -> one; keep "..." ellipsis
+    text = re.sub(r"\.{3,}", ",", text)              # ellipsis → comma pause (Piper reads "..." as "punto")
+    text = text.replace("\u2026", ",")                    # Unicode ellipsis (…) → same comma pause
+    text = re.sub(r"\.{2}(?!\.)", ".", text)          # exactly two dots -> one; ellipsis already handled above
     text = re.sub(r"([,;:!?])\1+", r"\1", text)
     text = re.sub(r"^[\s,;:]+", "", text)
     return text.strip()
