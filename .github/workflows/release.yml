@@ -23,12 +23,12 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       payload_sha256: ${{ steps.payload.outputs.payload_sha256 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v5
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -78,7 +78,7 @@ jobs:
           echo "Engine payload SHA256: ${SHA}"
 
       - name: Upload engine payload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: engine-payload
           path: build_artifacts/payloads/*
@@ -89,12 +89,12 @@ jobs:
     runs-on: windows-latest
     needs: build-engine-payload
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
@@ -107,7 +107,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v5
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -129,7 +129,7 @@ jobs:
           cp OpenCohost_UI/src-tauri/target/release/bundle/nsis/*.exe "release_assets/OpenCohost-${VERSION}-x64-setup.exe"
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: installer-windows
           path: release_assets/*
@@ -143,7 +143,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: release_assets
           merge-multiple: true

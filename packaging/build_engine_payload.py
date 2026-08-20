@@ -89,10 +89,25 @@ def build_payload(source_root: Path | str, output_path: Path | str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source_root", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("source_root", nargs="?", type=Path, default=Path("."))
+    parser.add_argument("output", nargs="?", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory to place engine payload in")
     args = parser.parse_args(argv)
-    build_payload(args.source_root, args.output)
+
+    source_root = args.source_root
+    output_path = args.output
+    if output_path is None:
+        if args.output_dir:
+            from opencohost import __version__
+            # Convert PEP 440 to semver if prerelease for file naming
+            import re
+            m = re.match(r'^(\d+\.\d+\.\d+)a(\d+)$', __version__)
+            semver = f"{m.group(1)}-alpha.{m.group(2)}" if m else __version__
+            output_path = args.output_dir / f"engine-{semver}.zip"
+        else:
+            parser.error("Either 'output' positional argument or '--output-dir' must be specified.")
+
+    build_payload(source_root, output_path)
     return 0
 
 
