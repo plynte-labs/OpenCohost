@@ -149,6 +149,7 @@ class CloudFallbackMixin:
             previous_provider = (self._provider_config.get("active_provider") or "local")
             incoming_provider = (cfg.get("active_provider") or "local")
             self._provider_config = cfg
+            self.is_ready = (incoming_provider != "local")
             if incoming_provider != previous_provider:
                 provider_changed = True
                 self._cloud_fallback_active = False

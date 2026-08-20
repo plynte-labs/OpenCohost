@@ -51,8 +51,13 @@ from opencohost.smart_aggregator.kira_agenda_controller import AgendaState, Kira
 
 try:
     import msvcrt
-except ImportError:  # pragma: no cover - Phase 1 targets Windows only
+except ImportError:  # pragma: no cover - Windows only
     msvcrt = None
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX only
+    fcntl = None
 
 def _resolve_lock_path() -> str:
     explicit_root = os.environ.get("OPENCOHOST_DATA_ROOT", "").strip()
@@ -1207,7 +1212,10 @@ class EngineHost:
             os.makedirs(parent, exist_ok=True)
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
         try:
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            if msvcrt is not None:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
             raise RuntimeError(
@@ -1220,8 +1228,11 @@ class EngineHost:
         if self._lock_fd is None:
             return
         try:
-            os.lseek(self._lock_fd, 0, os.SEEK_SET)
-            msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
+            if msvcrt is not None:
+                os.lseek(self._lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         except Exception:
             pass
         try:

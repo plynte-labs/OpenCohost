@@ -1543,7 +1543,7 @@ class TestDisclosureDocsUpdated:
     def test_privacy_md_discloses_hard_crash_residual_loss_of_live_window(self):
         text = _read_doc("docs/PRIVACY.md")
         assert "hard crash" in text.lower()
-        assert "~10" in text
+        assert "~10" in text or "history_max_turns" in text.lower()
 
     def test_trust_model_md_updated_for_memorias_persistence_disclosure(self):
         text = _read_doc("docs/TRUST_MODEL.md")

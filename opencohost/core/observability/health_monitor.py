@@ -64,6 +64,8 @@ class VRAMGuard:
 
     def __init__(self) -> None:
         self._pynvml_available = False
+        self._handle = None
+        self._pynvml = None
         self._free_mb: float = 0.0
         self._total_mb: float = 0.0
         self._used_mb: float = 0.0
@@ -442,7 +444,9 @@ class QwenProcessManager:
         try:
             creationflags = 0
             if sys.platform == "win32":
-                creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                c_no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                c_new_grp = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                creationflags = c_no_win | c_new_grp
 
             # If a previous managed Qwen process exited unexpectedly and start()
             # is called again before stop(), close stale log handles before
@@ -506,7 +510,8 @@ class QwenProcessManager:
 
         try:
             if sys.platform == "win32":
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
+                sig = getattr(signal, "CTRL_BREAK_EVENT", getattr(signal, "SIGTERM", 15))
+                proc.send_signal(sig)
             else:
                 proc.terminate()
         except Exception as e:

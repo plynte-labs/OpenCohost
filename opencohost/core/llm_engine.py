@@ -753,7 +753,7 @@ class MotorVocalIA(
         self.on_cloud_probe_scheduled: Optional[Callable[[dict], None]] = None
 
         self.voz_referencia = None
-        self.is_ready = False
+        self.is_ready = not self._is_local
         self._processing = False
         self._speaking = False
         # WU3 (design-fase2.md §2.3): narrow "Ollama is busy right now" flag,
