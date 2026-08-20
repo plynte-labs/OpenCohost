@@ -86,6 +86,15 @@ Para utilizar OpenCohost sin requerir Ollama local ni agotar la VRAM de tu lapto
 3. **Alternativa en runtime (`config/llm_provider.json`)**:
    El motor soporta perfiles dinámicos mediante `config/llm_provider.json` y `config/llm_keys.json`, permitiendo alternar entre proveedores cloud y local desde la UI.
 
+4. **Modelos para Síntesis de Voz Offline (Piper TTS)**:
+   Si querés usar síntesis de voz 100% offline (sin Edge-TTS), descargá las voces ONNX en `modelos_f5/piper/`:
+   ```bash
+   mkdir -p modelos_f5/piper
+   # Voz Argentina (predeterminada)
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx" -o modelos_f5/piper/es_AR-daniela-high.onnx
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json" -o modelos_f5/piper/es_AR-daniela-high.onnx.json
+   ```
+
 ---
 
 ## 5. Ejecución en Desarrollo
