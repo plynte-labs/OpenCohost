@@ -90,9 +90,13 @@ Para utilizar OpenCohost sin requerir Ollama local ni agotar la VRAM de tu lapto
    Si querés usar síntesis de voz 100% offline (sin Edge-TTS), descargá las voces ONNX en `modelos_f5/piper/`:
    ```bash
    mkdir -p modelos_f5/piper
-   # Voz Argentina (predeterminada)
-   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx" -o modelos_f5/piper/es_AR-daniela-high.onnx
-   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json" -o modelos_f5/piper/es_AR-daniela-high.onnx.json
+   # 1. Voz Neutral (Español): es_MX-claude-high
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx" -o modelos_f5/piper/es_MX-claude-high.onnx
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json" -o modelos_f5/piper/es_MX-claude-high.onnx.json
+
+   # 2. Voz English: en_US-lessac-high
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx" -o modelos_f5/piper/en_US-lessac-high.onnx
+   curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx.json" -o modelos_f5/piper/en_US-lessac-high.onnx.json
    ```
 
 ---
