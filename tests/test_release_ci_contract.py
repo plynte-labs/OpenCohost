@@ -25,19 +25,28 @@ def _get_pyproject_version() -> str:
     raise ValueError("Could not find __version__ in opencohost/__init__.py")
 
 
+def _normalize_to_semver(pep440: str) -> str:
+    """Convert PEP 440 prerelease (e.g. '0.2.0a1') to semver (e.g. '0.2.0-alpha.1')."""
+    m = re.match(r'^(\d+\.\d+\.\d+)(?:a(\d+))?$', pep440)
+    if m and m.group(2):
+        return f"{m.group(1)}-alpha.{m.group(2)}"
+    return pep440
+
+
 def test_version_parity_across_repository_components():
     py_version = _get_pyproject_version()
+    semver_version = _normalize_to_semver(py_version)
     
     # Tauri conf version
     tauri_conf = json.loads(TAURI_CONF.read_text(encoding="utf-8"))
-    assert tauri_conf["version"] == py_version, (
-        f"Tauri config version ({tauri_conf['version']}) does not match python version ({py_version})"
+    assert tauri_conf["version"] == semver_version, (
+        f"Tauri config version ({tauri_conf['version']}) does not match python version ({py_version} -> {semver_version})"
     )
     
     # UI package.json version
     package_json = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
-    assert package_json["version"] == py_version, (
-        f"UI package.json version ({package_json['version']}) does not match python version ({py_version})"
+    assert package_json["version"] == semver_version, (
+        f"UI package.json version ({package_json['version']}) does not match python version ({py_version} -> {semver_version})"
     )
 
 

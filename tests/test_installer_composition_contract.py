@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import tomllib
 import pytest
 
@@ -28,9 +29,18 @@ def _pyproject_version() -> str:
     raise ValueError("Could not find __version__ in opencohost/__init__.py")
 
 
+
+def _normalize_to_semver(pep440: str) -> str:
+    """Convert PEP 440 prerelease (e.g. '0.2.0a1') to semver (e.g. '0.2.0-alpha.1')."""
+    m = re.match(r'^(\d+\.\d+\.\d+)(?:a(\d+))?$', pep440)
+    if m and m.group(2):
+        return f"{m.group(1)}-alpha.{m.group(2)}"
+    return pep440
+
+
 def test_tauri_config_declares_nsis_target_and_current_user_install():
     conf = _tauri_config()
-    version = _pyproject_version()
+    version = _normalize_to_semver(_pyproject_version())
     
     assert conf["productName"] == "OpenCohost"
     assert conf["version"] == version, "Tauri version must match python package version"
@@ -52,7 +62,7 @@ def test_bootstrap_manifest_resource_valid_and_non_developer_paths():
     manifest = json.loads(raw)
     
     assert manifest["schema_version"] == 1
-    assert manifest["product_version"] == _pyproject_version()
+    assert manifest["product_version"] == _normalize_to_semver(_pyproject_version())
     assert manifest["python_version"] == "3.12.4"
     assert "allowed_hosts" in manifest and len(manifest["allowed_hosts"]) > 0
     assert manifest["uv"]["name"] == "uv"

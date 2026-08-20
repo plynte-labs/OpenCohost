@@ -41,18 +41,29 @@ jobs:
           import re
           import sys
 
+          def normalize_pep440(v):
+              """Normalize semver prerelease to PEP 440: 0.2.0-alpha.1 -> 0.2.0a1"""
+              m = re.match(r'^(\d+\.\d+\.\d+)-alpha\.(\d+)$', v)
+              return f"{m.group(1)}a{m.group(2)}" if m else v
+
+          def pep440_to_semver(v):
+              """Expand PEP 440 prerelease to semver: 0.2.0a1 -> 0.2.0-alpha.1"""
+              m = re.match(r'^(\d+\.\d+\.\d+)a(\d+)$', v)
+              return f"{m.group(1)}-alpha.{m.group(2)}" if m else v
+
           tag = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
           text = open("opencohost/__init__.py", encoding="utf-8").read()
           pkg_version = re.search(
               r"__version__\s*=\s*[\"']([^\"']+)[\"']", text
           ).group(1)
           if tag and tag.startswith("v"):
-              tag_version = tag[1:]
+              tag_version = normalize_pep440(tag[1:])
               if tag_version != pkg_version:
-                  sys.exit(f"Tag {tag} does not match opencohost.__version__ == {pkg_version}")
+                  sys.exit(f"Tag {tag} (normalized: {tag_version}) does not match opencohost.__version__ == {pkg_version}")
+          semver = pep440_to_semver(pkg_version)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"version={pkg_version}\n")
-          print(f"Release version: {pkg_version}")
+              fh.write(f"version={semver}\n")
+          print(f"Release version: {pkg_version} (semver: {semver})")
           EOF
 
       - name: Build immutable engine payload zip
