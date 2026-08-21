@@ -63,6 +63,7 @@ and opencohost/ui/inspector_memory.py.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -402,24 +403,47 @@ _SCORING_STOPWORDS: frozenset[str] = frozenset({
 })
 
 
-def select_top_k(topic_text: str, rows, k: int = 3) -> list:
-    """Lexical top-k of *rows* against *topic_text* by signature overlap.
+def _compute_candidate_idf(rows) -> dict[str, float]:
+    """Compute smoothed inverse document frequency in RAM across candidate rows.
 
-    Candidate 2 (memoria_rag_followups_20260716): each row is scored on the
-    shared-token count between the topic's significant tokens and the row's
-    stored 12-token signature (title fallback when the signature is empty,
-    e.g. an all-stopword legacy backfill). Requires >= _MIN_SHARED_TOKENS
-    shared tokens — one incidental shared word never matches (stricter than
-    the old 1-token/0.25 title threshold, by design: precision over recall,
-    ADR-034). Returns up to *k* rows, best overlap ratio first.
+    df(t) is the count of candidate documents whose filtered signature
+    (title fallback) contains token t. Each document contributes at most 1
+    to df(t). Smooth formula: log((N + 1) / (df + 1)) + 1.0.
+    """
+    n_docs = len(rows)
+    if n_docs == 0:
+        return {}
+    df: dict[str, int] = {}
+    for row in rows:
+        sig = set((row["signature"] or row["title"]).split()) - _SCORING_STOPWORDS
+        for token in sig:
+            df[token] = df.get(token, 0) + 1
+    return {
+        token: math.log((n_docs + 1.0) / (count + 1.0)) + 1.0
+        for token, count in df.items()
+    }
+
+
+def select_top_k(topic_text: str, rows, k: int = 3) -> list:
+    """Lexical top-k of *rows* against *topic_text* by Raw IDF Sum.
+
+    Candidate A (2026-08-21): each row is scored by the sum of inverse document
+    frequency (IDF) weights of the shared significant tokens between topic and
+    the candidate's signature (title fallback). Requires >= _MIN_SHARED_TOKENS
+    shared tokens. Preserves input order on score ties (Timsort stability).
+    Returns up to *k* rows.
     """
     topic = set(_significant_tokens(topic_text)) - _SCORING_STOPWORDS
+    if not topic or not rows:
+        return []
+    idf_map = _compute_candidate_idf(rows)
     scored = []
     for row in rows:
         sig = set((row["signature"] or row["title"]).split()) - _SCORING_STOPWORDS
-        shared = len(topic & sig)
-        if shared >= _MIN_SHARED_TOKENS:
-            scored.append((shared / max(len(sig), 1), row))
+        shared = topic & sig
+        if len(shared) >= _MIN_SHARED_TOKENS:
+            score = sum(idf_map[token] for token in shared)
+            scored.append((score, row))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [row for _, row in scored[:k]]
 

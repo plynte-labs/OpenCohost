@@ -666,3 +666,130 @@ def test_retrieval_fail_open_secret_sentinel_absent_from_logs(monkeypatch, tmp_p
 
     assert block == ""
     assert sentinel not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Raw IDF Lexical Reranking (Candidate A — 2026-08-21)
+# ---------------------------------------------------------------------------
+
+def test_select_top_k_ranks_rare_discriminative_over_generic_collision():
+    """RED 1: A specific memory sharing rare discriminative tokens outranks
+    a generic memory sharing ubiquitous tokens, even when the generic memory
+    has a shorter signature."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    bg_rows = [
+        {"id": f"bg_{i}", "title": f"stream audio proyecto {i}", "signature": f"stream audio proyecto charla obs twitch {i}"}
+        for i in range(50)
+    ]
+    generic_row = {
+        "id": "mem_generic",
+        "title": "proyecto stream audio",
+        "signature": "proyecto stream audio",
+    }
+    specific_row = {
+        "id": "mem_specific",
+        "title": "contrato patrocinio logitech",
+        "signature": "proyecto patrocinador logitech contrato sponsor marca acuerdo plata hardware perifericos",
+    }
+    candidates = [generic_row, specific_row] + bg_rows
+    query = "que paso con el proyecto de audio y el contrato de logitech"
+
+    ranked = select_top_k(query, candidates, k=2)
+    assert len(ranked) >= 2
+    assert ranked[0]["id"] == "mem_specific"
+
+
+def test_select_top_k_enforces_min_shared_tokens_gate():
+    """RED 2: Exactly one shared significant token is rejected (_MIN_SHARED_TOKENS = 2)."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "r1", "title": "pizza noche amigos", "signature": "pizza noche amigos delivery muzzarella"},
+    ]
+    query = "hoy compramos pizza para cenar"
+    assert select_top_k(query, rows) == []
+
+
+def test_select_top_k_preserves_stable_order_on_score_ties():
+    """RED 3: When two rows produce identical IDF sum, their relative order in the input is preserved (Timsort stability)."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "first", "title": "python backend refactor", "signature": "python backend refactor"},
+        {"id": "second", "title": "python backend test", "signature": "python backend test"},
+    ]
+    query = "el backend en python"
+    ranked = select_top_k(query, rows, k=2)
+    assert [r["id"] for r in ranked] == ["first", "second"]
+
+
+def test_select_top_k_single_candidate_no_zero_division():
+    """RED 4: N=1 candidate behaves cleanly without zero division or exception."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "lone_row", "title": "viaje bariloche nieve", "signature": "viaje bariloche nieve invierno montana"},
+    ]
+    query = "el viaje a Bariloche en invierno"
+    ranked = select_top_k(query, rows, k=3)
+    assert len(ranked) == 1
+    assert ranked[0]["id"] == "lone_row"
+
+
+def test_select_top_k_empty_candidate_set_returns_empty():
+    """RED 5: Empty candidate list returns empty list."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    assert select_top_k("consulta de prueba", []) == []
+
+
+def test_select_top_k_empty_query_returns_empty():
+    """RED 6: Empty query or query with no significant tokens returns empty list."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [{"id": "r1", "title": "titulo", "signature": "musica synthwave noche"}]
+    assert select_top_k("", rows) == []
+    assert select_top_k("   ", rows) == []
+    assert select_top_k("que mi este como", rows) == []
+
+
+def test_select_top_k_legacy_empty_signature_falls_back_to_title():
+    """RED 7: Row with empty/None signature falls back to row['title']."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "legacy_row", "title": "viaje bariloche invierno", "signature": ""},
+        {"id": "none_sig_row", "title": "campamento villa angostura", "signature": None},
+    ]
+    ranked = select_top_k("viaje a Bariloche en invierno", rows, k=3)
+    assert len(ranked) == 1
+    assert ranked[0]["id"] == "legacy_row"
+
+
+def test_select_top_k_scoring_stopwords_excluded_from_df_and_score():
+    """RED 8: Scoring stopwords do not increase DF or shared score."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "r1", "title": "proyecto torneo", "signature": "que mi este como para proyecto torneo"},
+    ]
+    assert select_top_k("que mi este torneo", rows) == []
+    ranked = select_top_k("proyecto torneo gamer", rows)
+    assert len(ranked) == 1
+    assert ranked[0]["id"] == "r1"
+
+
+def test_select_top_k_repeated_token_counted_once_per_document():
+    """RED 9: Repeated tokens in signature contribute at most 1 to document frequency and match once."""
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    rows = [
+        {"id": "r1", "title": "logitech", "signature": "logitech logitech logitech contrato contrato"},
+        {"id": "r2", "title": "logitech acuerdo", "signature": "logitech acuerdo marca"},
+    ]
+    query = "el contrato de logitech"
+    ranked = select_top_k(query, rows, k=2)
+    assert len(ranked) == 1
+    assert ranked[0]["id"] == "r1"
+

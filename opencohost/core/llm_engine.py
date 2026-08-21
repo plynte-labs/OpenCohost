@@ -44,7 +44,7 @@ from opencohost.config.settings import (
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
-    PIPER_VOICES, piper_voice_path, load_piper_voice, save_piper_voice,
+    PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
     MEMORIAS_ENABLED, MEMORIAS_DB,
     MEMORIAS_PROFILE_CAP,
@@ -847,7 +847,7 @@ class MotorVocalIA(
             self._edge_tts_offline: bool = False
         # An explicit user pick (persisted piper_voice.json) always wins; only
         # when NO persisted choice exists does the active locale pick the
-        # default (es -> argentina, en -> english).
+        # default (es -> neutral, en -> english).
         self._piper_voice_key: str = load_piper_voice(
             default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
         )
@@ -1460,7 +1460,8 @@ class MotorVocalIA(
             logger.info("Piper speech rate set to length_scale=%.2f", scale)
 
         elif tipo == "set_piper_voice":
-            voice_key = str(payload)
+            raw_key = str(payload)
+            voice_key = raw_key if raw_key in PIPER_VOICES else DEFAULT_PIPER_VOICE
             path = piper_voice_path(voice_key)
             if self._piper.reload(path):
                 save_piper_voice(voice_key)

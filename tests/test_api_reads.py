@@ -443,7 +443,26 @@ def test_tts_config_shape_from_accessors(monkeypatch):
             "speed": 1.25,
             "engine": "pesado",
             "heavy_available": True,
+            "piper_available": False,
+            "edge_tts_offline": False,
         }
+
+
+def test_tts_config_surfaces_piper_and_edge_tts_status():
+    app = _app()
+    with TestClient(app) as client:
+        class _StubPiper:
+            def is_available(self):
+                return True
+
+        app.state.host.motor._piper = _StubPiper()
+        app.state.host.motor._edge_tts_offline = True
+
+        resp = client.get("/api/tts/config")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["piper_available"] is True
+        assert body["edge_tts_offline"] is True
 
 
 def test_tts_config_does_not_touch_command_queue():

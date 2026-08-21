@@ -496,6 +496,8 @@ class TTSConfigResponse(BaseModel):
     speed: float
     engine: str
     heavy_available: bool
+    piper_available: bool = True
+    edge_tts_offline: bool = False
 
 
 class StreamChatLiveResponse(BaseModel):

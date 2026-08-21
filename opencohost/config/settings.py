@@ -1130,7 +1130,7 @@ def load_piper_voice(config_file: Optional[str] = None, default: str = DEFAULT_P
     absent, unreadable, corrupted, or holds an unknown key — i.e. whenever
     there is no valid user-persisted choice. Engine init passes a
     locale-aware `default` (see default_piper_voice_for_locale); every other
-    caller keeps the original Argentina-default behavior unchanged.
+    caller keeps the original default (neutral) behavior unchanged.
     """
     path = config_file if config_file is not None else PIPER_VOICE_FILE
     try:

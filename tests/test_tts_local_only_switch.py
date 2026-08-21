@@ -649,9 +649,36 @@ class TestPiperVoiceCommand:
         from unittest.mock import patch, MagicMock
 
         motor, *_ = _make_motor()
-        motor._piper_voice_key = "argentina"
+        motor._piper_voice_key = "english"
         motor._piper = MagicMock()
         motor._piper.reload.return_value = False
         with patch("opencohost.core.llm_engine.save_piper_voice"):
             motor._dispatch_command("set_piper_voice", "neutral")
-        assert motor._piper_voice_key == "argentina"
+        assert motor._piper_voice_key == "english"
+
+    def test_set_piper_voice_unknown_key_normalizes_to_default(self):
+        from unittest.mock import patch, MagicMock
+
+        motor, *_ = _make_motor()
+        motor._piper_voice_key = "english"
+        motor._piper = MagicMock()
+        motor._piper.reload.return_value = True
+        with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+            motor._dispatch_command("set_piper_voice", "argentina")
+        motor._piper.reload.assert_called_once()
+        assert motor._piper.reload.call_args[0][0].endswith("es_MX-claude-high.onnx")
+        mock_save.assert_called_once_with("neutral")
+        assert motor._piper_voice_key == "neutral"
+
+    def test_load_piper_voice_legacy_key_normalizes_to_default_on_startup(self, tmp_path):
+        from opencohost.config.settings import load_piper_voice, PIPER_VOICES
+
+        legacy_file = tmp_path / "piper_voice.json"
+        legacy_file.write_text('{"piper_voice": "argentina"}', encoding="utf-8")
+
+        # Spanish startup default
+        resolved = load_piper_voice(str(legacy_file), default="neutral")
+        assert resolved == "neutral"
+        assert resolved in PIPER_VOICES
+
+

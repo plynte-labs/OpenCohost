@@ -78,6 +78,9 @@ def set_i18n(body: I18nSetLocaleRequest):
 @router.get("/api/tts/config", response_model=TTSConfigResponse)
 def get_tts_config(request: Request) -> TTSConfigResponse:
     host = request.app.state.host
+    piper = getattr(host.motor, "_piper", None)
+    piper_available = piper.is_available() if piper is not None else False
+    edge_tts_offline = bool(getattr(host.motor, "_edge_tts_offline", False))
     return TTSConfigResponse(
         piper_voice=deps.load_piper_voice(
             default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
@@ -86,4 +89,6 @@ def get_tts_config(request: Request) -> TTSConfigResponse:
         speed=deps.load_tts_speed(),
         engine=host.motor.motor_tts,
         heavy_available=deps.experimental_heavy_tts_enabled(),
+        piper_available=piper_available,
+        edge_tts_offline=edge_tts_offline,
     )
