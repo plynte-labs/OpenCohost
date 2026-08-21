@@ -87,6 +87,18 @@ def build_payload(source_root: Path | str, output_path: Path | str) -> dict:
     return manifest
 
 
+def _read_version(source_root: Path) -> str:
+    init_py = source_root / "opencohost" / "__init__.py"
+    if init_py.is_file():
+        text = init_py.read_text(encoding="utf-8")
+        m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            v = m.group(1)
+            m2 = re.match(r'^(\d+\.\d+\.\d+)a(\d+)$', v)
+            return f"{m2.group(1)}-alpha.{m2.group(2)}" if m2 else v
+    return "0.0.0"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_root", nargs="?", type=Path, default=Path("."))
@@ -98,11 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     output_path = args.output
     if output_path is None:
         if args.output_dir:
-            from opencohost import __version__
-            # Convert PEP 440 to semver if prerelease for file naming
-            import re
-            m = re.match(r'^(\d+\.\d+\.\d+)a(\d+)$', __version__)
-            semver = f"{m.group(1)}-alpha.{m.group(2)}" if m else __version__
+            semver = _read_version(source_root)
             output_path = args.output_dir / f"engine-{semver}.zip"
         else:
             parser.error("Either 'output' positional argument or '--output-dir' must be specified.")

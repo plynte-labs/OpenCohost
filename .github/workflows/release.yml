@@ -71,8 +71,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           mkdir -p build_artifacts/payloads
-          python3 packaging/build_engine_payload.py --output-dir build_artifacts/payloads
           PAYLOAD_FILE="build_artifacts/payloads/engine-${VERSION}.zip"
+          python3 packaging/build_engine_payload.py . "${PAYLOAD_FILE}"
           SHA="$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "${PAYLOAD_FILE}")"
           echo "payload_sha256=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Engine payload SHA256: ${SHA}"
