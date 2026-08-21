@@ -33,13 +33,11 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Sync dependencies (dev + legacy-ui + integrations + youtube-chat)
+      - name: Sync dependencies (dev + legacy-ui + integrations + youtube-chat + local-tts + cloud-tts)
         # FastAPI/uvicorn are core dependencies; legacy-ui provides CTk/input/audio
         # dependencies needed by the full legacy-inclusive test suite.
-        # youtube-chat provides pytchat — chat_source raises from connect() when
-        # pytchat is absent, and its tests exercise that integration with the
-        # package importable. CI installs it to cover the opt-in path; users do not.
-        run: uv sync --locked --extra dev --extra legacy-ui --extra integrations --extra youtube-chat
+        # youtube-chat provides pytchat; local-tts/cloud-tts provide piper-tts/edge-tts.
+        run: uv sync --locked --extra dev --extra legacy-ui --extra integrations --extra youtube-chat --extra local-tts --extra cloud-tts
 
       - name: Tests
         run: uv run pytest tests/ -q
