@@ -28,6 +28,9 @@ def get_app_dir() -> Path:
 
 
 def get_user_data_dir() -> Path:
+    explicit_root = os.environ.get("OPENCOHOST_DATA_ROOT", "").strip()
+    if explicit_root:
+        return Path(os.path.expandvars(os.path.expanduser(explicit_root))).resolve()
     if getattr(sys, "frozen", False):
         if sys.platform == "win32":
             return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "OpenCohost"
@@ -69,6 +72,7 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 @dataclass(frozen=True)
 class StoragePaths:
+    user_data_dir: Path
     cache_root: Path
     temp_root: Path
     hf_home: Path
@@ -127,6 +131,28 @@ def _resolve_path(value: str | None, fallback: Path) -> Path:
 def resolve_storage_paths(config: dict[str, Any] | None = None) -> StoragePaths:
     config = config or load_storage_config()
 
+    explicit_root = os.environ.get("OPENCOHOST_DATA_ROOT", "").strip()
+    if explicit_root:
+        # Installed mode owns all writable OpenCohost paths beneath the
+        # installer-selected root. Ollama is deliberately excluded: its model
+        # directory is external and remains user-owned.
+        data_root = Path(os.path.expandvars(os.path.expanduser(explicit_root))).resolve()
+        cache_root = data_root / "cache"
+        temp_root = data_root / "temp"
+        ollama_models = _resolve_path(
+            os.environ.get("OLLAMA_MODELS") or config.get("ollama_models"),
+            _external_ollama_models(),
+        )
+        return StoragePaths(
+            user_data_dir=data_root,
+            cache_root=cache_root,
+            temp_root=temp_root,
+            hf_home=cache_root,
+            hf_hub_cache=cache_root / "hub",
+            torch_home=cache_root / "torch",
+            ollama_models=ollama_models,
+        )
+
     # Backward-compatible auto defaults:
     # - keep Qwen/HF cache in the existing project-local modelos_f5 directory
     # - keep app temp in project-local temp
@@ -139,6 +165,7 @@ def resolve_storage_paths(config: dict[str, Any] | None = None) -> StoragePaths:
     )
 
     return StoragePaths(
+        user_data_dir=USER_DATA_DIR,
         cache_root=cache_root,
         temp_root=temp_root,
         hf_home=cache_root,
@@ -148,6 +175,13 @@ def resolve_storage_paths(config: dict[str, Any] | None = None) -> StoragePaths:
     )
 
 
+def _external_ollama_models() -> Path:
+    """Return the conventional user-owned Ollama model directory."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Ollama" / "models"
+    return Path.home() / ".ollama" / "models"
+
+
 def ensure_storage_dirs(paths: StoragePaths) -> None:
     for path in (
         paths.cache_root,
@@ -155,12 +189,12 @@ def ensure_storage_dirs(paths: StoragePaths) -> None:
         paths.hf_home,
         paths.hf_hub_cache,
         paths.torch_home,
-        paths.ollama_models,
-        USER_DATA_DIR,
-        USER_DATA_DIR / "config",
-        USER_DATA_DIR / "logs",
-        USER_DATA_DIR / "assets" / "music",
-        USER_DATA_DIR / "assets" / "avatar" / "kira",
+        paths.user_data_dir,
+        paths.user_data_dir / "state",
+        paths.user_data_dir / "config",
+        paths.user_data_dir / "logs",
+        paths.user_data_dir / "assets" / "music",
+        paths.user_data_dir / "assets" / "avatar" / "kira",
     ):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +202,7 @@ def ensure_storage_dirs(paths: StoragePaths) -> None:
 def apply_storage_environment(paths: StoragePaths | None = None) -> StoragePaths:
     paths = paths or resolve_storage_paths()
     ensure_storage_dirs(paths)
+    os.environ["OPENCOHOST_DATA_ROOT"] = str(paths.user_data_dir)
 
     # Force per-process temp/cache locations away from the Windows user temp on C:.
     os.environ["TEMP"] = str(paths.temp_root)

@@ -369,6 +369,7 @@ class TestQwenProcessManager:
                 with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
                     with patch.object(mgr, "_check_health", return_value=True):
                         mock_popen.return_value.poll.return_value = None
+
                         assert mgr.start() is True
 
         flags = mock_popen.call_args.kwargs["creationflags"]

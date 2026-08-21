@@ -498,18 +498,18 @@ class TestServerQwenLocalOnlyGuardStructural:
 # ===========================================================================
 
 class TestPiperVoiceSettings:
-    def test_default_voice_is_argentina(self):
+    def test_default_voice_is_neutral(self):
         from opencohost.config import settings as cfg
 
-        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "argentina"
-        assert cfg.DEFAULT_PIPER_VOICE == "argentina"
+        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "neutral"
+        assert cfg.DEFAULT_PIPER_VOICE == "neutral"
 
-    def test_save_and_reload_neutral(self, tmp_path):
+    def test_save_and_reload_english(self, tmp_path):
         from opencohost.config import settings as cfg
 
         path = str(tmp_path / "piper_voice.json")
-        cfg.save_piper_voice("neutral", config_file=path)
-        assert cfg.load_piper_voice(config_file=path) == "neutral"
+        cfg.save_piper_voice("english", config_file=path)
+        assert cfg.load_piper_voice(config_file=path) == "english"
 
     def test_invalid_saved_key_falls_back_to_default(self, tmp_path):
         from opencohost.config import settings as cfg
@@ -517,22 +517,22 @@ class TestPiperVoiceSettings:
         path = str(tmp_path / "piper_voice.json")
         with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps({"piper_voice": "klingon"}))
-        assert cfg.load_piper_voice(config_file=path) == "argentina"
+        assert cfg.load_piper_voice(config_file=path) == "neutral"
 
     def test_invalid_save_key_is_normalized(self, tmp_path):
         from opencohost.config import settings as cfg
 
         path = str(tmp_path / "piper_voice.json")
         cfg.save_piper_voice("klingon", config_file=path)
-        assert cfg.load_piper_voice(config_file=path) == "argentina"
+        assert cfg.load_piper_voice(config_file=path) == "neutral"
 
     def test_voice_path_resolves_per_key(self):
         from opencohost.config import settings as cfg
 
-        assert cfg.piper_voice_path("argentina").endswith("es_AR-daniela-high.onnx")
         assert cfg.piper_voice_path("neutral").endswith("es_MX-claude-high.onnx")
-        # Unknown key resolves to the default (argentina), never an empty path.
-        assert cfg.piper_voice_path("klingon").endswith("es_AR-daniela-high.onnx")
+        assert cfg.piper_voice_path("english").endswith("en_US-kristin-medium.onnx")
+        # Unknown key resolves to the default (neutral), never an empty path.
+        assert cfg.piper_voice_path("klingon").endswith("es_MX-claude-high.onnx")
 
     def test_voice_path_under_piper_cache_dir(self):
         from opencohost.config import settings as cfg
@@ -550,19 +550,18 @@ class TestPiperVoiceRegistryLang:
         from opencohost.config import settings as cfg
 
         assert cfg.PIPER_VOICES["english"] == {
-            "label": "🇺🇸 English", "file": "en_US-lessac-high.onnx", "lang": "en",
+            "label": "🇺🇸 English", "file": "en_US-kristin-medium.onnx", "lang": "en",
         }
 
     def test_es_voices_tagged_lang_es(self):
         from opencohost.config import settings as cfg
 
-        assert cfg.PIPER_VOICES["argentina"]["lang"] == "es"
         assert cfg.PIPER_VOICES["neutral"]["lang"] == "es"
 
     def test_voice_path_resolves_english(self):
         from opencohost.config import settings as cfg
 
-        assert cfg.piper_voice_path("english").endswith("en_US-lessac-high.onnx")
+        assert cfg.piper_voice_path("english").endswith("en_US-kristin-medium.onnx")
 
 
 class TestDefaultPiperVoiceForLocale:
@@ -590,19 +589,19 @@ class TestLoadPiperVoiceLocaleAwareDefault:
             config_file="/nonexistent/voice.json", default="english"
         ) == "english"
 
-    def test_missing_file_default_param_preserves_argentina(self):
-        # No `default` passed -> unchanged pre-P5 behavior.
+    def test_missing_file_default_param_preserves_default(self):
+        # No `default` passed -> unchanged default behavior.
         from opencohost.config import settings as cfg
 
-        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "argentina"
+        assert cfg.load_piper_voice(config_file="/nonexistent/voice.json") == "neutral"
 
     def test_persisted_choice_wins_over_custom_default(self, tmp_path):
         # An explicit user pick always wins over the locale-aware default.
         from opencohost.config import settings as cfg
 
         path = str(tmp_path / "piper_voice.json")
-        cfg.save_piper_voice("argentina", config_file=path)
-        assert cfg.load_piper_voice(config_file=path, default="english") == "argentina"
+        cfg.save_piper_voice("neutral", config_file=path)
+        assert cfg.load_piper_voice(config_file=path, default="english") == "neutral"
 
     def test_corrupted_key_falls_back_to_custom_default(self, tmp_path):
         from opencohost.config import settings as cfg

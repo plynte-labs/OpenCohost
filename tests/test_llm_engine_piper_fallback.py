@@ -227,7 +227,7 @@ class TestPiperLocaleMismatchNotice:
         motor, _log_q, ui_events = _make_motor()
         motor.tts_local_only = False
         motor._edge_tts_offline = False
-        motor._piper_voice_key = "argentina"  # es voice under en locale -> mismatch
+        motor._piper_voice_key = "neutral"  # es voice under en locale -> mismatch
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
         _drive_hablar(motor, "Hello world", edge_save_side_effect=socket.gaierror("dns"))
@@ -251,12 +251,12 @@ class TestPiperLocaleMismatchNotice:
         assert "piper_voice_locale_mismatch" not in ui_events
 
     def test_fallback_engage_also_logs_a_warning(self):
-        """design S5.1(3): the notice must fire 'in addition to the WARNING
+        """design §5.1(3): the notice must fire 'in addition to the WARNING
         log' — not just the ui_callback event."""
         motor, log_q, _ui_events = _make_motor()
         motor.tts_local_only = False
         motor._edge_tts_offline = False
-        motor._piper_voice_key = "argentina"  # es voice under en locale -> mismatch
+        motor._piper_voice_key = "neutral"  # es voice under en locale -> mismatch
         motor._piper = _make_mock_piper(available=True, synthesize_ok=True)
 
         _drive_hablar(motor, "Hello world", edge_save_side_effect=socket.gaierror("dns"))

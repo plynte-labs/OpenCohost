@@ -1,6 +1,6 @@
 """find_api must survive a cold backend start.
 
-The Tauri shell now spawns ptt_f10_bridge.py alongside uvicorn, and the
+The Tauri shell now spawns the packaged PTT module alongside uvicorn, and the
 backend's lifespan (engine warm-up) can take a long while before /api/health
 answers. A single probe sweep that sys.exit()s on failure kills the bridge
 before the API exists — find_api has to retry until a deadline instead.
@@ -14,10 +14,10 @@ import pytest
 
 @pytest.fixture()
 def bridge(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["ptt_f10_bridge.py"])
+    monkeypatch.setattr(sys, "argv", ["opencohost-ptt"])
     monkeypatch.delenv("OPENCOHOST_API_URL", raising=False)
-    sys.modules.pop("ptt_f10_bridge", None)
-    return importlib.import_module("ptt_f10_bridge")
+    sys.modules.pop("opencohost.api.ptt_f10_bridge", None)
+    return importlib.import_module("opencohost.api.ptt_f10_bridge")
 
 
 class _Resp:

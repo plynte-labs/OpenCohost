@@ -19,24 +19,17 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
-    "customtkinter>=5.2.0",
+    # Tauri/API composition root (opencohost.api.main) and EngineHost runtime.
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
     "ollama>=0.2.1",
+    "pydantic>=2.0.0",
     "requests>=2.31.0",
-    # websocket-client (websocket.*) — kept for backward compat; shipped code uses websockets (async)
-    "websocket-client>=1.8.0",
-    # websockets — async WebSocket client used by opencohost/ui/voice_control.py
-    "websockets>=12.0",
-    # numpy — used by opencohost/ui/app_shell.py and opencohost/ui/voice_control.py for RMS computation
-    "numpy>=1.26.0",
-    "sounddevice>=0.4.6",
-    "soundfile>=0.12.1",
     "pygame>=2.5.2",
     "pyyaml>=6.0.1",
-    "pillow>=10.3.0",
-    "pynput>=1.7.6",
-    "keyboard>=0.13.5",
-    "google-auth>=2.29.0",
-    "google-api-python-client>=2.128.0",
+    "uvicorn>=0.32.0",
+    # websockets — async client used by the headless API PTT session.
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +54,23 @@ integrations = [
     "obsws-python>=1.7.0",
     "nvidia-ml-py>=12.0.0",
 ]
+# legacy-ui: frozen CustomTkinter application and its input/audio adapters.
+# This extra is intentionally separate from the Tauri/API core and is not
+# selected by the Windows v1 engine sync.
+legacy-ui = [
+    "customtkinter>=5.2.0",
+    "google-api-python-client>=2.128.0",
+    "google-auth>=2.29.0",
+    "keyboard>=0.13.5",
+    "numpy>=1.26.0",
+    "pillow>=10.3.0",
+    "pynput>=1.7.6",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    # websocket-client (websocket.*) is used by legacy voice control;
+    # the Tauri PTT path uses websockets (async) from the core set.
+    "websocket-client>=1.8.0",
+]
 # youtube-chat: DELIBERATELY SEPARATE, opt-in only. pytchat reads YouTube's
 # unofficial live-chat endpoint, which YouTube's Terms of Service do not permit.
 # Twitch is the supported platform and requires no extra. Installing this is an
@@ -73,13 +83,9 @@ dev = [
     "detect-secrets==1.5.0",
     "pytest>=8.0",
 ]
-# api: standalone FastAPI process (opencohost/api/) exposing Kira's engine
-# control surface over HTTP for a future web/Tauri frontend. Never imported
-# by the Tk app — see opencohost/api/main.py for the run form and warnings.
-api = [
-    "fastapi>=0.115.0",
-    "uvicorn>=0.32.0",
-]
+[project.scripts]
+opencohost-api = "opencohost.api.cli:main"
+opencohost-ptt = "opencohost.api.ptt_f10_bridge:main"
 
 [project.gui-scripts]
 opencohost = "opencohost.__main__:main"
