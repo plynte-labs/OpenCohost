@@ -384,22 +384,14 @@ TTS_LIGHT_TIMEOUT = 45
 # storage cache root so packaged builds and storage.yaml overrides work.
 # If the file is missing, PiperEngine.load() disables the offline fallback.
 TTS_LOCAL_MODEL_PATH: str = os.path.join(
-    str(STORAGE_PATHS.cache_root), "piper", "es_AR-daniela-high.onnx"
+    str(STORAGE_PATHS.cache_root), "piper", "es_MX-claude-high.onnx"
 )
-# Offline Piper voice registry for the in-app "Voz de Kira" toggle. The two es
-# voices ship as local .onnx files under the piper cache dir, so switching never
-# touches the Edge-TTS cloud — the toggle stays bulletproof for live / offline
-# demos. "english" has NO auto-download (D8): its .onnx must be manually placed
-# in the same piper cache dir until the model-orchestration track lands;
-# piper_voice_path() resolves the path regardless of whether the file exists,
-# app_shell.py's os.path.isfile() guard is what surfaces "not installed" to the
-# operator (see default_piper_voice_for_locale below for the locale-aware pick).
+# Offline Piper voice registry for the in-app "Voz de Kira" toggle.
 PIPER_VOICES: dict[str, dict] = {
-    "argentina": {"label": "🇦🇷 Argentina", "file": "es_AR-daniela-high.onnx", "lang": "es"},
     "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx", "lang": "es"},
-    "english": {"label": "🇺🇸 English", "file": "en_US-lessac-high.onnx", "lang": "en"},
+    "english": {"label": "🇺🇸 English", "file": "en_US-kristin-medium.onnx", "lang": "en"},
 }
-DEFAULT_PIPER_VOICE = "argentina"
+DEFAULT_PIPER_VOICE = "neutral"
 
 
 def default_piper_voice_for_locale(code: str | None) -> str:

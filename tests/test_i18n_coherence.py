@@ -242,11 +242,11 @@ class TestPiperVoiceStartupCoherence:
         from opencohost.config import settings as settings_mod
 
         path = str(tmp_path / "piper_voice.json")
-        settings_mod.save_piper_voice("argentina", config_file=path)
+        settings_mod.save_piper_voice("neutral", config_file=path)
         monkeypatch.setattr(settings_mod, "PIPER_VOICE_FILE", path)
         with caplog.at_level(logging.WARNING, logger="OpenCohost"):
             motor = _make_motor()
-        assert motor._piper_voice_key == "argentina"  # explicit user pick always wins
+        assert motor._piper_voice_key == "neutral"  # explicit user pick always wins
         assert PIPER_VOICE_LOCALE_MISMATCH in caplog.text
 
     def test_init_silent_when_persisted_choice_matches_locale(self, tmp_path, monkeypatch, caplog):
