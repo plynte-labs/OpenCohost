@@ -172,7 +172,7 @@ def test_fast_qwen_native_ctx_is_clamped_to_effective_cap_for_options_and_budget
 
     captured_budget = {}
     from opencohost.core.context import context_budget
-    real_apply = context_budget.apply_char_budget
+    real_apply = context_budget.apply_char_budget_pure
 
     def spy_apply(messages, *, ctx_limit, max_output_tokens, safety_factor):
         captured_budget["ctx_limit"] = ctx_limit
@@ -183,7 +183,7 @@ def test_fast_qwen_native_ctx_is_clamped_to_effective_cap_for_options_and_budget
             safety_factor=safety_factor,
         )
 
-    with patch("opencohost.core.llm_engine.context_budget.apply_char_budget", side_effect=spy_apply):
+    with patch("opencohost.core.llm_engine.context_budget.apply_char_budget_pure", side_effect=spy_apply):
         assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "respuesta rapida"
 
     assert motor._model_ctx_limit["qwen3:1.7b"] == 40960

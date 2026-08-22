@@ -41,6 +41,15 @@ class MemoryDigest:
     def lines(self) -> List[str]:
         return self._lines
 
+    def __len__(self) -> int:
+        return len(self._lines)
+
+    def __bool__(self) -> bool:
+        return bool(self._lines)
+
+    def __iter__(self):
+        return iter(self._lines)
+
     def append(self, line: str) -> None:
         """Add a ledger line, evicting the oldest entries to stay within cap."""
         # Truncate the incoming line itself if it alone exceeds the cap

@@ -92,6 +92,51 @@ def parse_model_ctx(show_response, *, fallback: int) -> int:
     return max(_CTX_FLOOR, fallback)
 
 
+def apply_char_budget_pure(
+    messages: list[dict],
+    *,
+    ctx_limit: int,
+    max_output_tokens: int,
+    safety_factor: float,
+) -> tuple[list[dict], list[tuple[dict, dict]], int]:
+    """Pure, non-mutating context budget partitioning.
+
+    Returns:
+        (retained_messages, evicted_pairs, n_pairs_evicted)
+    where:
+        - retained_messages is a new list of dicts within the budget.
+        - evicted_pairs is a list of (user_msg, assistant_msg) tuples that were
+          evicted, preserved in chronological order.
+        - n_pairs_evicted is the count of evicted pairs.
+    """
+    char_budget = (ctx_limit - max_output_tokens) * safety_factor
+
+    def _total(msgs: list[dict]) -> int:
+        return sum(len(m.get("content", "")) for m in msgs)
+
+    if _total(messages) <= char_budget:
+        return list(messages), [], 0
+
+    retained = list(messages)
+    front = 1 if (retained and isinstance(retained[0], dict) and retained[0].get("role") == "system") else 0
+    evicted_pairs: list[tuple[dict, dict]] = []
+    n_pairs_evicted = 0
+
+    while _total(retained) > char_budget and (len(retained) - front - 1) >= 1:
+        if (len(retained) - front - 1) >= 2:
+            u_msg = retained[front]
+            a_msg = retained[front + 1]
+            evicted_pairs.append((u_msg, a_msg))
+            del retained[front:front + 2]
+        else:
+            u_msg = retained[front]
+            evicted_pairs.append((u_msg, {"role": "assistant", "content": ""}))
+            del retained[front]
+        n_pairs_evicted += 1
+
+    return retained, evicted_pairs, n_pairs_evicted
+
+
 def apply_char_budget(
     messages: list[dict],
     *,
@@ -114,27 +159,15 @@ def apply_char_budget(
 
     ``messages`` is modified IN PLACE. Returns ``(messages, n_pairs_evicted)``.
     """
-    char_budget = (ctx_limit - max_output_tokens) * safety_factor
-
-    def _total() -> int:
-        return sum(len(m.get("content", "")) for m in messages)
-
-    if _total() <= char_budget:
-        return messages, 0
-
-    # Determine the front anchor: protect index 0 only when it is a system message.
-    front = 1 if (messages and isinstance(messages[0], dict) and messages[0].get("role") == "system") else 0
-
-    n_pairs_evicted = 0
-    # Evict from the front of the evictable slice messages[front:-1].
-    # Need at least one evictable message between front and the protected final turn.
-    while _total() > char_budget and (len(messages) - front - 1) >= 1:
-        if (len(messages) - front - 1) >= 2:
-            del messages[front:front + 2]
-        else:
-            del messages[front]
-        n_pairs_evicted += 1
-
+    retained, _, n_pairs_evicted = apply_char_budget_pure(
+        messages,
+        ctx_limit=ctx_limit,
+        max_output_tokens=max_output_tokens,
+        safety_factor=safety_factor,
+    )
+    if n_pairs_evicted > 0:
+        messages.clear()
+        messages.extend(retained)
     return messages, n_pairs_evicted
 
 

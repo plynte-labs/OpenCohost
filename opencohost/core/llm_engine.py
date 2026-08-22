@@ -881,6 +881,9 @@ class MotorVocalIA(
         # Survives model switch / watchdog recovery; dies on set_profile,
         # clear_history, and app restart (RAM-only, never persisted to disk).
         self._memory_digest: MemoryDigest = MemoryDigest()
+        # Sidecar watermark tracking turns already converted to digest lines
+        # to prevent duplicate digest entries when deque rotates later (INV-DEDUP).
+        self._digested_turn_keys: set[str] = set()
         # Dedicated lock for _commit_history (eviction capture + historial appends).
         # A separate lock avoids deadlock risk — self._lock must never be held on
         # any path that calls _commit_history.
@@ -1405,6 +1408,7 @@ class MotorVocalIA(
         elif tipo == "clear_history":
             self.historial.clear()
             self._memory_digest.clear()
+            self._digested_turn_keys.clear()
             self._log("Historial de conversación limpiado.")
 
         elif tipo == "switch_model":
@@ -1503,6 +1507,7 @@ class MotorVocalIA(
                 self._current_profile_id = payload.get("id")
                 self.historial.clear()
                 self._memory_digest.clear()
+                self._digested_turn_keys.clear()
             # RC-2/RC-3: disk upserts dispatched AFTER lock release, on a
             # worker thread — the profile switch must never block on I/O. The
             # departing profile's mechanical session summary rides that same
@@ -2938,7 +2943,7 @@ class MotorVocalIA(
             # replacing the reactive trim.
             _native_ctx = CLOUD_CTX_BUDGET
             _effective_ctx = CLOUD_CTX_BUDGET
-        messages, _ctx_evicted = context_budget.apply_char_budget(
+        messages, evicted_pairs, _ctx_evicted = context_budget.apply_char_budget_pure(
             messages,
             ctx_limit=_effective_ctx,
             max_output_tokens=LLM_MAX_TOKENS,
@@ -2950,6 +2955,17 @@ class MotorVocalIA(
                 f"(model={request_model}, native_ctx={_native_ctx}, effective_ctx={_effective_ctx})",
                 level="warning",
             )
+            with self._history_lock:
+                for u_msg, a_msg in evicted_pairs:
+                    u_content = u_msg.get("content", "") if isinstance(u_msg, dict) else ""
+                    a_content = a_msg.get("content", "") if isinstance(a_msg, dict) else ""
+                    if not u_content or u_content.startswith("[agenda segura"):
+                        continue
+                    turn_key = f"{u_content}::{a_content}"
+                    if turn_key not in self._digested_turn_keys:
+                        ledger_line = self._build_ledger_line(u_content, a_content)
+                        self._memory_digest.append(ledger_line)
+                        self._digested_turn_keys.add(turn_key)
 
         # Cloud item 3 (2026-07-24 incident): the LOCAL 768-token cap
         # (LLM_MAX_TOKENS) was starving cloud/reasoning models. Cloud uses

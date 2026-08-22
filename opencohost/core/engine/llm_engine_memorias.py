@@ -279,11 +279,16 @@ class MemoriaCaptureMixin:
                         evicted_source,
                     )
                 elif not evicted_is_agenda:
-                    ledger_line = self._build_ledger_line(
-                        evicted_user_content,
-                        evicted_asst_content,
-                    )
-                    self._memory_digest.append(ledger_line)
+                    turn_key = f"{evicted_user_content}::{evicted_asst_content}"
+                    digested_keys = getattr(self, "_digested_turn_keys", None)
+                    if digested_keys is None or turn_key not in digested_keys:
+                        ledger_line = self._build_ledger_line(
+                            evicted_user_content,
+                            evicted_asst_content,
+                        )
+                        self._memory_digest.append(ledger_line)
+                        if digested_keys is not None:
+                            digested_keys.add(turn_key)
 
                     # T3 — memorias draft (R1-R4). _build_memoria_draft re-runs
                     # the source+agenda checks internally (redundant here, since
@@ -547,6 +552,8 @@ class MemoriaCaptureMixin:
         format already says who said what.
         """
         user_summary = cls._first_words(_eng.strip_history_wrapper(user_text))
+        if len(user_summary) > 100:
+            user_summary = user_summary[:100]
         kira_summary = cls._first_sentence(asst_text)
         ctx_label = _eng.i18n_active.ledger_context_label()
         kira_label = _eng.i18n_active.ledger_kira_label()
