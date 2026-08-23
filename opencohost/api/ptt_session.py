@@ -121,7 +121,7 @@ class PttSession:
         on_close: Optional[Callable[[Optional[str]], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         grace: float = 5.0,
-        keepalive_timeout: float = 3.0,
+        keepalive_timeout: float = 8.0,
         watchdog_tick: float = 0.5,
         ws_open_timeout: float = 2.0,
         max_chars: int = 2000,
@@ -204,9 +204,18 @@ class PttSession:
 
     def stop(self) -> None:
         """Cut an active listening session: begin the grace period, return
-        immediately. The background WS loop flushes at the deadline. Idempotent
-        — a stop on a connecting/flushing/idle session is a no-op."""
-        self._begin_grace("stopped")
+        immediately. If the session already left _LISTENING (auto_stopped or error),
+        ensure the physical release is still delivered to clear any speech hold."""
+        with self._lock:
+            listening = self._state == _LISTENING
+        if listening:
+            self._begin_grace("stopped")
+        else:
+            if self._on_release is not None:
+                try:
+                    self._on_release()
+                except Exception:
+                    logger.exception("PTT on_release hook failed")
 
     # ------------------------------------------------------------------
     # WS thread
@@ -315,7 +324,17 @@ class PttSession:
             return
         if not isinstance(data, dict):
             return
-        text = (data.get("text") or "").strip()
+        raw_text = data.get("text")
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
+        if not text and "segments" in data and isinstance(data["segments"], list):
+            text = " ".join(
+                s["text"].strip()
+                for s in data["segments"]
+                if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"].strip()
+            ).strip()
+        if not text and "transcript" in data:
+            raw_tr = data.get("transcript")
+            text = raw_tr.strip() if isinstance(raw_tr, str) else ""
         if not text:
             return
         text = _ANTILOOP_RE.sub(r"\1", text).strip()
@@ -374,13 +393,15 @@ class PttSession:
                 self._grace_deadline = time.monotonic() + self._grace
                 if last_error:
                     self._last_error = last_error
+                elif action == "auto_stopped":
+                    self._last_error = "keepalive_starvation"
                 emit = True
         if emit:
             self._emit(action)
-            # Step 3 (design §5.1): PTT_UP, not after grace -- the single
-            # funnel every exit from _LISTENING passes through. Fail-open,
-            # outside `self._lock`, same discipline as `_emit`.
-            if self._on_release is not None:
+            # Physical release contract: only explicit "stopped" (PTT_UP) clears the
+            # speech hold immediately. Transport anomalies ("auto_stopped", "error")
+            # preserve the acoustic hold so Kira does not talk over an open physical press.
+            if action == "stopped" and self._on_release is not None:
                 try:
                     self._on_release()
                 except Exception:
@@ -472,12 +493,16 @@ class PttController:
         # honestly report the last exit reason (e.g. stt_lost). Cleared on the
         # next successful start.
         self._last_error: Optional[str] = None
+        self._last_session_id: Optional[str] = None
         # Closure M6 (2026-08-05): press generation. Bumped under `_lock` at
         # every press that BUILDS a session; each session's close/release
         # callbacks capture their own epoch, so a stale session's LATE close
         # (descheduled across a newer press) can never clear the hold that
         # newer press armed.
         self._press_epoch: int = 0
+        # Exactly-once release tracking: set to active epoch on press, cleared
+        # atomically at the very first release call.
+        self._held_epoch: Optional[int] = None
 
     def _record_event(self, action: str) -> None:
         # PRIVACY: fixed literal action, detail ALWAYS None — the transcript
@@ -485,30 +510,18 @@ class PttController:
         self._event_log.record("ptt", action, None)
 
     def _release_hold(self, epoch: Optional[int] = None) -> None:
-        """Fail-open funnel for every PTT exit path (design §5.1, I6):
-        explicit stop / keepalive starvation / WS drop (via the session's own
-        `on_release`), the two `session.start()` failure paths, and the
-        `_on_session_closed` backstop. Idempotent by construction —
-        `resume_speech_after_ptt` itself is a no-op once already clear.
+        """Exactly-once release funnel for the active hold epoch.
 
-        `epoch` (closure M6): the press generation the caller belongs to. A
-        stale caller — session N's late close arriving after press N+1
-        armed a new hold — is a no-op instead of clearing the live hold.
-        Every production caller passes its epoch (judge closure 2026-08-05:
-        the epoch-less unconditional form's two callers — the 409 path and
-        the raising-factory path — are gone; those presses never arm, so
-        they have nothing to release). None = unknown generation, treated
-        as stale: fail-safe no-op."""
-        if self._on_release is None:
+        Atomically checks epoch == self._held_epoch and sets self._held_epoch = None
+        under lock. Multiple callers (session._on_release, Controller.stop, clean
+        _on_session_closed backstop, or late deadman timer) safely collapse to
+        exactly one execution of the engine release hook."""
+        if self._on_release is None or epoch is None:
             return
         with self._lock:
-            if epoch != self._press_epoch:
+            if epoch != self._held_epoch:
                 return
-            # Fired UNDER the lock: the check must be atomic with the
-            # callback, or the stale caller could pass it and then be
-            # descheduled across a new press — the exact TOCTOU this guard
-            # exists to close. Safe: the motor never calls back into this
-            # controller, so no path re-enters `_lock`.
+            self._held_epoch = None
             self._fire_release()
 
     def _fire_release(self) -> None:
@@ -593,17 +606,16 @@ class PttController:
                 **self._session_kwargs,
             )
             self._session = session
+            self._last_session_id = session.session_id
             self._last_error = None
-        # Step 3 (design §0 row 1, §5.1): the REAL pause — fired only by the
-        # press that WON the slot, after the 409 check, and still BEFORE
-        # session.start() blocks on the STT connect, so Kira is paused before
-        # the microphone opens. Fail-open: a raising/absent callback never
-        # blocks or breaks the press path.
-        if self._on_press_precheck is not None:
-            try:
-                self._on_press_precheck()
-            except Exception:
-                logger.exception("PTT press precheck failed")
+            self._held_epoch = epoch
+            # Step 3: Fire the pause hook INSIDE the lock so no concurrent stop()
+            # can slip in before the hold is applied.
+            if self._on_press_precheck is not None:
+                try:
+                    self._on_press_precheck()
+                except Exception:
+                    logger.exception("PTT press precheck failed")
         try:
             session.start()  # blocks until connect result is known
         except PttUnreachable:
@@ -641,13 +653,33 @@ class PttController:
             "buffered_chars": session.buffered_chars,
         }
 
+    def _arm_deadman(self, epoch: int, timeout: float = 15.0) -> None:
+        """Fail-safe: if a session dropped on transport error or starvation and the
+        operator never sends an explicit stop (client crash/kill), the deadman timer
+        releases the SpeechRouter hold after timeout so Kira is never permanently muted."""
+        def _deadman_fire():
+            self._release_hold(epoch)
+        t = threading.Timer(timeout, _deadman_fire)
+        t.daemon = True
+        t.start()
+
     def stop(self, session_id: Optional[str] = None) -> dict:
+        session = None
+        epoch_to_release = None
         with self._lock:
-            session = self._session
-            if session is None or (session_id is not None and session_id != session.session_id):
-                return {"state": _IDLE}
-        session.stop()  # idempotent, returns immediately; watcher flushes
-        return {"state": _FLUSHING}
+            if self._session is not None:
+                if session_id is None or session_id == self._session.session_id:
+                    session = self._session
+                    epoch_to_release = self._press_epoch
+            else:
+                # If session already idled/closed, release if session_id matches the last session (or was omitted)
+                if session_id is None or session_id == self._last_session_id:
+                    epoch_to_release = self._press_epoch
+        if session is not None:
+            session.stop()  # idempotent, returns immediately; watcher flushes
+        if epoch_to_release is not None:
+            self._release_hold(epoch_to_release)
+        return {"state": _FLUSHING if session is not None else _IDLE}
 
     def state(self) -> dict:
         # stt_ws_url: the LiveAudio viewer WS address (a URL, never text) —
@@ -701,14 +733,15 @@ class PttController:
         with self._lock:
             self._session = None
             self._last_error = last_error
-        # Step 3 (design §5.1, I6): idempotent backstop -- covers a
-        # `_ws_main` crash that never reached `_begin_grace` (still calls
-        # `_notify_close` -> here). `_release_hold` is itself a no-op when
-        # `_on_release` is unset; `resume_speech_after_ptt` is a no-op once
-        # already clear, so a double-clear (session's own on_release having
-        # already fired) is harmless. `epoch` (closure M6): a STALE session's
-        # late close must not clear a newer press's live hold.
-        self._release_hold(epoch)
+        # Physical hold fail-safe:
+        # If clean close (last_error is None), release immediately as backstop.
+        # If abnormal close on transport drop/starvation (last_error is not None),
+        # do NOT release hold immediately; arm the deadman fail-safe timer instead.
+        if epoch is not None:
+            if last_error is None:
+                self._release_hold(epoch)
+            else:
+                self._arm_deadman(epoch, timeout=15.0)
         # Recovery hook: EVERY PTT session close (stopped, auto_stopped, or
         # error all route through PttSession._notify_close -> here) flags the
         # shared pygame mixer suspect, regardless of last_error -- WASAPI
