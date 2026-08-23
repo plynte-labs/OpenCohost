@@ -613,17 +613,8 @@ Aplicar patrones de agrupamiento y throttling en el pipeline de la UI:
 
 ---
 
-## ADR-048: Contrato de Retención Física de PTT, Tolerancia a Fallos de Transporte y Liberación Exactly-Once
+## ADR-048: PTT Physical Hold Contract, Transport Fault Tolerance, and Exactly-Once Release
 
-**Fecha:** 2026-08-22  
-**Estado:** Aceptada / Implementada  
-**Documento completo:** [`docs/adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md`](./adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md)
+**Status:** Accepted / Implemented
 
-### Contexto
-Caídas transitorias de WebSocket o retardos de red provocaban que el watchdog de keepalive auto-detuviera la sesión STT y liberara el SpeechRouter, reactivando la voz de Kira encima de un turno del streamer con micrófono abierto.
-
-### Decisión
-1. **Desacoplamiento total:** La sesión de transporte no comanda la retención acústica. `auto_stopped` y `error` mantienen el silencio. Únicamente la acción explícita `stopped` (PTT_UP) libera el audio de inmediato.
-2. **Exactly-Once Release:** Introducción de `_held_epoch` para que múltiples emisores (`session.stop`, `controller.stop`, backstop y deadman) colapsen a una única llamada de reanudación.
-3. **Deadman Fail-Safe (15s):** En caso de crash completo del cliente, el temporizador deadman libera el SpeechRouter evitando que Kira quede muteada indefinidamente.
-4. **Bridge Resiliente:** Timeout HTTP acotado a 1.5s (<< 8.0s del servidor) y reintento continuo de `stop()` cada 30ms hasta confirmar la entrega.
+For full details, see: [`docs/adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md`](./adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md)
