@@ -50,6 +50,10 @@ build/
 # _release_meta.py is generated at release-build time (see packaging/build_release_meta.py)
 packaging/_release_meta.py
 packaging/vendor/
+packaging/standalone_python/
+packaging/uv_bin/
+packaging/*.zip
+OpenCohost Shell Prototype/
 *.egg
 *.whl
 

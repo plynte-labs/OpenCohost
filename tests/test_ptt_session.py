@@ -656,7 +656,10 @@ def test_explicit_stop_clears_the_hold(monkeypatch):
     router.stop(timeout=5.0)
 
 
-def test_keepalive_starvation_clears_the_hold(monkeypatch):
+def test_keepalive_starvation_preserves_hold_until_explicit_stop(monkeypatch):
+    """Physical hold contract: keepalive starvation (auto_stopped) must NOT release
+    the speech hold prematurely while the operator is still holding the physical key.
+    Only explicit stop() (or deadman timeout) releases the hold."""
     motor = _armed_motor()
     motor.pause_speech_for_ptt()
     router = motor._speech_router
@@ -669,12 +672,19 @@ def test_keepalive_starvation_clears_the_hold(monkeypatch):
     # Deliberately NO keepalive -> the watchdog auto-stops.
     _wait_state(session, "idle")
 
-    assert router._ptt_held is False
+    # Invariant: SpeechRouter MUST remain held! Kira does not talk over the open mic.
+    assert router._ptt_held is True
     assert "auto_stopped" in rec.events
+
+    # Explicit physical stop arrives -> clears the hold cleanly
+    session.stop()
+    assert router._ptt_held is False
     router.stop(timeout=5.0)
 
 
-def test_ws_drop_clears_the_hold(monkeypatch):
+def test_ws_drop_preserves_hold_until_explicit_stop(monkeypatch):
+    """Physical hold contract: mid-session STT WebSocket drop must NOT release
+    the speech hold into an open mic. Only explicit stop() releases."""
     motor = _armed_motor()
     motor.pause_speech_for_ptt()
     router = motor._speech_router
@@ -687,8 +697,13 @@ def test_ws_drop_clears_the_hold(monkeypatch):
     ws.closed = True  # WhisperLive vanishes mid-listening -> stt_lost
     _wait_state(session, "idle")
 
-    assert router._ptt_held is False
+    # Invariant: SpeechRouter MUST remain held!
+    assert router._ptt_held is True
     assert session.last_error == "stt_lost"
+
+    # Explicit physical stop arrives -> clears the hold
+    session.stop()
+    assert router._ptt_held is False
     router.stop(timeout=5.0)
 
 
@@ -786,9 +801,7 @@ def _slot_controller(motor):
 
 
 def test_on_session_closed_backstop_clears_the_hold_after_a_ws_crash():
-    """Closure (vacuous-test finding, 2026-08-05): the old version drove a
-    NORMAL stop first, so the hold was already clear and a DELETED backstop
-    stayed green. The backstop's real job: a `_ws_main` crash never reaches
+    """Closure: the backstop's real job: a `_ws_main` crash never reaches
     `_begin_grace` (no on_release), only `_notify_close` -> the controller —
     the hold MUST clear there or `_pick()` returns None forever (permanent
     silence with no error)."""
@@ -804,6 +817,138 @@ def test_on_session_closed_backstop_clears_the_hold_after_a_ws_crash():
         assert router._ptt_held is False, "the backstop never cleared the hold"
     finally:
         motor._speech_router.stop(timeout=5.0)
+
+
+def test_deadman_timer_eventually_releases_hold_on_client_abandonment(monkeypatch):
+    """Fail-safe: if the client process crashes/abandons without ever calling stop(),
+    PttController's deadman timer frees the SpeechRouter hold after timeout so Kira is not muted forever."""
+    motor = _armed_motor()
+    router = motor._speech_router
+
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+        grace=0.05, keepalive_timeout=0.1, watchdog_tick=0.02,
+    )
+    controller.start()
+    router = motor._speech_router
+    assert router._ptt_held is True
+
+    # Arm a fast deadman timer
+    controller._arm_deadman(controller._press_epoch, timeout=0.1)
+
+    end = time.time() + 2.0
+    while time.time() < end and router._ptt_held:
+        time.sleep(0.02)
+    assert router._ptt_held is False
+    router.stop(timeout=5.0)
+
+
+def test_controller_keepalive_starvation_preserves_hold_until_explicit_stop(monkeypatch):
+    """End-to-end controller physical hold contract: when a session dies from
+    keepalive starvation, PttController must NOT immediately clear the hold.
+    The SpeechRouter remains held until the operator's explicit stop() arrives."""
+    motor = _armed_motor()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+        grace=0.05, keepalive_timeout=0.1, watchdog_tick=0.02,
+    )
+    session_id = controller.start()
+    router = motor._speech_router
+    assert router._ptt_held is True
+
+    # Wait for keepalive starvation to auto-stop and close the session
+    end = time.time() + 2.0
+    while time.time() < end and controller._session is not None:
+        time.sleep(0.02)
+    assert controller._session is None
+
+    # Invariant: Hold MUST still be active via deadman fail-safe!
+    assert router._ptt_held is True
+
+    # Explicit physical stop arrives -> clears the hold immediately
+    controller.stop(session_id)
+    assert router._ptt_held is False
+    router.stop(timeout=5.0)
+
+
+def test_controller_stale_session_stop_cannot_clear_newer_session_hold(monkeypatch):
+    """Epoch safety: a late stop() for session 1 must NEVER clear the live hold of session 2."""
+    motor = _armed_motor()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        on_press_precheck=motor.pause_speech_for_ptt,
+        on_release=motor.resume_speech_after_ptt,
+        grace=0.05, keepalive_timeout=0.1, watchdog_tick=0.02,
+    )
+    s1_id = controller.start()
+    router = motor._speech_router
+    assert router._ptt_held is True
+
+    # s1 times out
+    end = time.time() + 2.0
+    while time.time() < end and controller._session is not None:
+        time.sleep(0.02)
+
+    # s2 starts
+    s2_id = controller.start()
+    assert router._ptt_held is True
+
+    # Stale stop for s1 arrives -> MUST NOT clear s2's hold!
+    controller.stop(s1_id)
+    assert router._ptt_held is True
+
+    # Legitimate stop for s2 arrives -> clears the hold
+    controller.stop(s2_id)
+    assert router._ptt_held is False
+    router.stop(timeout=5.0)
+
+
+def test_controller_release_hold_is_strictly_exactly_once(monkeypatch):
+    """Exactly-once release contract: multiple calls to _release_hold (from session,
+    controller stop, session close backstop, and late deadman timer) must trigger
+    on_release exactly once per press epoch."""
+    release_calls = []
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    controller = PttController(
+        "ws://test/whisperlive",
+        MagicMock(),
+        MagicMock(),
+        on_press_precheck=lambda: None,
+        on_release=lambda: release_calls.append(1),
+        grace=0.05, keepalive_timeout=0.1, watchdog_tick=0.02,
+    )
+    session_id = controller.start()
+    epoch = controller._press_epoch
+    assert controller._held_epoch == epoch
+    assert len(release_calls) == 0
+
+    # Explicit stop
+    controller.stop(session_id)
+    assert len(release_calls) == 1
+    assert controller._held_epoch is None
+
+    # Redundant release attempts for the same epoch (stop, close backstop, deadman)
+    controller._release_hold(epoch)
+    controller._release_hold(epoch)
+    controller._on_session_closed(None, epoch)
+    assert len(release_calls) == 1
 
 
 def test_a_grace_window_double_tap_releases_its_own_hold():
@@ -958,3 +1103,40 @@ def test_accidental_press_below_min_words_resumes_the_job_exactly_once(monkeypat
         r = getattr(m, "_speech_router", None)
         if r is not None:
             r.stop(timeout=5.0)
+
+
+def test_ingest_handles_segments_array_and_transcript_key(monkeypatch):
+    """Verify _ingest supports standard WhisperLive segment arrays and transcript field."""
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec)
+    session.start()
+
+    # Ingest JSON with "segments" array
+    ws.inbox.append(json.dumps({"segments": [{"text": "hola"}, {"text": "amigos"}]}))
+    end = time.time() + 3.0
+    while time.time() < end and session.buffered_chars == 0:
+        time.sleep(0.01)
+    assert session.buffered_chars > 0
+
+    # Ingest JSON with "transcript" key
+    ws.inbox.append(json.dumps({"transcript": "como estan"}))
+    end = time.time() + 3.0
+    while time.time() < end and "como estan" not in session._buffer:
+        time.sleep(0.01)
+    assert "como estan" in session._buffer
+
+    session.stop()
+    _wait_state(session, "idle")
+    assert len(rec.flushes) == 1
+    assert "hola amigos como estan" in rec.flushes[0]
+
+
+def test_default_keepalive_timeout_is_at_least_8s():
+    """Verify default keepalive_timeout provides at least 8 seconds of margin against network jitter."""
+    rec = _Recorder()
+    session = PttSession("ws://dummy", rec.on_flush, rec.on_event)
+    assert session._keepalive_timeout >= 8.0
+
+

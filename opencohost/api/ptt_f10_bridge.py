@@ -31,10 +31,12 @@ def _post(base, path, body):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read() or b"{}")
+    except Exception as exc:
+        return 500, {"error": str(exc)}
 
 
 FIND_API_DEADLINE_S = 300.0
@@ -88,14 +90,16 @@ def main():
                         time.sleep(POLL_S)
             elif held and session_id and now - last_keepalive >= KEEPALIVE_S:
                 status, _ = _post(base, "/api/ptt/keepalive", {"session_id": session_id})
-                last_keepalive = now
+                last_keepalive = time.monotonic()
                 if status == 409:
-                    print("server cut the session — released")
-                    session_id = None
+                    print("server cut the session — waiting for key release")
             elif not held and session_id:
-                _post(base, "/api/ptt/stop", {"session_id": session_id})
-                session_id = None
-                print("sent to Kira")
+                status, _ = _post(base, "/api/ptt/stop", {"session_id": session_id})
+                if status in (200, 409):
+                    session_id = None
+                    print("sent to Kira")
+                else:
+                    print(f"stop retry pending (status {status})...")
             time.sleep(POLL_S)
     except KeyboardInterrupt:
         if session_id:
