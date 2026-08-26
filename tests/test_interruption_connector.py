@@ -894,6 +894,24 @@ def test_main_wires_the_press_hook_to_the_real_pause():
     )
 
 
+def test_pause_speech_for_ptt_on_fresh_motor_without_promotion_state():
+    """Verify pause_speech_for_ptt and resume_speech_after_ptt complete cleanly
+    when called on a fresh MotorVocalIA instance where memory promotion attributes
+    have not yet been initialized."""
+    motor = _bare_motor()
+    motor._speech_interrupt_enabled = True
+    motor._speech_router_enabled = True
+
+    # Calling pause_speech_for_ptt must not raise AttributeError even if
+    # _promotion_state is not set on motor.
+    motor.pause_speech_for_ptt()
+    assert motor._promotion_ptt_held is True
+    assert motor._speech_router is not None
+
+    motor.resume_speech_after_ptt()
+    assert motor._promotion_ptt_held is False
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AC5.6 (step 4 batch 2) — the upgrade yields to a widened-pop foreground turn
 # ══════════════════════════════════════════════════════════════════════════

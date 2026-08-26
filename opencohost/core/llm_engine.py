@@ -25,6 +25,7 @@ except ImportError:
     winsound = None  # non-Windows: the PTT cue is a silent no-op
 from collections import deque, Counter
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable, Optional
 
 from opencohost.config.settings import (
@@ -46,7 +47,7 @@ from opencohost.config.settings import (
     load_tts_speed, save_tts_speed,
     PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
-    MEMORIAS_ENABLED, MEMORIAS_DB,
+    MEMORIAS_ENABLED, MEMORIAS_DB, MEMORY_PROMOTION_DIAGNOSTICS,
     MEMORIAS_PROFILE_CAP,
     MEMORIAS_SUMMARY_MIN_TITLES,
     PERSONALIZATION_ENABLED,
@@ -237,9 +238,13 @@ _GUARDRAIL_RETRY_NUDGE = (
 # is the missing step: ONE LLM call per launch judges the oldest unjudged
 # drafts, rewrites the survivors so they stand alone, and promotes them.
 
-_PROMOTION_DRAFT_BATCH = 40          # ~12,000 chars — the volume owner decision 1 approved
-_PROMOTION_NUM_PREDICT = 1200        # omitted entirely on reasoning models (D2)
+from opencohost.core.memory.promotion_backoff_store import PromotionBackoffStore
+
+_PROMOTION_DRAFT_BATCH = 8
+_PROMOTION_DRAFT_CHARS = 5000
+_PROMOTION_NUM_PREDICT = 512
 _PROMOTION_TEXT_MAX_CHARS = 220
+_PROMOTION_RESIDENCY_TIMEOUT_SECONDS = 2.0
 
 # Adaptive judge budget (owner decision 5). A fixed 30s/90s would be a per-model
 # assumption in disguise, contradicting the model-agnostic decision. Derived
@@ -312,68 +317,111 @@ If unsure whether to keep an item, use keep:false."""
 _PROMOTION_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
+@dataclass(frozen=True)
+class PromotionParseDiagnostics:
+    decisions: list[tuple[int, str | None, bool, str]]
+    top_level_valid: bool
+    unresolved: dict[int, str]
+
+
+_PromotionParseDiagnostics = PromotionParseDiagnostics
+
+
+class _PromotionState(Enum):
+    NOT_ELIGIBLE = "not_eligible"
+    WAITING_IDLE = "waiting_idle"
+    RUNNING = "running"
+
+
 def _parse_promotion_decisions(text, batch_len: int) -> list[tuple[int, str | None, bool, str]]:
     """Parse the judge's reply into applied decisions. PURE — no I/O, no engine.
 
     Returns ``(index, text_or_None, uncertain, reason)`` per usable entry:
     a keep is ``(i, sentence, uncertain, "")``; a reject is ``(i, None, False,
     reason)``. NEVER raises: every unusable shape (empty, prose, a truncated
-    reasoning-model reply, a fence full of apologies) collapses to ``[]``, which
-    is what makes the sweep's fail-silent contract real — nothing applied means
-    nothing marked judged, so the next launch retries.
-
-    A ``keep`` whose text is missing, blank or over the char cap is demoted to a
-    reject with reason ``not_self_contained`` rather than treated as an error: a
-    judge that cannot produce a standalone sentence has answered criterion 2 in
-    the negative.
+    reasoning-model reply, a fence full of apologies) collapses to ``[]``.
     """
     if not text or not isinstance(text, str):
         return []
     stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
     try:
-        payload = json.loads(stripped)
+        raw_dict = json.loads(stripped)
     except Exception:
         return []
-    if not isinstance(payload, dict):
+    if not isinstance(raw_dict, dict):
         return []
-    entries = payload.get("decisions")
-    if not isinstance(entries, list):
+    try:
+        from opencohost.core.memory.models import MemoryJudgeResult, ValidationError
+        parsed = MemoryJudgeResult.model_validate_json(stripped)
+    except Exception:
         return []
+
+    raw_entries = raw_dict.get("decisions")
+    raw_counts: dict[int, int] = {}
+    if isinstance(raw_entries, list):
+        for entry in raw_entries:
+            if isinstance(entry, dict):
+                idx = entry.get("i")
+                if isinstance(idx, int) and not isinstance(idx, bool):
+                    raw_counts[idx] = raw_counts.get(idx, 0) + 1
 
     results: list[tuple[int, str | None, bool, str]] = []
     seen: set[int] = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        index = entry.get("i")
-        # bool is an int subclass — True would otherwise pass as index 1.
-        if not isinstance(index, int) or isinstance(index, bool):
-            continue
-        if not 1 <= index <= batch_len or index in seen:
-            continue
-        keep = entry.get("keep")
-        if not isinstance(keep, bool):
+    for decision in parsed.decisions:
+        index = decision.i
+        if not 1 <= index <= batch_len or raw_counts.get(index, 0) > 1 or index in seen:
             continue
         seen.add(index)
-        if not keep:
-            reason = entry.get("reason")
-            # isinstance FIRST: a list/dict `reason` is unhashable, and a bare
-            # `in frozenset(...)` would raise TypeError straight through the
-            # "NEVER raises" contract into the sweep's outer catch-all —
-            # discarding every OTHER valid decision in the same batch.
-            results.append((
-                index, None, False,
-                reason if isinstance(reason, str) and reason in _PROMOTION_JUDGE_REASONS
-                else "unspecified",
-            ))
-            continue
-        judged = entry.get("text")
-        judged = " ".join(judged.split()) if isinstance(judged, str) else ""
-        if not judged or len(judged) > _PROMOTION_TEXT_MAX_CHARS:
-            results.append((index, None, False, "not_self_contained"))
-            continue
-        results.append((index, judged, entry.get("uncertain") is True, ""))
+        if decision.keep:
+            results.append((index, decision.text or "", bool(decision.uncertain), ""))
+        else:
+            results.append((index, None, False, decision.reason or "unspecified"))
     return results
+
+
+def _parse_promotion_diagnostics(text, batch_len: int) -> PromotionParseDiagnostics:
+    """Parse the judge's reply into applied decisions and per-draft diagnostics."""
+    if not text or not isinstance(text, str):
+        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
+    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
+    if not isinstance(payload, dict) or set(payload.keys()) != {"decisions"}:
+        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
+    entries = payload.get("decisions")
+    if not isinstance(entries, list):
+        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
+
+    decisions = _parse_promotion_decisions(text, batch_len)
+    decision_indices = {d[0] for d in decisions}
+
+    raw_counts: dict[int, int] = {}
+    present_indices: set[int] = set()
+    for entry in entries:
+        if isinstance(entry, dict):
+            idx = entry.get("i")
+            if isinstance(idx, int) and not isinstance(idx, bool):
+                raw_counts[idx] = raw_counts.get(idx, 0) + 1
+                present_indices.add(idx)
+
+    unresolved: dict[int, str] = {}
+    for i in range(1, batch_len + 1):
+        if i in decision_indices:
+            continue
+        if raw_counts.get(i, 0) > 1:
+            unresolved[i] = "duplicate_index"
+        elif i in present_indices:
+            unresolved[i] = "invalid_decision"
+        else:
+            unresolved[i] = "missing_decision"
+
+    return PromotionParseDiagnostics(
+        decisions=decisions,
+        top_level_valid=True,
+        unresolved=unresolved,
+    )
 
 
 def _is_connection_error(exc: BaseException) -> bool:
@@ -815,15 +863,14 @@ class MotorVocalIA(
         # memory_promotion_20260725: same shape as the scout client, but built
         # per sweep with the adaptive judge budget (_judge_timeout_seconds).
         self._ollama_judge_client = None
-        # One-shot latch for the STARTUP promotion sweep (owner decision 7): the
-        # first time run()'s idle branch is reached the process is guaranteed
-        # idle and the stream has not begun. NOT a recurring tick — the
-        # unvalidated "30 consecutive idle seconds" threshold is deliberately
-        # absent, not deferred.
+        self._promotion_state: _PromotionState = _PromotionState.NOT_ELIGIBLE
+        self._promotion_idle_since: Optional[float] = None
+        self._promotion_ptt_held: bool = False
         self._promotion_swept: bool = False
         # Last gate name reported by _promotion_gate, so a permanently inert
         # sweep logs once per CHANGED state instead of once per idle tick.
         self._promotion_last_gate: str = ""
+        self._promotion_backoff_store = None
         self._scout_last_input_hash: Optional[str] = None
         self._last_llm_failure: Optional[dict] = None
         self._last_known_good_model: Optional[str] = _startup_model
@@ -1415,12 +1462,16 @@ class MotorVocalIA(
             new_model = payload
             if self._is_model_switch_noop(new_model):
                 return
-            self._desired_model = new_model
+
+            if not self.is_ready and self._is_local:
+                self._reconcile_local_readiness()
 
             if not self.is_ready:
                 self._log(f"Switch a {new_model} rechazado: Ollama no esta listo.", level="warning")
                 self.ui_callback("model_switch_failed")
                 return
+
+            self._desired_model = new_model
 
             if self._processing or self._speech_active:
                 if self._pending_model_switch == new_model:

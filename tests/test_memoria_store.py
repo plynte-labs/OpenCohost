@@ -95,7 +95,7 @@ def _seed_row(
 # Schema (2.1)
 # ---------------------------------------------------------------------------
 
-def test_memorias_db_created_at_user_data_dir_with_user_version_3(tmp_path) -> None:
+def test_memorias_db_uses_user_data_dir_and_schema_v4(tmp_path) -> None:
     from opencohost.config.settings import MEMORIAS_DB
     from opencohost.config.storage import USER_DATA_DIR
 
@@ -108,7 +108,7 @@ def test_memorias_db_created_at_user_data_dir_with_user_version_3(tmp_path) -> N
     MemoriaStore(db_path)
     assert db_path.exists()
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert cols == {
         "id", "profile_id", "stable_key", "revision", "title", "content",
@@ -181,7 +181,7 @@ def test_legacy_v1_db_migrates_signature_column_and_backfills(tmp_path) -> None:
 
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
         assert "signature" in cols
         row = conn.execute("SELECT * FROM memorias WHERE id = 'mem_legacy_1'").fetchone()
@@ -208,7 +208,7 @@ def test_migration_is_idempotent_on_second_construction(tmp_path) -> None:
     MemoriaStore(db_path)  # must not raise (no duplicate-column error)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     assert sig == "marker-must-survive"  # backfill did not rerun
 
@@ -234,7 +234,7 @@ def test_interrupted_migration_column_present_version_stale_self_heals(tmp_path)
     MemoriaStore(db_path)  # must NOT raise duplicate-column
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     expected = build_signature("musica synthwave calma contexto: streamer prefiere musica synthwave calma nocturna")
     assert sig == expected  # backfill still ran on the resumed migration
@@ -266,7 +266,7 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         done = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_done'").fetchone()[0]
         pending = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_pending'").fetchone()[0]
     assert done == "already-backfilled-marker"  # resume never rewrites filled rows
@@ -275,13 +275,13 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     )
 
 
-def test_fresh_db_lands_directly_at_user_version_3_with_signature_column(tmp_path) -> None:
+def test_fresh_db_has_v4_signature_column(tmp_path) -> None:
     db_path = tmp_path / "fresh" / "memorias.db"
 
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert "signature" in cols  # no user ever sees a version-1 schema
 
@@ -1544,21 +1544,21 @@ def _row(db_path, row_id):
         return conn.execute("SELECT * FROM memorias WHERE id = ?", (row_id,)).fetchone()
 
 
-def test_fresh_db_reports_user_version_3_with_judged_at_column(tmp_path) -> None:
+def test_fresh_db_has_v4_judged_at_column(tmp_path) -> None:
     db_path = tmp_path / "memorias.db"
     MemoriaStore(db_path)
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert "judged_at" in cols
 
 
-def test_v3_migration_is_idempotent_across_two_constructions(tmp_path) -> None:
+def test_v4_migration_is_idempotent_across_two_constructions(tmp_path) -> None:
     db_path = tmp_path / "memorias.db"
     MemoriaStore(db_path)
     MemoriaStore(db_path)  # must not raise
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v3_migration_tolerates_preadded_column_after_interrupted_run(tmp_path) -> None:
@@ -1569,20 +1569,12 @@ def test_v3_migration_tolerates_preadded_column_after_interrupted_run(tmp_path) 
         conn.execute("PRAGMA user_version = 2")
     MemoriaStore(db_path)  # column already present, version behind -> must not raise
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v2_db_with_rows_migrates_with_every_row_unjudged(tmp_path) -> None:
     db_path = tmp_path / "memorias.db"
-    MemoriaStore(db_path)
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("ALTER TABLE memorias DROP COLUMN judged_at")
-        conn.execute("PRAGMA user_version = 2")
-        conn.execute(
-            "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
-            "status, pinned, private, inactive, created_at, updated_at, signature) "
-            "VALUES ('legacy', 'p', 'p|k', 1, 't', 'c', 'draft', 0, 0, 0, 'x', 'x', 's')"
-        )
+    _create_versioned_memorias_db(db_path, 2)
     MemoriaStore(db_path)
     assert _row(db_path, "legacy")["judged_at"] == ""
 
@@ -1831,10 +1823,12 @@ def test_update_row_can_leave_updated_at_untouched(tmp_path) -> None:
     assert row["updated_at"] == before["updated_at"]
 
 
-def test_mark_judged_revision_guard_skips_rows_that_moved_and_returns_the_count(tmp_path) -> None:
+def test_mark_judged_revision_guard_skips_moved_rows(
+    tmp_path,
+) -> None:
     """The REJECT path's optimistic-concurrency token. A draft refreshed with
     better content mid-sweep must not be hidden on the strength of a judgment
-    of text it no longer holds; it stays unjudged and is re-judged next launch."""
+    of text it no longer holds; a later eligible sweep re-judges it."""
     db_path = tmp_path / "memorias.db"
     _seed_judged_row(db_path, "p", "still", stable_key="p|still")
     _seed_judged_row(db_path, "p", "moved", stable_key="p|moved")
@@ -1945,3 +1939,552 @@ def test_operator_unhiding_a_row_keeps_the_judge_stamp(tmp_path) -> None:
 
     assert _row(db_path, "d1")["judged_at"] == "2026-01-02T00:00:00+00:00"
     assert store.list_unjudged_drafts("p", limit=10) == []
+
+
+# ---------------------------------------------------------------------------
+# Schema v4: sparse promotion-attempt metadata and draft lifecycle
+# ---------------------------------------------------------------------------
+
+def _create_versioned_memorias_db(db_path, version: int) -> None:
+    """Create one populated, authentic pre-v4 schema at version 0..3."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(_V1_DDL)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memorias_profile_id "
+            "ON memorias(profile_id)"
+        )
+        if version >= 2:
+            conn.execute(
+                "ALTER TABLE memorias ADD COLUMN "
+                "signature TEXT NOT NULL DEFAULT ''"
+            )
+        if version >= 3:
+            conn.execute(
+                "ALTER TABLE memorias ADD COLUMN "
+                "judged_at TEXT NOT NULL DEFAULT ''"
+            )
+        columns = (
+            "id, profile_id, stable_key, revision, title, content, status, "
+            "pinned, private, inactive, created_at, updated_at"
+        )
+        values = [
+            "legacy", "p", "p|legacy", 1, "legacy title",
+            "legacy content", "draft", 0, 0, 0, "x", "x",
+        ]
+        if version >= 2:
+            columns += ", signature"
+            values.append("legacy signature")
+        if version >= 3:
+            columns += ", judged_at"
+            values.append("")
+        placeholders = ", ".join("?" for _ in values)
+        conn.execute(
+            f"INSERT INTO memorias ({columns}) VALUES ({placeholders})",
+            values,
+        )
+        conn.execute(f"PRAGMA user_version = {version}")
+
+
+def _insert_promotion_attempt(
+    db_path,
+    memoria_id: str,
+    *,
+    revision: int = 1,
+    attempt_count: int,
+    last_attempt_at_s: int,
+    next_attempt_at_s: int | None,
+    state: str,
+    failure_code: str = "missing_decision",
+) -> None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            """
+            INSERT INTO memoria_promotion_attempts (
+                memoria_id, draft_revision, attempt_count,
+                last_attempt_at_s, next_attempt_at_s,
+                last_failure_code, promotion_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                memoria_id,
+                revision,
+                attempt_count,
+                last_attempt_at_s,
+                next_attempt_at_s,
+                failure_code,
+                state,
+            ),
+        )
+
+
+@pytest.mark.parametrize("source_version", [0, 1, 2, 3])
+def test_v0_through_v3_migrate_to_v4_without_losing_base_rows(
+    tmp_path, source_version,
+) -> None:
+    db_path = tmp_path / f"v{source_version}" / "memorias.db"
+    _create_versioned_memorias_db(db_path, source_version)
+
+    MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        row = conn.execute(
+            "SELECT id, content FROM memorias WHERE id = 'legacy'"
+        ).fetchone()
+        tables = {
+            item[0]
+            for item in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert row == ("legacy", "legacy content")
+    assert "memoria_promotion_attempts" in tables
+
+
+def test_v4_schema_has_required_shape(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(memoria_promotion_attempts)"
+            )
+        }
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(memoria_promotion_attempts)"
+        ).fetchall()
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'memoria_promotion_attempts'"
+        ).fetchone()[0]
+
+    assert columns == {
+        "memoria_id",
+        "draft_revision",
+        "attempt_count",
+        "last_attempt_at_s",
+        "next_attempt_at_s",
+        "last_failure_code",
+        "promotion_state",
+    }
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2:5] == (
+        "memorias", "memoria_id", "id",
+    )
+    assert foreign_keys[0][6] == "CASCADE"
+    assert "idx_memoria_promotion_attempts_due" in indexes
+    assert "idx_memorias_unjudged_drafts" in indexes
+    assert "attempt_count BETWEEN 1 AND 3" in table_sql
+    assert "promotion_state IN ('pending', 'deferred')" in table_sql
+
+    with store._connect(timeout=0.1) as conn:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_malformed_existing_v4_table_is_rejected_before_version_bump(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    _create_versioned_memorias_db(db_path, 3)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "CREATE TABLE memoria_promotion_attempts "
+            "(memoria_id TEXT PRIMARY KEY)"
+        )
+
+    with pytest.raises(sqlite3.DatabaseError):
+        MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM memorias").fetchone()[0] == 1
+
+
+def test_v4_shape_without_required_checks_is_rejected_before_version_bump(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    _create_versioned_memorias_db(db_path, 3)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE memoria_promotion_attempts (
+                memoria_id TEXT PRIMARY KEY
+                    REFERENCES memorias(id) ON DELETE CASCADE,
+                draft_revision INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                last_attempt_at_s INTEGER NOT NULL,
+                next_attempt_at_s INTEGER,
+                last_failure_code TEXT NOT NULL,
+                promotion_state TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX idx_memoria_promotion_attempts_due "
+            "ON memoria_promotion_attempts(next_attempt_at_s, memoria_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_memorias_unjudged_drafts "
+            "ON memorias(profile_id, updated_at, id)"
+        )
+
+    with pytest.raises(sqlite3.DatabaseError):
+        MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_v4_named_indexes_with_wrong_key_columns_are_rejected(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("DROP INDEX idx_memoria_promotion_attempts_due")
+        conn.execute("DROP INDEX idx_memorias_unjudged_drafts")
+        conn.execute(
+            "CREATE INDEX idx_memoria_promotion_attempts_due "
+            "ON memoria_promotion_attempts(memoria_id) "
+            "WHERE promotion_state = 'pending'"
+        )
+        conn.execute(
+            "CREATE INDEX idx_memorias_unjudged_drafts "
+            "ON memorias(id) WHERE status = 'draft' AND judged_at = '' "
+            "AND private = 0 AND inactive = 0"
+        )
+        conn.execute("PRAGMA user_version = 3")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_v4_attempt_table_requires_memoria_id_primary_key(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'memoria_promotion_attempts'"
+        ).fetchone()[0]
+        malformed_sql = table_sql.replace(
+            "memoria_id TEXT PRIMARY KEY",
+            "memoria_id TEXT NOT NULL",
+        )
+        assert malformed_sql != table_sql
+        conn.execute("DROP INDEX idx_memoria_promotion_attempts_due")
+        conn.execute(
+            "ALTER TABLE memoria_promotion_attempts "
+            "RENAME TO old_memoria_promotion_attempts"
+        )
+        conn.execute(malformed_sql)
+        conn.execute("DROP TABLE old_memoria_promotion_attempts")
+        conn.execute(
+            "CREATE INDEX idx_memoria_promotion_attempts_due "
+            "ON memoria_promotion_attempts(next_attempt_at_s, memoria_id) "
+            "WHERE promotion_state = 'pending'"
+        )
+        conn.execute("PRAGMA user_version = 3")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        MemoriaStore(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_pending_and_deferred_state_checks_reject_impossible_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    row_id = store.upsert_draft("p", "p|k", "title", "content alpha beta")
+    invalid = [
+        (3, 100, 400, "pending"),
+        (1, 100, None, "pending"),
+        (2, 100, None, "deferred"),
+        (3, 100, 400, "deferred"),
+        (1, 100, 100, "pending"),
+    ]
+
+    for attempt_count, last_s, next_s, state in invalid:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_promotion_attempt(
+                db_path,
+                row_id,
+                attempt_count=attempt_count,
+                last_attempt_at_s=last_s,
+                next_attempt_at_s=next_s,
+                state=state,
+            )
+
+
+def test_draft_deadlines_are_due_at_exact_300_and_1800_boundaries(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    for row_id, updated_at in (
+        ("attempt-0", "2026-01-01T00:00:00+00:00"),
+        ("attempt-1", "2026-01-02T00:00:00+00:00"),
+        ("attempt-2", "2026-01-03T00:00:00+00:00"),
+        ("attempt-3", "2026-01-04T00:00:00+00:00"),
+    ):
+        _seed_judged_row(db_path, "p", row_id, updated_at=updated_at)
+    _insert_promotion_attempt(
+        db_path,
+        "attempt-1",
+        attempt_count=1,
+        last_attempt_at_s=1_000,
+        next_attempt_at_s=1_300,
+        state="pending",
+    )
+    _insert_promotion_attempt(
+        db_path,
+        "attempt-2",
+        attempt_count=2,
+        last_attempt_at_s=1_000,
+        next_attempt_at_s=2_800,
+        state="pending",
+    )
+    _insert_promotion_attempt(
+        db_path,
+        "attempt-3",
+        attempt_count=3,
+        last_attempt_at_s=1_000,
+        next_attempt_at_s=None,
+        state="deferred",
+    )
+    store = MemoriaStore(db_path)
+
+    def ids(now_s: int) -> list[str]:
+        return [
+            row["id"]
+            for row in store.list_unjudged_drafts(
+                "p", limit=10, now_s=now_s,
+            )
+        ]
+
+    assert ids(1_299) == ["attempt-0"]
+    assert ids(1_300) == ["attempt-0", "attempt-1"]
+    assert ids(2_799) == ["attempt-0", "attempt-1"]
+    assert ids(2_800) == ["attempt-0", "attempt-1", "attempt-2"]
+
+
+def test_due_filter_runs_before_limit_and_order_is_deterministic(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(
+        db_path, "p", "old-cooling",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    _seed_judged_row(
+        db_path, "p", "due-b",
+        updated_at="2026-01-02T00:00:00+00:00",
+    )
+    _seed_judged_row(
+        db_path, "p", "due-a",
+        updated_at="2026-01-02T00:00:00+00:00",
+    )
+    _insert_promotion_attempt(
+        db_path,
+        "old-cooling",
+        attempt_count=1,
+        last_attempt_at_s=100,
+        next_attempt_at_s=400,
+        state="pending",
+    )
+
+    rows = MemoriaStore(db_path).list_unjudged_drafts(
+        "p", limit=1, now_s=200,
+    )
+
+    assert [row["id"] for row in rows] == ["due-a"]
+
+
+def test_backward_wall_clock_makes_pending_draft_due(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "future-attempt")
+    _insert_promotion_attempt(
+        db_path,
+        "future-attempt",
+        attempt_count=1,
+        last_attempt_at_s=2_000,
+        next_attempt_at_s=2_300,
+        state="pending",
+    )
+
+    rows = MemoriaStore(db_path).list_unjudged_drafts(
+        "p", limit=10, now_s=1_000,
+    )
+
+    assert [row["id"] for row in rows] == ["future-attempt"]
+
+
+def test_deferred_rows_remain_ordinary_drafts_for_existing_reads(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "deferred")
+    _insert_promotion_attempt(
+        db_path,
+        "deferred",
+        attempt_count=3,
+        last_attempt_at_s=100,
+        next_attempt_at_s=None,
+        state="deferred",
+    )
+    store = MemoriaStore(db_path)
+
+    assert store.get("deferred")["status"] == "draft"
+    assert [row["id"] for row in store.list_for_profile("p")] == [
+        "deferred"
+    ]
+    assert [
+        row["id"] for row in store.list_injection_candidates("p")
+    ] == ["deferred"]
+    assert store.list_unjudged_drafts("p", limit=10, now_s=10_000) == []
+    deferred = store.list_deferred_drafts("p", limit=10)
+    assert [row["id"] for row in deferred] == ["deferred"]
+    assert deferred[0]["promotion_state"] == "deferred"
+
+
+def test_recapture_clears_attempt_metadata_for_the_old_revision(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    row_id = store.upsert_draft("p", "p|shared", "old", "old alpha beta")
+    _insert_promotion_attempt(
+        db_path,
+        row_id,
+        attempt_count=2,
+        last_attempt_at_s=100,
+        next_attempt_at_s=1_900,
+        state="pending",
+    )
+
+    store.upsert_draft("p", "p|shared", "new", "new alpha beta")
+
+    assert store.get(row_id)["revision"] == 2
+    with sqlite3.connect(str(db_path)) as conn:
+        attempts = conn.execute(
+            "SELECT COUNT(*) FROM memoria_promotion_attempts "
+            "WHERE memoria_id = ?",
+            (row_id,),
+        ).fetchone()[0]
+    assert attempts == 0
+    assert [
+        row["id"]
+        for row in store.list_unjudged_drafts("p", limit=10, now_s=100)
+    ] == [row_id]
+
+
+def test_manual_retry_is_profile_revision_and_deferred_state_conditional(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    _seed_judged_row(db_path, "p", "deferred")
+    _insert_promotion_attempt(
+        db_path,
+        "deferred",
+        attempt_count=3,
+        last_attempt_at_s=100,
+        next_attempt_at_s=None,
+        state="deferred",
+    )
+    store = MemoriaStore(db_path)
+
+    assert store.retry_deferred_draft(
+        "other", "deferred", if_revision=1,
+    ) is False
+    assert store.retry_deferred_draft(
+        "p", "deferred", if_revision=2,
+    ) is False
+    assert store.retry_deferred_draft(
+        "p", "deferred", if_revision=1,
+    ) is True
+    assert store.list_deferred_drafts("p", limit=10) == []
+    assert [
+        row["id"]
+        for row in store.list_unjudged_drafts("p", limit=10, now_s=100)
+    ] == ["deferred"]
+
+
+def test_delete_and_purge_cascade_attempt_metadata_per_profile(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    ids = {
+        "delete": store.upsert_draft(
+            "p", "p|delete", "t", "delete alpha beta",
+        ),
+        "purge": store.upsert_draft(
+            "p", "p|purge", "t", "purge alpha beta",
+        ),
+        "other": store.upsert_draft(
+            "q", "q|other", "t", "other alpha beta",
+        ),
+    }
+    for row_id in ids.values():
+        _insert_promotion_attempt(
+            db_path,
+            row_id,
+            attempt_count=1,
+            last_attempt_at_s=100,
+            next_attempt_at_s=400,
+            state="pending",
+        )
+
+    assert store.delete_row(ids["delete"]) is True
+    assert store.purge_profile("p") == 1
+
+    with sqlite3.connect(str(db_path)) as conn:
+        remaining = conn.execute(
+            "SELECT memoria_id FROM memoria_promotion_attempts"
+        ).fetchall()
+    assert remaining == [(ids["other"],)]
+
+
+def test_growth_prune_cascades_attempt_metadata(monkeypatch, tmp_path) -> None:
+    from opencohost.core.memory import memoria_store as store_mod
+
+    monkeypatch.setattr(store_mod, "MEMORIAS_PROFILE_CAP", 1)
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    old_id = store.upsert_draft("p", "p|old", "old", "old alpha beta")
+    _insert_promotion_attempt(
+        db_path,
+        old_id,
+        attempt_count=1,
+        last_attempt_at_s=100,
+        next_attempt_at_s=400,
+        state="pending",
+    )
+
+    new_id = store.upsert_draft(
+        "p", "p|new", "new", "new alpha beta",
+    )
+
+    assert store.get(old_id) is None
+    assert store.get(new_id) is not None
+    with sqlite3.connect(str(db_path)) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memoria_promotion_attempts"
+        ).fetchone()[0]
+    assert count == 0

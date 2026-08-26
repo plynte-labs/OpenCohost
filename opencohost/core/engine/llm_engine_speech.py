@@ -526,7 +526,17 @@ class SpeechPipelineMixin:
         suspend to, no discard log). Router-off strictly dominates. The
         hold and the victim's request publish in ONE `_sched_lock`
         acquisition (`hold_and_pause`) — a press landing before this
-        process ever spoke still blocks `_pick()`."""
+        process ever spoke still blocks `_pick()`.
+
+        The promotion scheduler's physical-hold bit is independent of those
+        playback switches: a real open mic blocks maintenance even when router
+        behavior is disabled."""
+        with self._lock:
+            self._promotion_ptt_held = True
+            promotion_state = getattr(self, "_promotion_state", None)
+            waiting_idle = getattr(getattr(_eng, "_PromotionState", None), "WAITING_IDLE", None)
+            if waiting_idle is not None and promotion_state is waiting_idle:
+                self._promotion_idle_since = None
         if not (self._speech_interrupt_enabled and self._speech_router_enabled):
             return
         self._ensure_router().hold_and_pause("ptt")
@@ -536,6 +546,8 @@ class SpeechPipelineMixin:
         a no-op unless BOTH switches are armed (same conjunction as the
         press — router-off dominates). Idempotent — every PTT exit path may
         call this, including a double-clear."""
+        with self._lock:
+            self._promotion_ptt_held = False
         if not (self._speech_interrupt_enabled and self._speech_router_enabled):
             return
         router = self._ensure_router()

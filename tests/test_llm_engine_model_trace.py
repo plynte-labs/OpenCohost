@@ -317,11 +317,14 @@ class TestRetryExhaustion:
             motor.current_model = "qwen3:1.7b"
             motor._desired_model = "qwen3:1.7b"
 
+            client_mock = MagicMock()
+            client_mock.list.side_effect = RuntimeError("down")
             fake_ollama = SimpleNamespace(
-                list=MagicMock(side_effect=[RuntimeError("down"), []]),
+                list=MagicMock(side_effect=RuntimeError("down")),
                 generate=MagicMock(),
-                Client=MagicMock(return_value=MagicMock()),
+                Client=MagicMock(return_value=client_mock),
             )
+            motor.ollama = fake_ollama
             fake_pygame = SimpleNamespace(mixer=SimpleNamespace(init=MagicMock()))
             monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
             monkeypatch.setitem(sys.modules, "pygame", fake_pygame)
@@ -335,9 +338,8 @@ class TestRetryExhaustion:
             assert motor.current_model == "qwen3:1.7b"
             assert motor._pending_model_switch is None
 
-            # Ollama comes online — but the switch was already rejected
-            # The user's _desired_model is recorded but not applied automatically
-            assert motor._desired_model == "gemma4:e4b"
+            # Ollama remains offline during switch — switch is rejected without mutating _desired_model
+            assert motor._desired_model == "qwen3:1.7b"
         finally:
             if motor is not None:
                 motor.command_queue.put(None)

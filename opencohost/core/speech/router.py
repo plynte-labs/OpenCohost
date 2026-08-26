@@ -42,6 +42,7 @@ job ids, indices and counts only.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -226,7 +227,13 @@ class SpeechRouter:
         never run while `_sched_lock` is held) and only when
         `interrupt_enabled` is True — the step-3 kill switch.
         """
-        with self._sched_lock:
+        publication = getattr(
+            self._motor,
+            "_memoria_promotion_publication",
+            contextlib.nullcontext,
+        )
+        # The reservation holds no Motor lock while `_sched_lock` is held (I10).
+        with publication(), self._sched_lock:
             self._next_job_id += 1
             job = SpeechJob(
                 job_id=self._next_job_id, text=text, source=source, priority=priority
@@ -256,7 +263,12 @@ class SpeechRouter:
         `text=""` (chunks are the payload; there is no full text yet).
         The producer feeds it via `append_chunks` and closes it via `seal`.
         """
-        with self._sched_lock:
+        publication = getattr(
+            self._motor,
+            "_memoria_promotion_publication",
+            contextlib.nullcontext,
+        )
+        with publication(), self._sched_lock:
             self._next_job_id += 1
             job = SpeechJob(
                 job_id=self._next_job_id, text="", source=source,

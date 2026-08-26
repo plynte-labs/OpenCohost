@@ -149,9 +149,9 @@ class CloudFallbackMixin:
             previous_provider = (self._provider_config.get("active_provider") or "local")
             incoming_provider = (cfg.get("active_provider") or "local")
             self._provider_config = cfg
-            self.is_ready = (incoming_provider != "local")
             if incoming_provider != previous_provider:
                 provider_changed = True
+                self.is_ready = (incoming_provider != "local")
                 self._cloud_fallback_active = False
                 # Unit 2.2: a manual re-arm (this IS the documented re-arm path
                 # for ambiguous_429/bad_key) clears the reason/schedule and is
@@ -183,6 +183,8 @@ class CloudFallbackMixin:
             # Cancel any running background return probe cleanly (outside the
             # lock above -- _stop_cloud_prober takes it again itself).
             self._stop_cloud_prober()
+            if incoming_provider == "local":
+                self._reconcile_local_readiness()
 
     def _handle_cloud_failure(
         self,

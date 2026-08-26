@@ -8,6 +8,35 @@ import re
 import sqlite3
 import time
 from collections import Counter
+from collections.abc import Sequence
+from pathlib import Path
+
+
+_PROMOTION_DIAGNOSTIC_EVENTS = frozenset({
+    "eligible", "started", "completed", "deferred",
+})
+_PROMOTION_DIAGNOSTIC_REASONS = frozenset({
+    "none", "memorias_disabled", "model_not_loaded",
+    "model_switch_pending", "no_profile", "profile_backoff",
+    "model_not_resident", "no_drafts", "no_due", "input_cap",
+    "success", "semantic_partial", "store_read_failed", "judge_failed",
+    "protocol_malformed", "store_write_failed", "unexpected_failure",
+})
+_PROMOTION_DIAGNOSTIC_FAILURES = frozenset({
+    "none", "residency_timeout", "residency_offline",
+    "residency_malformed", "sqlite_read", "judge_watchdog",
+    "model_unavailable", "model_server_error", "model_transport",
+    "unexpected_precommit", "protocol_malformed", "sqlite_write",
+    "backoff_reset_failed",
+})
+_PROMOTION_DIAGNOSTIC_LOG = (
+    "[MEMORY_SWEEP] operation=memory_promotion "
+    "event=%s profile_hash=%s model_hash=%s drafts_count=%d "
+    "input_chars=%d reasoning_mode=%s output_budget=%d duration_ms=%d "
+    "decided_count=%d kept_count=%d rejected_count=%d charged_count=%d "
+    "deferred_count=%d stale_count=%d remaining_count=%d reason=%s "
+    "failure_class=%s"
+)
 
 # Module object, not names off it: `_eng.X` resolves at CALL time, so the suite's
 # monkeypatches on llm_engine are seen. Safe at module level in THIS direction --
@@ -185,30 +214,225 @@ class ScoutPromotionMixin:
             return []
 
     # ── memoria draft promotion (memory_promotion_20260725) ─────────────────
-    def _judge_model(self) -> str:
-        """The LOCAL model the judge will run on — pinned regardless of the
-        active provider (owner decision 2026-08-08, F16).
+    def _get_promotion_backoff_store(self):
+        """Return the process singleton for the sibling control database."""
+        with self._memoria_store_lock:
+            if self._promotion_backoff_store is None:
+                path = Path(_eng.MEMORIAS_DB).with_name(
+                    "memoria_promotion_backoff.db"
+                )
+                self._promotion_backoff_store = _eng.PromotionBackoffStore(
+                    path
+                )
+            return self._promotion_backoff_store
 
-        The once-per-launch promotion sweep sends up to 40 draft contents
+    def _promotion_now_s(self) -> int:
+        """Return the injected non-negative UTC epoch second."""
+        return max(0, int(self._promotion_wall_clock()))
+
+    def _promotion_diagnostic(
+        self,
+        event: str,
+        profile_id: str | None = None,
+        model: str | None = None,
+        drafts_count: int = -1,
+        input_chars: int = -1,
+        *,
+        reasoning_mode: str = "none",
+        duration_ms: int = -1,
+        decided_count: int = 0,
+        kept_count: int = 0,
+        rejected_count: int = 0,
+        charged_count: int = 0,
+        deferred_count: int = 0,
+        stale_count: int = 0,
+        remaining_count: int = -1,
+        reason: str = "none",
+        failure_class: str = "none",
+        dedupe: bool = False,
+        gate_dedupe: bool = False,
+        clear_noop: bool = False,
+        start_ns: int | None = None,
+        counts: dict | None = None,
+    ) -> int | None:
+        """Emit one bounded metadata-only lifecycle line when opted in."""
+        if not _eng.MEMORY_PROMOTION_DIAGNOSTICS:
+            return None
+        try:
+            def identity_hash(domain: str, value: str | None) -> str:
+                if not isinstance(value, str) or not value:
+                    return "none"
+                prefix = (
+                    f"opencohost.memory_promotion.{domain}.v1\0".encode()
+                )
+                return hashlib.sha256(
+                    prefix + value.encode("utf-8")
+                ).hexdigest()[:16]
+
+            def bounded(value: int, upper: int | None = None) -> int:
+                value = int(value)
+                if value < -1:
+                    return -1
+                if upper is not None:
+                    return min(value, upper)
+                return value
+
+            if event not in _PROMOTION_DIAGNOSTIC_EVENTS:
+                return None
+            if clear_noop:
+                self._promotion_diagnostic_last_noop = None
+            profile_hash = identity_hash("profile", profile_id)
+            model_hash = identity_hash("model", model)
+            if reasoning_mode == "request":
+                normalized = (model or "").lower().replace("_", "-")
+                reasoning_mode = (
+                    "low" if "gpt-oss" in normalized else "disabled"
+                )
+            if reasoning_mode not in {"disabled", "low", "none"}:
+                reasoning_mode = "none"
+            if reason not in _PROMOTION_DIAGNOSTIC_REASONS:
+                reason = "unexpected_failure"
+            if failure_class not in _PROMOTION_DIAGNOSTIC_FAILURES:
+                failure_class = "unexpected_precommit"
+            if counts is not None:
+                decided_count = counts["decided"]
+                kept_count = counts["kept"]
+                rejected_count = counts["rejected"]
+                stale_count = counts["stale"]
+            if start_ns is not None:
+                try:
+                    duration_ms = max(
+                        0, (time.monotonic_ns() - start_ns) // 1_000_000,
+                    )
+                except Exception:
+                    duration_ms = -1
+            remaining_count = bounded(remaining_count)
+            if gate_dedupe:
+                signature = (profile_hash, reason)
+                if self._promotion_diagnostic_last_gate == signature:
+                    return None
+                self._promotion_diagnostic_last_gate = signature
+            if dedupe:
+                signature = (profile_hash, reason, remaining_count)
+                if self._promotion_diagnostic_last_noop == signature:
+                    return None
+                self._promotion_diagnostic_last_noop = signature
+            _eng.logger.info(
+                _PROMOTION_DIAGNOSTIC_LOG,
+                event,
+                profile_hash,
+                model_hash,
+                bounded(drafts_count, _eng._PROMOTION_DRAFT_BATCH),
+                bounded(input_chars, _eng._PROMOTION_DRAFT_CHARS),
+                reasoning_mode,
+                _eng._PROMOTION_NUM_PREDICT,
+                bounded(duration_ms),
+                max(0, int(decided_count)),
+                max(0, int(kept_count)),
+                max(0, int(rejected_count)),
+                max(0, int(charged_count)),
+                max(0, int(deferred_count)),
+                max(0, int(stale_count)),
+                remaining_count,
+                reason,
+                failure_class,
+            )
+            if event == "started":
+                try:
+                    return time.monotonic_ns()
+                except Exception:
+                    return None
+        except Exception:
+            return None
+
+    def _record_promotion_profile_failure(
+        self, profile_id: str, failure_class: str, now_s: int,
+    ) -> None:
+        """Persist one privacy-safe infrastructure class, never draft text."""
+        self._get_promotion_backoff_store().record_failure(
+            profile_id, failure_class, now_s,
+        )
+        _eng.logger.warning(
+            "memoria promotion sweep deferred: failure_class=%s",
+            failure_class,
+        )
+
+    @staticmethod
+    def _promotion_exception_class(exc: BaseException) -> str:
+        """Map model-call exceptions to the bounded profile taxonomy."""
+        if isinstance(exc, TimeoutError):
+            return "judge_watchdog"
+        status_code = getattr(exc, "status_code", None)
+        if status_code in {404, 410}:
+            return "model_unavailable"
+        if isinstance(status_code, int) and status_code >= 500:
+            return "model_server_error"
+        transport_module = type(exc).__module__.split(".", 1)[0]
+        if isinstance(exc, (ConnectionError, OSError)) or transport_module in {
+            "httpcore",
+            "httpx",
+            "requests",
+            "urllib3",
+        }:
+            return "model_transport"
+        return "unexpected_precommit"
+
+    def _judge_model(self) -> str:
+        """Return only the model this motor already loaded locally.
+
+        The promotion sweep sends up to 8 draft contents
         (excerpts of the owner's own conversation) to whatever model this
         resolves to. Memory content stays on the machine; the judge is the
         only place in the memoria pipeline that ever crosses the network, so
         it must never follow a cloud provider — never the active profile's
         model, never ``_cloud_chat``.
 
-        Prefers the already-resident model (``_loaded_model``, no cold-load)
-        when Ollama already has one loaded; otherwise falls back to the SAME
-        local-posture resolution the cloud-fallback retry already uses
-        (``llm_engine.py`` F1: ``_last_known_good_model or current_model``) —
-        reused here rather than inventing a second one. Always a str:
-        ``_resolve_reasoning_classification`` lowercases it, so a None would
-        raise straight into the sweep's catch-all and silently disable the
-        feature.
+        No configured-model fallback is allowed: requesting an unloaded model
+        would cold-load it solely for housekeeping. Always returns a string
+        because reasoning classification lowercases the result.
         """
-        return self._loaded_model or self._last_known_good_model or self.current_model or ""
+        return self._loaded_model or ""
+
+    def _judge_model_residency(self) -> tuple[bool, str | None]:
+        """Confirm the exact loaded model through a short local ``Client.ps``.
+
+        This is a fail-closed pre-call check, not an atomic reservation. Ollama
+        can still evict the runner between ``ps()`` and ``chat()``; Phase 2 does
+        not claim to close that external race.
+        """
+        judge_model = self._judge_model()
+        if not judge_model:
+            return False, None
+        try:
+            client = self.ollama.Client(
+                timeout=_eng._PROMOTION_RESIDENCY_TIMEOUT_SECONDS
+            )
+            response = client.ps()
+            models = getattr(response, "models", None)
+            if isinstance(models, (str, bytes)) or not isinstance(
+                models, Sequence
+            ):
+                return False, "residency_malformed"
+            resident = False
+            for item in models:
+                model = getattr(item, "model", None)
+                if not isinstance(model, str) or not model:
+                    return False, "residency_malformed"
+                if model == judge_model:
+                    resident = True
+            return resident, None
+        except TimeoutError:
+            return False, "residency_timeout"
+        except Exception:
+            return False, "residency_offline"
+
+    def _judge_model_is_resident(self) -> bool:
+        """Compatibility projection of the richer residency result."""
+        resident, _failure_class = self._judge_model_residency()
+        return resident
 
     def _judge_timeout_seconds(self) -> float:
-        """The judge's adaptive time budget (owner decision 5).
+        """Return the judge's finite adaptive watchdog budget.
 
         Reuses ``_pregen_last_gen_duration`` — the SAME measurement
         ``_pregen_retry_gate_seconds`` already ships — instead of introducing a
@@ -216,11 +440,11 @@ class ScoutPromotionMixin:
         be a per-model assumption in disguise, contradicting the model-agnostic
         decision 2).
 
-        Stated honestly: at the STARTUP trigger no generation has happened yet,
-        so ``last`` is None and this returns the cold-start value — the identical
-        contract ``_pregen_retry_gate_seconds`` already has. The reasoning branch
-        rides the capability probe D2 needs anyway (cached ``ollama.show``), so it
-        is a per-model MEASUREMENT, not a per-model assumption.
+        The current trigger follows a successful owner response and a real-idle
+        window, so ``last`` may already hold observed generation latency. When
+        unavailable, ``None`` still selects the finite cold-start fallback.
+        Reasoning capability does not expand the timeout because this maintenance
+        request always sends an explicit thinking mode and output-token cap.
 
         Always the LOCAL adaptive budget now (owner decision 2026-08-08, F16):
         the judge transport (``_ollama_judge_chat``) is pinned local, so there is
@@ -229,33 +453,22 @@ class ScoutPromotionMixin:
         just when the active provider happens to be local too.
         """
         last = self._pregen_last_gen_duration
-        if last is None:
-            base = _eng.RETRY_MIN_REMAINING_SECONDS * (
-                _eng._JUDGE_REASONING_COLD_FACTOR
-                if self._resolve_reasoning_classification(self._judge_model()) else 1.0
-            )
-        else:
-            base = last * _eng._JUDGE_BUDGET_FACTOR
+        base = (
+            _eng.RETRY_MIN_REMAINING_SECONDS
+            if last is None
+            else last * _eng._JUDGE_BUDGET_FACTOR
+        )
         return max(_eng._JUDGE_BUDGET_FLOOR_SECONDS, min(_eng._JUDGE_BUDGET_CEILING_SECONDS, base))
 
-    def _run_promotion_judge(self, batch: list, *, chat_callable=None) -> list[tuple]:
+    def _run_promotion_judge(
+        self, batch: list, *, chat_callable=None,
+    ) -> "_eng._PromotionParseDiagnostics":
         """ONE chat completion over *batch*, parsed. Raises on transport failure.
 
-        The reasoning branch (D2): ``scout_digest``'s sixth gate skips thinking
-        models entirely because they burn a 64-token budget inside ``<think>``
-        and return empty ``content``. Adopting it here would mean ZERO promotions
-        forever on the owner's Qwen3-class models, so this reaches the same
-        conclusion ``_generar_dialogo``'s self-heal already does instead: OMIT
-        ``num_predict`` on a reasoning-capable model. The capability answer is
-        cached, so this costs no extra RPC.
-
-        Detection goes through ``_resolve_reasoning_classification`` — the SAME
-        resolver ``_generar_dialogo`` already trusts — not the narrow
-        ``_check_capabilities_reasoning`` probe alone. That probe degrades to
-        False on any Ollama build whose ``show`` response lacks ``capabilities``
-        (and returns {} outright on cloud), which would leave the cap on a
-        Qwen3-class model, burn it inside <think>, return empty content, and
-        re-pay the identical inference every launch with zero promotions.
+        Maintenance is deterministic and bounded: temperature zero, 512 output
+        tokens, and thinking disabled. GPT-OSS is the exception because Ollama
+        ignores booleans for that family, so it receives the smallest supported
+        level (``low``) while retaining the same output cap.
         """
         draft_block = "\n".join(
             f"{i}. {row['content']}" for i, row in enumerate(batch, start=1)
@@ -264,24 +477,15 @@ class ScoutPromotionMixin:
         # literal braces and doubling every one of them is a corruption trap.
         prompt = _eng._PROMOTION_JUDGE_PROMPT.replace("{draft_block}", draft_block)
         budget = self._judge_timeout_seconds()
-        # Reuses the established auxiliary-generation temperature rather than
-        # inventing a second knob; a format-drifted reply is already handled
-        # (the parser returns [] and nothing is marked judged).
-        options = {"temperature": _eng.LLM_SCOUT_TEMPERATURE}
+        options = {
+            "temperature": 0,
+            "num_predict": _eng._PROMOTION_NUM_PREDICT,
+        }
         judge_model = self._judge_model()
-        if not self._resolve_reasoning_classification(judge_model):
-            # Always the LOCAL-sized cap now (owner decision 2026-08-08, F16):
-            # the judge transport is pinned local, so the CLOUD_MAX_TOKENS branch
-            # this used to take when the ACTIVE PROVIDER was cloud would size the
-            # cap for a model this call never reaches. A 40-draft batch that keeps
-            # ~20 needs ~1700 output tokens (a keep is ~60-67: the index, the
-            # flags and up to 220 chars of rewritten text), so a flat 1200 can
-            # still truncate a big local batch -- accepted cost of the pin, same
-            # as any other local judge run; the next launch simply retries.
-            options["num_predict"] = _eng._PROMOTION_NUM_PREDICT
+        normalized_model = judge_model.lower().replace("_", "-")
+        think = "low" if "gpt-oss" in normalized_model else False
         if chat_callable is None:
-            # Rebuilt per sweep because the budget is adaptive; the sweep runs
-            # once per launch, so this costs nothing. Unconditional now: the
+            # Rebuilt per sweep because the budget is adaptive. The
             # judge transport (`_ollama_judge_chat`) is pinned local regardless
             # of the active provider, so it always needs this client.
             self._ollama_judge_client = self._create_ollama_scout_client(
@@ -289,75 +493,51 @@ class ScoutPromotionMixin:
             )
         call = chat_callable or self._ollama_judge_chat
         messages = [{"role": "user", "content": prompt}]
-        deadline = time.monotonic() + budget + 2
+
+        from opencohost.core.memory.models import MemoryJudgeResult
+        json_schema = MemoryJudgeResult.model_json_schema()
+
         response = self._ollama_chat_with_watchdog(
             timeout=budget + 2,  # the socket abort must fire first (scout precedent)
             chat_callable=call,
             model=judge_model,
             messages=messages,
+            format=json_schema,
+            think=think,
             options=options,
             keep_alive=_eng.LLM_KEEP_ALIVE,
         )
         text = self._scout_extract_text(response)
-        # `_generar_dialogo`'s Layer-2 self-heal, verbatim in shape: empty visible
-        # content + internal thinking + a cap in the options means the model spent
-        # the budget inside <think>. Drop the cap and re-issue ONCE.
-        #
-        # This is the only thing that makes the judge work on a thinking-capable
-        # CLOUD model. Detection cannot: the name heuristic knows a handful of
-        # markers and `_fetch_show` returns {} outright when `not self._is_local`,
-        # so glm-5.2 is classified "not reasoning", gets num_predict (sent as
-        # max_tokens), returns empty content — and the sweep promotes nothing,
-        # every launch, forever, paying a full cloud inference each time. The
-        # response IS the evidence, so no detection is involved and this covers
-        # cloud and local, known and unknown model names alike.
-        #
-        # One shot, never a loop, and inside the FIRST call's deadline: the retry
-        # gets what is LEFT of it, so the self-heal cannot double the operator's
-        # worst-case wait. A non-positive remainder is already handled — the
-        # watchdog floors its wait at 0.1s and raises, which the sweep's isolation
-        # turns into "nothing written, next launch retries".
-        if not text.strip() and self._scout_extract_text(response, field="thinking") \
-                and "num_predict" in options:
-            options.pop("num_predict", None)
-            _eng.logger.warning(
-                "memoria judge returned empty content with internal thinking; "
-                "dropping the token cap and retrying once",
-            )
-            response = self._ollama_chat_with_watchdog(
-                timeout=deadline - time.monotonic(),
-                chat_callable=call,
-                model=judge_model,
-                messages=messages,
-                options=options,
-                keep_alive=_eng.LLM_KEEP_ALIVE,
-            )
-            text = self._scout_extract_text(response)
-        return _eng._parse_promotion_decisions(text, len(batch))
+        return _eng._parse_promotion_diagnostics(text, len(batch))
+
+    def _promotion_lifecycle_gate(self) -> str:
+        """Return a normal lifecycle gate without probing infrastructure."""
+        if not _eng.MEMORIAS_ENABLED:
+            return "memorias_disabled"
+        if not self._judge_model():
+            return "model_not_loaded"
+        if (
+            self._pending_model_switch
+            or self._awaiting_first_success_after_switch
+        ):
+            return "model_switch_pending"
+        if self._current_profile_id is None:
+            return "no_profile"
+        return ""
 
     def _promotion_gate(self) -> str:
         """Name of the gate blocking a sweep right now, or "" when clear.
 
-        No longer branches on the active provider (owner decision 2026-08-08,
-        F16 superseding the earlier "whatever provider is active" decision 2):
-        the judge is pinned local always, so this gates only when NO local
-        model name can be resolved at all (``_judge_model()`` empty) — a fresh
-        install with no local model ever configured. An actually-unreachable
-        Ollama, or a model name that IS resolved but not actually installed,
-        cannot be known without a live probe here; both surface later as an
-        ordinary transport failure inside ``_run_promotion_judge``, caught by
-        ``promote_pending_drafts``'s own fail-open ``except Exception`` — the
-        SAME contract every other internal judge failure already gets, so the
-        drafts stay unjudged and the next launch simply retries.
+        The judge stays local regardless of foreground provider and can run
+        only on the exact non-empty `_loaded_model` confirmed by local
+        ``Client.ps()``. Absence, mismatch, timeout, or malformed responses all
+        stop before any judge call.
         """
-        if not _eng.MEMORIAS_ENABLED:
-            return "memorias_disabled"
-        if not self._judge_model():
-            return "no_local_model"
-        if self._pending_model_switch or self._awaiting_first_success_after_switch:
-            return "model_switch_pending"
-        if self._current_profile_id is None:
-            return "no_profile"
+        gate = self._promotion_lifecycle_gate()
+        if gate:
+            return gate
+        if not self._judge_model_is_resident():
+            return "model_not_resident"
         return ""
 
     def promote_pending_drafts(self, *, chat_callable=None) -> dict:
@@ -368,62 +548,159 @@ class ScoutPromotionMixin:
         afterward, so the store fills with vague half-memories Kira then recites.
         This is the missing step.
 
-        Synchronous, on the engine thread, and FULLY isolated (``scout_digest``
-        precedent): every internal failure — timeout, malformed JSON, provider
-        offline, sqlite lock — returns counts-only and leaves every draft
-        untouched and UNJUDGED, so the next launch simply retries. A failed
-        promotion can never lose a memory: this method never deletes and never
-        demotes.
+        Synchronous on the engine thread and fully isolated. Infrastructure and
+        malformed-protocol failures charge only the profile sidecar. A valid
+        top-level response is applied atomically with attributable per-draft
+        retry metadata; no failure path deletes memory content.
 
         *chat_callable* is the test seam, threaded straight into
         ``_ollama_chat_with_watchdog`` (the same boundary the Topic Scout tests
         fake). Returns counts ONLY — RC-8: no memory text ever reaches a log.
 
         ``counts["skipped"]`` names the gate that blocked a NOT-ATTEMPTED sweep
-        and is "" whenever the sweep genuinely reached the store. The one-shot
-        latch in ``run()`` reads it: arming on the attempt instead of the outcome
-        meant a single transient not-ready first idle tick (the profile is seeded
-        AFTER ``motor.start()`` on the API surface; Ollama may not be up yet on
-        the GUI one) disabled promotion for the whole process, silently.
+        and is "" whenever the sweep genuinely reached the store.
         """
         reasons: Counter = Counter()
         counts = {
             "considered": 0, "decided": 0, "kept": 0, "rejected": 0, "stale": 0,
             "unjudged_remaining": 0, "reasons": reasons, "skipped": "",
         }
+        profile_id = None
+        now_s = None
+        attempt_started = False
+        attempt_terminal = False
+        attempt_start_ns = None
+        batch = []
+        draft_chars = 0
+        charged_count = 0
+        deferred_count = 0
         try:
-            # scout_digest's gates MINUS its reasoning value gate (see D2).
-            gate = self._promotion_gate()
+            # Promotion supplies its own bounded reasoning controls, so it does
+            # not inherit Topic Scout's reasoning-model skip.
+            gate = self._promotion_lifecycle_gate()
             if gate:
                 counts["skipped"] = gate
                 # Once per CHANGED gate state, so a permanently inert sweep is
                 # observable (owner decision 8) without a log line every second.
                 if gate != self._promotion_last_gate:
                     self._promotion_last_gate = gate
-                    # `no_local_model` is PERMANENT for this install, not a
-                    # phase: `_judge_model()` resolves nothing, so no sweep will
-                    # ever run, nothing is ever judged, and — since the owner
-                    # notice moved to the sweep on 2026-08-14 — the owner also
-                    # never hears about memorias again while drafts keep
-                    # accumulating. That deserves a WARNING; the other gates are
-                    # transient (a model switch settles, a profile gets picked)
-                    # and stay INFO. Raised after adversarial review flagged the
-                    # cloud-primary-with-no-local-model install as silently
-                    # losing the whole subsystem.
+                    # Missing/unconfirmed residency can leave the subsystem
+                    # inert while drafts accumulate, so report it as a warning.
+                    # Other gates are ordinary transient lifecycle phases.
                     level = (
-                        _eng.logger.warning if gate == "no_local_model"
+                        _eng.logger.warning if gate.startswith("model_not_")
                         else _eng.logger.info
                     )
                     level("memoria promotion sweep gated: %s", gate)
+                self._promotion_diagnostic(
+                    "deferred",
+                    self._current_profile_id,
+                    self._loaded_model,
+                    reason=gate,
+                    gate_dedupe=True,
+                )
+                return counts
+            profile_id = self._current_profile_id
+            now_s = self._promotion_now_s()
+            backoff_store = self._get_promotion_backoff_store()
+            if backoff_store.is_active(profile_id, now_s):
+                counts["skipped"] = "profile_backoff"
+                if self._promotion_last_gate != "profile_backoff":
+                    self._promotion_last_gate = "profile_backoff"
+                    _eng.logger.info(
+                        "memoria promotion sweep gated: profile_backoff"
+                    )
+                self._promotion_diagnostic(
+                    "deferred",
+                    profile_id,
+                    self._loaded_model,
+                    reason="profile_backoff",
+                    gate_dedupe=True,
+                )
+                return counts
+
+            resident, residency_failure = self._judge_model_residency()
+            if not resident:
+                counts["skipped"] = "model_not_resident"
+                if residency_failure:
+                    self._record_promotion_profile_failure(
+                        profile_id, residency_failure, now_s,
+                    )
+                if self._promotion_last_gate != "model_not_resident":
+                    self._promotion_last_gate = "model_not_resident"
+                    _eng.logger.warning(
+                        "memoria promotion sweep gated: model_not_resident"
+                    )
+                self._promotion_diagnostic(
+                    "deferred",
+                    profile_id,
+                    self._loaded_model,
+                    reason="model_not_resident",
+                    failure_class=residency_failure or "none",
+                    gate_dedupe=True,
+                )
                 return counts
             self._promotion_last_gate = ""
-            profile_id = self._current_profile_id
 
-            store = self._get_memoria_store()
-            drafts = store.list_unjudged_drafts(profile_id, limit=_eng._PROMOTION_DRAFT_BATCH)
+            try:
+                store = self._get_memoria_store()
+                drafts = store.list_unjudged_drafts(
+                    profile_id,
+                    limit=_eng._PROMOTION_DRAFT_BATCH,
+                    now_s=now_s,
+                    raising=True,
+                )
+            except sqlite3.Error:
+                self._record_promotion_profile_failure(
+                    profile_id, "sqlite_read", now_s,
+                )
+                self._promotion_diagnostic(
+                    "deferred",
+                    profile_id,
+                    self._loaded_model,
+                    reason="store_read_failed",
+                    failure_class="sqlite_read",
+                )
+                return counts
             if not drafts:
+                try:
+                    counts["unjudged_remaining"] = (
+                        store._count_unjudged_drafts(
+                            profile_id, raising=True,
+                        )
+                    )
+                except sqlite3.Error:
+                    self._record_promotion_profile_failure(
+                        profile_id, "sqlite_read", now_s,
+                    )
+                    self._promotion_diagnostic(
+                        "deferred",
+                        profile_id,
+                        self._loaded_model,
+                        reason="store_read_failed",
+                        failure_class="sqlite_read",
+                    )
+                    return counts
+                # Includes the cooling/deferred no-call case. A stale, already
+                # due profile failure no longer has work to protect, while the
+                # draft's own deadline remains authoritative in memorias.db.
+                reset_ok = backoff_store.reset(profile_id, now_s=now_s)
+                remaining = counts["unjudged_remaining"]
+                self._promotion_diagnostic(
+                    "completed",
+                    profile_id,
+                    self._loaded_model,
+                    0,
+                    0,
+                    duration_ms=0,
+                    remaining_count=remaining,
+                    reason="no_drafts" if remaining == 0 else "no_due",
+                    failure_class=(
+                        "none" if reset_ok else "backoff_reset_failed"
+                    ),
+                    dedupe=True,
+                )
                 return counts  # the common no-op: zero tokens, no call at all
-            counts["considered"] = len(drafts)
 
             # No dedup step, deliberately: the design's "drop any draft whose
             # stable_key is already durable" can never fire. UNIQUE(profile_id,
@@ -433,120 +710,162 @@ class ScoutPromotionMixin:
             # equally impossible (list_unjudged_drafts filters status='draft'
             # AND judged_at=''). Both would have been dead code behind a test
             # that only passes on a hand-forged database.
-            batch = drafts
+            for row in drafts:
+                next_chars = draft_chars + len(row["content"])
+                if next_chars > _eng._PROMOTION_DRAFT_CHARS:
+                    break
+                batch.append(row)
+                draft_chars = next_chars
+            counts["considered"] = len(batch)
 
-            if batch:
-                kept: list[tuple[str, int]] = []
-                rejected: list[tuple[str, int]] = []
-                # _parse_promotion_decisions drops every unusable entry in
-                # silence (a `keep` the model wrote as "yes" instead of true is
-                # skipped by a bare `continue`), so a batch can come back
-                # part-answered with nothing to show for the gap. Those rows
-                # keep no judged_at and return on the next launch, where they
-                # can fail the same way forever -- which is what accumulating
-                # unjudged drafts looks like from the operator's side. Naming
-                # the answer rate makes that visible; kept+rejected does not,
-                # because an applied decision can still lose its update_row
-                # revision race below and never land in either bucket.
-                decisions = self._run_promotion_judge(
+            if not batch:
+                self._promotion_diagnostic(
+                    "completed",
+                    profile_id,
+                    self._loaded_model,
+                    0,
+                    0,
+                    duration_ms=0,
+                    remaining_count=-1,
+                    reason="input_cap",
+                    dedupe=True,
+                )
+                return counts
+
+            # The model call is intentionally outside every SQLite transaction.
+            diagnostic = (
+                profile_id, self._loaded_model, len(batch), draft_chars,
+            )
+            self._promotion_diagnostic(
+                "eligible",
+                *diagnostic,
+                reasoning_mode="request",
+                clear_noop=True,
+            )
+            attempt_started = True
+            attempt_start_ns = self._promotion_diagnostic(
+                "started",
+                *diagnostic,
+                reasoning_mode="request",
+            )
+            try:
+                diagnostics = self._run_promotion_judge(
                     batch, chat_callable=chat_callable,
                 )
-                counts["decided"] = len(decisions)
-                for index, judged_text, uncertain, reason in decisions:
-                    row = batch[index - 1]
-                    if judged_text is None:
-                        reasons[reason] += 1
-                        rejected.append((row["id"], row["revision"]))
-                        continue
-                    # Two optimistic-concurrency tokens, because the operator has
-                    # two ways to touch a row while the model is thinking.
-                    # `if_revision` catches a re-CAPTURE (upsert_draft bumps it);
-                    # `if_status` catches a hand EDIT, which goes through
-                    # update_row and sets status='curated' WITHOUT bumping
-                    # revision — without it the judge's rewrite of the now-stale
-                    # text would overwrite the operator's own words and demote
-                    # curated (operator intent) to promoted (machine).
-                    # `touch_updated_at=False` keeps the row's place in the
-                    # recency ranking build_recency_lines uses; the judgment
-                    # rewrites text about an OLD conversation.
-                    # An UNCERTAIN keep gets its rewritten text but stays `draft`
-                    # (owner decision 4: keep and MARK) — the shipped `draft`
-                    # badge already means "provisional, not operator-confirmed".
-                    # `status=` must be passed explicitly: update_row's default
-                    # is 'curated' (the F5 operator-edit contract), a provenance
-                    # lie either way.
-                    try:
-                        written = store.update_row(
-                            row["id"],
-                            title=_eng.build_title(judged_text),
-                            content=judged_text,
-                            signature=_eng.build_signature(judged_text),
-                            if_revision=row["revision"],
-                            if_status="draft",
-                            status="draft" if uncertain else "promoted",
-                            touch_updated_at=False,
-                            raising=True,
-                        )
-                    except sqlite3.Error:
-                        # raising=True is what makes a plain False mean ONLY
-                        # rowcount==0, so `stale` keeps its documented meaning
-                        # ("the operator was speaking on this topic") instead of
-                        # silently absorbing every locked-database write.
-                        reasons["write_failed"] += 1
-                        continue
-                    if not written:
-                        reasons["stale"] += 1
-                        counts["stale"] += 1
-                        continue
-                    if uncertain:
-                        reasons["uncertain_entity"] += 1
-                    kept.append((row["id"], row["revision"]))
+            except Exception as exc:
+                failure_class = self._promotion_exception_class(exc)
+                self._record_promotion_profile_failure(
+                    profile_id,
+                    failure_class,
+                    now_s,
+                )
+                self._promotion_diagnostic(
+                    "deferred",
+                    *diagnostic,
+                    start_ns=attempt_start_ns,
+                    reasoning_mode="request",
+                    reason="judge_failed",
+                    failure_class=failure_class,
+                )
+                attempt_terminal = True
+                return counts
 
-                # mark_judged, never set_flags: set_flags bumps updated_at, and
-                # _prune_profile keeps the newest drafts by updated_at — routing
-                # a rejection through it would evict a newer unjudged draft.
-                # Keeps are counted from the writes that ALREADY landed on disk:
-                # a failed bookkeeping stamp must never report kept=0 on a launch
-                # that genuinely promoted rows (owner decision 8).
-                if kept:
-                    counts["kept"] = len(kept)
-                    try:
-                        stamped = store.mark_judged(kept, raising=True)
-                    except sqlite3.Error:
-                        reasons["write_failed"] += len(kept)
-                    else:
-                        # The text is already on disk; only the stamp is missing,
-                        # so the row is simply re-judged next launch.
-                        if stamped < len(kept):
-                            reasons["unstamped"] += len(kept) - stamped
-                if rejected:
-                    try:
-                        # `if_status="draft"` ONLY here. A reject performs no
-                        # earlier guarded write, so this call carries BOTH of its
-                        # race checks: `revision` catches a re-CAPTURE, `status`
-                        # catches an operator EDIT or PIN (which write 'curated'
-                        # WITHOUT bumping revision) — otherwise a memory he just
-                        # curated is hidden on a judgment of the text he replaced,
-                        # permanently, since upsert_draft's un-hiding CASE only
-                        # fires on rows still in draft. It must NOT be passed on
-                        # the keep call above: `update_row` has already written
-                        # 'promoted' by then, so the same guard would leave every
-                        # confident keep unstamped and re-judged every launch.
-                        stamped = store.mark_judged(
-                            rejected, inactive=True, if_status="draft", raising=True,
-                        )
-                    except sqlite3.Error:
-                        reasons["write_failed"] += len(rejected)
-                    else:
-                        counts["rejected"] = stamped
-                        lost = len(rejected) - stamped
-                        if lost:
-                            reasons["stale"] += lost
-                            counts["stale"] += lost
+            if not diagnostics.top_level_valid:
+                self._record_promotion_profile_failure(
+                    profile_id, "protocol_malformed", now_s,
+                )
+                self._promotion_diagnostic(
+                    "deferred",
+                    *diagnostic,
+                    start_ns=attempt_start_ns,
+                    reasoning_mode="request",
+                    reason="protocol_malformed",
+                    failure_class="protocol_malformed",
+                )
+                attempt_terminal = True
+                return counts
 
-            counts["unjudged_remaining"] = len(
-                store.list_unjudged_drafts(profile_id, limit=_eng.MEMORIAS_PROFILE_CAP)
+            counts["decided"] = len(diagnostics.decisions)
+            try:
+                committed = store.apply_promotion_batch(
+                    profile_id,
+                    batch,
+                    decisions=diagnostics.decisions,
+                    unresolved=diagnostics.unresolved,
+                    now_s=now_s,
+                )
+            except sqlite3.Error:
+                self._record_promotion_profile_failure(
+                    profile_id, "sqlite_write", now_s,
+                )
+                self._promotion_diagnostic(
+                    "deferred",
+                    *diagnostic,
+                    start_ns=attempt_start_ns,
+                    reasoning_mode="request",
+                    counts=counts,
+                    reason="store_write_failed",
+                    failure_class="sqlite_write",
+                )
+                attempt_terminal = True
+                return counts
+            except Exception:
+                self._record_promotion_profile_failure(
+                    profile_id, "unexpected_precommit", now_s,
+                )
+                self._promotion_diagnostic(
+                    "deferred",
+                    *diagnostic,
+                    start_ns=attempt_start_ns,
+                    reasoning_mode="request",
+                    counts=counts,
+                    reason="store_write_failed",
+                    failure_class="unexpected_precommit",
+                )
+                attempt_terminal = True
+                return counts
+
+            counts["kept"] = committed.kept
+            counts["rejected"] = committed.rejected
+            counts["stale"] = committed.stale
+            charged_count = committed.charged
+            deferred_count = committed.deferred
+            reasons.update(committed.reasons)
+
+            # A reset is truthful only after the transaction committed. If the
+            # sidecar reset fails it keeps conservative state internally.
+            terminal_failure = "none"
+            if not backoff_store.reset(profile_id, now_s=now_s):
+                reasons["backoff_reset_failed"] += 1
+                terminal_failure = "backoff_reset_failed"
+            remaining_count = -1
+            try:
+                counts["unjudged_remaining"] = (
+                    store._count_unjudged_drafts(
+                        profile_id, raising=True,
+                    )
+                )
+                remaining_count = counts["unjudged_remaining"]
+            except sqlite3.Error:
+                self._record_promotion_profile_failure(
+                    profile_id, "sqlite_read", now_s,
+                )
+                terminal_failure = "sqlite_read"
+            self._promotion_diagnostic(
+                "completed",
+                *diagnostic,
+                start_ns=attempt_start_ns,
+                reasoning_mode="request",
+                counts=counts,
+                charged_count=charged_count,
+                deferred_count=deferred_count,
+                remaining_count=remaining_count,
+                reason=(
+                    "semantic_partial" if diagnostics.unresolved else "success"
+                ),
+                failure_class=terminal_failure,
             )
+            attempt_terminal = True
             _eng.logger.info(
                 "memoria promotion sweep: considered=%d decided=%d kept=%d rejected=%d "
                 "stale=%d remaining=%d reasons=%s",
@@ -585,9 +904,39 @@ class ScoutPromotionMixin:
                 except Exception:
                     pass
         except Exception as exc:
-            # Total isolation: nothing was marked judged, so the next launch
-            # retries. Type only — never a message that could carry row text.
-            _eng.logger.warning("memoria promotion sweep failed (fail-open): %s", type(exc).__name__)
+            # Last-resort pre-commit isolation. Type only; never raw draft
+            # text.
+            if profile_id is not None and now_s is not None:
+                try:
+                    self._record_promotion_profile_failure(
+                        profile_id, "unexpected_precommit", now_s,
+                    )
+                except Exception:
+                    pass
+            if attempt_started and not attempt_terminal and profile_id:
+                self._promotion_diagnostic(
+                    "deferred",
+                    *diagnostic,
+                    start_ns=attempt_start_ns,
+                    reasoning_mode="request",
+                    counts=counts,
+                    charged_count=charged_count,
+                    deferred_count=deferred_count,
+                    reason="unexpected_failure",
+                    failure_class="unexpected_precommit",
+                )
+            elif not attempt_started:
+                self._promotion_diagnostic(
+                    "deferred",
+                    profile_id,
+                    self._loaded_model,
+                    reason="unexpected_failure",
+                    failure_class="unexpected_precommit",
+                )
+            _eng.logger.warning(
+                "memoria promotion sweep failed (fail-open): %s",
+                type(exc).__name__,
+            )
         return counts
 
     def memory_inspector_snapshot(self) -> dict:

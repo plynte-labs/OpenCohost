@@ -1,7 +1,7 @@
 """MemoriaStore — SQLite-backed store for Kira's auto-captured + curated memorias.
 
 Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
-  - Own unshared SQLite file (memorias.db), PRAGMA user_version=1.
+  - Own unshared SQLite file (memorias.db), PRAGMA user_version=4.
   - Single guarded upsert: INSERT .. ON CONFLICT(profile_id, stable_key) DO
     UPDATE .. WHERE status='draft' — curated rows are immune by construction
     (the conflict resolves to a no-op when the WHERE clause is false, so no
@@ -67,7 +67,10 @@ import math
 import re
 import sqlite3
 import threading
+import time
+from collections import Counter
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -96,6 +99,13 @@ logger = logging.getLogger(__name__)
 # (sqlite default is 5s — a visible freeze). Mirrors agenda_persistence.py.
 READ_TIMEOUT_SECONDS: float = 0.5
 WRITE_TIMEOUT_SECONDS: float = 1.0
+
+PROMOTION_DRAFT_FAILURE_CODES = frozenset({
+    "duplicate_index",
+    "invalid_decision",
+    "missing_decision",
+})
+PROMOTION_DRAFT_RETRY_DELAYS_S = (300, 1800)
 
 _MIN_SIGNIFICANT_TOKENS = 3
 _STABLE_KEY_TOKEN_COUNT = 6
@@ -180,6 +190,18 @@ class MemoriaValidationError(ValueError):
     The message is a static, content-free string by design (RC-8): it must
     never interpolate row title/content, since callers may log it.
     """
+
+
+@dataclass(frozen=True)
+class PromotionBatchApplyResult:
+    """Counts that became durable in one promotion-batch commit."""
+
+    kept: int
+    rejected: int
+    stale: int
+    charged: int
+    deferred: int
+    reasons: Counter
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +790,7 @@ def build_recency_lines(
 # ---------------------------------------------------------------------------
 
 class MemoriaStore:
-    """SQLite-backed store for Kira memorias (own unshared DB, schema v1)."""
+    """SQLite-backed store for Kira memorias (own unshared DB, schema v4)."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -850,6 +872,16 @@ class MemoriaStore:
                     (row_id, profile_id, stable_key, title, content, now, now, signature),
                 )
                 result = cur.fetchone()
+                if result is not None and result["revision"] > 1:
+                    # A retry verdict belongs to one exact capture revision.
+                    # Clear it in the SAME transaction as the revision bump so
+                    # a crash can never leave new content cooling/deferred on
+                    # old content's metadata.
+                    conn.execute(
+                        "DELETE FROM memoria_promotion_attempts "
+                        "WHERE memoria_id = ?",
+                        (result["id"],),
+                    )
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store write failed (fail-open): {type(exc).__name__}")
             return (None, False) if return_created else None
@@ -1032,8 +1064,8 @@ class MemoriaStore:
         to its budget in inference, then writes; if the operator speaks on the
         same topic in that window upsert_draft bumps ``revision``, this write
         matches zero rows and returns False, and the caller leaves the draft
-        UNJUDGED for the next launch instead of freezing a judgment of stale
-        text into a durable row.
+        UNJUDGED for a later eligible sweep instead of freezing a judgment of
+        stale text into a durable row.
 
         *if_status* appends ``AND status = ?``. ``if_revision`` alone is NOT
         enough to detect an operator EDIT racing the sweep: an edit goes through
@@ -1090,8 +1122,9 @@ class MemoriaStore:
         self, judged: list[tuple[str, int]], *, inactive: bool = False,
         if_status: str | None = None, raising: bool = False,
     ) -> int:
-        """Stamp ``judged_at`` on ``(id, observed_revision)`` pairs — the ONLY
-        judgment bookkeeping verb. Returns the number of rows actually stamped.
+        """Stamp ``judged_at`` on revision pairs as a standalone write.
+
+        Returns the number of rows actually stamped.
 
         NEVER touches ``updated_at`` and NEVER touches ``status``. That is the
         whole point (memory_promotion_20260725 D3a): ``set_flags`` bumps
@@ -1111,7 +1144,7 @@ class MemoriaStore:
         it performs no ``update_row`` — so without this a draft the operator
         refreshed with BETTER content mid-sweep would be hidden on the strength
         of a judgment of text it no longer holds. A row that moved matches zero
-        times, stays unjudged, and is re-judged next launch, which is what the
+        times and stays unjudged. A later eligible sweep re-judges it, as the
         design's failure-mode table promises for both write paths.
 
         *if_status* (opt-in) appends ``AND status = ?`` to every pair term — the
@@ -1158,6 +1191,199 @@ class MemoriaStore:
             return 0
         self._clear_warn()
         return max(stamped, 0)
+
+    def apply_promotion_batch(
+        self,
+        profile_id: str,
+        batch: list,
+        *,
+        decisions: list[tuple[int, str | None, bool, str]],
+        unresolved: dict[int, str],
+        now_s: int,
+    ) -> PromotionBatchApplyResult:
+        """Atomically apply decisions and charge attributable current drafts.
+
+        The model call belongs outside this method. Every row is revalidated
+        inside one write transaction against profile, id, revision, draft
+        provenance, judgment, privacy, and visibility. Any SQL or commit error
+        propagates after rollback; callers then apply profile infrastructure
+        backoff without reporting partial decisions.
+        """
+        now_s = int(now_s)
+        if now_s < 0:
+            raise ValueError("promotion epoch seconds must be non-negative")
+
+        decision_by_index: dict[
+            int, tuple[int, str | None, bool, str]
+        ] = {}
+        for decision in decisions:
+            index = int(decision[0])
+            if 1 <= index <= len(batch) and index not in decision_by_index:
+                decision_by_index[index] = decision
+
+        unresolved_by_index: dict[int, str] = {}
+        for raw_index, code in unresolved.items():
+            index = int(raw_index)
+            if not 1 <= index <= len(batch):
+                continue
+            if code not in PROMOTION_DRAFT_FAILURE_CODES:
+                raise ValueError("invalid promotion draft failure code")
+            if index not in decision_by_index:
+                unresolved_by_index[index] = code
+
+        kept = 0
+        rejected = 0
+        stale = 0
+        charged = 0
+        deferred = 0
+        reasons: Counter = Counter()
+        judged_at = _now_text()
+
+        with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for index, snapshot in enumerate(batch, start=1):
+                    decision = decision_by_index.get(index)
+                    failure_code = unresolved_by_index.get(index)
+                    if decision is None and failure_code is None:
+                        continue
+
+                    memoria_id = snapshot["id"]
+                    revision = int(snapshot["revision"])
+                    current = conn.execute(
+                        "SELECT id FROM memorias WHERE id = ? "
+                        "AND profile_id = ? AND revision = ? "
+                        "AND status = 'draft' AND judged_at = '' "
+                        "AND private = 0 AND inactive = 0",
+                        (memoria_id, profile_id, revision),
+                    ).fetchone()
+                    if current is None:
+                        stale += 1
+                        reasons["stale"] += 1
+                        continue
+
+                    if decision is not None:
+                        _, judged_text, uncertain, reason = decision
+                        if judged_text is None:
+                            written = conn.execute(
+                                "UPDATE memorias SET judged_at = ?, "
+                                "inactive = 1 WHERE id = ? "
+                                "AND profile_id = ? AND revision = ? "
+                                "AND status = 'draft' AND judged_at = '' "
+                                "AND private = 0 AND inactive = 0",
+                                (
+                                    judged_at,
+                                    memoria_id,
+                                    profile_id,
+                                    revision,
+                                ),
+                            ).rowcount
+                            if written != 1:
+                                stale += 1
+                                reasons["stale"] += 1
+                                continue
+                            rejected += 1
+                            reasons[reason or "unspecified"] += 1
+                        else:
+                            status = "draft" if uncertain else "promoted"
+                            written = conn.execute(
+                                "UPDATE memorias SET title = ?, content = ?, "
+                                "signature = ?, status = ?, judged_at = ? "
+                                "WHERE id = ? AND profile_id = ? "
+                                "AND revision = ? AND status = 'draft' "
+                                "AND judged_at = '' AND private = 0 "
+                                "AND inactive = 0",
+                                (
+                                    build_title(judged_text),
+                                    judged_text,
+                                    build_signature(judged_text),
+                                    status,
+                                    judged_at,
+                                    memoria_id,
+                                    profile_id,
+                                    revision,
+                                ),
+                            ).rowcount
+                            if written != 1:
+                                stale += 1
+                                reasons["stale"] += 1
+                                continue
+                            kept += 1
+                            if uncertain:
+                                reasons["uncertain_entity"] += 1
+                        conn.execute(
+                            "DELETE FROM memoria_promotion_attempts "
+                            "WHERE memoria_id = ?",
+                            (memoria_id,),
+                        )
+                        continue
+
+                    prior = conn.execute(
+                        "SELECT draft_revision, attempt_count "
+                        "FROM memoria_promotion_attempts "
+                        "WHERE memoria_id = ?",
+                        (memoria_id,),
+                    ).fetchone()
+                    prior_count = (
+                        int(prior["attempt_count"])
+                        if prior is not None
+                        and int(prior["draft_revision"]) == revision
+                        else 0
+                    )
+                    attempt_count = min(prior_count + 1, 3)
+                    if attempt_count < 3:
+                        next_attempt_at_s = (
+                            now_s
+                            + PROMOTION_DRAFT_RETRY_DELAYS_S[
+                                attempt_count - 1
+                            ]
+                        )
+                        promotion_state = "pending"
+                    else:
+                        next_attempt_at_s = None
+                        promotion_state = "deferred"
+                        deferred += 1
+                    conn.execute(
+                        """
+                        INSERT INTO memoria_promotion_attempts (
+                            memoria_id, draft_revision, attempt_count,
+                            last_attempt_at_s, next_attempt_at_s,
+                            last_failure_code, promotion_state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(memoria_id) DO UPDATE SET
+                            draft_revision = excluded.draft_revision,
+                            attempt_count = excluded.attempt_count,
+                            last_attempt_at_s = excluded.last_attempt_at_s,
+                            next_attempt_at_s = excluded.next_attempt_at_s,
+                            last_failure_code = excluded.last_failure_code,
+                            promotion_state = excluded.promotion_state
+                        """,
+                        (
+                            memoria_id,
+                            revision,
+                            attempt_count,
+                            now_s,
+                            next_attempt_at_s,
+                            failure_code,
+                            promotion_state,
+                        ),
+                    )
+                    charged += 1
+                    reasons[failure_code] += 1
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        self._clear_warn()
+        return PromotionBatchApplyResult(
+            kept=kept,
+            rejected=rejected,
+            stale=stale,
+            charged=charged,
+            deferred=deferred,
+            reasons=reasons,
+        )
 
     def set_flags(
         self,
@@ -1370,7 +1596,14 @@ class MemoriaStore:
             self._warn_once(f"memoria store injection-candidate list failed (fail-open): {type(exc).__name__}")
             return []
 
-    def list_unjudged_drafts(self, profile_id: str, *, limit: int) -> list[sqlite3.Row]:
+    def list_unjudged_drafts(
+        self,
+        profile_id: str,
+        *,
+        limit: int,
+        now_s: int | None = None,
+        raising: bool = False,
+    ) -> list[sqlite3.Row]:
         """The judge's candidate batch: OLDEST-first unjudged drafts (D7).
 
         Oldest-first because those are the rows closest to prune death — the
@@ -1389,18 +1622,129 @@ class MemoriaStore:
         memorias.judged_at != '' THEN 0 ...`` read the OPERATOR's mute as a
         JUDGE's mute and silently un-hide the row on the next capture, defeating
         the one guard that CASE exists to provide.
+        No attempt row means attempt zero and immediately due. Pending rows are
+        due at their inclusive deadline. If wall time moved behind the recorded
+        attempt, the row is due instead of being stranded until the old epoch.
+        Deferred rows are manual-only and stay ordinary base-table drafts.
         """
+        now_s = int(time.time()) if now_s is None else int(now_s)
+        try:
+            with closing(
+                self._connect(timeout=READ_TIMEOUT_SECONDS)
+            ) as conn, conn:
+                return conn.execute(
+                    "SELECT m.* FROM memorias AS m "
+                    "LEFT JOIN memoria_promotion_attempts AS a "
+                    "ON a.memoria_id = m.id "
+                    "AND a.draft_revision = m.revision "
+                    "WHERE m.profile_id = ? AND m.status = 'draft' "
+                    "AND m.judged_at = '' AND m.private = 0 "
+                    "AND m.inactive = 0 AND (a.memoria_id IS NULL OR ("
+                    "a.promotion_state = 'pending' AND ("
+                    "a.next_attempt_at_s <= ? OR a.last_attempt_at_s > ?))) "
+                    "ORDER BY m.updated_at ASC, m.id ASC LIMIT ?",
+                    (profile_id, now_s, now_s, limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            if raising:
+                raise
+            self._warn_once(
+                "memoria unjudged-draft list failed (fail-open): "
+                f"{type(exc).__name__}"
+            )
+            return []
+
+    def list_deferred_drafts(
+        self,
+        profile_id: str,
+        *,
+        limit: int,
+        raising: bool = False,
+    ) -> list[sqlite3.Row]:
+        """Return current manual-only drafts, oldest first, for one profile."""
         try:
             with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
                 return conn.execute(
-                    "SELECT * FROM memorias WHERE profile_id = ? AND status = 'draft' "
-                    "AND judged_at = '' AND private = 0 AND inactive = 0 "
-                    "ORDER BY updated_at ASC, id ASC LIMIT ?",
+                    "SELECT m.*, a.draft_revision, a.attempt_count, "
+                    "a.last_attempt_at_s, a.next_attempt_at_s, "
+                    "a.last_failure_code, a.promotion_state "
+                    "FROM memorias AS m "
+                    "JOIN memoria_promotion_attempts AS a "
+                    "ON a.memoria_id = m.id "
+                    "AND a.draft_revision = m.revision "
+                    "WHERE m.profile_id = ? AND m.status = 'draft' "
+                    "AND m.judged_at = '' AND m.private = 0 "
+                    "AND m.inactive = 0 "
+                    "AND a.promotion_state = 'deferred' "
+                    "ORDER BY m.updated_at ASC, m.id ASC LIMIT ?",
                     (profile_id, limit),
                 ).fetchall()
         except sqlite3.Error as exc:
-            self._warn_once(f"memoria unjudged-draft list failed (fail-open): {type(exc).__name__}")
+            if raising:
+                raise
+            self._warn_once(
+                "memoria deferred-draft list failed (fail-open): "
+                f"{type(exc).__name__}"
+            )
             return []
+
+    def retry_deferred_draft(
+        self,
+        profile_id: str,
+        memoria_id: str,
+        *,
+        if_revision: int,
+        raising: bool = False,
+    ) -> bool:
+        """Clear metadata only for the exact current deferred revision."""
+        try:
+            with closing(
+                self._connect(timeout=WRITE_TIMEOUT_SECONDS)
+            ) as conn, conn:
+                deleted = conn.execute(
+                    "DELETE FROM memoria_promotion_attempts AS a "
+                    "WHERE a.memoria_id = ? "
+                    "AND a.draft_revision = ? "
+                    "AND a.promotion_state = 'deferred' "
+                    "AND EXISTS (SELECT 1 FROM memorias AS m "
+                    "WHERE m.id = a.memoria_id AND m.profile_id = ? "
+                    "AND m.revision = a.draft_revision "
+                    "AND m.status = 'draft' AND m.judged_at = '' "
+                    "AND m.private = 0 AND m.inactive = 0)",
+                    (memoria_id, int(if_revision), profile_id),
+                ).rowcount
+        except sqlite3.Error as exc:
+            if raising:
+                raise
+            self._warn_once(
+                "memoria deferred-draft retry failed (fail-open): "
+                f"{type(exc).__name__}"
+            )
+            return False
+        self._clear_warn()
+        return deleted > 0
+
+    def _count_unjudged_drafts(
+        self, profile_id: str, *, raising: bool = False,
+    ) -> int:
+        """Count every current unjudged draft, including cooling/deferred."""
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM memorias WHERE profile_id = ? "
+                    "AND status = 'draft' AND judged_at = '' "
+                    "AND private = 0 AND inactive = 0",
+                    (profile_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            if raising:
+                raise
+            self._warn_once(
+                "memoria unjudged-draft count failed (fail-open): "
+                f"{type(exc).__name__}"
+            )
+            return 0
+        return int(row[0]) if row is not None else 0
 
     # NOTE (memory_promotion_20260725): the design's `list_durable_keys` +
     # "arithmetic dedup" step is NOT implemented, because the state it looks for
@@ -1541,10 +1885,212 @@ class MemoriaStore:
                     "memorias.db migrated to schema v3 (prior user_version=%d)", prior_version,
                 )
 
+            # v3 -> v4: retry state is sparse metadata, never a new provenance
+            # status or columns on memorias. CREATE IF NOT EXISTS makes an
+            # interrupted run resumable; exact shape/FK/index validation MUST
+            # pass before user_version advances.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memoria_promotion_attempts (
+                    memoria_id TEXT PRIMARY KEY
+                        REFERENCES memorias(id) ON DELETE CASCADE,
+                    draft_revision INTEGER NOT NULL
+                        CHECK(draft_revision >= 1),
+                    attempt_count INTEGER NOT NULL
+                        CHECK(attempt_count BETWEEN 1 AND 3),
+                    last_attempt_at_s INTEGER NOT NULL
+                        CHECK(last_attempt_at_s >= 0),
+                    next_attempt_at_s INTEGER
+                        CHECK(next_attempt_at_s IS NULL
+                              OR next_attempt_at_s >= 0),
+                    last_failure_code TEXT NOT NULL
+                        CHECK(length(last_failure_code) BETWEEN 1 AND 48)
+                        CHECK(last_failure_code
+                              NOT GLOB '*[^a-z0-9_]*'),
+                    promotion_state TEXT NOT NULL
+                        CHECK(promotion_state IN ('pending', 'deferred')),
+                    CHECK(
+                        (promotion_state = 'pending'
+                         AND attempt_count IN (1, 2)
+                         AND next_attempt_at_s IS NOT NULL
+                         AND next_attempt_at_s > last_attempt_at_s)
+                        OR
+                        (promotion_state = 'deferred'
+                         AND attempt_count = 3
+                         AND next_attempt_at_s IS NULL)
+                    )
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_memoria_promotion_attempts_due "
+                "ON memoria_promotion_attempts(next_attempt_at_s, memoria_id) "
+                "WHERE promotion_state = 'pending'"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memorias_unjudged_drafts "
+                "ON memorias(profile_id, updated_at, id) "
+                "WHERE status = 'draft' AND judged_at = '' "
+                "AND private = 0 AND inactive = 0"
+            )
+            self._validate_v4_schema(conn)
+            if prior_version < 4:
+                conn.execute("PRAGMA user_version = 4")
+                logger.info(
+                    "memorias.db migrated to schema v4 "
+                    "(prior user_version=%d)",
+                    prior_version,
+                )
+
     def _connect(self, timeout: float) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @staticmethod
+    def _validate_v4_schema(conn: sqlite3.Connection) -> None:
+        """Reject a partial/colliding v4 schema before stamping its version."""
+        expected_columns = [
+            "memoria_id",
+            "draft_revision",
+            "attempt_count",
+            "last_attempt_at_s",
+            "next_attempt_at_s",
+            "last_failure_code",
+            "promotion_state",
+        ]
+        column_rows = conn.execute(
+            "PRAGMA table_info(memoria_promotion_attempts)"
+        ).fetchall()
+        actual_columns = [row["name"] for row in column_rows]
+        if actual_columns != expected_columns:
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt schema"
+            )
+        columns = {row["name"]: row for row in column_rows}
+        expected_types = {
+            "memoria_id": "TEXT",
+            "draft_revision": "INTEGER",
+            "attempt_count": "INTEGER",
+            "last_attempt_at_s": "INTEGER",
+            "next_attempt_at_s": "INTEGER",
+            "last_failure_code": "TEXT",
+            "promotion_state": "TEXT",
+        }
+        actual_types = {
+            name: str(row["type"]).upper()
+            for name, row in columns.items()
+        }
+        primary_keys = [
+            row["name"] for row in column_rows if int(row["pk"]) > 0
+        ]
+        required_not_null = expected_columns[1:4] + expected_columns[5:]
+        invalid_nullability = any(
+            int(columns[name]["notnull"]) != 1
+            for name in required_not_null
+        ) or int(columns["next_attempt_at_s"]["notnull"]) != 0
+        if (
+            actual_types != expected_types
+            or primary_keys != ["memoria_id"]
+            or invalid_nullability
+        ):
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt column shape"
+            )
+
+        table_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'memoria_promotion_attempts'"
+        ).fetchone()
+        table_sql = re.sub(
+            r"\s+", " ", (table_row["sql"] if table_row else "").lower()
+        )
+        required_table_fragments = (
+            "check(draft_revision >= 1)",
+            "check(attempt_count between 1 and 3)",
+            "check(last_attempt_at_s >= 0)",
+            "check(length(last_failure_code) between 1 and 48)",
+            "check(last_failure_code not glob '*[^a-z0-9_]*')",
+            "check(promotion_state in ('pending', 'deferred'))",
+            "promotion_state = 'pending'",
+            "attempt_count in (1, 2)",
+            "next_attempt_at_s > last_attempt_at_s",
+            "promotion_state = 'deferred'",
+            "attempt_count = 3",
+            "next_attempt_at_s is null",
+        )
+        if any(
+            fragment not in table_sql
+            for fragment in required_table_fragments
+        ):
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt constraints"
+            )
+
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(memoria_promotion_attempts)"
+        ).fetchall()
+        valid_foreign_key = (
+            len(foreign_keys) == 1
+            and foreign_keys[0]["table"] == "memorias"
+            and foreign_keys[0]["from"] == "memoria_id"
+            and foreign_keys[0]["to"] == "id"
+            and foreign_keys[0]["on_delete"].upper() == "CASCADE"
+        )
+        if not valid_foreign_key:
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt foreign key"
+            )
+
+        indexes = {
+            row["name"]: re.sub(
+                r"\s+", " ", (row["sql"] or "").lower()
+            )
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'index'"
+            )
+        }
+        required_indexes = {
+            "idx_memoria_promotion_attempts_due",
+            "idx_memorias_unjudged_drafts",
+        }
+        if not required_indexes.issubset(indexes):
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt indexes"
+            )
+        expected_index_columns = {
+            "idx_memoria_promotion_attempts_due": [
+                "next_attempt_at_s",
+                "memoria_id",
+            ],
+            "idx_memorias_unjudged_drafts": [
+                "profile_id",
+                "updated_at",
+                "id",
+            ],
+        }
+        for name, expected in expected_index_columns.items():
+            actual = [
+                row["name"]
+                for row in conn.execute(f"PRAGMA index_info('{name}')")
+            ]
+            if actual != expected:
+                raise sqlite3.DatabaseError(
+                    "invalid memoria promotion-attempt index columns"
+                )
+        if (
+            "where promotion_state = 'pending'"
+            not in indexes["idx_memoria_promotion_attempts_due"]
+            or "where status = 'draft' and judged_at = '' "
+            "and private = 0 and inactive = 0"
+            not in indexes["idx_memorias_unjudged_drafts"]
+        ):
+            raise sqlite3.DatabaseError(
+                "invalid memoria promotion-attempt index predicates"
+            )
 
     def _execute_write(self, sql: str, params: list[object], *, error_label: str, raising: bool = False) -> bool:
         """Run a write; return True when it affected >=1 row.

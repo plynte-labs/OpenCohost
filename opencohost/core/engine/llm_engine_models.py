@@ -7,6 +7,7 @@ import requests
 import socket
 import threading
 import time
+import types
 import uuid
 from typing import Optional
 
@@ -30,6 +31,72 @@ from opencohost.core.providers.llm_tiers import LLMTierConfig
 from opencohost.core import llm_engine as _eng
 
 class ModelManagementMixin:
+    def _probe_ollama_service(self, timeout: float = 3.0) -> bool:
+        """Pure, side-effect-free, bounded health check for Ollama daemon.
+
+        Returns True if Ollama responds to list() without raising, False otherwise.
+        Uses a short-timeout client (default 3.0s) so socket timeouts cancel in flight.
+        Never mutates `is_ready`, never triggers `_prepare_model` or warming,
+        never applies pending switches, and never emits UI callbacks.
+        """
+        if not self._is_local:
+            return True
+        try:
+            client = self._select_ollama_probe_client(timeout)
+            if client is None:
+                return False
+            client.list()
+            return True
+        except Exception:
+            return False
+
+    def _select_ollama_probe_client(self, timeout: float = 3.0):
+        probe_client = getattr(self, "_ollama_probe_client", None)
+        if probe_client is not None:
+            return probe_client
+        if hasattr(self, "ollama") and self.ollama is not None:
+            client_factory = getattr(self.ollama, "Client", None)
+            if isinstance(self.ollama, types.ModuleType) and client_factory is not None:
+                try:
+                    probe_client = client_factory(timeout=timeout)
+                    self._ollama_probe_client = probe_client
+                    return probe_client
+                except Exception:
+                    return self.ollama
+            return self.ollama
+        return None
+
+    def _reconcile_local_readiness(self) -> bool:
+        """Reconcile local Ollama readiness with provider_epoch snapshot.
+
+        Captures provider_epoch before probing. If probe succeeds and epoch/provider
+        did not change concurrently, sets self.is_ready = True under self._lock.
+        Returns True if engine is (or became) ready in local mode, False otherwise.
+        """
+        with self._lock:
+            if not self._is_local:
+                return True
+            probe_epoch = self.provider_epoch
+
+        success = self._probe_ollama_service()
+
+        with self._lock:
+            if (
+                success
+                and self.provider_epoch == probe_epoch
+                and self._cfg_is_local(self._provider_config)
+            ):
+                self.is_ready = True
+                return True
+            elif (
+                not success
+                and self.provider_epoch == probe_epoch
+                and self._cfg_is_local(self._provider_config)
+            ):
+                self.is_ready = False
+                return False
+            return self.is_ready
+
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         if not self._is_local:
             # Cloud provider active: no local Ollama service to probe or warm.
@@ -140,8 +207,27 @@ class ModelManagementMixin:
             self.ui_callback("llm_tier_switch_failed")
             return False
 
+        if not self.is_ready and self._is_local:
+            self._reconcile_local_readiness()
+
+        if not self.is_ready:
+            self._last_switch_failure = {
+                "requested_tier": target_tier,
+                "requested": target_model,
+                "current_tier": previous_tier,
+                "current": previous_model,
+                "reason": "ollama_not_ready",
+            }
+            self._log(
+                f"Tier LLM '{target_tier}' ({target_model}) rechazado: motor no está listo; "
+                f"se mantiene {previous_tier} ({previous_model}).",
+                level="warning",
+            )
+            self.ui_callback("llm_tier_switch_failed")
+            return False
+
         try:
-            if self.is_ready and not self._prepare_model(target_model):
+            if not self._prepare_model(target_model):
                 raise RuntimeError("target_model_unavailable")
             self.llm_tiers.switch_to(target_tier)
             self.current_model = target_model

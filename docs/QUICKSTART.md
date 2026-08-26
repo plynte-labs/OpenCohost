@@ -197,6 +197,21 @@ To enable verbose logging, set `OPENCOHOST_DEBUG=1` before launching. `pnpm taur
 already sets it — but only for a backend it spawns itself, so a backend you started
 separately will not pick it up.
 
+Memory-promotion diagnostics are a separate, privacy-safe opt-in and remain off even
+when verbose logging is enabled. Set the variable in the shell that launches the app:
+
+```powershell
+$env:OPENCOHOST_MEMORY_PROMOTION_DIAGNOSTICS = "1"
+pnpm tauri:debug
+```
+
+A backend restart is required after changing the variable. The runtime log then gains
+local `[MEMORY_SWEEP]` lifecycle lines with bounded counts, durations, reason codes,
+and domain-separated 16-character hashes. They never include profile names or IDs,
+model tags, memory/prompt/rewrite text, usernames, database paths, or exception text.
+No diagnostic is persisted anywhere beyond the existing local runtime log and no
+diagnostic is exposed through the API or desktop UI.
+
 ---
 
 ## Troubleshooting

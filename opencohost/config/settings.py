@@ -87,6 +87,11 @@ DEFAULT_MODEL = "llama3"
 # on timeout), and returns adjacent topic titles as DRAFTED-ready dicts.
 # OFF by default until adjacency is validated against a real model at runtime.
 SCOUT_ENABLED: bool = False
+# Restart-scoped, metadata-only promotion diagnostics. Exact-one keeps every
+# other value off and avoids coupling this privacy boundary to broad debug mode.
+MEMORY_PROMOTION_DIAGNOSTICS = (
+    os.getenv("OPENCOHOST_MEMORY_PROMOTION_DIAGNOSTICS") == "1"
+)
 # Dedicated HTTP timeout for the scout client (seconds). MUST stay strictly below
 # the idle re-arm window (~13.5s = 3 ticks x 4500ms) so a synchronous scout can
 # never overlap the next dispatch on the single runner.

@@ -22,7 +22,7 @@ dependencies = [
     # Tauri/API composition root (opencohost.api.main) and EngineHost runtime.
     "fastapi>=0.115.0",
     "httpx>=0.27.0",
-    "ollama>=0.2.1",
+    "ollama>=0.6.2",
     "pydantic>=2.0.0",
     "requests>=2.31.0",
     "pygame>=2.5.2",

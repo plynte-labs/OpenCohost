@@ -1,7 +1,7 @@
 """Strict-TDD tests for the memoria draft-promotion sweep
 (memory_promotion_20260725, WU3 + WU4).
 
-ONE LLM call per launch judges the oldest unjudged drafts, rewrites the
+ONE LLM call per eligible maintenance sweep judges the oldest unjudged drafts, rewrites the
 survivors so they stand alone, and promotes them. Every model call here goes
 through the SAME injectable seam the Topic Scout tests use
 (`_ollama_chat_with_watchdog(chat_callable=...)`), threaded in as
@@ -18,14 +18,18 @@ import json
 import logging
 import queue
 import sqlite3
-import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 import opencohost.core.llm_engine as llm_engine
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.memory.memoria_store import MemoriaStore, build_signature
+from opencohost.core.memory.promotion_backoff_store import (
+    PromotionBackoffStore,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,13 +44,8 @@ def _make_motor(monkeypatch, tmp_path, *, profile_id="profile-1"):
     would silently depend on whichever provider the machine running the suite
     happens to have active.
 
-    `current_model`/`_last_known_good_model` are ALSO pinned explicitly to the
-    same "m" as `_loaded_model`: owner decision 2026-08-08 (F16) makes
-    `_judge_model()` fall back to `_last_known_good_model or current_model`
-    whenever nothing is resident, and both attributes otherwise come from the
-    constructor's real `resolve_startup_model()` call — without this pin, any
-    test exercising that fallback would silently depend on the local disk
-    config of the machine running the suite.
+    The fake local ``Client.ps()`` reports the motor's live `_loaded_model`, so
+    every judge test proves residency without touching a real Ollama daemon.
     """
     monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
     monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
@@ -59,29 +58,29 @@ def _make_motor(monkeypatch, tmp_path, *, profile_id="profile-1"):
     motor._loaded_model = "m"
     motor.current_model = "m"
     motor._last_known_good_model = "m"
+    resident_client = MagicMock()
+    resident_client.ps.side_effect = lambda: SimpleNamespace(
+        models=[SimpleNamespace(model=motor._loaded_model)]
+    )
+    motor.ollama.Client.return_value = resident_client
     motor._pending_model_switch = None
     motor._awaiting_first_success_after_switch = False
     motor._check_capabilities_reasoning = lambda model: False
+    motor._promotion_wall_clock = lambda: 100
     return motor
 
 
 def _go_cloud(motor, *, model="glm-5.2"):
-    """Put the motor on the owner's ACTUAL configuration: a cloud provider, and
-    therefore NO resident local model for the whole process (`_check_ollama_service`
-    returns before `_prepare_model`, and `_prepare_model` returns without ever
-    assigning `_loaded_model`).
+    """Activate cloud foreground while leaving an already-resident local model.
 
-    Deliberately leaves `current_model`/`_last_known_good_model` at whatever
-    `_make_motor` pinned ("m") — owner decision 2026-08-08 (F16) means the
-    judge must fall back to THAT local model, never to `model` (the active
-    cloud profile's model), which is why every promotion call in these tests
-    keeps requesting "m" even after this call.
+    This represents a provider switch after local use. Promotion may use only
+    the exact model Ollama still reports resident; it never falls back to a
+    configured-but-unloaded model and never follows the cloud profile.
     """
     motor._provider_config = {
         "active_provider": "nvidia_nim",
         "profiles": {"nvidia_nim": {"base_url": "https://x/v1", "model": model}},
     }
-    motor._loaded_model = None
     return motor
 
 
@@ -93,6 +92,23 @@ def _row(tmp_path, row_id):
     with sqlite3.connect(str(tmp_path / "memorias.db")) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute("SELECT * FROM memorias WHERE id = ?", (row_id,)).fetchone()
+
+
+def _attempt(tmp_path, row_id):
+    with sqlite3.connect(str(tmp_path / "memorias.db")) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM memoria_promotion_attempts WHERE memoria_id = ?",
+            (row_id,),
+        ).fetchone()
+
+
+def _backoff_path(tmp_path):
+    return tmp_path / "memoria_promotion_backoff.db"
+
+
+def _backoff_state(tmp_path, profile_id="profile-1"):
+    return PromotionBackoffStore(_backoff_path(tmp_path)).get_state(profile_id)
 
 
 def _seed_draft(store, profile_id, key_suffix, content, *, private=False):
@@ -130,6 +146,12 @@ def _decisions(*entries) -> str:
     return json.dumps({"decisions": list(entries)})
 
 
+class _StatusError(RuntimeError):
+    def __init__(self, status_code: int):
+        super().__init__("bounded test status")
+        self.status_code = status_code
+
+
 # ---------------------------------------------------------------------------
 # Gates — the sweep must never spend a token when it cannot act
 # ---------------------------------------------------------------------------
@@ -144,8 +166,7 @@ def test_zero_drafts_never_calls_the_model(monkeypatch, tmp_path):
     assert counts["considered"] == 0
     assert counts["kept"] == 0
     assert counts["rejected"] == 0
-    # NOT a gate: the sweep reached the store and found nothing, so the startup
-    # latch must arm. A blanket "return zero counts" would report a gate here.
+    # NOT a gate: the sweep reached the store and found nothing.
     assert counts["skipped"] == ""
 
 
@@ -158,13 +179,13 @@ def test_engine_gates_skip_the_call_entirely(monkeypatch, tmp_path, attr, value)
     """`_make_motor` pins `_provider_config` local precisely so this
     parametrisation cannot silently become "the feature is dead on cloud".
 
-    NOTE: `_loaded_model=None` is NOT parametrized here anymore — see
-    test_loaded_model_none_alone_no_longer_gates_the_sweep and
-    test_no_local_model_at_all_gates_the_sweep_quietly, which cover its new
-    (post owner decision 2026-08-08, F16) behavior instead.
+    Residency has its own fail-closed tests below.
     """
     motor = _make_motor(monkeypatch, tmp_path)
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "k1",
+        "el streamer juega Silksong los martes",
+    )
     setattr(motor, attr, value)
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
 
@@ -172,62 +193,101 @@ def test_engine_gates_skip_the_call_entirely(monkeypatch, tmp_path, attr, value)
 
     assert stub.calls == []
     assert counts["considered"] == 0
-    # Naming the gate is what stops this from also passing against a sweep that
-    # simply does nothing — and is what run()'s latch reads.
+    # Naming the gate stops this from also passing against a sweep that simply
+    # does nothing.
     assert counts["skipped"] == {
         "_pending_model_switch": "model_switch_pending",
         "_awaiting_first_success_after_switch": "model_switch_pending",
         "_current_profile_id": "no_profile",
     }[attr]
+    assert _attempt(tmp_path, row_id) is None
+    assert _backoff_state(tmp_path) is None
 
 
-def test_loaded_model_none_alone_no_longer_gates_the_sweep(monkeypatch, tmp_path):
-    """Owner decision 2026-08-08 (F16): `_judge_model()` now falls back to
-    `_last_known_good_model or current_model` when nothing is resident, so a
-    bare `_loaded_model=None` (e.g. the local warm-up race, or the owner's
-    cloud provider being active) no longer blocks the sweep by itself — it
-    just requests the fallback local model instead of cold-loading the
-    resident one."""
+def test_no_loaded_model_gates_without_a_residency_probe(monkeypatch, tmp_path):
     motor = _make_motor(monkeypatch, tmp_path)
     motor._loaded_model = None
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "k1",
+        "el streamer juega Silksong los martes",
+    )
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert len(stub.calls) == 1
-    assert stub.calls[0]["model"] == "m"
-    assert counts["skipped"] == ""
+    assert stub.calls == []
+    assert motor.ollama.Client.call_count == 0
+    assert counts["skipped"] == "model_not_loaded"
+    assert _attempt(tmp_path, row_id) is None
+    assert _backoff_state(tmp_path) is None
 
 
-def test_no_local_model_at_all_gates_the_sweep_quietly(monkeypatch, tmp_path):
-    """The one case that still gates proactively: no local model name can be
-    resolved from ANY of the three sources (fresh install, nothing ever
-    configured). Fails open BEFORE spending a token, same contract as every
-    other gate."""
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(models=[]),
+        SimpleNamespace(models=[SimpleNamespace(model="other")]),
+        SimpleNamespace(models=[{"model": "m"}]),
+        SimpleNamespace(),
+    ],
+    ids=["absent", "mismatch", "dict-is-malformed", "missing-models"],
+)
+def test_unconfirmed_residency_never_calls_the_judge(
+    monkeypatch, tmp_path, response
+):
     motor = _make_motor(monkeypatch, tmp_path)
-    motor._loaded_model = None
-    motor._last_known_good_model = None
-    motor.current_model = ""
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    client = motor.ollama.Client.return_value
+    client.ps.side_effect = None
+    client.ps.return_value = response
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "k1",
+        "el streamer juega Silksong los martes",
+    )
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
     assert stub.calls == []
     assert counts["considered"] == 0
-    assert counts["skipped"] == "no_local_model"
+    assert counts["skipped"] == "model_not_resident"
 
 
-def test_cloud_provider_sweeps_using_the_local_fallback_model_not_the_cloud_one(monkeypatch, tmp_path):
-    """Owner decision 2026-08-08 (F16), superseding the earlier "whatever
-    provider is active" decision: the judge is pinned LOCAL always. On cloud
-    `_loaded_model` is None for the ENTIRE process (`_check_ollama_service`
-    returns before `_prepare_model`, which itself never assigns it), so the
-    judge must fall back to `_last_known_good_model`/`current_model` ("m") —
-    NEVER to the active cloud profile's model ("glm-5.2", set by `_go_cloud`).
-    """
+def test_failed_residency_probe_never_calls_the_judge(monkeypatch, tmp_path):
+    motor = _make_motor(monkeypatch, tmp_path)
+    motor.ollama.Client.return_value.ps.side_effect = TimeoutError(
+        "local ps timeout"
+    )
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "k1",
+        "el streamer juega Silksong los martes",
+    )
+    stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls == []
+    assert counts["skipped"] == "model_not_resident"
+
+
+def test_exact_resident_model_allows_judge_with_short_local_probe(monkeypatch, tmp_path):
+    motor = _make_motor(monkeypatch, tmp_path)
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "el streamer juega Silksong los martes")
+    stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    motor.ollama.Client.assert_called_once_with(
+        timeout=llm_engine._PROMOTION_RESIDENCY_TIMEOUT_SECONDS
+    )
+    motor.ollama.Client.return_value.ps.assert_called_once_with()
+    assert len(stub.calls) == 1
+    assert stub.calls[0]["model"] == "m"
+    assert counts["skipped"] == ""
+
+
+def test_cloud_provider_without_a_resident_local_model_never_calls_judge(monkeypatch, tmp_path):
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path))
+    motor._loaded_model = None
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
     judged = "El streamer corre el juez de memorias localmente."
@@ -235,10 +295,10 @@ def test_cloud_provider_sweeps_using_the_local_fallback_model_not_the_cloud_one(
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert len(stub.calls) == 1
-    assert stub.calls[0]["model"] == "m"  # the LOCAL fallback, never "glm-5.2"
-    assert _row(tmp_path, row_id)["status"] == "promoted"
-    assert counts["kept"] == 1
+    assert stub.calls == []
+    assert motor.ollama.Client.call_count == 0
+    assert _row(tmp_path, row_id)["status"] == "draft"
+    assert counts["skipped"] == "model_not_loaded"
 
 
 def test_the_sweep_announces_a_kept_memoria_to_the_owner(monkeypatch, tmp_path):
@@ -311,14 +371,11 @@ def test_a_sweep_that_keeps_nothing_stays_silent(monkeypatch, tmp_path):
     assert "memoria_captured" not in events
 
 
-def test_reasoning_model_is_detected_from_the_resolved_local_fallback_model(monkeypatch, tmp_path):
-    """`_fetch_show`/`_check_capabilities_reasoning` are stubbed to False (older
-    Ollama / no probe) here, so the reasoning branch has to come from the name
-    heuristic applied to the model the judge ACTUALLY requests — the resolved
-    local fallback, even though the active provider is cloud and its profile
-    model ("glm-5.2") carries no such marker."""
+def test_qwen3_uses_boolean_think_false_on_the_resolved_local_model(monkeypatch, tmp_path):
+    """The maintenance controls apply to the local model actually requested,
+    even while the foreground provider is cloud."""
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
-    motor._last_known_good_model = "qwen3:8b"
+    motor._loaded_model = "qwen3:8b"
     _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso Qwen3 en local para juzgar")
     stub = _Recorder(_decisions())
 
@@ -326,7 +383,8 @@ def test_reasoning_model_is_detected_from_the_resolved_local_fallback_model(monk
 
     assert len(stub.calls) == 1
     assert stub.calls[0]["model"] == "qwen3:8b"
-    assert "num_predict" not in stub.calls[0]["options"]
+    assert stub.calls[0].get("think") is False
+    assert stub.calls[0]["options"]["num_predict"] == 512
 
 
 def test_memorias_disabled_skips_the_call(monkeypatch, tmp_path):
@@ -495,22 +553,42 @@ def test_promoted_rows_are_never_re_sent_to_the_judge(monkeypatch, tmp_path):
     assert "sintetizadores modulares vintage" not in second.prompt
 
 
-def test_batch_is_capped_at_forty_oldest_first(monkeypatch, tmp_path):
+def test_batch_is_capped_at_eight_oldest_first(monkeypatch, tmp_path):
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
-    for i in range(60):
+    for i in range(12):
         _seed_draft(store, "profile-1", f"k{i:03d}", f"streamer: contenido numerado {i:03d} sobre juegos")
     stub = _Recorder(_decisions())
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert counts["considered"] == llm_engine._PROMOTION_DRAFT_BATCH == 40
+    assert counts["considered"] == llm_engine._PROMOTION_DRAFT_BATCH == 8
     prompt = stub.prompt
-    # Oldest first: 000..039 are in the prompt, 040+ are not.
+    # Oldest first: 000..007 are in the prompt, 008+ are not.
     assert "contenido numerado 000" in prompt
-    assert "contenido numerado 039" in prompt
-    assert "contenido numerado 040" not in prompt
-    assert "contenido numerado 059" not in prompt
+    assert "contenido numerado 007" in prompt
+    assert "contenido numerado 008" not in prompt
+    assert "contenido numerado 011" not in prompt
+
+
+def test_batch_stops_before_exceeding_five_thousand_draft_characters(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    store = _store(tmp_path)
+    contents = [f"DRAFT_{i:02d} " + ("x" * 980) for i in range(6)]
+    for i, content in enumerate(contents):
+        _seed_draft(store, "profile-1", f"k{i:03d}", content)
+    stub = _Recorder(_decisions())
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert counts["considered"] == 5
+    assert llm_engine._PROMOTION_DRAFT_CHARS == 5_000
+    assert sum(len(content) for content in contents[:5]) <= llm_engine._PROMOTION_DRAFT_CHARS
+    for i in range(5):
+        assert f"DRAFT_{i:02d}" in stub.prompt
+    assert "DRAFT_05" not in stub.prompt
 
 
 def test_private_rows_never_reach_the_judge(monkeypatch, tmp_path):
@@ -540,13 +618,334 @@ def test_other_profiles_drafts_are_never_sent(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Failure paths — nothing written, nothing judged, next launch retries
+# Infrastructure failures: draft untouched, profile retry durable
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("failure", "failure_class"),
+    [
+        (TimeoutError("bounded watchdog"), "judge_watchdog"),
+        (ConnectionError("offline"), "model_transport"),
+        (httpx.ConnectError("offline"), "model_transport"),
+        (_StatusError(404), "model_unavailable"),
+        (_StatusError(503), "model_server_error"),
+        (RuntimeError("unexpected"), "unexpected_precommit"),
+    ],
+)
+def test_model_infrastructure_failures_back_off_profile_not_draft(
+    monkeypatch, tmp_path, failure, failure_class,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "infra",
+        "streamer: uso Ollama con Qwen3 en local",
+    )
+
+    counts = motor.promote_pending_drafts(chat_callable=_Recorder(failure))
+
+    state = _backoff_state(tmp_path)
+    assert state.failure_count == 1
+    assert state.last_failure_at_s == 100
+    assert state.next_attempt_at_s == 160
+    assert state.last_failure_class == failure_class
+    assert _attempt(tmp_path, row_id) is None
+    assert _row(tmp_path, row_id)["judged_at"] == ""
+    assert counts["kept"] == counts["rejected"] == 0
+
+
+@pytest.mark.parametrize("reply", ["", "not json", "{}", "{malformed"])
+def test_malformed_top_level_records_protocol_backoff_without_draft_charge(
+    monkeypatch, tmp_path, reply,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "protocol",
+        "streamer: uso Ollama con Qwen3 en local",
+    )
+
+    motor.promote_pending_drafts(chat_callable=_Recorder(reply))
+
+    assert _backoff_state(tmp_path).last_failure_class == "protocol_malformed"
+    assert _attempt(tmp_path, row_id) is None
+
+
+def test_valid_empty_result_charges_missing_draft_at_exact_five_minutes(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "missing",
+        "streamer: uso Ollama con Qwen3 en local",
+    )
+
+    counts = motor.promote_pending_drafts(
+        chat_callable=_Recorder(_decisions()),
+    )
+
+    attempt = _attempt(tmp_path, row_id)
+    assert attempt["attempt_count"] == 1
+    assert attempt["last_attempt_at_s"] == 100
+    assert attempt["next_attempt_at_s"] == 400
+    assert attempt["last_failure_code"] == "missing_decision"
+    assert attempt["promotion_state"] == "pending"
+    assert _backoff_state(tmp_path) is None
+    assert counts["decided"] == 0
+    assert counts["reasons"]["missing_decision"] == 1
+
+
+def test_partial_valid_response_charges_only_the_unresolved_current_index(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    store = _store(tmp_path)
+    first_id = _seed_draft(
+        store, "profile-1", "first",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    second_id = _seed_draft(
+        store, "profile-1", "second",
+        "streamer: prefiere sintetizadores modulares analogicos",
+    )
+    reply = _decisions(
+        {
+            "i": 1,
+            "keep": True,
+            "text": "El streamer usa Ollama local para mantener privacidad.",
+        },
+        {"i": 2, "keep": "invalid"},
+    )
+
+    counts = motor.promote_pending_drafts(chat_callable=_Recorder(reply))
+
+    assert _row(tmp_path, first_id)["status"] == "promoted"
+    assert _attempt(tmp_path, first_id) is None
+    attempt = _attempt(tmp_path, second_id)
+    assert attempt["last_failure_code"] == "invalid_decision"
+    assert attempt["next_attempt_at_s"] == 400
+    assert counts["kept"] == 1
+    assert counts["reasons"]["invalid_decision"] == 1
+
+
+def test_active_profile_backoff_causes_zero_model_calls_until_boundary(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "active",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    motor.promote_pending_drafts(
+        chat_callable=_Recorder(ConnectionError("offline")),
+    )
+    success = _Recorder(_decisions({
+        "i": 1,
+        "keep": True,
+        "text": "El streamer usa Ollama local para mantener privacidad.",
+    }))
+
+    motor._promotion_wall_clock = lambda: 159
+    blocked = motor.promote_pending_drafts(chat_callable=success)
+    assert blocked["skipped"] == "profile_backoff"
+    assert success.calls == []
+
+    motor._promotion_wall_clock = lambda: 160
+    allowed = motor.promote_pending_drafts(chat_callable=success)
+    assert len(success.calls) == 1
+    assert allowed["kept"] == 1
+    assert _row(tmp_path, row_id)["status"] == "promoted"
+
+
+def test_cooling_draft_causes_zero_model_calls_until_exact_boundary(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    _seed_draft(
+        _store(tmp_path), "profile-1", "cooling",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    motor.promote_pending_drafts(chat_callable=_Recorder(_decisions()))
+    next_reply = _Recorder(_decisions({
+        "i": 1,
+        "keep": False,
+        "reason": "vague",
+    }))
+
+    motor._promotion_wall_clock = lambda: 399
+    motor.promote_pending_drafts(chat_callable=next_reply)
+    assert next_reply.calls == []
+
+    motor._promotion_wall_clock = lambda: 400
+    result = motor.promote_pending_drafts(chat_callable=next_reply)
+    assert len(next_reply.calls) == 1
+    assert result["rejected"] == 1
+
+
+def test_due_draft_waits_for_later_profile_deadline(monkeypatch, tmp_path):
+    motor = _make_motor(monkeypatch, tmp_path)
+    _seed_draft(
+        _store(tmp_path), "profile-1", "later",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    motor.promote_pending_drafts(chat_callable=_Recorder(_decisions()))
+    backoff = motor._get_promotion_backoff_store()
+    state = backoff.record_failure("profile-1", "model_transport", 390)
+    assert state.next_attempt_at_s == 450
+    next_reply = _Recorder(_decisions({
+        "i": 1,
+        "keep": False,
+        "reason": "vague",
+    }))
+
+    motor._promotion_wall_clock = lambda: 400
+    motor.promote_pending_drafts(chat_callable=next_reply)
+    assert next_reply.calls == []
+
+    motor._promotion_wall_clock = lambda: 450
+    result = motor.promote_pending_drafts(chat_callable=next_reply)
+    assert len(next_reply.calls) == 1
+    assert result["rejected"] == 1
+    assert backoff.get_state("profile-1") is None
+
+
+def test_healthy_no_draft_sweep_resets_due_profile_backoff(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    backoff = motor._get_promotion_backoff_store()
+    backoff.record_failure("profile-1", "model_transport", 100)
+    motor._promotion_wall_clock = lambda: 160
+    stub = _Recorder(_decisions())
+
+    motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls == []
+    assert backoff.get_state("profile-1") is None
+
+
+@pytest.mark.parametrize(
+    ("probe", "failure_class"),
+    [
+        (TimeoutError("ps timeout"), "residency_timeout"),
+        (ConnectionError("ps offline"), "residency_offline"),
+        (SimpleNamespace(), "residency_malformed"),
+        (
+            SimpleNamespace(
+                models=[SimpleNamespace(model="m"), {}],
+            ),
+            "residency_malformed",
+        ),
+    ],
+)
+def test_residency_infrastructure_failures_back_off_profile_only(
+    monkeypatch, tmp_path, probe, failure_class,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "residency",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    client = motor.ollama.Client.return_value
+    if isinstance(probe, BaseException):
+        client.ps.side_effect = probe
+    else:
+        client.ps.side_effect = None
+        client.ps.return_value = probe
+    stub = _Recorder(_decisions())
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls == []
+    assert counts["skipped"] == "model_not_resident"
+    assert _backoff_state(tmp_path).last_failure_class == failure_class
+    assert _attempt(tmp_path, row_id) is None
+
+
+def test_valid_absent_resident_model_is_a_normal_gate_without_backoff(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    _seed_draft(
+        _store(tmp_path), "profile-1", "absent",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    client = motor.ollama.Client.return_value
+    client.ps.side_effect = None
+    client.ps.return_value = SimpleNamespace(models=[])
+
+    counts = motor.promote_pending_drafts(
+        chat_callable=_Recorder(_decisions()),
+    )
+
+    assert counts["skipped"] == "model_not_resident"
+    assert _backoff_state(tmp_path) is None
+
+
+def test_locked_read_records_profile_backoff_without_calling_model(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "read-lock",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    blocker = sqlite3.connect(str(tmp_path / "memorias.db"))
+    blocker.execute("BEGIN EXCLUSIVE")
+    stub = _Recorder(_decisions())
+    try:
+        motor.promote_pending_drafts(chat_callable=stub)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert stub.calls == []
+    assert _attempt(tmp_path, row_id) is None
+    assert _backoff_state(tmp_path).last_failure_class == "sqlite_read"
+
+
+def test_locked_atomic_write_rolls_back_and_notifies_only_after_commit(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    events = []
+    motor.ui_callback = events.append
+    row_id = _seed_draft(
+        _store(tmp_path), "profile-1", "write-lock",
+        "streamer: usa Ollama local para mantener privacidad",
+    )
+    before = dict(_row(tmp_path, row_id))
+    blockers = []
+
+    def lock_then_reply(**_kwargs):
+        blocker = sqlite3.connect(
+            str(tmp_path / "memorias.db"), check_same_thread=False,
+        )
+        blocker.execute("BEGIN EXCLUSIVE")
+        blockers.append(blocker)
+        return _decisions({
+            "i": 1,
+            "keep": True,
+            "text": "El streamer usa Ollama local para mantener privacidad.",
+        })
+
+    try:
+        counts = motor.promote_pending_drafts(
+            chat_callable=_Recorder(lock_then_reply),
+        )
+    finally:
+        for blocker in blockers:
+            blocker.rollback()
+            blocker.close()
+
+    assert dict(_row(tmp_path, row_id)) == before
+    assert _attempt(tmp_path, row_id) is None
+    assert counts["kept"] == 0
+    assert events == []
+    assert _backoff_state(tmp_path).last_failure_class == "sqlite_write"
 
 @pytest.mark.parametrize("reply", [
     TimeoutError("watchdog_timeout:25.00s"),
     RuntimeError("provider offline"),
-    "",                       # reasoning model that spent the whole budget in <think>
+    "",                       # bounded model response with no visible content
     "Claro, aca va mi analisis del asunto",
     "{malformed",
     "{}",
@@ -623,11 +1022,14 @@ def test_operator_editing_mid_sweep_keeps_his_own_text_and_his_curated_status(mo
     assert counts["stale"] == 1
 
 
-def test_operator_refreshing_a_draft_mid_sweep_is_not_rejected_on_stale_text(monkeypatch, tmp_path):
-    """The reject mirror of the keep race. `mark_judged` matched on id alone, so
-    a draft refreshed with BETTER content during the sweep window was hidden on
-    the strength of a judgment of text it no longer held — and stamped judged,
-    so nothing ever re-examined it."""
+def test_operator_refreshing_a_draft_mid_sweep_is_not_rejected_on_stale_text(
+    monkeypatch, tmp_path,
+):
+    """The reject path revalidates revision before hiding a draft.
+
+    A draft refreshed with better content during the sweep must not be hidden
+    or stamped on the strength of a judgment of text it no longer holds.
+    """
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: hubo una correccion algo tecnico")
@@ -698,7 +1100,9 @@ def test_operator_muted_draft_is_never_shipped_to_the_provider(monkeypatch, tmp_
     assert _row(tmp_path, muted_id)["inactive"] == 1
 
 
-def test_a_locked_store_is_reported_as_write_failed_not_as_a_lost_race(monkeypatch, tmp_path):
+def test_a_locked_atomic_apply_is_profile_failure_not_a_lost_race(
+    monkeypatch, tmp_path,
+):
     """`stale` means "the operator was speaking on this topic during the sweep".
     A fail-open lock counted as `stale` sends the owner tuning judge criteria
     against a phantom."""
@@ -710,38 +1114,44 @@ def test_a_locked_store_is_reported_as_write_failed_not_as_a_lost_race(monkeypat
     def locked(*a, **kw):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(real_store, "update_row", locked)
+    monkeypatch.setattr(real_store, "apply_promotion_batch", locked)
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "El streamer corre Qwen3 en su maquina."}))
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
     assert counts["stale"] == 0
-    assert counts["reasons"]["write_failed"] == 1
     assert counts["kept"] == 0
     assert _row(tmp_path, row_id)["judged_at"] == ""
+    assert _backoff_state(tmp_path).last_failure_class == "sqlite_write"
 
 
-def test_kept_counts_rows_written_even_when_the_bookkeeping_stamp_fails(monkeypatch, tmp_path):
-    """The counters are the owner's ONLY feedback loop on the judge's criteria.
-    `kept=0` on a launch that genuinely rewrote and promoted rows on disk is the
-    one observability surface lying about what happened."""
+def test_judgment_update_failure_never_persists_or_counts_a_keep(
+    monkeypatch, tmp_path,
+):
+    """Content, status, and judgment are one transaction, never partial."""
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso Ollama con Qwen3 en local")
-    real_store = motor._get_memoria_store()
-
-    def locked(*a, **kw):
-        raise sqlite3.OperationalError("database is locked")
-
-    monkeypatch.setattr(real_store, "mark_judged", locked)
+    before = dict(_row(tmp_path, row_id))
+    with sqlite3.connect(str(tmp_path / "memorias.db")) as conn:
+        conn.execute(
+            f"""
+            CREATE TRIGGER fail_judgment_update
+            BEFORE UPDATE OF judged_at ON memorias
+            WHEN OLD.id = '{row_id}'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected judgment failure');
+            END
+            """
+        )
     judged = "El streamer corre Qwen3 sobre Ollama en su propia maquina."
     stub = _Recorder(_decisions({"i": 1, "keep": True, "text": judged}))
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert _row(tmp_path, row_id)["status"] == "promoted"
-    assert counts["kept"] == 1
-    assert counts["reasons"]["write_failed"] == 1
+    assert dict(_row(tmp_path, row_id)) == before
+    assert counts["kept"] == 0
+    assert _backoff_state(tmp_path).last_failure_class == "sqlite_write"
 
 
 def test_promote_pending_drafts_never_raises_on_a_store_failure(monkeypatch, tmp_path):
@@ -790,15 +1200,14 @@ def test_a_part_answered_batch_reports_how_many_the_judge_actually_decided(
     monkeypatch, tmp_path, caplog
 ):
     """Live sweep 2026-08-14 10:15:52 read `considered=12 kept=3 rejected=0
-    remaining=9`. Nine drafts came back with no verdict at all, because
-    _parse_promotion_decisions drops every unusable entry in silence — here a
-    `keep` written as the string "yes" instead of a bool. Those rows keep no
-    judged_at, so they return next launch and can fail the same way forever,
-    which is what a pile of unjudged drafts looks like from the outside.
+    remaining=9`. Nine drafts came back with no verdict at all because the
+    parser drops every unusable entry — here, a `keep` written as the string
+    "yes" instead of a bool. Those rows remain unjudged but now receive bounded
+    per-draft retry metadata instead of returning on every launch forever.
 
-    kept+rejected cannot stand in for this: a decision can be applied and still
-    lose the update_row revision race, landing in neither bucket. `decided` is
-    the judge's own answer rate, and the gap against `considered` is the bug.
+    kept+rejected cannot stand in for this: a parsed decision can still lose
+    atomic row revalidation and land in neither bucket. `decided` is the
+    judge's own answer rate, and the gap against `considered` is the bug.
     """
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
@@ -833,40 +1242,36 @@ def test_a_part_answered_batch_reports_how_many_the_judge_actually_decided(
 
 
 # ---------------------------------------------------------------------------
-# The reasoning branch and the adaptive budget
+# Bounded inference controls and the adaptive watchdog
 # ---------------------------------------------------------------------------
 
-def test_reasoning_model_gets_no_num_predict_cap(monkeypatch, tmp_path):
-    """scout_digest's sixth gate would disable promotion FOREVER on Qwen3-class
-    models. Drop the token cap instead, the way _generar_dialogo already does."""
-    motor = _make_motor(monkeypatch, tmp_path)
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso Ollama con Qwen3 en local")
-    motor._check_capabilities_reasoning = lambda model: True
-    stub = _Recorder(_decisions())
-
-    motor.promote_pending_drafts(chat_callable=stub)
-
-    assert "num_predict" not in stub.calls[0]["options"]
-
-
-def test_reasoning_detection_uses_the_name_heuristic_not_only_the_capability_probe(
+def test_maintenance_request_uses_schema_and_deterministic_bounded_options(
     monkeypatch, tmp_path,
 ):
-    """`_check_capabilities_reasoning` degrades to False on any older Ollama
-    whose `show` response carries no `capabilities` field. Detecting reasoning
-    with that narrow probe alone caps `num_predict` on a Qwen3-class model, which
-    then burns the budget inside <think> and returns empty content — the same 25s
-    inference re-paid every launch with zero promotions, forever. The engine's own
-    resolver (which `_generar_dialogo` already trusts) ORs in the name heuristic."""
     motor = _make_motor(monkeypatch, tmp_path)
     _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso Ollama con Qwen3 en local")
-    motor._loaded_model = "qwen3:8b"
-    motor._check_capabilities_reasoning = lambda model: False   # older Ollama
     stub = _Recorder(_decisions())
 
     motor.promote_pending_drafts(chat_callable=stub)
 
-    assert "num_predict" not in stub.calls[0]["options"]
+    assert stub.calls[0].get("think") is False
+    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
+    assert isinstance(stub.calls[0].get("format"), dict)
+    assert stub.calls[0]["format"].get("title") == "MemoryJudgeResult"
+
+
+def test_gpt_oss_uses_low_thinking_level_with_the_same_hard_limits(
+    monkeypatch, tmp_path,
+):
+    motor = _make_motor(monkeypatch, tmp_path)
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso GPT-OSS en local")
+    motor._loaded_model = "gpt-oss:20b"
+    stub = _Recorder(_decisions())
+
+    motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls[0].get("think") == "low"
+    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
 
 
 def test_plain_model_keeps_the_num_predict_cap(monkeypatch, tmp_path):
@@ -876,7 +1281,37 @@ def test_plain_model_keeps_the_num_predict_cap(monkeypatch, tmp_path):
 
     motor.promote_pending_drafts(chat_callable=stub)
 
-    assert stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
+    assert stub.calls[0].get("think") is False
+    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
+
+
+def test_parse_promotion_decisions_rejects_out_of_bounds_index():
+    from opencohost.core.llm_engine import _parse_promotion_decisions
+    # index 999 is outside batch_len=3
+    raw = json.dumps({"decisions": [{"i": 999, "keep": True, "text": "El streamer colecciona vinilos."}]})
+    assert _parse_promotion_decisions(raw, 3) == []
+
+
+def test_parse_promotion_decisions_rejects_every_duplicate_occurrence():
+    from opencohost.core.llm_engine import _parse_promotion_decisions
+    raw = json.dumps({
+        "decisions": [
+            {"i": 1, "keep": False, "reason": "vague"},
+            {"i": 2, "keep": True, "text": "El streamer programa en Rust."},
+            {"i": 1, "keep": True, "text": "segunda respuesta conflictiva"},
+        ]
+    })
+    assert _parse_promotion_decisions(raw, 2) == [
+        (2, "El streamer programa en Rust.", False, ""),
+    ]
+
+
+def test_parse_promotion_decisions_rejects_invalid_schema_fail_open():
+    from opencohost.core.llm_engine import _parse_promotion_decisions
+    assert _parse_promotion_decisions("not json at all", 3) == []
+    assert _parse_promotion_decisions(json.dumps({"decisions": "not a list"}), 3) == []
+    assert _parse_promotion_decisions(json.dumps({"wrong_key": []}), 3) == []
+
 
 
 def test_the_output_cap_stays_local_sized_even_under_a_cloud_provider(monkeypatch, tmp_path):
@@ -900,49 +1335,30 @@ def test_the_output_cap_stays_local_sized_even_under_a_cloud_provider(monkeypatc
     assert cloud_stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
 
 
-def test_empty_content_with_thinking_retries_once_uncapped_and_promotes(monkeypatch, tmp_path):
-    """The cloud self-heal `_generar_dialogo` already ships and the judge lacked
-    — still exercised here with the active PROVIDER on cloud (`_go_cloud`) to
-    prove the self-heal keeps working once the judge itself is pinned local
-    (owner decision 2026-08-08, F16): the model requested is the resolved
-    local fallback ("m"), never the active profile's "glm-5.2".
-
-    Detection is blind regardless of provider now: the name heuristic knows a
-    handful of markers and "m" carries none, so it is classified "not
-    reasoning", gets `num_predict`, burns the cap inside <think>, and returns
-    empty `content` — the sweep then promotes NOTHING, every launch, forever,
-    paying a full local inference each time. The response itself is the
-    evidence, so no detection is needed: empty text + non-empty `thinking` +
-    a cap in the options means drop the cap and re-issue ONCE.
-    """
+def test_empty_content_fails_open_without_retrying_uncapped(monkeypatch, tmp_path):
+    """With think=False and bounded num_predict, empty content returns 0 promotions
+    safely and leaves drafts unjudged without uncapped loops."""
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
     store = _store(tmp_path)
     row_id = _seed_draft(store, "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
-    judged = "El streamer corre el juez de memorias localmente."
     calls = []
 
     def stub(**kwargs):
-        # Snapshot: the implementation may pop from the options dict in place,
-        # exactly as _generar_dialogo's own self-heal does.
         calls.append({**kwargs, "options": dict(kwargs.get("options") or {})})
-        if len(calls) == 1:
-            return {"message": {"content": "", "thinking": "razonando largo y tendido"}}
-        return {"message": {"content": _decisions({"i": 1, "keep": True, "text": judged})}}
+        return {"message": {"content": ""}}
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["model"] == "m"
-    assert calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
-    assert "num_predict" not in calls[1]["options"]
-    assert calls[1]["messages"] == calls[0]["messages"]
-    assert counts["kept"] == 1
+    assert calls[0]["options"]["num_predict"] == 512
+    assert calls[0]["think"] is False
+    assert counts["kept"] == 0
     row = _row(tmp_path, row_id)
-    assert row["content"] == judged
-    assert row["status"] == "promoted"
+    assert row["judged_at"] == ""  # fail-open: unjudged
 
 
-def test_the_empty_content_retry_is_one_shot_never_a_loop(monkeypatch, tmp_path):
+def test_the_empty_content_is_strictly_single_call_fail_open(monkeypatch, tmp_path):
     motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
     row_id = _seed_draft(
         _store(tmp_path), "profile-1", "k1", "streamer: uso GLM en la nube para el juez",
@@ -955,52 +1371,29 @@ def test_the_empty_content_retry_is_one_shot_never_a_loop(monkeypatch, tmp_path)
 
     counts = motor.promote_pending_drafts(chat_callable=always_thinking)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert counts["kept"] == 0
-    assert _row(tmp_path, row_id)["judged_at"] == ""   # unjudged: next launch retries
+    # The malformed response leaves the draft unjudged; profile backoff
+    # governs its retry.
+    assert _row(tmp_path, row_id)["judged_at"] == ""
 
 
-def test_the_retry_runs_inside_the_first_calls_budget_not_a_fresh_one(monkeypatch, tmp_path):
-    """One retry must not double the operator's worst-case wait: the second call
-    gets what is LEFT of the sweep's deadline, never a second full budget."""
-    motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
-    _seed_draft(_store(tmp_path), "profile-1", "k1", "streamer: uso GLM en la nube para el juez")
-    budgets = []
-    original = motor._ollama_chat_with_watchdog
 
-    def spy(*, timeout, **kwargs):
-        budgets.append(timeout)
-        return original(timeout=timeout, **kwargs)
-
-    motor._ollama_chat_with_watchdog = spy
-
-    def always_thinking(**kwargs):
-        # Long enough to clear the platform clock resolution, so "what is left of
-        # the deadline" is measurably smaller than the deadline itself.
-        time.sleep(0.05)
-        return {"message": {"content": "", "thinking": "sigue razonando"}}
-
-    motor.promote_pending_drafts(chat_callable=always_thinking)
-
-    assert len(budgets) == 2
-    assert budgets[1] < budgets[0]
-
-
-def test_judge_budget_is_derived_from_observed_latency_not_a_constant(monkeypatch, tmp_path):
+def test_judge_watchdog_budget_is_finite_and_derived_from_observed_latency(
+    monkeypatch, tmp_path,
+):
     from opencohost.config.settings import RETRY_MIN_REMAINING_SECONDS
 
     motor = _make_motor(monkeypatch, tmp_path)
 
-    # Cold start (the startup trigger's own path): the SAME fallback
-    # _pregen_retry_gate_seconds already ships.
+    # Cold start uses the same finite fallback _pregen_retry_gate_seconds ships.
     motor._pregen_last_gen_duration = None
     assert motor._judge_timeout_seconds() == RETRY_MIN_REMAINING_SECONDS
 
-    # Cold start on a thinking model: no num_predict cap, so more headroom.
-    # Detected by NAME, with the capability probe left saying False — the older
-    # Ollama case. The narrow probe alone would give this model a 25s budget.
+    # Reasoning capability no longer expands the timeout: maintenance always has
+    # explicit thinking and output limits.
     motor._loaded_model = "qwen3:8b"
-    assert motor._judge_timeout_seconds() == pytest.approx(RETRY_MIN_REMAINING_SECONDS * 3.0)
+    assert motor._judge_timeout_seconds() == RETRY_MIN_REMAINING_SECONDS
 
     # Measured: 2x the last completed generation.
     motor._loaded_model = "m"
@@ -1103,96 +1496,6 @@ def test_scout_client_factory_takes_a_timeout_and_defaults_to_the_scout_one(monk
     assert built == [LLM_SCOUT_TIMEOUT, 42.0]
 
 
-# ---------------------------------------------------------------------------
-# WU4 — the startup call site inside run()'s existing idle branch
-# ---------------------------------------------------------------------------
-
-class _EmptyQueue:
-    """A command_queue that is always empty, then feeds the shutdown sentinel."""
-
-    def __init__(self, idle_ticks):
-        self._remaining = idle_ticks
-
-    def get(self, timeout=None):
-        if self._remaining > 0:
-            self._remaining -= 1
-            raise queue.Empty
-        return None
-
-    def qsize(self):
-        # run()'s idle branch drains control commands (§11 B4 backstop);
-        # the drain sizes its bounded pass off qsize(). Always empty here.
-        return 0
-
-
-def _drive_run(motor, idle_ticks):
-    motor.command_queue = _EmptyQueue(idle_ticks)
-    motor._process_priority_queue = lambda: None
-    motor._check_pending_model_switch = lambda: None
-    motor._check_ollama_service = lambda: None
-    motor._piper = MagicMock()
-    motor.run()
-
-
-def test_startup_sweep_fires_exactly_once_across_many_idle_ticks(monkeypatch, tmp_path):
-    motor = _make_motor(monkeypatch, tmp_path)
-    calls = []
-
-    def sweep(**kw):
-        calls.append(kw)
-        return {"considered": 0, "kept": 0, "rejected": 0, "stale": 0,
-                "unjudged_remaining": 0, "reasons": llm_engine.Counter(), "skipped": ""}
-
-    motor.promote_pending_drafts = sweep
-
-    _drive_run(motor, idle_ticks=25)
-
-    assert len(calls) == 1
-
-
-def test_a_gated_first_idle_tick_does_not_burn_the_latch(monkeypatch, tmp_path):
-    """The latch must be armed on the OUTCOME, not on the attempt.
-
-    On the API surface `EngineHost.start()` calls `motor.start()` and only
-    reaches `_seed_startup_profile()` — the sole setter of `_current_profile_id`
-    — after building the health monitor, the aggregator, the agenda controller
-    (a sqlite read) and the music library. The engine thread's 1.0s idle tick
-    routinely wins that race, so the first sweep is gated on a None profile. If
-    the latch is set on the attempt, the profile arrives 200ms later and the
-    sweep never runs again for the whole process, with no log and no retry.
-    """
-    motor = _make_motor(monkeypatch, tmp_path)
-    motor._current_profile_id = None
-    attempts = []
-
-    def sweep(**kw):
-        attempts.append(motor._current_profile_id)
-        if motor._current_profile_id is None:
-            return {"considered": 0, "kept": 0, "rejected": 0, "stale": 0,
-                    "unjudged_remaining": 0, "reasons": llm_engine.Counter(),
-                    "skipped": "no_profile"}
-        return {"considered": 0, "kept": 0, "rejected": 0, "stale": 0,
-                "unjudged_remaining": 0, "reasons": llm_engine.Counter(), "skipped": ""}
-
-    motor.promote_pending_drafts = sweep
-    ticks = []
-
-    def seed_the_profile_on_the_third_tick():
-        ticks.append(1)
-        if len(ticks) == 3:
-            motor._current_profile_id = "profile-1"
-
-    motor._check_pending_model_switch = seed_the_profile_on_the_third_tick
-
-    motor.command_queue = _EmptyQueue(8)
-    motor._process_priority_queue = lambda: None
-    motor._check_ollama_service = lambda: None
-    motor._piper = MagicMock()
-    motor.run()
-
-    assert attempts == [None, None, "profile-1"]
-
-
 def test_the_gate_reason_is_reported_so_a_dead_sweep_is_observable(monkeypatch, tmp_path):
     motor = _make_motor(monkeypatch, tmp_path)
     motor._current_profile_id = None
@@ -1201,25 +1504,3 @@ def test_the_gate_reason_is_reported_so_a_dead_sweep_is_observable(monkeypatch, 
     assert motor._loaded_model is not None
     motor._current_profile_id = "profile-1"
     assert motor.promote_pending_drafts(chat_callable=_Recorder(_decisions()))["skipped"] == ""
-
-
-def test_a_raising_sweep_does_not_break_the_engine_loop(monkeypatch, tmp_path):
-    motor = _make_motor(monkeypatch, tmp_path)
-    seen = []
-
-    def exploding(**kw):
-        seen.append(kw)
-        raise RuntimeError("judge exploded")
-
-    motor.promote_pending_drafts = exploding
-    ticks = []
-    motor._check_pending_model_switch = lambda: ticks.append(1)
-
-    motor.command_queue = _EmptyQueue(5)
-    motor._process_priority_queue = lambda: None
-    motor._check_ollama_service = lambda: None
-    motor._piper = MagicMock()
-    motor.run()  # must return via the shutdown sentinel, not via the exception
-
-    assert len(seen) == 1
-    assert len(ticks) == 5  # the loop kept ticking after the failure
