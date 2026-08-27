@@ -73,6 +73,10 @@ from opencohost.core.context import context_budget
 # STREAM_TTL_SECONDS are runtime-mutable (PUT /api/stream/chat-live/limits
 # rebinds them), and the functions read the module globals live.
 from opencohost.core import turn_priority
+from opencohost.core.turn_scheduler import (
+    OWNER_QUESTION_SOURCES as _OWNER_QUESTION_SOURCES,
+    TurnScheduler,
+)
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
 from opencohost.core.scheduling.turn_stamp import TurnStamp
@@ -201,11 +205,9 @@ _EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 _HISTORY_ASSISTANT_ONLY_SOURCES = frozenset({"chat"})
 
 # interruptible_speech_architecture_20260804 §3.1 — the single definition of
-# "a question the owner asked" (typed OR spoken), used by the drain guard
-# below (Step 1) and by the overflow/bundling logic that follows in later
-# steps of the same track. Declared here (Step 1) because the drain guard
-# needs it now; Step 2/3 reuse this same frozenset rather than redeclaring it.
-_OWNER_QUESTION_SOURCES = frozenset({"direct", "ptt"})
+# "a question the owner asked" (typed OR spoken). TurnScheduler now owns that
+# queue policy; the imported private alias preserves the engine's non-queue
+# source gates without redeclaring it.
 
 # W2a (memoria_recall_20260718): max captured titles retained per session for
 # the mechanical session summary. Bounds the RAM held between summaries; the
@@ -701,6 +703,33 @@ class SpeechOutcome:
     error: Optional[str] = None
 
 
+def _get_turn_scheduler(engine) -> TurnScheduler:
+    """Return the TurnScheduler for engine or bind one for test harnesses."""
+    scheduler = getattr(engine, "_turn_scheduler", None)
+    if scheduler is not None and isinstance(scheduler, TurnScheduler):
+        return scheduler
+    scheduler = TurnScheduler(
+        max_items=getattr(engine, "_pq_max_items", 5),
+        default_ttl_seconds=getattr(engine, "_pq_ttl_seconds", 30.0),
+        direct_ttl_seconds=DIRECT_ANSWER_MAX_WAIT_SECONDS,
+        direct_ttl_resolver=lambda: DIRECT_ANSWER_MAX_WAIT_SECONDS,
+        priority_resolver=turn_priority.dispatch_priority_for_source,
+        stream_ttl_resolver=turn_priority.effective_stream_ttl,
+    )
+    if hasattr(engine, "_priority_queue"):
+        scheduler._replace_items_for_compat(engine._priority_queue)
+    if hasattr(engine, "_pq_lock"):
+        scheduler._replace_lock_for_compat(engine._pq_lock)
+    try:
+        object.__setattr__(engine, "_turn_scheduler", scheduler)
+    except Exception:
+        try:
+            engine._turn_scheduler = scheduler
+        except Exception:
+            pass
+    return scheduler
+
+
 class MotorVocalIA(
     ScoutPromotionMixin,
     MemoriaCaptureMixin,
@@ -715,6 +744,42 @@ class MotorVocalIA(
     Hilo de IA: gestiona Ollama (LLM), memoria conversacional,
     y comunicación con el servidor TTS vía HTTP.
     """
+
+    # Transitional compatibility surface for the existing characterization
+    # suite. Queue state itself lives only in TurnScheduler; production methods
+    # below delegate through its public operations.
+    @property
+    def _priority_queue(self):
+        return self._turn_scheduler._items_for_compat()
+
+    @_priority_queue.setter
+    def _priority_queue(self, items):
+        self._turn_scheduler._replace_items_for_compat(items)
+
+    @property
+    def _pq_lock(self):
+        return self._turn_scheduler.lock
+
+    @_pq_lock.setter
+    def _pq_lock(self, lock):
+        self._turn_scheduler._replace_lock_for_compat(lock)
+
+    @property
+    def _pq_max_items(self) -> int:
+        return self._turn_scheduler.max_items
+
+    @_pq_max_items.setter
+    def _pq_max_items(self, value: int) -> None:
+        self._turn_scheduler.max_items = value
+
+    @property
+    def _pq_ttl_seconds(self) -> float:
+        return self._turn_scheduler.default_ttl_seconds
+
+    @_pq_ttl_seconds.setter
+    def _pq_ttl_seconds(self, value: float) -> None:
+        self._turn_scheduler.default_ttl_seconds = value
+
     def __init__(self, log_queue, ui_callback, dialogue_callback: Optional[Callable[[str, str], None]] = None):
         super().__init__(daemon=True)
         self.log_queue = log_queue
@@ -989,17 +1054,15 @@ class MotorVocalIA(
         # winsound refuses SND_ASYNC from memory (see _ptt_cue_wav_file).
         self._ptt_cue_wav_path = None
 
-        # Priority queue: (priority, timestamp, payload, source)
-        # priority tiers (turn_priority module, tauri_stream_chat_20260812):
-        #   0 = PTT/voice, 1 = direct (always above stream), 2/3 = stream vs
-        #   agenda — their relative order is the STREAM_OVER_AGENDA setting.
-        self._priority_queue: list = []
-        self._pq_lock = threading.Lock()
-        self._pq_max_items: int = 5
-        # Base TTL for non-exempt sources. Stream ("chat") items do NOT use
-        # this any more — their window is turn_priority.effective_stream_ttl()
-        # (configurable + agenda-first floor); direct has its own bound.
-        self._pq_ttl_seconds: float = 30.0
+        # TurnScheduler owns dispatch queue state, sorting, TTL, and capacity bounds.
+        self._turn_scheduler = TurnScheduler(
+            max_items=5,
+            default_ttl_seconds=30.0,
+            direct_ttl_seconds=DIRECT_ANSWER_MAX_WAIT_SECONDS,
+            direct_ttl_resolver=lambda: DIRECT_ANSWER_MAX_WAIT_SECONDS,
+            priority_resolver=turn_priority.dispatch_priority_for_source,
+            stream_ttl_resolver=turn_priority.effective_stream_ttl,
+        )
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -1627,53 +1690,18 @@ class MotorVocalIA(
                 the reply instead of silently answering under a different
                 provider. None for every internally-generated item.
         """
-        if priority is None:
-            # Resolved per item at enqueue time. A mid-session flip of
-            # STREAM_OVER_AGENDA leaves already-queued items with their old
-            # numbers until served — bounded by _pq_max_items (5) and one or
-            # two pops, so the misorder is transient; retagging the queue
-            # under _pq_lock for that window is not worth the machinery.
-            priority = turn_priority.dispatch_priority_for_source(source)
-        with self._pq_lock:
-            self._priority_queue.append(
-                (priority, time.time(), payload, source, history_text, submitted_at, submitted_under_provider)
-            )
-            self._priority_queue.sort(key=lambda x: (x[0], x[1]))
-            # Enforce max items — drop lowest priority (highest number) first,
-            # breaking ties by newest timestamp. PTT (0) and direct (1) are
-            # always preserved over stream/agenda (2/3, whichever way the
-            # streamer ordered them). interruptible_speech_architecture_20260804
-            # §6 Step 2: an owner question (_OWNER_QUESTION_SOURCES) must never be
-            # demoted into _accumulation_buffer — it would be answered under
-            # source="accumulated", excluded from all five privacy/personalization
-            # frozensets. Scan from the tail for the last non-owner item instead of
-            # blindly popping the tail.
-            while len(self._priority_queue) > self._pq_max_items:
-                idx = next(
-                    (
-                        i
-                        for i in range(len(self._priority_queue) - 1, -1, -1)
-                        if self._priority_queue[i][3] not in _OWNER_QUESTION_SOURCES
-                    ),
-                    None,
-                )
-                if idx is None:
-                    # ponytail: every pending item is an owner question — the cap
-                    # yields rather than silently losing one. Bounded in practice
-                    # by human typing rate and drained wholesale by the next
-                    # bundle (design §4 step 10). Add a hard owner cap only if a
-                    # real session shows unbounded growth.
-                    break
-                dropped = self._priority_queue.pop(idx)
-                self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
-                self.enqueue_accumulation(dropped[2], source=dropped[3])
-            # WU3 (design-fase2.md §2.3): snapshot the HEAD under the lock; the
-            # interactive pregen trigger runs OUTSIDE it so it never blocks the
-            # enqueue caller. F1 [v4]: carry history_text (tuple index 4) so a
-            # reply spoken from the pregen cache commits the HONEST turn text, not
-            # the raw prompt template (the memoria_quality regression).
-            head_snapshot = self._head_snapshot_locked()
-        self._maybe_trigger_interactive_pregen(head_snapshot)
+        result = _get_turn_scheduler(self).enqueue(
+            payload,
+            priority=priority,
+            source=source,
+            history_text=history_text,
+            submitted_at=submitted_at,
+            submitted_under_provider=submitted_under_provider,
+        )
+        for dropped in result.dropped:
+            self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
+            self.enqueue_accumulation(dropped[2], source=dropped[3])
+        self._maybe_trigger_interactive_pregen(result.head_snapshot)
 
     def replace_pending(self, payload: str, priority: Optional[int] = None, source: str = "chat") -> None:
         """Replace stale pending items from the same source and enqueue a fresh one.
@@ -1681,8 +1709,7 @@ class MotorVocalIA(
         This keeps product features such as Agenda Mode from stacking old
         autonomous turns while preserving unrelated higher-priority items.
         """
-        with self._pq_lock:
-            self._priority_queue = [item for item in self._priority_queue if item[3] != source]
+        _get_turn_scheduler(self).drop_source(source)
         if source.startswith("kira-agenda"):
             # WU2 (design-fase2.md §2.2/§2.3): match-aware clear. The API-host
             # consume path routes a ready draft by enqueueing its OWN
@@ -1705,8 +1732,7 @@ class MotorVocalIA(
         at arrival — a question still sitting in `command_queue` is invisible
         here, which is exactly the gap those hooks close.
         """
-        with self._pq_lock:
-            return sum(1 for item in self._priority_queue if item[3] in _OWNER_QUESTION_SOURCES)
+        return _get_turn_scheduler(self).pending_owner_questions()
 
     def drop_pending_sources(self, prefixes: tuple[str, ...]) -> int:
         """Drop pending priority/accumulation items whose source matches prefixes.
@@ -1717,15 +1743,7 @@ class MotorVocalIA(
         Returns:
             Number of pending items removed.
         """
-        removed = 0
-        with self._pq_lock:
-            kept = []
-            for item in self._priority_queue:
-                if str(item[3]).startswith(prefixes):
-                    removed += 1
-                    continue
-                kept.append(item)
-            self._priority_queue = kept
+        removed = len(_get_turn_scheduler(self).drop_sources(prefixes))
 
         with self._accum_lock:
             kept_accum = []
@@ -1868,19 +1886,7 @@ class MotorVocalIA(
         _clear_prefetch_if_matches, not _log — so no new lock edge is created
         and the "never hold _pq_lock across _prefetch_lock" invariant survives.
         """
-        taken: list = []
-        chars = len(head_item[2])
-        with self._pq_lock:
-            while (
-                self._priority_queue
-                and self._priority_queue[0][3] in _OWNER_QUESTION_SOURCES
-                and len(taken) + 1 < OWNER_BUNDLE_MAX_ITEMS
-                and chars + len(self._priority_queue[0][2]) <= OWNER_BUNDLE_MAX_CHARS
-            ):
-                nxt = self._priority_queue.pop(0)
-                chars += len(nxt[2])
-                taken.append(nxt)
-        return taken
+        return _get_turn_scheduler(self).take_owner_prefix(head_item)
 
     def _compose_owner_bundle(self, members: list) -> tuple:
         """Render queue tuples into one (payload, history_text, stamp).
@@ -2004,12 +2010,7 @@ class MotorVocalIA(
         only be exceeded by arrivals during the failed generation, and the very
         next `enqueue()` trims back to `_pq_max_items` on its own.
         """
-        # ponytail: self-healing cap overshoot, the same call the owner-question
-        # `break` in enqueue() already makes. Trim here only if a real session
-        # shows the queue staying over cap.
-        with self._pq_lock:
-            self._priority_queue.extend(followers)
-            self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+        _get_turn_scheduler(self).requeue(followers)
         # METADATA ONLY, same rule as [BUNDLE] and [CLAUSE_SANITIZER]. WARNING,
         # not INFO: a silent recovery is only marginally better than a silent
         # loss, and this line is how the owner greps that it happened at all.
@@ -2068,72 +2069,15 @@ class MotorVocalIA(
             if not widened_pop_armed and speech_busy:
                 return
 
+            expired_turns = _get_turn_scheduler(self).expire()
             expired_chat_infos: list = []
-            expired_pregen_keys: list = []
-            with self._pq_lock:
-                # Expire stale non-PTT items before selecting next work
-                now = time.time()
-                kept = []
-                for item in self._priority_queue:
-                    # Slice first 4 — tolerates both the legacy 4-tuple (no
-                    # history_text, e.g. tests constructing raw queue items) and
-                    # the current 5-tuple produced by enqueue().
-                    prio, ts, payload, source = item[:4]
-                    # F2 (judgment-day WU2): kira-agenda* is EXEMPT from TTL
-                    # expiry. Adopted agenda drafts routed through consume-at-event
-                    # are replace_pending-deduped (they never stack), so exemption
-                    # can never grow the queue — but expiring one strands the
-                    # adopted turn (it never speaks) and its orphaned pregen cache
-                    # blocks every new prefetch until a mismatching enqueue clears
-                    # it. Interactive (chat/PTT) items keep the TTL.
-                    #
-                    # Step 1 (direct_turn_preemption_20260803): `direct` items now
-                    # enter this queue at ARRIVAL (routers/chat.py) instead of at
-                    # the speech boundary, so their age is the real wait — a 71s
-                    # agenda block would age one past 30s and the sweep would
-                    # SILENTLY DISCARD a turn the API already receipted as
-                    # "queued", with Kira never answering. Bound them by the
-                    # contractual DIRECT_ANSWER_MAX_WAIT_SECONDS instead, so the
-                    # documented bound and the mechanical one finally coincide.
-                    # (This also closes the same latent hole on the pre-Step-1
-                    # path: a second direct queued behind a long first answer
-                    # could already TTL-die receipted.)
-                    #
-                    # Stream ("chat") items read the LIVE configurable window
-                    # (turn_priority.effective_stream_ttl), not the static
-                    # _pq_ttl_seconds. The effective value is FLOORED when the
-                    # streamer selects agenda-first — without that floor, the
-                    # "agenda first + short TTL" combination expires every
-                    # stream item that waits out an agenda monologue and the
-                    # co-host goes MUTE toward its audience with no visible
-                    # error anywhere (the §3.2 TRAP). See turn_priority.
-                    if source == "direct":
-                        ttl = DIRECT_ANSWER_MAX_WAIT_SECONDS
-                    elif source == "chat":
-                        ttl = turn_priority.effective_stream_ttl()
-                    else:
-                        ttl = self._pq_ttl_seconds
-                    if (
-                        prio > 0
-                        and not source.startswith("kira-agenda")
-                        and (now - ts) > ttl
-                    ):
-                        self._log(f"Item expirado y omitido (TTL {ttl:.0f}s): {source}")
-                        # Measure-first telemetry seam: record (never alter) chat expiries.
-                        # Captured here, emitted below OUTSIDE _pq_lock.
-                        if source == "chat":
-                            expired_chat_infos.append({"age_sec": now - ts, "ttl_sec": ttl})
-                        # F7 [v4]: record the expired item's (payload, source) so its
-                        # orphaned pregen draft (if any) can be cleared below — a stale
-                        # cache entry must not block the single slot for later prefetches.
-                        expired_pregen_keys.append((payload, source))
-                    else:
-                        kept.append(item)
-                self._priority_queue = kept
+            for exp in expired_turns:
+                prio, ts, payload, source = exp.item[:4]
+                self._log(f"Item expirado y omitido (TTL {exp.ttl_seconds:.0f}s): {source}")
+                if source == "chat":
+                    expired_chat_infos.append({"age_sec": exp.age_seconds, "ttl_sec": exp.ttl_seconds})
+                self._clear_prefetch_if_matches(payload, source)
 
-            # Emit expiry telemetry OUTSIDE _pq_lock so the queue lock is never held across
-            # the aggregator collector's lock (the two locks stay order-independent). No-op
-            # unless wired (diagnostics enabled); a failing callback never disturbs the queue.
             if expired_chat_infos and self.on_chat_item_expired is not None:
                 for info in expired_chat_infos:
                     try:
@@ -2141,62 +2085,35 @@ class MotorVocalIA(
                     except Exception:
                         pass
 
-            # F7 [v4]: clear any cached pregen draft matching an expired item, OUTSIDE
-            # _pq_lock (never hold _pq_lock across _prefetch_lock — lock ordering).
-            for exp_payload, exp_source in expired_pregen_keys:
-                self._clear_prefetch_if_matches(exp_payload, exp_source)
-
             queue_empty = False
             accumulated = None
-            with self._pq_lock:
-                if widened_pop_armed and speech_busy and (
-                    not self._priority_queue or self._priority_queue[0][0] != 0
-                ):
-                    # §5.2: only a priority-0 owner item may be SELECTED
-                    # while speech plays. `_priority_queue` stays sorted
-                    # (priority, ts) ascending — every mutation (enqueue(),
-                    # the TTL filter above) preserves it — so the head IS the
-                    # highest-priority item: checking index 0 here is the
-                    # same as "no priority-0 item exists anywhere", and doing
-                    # it INSIDE this lock (not a peek taken before it) is
-                    # what makes the check atomic with the pop below.
-                    # (`speech_busy` is the loop-top snapshot — see the I10
-                    # note there.) Selection, not removal: on a pregen MISS
-                    # the pop-time bundler below absorbs the contiguous
-                    # OWNER-source prefix regardless of priority — a queued
-                    # `direct` at priority 1 rides along DELIBERATELY: the
-                    # press already justified the one D3 preemption and the
-                    # burst is answered in one request (§4 step 10). Pinned by
-                    # test_the_mid_playback_bundle_absorbs_a_queued_direct_question.
-                    # Accumulation is deliberately NOT flushed on this
-                    # return: an accumulated turn is never priority 0.
-                    return
-                if not self._priority_queue:
-                    # No priority items — check accumulation buffer. The FLUSH
-                    # stays under _pq_lock (it is the same critical section that
-                    # observed the queue empty, and it preserves the existing
-                    # _pq_lock -> _accum_lock edge); the TURN it produces does
-                    # not — see below.
-                    queue_empty = True
-                    accumulated = self._flush_accumulation()
-                else:
-                    item = self._priority_queue.pop(0)
-                    # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
-                    # source, history_text), the 6-tuple that adds submitted_at
-                    # (Unit 4.1), and the current 7-tuple that adds
-                    # submitted_under_provider (Unit 4.2, F12), all produced by
-                    # enqueue().
-                    priority, ts, payload, source, *rest = item
-                    history_text = rest[0] if rest else None
-                    submitted_at = rest[1] if len(rest) > 1 else None
-                    submitted_under_provider = rest[2] if len(rest) > 2 else None
-                    # C1 (refactor_core_api_20260802): build the stamp at unpack —
-                    # enqueue()'s public signature and internal tuple storage stay
-                    # unchanged, only the downstream threading collapses to one object.
-                    stamp = (
-                        TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
-                        if submitted_at is not None else None
-                    )
+            dequeue_res = _get_turn_scheduler(self).dequeue_or_else(
+                on_empty=self._flush_accumulation,
+                required_priority=0 if (widened_pop_armed and speech_busy) else None,
+            )
+            if dequeue_res.blocked:
+                return
+            if dequeue_res.empty:
+                queue_empty = True
+                accumulated = dequeue_res.empty_value
+            else:
+                item = dequeue_res.item
+                # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
+                # source, history_text), the 6-tuple that adds submitted_at
+                # (Unit 4.1), and the current 7-tuple that adds
+                # submitted_under_provider (Unit 4.2, F12), all produced by
+                # enqueue().
+                priority, ts, payload, source, *rest = item
+                history_text = rest[0] if rest else None
+                submitted_at = rest[1] if len(rest) > 1 else None
+                submitted_under_provider = rest[2] if len(rest) > 2 else None
+                # C1 (refactor_core_api_20260802): build the stamp at unpack —
+                # enqueue()'s public signature and internal tuple storage stay
+                # unchanged, only the downstream threading collapses to one object.
+                stamp = (
+                    TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+                    if submitted_at is not None else None
+                )
 
             # Step 0 (interruptible_speech_architecture_20260804, design §2b):
             # the accumulated turn runs OUTSIDE _pq_lock. It used to run inside,

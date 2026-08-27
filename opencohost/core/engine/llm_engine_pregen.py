@@ -22,6 +22,8 @@ class PregenCacheMixin:
         re-trigger (Step 2, direct_turn_preemption_20260803) builds the snapshot
         in exactly the same shape `enqueue()`'s tail does.
         """
+        if hasattr(self, "_turn_scheduler"):
+            return self._turn_scheduler._head_snapshot_locked()
         head = self._priority_queue[0] if self._priority_queue else None
         if head is None:
             return None
@@ -152,9 +154,12 @@ class PregenCacheMixin:
         # STILL the queue head right before spawning (the worker may already have
         # popped it, making this pregen a wasted duplicate). The epoch bump on the
         # foreground commit remains the backstop for the residual window.
-        with self._pq_lock:
-            cur = self._priority_queue[0] if self._priority_queue else None
-            still_head = cur is not None and (cur[0], cur[2], cur[3]) == (priority, payload, source)
+        if hasattr(self, "_turn_scheduler"):
+            still_head = self._turn_scheduler.is_head(priority, payload, source)
+        else:
+            with self._pq_lock:
+                cur = self._priority_queue[0] if self._priority_queue else None
+                still_head = cur is not None and (cur[0], cur[2], cur[3]) == (priority, payload, source)
         if not still_head:
             return
         self.pregenerate(payload, priority, source, history_text=history_text)
@@ -432,6 +437,8 @@ class PregenCacheMixin:
 
     def has_pending_priority_before(self, priority: int) -> bool:
         """Return True when queued work should run before a cached agenda draft."""
+        if hasattr(self, "_turn_scheduler"):
+            return self._turn_scheduler.has_pending_priority_before(priority)
         with self._pq_lock:
             return any(item[0] < priority for item in self._priority_queue)
 
