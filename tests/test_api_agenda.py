@@ -711,6 +711,6 @@ def test_engine_host_start_survives_agenda_construction_failure(tmp_path, monkey
     try:
         host.start()  # must not raise
         assert host.agenda is None
-        assert host.motor is fake_motor  # engine still came up
+        assert host.motor.runtime is fake_motor  # engine still came up behind the facade
     finally:
         host.stop()

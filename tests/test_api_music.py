@@ -133,6 +133,6 @@ def test_engine_host_start_survives_music_library_construction_failure(tmp_path,
     try:
         host.start()  # must not raise
         assert host.music_library is None
-        assert host.motor is fake_motor  # engine still came up
+        assert host.motor.runtime is fake_motor  # engine still came up behind the facade
     finally:
         host.stop()

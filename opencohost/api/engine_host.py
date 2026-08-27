@@ -1,9 +1,9 @@
 """Standalone engine host for the Kira FastAPI API layer (Phase 1).
 
 The ONLY file in `opencohost/api/` that imports the core engine classes.
-`EngineHost` constructs and owns a private `MotorVocalIA` + `HealthMonitor`
-pair for a standalone process — wired the same way `app_shell.py` wires
-the Tk app's engine, but never shared with it.
+`EngineHost` constructs and owns a `CohostEngine` facade around a private
+`MotorVocalIA` runtime plus `HealthMonitor` for a standalone process — wired
+the same way `app_shell.py` wires the Tk app's engine, but never shared with it.
 """
 
 import collections
@@ -26,6 +26,7 @@ from opencohost.config.settings import (
 from opencohost.core.agenda.agenda_persistence import AgendaPersistence
 from opencohost.core.editorial.editorial_agenda_bridge import EditorialAgendaBridge
 from opencohost.core.editorial.editorial_cards import EditorialCardStore
+from opencohost.core.cohost_engine import CohostEngine
 from opencohost.core.observability.health_monitor import HealthMonitor, OllamaWatchdog
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.profiles.profiles import cargar_perfiles
@@ -452,12 +453,12 @@ class MusicState:
 
 
 class EngineHost:
-    """Owns a standalone MotorVocalIA + HealthMonitor pair for this process."""
+    """Owns the API process's CohostEngine facade and health monitor."""
 
     def __init__(self, lock_path: str | None = None):
         self._lock_path = lock_path or _resolve_lock_path()
         self._lock_fd = None
-        self.motor = None
+        self.motor: CohostEngine[MotorVocalIA] | None = None
         self.monitor = None
         # FIX-B: headless OBS push chain (mirrors the CTK AvatarStateBridge +
         # OBSClient wiring). None until start() constructs it; stays None if
@@ -1015,10 +1016,12 @@ class EngineHost:
             except Exception:
                 self.obs_runtime = None
                 _logger.exception("ObsRuntime construction failed; OBS push chain disabled")
-            self.motor = MotorVocalIA(
-                _Drain(),
-                ui_callback=self._dispatch_motor_event,
-                dialogue_callback=self.chat_sink.record,
+            self.motor = CohostEngine(
+                MotorVocalIA(
+                    _Drain(),
+                    ui_callback=self._dispatch_motor_event,
+                    dialogue_callback=self.chat_sink.record,
+                )
             )
             # Unit 2.3: wired unconditionally (unlike the agenda-only guardrail
             # hook below) -- ctx_pressure_high is a pure LLM/context concern,

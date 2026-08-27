@@ -777,7 +777,7 @@ def test_engine_host_start_survives_aggregator_construction_failure(tmp_path, mo
     try:
         host.start()  # must not raise
         assert host.aggregator is None
-        assert host.motor is fake_motor  # engine still came up
+        assert host.motor.runtime is fake_motor  # engine still came up behind the facade
     finally:
         host.stop()
 
