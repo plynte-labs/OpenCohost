@@ -77,6 +77,10 @@ from opencohost.core.turn_scheduler import (
     OWNER_QUESTION_SOURCES as _OWNER_QUESTION_SOURCES,
     TurnScheduler,
 )
+from opencohost.core.engine.llm_inference_service import (
+    LLMInferenceService,
+    get_inference_service,
+)
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
 from opencohost.core.scheduling.turn_stamp import TurnStamp
@@ -1063,6 +1067,8 @@ class MotorVocalIA(
             priority_resolver=turn_priority.dispatch_priority_for_source,
             stream_ttl_resolver=turn_priority.effective_stream_ttl,
         )
+        # LLMInferenceService owns pure multi-provider model execution and token streams.
+        self._inference_service = get_inference_service(self)
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -3677,14 +3683,17 @@ class MotorVocalIA(
 
         # Layer 4 observability: log prompt-window utilization on every populated
         # response and raise a UI pressure signal when it crosses the high mark.
-        _pec_final = (getattr(respuesta, "prompt_eval_count", 0) or 0) if respuesta is not None else 0
+        _pec_raw = getattr(respuesta, "prompt_eval_count", 0) if respuesta is not None else 0
+        _pec_final = _pec_raw if isinstance(_pec_raw, (int, float)) else 0
         if _pec_final > 0:
             _util = context_budget.utilization(_pec_final, _effective_ctx)
             # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
             # vs decode wall-time split so the prefill fraction of TTFT is observable
             # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
-            _prefill_ms = (getattr(respuesta, "prompt_eval_duration", 0) or 0) / 1e6
-            _decode_ms = (getattr(respuesta, "eval_duration", 0) or 0) / 1e6
+            _predur = getattr(respuesta, "prompt_eval_duration", 0)
+            _prefill_ms = (_predur / 1e6) if isinstance(_predur, (int, float)) else 0.0
+            _evaldur = getattr(respuesta, "eval_duration", 0)
+            _decode_ms = (_evaldur / 1e6) if isinstance(_evaldur, (int, float)) else 0.0
             # llm_output_streaming_20260813: Ollama reports the COLD MODEL LOAD
             # separately from prefill, and this line never read it -- so a slow
             # turn was one undifferentiated lump with no way to tell "the model
@@ -3694,8 +3703,10 @@ class MotorVocalIA(
             # on a switch and on cloud fallback (never on the turn path), any
             # idle gap over 7 minutes makes the NEXT turn pay a cold load
             # inside the chat call itself. Measure it before choosing a timeout.
-            _load_ms = (getattr(respuesta, "load_duration", 0) or 0) / 1e6
-            _ec_final = getattr(respuesta, "eval_count", 0) or 0
+            _loaddur = getattr(respuesta, "load_duration", 0)
+            _load_ms = (_loaddur / 1e6) if isinstance(_loaddur, (int, float)) else 0.0
+            _ec_raw = getattr(respuesta, "eval_count", 0)
+            _ec_final = _ec_raw if isinstance(_ec_raw, (int, float)) else 0
             logger.info(
                 "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
                 "load_ms=%.0f prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",

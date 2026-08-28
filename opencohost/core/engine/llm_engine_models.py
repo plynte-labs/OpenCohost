@@ -29,6 +29,7 @@ from opencohost.core.providers.llm_tiers import LLMTierConfig
 # AttributeError. They are read live from this module's globals on every call, so
 # a test (or a future settings reload) can rebind them here.
 from opencohost.core import llm_engine as _eng
+from opencohost.core.engine.llm_inference_service import get_inference_service
 
 class ModelManagementMixin:
     def _probe_ollama_service(self, timeout: float = 3.0) -> bool:
@@ -529,25 +530,20 @@ class ModelManagementMixin:
         # live (config OR active fallback).
         if is_local is None:
             is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
-        if not is_local:
-            return self._cloud_chat(provider_cfg=cfg, is_local=is_local, **kwargs)
-        client = self._select_ollama_chat_client(chat_timeout)
-        return client.chat(**kwargs)
+        return get_inference_service(self).chat(
+            provider_cfg=cfg,
+            is_local=is_local,
+            chat_timeout=chat_timeout,
+            **kwargs,
+        )
 
     def _select_ollama_chat_client(self, chat_timeout):
-        """Pick the client memoized for *chat_timeout* (the resolved watchdog
-        budget this call is running under), falling back to the steady-state
-        default client / raw ``self.ollama`` when none was pre-built for it.
-
-        Deliberately a pure lookup -- never builds a client here. Building
-        happens only in ``_create_ollama_chat_client`` (called from ``run()``),
-        so a test double standing in for ``self.ollama`` (a plain MagicMock,
-        not the real module) is never silently routed through an unrelated
-        auto-mocked ``self.ollama.Client()``.
-        """
+        """Pick the client memoized for *chat_timeout* via LLMInferenceService."""
         cache = getattr(self, "_ollama_chat_clients", None)
         client = cache.get(chat_timeout) if cache and chat_timeout is not None else None
-        return client or self._ollama_chat_client or self.ollama
+        if client is not None:
+            return client
+        return get_inference_service(self).select_chat_client(chat_timeout) or self._ollama_chat_client or self.ollama
 
     def _ollama_scout_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
@@ -559,178 +555,35 @@ class ModelManagementMixin:
         return client.chat(**kwargs)
 
     def _ollama_judge_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
-        """Transport for the memoria promotion judge — ALWAYS local.
-
-        Owner decision 2026-08-08 (F16): memoria draft content stays on this
-        machine; the judge is the only place in the memoria pipeline that could
-        send it over the network, so — unlike ``_ollama_scout_chat`` and
-        ``_ollama_chat`` — this NEVER falls through to ``_cloud_chat``,
-        regardless of the active provider or ``_cloud_fallback_active``. It
-        always uses the dedicated short-timeout client built with the adaptive
-        judge budget, so a timed-out judgment actually releases the single
-        Ollama runner instead of leaving it generating into a closed watchdog.
-        ``provider_cfg``/``is_local`` are accepted only to keep the same call
-        signature as the other ``_ollama_*_chat`` transports; both are unused.
-        """
+        """Transport for the memoria promotion judge — ALWAYS local."""
         client = self._ollama_judge_client or self.ollama
         return client.chat(**kwargs)
 
     def _call_with_watchdog(self, call, *, timeout: float, label: str = "OllamaChatWatchdog", **kwargs):
-        """Run *call* on a daemon thread and stop waiting on it after *timeout*.
-
-        Deliberately separate from ``_ollama_chat_with_watchdog``: the chat
-        transport gets swapped — by the cloud fallback and by tests — and
-        swapping it must NOT also swap the ``ollama.show`` metadata probe, which
-        is a different call with a different budget. Sharing one seam for both
-        made the probe return chat-shaped responses.
-
-        Streaming calls are refused outright. This watchdog measures "did
-        ``call(**kwargs)`` return within budget", and calling a function that
-        returns a generator returns WITHOUT executing its body -- the wait
-        succeeds in microseconds and the watchdog blesses an un-started
-        generator. The stall recovery validated on 2026-06-17 and again on
-        2026-08-13 would become a guaranteed false success, silently. Streaming
-        has its own seam that iterates on the calling thread; routing it here
-        instead must fail loudly at the first call, not degrade the watchdog.
-        """
-        if kwargs.get("stream"):
-            raise ValueError(
-                "_call_with_watchdog cannot supervise stream=True: a generator-returning "
-                "call returns before its body runs, so the watchdog would always succeed. "
-                "Use the dedicated streaming seam, which iterates on the calling thread."
-            )
-
-        result = {}
-        done = threading.Event()
-
-        def worker() -> None:
-            try:
-                result["response"] = call(**kwargs)
-            except httpx.TimeoutException:
-                # The chat client's HTTP timeout can now fire at ~the same
-                # moment as the watchdog (both are derived from the same
-                # budget). Translate it into the SAME contract the pure
-                # wait-based timeout below raises, so `_is_watchdog_timeout_error`
-                # still recognizes it and automatic recovery still fires --
-                # otherwise this raw transport exception would propagate
-                # instead and silently kill the whole recovery path.
-                result["error"] = TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
-            except Exception as exc:
-                result["error"] = exc
-            finally:
-                done.set()
-
-        thread = threading.Thread(
-            target=worker,
-            name=f"{label}-{uuid.uuid4().hex[:8]}",
-            daemon=True,
+        """Run *call* on a daemon thread and stop waiting on it after *timeout*."""
+        return get_inference_service(self).call_with_watchdog(
+            call, timeout=timeout, label=label, **kwargs
         )
-        thread.start()
-        if not done.wait(timeout=max(0.1, float(timeout))):
-            raise TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
-        if "error" in result:
-            raise result["error"]
-        return result.get("response")
 
     def _ollama_chat_with_watchdog(self, *, timeout: float, chat_callable=None, **kwargs):
-        # Thread the resolved watchdog budget into `_ollama_chat`'s own client
-        # selection (as `chat_timeout`), but ONLY for the default transport --
-        # an explicit `chat_callable` (scout/judge) already carries its own
-        # dedicated timeout-scoped client and must stay byte-identical.
         call = chat_callable or (lambda **kw: self._ollama_chat(chat_timeout=timeout, **kw))
-        return self._call_with_watchdog(call, timeout=timeout, **kwargs)
+        return get_inference_service(self).call_with_watchdog(
+            call,
+            timeout=timeout,
+            **kwargs,
+        )
 
     def _ollama_chat_streaming(self, *, timeout: float, **kwargs):
-        """Yield raw chunks from a local ``ollama.chat(stream=True)``, bounded.
-
-        The streaming counterpart of ``_ollama_chat_with_watchdog``, and
-        deliberately NOT routed through ``_call_with_watchdog`` -- which refuses
-        ``stream=True`` outright, because that watchdog measures "did the call
-        return within budget" and a generator-returning call returns WITHOUT
-        executing its body, so it would bless an un-started generator. This seam
-        iterates on the CALLING thread instead: no daemon thread exists to
-        orphan, and every abort is an exception or return in the consumer's own
-        frame.
-
-        Two budgets, both raising the SAME
-        ``TimeoutError("watchdog_timeout:<budget>s")`` string the buffered path
-        raises, so ``_is_watchdog_timeout_error`` still recognises them, they
-        land in the attempt loop's existing handler unchanged, and automatic
-        recovery (``_recover_from_stalled_inference``) still fires:
-
-        1. *Idle / per-read* -- ``STREAM_IDLE_TIMEOUT_SECONDS``, enforced by the
-           transport itself. Under ``stream=True`` the httpx timeout is a
-           per-read timeout and every chunk is one read (the first included), so
-           riding the client memoized at that value IS the idle watchdog. Client
-           construction is left entirely to ``_create_ollama_chat_client`` /
-           ``_select_ollama_chat_client`` (``a8830bb``, production-validated on
-           2026-08-13); the httpx -> ``watchdog_timeout:`` translation is
-           replicated from ``_call_with_watchdog``'s worker because streaming
-           bypasses that worker.
-        2. *Total wall clock* -- ``timeout``, the budget
-           ``_resolve_chat_watchdog_timeout`` already resolves (45s post-switch,
-           180s steady, 75s cloud), re-checked per chunk. This is the hard
-           ceiling on runaway generation, which matters precisely because
-           ``num_predict`` is popped for reasoning-classified models like
-           gemma4: an idle-only watchdog would let an infinite decode run
-           forever.
-
-        On a streamed post-switch turn the 40s idle budget fires 5s BEFORE the
-        45s total cap -- earlier detection on the same path, never later.
-
-        ``finally: stream.close()`` on EVERY exit path -- normal completion,
-        either timeout, a consumer that abandons the generator (guard trip,
-        cancel token, any raise downstream). Closing the socket is the ONLY real
-        server-side abort for Ollama and is what frees the single runner slot
-        (see ``_create_ollama_scout_client``); ``a8830bb`` measured exactly that
-        for the non-streaming case -- the rollback's ``_prepare_model`` got a
-        runner in 8.57s right after the timed-out call's socket closed.
-
-        Local transport only: phase 1 does not stream the cloud path.
-        """
+        """Yield raw chunks from a local ``ollama.chat(stream=True)``, bounded."""
         idle_budget = float(STREAM_IDLE_TIMEOUT_SECONDS)
-        # Build-then-select, not a bare lookup: `run()` pre-warms only the 180s
-        # and 45s clients, so a pure lookup would always miss and fall back to
-        # the steady-state client -- leaving the idle budget unenforced at the
-        # transport, which is the one place it can be enforced at all.
         self._create_ollama_chat_client(self.ollama, timeout=idle_budget)
         client = self._select_ollama_chat_client(idle_budget)
-
-        started = time.monotonic()
-        first_chunk_pending = True
-        stream = None
-        try:
-            stream = client.chat(stream=True, **kwargs)
-            for chunk in stream:
-                if first_chunk_pending:
-                    first_chunk_pending = False
-                    waited = time.monotonic() - started
-                    if waited > STREAM_IDLE_PROBE_SECONDS:
-                        # Log-only, never an abort. Measured after the fact on
-                        # this thread rather than armed on a timer: same
-                        # information one probe-interval late, with no extra
-                        # thread and no way to false-positive on a stream that
-                        # was merely slow to start. METADATA ONLY -- raw
-                        # dialogue never reaches the logs.
-                        _eng.logger.warning(
-                            "[STREAM_IDLE_PROBE] first_chunk_wait_s=%.2f threshold_s=%.2f "
-                            "idle_budget_s=%.2f total_budget_s=%.2f",
-                            waited,
-                            float(STREAM_IDLE_PROBE_SECONDS),
-                            idle_budget,
-                            float(timeout),
-                        )
-                if time.monotonic() - started > timeout:
-                    # Checked BEFORE handing the chunk over: a chunk released
-                    # after the budget blew could still close a sentence and put
-                    # audio on air for a turn that is already being declared dead.
-                    raise TimeoutError(f"watchdog_timeout:{timeout:.2f}s")
-                yield chunk
-        except httpx.TimeoutException as exc:
-            raise TimeoutError(f"watchdog_timeout:{idle_budget:.2f}s") from exc
-        finally:
-            if stream is not None:
-                stream.close()
+        return get_inference_service(self).chat_streaming(
+            timeout=timeout,
+            chat_client=client,
+            time_fn=time.monotonic,
+            **kwargs,
+        )
 
     def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
         cfg = provider_cfg if provider_cfg is not None else self._provider_config

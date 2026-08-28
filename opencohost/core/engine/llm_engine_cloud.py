@@ -655,31 +655,13 @@ class CloudFallbackMixin:
         return ""
 
     def _cloud_chat(self, *, provider_cfg=None, model=None, messages, options=None, is_local=None, **_ignored):
-        """Dispatch a chat request to the OpenAI-compatible cloud client.
-
-        Resolves profile + provider_id + key from a SINGLE provider-config
-        snapshot (`provider_cfg`, threaded from `_generar_dialogo`'s entry) so a
-        mid-generation `set_provider_config` swap can never pair provider A's
-        base_url/model with provider B's key (F2). Falls back to live config for
-        stand-alone (non-generation) callers. Uses the ACTIVE profile's
-        `base_url`/`model`/key — never the local `current_model` the call site
-        passes. Ollama-only kwargs (`keep_alive`) are ignored here.
-        """
+        """Dispatch a chat request to the OpenAI-compatible cloud client via LLMInferenceService."""
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
-        profile = self._cfg_active_profile(cfg)
-        if profile is None:
-            # F7: degrade like every other cloud failure. A RequestException
-            # subclass is caught by the transport-error contract and returns ''
-            # instead of propagating out through the noisy outer catch-all.
-            raise _eng.cloud_llm_client.CloudLLMResponseError(
-                "cloud provider active but no profile configured"
-            )
-        provider_id = cfg.get("active_provider")
-        return _eng.cloud_llm_client.send_chat_completion(
-            base_url=str(profile.get("base_url") or ""),
-            api_key=self._cloud_api_key(provider_id),
-            model=str(profile.get("model") or ""),
+        timeout = self._resolve_chat_watchdog_timeout(model, provider_cfg=cfg, is_local=is_local)
+        from opencohost.core.engine.llm_inference_service import get_inference_service
+        return get_inference_service(self).cloud_chat(
+            provider_cfg=cfg,
             messages=messages,
-            options=options or {},
-            timeout=self._resolve_chat_watchdog_timeout(model, provider_cfg=cfg, is_local=is_local),
+            options=options,
+            timeout=timeout,
         )
