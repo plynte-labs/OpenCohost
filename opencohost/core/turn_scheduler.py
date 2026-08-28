@@ -8,6 +8,7 @@ UI callbacks, prefetch, accumulation policy or speech playback.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
 import time
 from typing import Any, Callable, Iterable
@@ -18,11 +19,39 @@ from opencohost.config.settings import (
     OWNER_BUNDLE_MAX_ITEMS,
 )
 from opencohost.core import turn_priority
+from opencohost.core.scheduling.turn_stamp import TurnStamp
+from opencohost.i18n import active as i18n_active
 
+
+logger = logging.getLogger("OpenCohost")
 
 OWNER_QUESTION_SOURCES = frozenset({"direct", "ptt"})
 TurnItem = tuple
 HeadSnapshot = tuple[int, str, str, str | None]
+
+
+def compose_owner_bundle(members: list[TurnItem]) -> tuple[str, str, TurnStamp | None]:
+    """Render queue tuples into one (payload, history_text, stamp). Pure: no locks, no I/O."""
+    ordered = sorted(members, key=lambda it: it[1])
+    numbered = "\n".join(f"{i}. {it[2]}" for i, it in enumerate(ordered, 1))
+    payload = i18n_active.owner_bundle_header().format(
+        count=len(ordered), questions=numbered,
+    )
+    recap = "; ".join(
+        (it[4] if len(it) > 4 and it[4] else it[2]) for it in ordered
+    )
+    history_text = i18n_active.owner_bundle_history().format(questions=recap)
+    stamped = [it for it in ordered if len(it) > 5 and it[5] is not None]
+    oldest = min(stamped, key=lambda it: it[5]) if stamped else None
+    stamp = (
+        TurnStamp(
+            submitted_at=oldest[5],
+            submitted_under_provider=(oldest[6] if len(oldest) > 6 else None),
+        )
+        if oldest is not None
+        else None
+    )
+    return payload, history_text, stamp
 
 
 @dataclass(frozen=True)
@@ -215,19 +244,25 @@ class TurnScheduler:
 
     def expire(self, *, now: float | None = None) -> tuple[ExpiredTurn, ...]:
         current = self._clock() if now is None else now
+        direct_ttl = (
+            self._direct_ttl_resolver()
+            if self._direct_ttl_resolver is not None
+            else self._direct_ttl_seconds
+        )
+        stream_ttl = (
+            self._stream_ttl_resolver()
+            if self._stream_ttl_resolver is not None
+            else self._default_ttl_seconds
+        )
         with self._sched_lock:
             expired = []
             kept = []
             for item in self._items:
                 priority, timestamp, _payload, source = item[:4]
                 if source == "direct":
-                    ttl = (
-                        self._direct_ttl_resolver()
-                        if self._direct_ttl_resolver is not None
-                        else self._direct_ttl_seconds
-                    )
+                    ttl = direct_ttl
                 elif source == "chat":
-                    ttl = self._stream_ttl_resolver()
+                    ttl = stream_ttl
                 else:
                     ttl = self._default_ttl_seconds
                 age = current - timestamp
@@ -277,6 +312,9 @@ class TurnScheduler:
         with self._sched_lock:
             self._items.extend(items)
             self._items.sort(key=lambda queued: (queued[0], queued[1]))
+
+    def compose_bundle(self, members: list[TurnItem]) -> tuple[str, str, TurnStamp | None]:
+        return compose_owner_bundle(members)
 
     # Transitional probes for the existing MotorVocalIA test surface. Production
     # code delegates through the methods above; these keep legacy tests able to

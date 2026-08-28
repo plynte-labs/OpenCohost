@@ -75,9 +75,28 @@ from opencohost.core.context import context_budget
 # STREAM_TTL_SECONDS are runtime-mutable (PUT /api/stream/chat-live/limits
 # rebinds them), and the functions read the module globals live.
 from opencohost.core import turn_priority
+from opencohost.core.scheduling.turn_stamp import TurnStamp as TurnStamp
 from opencohost.core.turn_scheduler import (
     OWNER_QUESTION_SOURCES as _OWNER_QUESTION_SOURCES,
     TurnScheduler,
+    compose_owner_bundle as compose_owner_bundle,
+)
+from opencohost.core.memory.promotion_parser import (
+    _PROMOTION_JUDGE_PROMPT as _PROMOTION_JUDGE_PROMPT,
+    _PROMOTION_FENCE_RE as _PROMOTION_FENCE_RE,
+    PromotionParseDiagnostics as PromotionParseDiagnostics,
+    _PromotionState as _PromotionState,
+    _parse_promotion_decisions as _parse_promotion_decisions,
+    _parse_promotion_diagnostics as _parse_promotion_diagnostics,
+)
+from opencohost.core.context.injection_markers import (
+    SCOUT_TITLE_MAX_WORDS as SCOUT_TITLE_MAX_WORDS,
+    INJECTION_MARKERS as INJECTION_MARKERS,
+    _strip_injection_markers as _strip_injection_markers,
+)
+from opencohost.core.speech.speech_rate import (
+    edge_rate_for_length_scale as edge_rate_for_length_scale,
+    _is_connection_error as _is_connection_error,
 )
 from opencohost.core.context.repetition_guard import (
     DEFAULT_CONFIG as REPETITION_CONFIG,
@@ -108,7 +127,6 @@ from opencohost.core.engine.llm_inference_service import (
 )
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
-from opencohost.core.scheduling.turn_stamp import TurnStamp
 from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
 from opencohost.core.speech.router import (
     SPEECH_BOUNDARY_COMMAND,
@@ -294,270 +312,7 @@ _PROMOTION_JUDGE_REASONS = frozenset({
     "vague", "speculative", "trivial", "transient", "not_attributable",
 })
 
-# NOT an i18n slot, deliberately: this string never reaches a user, it instructs
-# its own output language inline, and a slot would cost two manifest edits plus
-# churn in the i18n contract tests for zero user-visible benefit.
-# `{draft_block}` is substituted with str.replace, NOT str.format — the JSON
-# example below is full of literal braces, and doubling every one of them is a
-# silent-corruption trap for the next editor.
-_PROMOTION_JUDGE_PROMPT = """You are a memory archivist for a streaming co-host. You do NOT talk to anyone.
-You only decide which of the numbered exchanges below are worth remembering
-permanently, and rewrite each keeper as ONE standalone sentence.
-
-KEEP an item only if ALL SIX hold:
-1. EXPLICIT — the operator stated it. Anything only the assistant speculated,
-   guessed, joked about or inferred is not a fact. Reject it.
-2. SELF-CONTAINED — your rewrite must be fully understandable a month from now
-   by someone who never saw this conversation. No "this", "that", "the game",
-   "the question", "the bug", "the fix", no unnamed pronouns, no unresolved
-   references. If you cannot name the actual subject from the text you were
-   given, REJECT. A vague rewrite is WORSE than no memory at all.
-3. SPECIFIC — a concrete fact, preference, name, decision or number. Not a
-   mood, not a greeting, not small talk.
-4. REUSABLE — useful in a DIFFERENT future conversation, not only as a recap
-   of this one.
-5. DURABLE — still true next month. Reject anything about the current moment.
-6. ATTRIBUTABLE — it is clear whose fact it is.
-
-NAMES: never invent, normalise, translate or "correct" a proper noun. Game
-titles, model names, tools and people usually appear only ONCE — that is
-normal and is NOT a reason to reject. Copy the operator's own spelling
-verbatim. If you are not confident you transcribed a name correctly, still
-KEEP the item and set "uncertain": true.
-
-Write each rewrite in the SAME LANGUAGE the operator used, in at most 30 words.
-
-CANDIDATES:
-{draft_block}
-
-Reply with JSON only, no prose, no markdown fence:
-{"decisions":[{"i":1,"keep":true,"text":"<standalone sentence>"},
-              {"i":2,"keep":true,"text":"<sentence>","uncertain":true},
-              {"i":3,"keep":false,"reason":"vague"}]}
-
-Field contract:
-  i          int, 1..N, exactly one object per candidate number
-  keep       bool, required
-  text       string, required when keep is true, <=220 characters
-  uncertain  bool, optional, only meaningful when keep is true
-  reason     string, only when keep is false; one of:
-             vague, speculative, trivial, transient, not_attributable
-
-If unsure whether to keep an item, use keep:false."""
-
-_PROMOTION_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class PromotionParseDiagnostics:
-    decisions: list[tuple[int, str | None, bool, str]]
-    top_level_valid: bool
-    unresolved: dict[int, str]
-
-
 _PromotionParseDiagnostics = PromotionParseDiagnostics
-
-
-class _PromotionState(Enum):
-    NOT_ELIGIBLE = "not_eligible"
-    WAITING_IDLE = "waiting_idle"
-    RUNNING = "running"
-
-
-def _parse_promotion_decisions(text, batch_len: int) -> list[tuple[int, str | None, bool, str]]:
-    """Parse the judge's reply into applied decisions. PURE — no I/O, no engine.
-
-    Returns ``(index, text_or_None, uncertain, reason)`` per usable entry:
-    a keep is ``(i, sentence, uncertain, "")``; a reject is ``(i, None, False,
-    reason)``. NEVER raises: every unusable shape (empty, prose, a truncated
-    reasoning-model reply, a fence full of apologies) collapses to ``[]``.
-    """
-    if not text or not isinstance(text, str):
-        return []
-    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
-    try:
-        raw_dict = json.loads(stripped)
-    except Exception:
-        return []
-    if not isinstance(raw_dict, dict):
-        return []
-    try:
-        from opencohost.core.memory.models import MemoryJudgeResult, ValidationError
-        parsed = MemoryJudgeResult.model_validate_json(stripped)
-    except Exception:
-        return []
-
-    raw_entries = raw_dict.get("decisions")
-    raw_counts: dict[int, int] = {}
-    if isinstance(raw_entries, list):
-        for entry in raw_entries:
-            if isinstance(entry, dict):
-                idx = entry.get("i")
-                if isinstance(idx, int) and not isinstance(idx, bool):
-                    raw_counts[idx] = raw_counts.get(idx, 0) + 1
-
-    results: list[tuple[int, str | None, bool, str]] = []
-    seen: set[int] = set()
-    for decision in parsed.decisions:
-        index = decision.i
-        if not 1 <= index <= batch_len or raw_counts.get(index, 0) > 1 or index in seen:
-            continue
-        seen.add(index)
-        if decision.keep:
-            results.append((index, decision.text or "", bool(decision.uncertain), ""))
-        else:
-            results.append((index, None, False, decision.reason or "unspecified"))
-    return results
-
-
-def _parse_promotion_diagnostics(text, batch_len: int) -> PromotionParseDiagnostics:
-    """Parse the judge's reply into applied decisions and per-draft diagnostics."""
-    if not text or not isinstance(text, str):
-        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
-    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
-    try:
-        payload = json.loads(stripped)
-    except Exception:
-        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
-    if not isinstance(payload, dict) or set(payload.keys()) != {"decisions"}:
-        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
-    entries = payload.get("decisions")
-    if not isinstance(entries, list):
-        return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
-
-    decisions = _parse_promotion_decisions(text, batch_len)
-    decision_indices = {d[0] for d in decisions}
-
-    raw_counts: dict[int, int] = {}
-    present_indices: set[int] = set()
-    for entry in entries:
-        if isinstance(entry, dict):
-            idx = entry.get("i")
-            if isinstance(idx, int) and not isinstance(idx, bool):
-                raw_counts[idx] = raw_counts.get(idx, 0) + 1
-                present_indices.add(idx)
-
-    unresolved: dict[int, str] = {}
-    for i in range(1, batch_len + 1):
-        if i in decision_indices:
-            continue
-        if raw_counts.get(i, 0) > 1:
-            unresolved[i] = "duplicate_index"
-        elif i in present_indices:
-            unresolved[i] = "invalid_decision"
-        else:
-            unresolved[i] = "missing_decision"
-
-    return PromotionParseDiagnostics(
-        decisions=decisions,
-        top_level_valid=True,
-        unresolved=unresolved,
-    )
-
-
-def _is_connection_error(exc: BaseException) -> bool:
-    """Walk the exception cause chain; return True only for network-offline errors.
-
-    Classified as connection errors: socket.gaierror, ssl.SSLError,
-    aiohttp.ClientConnectorError.  asyncio.TimeoutError and all other
-    exceptions return False.
-    """
-    import ssl
-    seen: set = set()
-    e: BaseException | None = exc
-    while e is not None and id(e) not in seen:
-        seen.add(id(e))
-        if isinstance(e, (socket.gaierror, ssl.SSLError)):
-            return True
-        try:
-            import aiohttp
-            if isinstance(e, aiohttp.ClientConnectorError):
-                return True
-        except ImportError:
-            pass
-        e = e.__cause__ or e.__context__  # type: ignore[assignment]
-    return False
-
-
-def edge_rate_for_length_scale(scale: float) -> str:
-    """Convert a Piper length_scale into the equivalent Edge-TTS rate string.
-
-    length_scale multiplies phoneme durations (higher = SLOWER), so the
-    effective speed multiplier is 1/scale. Edge-TTS's `rate` kwarg wants a
-    signed percentage ("-23%"), so both engines end up moving together
-    instead of in opposite directions (1.30 must slow Edge-TTS down too, not
-    speed it up 30%). Guard scale <= 0 (never divide by zero / invert
-    direction) by returning "+0%".
-    """
-    if scale <= 0:
-        return "+0%"
-    pct = round((1.0 / scale - 1.0) * 100)
-    return f"{pct:+d}%"
-
-
-# Topic Scout prompt — plain user message (NO system prompt / persona). Seeded
-# with a compact, sanitized rendering of the recent LIVE host turns. Migrated
-# to i18n_active.scout_prompt() (P4, kira_bilingual_e2e) -- es legacy default
-# lives in opencohost/i18n/active.py::LEGACY_SCOUT_PROMPT_TEMPLATE.
-
-# Max words allowed in a scout title (preamble filter rejects longer lines).
-SCOUT_TITLE_MAX_WORDS = 6
-
-# Prompt-injection marker floor (modest, not exhaustive — keyword lists don't
-# scale). Shared by _sanitize_history_context (neutralizes via truncation) and
-# the scout scrub (removes the phrase outright from the compact render).
-INJECTION_MARKERS = (
-    # English markers
-    "ignore all previous",
-    "you are now",
-    "new system prompt",
-    "pretend you are",
-    "forget everything",
-    "disregard previous",
-    "do not follow",
-    "your new role is",
-    "you must now",
-    "act as if",
-    "from now on you are",
-    # Spanish markers
-    "olvida todo",
-    "olvidá todo",
-    "ignora todo",
-    "ignorá todo",
-    "ignora las instrucciones",
-    "ignorá las instrucciones",
-    "ahora eres",
-    "ahora sos",
-    "nuevo system prompt",
-    "nuevo prompt de sistema",
-    "haz de cuenta",
-    "hacé de cuenta",
-    "tu nuevo rol es",
-    "no sigas",
-    "no obedezcas",
-    "actúa como",
-    "actua como",
-    "de ahora en adelante eres",
-    "de ahora en más sos",
-)
-
-
-def _strip_injection_markers(text: str) -> str:
-    """Remove INJECTION_MARKERS phrases outright, collapse whitespace.
-
-    Shared by the scout scrub (_scout_scrub_text) and the memorias injection
-    path (_build_memorias_injection_block): both surfaces re-render stored
-    text into the prompt, so a marker phrase must be stripped, not merely
-    truncated around (which _sanitize_history_context alone would do).
-    """
-    lowered = text.lower()
-    for marker in INJECTION_MARKERS:
-        idx = lowered.find(marker)
-        while idx != -1:
-            text = text[:idx] + text[idx + len(marker):]
-            lowered = text.lower()
-            idx = lowered.find(marker)
-    return " ".join(text.split())
 
 
 def _output_guard_with_tts_check(text: str, source: str) -> tuple[bool, str]:
@@ -1910,44 +1665,8 @@ class MotorVocalIA(
         return _get_turn_scheduler(self).take_owner_prefix(head_item)
 
     def _compose_owner_bundle(self, members: list) -> tuple:
-        """Render queue tuples into one (payload, history_text, stamp).
-
-        Pure: no locks, no I/O. `members` is [head] + whatever
-        _take_owner_bundle_prefix returned, each a full queue tuple.
-
-        Presentation order is the QUEUE TIMESTAMP — chronological, the order the
-        owner asked — not the priority order that decided which turn runs, so a
-        priority-0 PTT question asked second is still presented second.
-
-        `history_text` is built from each member's OWN history_text (tuple index
-        4; both arrival paths supply one) and never from the prompt scaffolding
-        above it: this string is what _commit_history stores as safe_context and
-        therefore what memoria and the digest later recite (§OQ-6).
-
-        The stamp carries the OLDEST member's submitted_at, so [TURN_LATENCY]'s
-        queue_wait_ms reports the WORST real wait in the burst rather than the
-        head's. None when no member was ever submitted through that seam — the
-        same "never fake a wait we didn't measure" rule enqueue() documents.
-        """
-        ordered = sorted(members, key=lambda it: it[1])
-        numbered = "\n".join(f"{i}. {it[2]}" for i, it in enumerate(ordered, 1))
-        payload = i18n_active.owner_bundle_header().format(
-            count=len(ordered), questions=numbered,
-        )
-        recap = "; ".join(
-            (it[4] if len(it) > 4 and it[4] else it[2]) for it in ordered
-        )
-        history_text = i18n_active.owner_bundle_history().format(questions=recap)
-        stamped = [it for it in ordered if len(it) > 5 and it[5] is not None]
-        oldest = min(stamped, key=lambda it: it[5]) if stamped else None
-        stamp = (
-            TurnStamp(
-                submitted_at=oldest[5],
-                submitted_under_provider=(oldest[6] if len(oldest) > 6 else None),
-            )
-            if oldest is not None else None
-        )
-        return payload, history_text, stamp
+        """Render queue tuples into one (payload, history_text, stamp). Pure: no locks, no I/O."""
+        return _get_turn_scheduler(self).compose_bundle(members)
 
     def _log_owner_bundle(self, members: list, payload: str) -> None:
         """One INFO line per bundle (§OQ-8). The owner validates this feature by
