@@ -54,23 +54,6 @@ integrations = [
     "obsws-python>=1.7.0",
     "nvidia-ml-py>=12.0.0",
 ]
-# legacy-ui: frozen CustomTkinter application and its input/audio adapters.
-# This extra is intentionally separate from the Tauri/API core and is not
-# selected by the Windows v1 engine sync.
-legacy-ui = [
-    "customtkinter>=5.2.0",
-    "google-api-python-client>=2.128.0",
-    "google-auth>=2.29.0",
-    "keyboard>=0.13.5",
-    "numpy>=1.26.0",
-    "pillow>=10.3.0",
-    "pynput>=1.7.6",
-    "sounddevice>=0.4.6",
-    "soundfile>=0.12.1",
-    # websocket-client (websocket.*) is used by legacy voice control;
-    # the Tauri PTT path uses websockets (async) from the core set.
-    "websocket-client>=1.8.0",
-]
 # youtube-chat: DELIBERATELY SEPARATE, opt-in only. pytchat reads YouTube's
 # unofficial live-chat endpoint, which YouTube's Terms of Service do not permit.
 # Twitch is the supported platform and requires no extra. Installing this is an

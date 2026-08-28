@@ -147,7 +147,7 @@ def test_engine_payload_build_is_byte_deterministic(tmp_path):
     assert first.read_bytes() == second.read_bytes()
 
 
-def test_ci_sync_extras_are_declared_and_select_legacy_suite():
+def test_ci_sync_extras_are_declared_and_select_modern_suite():
     project = _project_metadata()["project"]
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     sync_commands = re.findall(r"uv sync[^\r\n]+", workflow)
@@ -159,5 +159,6 @@ def test_ci_sync_extras_are_declared_and_select_legacy_suite():
     declared_extras = set(project.get("optional-dependencies", {}))
 
     assert "api" not in used_extras
-    assert "legacy-ui" in used_extras
+    assert "legacy-ui" not in used_extras
+    assert "legacy-ui" not in declared_extras
     assert used_extras <= declared_extras

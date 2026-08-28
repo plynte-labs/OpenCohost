@@ -33,11 +33,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Sync dependencies (dev + legacy-ui + integrations + youtube-chat + local-tts + cloud-tts)
-        # FastAPI/uvicorn are core dependencies; legacy-ui provides CTk/input/audio
-        # dependencies needed by the full legacy-inclusive test suite.
+      - name: Sync dependencies (dev + integrations + youtube-chat + local-tts + cloud-tts)
+        # FastAPI/uvicorn are core dependencies for the Tauri backend.
         # youtube-chat provides pytchat; local-tts/cloud-tts provide piper-tts/edge-tts.
-        run: uv sync --locked --extra dev --extra legacy-ui --extra integrations --extra youtube-chat --extra local-tts --extra cloud-tts
+        run: uv sync --locked --extra dev --extra integrations --extra youtube-chat --extra local-tts --extra cloud-tts
 
       - name: Tests
         run: uv run pytest tests/ -q
