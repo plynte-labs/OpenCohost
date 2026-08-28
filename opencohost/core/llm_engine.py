@@ -79,6 +79,18 @@ from opencohost.core.turn_scheduler import (
     OWNER_QUESTION_SOURCES as _OWNER_QUESTION_SOURCES,
     TurnScheduler,
 )
+from opencohost.core.context.repetition_guard import (
+    DEFAULT_CONFIG as REPETITION_CONFIG,
+    RepetitionResult,
+    detect_repetition,
+    sanitize_clause_repetition,
+)
+from opencohost.core.context.generation_evaluator import (
+    GenerationEvaluator,
+    EvaluationResult,
+    output_guard_with_tts_check as _output_guard_with_tts_check_pure,
+    guard_rule_id as _guard_rule_id_pure,
+)
 from opencohost.core.context.prompt_assembler import (
     DIGEST_CAPTURE_SOURCES,
     PERSONALIZATION_INJECT_SOURCES,
@@ -549,40 +561,13 @@ def _strip_injection_markers(text: str) -> str:
 
 
 def _output_guard_with_tts_check(text: str, source: str) -> tuple[bool, str]:
-    """output_guard runs on the RAW LLM text, but `_sanitize_tts_text_for_
-    playback` strips markdown emphasis (`*x*`) LATER, only inside
-    `_hablar_impl`. R9/R4's patterns join tokens with `\\s+`, and `*` is not
-    whitespace, so a markdown-wrapped violation ('Como *IA*, no puedo
-    opinar.') passes the raw-text guard and is then spoken clean once the
-    sanitizer strips the asterisks. Guard BOTH surfaces: raw text is what
-    reaches `historial`/`/api/chat/last-reply`, the sanitized copy is what
-    actually reaches TTS.
-
-    The sanitized pass only runs when the raw pass already allowed the text
-    (cheap: no double-sanitizing, no sanitizing when raw already blocked). A
-    block only the sanitized pass caught is tagged `[tts-sanitized]` so it
-    reads as distinct from a raw-text block in the log line.
-    """
-    allowed, reason = output_guard(text, source=source)
-    if not allowed:
-        return allowed, reason
-    sanitized = _sanitize_tts_text_for_playback(text)
-    allowed, reason = output_guard(sanitized, source=source)
-    if not allowed:
-        return allowed, f"[tts-sanitized] {reason}"
-    return True, ""
-
-
-# output_guard's reason strings carry the rule id in brackets
-# ("Non-negotiable violation [no_ai_self_identification]: ..."). The character
-# class deliberately excludes "-" so the "[tts-sanitized]" tag a
-# _output_guard_with_tts_check block prepends is never mistaken for a rule id.
-_GUARD_RULE_ID_RE = re.compile(r"\[([a-z0-9_]+)\]")
+    """Delegate to generation_evaluator.output_guard_with_tts_check."""
+    return _output_guard_with_tts_check_pure(text, source=source, output_guard_fn=output_guard)
 
 
 def _guard_rule_id(reason: str) -> str:
-    match = _GUARD_RULE_ID_RE.search(reason or "")
-    return match.group(1) if match else "unknown_rule"
+    """Delegate to generation_evaluator.guard_rule_id."""
+    return _guard_rule_id_pure(reason)
 
 
 # Control commands safe to apply at a turn boundary (see
@@ -1084,6 +1069,20 @@ class MotorVocalIA(
         self._inference_service = get_inference_service(self)
         self._prompt_assembler = PromptContextAssembler(
             sanitize_history_fn=self._sanitize_history_context
+        )
+        self._generation_evaluator = GenerationEvaluator(
+            output_guard_fn=lambda t, source="": output_guard(t, source=source),
+            guardrail_fallback_fn=self._guardrail_fallback_line,
+            detect_repetition_fn=lambda cand, rec, **kw: getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "detect_repetition",
+                detect_repetition,
+            )(cand, rec, **kw),
+            sanitize_clause_fn=lambda text: getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "sanitize_clause_repetition",
+                sanitize_clause_repetition,
+            )(text),
         )
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
@@ -3451,211 +3450,101 @@ class MotorVocalIA(
         retry/fallback, seal-on-success — and NOTHING else; a buffered turn
         (streamed_job=None) runs this method byte-identically to before.
         """
-        raw_content = outcome.raw_content
-        respuesta = outcome.respuesta
-        messages = setup.messages
-        opciones_llm = setup.opciones_llm
-        chat_timeout = setup.chat_timeout
-        start_llm = setup.start_llm
-        _native_ctx = setup.native_ctx
-        _effective_ctx = setup.effective_ctx
-        _ctx_evicted = setup.ctx_evicted
-        editorial_block = setup.editorial_block
-        history_snapshot = setup.history_snapshot
+        evaluator = getattr(self, "_generation_evaluator", None)
+        if evaluator is None:
+            evaluator = GenerationEvaluator(
+                output_guard_fn=output_guard,
+                guardrail_fallback_fn=getattr(self, "_guardrail_fallback_line", None),
+                detect_repetition_fn=lambda cand, rec, **kw: getattr(
+                    sys.modules.get("opencohost.core.llm_engine"),
+                    "detect_repetition",
+                    detect_repetition,
+                )(cand, rec, **kw),
+            )
 
-        dialogo = raw_content.strip().strip('\x00\ufeff')
-        elapsed = time.time() - start_llm
-        # T2(a) [v5]: last COMPLETED generation's duration (foreground or
-        # pregen, this is the shared _generar_dialogo body both use),
-        # feeding the adaptive retry gate (_pregen_retry_gate_seconds).
-        # Single Ollama runner -> at most one writer at a time; plain
-        # assignment is safe (atomic under the GIL).
+        eval_res = evaluator.evaluate(
+            outcome.raw_content,
+            outcome.respuesta,
+            setup,
+            source=source,
+            is_local=is_local,
+            provider_cfg=provider_cfg,
+            request_model=request_model,
+            desired_model=getattr(self, "_desired_model", request_model),
+            current_model=getattr(self, "current_model", request_model),
+            loaded_model=getattr(self, "_loaded_model", None),
+            current_profile_name=getattr(self, "_current_profile_name", "default"),
+            cfg_is_local_fn=getattr(self, "_cfg_is_local", None),
+            agenda_output_sanitizer=getattr(self, "_sanitize_agenda_output", None),
+            agenda_output_transformer=getattr(self, "agenda_output_transformer", None),
+            clause_sanitizer_sources=getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "CLAUSE_SANITIZER_SOURCES",
+                settings.CLAUSE_SANITIZER_SOURCES,
+            ),
+            sanitize_clause_fn=getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "sanitize_clause_repetition",
+                sanitize_clause_repetition,
+            ),
+            is_streamed=(streamed_job is not None),
+        )
+
+        dialogo = eval_res.dialogo
+        elapsed = eval_res.elapsed
         self._pregen_last_gen_duration = elapsed
 
-        # Editorial direct-mode USED trigger (D2): commit the pending
-        # injection exactly once, only when this turn actually injected a
-        # card block AND produced a non-empty dialogo. Single engine worker
-        # thread is the only caller (no lock needed). Fail-open \u2014 a recorder
-        # error must never break a turn.
-        #
-        # NO SOURCE GATE, deliberately-but-unratified: since F1 widened
-        # _EDITORIAL_INJECT_SOURCES to direct+ptt, a VOICE turn also consumes
-        # a single_use card. Pinned by
-        # test_editorial_direct_context.py::test_ptt_turn_consumes_single_use_armed_card
-        # \u2014 read that test before adding a gate here; it is an owner decision,
-        # not a bug.
-        if editorial_block and dialogo and self.direct_editorial_usage_recorder is not None:
+        # 1. Editorial usage recorder trigger
+        if setup.editorial_block and dialogo and getattr(self, "direct_editorial_usage_recorder", None) is not None:
             try:
                 self.direct_editorial_usage_recorder()
             except Exception:
                 logger.warning("editorial direct usage recorder failed", exc_info=True)
 
-        # Layer 4 observability: log prompt-window utilization on every populated
-        # response and raise a UI pressure signal when it crosses the high mark.
-        _pec_raw = getattr(respuesta, "prompt_eval_count", 0) if respuesta is not None else 0
-        _pec_final = _pec_raw if isinstance(_pec_raw, (int, float)) else 0
-        if _pec_final > 0:
-            _util = context_budget.utilization(_pec_final, _effective_ctx)
-            # measure-first (prompt_efficiency_kvcache_20260629): log the prefill
-            # vs decode wall-time split so the prefill fraction of TTFT is observable
-            # before any Lever-1 prefix-stability rewrite. Ollama reports ns.
-            _predur = getattr(respuesta, "prompt_eval_duration", 0)
-            _prefill_ms = (_predur / 1e6) if isinstance(_predur, (int, float)) else 0.0
-            _evaldur = getattr(respuesta, "eval_duration", 0)
-            _decode_ms = (_evaldur / 1e6) if isinstance(_evaldur, (int, float)) else 0.0
-            # llm_output_streaming_20260813: Ollama reports the COLD MODEL LOAD
-            # separately from prefill, and this line never read it -- so a slow
-            # turn was one undifferentiated lump with no way to tell "the model
-            # had to be loaded" from "the model stalled". That distinction is
-            # what the streaming stall detector has to be built on: with
-            # LLM_KEEP_ALIVE="7m" and `_prepare_model` called ONLY at startup,
-            # on a switch and on cloud fallback (never on the turn path), any
-            # idle gap over 7 minutes makes the NEXT turn pay a cold load
-            # inside the chat call itself. Measure it before choosing a timeout.
-            _loaddur = getattr(respuesta, "load_duration", 0)
-            _load_ms = (_loaddur / 1e6) if isinstance(_loaddur, (int, float)) else 0.0
-            _ec_raw = getattr(respuesta, "eval_count", 0)
-            _ec_final = _ec_raw if isinstance(_ec_raw, (int, float)) else 0
+        # 2. Context telemetry logging & ring append
+        if eval_res.telemetry is not None:
+            tel = eval_res.telemetry
             logger.info(
                 "ctx_utilization: model=%s prompt_eval_count=%d native_ctx=%d effective_ctx=%d ratio=%.3f "
                 "load_ms=%.0f prefill_ms=%.0f decode_ms=%.0f eval_count=%d source=%s",
-                request_model, _pec_final, _native_ctx, _effective_ctx, _util,
-                _load_ms, _prefill_ms, _decode_ms, _ec_final, source,
+                request_model, tel.pec, setup.native_ctx, setup.effective_ctx, tel.utilization,
+                tel.load_ms, tel.prefill_ms, tel.decode_ms, tel.eval_count, source,
             )
-            # Unit 2.3 (runtime_findings_batch_20260731 F10): stash the SAME
-            # numbers the line above just logged, per request, in the bounded
-            # ring -- built entirely from this call's own locals (never a
-            # shared attribute), so it cannot diverge from the log line for
-            # this turn and cannot race a concurrent pregen worker's own call.
-            # `_ctx_evicted` is the ctx_budget_gate value from THIS call's own
-            # `_GenerationSetup` (set once in `_build_generation_request`,
-            # carried per call, never stored on `self`) -- it cannot be
-            # another turn's value.
-            # `_ctx_provider` mirrors trace_provider's formula below without
-            # depending on it (that variable is computed later in this
-            # method and must not gate whether this snapshot is built).
-            _ctx_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
-            _ctx_snapshot = {
-                "request_id": str(uuid.uuid4()),
-                "timestamp": time.time(),
-                "source": source,
-                "provider": _ctx_provider,
-                "model": request_model,
-                "native_ctx": _native_ctx,
-                "effective_ctx": _effective_ctx,
-                "ratio": _util,
-                "prompt_eval_count": _pec_final,
-                "load_ms": _load_ms,
-                "prefill_ms": _prefill_ms,
-                "decode_ms": _decode_ms,
-                "eval_count": _ec_final,
-                "evicted_pairs": _ctx_evicted,
-            }
-            # getattr-guarded: several existing tests build a MotorVocalIA
-            # via __new__ (bypassing __init__) and only set the attributes
-            # their scenario touches -- mirrors the agenda_output_transformer
-            # guard above.
-            _ctx_ring = getattr(self, "_ctx_telemetry_ring", None)
-            if _ctx_ring is not None:
-                _ctx_ring.append(_ctx_snapshot)
-            if _util >= CTX_PRESSURE_HIGH_THRESHOLD:
+            ring = getattr(self, "_ctx_telemetry_ring", None)
+            if ring is not None:
+                ring.append(tel.snapshot)
+            if tel.pressure_high:
                 logger.warning(
                     "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
-                    _util * 100, request_model, source,
+                    tel.utilization * 100, request_model, source,
                 )
-                _on_ctx_pressure_high = getattr(self, "on_ctx_pressure_high", None)
-                if _on_ctx_pressure_high is not None:
+                on_high = getattr(self, "on_ctx_pressure_high", None)
+                if on_high is not None:
                     try:
-                        _on_ctx_pressure_high({
-                            "ratio": _util,
-                            "effective_ctx": _effective_ctx,
-                            "native_ctx": _native_ctx,
-                            "evicted_pairs": _ctx_evicted,
+                        on_high({
+                            "ratio": tel.utilization,
+                            "effective_ctx": setup.effective_ctx,
+                            "native_ctx": setup.native_ctx,
+                            "evicted_pairs": setup.ctx_evicted,
                         })
                     except Exception:
                         logger.exception("on_ctx_pressure_high callback failed")
-                self.ui_callback("ctx_pressure_high")
+                if getattr(self, "ui_callback", None) is not None:
+                    self.ui_callback("ctx_pressure_high")
 
-        # MODEL_TRACE: audit which model was used for this generation
-        generation_model = request_model
-        desired = self._desired_model
-        active = self.current_model
-        loaded = self._loaded_model or "unknown"
-        # F4 (runtime_findings_batch_20260731 1.3): provider/transport for
-        # THIS generation, derived from the entry-snapshot `is_local` (never
-        # a fresh live read — same pinning rule as the rest of the
-        # generation, threaded in from `_generar_dialogo`'s entry).
-        # `fallback_active` here means "local ONLY because of the runtime
-        # fallback flag, not because cfg was genuinely local" — derived from
-        # values already in scope, no extra snapshot variable needed.
-        trace_provider = "local" if is_local else (provider_cfg.get("active_provider") or "local")
-        trace_transport = "local" if is_local else "cloud"
-        trace_fallback_active = is_local and not self._cfg_is_local(provider_cfg)
-        trace_msg = (
-            f"[MODEL_TRACE] desired={desired} active={active} "
-            f"loaded={loaded} generation={generation_model} "
-            f"profile={self._current_profile_name} source={source} "
-            f"provider={trace_provider} transport={trace_transport} "
-            f"fallback_active={trace_fallback_active}"
-        )
-        # `generation` is the ENGINE's model label and stays that on a cloud
-        # turn -- logs/opencohost_20260804_191446.log reads
-        # `generation=gemma4:e4b provider=nvidia_nim transport=cloud`, which
-        # names the tier, not what NVIDIA actually ran. That made the 49-64s
-        # latencies CLOUD_CHAT_TIMEOUT was sized against (settings.py:137-143)
-        # unattributable two weeks later, when a provider-model swap to
-        # z-ai/glm-5.2 pushed a measured call to 123.69s and there was no way
-        # to say what the old number had been measured on.
-        # Cloud-only, because on a local turn `generation` already IS the model.
-        # A model id is a public name, never a credential -- the key lives in
-        # LLM_KEYS_FILE and never comes near this string.
-        if trace_transport == "cloud":
-            profiles = provider_cfg.get("profiles")
-            profile_cfg = profiles.get(trace_provider) if isinstance(profiles, dict) else None
-            cloud_model = (
-                profile_cfg.get("model") if isinstance(profile_cfg, dict) else None
-            ) or "unknown"
-            trace_msg += f" cloud_model={cloud_model}"
-        # Root cause confirmed against logs/opencohost_20260730_162650.log:
-        # `_prepare_model` short-circuits without ever setting `_loaded_model`
-        # while cloud is the effective transport (`:2683-2687` — see
-        # `_judge_model`'s docstring for the same fact), so `loaded` reads
-        # "unknown" on EVERY cloud-by-design turn even though nothing is
-        # wrong — that is the entire cause of the 29/29 false positives, not
-        # `generation` carrying the cloud model id (it never does: `request_model`
-        # is captured once at `_generar_dialogo`'s entry, threaded through the
-        # phases unrebound, and is always the local alias).
-        cloud_by_design = trace_transport == "cloud" and not trace_fallback_active
-        mismatch = desired != active or active != loaded or loaded != generation_model
-        if mismatch and not cloud_by_design:
-            self._log(f"[MODEL_MISMATCH_WARNING] {trace_msg}", level="warning")
+        # 3. Model trace & mismatch warning
+        if eval_res.model_trace.is_mismatch:
+            self._log(f"[MODEL_MISMATCH_WARNING] {eval_res.model_trace.trace_msg}", level="warning")
         else:
-            logger.info(f"Motor: {trace_msg}")
+            logger.info(f"Motor: {eval_res.model_trace.trace_msg}")
 
-        if source.startswith("kira-agenda"):
-            dialogo = self._sanitize_agenda_output(dialogo)
-            transformer = getattr(self, "agenda_output_transformer", None)
-            if transformer is not None:
-                try:
-                    dialogo = transformer(dialogo)
-                except Exception:
-                    logger.exception("Agenda output transformer failed")
-
+        # 4. Empty output handling
         if not dialogo:
             self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
-            logger.warning(f"Empty LLM response. Raw repr: {repr(raw_content)}")
-            # Item 4 (2026-07-24 incident): this is the FINAL empty return
-            # (max_intentos + Layer-2 self-heal already exhausted) -- on
-            # cloud that used to be silent dead air (no callback, no
-            # fallback). Surface it the same way a transport failure does
-            # (F1): fire the existing whitelisted status, then route to
-            # the fallback state machine. Local stays byte-identical.
+            logger.warning(f"Empty LLM response. Raw repr: {repr(outcome.raw_content)}")
             if not is_local:
-                self.ui_callback("cloud_llm_error")
-                # No exception/status here (a well-formed but empty 2xx) --
-                # `transient` per classify_cloud_error's own rule for a
-                # malformed/unclassifiable 2xx body; drives backoff auto-
-                # return (unit 2.2).
+                if getattr(self, "ui_callback", None) is not None:
+                    self.ui_callback("cloud_llm_error")
                 self._handle_cloud_failure(
                     source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
                 )
@@ -3664,31 +3553,15 @@ class MotorVocalIA(
             return ""
 
         if is_local:
-            # F5: a cloud success must not set an unvalidated LOCAL model as
-            # the rollback/fallback target (request_model is the local tag on
-            # cloud) nor clear _awaiting_first_success_after_switch.
             self._mark_model_generation_success(request_model)
-        # clause_sanitizer V1: intra-sentence clause repetition. Placed here,
-        # before output_guard, so it is provider-agnostic by construction —
-        # there is no is_local gate between this point and the return.
-        if source in CLAUSE_SANITIZER_SOURCES:
-            san = sanitize_clause_repetition(dialogo)
-            # A pregen/connector-upgrade worker generates on its own
-            # thread and interleaves into the same log, so the stage must
-            # say which one this was — otherwise the tuning pass cannot
-            # tell a spoken foreground turn from a speculative draft that
-            # may never be spoken at all. Logged for every verdict, including
-            # "clean" — otherwise the clean count is unobtainable from the
-            # log (ADR-039 gate).
+
+        # 5. Clause sanitizer handling
+        if eval_res.clause_verdict is not None:
+            san = eval_res.clause_verdict
             self._log_clause_sanitizer(
                 san, source,
                 stage="generate" if commit_history else "pregen_draft",
             )
-            # Tier 2 (reject -> regenerate) needs an owner for the
-            # regeneration, and only agenda has one: the ADR-011 ladder,
-            # reached by returning "" — the same idiom the ladder reject
-            # below already uses. Elsewhere this is repair-only; the verdict
-            # is still recorded so evidence for arming tier 2 accrues.
             if san.verdict == "rejected" and source.startswith("kira-agenda"):
                 self._log(
                     f"Salida descartada por repetición de cláusulas "
@@ -3700,32 +3573,21 @@ class MotorVocalIA(
                 return ""
             if streamed_job is None:
                 dialogo = san.text
-            # else: verdict-log-only (§5) — the ADR-039 counters accrued in
-            # the _log_clause_sanitizer call above, but _repair_sentence
-            # mutations are never applied to a turn that is already speaking.
+
+        # 6. Stream guard or output guard
         if streamed_job is not None:
-            # §5/§7: the per-sentence guard already ran on every sanitized
-            # sentence in the streaming loop; this applies the full-text
-            # backstop / truncation protocol and seals the job. It never
-            # returns an empty string (a job implies >=1 appended sentence),
-            # so the retry/fallback blocks below are structurally skipped.
             dialogo = self._apply_stream_guard_verdict(outcome.stream, dialogo, source)
-            allowed, guard_reason = True, ""
+            allowed = True
         else:
-            allowed, guard_reason = _output_guard_with_tts_check(dialogo, source=source)
+            allowed = eval_res.guard_allowed
+
         if not allowed:
-            self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
-            # guardrail_tuning_20260724 (owner decision "afinar + reintento"):
-            # ONE extra generation, same prompt + a corrective system nudge,
-            # before falling back to the canned line. A SEPARATE call outside
-            # the max_intentos transport-retry loop above — never consumes
-            # that budget. Posture (provider_cfg/is_local) stays the F2
-            # snapshot; no live re-read.
+            self._log(f"Salida bloqueada por guardrail: {eval_res.guard_reason}", level="warning")
             retry_content = self._retry_after_guard_block(
-                messages=messages,
-                opciones_llm=opciones_llm,
+                messages=setup.messages,
+                opciones_llm=setup.opciones_llm,
                 request_model=request_model,
-                chat_timeout=chat_timeout,
+                chat_timeout=setup.chat_timeout,
                 provider_cfg=provider_cfg,
                 is_local=is_local,
             )
@@ -3745,26 +3607,14 @@ class MotorVocalIA(
                     allowed = True
 
         if not allowed:
-            fallback = self._guardrail_fallback_line(source, guard_reason)
+            fallback = self._guardrail_fallback_line(source, eval_res.guard_reason)
             if fallback:
                 self._log("Guardrail fallback: usando línea neutral sin LLM.")
-                # D4 (memoria_quality_20260717): a guardrail-blocked turn used
-                # to return here BEFORE _commit_history, so the whole exchange
-                # vanished from history AND capture (F4). Commit the user turn
-                # + the spoken fallback line instead. Gated on commit_history
-                # so callers that opted out are unaffected, and on a truthy
-                # fallback so agenda sources (fallback="") keep their existing
-                # state-machine handling with no empty pair appended. C1's
-                # canned-fallback skip guarantees these pairs never become
-                # memorias.
                 if commit_history:
                     self._commit_history(
                         contexto, fallback, source=source, history_text=history_text,
                     )
                 return fallback
-            # WU4 F3 (WU3 follow-up): guardrail-no-fallback is a
-            # non-committing foreground return — bump the pregen epoch so
-            # a late zombie store cannot survive into the next pop.
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
@@ -3773,38 +3623,27 @@ class MotorVocalIA(
         self._last_cloud_failure_class = None
         self._cloud_bad_key_notified = False
 
-        # FIX 2 — chat-reactive reactive guard. Suppress repetition the sampling
-        # brake let through (verbatim dups + synonym-swap templates) BEFORE it
-        # reaches TTS or gets committed into the history window that feeds the
-        # next prompt. Reuses the proven neutral-fallback seam. Gated to
-        # source=="chat" so agenda/direct/ptt/LiveVoice paths are untouched.
-        if source == "chat":
-            recent_outputs = [
-                m.get("content", "")
-                for m in history_snapshot
-                if isinstance(m, dict) and m.get("role") == "assistant"
-            ][-REPETITION_CONFIG.window:]
-            repetition = detect_repetition(dialogo, recent_outputs)
-            if repetition.is_repetitive:
-                self._log(
-                    f"Repetición de chat bloqueada ({repetition.reason}); "
-                    f"usando línea neutral sin LLM.",
-                    level="warning",
-                )
-                if commit_history:
-                    self._invalidate_pregen_epoch()
-                return self._guardrail_fallback_line(source) or ""
+        # 7. Chat repetition guard
+        if source == "chat" and eval_res.repetition_verdict is not None and eval_res.repetition_verdict.is_repetitive:
+            self._log(
+                f"Repetición de chat bloqueada ({eval_res.repetition_verdict.reason}); "
+                f"usando línea neutral sin LLM.",
+                level="warning",
+            )
+            if commit_history:
+                self._invalidate_pregen_epoch()
+            return self._guardrail_fallback_line(source) or ""
 
+        # 8. Agenda acceptance
         if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
             self._log(f"Agenda: salida rechazada ({self._format_agenda_rejection()}).", level="warning")
             self._invalidate_pregen_epoch()
             return ""
 
+        # 9. History commit & UI queue
         if commit_history:
-            self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
-            # FIX-B2: emission moved to the speak site (_ejecutar_inferencia)
-            # so guardrail/repetition fallbacks — which return EARLIER than
-            # this block yet are still spoken — also update last-reply.
+            if getattr(self, "log_queue", None) is not None:
+                self.log_queue.put(f"\n🧠 [Kira]: {dialogo} ({elapsed:.2f}s)\n")
         preview = dialogo[:200] if _debug_enabled() else f"len={len(dialogo)}"
         logger.info(f"{log_prefix} response ({elapsed:.2f}s): {preview}")
 
