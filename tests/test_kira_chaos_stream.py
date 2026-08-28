@@ -25,7 +25,7 @@ from opencohost.smart_aggregator.kira_agenda_controller import (
     KiraAgendaController,
     TopicStatus,
 )
-from opencohost.ui.smart_aggregator_ui import SmartAggregatorUI
+from opencohost.smart_aggregator.chat_reaction import ChatReactionCore
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +209,14 @@ class TestCT004JoyitaSelection:
             {"user": "boring_user", "text": "Bueno esto es un mensaje largo sobre un tema que no tiene nada de interesante y solo ocupa espacio"},
             {"user": "joyita_user", "text": joyita},
         ]
-        result = SmartAggregatorUI._select_highlight(context)
+        result = ChatReactionCore._select_highlight(context)
         assert "joyita_user" in result, f"Joyita '{joyita}' must beat boring text"
 
     def test_joyita_selected_among_trash_chat(self):
         """Joyita must be selected even in a sea of trash chat."""
         context = [{"user": f"spam{i}", "text": t} for i, t in enumerate(TRASH_CHAT)]
         context.append({"user": "gem_user", "text": JOYITA_MESSAGES[0]})
-        result = SmartAggregatorUI._select_highlight(context)
+        result = ChatReactionCore._select_highlight(context)
         assert "gem_user" in result
 
     def test_at_least_one_joyita_selected_from_mixed_batch(self):
@@ -225,7 +225,7 @@ class TestCT004JoyitaSelection:
             [{"user": f"trash{i}", "text": t} for i, t in enumerate(TRASH_CHAT[:5])]
             + [{"user": "gem", "text": j} for j in JOYITA_MESSAGES[:2]]
         )
-        result = SmartAggregatorUI._select_highlight(context)
+        result = ChatReactionCore._select_highlight(context)
         assert any(j in result for j in JOYITA_MESSAGES[:2])
 
 

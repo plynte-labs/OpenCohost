@@ -902,36 +902,6 @@ def test_save_ptt_ws_uri_survives_a_corrupt_existing_file(tmp_path):
     assert settings.load_ptt_ws_uri(str(path)) == "ws://10.0.0.5:8765"
 
 
-def test_ctk_ptt_manager_still_reads_its_hotkey_after_an_api_write(tmp_path):
-    """The legacy CTK consumer (opencohost/ui/ptt_manager.py) must keep
-    working untouched across an API config write — it is the OTHER owner of
-    this file."""
-    from opencohost.ui.ptt_manager import PTTManager
-
-    path = str(tmp_path / "ptt_settings.json")
-    PTTManager(config_file=path).save_config("F8")
-
-    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", path)
-
-    assert PTTManager(config_file=path).get_hotkey() == "F8"
-    assert settings.load_ptt_ws_uri(path) == "ws://10.0.0.5:8765"
-
-
-def test_ctk_hotkey_write_preserves_the_api_stt_ws_uri(tmp_path):
-    """The reverse direction of the same shared-file hazard: remapping the
-    hotkey in the legacy CTK UI must not silently reset the operator's
-    LiveAudio URL back to the default."""
-    from opencohost.ui.ptt_manager import PTTManager
-
-    path = str(tmp_path / "ptt_settings.json")
-    settings.save_ptt_ws_uri("ws://10.0.0.5:8765", path)
-
-    PTTManager(config_file=path).save_config("F8")
-
-    assert settings.load_ptt_ws_uri(path) == "ws://10.0.0.5:8765"
-    assert PTTManager(config_file=path).get_hotkey() == "F8"
-
-
 def test_stt_unreachable_returns_503_and_frees_slot(monkeypatch):
     app = _app()
     client = TestClient(app)

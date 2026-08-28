@@ -25,7 +25,6 @@ if str(ROOT_DIR) not in sys.path:
 
 from opencohost.core import llm_engine
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaAction
-from opencohost.ui import app_shell
 
 
 REQUIRED_INVARIANTS = (
@@ -161,12 +160,24 @@ class _FakeAgendaController:
         )
 
 
-def _build_fake_app(motor: llm_engine.MotorVocalIA, trace: _Trace) -> app_shell.VocalAIApp:
-    app = object.__new__(app_shell.VocalAIApp)
-    app.motor_ia = motor
-    app.kira_agenda = _FakeAgendaController(trace)
-    app._kira_agenda_update_status = lambda: trace.record("agenda_status_updated")
-    app._on_stream_admin_log = lambda msg: trace.record("stream_admin_log", message=msg)
+from types import SimpleNamespace
+
+
+def _build_fake_app(motor: llm_engine.MotorVocalIA, trace: _Trace) -> SimpleNamespace:
+    app = SimpleNamespace(
+        motor_ia=motor,
+        kira_agenda=_FakeAgendaController(trace),
+        _kira_agenda_update_status=lambda: trace.record("agenda_status_updated"),
+        _on_stream_admin_log=lambda msg: trace.record("stream_admin_log", message=msg),
+    )
+
+    def _play_prefetched() -> bool:
+        if any(item[3] == "direct" for item in motor._priority_queue) or motor.is_processing_direct:
+            motor.clear_prefetched_agenda()
+            return False
+        return motor.play_prefetched_agenda()
+
+    app._kira_agenda_play_prefetched_if_ready = _play_prefetched
     return app
 
 

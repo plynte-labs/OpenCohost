@@ -308,68 +308,6 @@ class TestLocalOnlyOffPreservesOriginalBehavior:
 
 
 # ===========================================================================
-# 6. UI — switch widget wires to engine command
-# ===========================================================================
-
-class TestTtsLocalOnlyUISwitchWiring:
-    """Structural test: the UI shell has the switch and wires it correctly.
-
-    Uses source-level inspection to avoid importing CTk (which would require
-    a display and can cause OOM from unbounded MagicMock parents if not handled).
-    """
-
-    def test_app_shell_has_local_only_switch_attribute(self):
-        """app_shell.py source defines switch_local_only widget reference."""
-        import ast
-
-        src_path = os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py")
-        with open(src_path, "r", encoding="utf-8") as f:
-            source = f.read()
-
-        assert "switch_local_only" in source, (
-            "app_shell.py must define self.switch_local_only widget"
-        )
-
-    def test_app_shell_dispatches_set_tts_local_only(self):
-        """app_shell.py source dispatches set_tts_local_only command to motor."""
-        src_path = os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py")
-        with open(src_path, "r", encoding="utf-8") as f:
-            source = f.read()
-
-        assert "set_tts_local_only" in source, (
-            "app_shell.py must dispatch 'set_tts_local_only' command to motor_ia"
-        )
-
-    def test_app_shell_has_local_only_ui_label(self):
-        """app_shell.py source contains the Spanish UI label for the privacy switch."""
-        src_path = os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py")
-        with open(src_path, "r", encoding="utf-8") as f:
-            source = f.read()
-
-        # Accept any of the expected label fragments
-        has_label = any(
-            fragment in source
-            for fragment in ("Solo TTS local", "Piper", "tts local", "local_only")
-        )
-        assert has_label, (
-            "app_shell.py must contain the Spanish UI label for the privacy switch "
-            "(expected 'Solo TTS local' or similar)"
-        )
-
-    def test_app_shell_has_local_only_helper_text(self):
-        """app_shell.py source contains helper text mentioning Microsoft/Edge-TTS."""
-        src_path = os.path.join(ROOT_DIR, "opencohost", "ui", "app_shell.py")
-        with open(src_path, "r", encoding="utf-8") as f:
-            source = f.read()
-
-        has_helper = "Microsoft" in source or "Edge-TTS" in source
-        assert has_helper, (
-            "app_shell.py must contain helper text explaining the privacy tradeoff "
-            "(expected 'Microsoft' or 'Edge-TTS')"
-        )
-
-
-# ===========================================================================
 # 7. Engine — snapshot semantics: mid-utterance toggle does not re-route chunks
 # ===========================================================================
 

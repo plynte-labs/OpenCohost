@@ -592,53 +592,6 @@ def test_sanitize_agenda_output_empty_input_returns_empty(official):
 
 
 # ---------------------------------------------------------------------------
-# 10. Engine integration — voice_control.py wrapper call sites
-# ---------------------------------------------------------------------------
-
-
-def test_voice_control_ptt_flush_busy_uses_ptt_wrapper(official):
-    from opencohost.ui import voice_control
-
-    _activate("en", official)
-    panel = object.__new__(voice_control.VoiceControlPanel)
-    panel._ptt_lock = threading.Lock()
-    panel._ptt_buffer = "hello there"
-    panel._logger = logging.getLogger("test")
-    panel._motor_ia = MagicMock()
-    panel._motor_ia.is_speaking = True
-    panel._motor_ia.is_processing = False
-    panel._on_log = lambda *a, **k: None
-
-    panel._flush_ptt_buffer()
-
-    panel._motor_ia.enqueue.assert_called_once()
-    sent_text = panel._motor_ia.enqueue.call_args.args[0]
-    assert sent_text == active.ptt_wrapper().format(text="hello there")
-
-
-def test_voice_control_ptt_flush_idle_uses_ptt_wrapper(official):
-    from opencohost.ui import voice_control
-
-    _activate("en", official)
-    panel = object.__new__(voice_control.VoiceControlPanel)
-    panel._ptt_lock = threading.Lock()
-    panel._ptt_buffer = "hello there team"
-    panel._logger = logging.getLogger("test")
-    panel._motor_ia = MagicMock()
-    panel._motor_ia.is_speaking = False
-    panel._motor_ia.is_processing = False
-    panel._motor_ia.command_queue = queue.Queue()
-    panel._on_log = lambda *a, **k: None
-
-    panel._flush_ptt_buffer()
-
-    # WU1 (memoria_quality_20260717) made the idle PTT flush enqueue a 3-tuple
-    # (command, payload, history_text); tolerant unpack mirrors run()'s consumer.
-    _cmd, payload, *_rest = panel._motor_ia.command_queue.get_nowait()
-    assert payload == active.ptt_wrapper().format(text="hello there team")
-
-
-# ---------------------------------------------------------------------------
 # 11. Engine integration — kira_agenda_controller.py history_text
 # ---------------------------------------------------------------------------
 

@@ -337,35 +337,6 @@ class TestUtilizationObservability:
 
 
 # ===========================================================================
-# §4.7 — ctx_pressure_high handler wiring
-# ===========================================================================
-
-class TestCtxPressureHighHandler:
-    def test_registered_via_status_to_handler(self):
-        from opencohost.ui.motor_event_handlers import STATUS_TO_HANDLER
-        assert STATUS_TO_HANDLER.get("ctx_pressure_high") == "on_ctx_pressure_high"
-
-    def test_module_function_exists_and_logs_warning(self, caplog):
-        from opencohost.ui import motor_event_handlers as meh
-        with caplog.at_level("WARNING"):
-            meh.on_ctx_pressure_high()
-        assert any("ctx_pressure_high" in r.message for r in caplog.records)
-
-    def test_shell_delegate_exists(self):
-        from opencohost.ui import app_shell
-        assert callable(getattr(app_shell.VocalAIApp, "_on_ctx_pressure_high", None))
-
-    def test_dispatch_via_handle_motor_event(self):
-        """_handle_motor_event('ctx_pressure_high') routes to the delegate exactly once."""
-        from opencohost.ui import app_shell
-        app = object.__new__(app_shell.VocalAIApp)
-        calls = {"n": 0}
-        app._on_ctx_pressure_high = lambda: calls.__setitem__("n", calls["n"] + 1)
-        app._handle_motor_event("ctx_pressure_high")
-        assert calls["n"] == 1
-
-
-# ===========================================================================
 # §4.8 — regression guards
 # ===========================================================================
 

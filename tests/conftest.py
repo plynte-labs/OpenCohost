@@ -50,47 +50,6 @@ def _kill_hung_test():
         faulthandler.cancel_dump_traceback_later()
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _neutralize_ctk_appearance_tracker():
-    """Stop CustomTkinter from walking a mock widget's parent chain forever.
-
-    Every real CTk widget registers with ``AppearanceModeTracker.add()``, which
-    resolves the Tk root like this::
-
-        while isinstance(current_widget, tkinter.Tk) is False:
-            current_widget = current_widget.master
-
-    Hand it a ``MagicMock`` parent — what every headless UI test does — and the
-    loop never terminates: a MagicMock is never a ``tkinter.Tk``, and each
-    ``.master`` access CREATES a fresh child mock that the parent then caches
-    (``m.master is m.master`` -> True). It is a while loop, not recursion, so
-    there is no RecursionError to rescue it; RSS just climbs until the machine
-    dies.
-
-    Light/dark appearance tracking has no meaning in a headless suite, so we
-    no-op the registration for the whole session. This kills the entire CLASS
-    of hang rather than one test: any future panel nested inside another
-    (exactly how this surfaced — personalization_panel mounted from
-    profile_panel.build) is covered without anyone remembering to widen a
-    patch. Best-effort by design: if customtkinter is absent or its internals
-    move, tests must still run.
-    """
-    try:
-        from customtkinter.windows.widgets.appearance_mode import (
-            appearance_mode_tracker as _tracker_mod,
-        )
-    except Exception:
-        yield
-        return
-
-    tracker = _tracker_mod.AppearanceModeTracker
-    with (
-        patch.object(tracker, "add", classmethod(lambda cls, *a, **k: None)),
-        patch.object(tracker, "remove", classmethod(lambda cls, *a, **k: None)),
-    ):
-        yield
-
-
 @pytest.fixture(autouse=True)
 def _restore_api_logger_levels():
     """setup_api_logging() pins process-wide levels on the opencohost.api tree

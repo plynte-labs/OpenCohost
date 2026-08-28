@@ -298,86 +298,6 @@ class TestNewerRequestSupersedes:
 # Test 4 — _music_play_mood dispatches off the calling thread
 # ---------------------------------------------------------------------------
 
-def _import_app_shell_with_ui_deps_mocked():
-    """Import app_shell with all heavy UI deps mocked out (mirrors obs_resilience harness)."""
-    class DummyWidget:
-        pass
-
-    class DummyCustomTkinter(SimpleNamespace):
-        def __getattr__(self, _name):
-            return DummyWidget
-
-    modules = {
-        "customtkinter": DummyCustomTkinter(CTk=DummyWidget, CTkToplevel=DummyWidget),
-        "numpy": MagicMock(),
-        "sounddevice": MagicMock(),
-        "soundfile": MagicMock(),
-        "pynput": MagicMock(),
-        "pynput.keyboard": MagicMock(),
-        "pynput.mouse": MagicMock(),
-    }
-    old_module = sys.modules.pop("opencohost.ui.app_shell", None)
-    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(sys.modules, modules):
-        module = importlib.import_module("opencohost.ui.app_shell")
-    return module, old_module
-
-
-def _restore_app_shell_module(old_module) -> None:
-    if old_module is not None:
-        sys.modules["opencohost.ui.app_shell"] = old_module
-        return
-    sys.modules.pop("opencohost.ui.app_shell", None)
-    ui_module = sys.modules.get("opencohost.ui")
-    if ui_module is not None and hasattr(ui_module, "app_shell"):
-        delattr(ui_module, "app_shell")
-
-
-class TestMusicPlayMoodDispatchesOffCallingThread:
-    """_music_play_mood must NOT invoke request_mood on the calling thread.
-
-    The test stubs request_mood to record the thread it was called from,
-    then asserts it differs from the test (calling) thread.
-    Also asserts _music_update_panel is called (panel refresh must happen).
-    """
-
-    def test_music_play_mood_dispatches_off_calling_thread(self):
-        app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
-        try:
-            app = object.__new__(app_shell.VocalAIApp)
-
-            request_mood_thread = [None]
-            request_mood_event = threading.Event()
-
-            def fake_request_mood(mood, *, force=False, boundary=False):
-                request_mood_thread[0] = threading.current_thread()
-                request_mood_event.set()
-                return True
-
-            mock_audio_bed = MagicMock()
-            mock_audio_bed.request_mood.side_effect = fake_request_mood
-
-            app.audio_bed = mock_audio_bed
-            app._music_update_panel = MagicMock()
-
-            # Call _music_play_mood on THIS (test) thread
-            app_shell.VocalAIApp._music_play_mood(app, "normal")
-
-            # Wait for request_mood to be called (may be on worker thread)
-            called = request_mood_event.wait(timeout=3.0)
-            assert called, "request_mood was never called by _music_play_mood"
-
-            # Must have been called on a DIFFERENT thread
-            assert request_mood_thread[0] is not threading.current_thread(), (
-                "_music_play_mood must dispatch request_mood to a worker thread, "
-                "not call it on the UI (calling) thread"
-            )
-
-            # _music_update_panel must be called (on the calling thread, immediately)
-            app._music_update_panel.assert_called_once()
-        finally:
-            _restore_app_shell_module(old_module)
-
-
 # ---------------------------------------------------------------------------
 # FIX 2 — request_mood only_if_idle guard (synchronous)
 # ---------------------------------------------------------------------------
@@ -416,52 +336,6 @@ class TestRequestMoodOnlyIfIdle:
             "request_mood(only_if_idle=True) must proceed when current_track is None"
         )
         assert bed.current_track is not None
-
-
-# ---------------------------------------------------------------------------
-# FIX 3 — worker exceptions are logged, not swallowed
-# ---------------------------------------------------------------------------
-
-class TestDispatchAudioPlayLogsException:
-    """_dispatch_audio_play must log worker exceptions, not swallow them silently."""
-
-    def test_dispatch_audio_play_logs_worker_exception(self):
-        app_shell, old_module = _import_app_shell_with_ui_deps_mocked()
-        try:
-            app = object.__new__(app_shell.VocalAIApp)
-
-            done_event = threading.Event()
-            logged_messages = []
-
-            # Capture what gets logged on the module logger
-            import logging
-            original_warning = app_shell.logger.warning
-
-            def capture_warning(msg, *args, **kwargs):
-                logged_messages.append(msg % args if args else msg)
-                done_event.set()
-
-            app_shell.logger.warning = capture_warning
-
-            try:
-                def boom():
-                    raise RuntimeError("simulated mixer failure")
-
-                # Must not raise on the calling thread
-                app_shell.VocalAIApp._dispatch_audio_play(app, boom)
-
-                # Wait for the worker to run
-                fired = done_event.wait(timeout=3.0)
-                assert fired, "Worker exception was never logged — it was silently swallowed"
-
-                # The logged message must mention the error
-                assert any("simulated mixer failure" in m for m in logged_messages), (
-                    f"Expected error text in logged messages, got: {logged_messages}"
-                )
-            finally:
-                app_shell.logger.warning = original_warning
-        finally:
-            _restore_app_shell_module(old_module)
 
 
 # ---------------------------------------------------------------------------

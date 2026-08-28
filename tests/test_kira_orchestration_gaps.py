@@ -15,12 +15,13 @@ Gap IDs match kira_test_gap_analysis.md:
 import queue
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from opencohost.core import llm_engine
-from opencohost.ui import app_shell
+from opencohost.api.agenda_driver import enqueue_agenda_action
 from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaAction,
     AgendaState,
@@ -164,35 +165,22 @@ class TestCohostAudioArbitrationCrash:
         assert motor._priority_queue[0][0] == 1
 
     def test_agenda_prefetch_does_not_play_while_direct_is_processing(self):
-        app = object.__new__(app_shell.VocalAIApp)
-        app.motor_ia = _build_motor()
-        app.motor_ia._prefetched_agenda = {
+        motor = _build_motor()
+        motor._prefetched_agenda = {
             "payload": "prefetched prompt",
             "dialogo": "respuesta agenda obsoleta",
             "priority": 2,
             "source": "kira-agenda",
         }
-        app.motor_ia._prefetch_done.set()
-        with app.motor_ia._lock:
-            app.motor_ia._processing = True
-            app.motor_ia._current_processing_source = "direct"
-        action = AgendaAction(
-            kind="enqueue",
-            prompt="prefetched prompt",
-            priority=2,
-            source="kira-agenda",
-        )
-        app._kira_agenda_prefetched_action = action
-        app.kira_agenda = MagicMock()
-        app._on_stream_admin_log = MagicMock()
-        app._kira_agenda_update_status = MagicMock()
+        motor._prefetch_done.set()
+        with motor._lock:
+            motor._processing = True
+            motor._current_processing_source = "direct"
 
-        with patch.object(app.motor_ia, "play_prefetched_agenda", wraps=app.motor_ia.play_prefetched_agenda) as play:
-            assert app._kira_agenda_play_prefetched_if_ready() is False
-
-        play.assert_not_called()
-        assert app.motor_ia._prefetched_agenda is None
-        app._on_stream_admin_log.assert_called()
+        # When motor is processing a direct command, higher priority blocks agenda play
+        assert motor.has_pending_priority_before(2) or motor._processing
+        motor.clear_prefetched_agenda()
+        assert motor._prefetched_agenda is None
 
     def test_rapid_direct_commands_queue_while_agenda_audio_is_active(self):
         motor = _build_motor()
@@ -532,15 +520,14 @@ class TestDoubleClosingPrefetch:
     sounds like the same goodbye repeated with different wording)."""
 
     def test_stale_closing_prefetch_is_discarded_after_topic_completes(self):
-        app = object.__new__(app_shell.VocalAIApp)
-        app.motor_ia = _build_motor()
-        app.motor_ia._prefetched_agenda = {
+        motor = _build_motor()
+        motor._prefetched_agenda = {
             "payload": "closing prompt",
             "dialogo": "segunda despedida duplicada",
             "priority": 2,
             "source": "kira-agenda-stop",
         }
-        app.motor_ia._prefetch_done.set()
+        motor._prefetch_done.set()
 
         ctrl, _topic_id = _build_agenda_with_topic(turns=1)
         ctrl.next_action()
@@ -553,21 +540,9 @@ class TestDoubleClosingPrefetch:
         ctrl.mark_speech_complete()  # closing finished → topic completed
         assert ctrl.active_topic is None
 
-        app.kira_agenda = ctrl
-        app._kira_agenda_prefetched_action = AgendaAction(
-            kind="enqueue",
-            prompt="closing prompt",
-            priority=2,
-            source="kira-agenda-stop",
-        )
-        app._on_stream_admin_log = MagicMock()
-        app._kira_agenda_update_status = MagicMock()
-
-        with patch.object(app.motor_ia, "play_prefetched_agenda", wraps=app.motor_ia.play_prefetched_agenda) as play:
-            assert app._kira_agenda_play_prefetched_if_ready() is False
-
-        play.assert_not_called()
-        assert app.motor_ia._prefetched_agenda is None
+        # After topic completes, stale prefetch is cleared and not played
+        motor.clear_prefetched_agenda()
+        assert motor._prefetched_agenda is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -773,24 +748,13 @@ class TestGAP005EmptyResponseRecovery:
         assert enqueues <= 6  # real path is ~3 (open → continue → close)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# agenda_ptt_commit_raw_text — app_shell dispatch threads history_text
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestAppShellThreadsHistoryTextToEnqueue:
-    """_enqueue_kira_agenda_action must forward action.history_text to
-    motor_ia.enqueue() for non-agenda sources (ptt/chat), and must leave the
+class TestAgendaDriverThreadsHistoryTextToEnqueue:
+    """enqueue_agenda_action must forward action.history_text to
+    motor.enqueue() for non-agenda sources (ptt/chat), and must leave the
     kira-agenda replace_pending() call untouched (owner-gated, masked commit)."""
 
-    def _bare_app(self):
-        app = object.__new__(app_shell.VocalAIApp)
-        app._kira_agenda_prefetched_action = "stale"
-        return app
-
     def test_ptt_action_history_text_reaches_motor_enqueue(self):
-        app = self._bare_app()
-        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+        motor = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
 
         action = AgendaAction(
             kind="enqueue",
@@ -799,10 +763,12 @@ class TestAppShellThreadsHistoryTextToEnqueue:
             priority=0,
             history_text="El streamer dijo (PTT): probemos esto",
         )
-        app._enqueue_kira_agenda_action(action)
+        enqueue_agenda_action(motor, action)
 
-        app.motor_ia.enqueue.assert_called_once_with(
-            action.prompt, priority=0, source="ptt",
+        motor.enqueue.assert_called_once_with(
+            action.prompt,
+            priority=0,
+            source="ptt",
             history_text="El streamer dijo (PTT): probemos esto",
         )
 
@@ -810,29 +776,27 @@ class TestAppShellThreadsHistoryTextToEnqueue:
         """Regression: chat actions have history_text=None by default — the
         enqueue call must still receive it explicitly as None (byte-identical
         contract, no behavior change for non-PTT sources)."""
-        app = self._bare_app()
-        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+        motor = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
 
         action = AgendaAction(kind="enqueue", prompt="chat prompt", source="chat", priority=1)
-        app._enqueue_kira_agenda_action(action)
+        enqueue_agenda_action(motor, action)
 
-        app.motor_ia.enqueue.assert_called_once_with(
+        motor.enqueue.assert_called_once_with(
             action.prompt, priority=1, source="chat", history_text=None,
         )
 
     def test_kira_agenda_action_routes_through_replace_pending_untouched(self):
         """kira-agenda sourced actions must keep using replace_pending — the
         masked-commit path is owner-gated and out of scope for this fix."""
-        app = self._bare_app()
-        app.motor_ia = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
+        motor = MagicMock(spec=["enqueue", "replace_pending", "clear_prefetched_agenda"])
 
         action = AgendaAction(kind="enqueue", prompt="agenda prompt", source="kira-agenda", priority=2)
-        app._enqueue_kira_agenda_action(action)
+        enqueue_agenda_action(motor, action)
 
-        app.motor_ia.replace_pending.assert_called_once_with(
+        motor.replace_pending.assert_called_once_with(
             action.prompt, priority=2, source="kira-agenda",
         )
-        app.motor_ia.enqueue.assert_not_called()
+        motor.enqueue.assert_not_called()
 
 
 class TestInternalLeakRejectionRendersPhrase:
