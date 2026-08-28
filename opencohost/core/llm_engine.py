@@ -3,6 +3,7 @@ opencohost/core/llm_engine.py
 """
 import contextlib
 import os
+import sys
 import re
 import hashlib
 import json
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
+from opencohost.config import settings
 from opencohost.config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
     LLM_TOP_P, LLM_MAX_TOKENS, LLM_KEEP_ALIVE, TEMP_DIR, TTS_SERVER_URL,
@@ -76,6 +78,17 @@ from opencohost.core import turn_priority
 from opencohost.core.turn_scheduler import (
     OWNER_QUESTION_SOURCES as _OWNER_QUESTION_SOURCES,
     TurnScheduler,
+)
+from opencohost.core.context.prompt_assembler import (
+    DIGEST_CAPTURE_SOURCES,
+    PERSONALIZATION_INJECT_SOURCES,
+    MEMORIA_INJECT_SOURCES,
+    DIGEST_INJECT_SOURCES,
+    EDITORIAL_INJECT_SOURCES,
+    HISTORY_ASSISTANT_ONLY_SOURCES,
+    GenerationSetup,
+    _GenerationSetup,
+    PromptContextAssembler,
 )
 from opencohost.core.engine.llm_inference_service import (
     LLMInferenceService,
@@ -1069,6 +1082,9 @@ class MotorVocalIA(
         )
         # LLMInferenceService owns pure multi-provider model execution and token streams.
         self._inference_service = get_inference_service(self)
+        self._prompt_assembler = PromptContextAssembler(
+            sanitize_history_fn=self._sanitize_history_context
+        )
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -2689,7 +2705,7 @@ class MotorVocalIA(
             # finalize itself raised), the job must still be sealed and the
             # spoken prefix committed — an unsealed ACTIVE job would starve
             # the router forever (no idle, mouth stuck "speaking").
-            _orphan = self._live_stream_state
+            _orphan = getattr(self, "_live_stream_state", None)
             if _orphan is not None and _orphan.job is not None and not _orphan.handled:
                 try:
                     self._stream_partial_exit(
@@ -2711,71 +2727,9 @@ class MotorVocalIA(
         request_model: str,
         watchdog_timeout: Optional[float],
     ) -> "_GenerationSetup":
-        """Phase 1 of _generar_dialogo (refactor_core_api_20260802 B7):
-        build the message list + sampling options + posture-aware timeout.
-        Verbatim body moved from the original method (comments included) --
-        no behavior change, only a name and an explicit return.
+        """Phase 1 of _generar_dialogo: build message list, sampling options, and timeout.
+        Delegates pure assembly to PromptContextAssembler while taking minimal lock snapshots.
         """
-        messages = []
-
-        # Personalization block (kira_personalization_onboarding_20260705,
-        # design §2; memoria_recall_20260718 W1): built ONCE PER REQUEST and
-        # emitted at the SYSTEM position — mirroring set_profile's persona
-        # (self.system_prompt, llm_engine.py:715-737). This is a stable
-        # per-request copy at the system position, NOT literally once-per-
-        # session: ollama.chat is stateless, so identity must be re-supplied
-        # every request. It never enters historial or memoria capture
-        # (_commit_history stores raw contexto, not this system content).
-        # Same _PERSONALIZATION_INJECT_SOURCES gate as before. Fail-open: a
-        # raising build must never break a turn.
-        personalization_block = ""
-        if source in _PERSONALIZATION_INJECT_SOURCES and PERSONALIZATION_ENABLED:
-            try:
-                personalization_block = personalization.build_injection_block(
-                    self._sanitize_history_context
-                )
-            except Exception:
-                personalization_block = ""
-        # grounding_authority_temporal_humility: the grounding-authority +
-        # temporal-humility rules ride at the SYSTEM position on EVERY
-        # generation, appended by the engine rather than authored into
-        # llm.system_prompt.
-        #
-        # WHY HERE and not in the persona slot: `set_profile` replaces
-        # self.system_prompt wholesale with the profile's own prompt
-        # (`payload.get("prompt", ...)` in the set_profile handler). All six shipped
-        # profiles carry a full prompt of their own, and profiles are
-        # persisted to the user's PROFILES_FILE on first run — so a rule
-        # written into the locale persona (or into default_profiles.json)
-        # would be dead text for every existing install. This single site is
-        # the funnel all three _generar_dialogo callers route through.
-        #
-        # Unconditional by source: the "that doesn't exist" failure is not
-        # direct-only (chat and agenda turns assert facts too), unlike the
-        # <editorial_context> block below which stays gated on source.
-        #
-        # Position: persona -> rules -> personalization. The rules are a
-        # constant, so keeping them in the stable prefix ahead of the
-        # per-session personalization block preserves KV-cache reuse.
-        # Fail-open by construction: grounding_rules() is _slot-backed and
-        # cannot raise; "" simply appends nothing.
-        grounding_block = i18n_active.grounding_rules()
-        system_parts = [self.system_prompt]
-        if grounding_block:
-            system_parts.append(grounding_block)
-        if personalization_block:
-            system_parts.append(personalization_block)
-        system_content = "\n\n".join(system_parts)
-
-        if self.use_system_role:
-            messages.append({'role': 'system', 'content': system_content})
-
-        # Take a consistent snapshot of historial and (for host-turn paths) the
-        # digest block under _history_lock so that a concurrent _commit_history
-        # call from the agenda speaker daemon cannot mutate the deque while we
-        # are iterating it (RuntimeError: deque mutated during iteration).
-        # The lock is held ONLY for the fast snapshot + build_block reads;
-        # it is released before any I/O or the Ollama call.
         with self._history_lock:
             history_snapshot = list(self.historial)
             if source in _DIGEST_INJECT_SOURCES:
@@ -2787,146 +2741,14 @@ class MotorVocalIA(
                 )
             else:
                 digest_block = ""
-            # Slice 5 (R9): snapshot the profile id under the lock
-            # (engine state protected by _history_lock) — the actual
-            # store READ happens AFTER the lock releases, below,
-            # since memorias retrieval is disk I/O and _history_lock
-            # must never be held during I/O (same rule as capture).
-            # Candidate 1: gate site 1 of 3 — direct AND ptt snapshot.
-            if source in _MEMORIA_INJECT_SOURCES:
-                memorias_profile_id = self._current_profile_id
-            else:
-                memorias_profile_id = None
-
-        # Rebuild a fresh {role, content} per entry — never append by
-        # reference and never pop/mutate — so the stored `source` tag
-        # (history_source_tag_20260629) is projected away before the dicts
-        # reach ollama.chat, and the live deque entries keep their tag.
-        #
-        # §3.2 phase 2 gate: a stream turn appends assistant slots only (see
-        # _HISTORY_ASSISTANT_ONLY_SOURCES for the evidence). The filter lives
-        # HERE and not on history_snapshot: the snapshot rides to
-        # _finalize_generation, where FIX 2 derives recent_outputs from its
-        # assistant entries — filtering the snapshot itself would blind the
-        # guard that exists precisely because chat reactions repeat.
-        #
-        # Owner ruling 2026-08-13: of those assistant slots, the AGENDA-sourced
-        # ones collapse to the most recent one. Symptom it fixes (log
-        # opencohost_20260812_194539, 22:07:04): Kira answers a viewer and then
-        # keeps monologuing the agenda topic without ever mentioning the chat,
-        # because three inherited agenda turns outweighed the one comment she
-        # was actually replying to. Keeping the LAST one — not zero — is
-        # deliberate: it is what she just said out loud on stream, so she stays
-        # coherent with it instead of contradicting herself mid-segment.
-        #
-        # Entries without a `source` key (stream_admin_ui.py:1340 appends one
-        # such shape) fail OPEN and are kept: an untagged slot is not proven to
-        # be agenda, and dropping it would silently shrink the window.
-        history_assistant_only = source in _HISTORY_ASSISTANT_ONLY_SOURCES
-        last_agenda_idx = -1
-        if history_assistant_only:
-            for idx, msg in enumerate(history_snapshot):
-                if msg['role'] == 'assistant' and str(msg.get('source', '')).startswith('kira-agenda'):
-                    last_agenda_idx = idx
-        for idx, msg in enumerate(history_snapshot):
-            if history_assistant_only:
-                if msg['role'] != 'assistant':
-                    continue
-                if idx != last_agenda_idx and str(msg.get('source', '')).startswith('kira-agenda'):
-                    continue
-            messages.append({'role': msg['role'], 'content': msg['content']})
-
-        # Slice 5 (R9): memorias retrieval + injection for direct and ptt
-        # turns (candidate 1: gate site 2 of 3). Store I/O happens here,
-        # AFTER _history_lock released above (the store's own
-        # READ_TIMEOUT_SECONDS bounds the read). Fail-open to "" on any
-        # error — a retrieval failure must never break a turn.
-        memorias_block = ""
-        if source in _MEMORIA_INJECT_SOURCES and MEMORIAS_ENABLED and memorias_profile_id:
-            memorias_block = self._build_memorias_injection_block(memorias_profile_id, contexto)
-
-        # Editorial host-turn enrichment: inject matching ARMED card context for
-        # host queries, typed OR spoken (F1 — the operator arms a card and then
-        # asks about it by voice just as often as by keyboard).
-        # NON-CONSUMING — card stays ARMED for the agenda path.
-        # Never inject for chat/aggregator-driven sources.
-        editorial_block = ""
-        if source in _EDITORIAL_INJECT_SOURCES:
-            provider = self.direct_editorial_context_provider
-            if provider is not None:
-                try:
-                    editorial_block = provider(contexto) or ""
-                except Exception:
-                    editorial_block = ""
-
-        if editorial_block:
-            enriched = f"{contexto}\n\n{editorial_block}"
-            logger.info(
-                "editorial direct context injected (source=%s, len=%d)",
-                source,
-                len(editorial_block),
+            memorias_profile_id = (
+                self._current_profile_id if source in _MEMORIA_INJECT_SOURCES else None
             )
-        else:
-            enriched = contexto
 
-        # D3 — digest injection: only for host-turn prompts (typed or spoken),
-        # never chat/agenda. digest_block was already computed under
-        # _history_lock above. E3b: Wrap in explicit read-only delimiter so the
-        # LLM cannot mistake ledger lines for instructions (structural
-        # isolation, language-agnostic).
-        if source in _DIGEST_INJECT_SOURCES:
-            if digest_block:
-                wrapped_digest = (
-                    i18n_active.memory_block_open() + "\n"
-                    + digest_block
-                    + "\n" + i18n_active.memory_block_close()
-                )
-                enriched = f"{wrapped_digest}\n\n{enriched}"
-                logger.debug("L1 digest injected into direct prompt (len=%d)", len(digest_block))
-
-        # Memorias block (R9) is PREPENDED before the digest wrap — it
-        # must appear earlier in the prompt than <memoria_de_fondo>.
-        # Candidate 1: gate site 3 of 3 — own sibling gate (no longer
-        # nested inside `source == "direct"`), same pattern as
-        # _PERSONALIZATION_INJECT_SOURCES below, so ptt turns receive it.
-        if source in _MEMORIA_INJECT_SOURCES and memorias_block:
-            enriched = f"{memorias_block}\n\n{enriched}"
-
-        # W1 (memoria_recall_20260718): the personalization <perfil_streamer>
-        # block no longer prepends the user turn here — it was built above and
-        # folded into `system_content` at the SYSTEM position. Only the
-        # memorias/digest/editorial context rides in `enriched` now.
-        if self.use_system_role:
-            messages.append({'role': 'user', 'content': enriched})
-        else:
-            prompt_completo = f"{system_content}\n\n[{i18n_active.user_message_label()}]: {enriched}"
-            messages.append({'role': 'user', 'content': prompt_completo})
-
-        # Layer 1+2: discover the model's native context window (cached, free
-        # after first call — also covers the name-heuristic short-circuit gap)
-        # but budget against OpenCohost's effective runtime cap so large
-        # native windows do not disable prompt eviction or over-allocate KV.
-        if is_local:
-            self._discover_model_ctx(request_model)
-            _native_ctx = self._model_ctx_limit.get(request_model, CTX_FALLBACK_DEFAULT)
-            _effective_ctx = self._resolve_effective_ctx_limit(request_model, _native_ctx)
-        else:
-            # Cloud: no ollama.show telemetry (prompt_eval_count/eval_duration
-            # are absent from OpenAI-compatible responses). Apply the
-            # provider-aware budget proactively (design 'Cloud context budget'),
-            # replacing the reactive trim.
-            _native_ctx = CLOUD_CTX_BUDGET
-            _effective_ctx = CLOUD_CTX_BUDGET
-        messages, evicted_pairs, _ctx_evicted = context_budget.apply_char_budget_pure(
-            messages,
-            ctx_limit=_effective_ctx,
-            max_output_tokens=LLM_MAX_TOKENS,
-            safety_factor=CHAR_BUDGET_SAFETY_FACTOR,
-        )
-        if _ctx_evicted > 0:
+        def _on_evicted(evicted_pairs, native_ctx, effective_ctx):
             self._log(
-                f"ctx_budget_gate: evicted {_ctx_evicted} pair(s) from messages "
-                f"(model={request_model}, native_ctx={_native_ctx}, effective_ctx={_effective_ctx})",
+                f"ctx_budget_gate: evicted {len(evicted_pairs)} pair(s) from messages "
+                f"(model={request_model}, native_ctx={native_ctx}, effective_ctx={effective_ctx})",
                 level="warning",
             )
             with self._history_lock:
@@ -2941,61 +2763,48 @@ class MotorVocalIA(
                         self._memory_digest.append(ledger_line)
                         self._digested_turn_keys.add(turn_key)
 
-        # Cloud item 3 (2026-07-24 incident): the LOCAL 768-token cap
-        # (LLM_MAX_TOKENS) was starving cloud/reasoning models. Cloud uses
-        # the high CLOUD_MAX_TOKENS ceiling instead -- gated on the
-        # snapshotted `is_local`, never a live re-read (F2 invariant above).
-        opciones_llm = {
-            'temperature': LLM_TEMPERATURE,
-            'top_p': LLM_TOP_P,
-            'num_predict': LLM_MAX_TOKENS if is_local else CLOUD_MAX_TOKENS,
-            'num_ctx': _effective_ctx,
-        }
+        def _native_ctx_res(model_name: str) -> int:
+            self._discover_model_ctx(model_name)
+            return self._model_ctx_limit.get(model_name, CTX_FALLBACK_DEFAULT)
 
-        if is_local and "gemma" in request_model.lower():
-            opciones_llm.pop('num_ctx', None)
-            opciones_llm['temperature'] = 0.7
-
-        # Reasoning-capability discovery is an ollama.show probe (local-only);
-        # for cloud, num_predict maps to max_tokens and the provider owns any
-        # reasoning-token behavior. gemma temperature override is local-only too.
-        if is_local and self._resolve_reasoning_classification(request_model):
-            opciones_llm.pop('num_predict', None)
-            self._log("Modelo de razonamiento detectado. Límite de tokens removido.", level="debug")
-
-        # FIX 1 — chat-reactive anti-repetition sampling brake. Gated to
-        # source=="chat" (RF3 viewer chat, agenda HANDLE_CHAT, default-enqueue
-        # chat); NEVER applied to direct/ptt/accumulated/kira-agenda. Only ADDS
-        # keys, so non-chat options stay byte-identical. See the event_taxonomy
-        # track for the source-disambiguation follow-up.
-        if source == "chat":
-            opciones_llm["repeat_penalty"] = CHAT_REPEAT_PENALTY
-            opciones_llm["presence_penalty"] = CHAT_PRESENCE_PENALTY
-            opciones_llm["frequency_penalty"] = CHAT_FREQUENCY_PENALTY
-
-        start_llm = time.time()
-        max_intentos = 2
-        # R3: a bounded connector-upgrade call passes its own short watchdog
-        # timeout; every other caller keeps the resolved chat timeout.
-        chat_timeout = (
-            watchdog_timeout
-            if watchdog_timeout is not None
-            else self._resolve_chat_watchdog_timeout(
-                request_model, provider_cfg=provider_cfg, is_local=is_local
+        assembler = getattr(self, "_prompt_assembler", None)
+        if assembler is None:
+            assembler = PromptContextAssembler(
+                sanitize_history_fn=getattr(self, "_sanitize_history_context", None)
             )
+
+        pers_enabled = getattr(
+            sys.modules.get("opencohost.core.llm_engine"),
+            "PERSONALIZATION_ENABLED",
+            getattr(settings, "PERSONALIZATION_ENABLED", True),
+        )
+        mem_enabled = getattr(
+            sys.modules.get("opencohost.core.llm_engine"),
+            "MEMORIAS_ENABLED",
+            getattr(settings, "MEMORIAS_ENABLED", True),
         )
 
-        return _GenerationSetup(
-            messages=messages,
-            opciones_llm=opciones_llm,
-            chat_timeout=chat_timeout,
-            max_intentos=max_intentos,
-            start_llm=start_llm,
-            native_ctx=_native_ctx,
-            effective_ctx=_effective_ctx,
-            ctx_evicted=_ctx_evicted,
-            editorial_block=editorial_block,
+        return assembler.assemble(
+            contexto,
+            source,
+            system_prompt=self.system_prompt,
+            use_system_role=self.use_system_role,
+            is_local=is_local,
+            provider_cfg=provider_cfg,
+            request_model=request_model,
             history_snapshot=history_snapshot,
+            digest_block=digest_block,
+            memorias_profile_id=memorias_profile_id,
+            memorias_builder=getattr(self, "_build_memorias_injection_block", None),
+            editorial_provider=getattr(self, "direct_editorial_context_provider", None),
+            native_ctx_resolver=_native_ctx_res,
+            effective_ctx_resolver=getattr(self, "_resolve_effective_ctx_limit", None),
+            on_evicted_pairs=_on_evicted,
+            is_reasoning_model=getattr(self, "_resolve_reasoning_classification", None),
+            timeout_resolver=getattr(self, "_resolve_chat_watchdog_timeout", None),
+            watchdog_timeout=watchdog_timeout,
+            personalization_enabled=pers_enabled,
+            memorias_enabled=mem_enabled,
         )
 
     def _cloud_attempt_loop(
