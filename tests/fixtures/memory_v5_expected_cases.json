@@ -1,0 +1,275 @@
+{
+  "schema": "memory-v5-expected-cases/v1",
+  "cases": [
+    {
+      "id": "tc-lexical-001",
+      "class": "lexical",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Como fue el torneo de ajedrez blitz?",
+      "expected_ids": [101],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 101,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "torneo ajedrez blitz",
+          "content": "El streamer gano el torneo de ajedrez blitz del sabado con 5 victorias consecutivas.",
+          "signature": "torneo ajedrez blitz sabado victorias consecutivas gano",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-20T12:00:00Z"
+        },
+        {
+          "id": 102,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "receta pasta pesto",
+          "content": "A Kira le gusta cocinar pasta con salsa pesto y albahaca fresca.",
+          "signature": "receta pasta pesto albahaca fresca cocinar",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-21T14:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-paraphrase-002",
+      "class": "paraphrase",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Que campeonato de partidas rapidas sobre tablero gane?",
+      "expected_ids": [101],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 101,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "torneo ajedrez blitz",
+          "content": "El streamer gano el torneo de ajedrez blitz del sabado con 5 victorias consecutivas.",
+          "signature": "torneo ajedrez blitz sabado victorias consecutivas gano",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-20T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-temporal-003",
+      "class": "temporal",
+      "profile": "synthetic_streamer_alpha",
+      "query": "De que se hablo en la sesion pasada?",
+      "expected_ids": [103],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 103,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "resumen sesion pasada",
+          "content": "En la sesion pasada se configuro el microfono y se jugo Hollow Knight.",
+          "signature": "sesion pasada microfono configuro hollow knight",
+          "pinned": false,
+          "status": "summary",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-29T18:00:00Z"
+        },
+        {
+          "id": 104,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "charla anime favoritos",
+          "content": "Conversacion sobre series de ciencia ficcion favoritas del canal.",
+          "signature": "charla anime favoritos ciencia ficcion series",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-10T10:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-mixed-004",
+      "class": "mixed",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Cual es la configuracion de audio y microfono para stream?",
+      "expected_ids": [105],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 105,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "configuracion audio microfono",
+          "content": "El microfono Shure SM7B usa ganancia +48dB y filtro paso alto activado.",
+          "signature": "configuracion audio microfono shure sm7b ganancia filtro",
+          "pinned": false,
+          "status": "curated",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-15T09:00:00Z"
+        },
+        {
+          "id": 106,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "horario transmision noche",
+          "content": "Transmisiones habituales de lunes a viernes a las 20:00hs UTC.",
+          "signature": "horario transmision noche lunes viernes habituales",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-16T11:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-stale-contradiction-005",
+      "class": "stale_contradiction",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Que tarjeta grafica tiene la computadora principal?",
+      "expected_ids": [108],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 107,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "tarjeta grafica vieja",
+          "content": "La PC principal tiene instalada una RTX 3070 Ti.",
+          "signature": "tarjeta grafica vieja pc principal rtx 3070",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-01-10T10:00:00Z"
+        },
+        {
+          "id": 108,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "tarjeta grafica nueva",
+          "content": "La PC principal se actualizo a una RTX 5090 recientemente.",
+          "signature": "tarjeta grafica nueva pc principal rtx 5090 actualizo",
+          "pinned": false,
+          "status": "curated",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-25T15:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-private-006",
+      "class": "private",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Cual es la clave wifi del estudio secundario?",
+      "expected_ids": [],
+      "expected_abstain": true,
+      "candidates": [
+        {
+          "id": 109,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "clave wifi estudio",
+          "content": "Dato confidencial de red interna privada.",
+          "signature": "clave wifi estudio red interna confidencial",
+          "pinned": false,
+          "status": "curated",
+          "is_private": true,
+          "inactive": false,
+          "created_at": "2026-08-01T08:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-pinned-curated-007",
+      "class": "pinned_curated",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Cual es la regla fundamental de moderacion del canal?",
+      "expected_ids": [110],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 110,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "regla moderacion canal",
+          "content": "Regla de oro: Cero tolerancia a spoilers y respeto mutuo obligatorio.",
+          "signature": "regla moderacion canal spoilers respeto mutuo",
+          "pinned": true,
+          "status": "curated",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-05-01T00:00:00Z"
+        },
+        {
+          "id": 111,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "comando bots chat",
+          "content": "Comandos de Nightbot disponibles en la descripcion.",
+          "signature": "comando bots chat nightbot descripcion",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-20T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-profile-isolation-008",
+      "class": "profile_isolation",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Cual es el juego de velocidad favorito?",
+      "expected_ids": [112],
+      "expected_abstain": false,
+      "candidates": [
+        {
+          "id": 112,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "juego velocidad favorito",
+          "content": "En el perfil Alpha el juego de carreras preferido es F1 24.",
+          "signature": "juego velocidad favorito carreras f1 preferido alpha",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-10T12:00:00Z"
+        },
+        {
+          "id": 113,
+          "profile_id": "synthetic_streamer_beta",
+          "title": "juego velocidad favorito",
+          "content": "En el perfil Beta el juego preferido es Mario Kart 8.",
+          "signature": "juego velocidad favorito carreras mario kart preferido beta",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-10T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "tc-no-memory-009",
+      "class": "no_memory",
+      "profile": "synthetic_streamer_alpha",
+      "query": "Cuantos planetas extrasolares descubrio el telescopio James Webb?",
+      "expected_ids": [],
+      "expected_abstain": true,
+      "candidates": [
+        {
+          "id": 114,
+          "profile_id": "synthetic_streamer_alpha",
+          "title": "configuracion luces estudio",
+          "content": "Las luces Elgato Key Light estan al 45% de brillo y 5200K de temperatura.",
+          "signature": "configuracion luces estudio elgato key light brillo",
+          "pinned": false,
+          "status": "draft",
+          "is_private": false,
+          "inactive": false,
+          "created_at": "2026-08-18T16:00:00Z"
+        }
+      ]
+    }
+  ]
+}
