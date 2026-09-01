@@ -1,0 +1,43 @@
+{
+  "schema": "memory-v5-semantic-benchmark-lock/v1",
+  "lock_version": "1.0.0",
+  "locked_at": "2026-08-30T21:30:00Z",
+  "interpreter": {
+    "implementation": "cpython",
+    "version": "3.10.20",
+    "os": "Windows",
+    "arch": "AMD64",
+    "tags": [
+      "cp310-cp310-win_amd64",
+      "cp310-abi3-win_amd64",
+      "cp310-none-win_amd64"
+    ]
+  },
+  "model": {
+    "name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "revision": "bf3bf13ab40c3157080a7ab344c831b9ad18b5eb",
+    "files": [
+      {
+        "path": "config.json",
+        "size": 673,
+        "sha256": "05b570bff786faa5c4604152aa16f19f77ed6dfc31e47dd0f3dd987078693ac7"
+      },
+      {
+        "path": "model.onnx",
+        "size": 470268510,
+        "sha256": "185ae63f47e17a7e8d30d0e6a3cde6a6e4b79bc5b81666ecffc279a6856ca113"
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 17082913,
+        "sha256": "b60b6b43406a48bf3638526314f3d232d97058bc93472ff2de930d43686fa441"
+      }
+    ]
+  },
+  "shared_config": {
+    "seed": 42,
+    "rrf_k": 60,
+    "rrf_weight_lexical": 1.0,
+    "rrf_weight_semantic": 1.0
+  }
+}
