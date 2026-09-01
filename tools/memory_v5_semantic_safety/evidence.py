@@ -1,21 +1,20 @@
 """
-Fixture integrity validation, lexical adapter, MiniLM ONNX embedder,
-and SharedEvidenceProvider for memory-v5-semantic-safety-refinement.
+Shared Evidence Provider, Fixture Parsers, and Deterministic MiniLM ONNX Embedder.
 
-Guarantees:
-- Dataset integrity and quota validation.
-- Strict candidate-level payload disjointness (title + content) and normalized query disjointness.
-- Authoritative target profile resolution across all fixture cases.
-- Pure lexical search utilizing opencohost production helpers.
-- Dense semantic search using real ONNX CPU MiniLM embeddings matching baseline formatting.
-- Zero ground-truth leakage into candidate-facing InferenceEvidence.
+Module Responsibilities:
+1. Fixture loading and exact quota validation (Cal=24, Locked=80).
+2. Strict disjointness verification between Calibration and Locked evaluation sets.
+3. Candidate payload hash computation (normalized bytes without local candidate IDs).
+4. Authoritative profile ownership derivation for multi-profile evaluation.
+5. Deterministic ONNX CPU MiniLM embedding engine with thread-safe caching.
+6. Execution of pure lexical and dense semantic candidate retrieval.
+7. SharedEvidenceProvider producing immutable InferenceEvidence and EvaluationTruth pairs.
 """
 
 import hashlib
 import json
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import onnxruntime as ort
@@ -35,35 +34,30 @@ from tools.memory_v5_semantic_safety.models import (
 )
 
 
-def load_fixture(path: Union[str, Path]) -> Dict[str, Any]:
-    """Load JSON fixture file."""
-    with open(path, "r", encoding="utf-8") as f:
+def load_fixture(fixture_path: Path) -> Dict[str, Any]:
+    """Load JSON fixture file with strict UTF-8 decoding."""
+    with open(fixture_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def validate_fixture_quotas(data: Dict[str, Any], is_calibration: bool) -> bool:
+def validate_fixture_quotas(data: Dict[str, Any], is_calibration: bool, raise_error: bool = False) -> bool:
     """
-    Validate that fixture contains exact required case quotas.
-    Calibration (24 total): 4 hard_lexical, 4 synonym, 4 paraphrase, 4 no_memory, 4 near_but_wrong, 4 profile_privacy.
-    Locked (80 total): 16 hard_lexical, 14 synonym, 16 paraphrase, 12 no_memory, 12 near_but_wrong, 5 profile_privacy, 5 stale_contradiction.
+    Validate that fixture contains exact spec quotas:
+    - Calibration: exactly 24 cases (4 each of 6 families).
+    - Locked: exactly 80 cases (16 hard, 14 syn, 16 para, 12 no_memory, 12 near_wrong, 5 privacy, 5 stale).
     """
-    if not isinstance(data, dict):
-        return False
-    cases = data.get("cases")
-    if not isinstance(cases, list):
-        return False
-
-    counts: Dict[str, int] = {}
+    cases = data.get("cases", [])
+    family_counts: Dict[str, int] = {}
     for case in cases:
-        if not isinstance(case, dict):
-            return False
-        fam = case.get("family", "")
-        counts[fam] = counts.get(fam, 0) + 1
+        fam = case.get("family", "unknown")
+        family_counts[fam] = family_counts.get(fam, 0) + 1
 
     if is_calibration:
         if len(cases) != 24:
+            if raise_error:
+                raise ValueError(f"Calibration quota failure: expected 24 cases, got {len(cases)}")
             return False
-        expected = {
+        expected_cal = {
             "hard_lexical": 4,
             "synonym": 4,
             "paraphrase": 4,
@@ -71,14 +65,18 @@ def validate_fixture_quotas(data: Dict[str, Any], is_calibration: bool) -> bool:
             "near_but_wrong": 4,
             "profile_privacy": 4,
         }
-        for fam, exp_count in expected.items():
-            if counts.get(fam, 0) != exp_count:
+        for fam, count in expected_cal.items():
+            if family_counts.get(fam, 0) != count:
+                if raise_error:
+                    raise ValueError(f"Calibration family quota mismatch for {fam}: expected {count}, got {family_counts.get(fam, 0)}")
                 return False
         return True
     else:
         if len(cases) != 80:
+            if raise_error:
+                raise ValueError(f"Locked quota failure: expected 80 cases, got {len(cases)}")
             return False
-        expected = {
+        expected_locked = {
             "hard_lexical": 16,
             "synonym": 14,
             "paraphrase": 16,
@@ -87,17 +85,18 @@ def validate_fixture_quotas(data: Dict[str, Any], is_calibration: bool) -> bool:
             "profile_privacy": 5,
             "stale_contradiction": 5,
         }
-        for fam, exp_count in expected.items():
-            if counts.get(fam, 0) != exp_count:
+        for fam, count in expected_locked.items():
+            if family_counts.get(fam, 0) != count:
+                if raise_error:
+                    raise ValueError(f"Locked family quota mismatch for {fam}: expected {count}, got {family_counts.get(fam, 0)}")
                 return False
         return True
 
 
 def hash_candidate_payload(cand: Dict[str, Any]) -> str:
     """
-    Compute candidate semantic payload hash.
-    Normative definition: SHA-256 over normalized (title, content) bytes.
-    Excludes local candidate IDs to prevent candidate re-keying leakage.
+    Compute authoritative SHA-256 hash of normalized candidate memory payload.
+    Excludes case-local candidate ID to detect identical memory payloads across fixtures.
     """
     title = str(cand.get("title") or "").strip()
     content = str(cand.get("content") or "").strip()
@@ -105,56 +104,51 @@ def hash_candidate_payload(cand: Dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def validate_fixture_disjointness(cal_data: Dict[str, Any], locked_data: Dict[str, Any]) -> bool:
+def normalize_query_for_disjointness(query: str) -> str:
+    """Normalize query text (casefold and whitespace collapse) for disjointness checking."""
+    return " ".join(query.casefold().split())
+
+
+def validate_fixture_disjointness(cal_data: Dict[str, Any], locked_data: Dict[str, Any], raise_error: bool = False) -> bool:
     """
-    Assert calibration and locked datasets are completely disjoint:
-    - Zero overlapping case IDs.
-    - Zero overlapping normalized query strings (casefolded, collapsed whitespace).
-    - Zero overlapping individual candidate memory payload hashes (title + content).
+    Validate strict disjointness between Calibration and Locked evaluation sets:
+    1. Case IDs are disjoint.
+    2. Normalized query texts are disjoint.
+    3. Memory candidate payload hashes are disjoint.
     """
-    if not isinstance(cal_data, dict) or not isinstance(locked_data, dict):
-        return False
     cal_cases = cal_data.get("cases", [])
     locked_cases = locked_data.get("cases", [])
-    if not isinstance(cal_cases, list) or not isinstance(locked_cases, list):
+
+    cal_ids = {str(c.get("case_id") or c.get("id")) for c in cal_cases}
+    locked_ids = {str(c.get("case_id") or c.get("id")) for c in locked_cases}
+    id_overlap = cal_ids & locked_ids
+    if id_overlap:
+        if raise_error:
+            raise ValueError(f"Disjointness violation: overlapping case IDs: {id_overlap}")
         return False
 
-    cal_ids = {c.get("case_id") or c.get("id") for c in cal_cases if isinstance(c, dict)}
-    locked_ids = {c.get("case_id") or c.get("id") for c in locked_cases if isinstance(c, dict)}
-    if not cal_ids.isdisjoint(locked_ids):
+    cal_queries = {normalize_query_for_disjointness(str(c.get("query", ""))) for c in cal_cases}
+    locked_queries = {normalize_query_for_disjointness(str(c.get("query", ""))) for c in locked_cases}
+    query_overlap = cal_queries & locked_queries
+    if query_overlap:
+        if raise_error:
+            raise ValueError(f"Disjointness violation: overlapping normalized queries: {query_overlap}")
         return False
 
-    def norm_query(q: str) -> str:
-        return re.sub(r"\s+", " ", q.strip().casefold())
+    cal_payloads: Set[str] = set()
+    for c in cal_cases:
+        for cand in c.get("candidates", []):
+            cal_payloads.add(hash_candidate_payload(cand))
 
-    cal_queries = {
-        norm_query(c["query"])
-        for c in cal_cases
-        if isinstance(c, dict) and isinstance(c.get("query"), str)
-    }
-    locked_queries = {
-        norm_query(c["query"])
-        for c in locked_cases
-        if isinstance(c, dict) and isinstance(c.get("query"), str)
-    }
-    if not cal_queries.isdisjoint(locked_queries):
-        return False
+    locked_payloads: Set[str] = set()
+    for c in locked_cases:
+        for cand in c.get("candidates", []):
+            locked_payloads.add(hash_candidate_payload(cand))
 
-    cal_payloads = {
-        hash_candidate_payload(cand)
-        for c in cal_cases
-        if isinstance(c, dict)
-        for cand in c.get("candidates", [])
-        if isinstance(cand, dict)
-    }
-    locked_payloads = {
-        hash_candidate_payload(cand)
-        for c in locked_cases
-        if isinstance(c, dict)
-        for cand in c.get("candidates", [])
-        if isinstance(cand, dict)
-    }
-    if not cal_payloads.isdisjoint(locked_payloads):
+    payload_overlap = cal_payloads & locked_payloads
+    if payload_overlap:
+        if raise_error:
+            raise ValueError(f"Disjointness violation: overlapping candidate payloads ({len(payload_overlap)} hashes)")
         return False
 
     return True
@@ -162,19 +156,19 @@ def validate_fixture_disjointness(cal_data: Dict[str, Any], locked_data: Dict[st
 
 def resolve_target_user_id(case: Dict[str, Any]) -> str:
     """
-    Authoritative resolution of target profile ID for a fixture case.
-    Priority:
-    1. Explicit top-level target_user_id or profile_id on case.
-    2. Profile ID of target candidate(s) indicated by expected_ids / target_ids.
-    3. Profile ID of the primary/first candidate in the candidate pool.
+    Authoritatively resolve target user profile for a case without fallback ambiguity:
+    1. Check top-level 'target_user_id' or 'profile_id' in case.
+    2. If missing, look up profile_id of target/expected memory candidates.
+    3. If still missing, check candidates[0] profile_id.
+    4. Default safely to 'user_1'.
     """
     if case.get("target_user_id"):
         return str(case["target_user_id"])
     if case.get("profile_id"):
         return str(case["profile_id"])
 
-    expected_ids = set(case.get("expected_ids") or case.get("target_ids") or [])
     candidates = case.get("candidates", [])
+    expected_ids = set(case.get("target_ids") or case.get("expected_ids") or [])
     if expected_ids:
         for cand in candidates:
             if cand.get("id") in expected_ids and cand.get("profile_id"):
@@ -190,12 +184,11 @@ def execute_lexical_search(
     query: str,
     pool: List[Dict[str, Any]],
     profile_id: Optional[str] = None,
-    k: int = 3,
+    k: Optional[int] = 3,
 ) -> Tuple[RankedItem, ...]:
     """
     Execute pure lexical IDF retrieval by reusing opencohost production helpers.
     """
-    # 1. Deterministic sorting and row normalization
     sorted_pool: List[Dict[str, Any]] = []
     for cand in sorted(pool, key=lambda c: str(c.get("id", ""))):
         c = dict(cand)
@@ -208,14 +201,10 @@ def execute_lexical_search(
             c["access_count"] = 1
         sorted_pool.append(c)
 
-    # 2. Compute full-pool IDF map
     idf_map = _compute_candidate_idf(sorted_pool)
-
-    # 3. Select top candidates
     selected = select_top_k(query, sorted_pool, k=len(sorted_pool))
     topic = set(_significant_tokens(query)) - _SCORING_STOPWORDS
 
-    # 4. Filter by profile and privacy, compute exact scores
     results: List[RankedItem] = []
     rank = 1
     for row in selected:
@@ -241,7 +230,7 @@ def execute_lexical_search(
             )
         )
         rank += 1
-        if len(results) >= k:
+        if k is not None and len(results) >= k:
             break
 
     return tuple(results)
@@ -338,7 +327,7 @@ def execute_semantic_search(
     pool: List[Dict[str, Any]],
     embedder: MiniLMEmbedder,
     profile_id: Optional[str] = None,
-    k: int = 3,
+    k: Optional[int] = 3,
 ) -> Tuple[RankedItem, ...]:
     """
     Execute semantic dense retrieval using MiniLMEmbedder.
@@ -365,7 +354,8 @@ def execute_semantic_search(
 
     results: List[RankedItem] = []
     rank = 1
-    for score, cand in scored[:k]:
+    slice_end = len(scored) if k is None else k
+    for score, cand in scored[:slice_end]:
         results.append(
             RankedItem(
                 memory_id=str(cand.get("id", "")),
@@ -385,12 +375,12 @@ def execute_semantic_search(
 def generate_case_evidence(
     case: Dict[str, Any],
     embedder: MiniLMEmbedder,
-    k: int = 3,
+    k_semantic: int = 3,
 ) -> Tuple[InferenceEvidence, EvaluationTruth]:
     """
     Map fixture case into opaque InferenceEvidence and EvaluationTruth.
-    InferenceEvidence receives an opaque hash key with zero family/truth leakage.
-    Target user profile is authoritatively resolved.
+    lexical_ranking provides full case pool ranking/scores so mechanisms like H2
+    can inspect the semantic candidate's actual IDF score even if ranked > 3.
     """
     case_id = str(case.get("case_id") or case.get("id", ""))
     opaque_key = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:16]
@@ -399,8 +389,9 @@ def generate_case_evidence(
 
     target_user_id = resolve_target_user_id(case)
 
-    lex_ranking = execute_lexical_search(query, candidates, profile_id=target_user_id, k=k)
-    sem_ranking = execute_semantic_search(query, candidates, embedder=embedder, profile_id=target_user_id, k=k)
+    # Full case pool lexical ranking for complete signal visibility without ground truth leakage
+    lex_ranking = execute_lexical_search(query, candidates, profile_id=target_user_id, k=None)
+    sem_ranking = execute_semantic_search(query, candidates, embedder=embedder, profile_id=target_user_id, k=k_semantic)
 
     inf_evidence = InferenceEvidence(
         evidence_key=opaque_key,
