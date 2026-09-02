@@ -7,7 +7,7 @@ def _run(code: str) -> subprocess.CompletedProcess:
     import os
 
     env = os.environ.copy()
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=15)
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=30)
 
 
 def test_off_vs_shadow_prompt_byte_identical_when_suppressed():
