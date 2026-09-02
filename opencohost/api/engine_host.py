@@ -1179,17 +1179,30 @@ class EngineHost:
             except Exception:
                 pass
         if self.motor is not None:
-            # B2a (memoria_quality_20260717): flush the live memorias window on a
-            # clean API shutdown BEFORE the stop sentinel, so un-evicted pairs
-            # survive. Belt-and-braces with B1 capture-at-commit (which already
-            # persists each pair at commit). flush_memorias is itself bounded +
-            # fail-open, but guard anyway so a flush error never blocks teardown.
             try:
                 self.motor.flush_memorias()
             except Exception:
                 pass
             try:
-                self.motor.command_queue.put(None)  # only engine-thread stop path
+                self.motor.command_queue.put(None)
+            except Exception:
+                pass
+            try:
+                import time as _t
+                _deadline = _t.monotonic() + 1.0
+                while _t.monotonic() < _deadline:
+                    try:
+                        if not getattr(self.motor, "is_processing", False) and not getattr(self.motor, "_speech_active", False):
+                            break
+                    except Exception:
+                        break
+                    _t.sleep(0.02)
+            except Exception:
+                pass
+            try:
+                rt = getattr(self.motor, "_memory_runtime", None)
+                if rt is not None:
+                    rt.shutdown(timeout=1.0)
             except Exception:
                 pass
         if self.monitor is not None:

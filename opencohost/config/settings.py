@@ -570,6 +570,27 @@ PERSONALIZATION_OCCUPATION_MAX = 120
 PERSONALIZATION_INTERESTS_MAX = 240
 PERSONALIZATION_INSTRUCTIONS_MAX = 400
 
+# ──────────────────────────────────────────────
+# Memory v5 Shadow Mode (memory-v5-shadow-formation-foundation WU1)
+# ──────────────────────────────────────────────
+def _resolve_memory_v5_mode() -> str:
+    raw = os.environ.get("OPENCOHOST_MEMORY_V5_MODE") or os.environ.get("MEMORY_V5_MODE") or "OFF"
+    v = raw.strip().upper()
+    return v if v in ("OFF", "SHADOW") else "OFF"
+
+
+def _resolve_memory_v5_shadow_db() -> str:
+    explicit = os.environ.get("OPENCOHOST_MEMORY_V5_SHADOW_DB", "").strip()
+    if explicit:
+        return explicit
+    return os.path.join(str(USER_DATA_DIR), "data", "memory_v5_shadow", "memory_v5_shadow.db")
+
+
+MEMORY_V5_MODE: str = _resolve_memory_v5_mode()
+MEMORY_V5_SHADOW_DB: str = _resolve_memory_v5_shadow_db()
+MEMORY_V5_SHADOW_QUEUE_MAXSIZE: int = 1000
+MEMORY_V5_SHADOW_CONTROL_RESERVED: int = 100
+
 
 # ──────────────────────────────────────────────
 # Experimental feature flags

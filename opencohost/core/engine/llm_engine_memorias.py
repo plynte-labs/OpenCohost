@@ -250,6 +250,17 @@ class MemoriaCaptureMixin:
         # releases (upsert_draft must never run with _history_lock held).
         pending_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
         committed_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
+        # WU1 shadow — OFF-ZERO: no v5 work when disabled.
+        _shadow_rt0 = getattr(self, "_memory_runtime", None)
+        _shadow_run0 = getattr(self, "_memory_run_id", None)
+        if _shadow_rt0 is not None and _shadow_run0 is not None:
+            from datetime import datetime, timezone
+
+            shadow_occurred_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            shadow_snapshots: list = []
+        else:
+            shadow_occurred_at = None  # type: ignore
+            shadow_snapshots = None  # type: ignore
 
         # Hold _history_lock around the eviction-capture + both appends so
         # concurrent callers (worker loop and agenda speaker daemon) cannot
@@ -344,6 +355,60 @@ class MemoriaCaptureMixin:
             committed_memoria_capture = self._build_memoria_draft(
                 safe_context, dialogo, source=source, private=priv,
             )
+            # WU1 shadow: allocate monotonic (run_id, stream_sequence) under lock, no I/O.
+            _rt = getattr(self, "_memory_runtime", None)
+            _run = getattr(self, "_memory_run_id", None)
+            if _rt is not None and _run is not None:
+                if source in ("direct", "ptt", "owner-bundle") and priv is False:
+                    pid = getattr(self, "_current_profile_id", None)
+                    if pid is not None:
+                        # two consecutive sequences, one per role
+                        self._memory_stream_seq += 1
+                        seq_u = self._memory_stream_seq
+                        self._memory_stream_seq += 1
+                        seq_a = self._memory_stream_seq
+                        try:
+                            from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
+
+                            shadow_snapshots.append(
+                                CommittedTurnSnapshot(
+                                    committed_turn_id=f"{_run}:{seq_u}",
+                                    profile_id=pid,
+                                    run_id=_run,
+                                    stream_sequence=seq_u,
+                                    role="user",
+                                    source=source,
+                                    occurred_at=shadow_occurred_at,
+                                    content=safe_context,
+                                    is_private=False,
+                                )
+                            )
+                            shadow_snapshots.append(
+                                CommittedTurnSnapshot(
+                                    committed_turn_id=f"{_run}:{seq_a}",
+                                    profile_id=pid,
+                                    run_id=_run,
+                                    stream_sequence=seq_a,
+                                    role="assistant",
+                                    source=source,
+                                    occurred_at=shadow_occurred_at,
+                                    content=dialogo,
+                                    is_private=False,
+                                )
+                            )
+                        except Exception:
+                            # fail-open: drop snapshots if construction fails
+                            shadow_snapshots.clear()
+
+        # WU1 shadow: enqueue after lock release, non-blocking, fail-open.
+        if shadow_snapshots:
+            _rt2 = getattr(self, "_memory_runtime", None)
+            if _rt2 is not None:
+                for _snap in shadow_snapshots:
+                    try:
+                        _rt2.record_turn(_snap)
+                    except Exception:
+                        pass
 
         if pending_memoria_capture is not None:
             self._capture_memoria(*pending_memoria_capture)

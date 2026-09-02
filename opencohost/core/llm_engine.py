@@ -787,6 +787,34 @@ class MotorVocalIA(
         # first direct-path turn with memorias enabled. Value only; rendered
         # by the slice-7 management UI.
         self._memorias_pin_counter: Optional[tuple[int, int]] = None
+        # Memory v5 Shadow (WU1): OFF default — no runtime, no DB, no worker.
+        self._memory_runtime = None
+        self._memory_run_id: Optional[str] = None
+        self._memory_stream_seq: int = 0
+        self._memory_init_status = {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"}
+        try:
+            from opencohost.config.settings import MEMORY_V5_MODE, MEMORY_V5_SHADOW_DB
+
+            req = str(MEMORY_V5_MODE).upper() if isinstance(MEMORY_V5_MODE, str) else "OFF"
+            if req != "SHADOW":
+                self._memory_init_status = {"requested": req, "effective": "OFF", "reason_code": "off_default"}
+            else:
+                self._memory_init_status = {"requested": "SHADOW", "effective": "SHADOW", "reason_code": "ok"}
+                try:
+                    from opencohost.core.memory_v5_shadow.runtime import MemoryRuntime
+
+                    rt = MemoryRuntime(db_path=MEMORY_V5_SHADOW_DB)
+                    self._memory_runtime = rt
+                    self._memory_run_id = rt.run_id
+                    self._memory_init_status = {"requested": "SHADOW", "effective": "SHADOW", "reason_code": "ok"}
+                except Exception:
+                    self._memory_runtime = None
+                    self._memory_run_id = None
+                    self._memory_init_status = {"requested": "SHADOW", "effective": "INIT_FAILED", "reason_code": "init_exception"}
+        except Exception:
+            self._memory_init_status = {"requested": "SHADOW", "effective": "INIT_FAILED", "reason_code": "init_exception"}
+            self._memory_runtime = None
+            self._memory_run_id = None
 
         self._lock = threading.Lock()
 
@@ -1386,11 +1414,9 @@ class MotorVocalIA(
             # the misattribution/loss window where a concurrent _commit_history
             # could previously land between the id swap and the historial
             # clear (tracked in apply-progress #2780, judge notes A-N2/B-S1).
+            shadow_switch_ordered = None
             with self._history_lock:
                 switch_drafts = self._collect_flush_drafts()
-                # W2a: snapshot the DEPARTING profile id + this session's titles
-                # (before the id swap) and clear titles so the new profile starts
-                # a fresh session — same atomic critical section as the drafts.
                 departing_profile_id = self._current_profile_id
                 summary_titles = list(self._session_memoria_titles)
                 self._session_memoria_titles.clear()
@@ -1398,11 +1424,30 @@ class MotorVocalIA(
                 self.historial.clear()
                 self._memory_digest.clear()
                 self._digested_turn_keys.clear()
-            # RC-2/RC-3: disk upserts dispatched AFTER lock release, on a
-            # worker thread — the profile switch must never block on I/O. The
-            # departing profile's mechanical session summary rides that same
-            # worker (W2a), so it never blocks the Tk thread either.
+                _rt = getattr(self, "_memory_runtime", None)
+                _run = getattr(self, "_memory_run_id", None)
+                if _rt is not None and _run is not None:
+                    try:
+                        self._memory_stream_seq += 1
+                        seq_out = self._memory_stream_seq
+                        self._memory_stream_seq += 1
+                        seq_in = self._memory_stream_seq
+                        shadow_switch_ordered = (departing_profile_id, payload.get("id"), _run, seq_out, seq_in)
+                    except Exception:
+                        shadow_switch_ordered = None
             self._dispatch_switch_flush(switch_drafts, departing_profile_id, summary_titles)
+            try:
+                rt = getattr(self, "_memory_runtime", None)
+                if rt is not None:
+                    if shadow_switch_ordered is not None:
+                        try:
+                            rt._ordered_profile_switch(*shadow_switch_ordered)
+                        except Exception:
+                            rt.on_profile_switch(departing_profile_id, payload.get("id"))
+                    else:
+                        rt.on_profile_switch(departing_profile_id, payload.get("id"))
+            except Exception:
+                pass
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
             # T4 coherence gate (warn-only; the profile always wins). Flags when a
             # custom persona's language is not governed by the active locale.
