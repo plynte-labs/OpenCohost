@@ -1414,7 +1414,6 @@ class MotorVocalIA(
             # the misattribution/loss window where a concurrent _commit_history
             # could previously land between the id swap and the historial
             # clear (tracked in apply-progress #2780, judge notes A-N2/B-S1).
-            shadow_switch_ordered = None
             with self._history_lock:
                 switch_drafts = self._collect_flush_drafts()
                 departing_profile_id = self._current_profile_id
@@ -1428,26 +1427,12 @@ class MotorVocalIA(
                 _run = getattr(self, "_memory_run_id", None)
                 if _rt is not None and _run is not None:
                     try:
-                        self._memory_stream_seq += 1
-                        seq_out = self._memory_stream_seq
-                        self._memory_stream_seq += 1
-                        seq_in = self._memory_stream_seq
-                        shadow_switch_ordered = (departing_profile_id, payload.get("id"), _run, seq_out, seq_in)
+                        assigned = _rt._ordered_profile_switch(departing_profile_id, payload.get("id"), run_id=_run)
+                        if assigned:
+                            self._memory_stream_seq = assigned[1]
                     except Exception:
-                        shadow_switch_ordered = None
+                        pass
             self._dispatch_switch_flush(switch_drafts, departing_profile_id, summary_titles)
-            try:
-                rt = getattr(self, "_memory_runtime", None)
-                if rt is not None:
-                    if shadow_switch_ordered is not None:
-                        try:
-                            rt._ordered_profile_switch(*shadow_switch_ordered)
-                        except Exception:
-                            rt.on_profile_switch(departing_profile_id, payload.get("id"))
-                    else:
-                        rt.on_profile_switch(departing_profile_id, payload.get("id"))
-            except Exception:
-                pass
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
             # T4 coherence gate (warn-only; the profile always wins). Flags when a
             # custom persona's language is not governed by the active locale.

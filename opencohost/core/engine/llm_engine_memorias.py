@@ -245,26 +245,9 @@ class MemoriaCaptureMixin:
             # ends up in safe_context.
             safe_context = self._sanitize_history_context(history_text if history_text else contexto)
 
-        # T3 — staged memorias draft (pure strings, no I/O). Built while
-        # _history_lock is held below; upsert_draft is called AFTER the lock
-        # releases (upsert_draft must never run with _history_lock held).
         pending_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
         committed_memoria_capture: Optional[tuple[str, str, str, str, str]] = None
-        # WU1 shadow — OFF-ZERO: no v5 work when disabled.
-        _shadow_rt0 = getattr(self, "_memory_runtime", None)
-        _shadow_run0 = getattr(self, "_memory_run_id", None)
-        if _shadow_rt0 is not None and _shadow_run0 is not None:
-            from datetime import datetime, timezone
 
-            shadow_occurred_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            shadow_snapshots: list = []
-        else:
-            shadow_occurred_at = None  # type: ignore
-            shadow_snapshots = None  # type: ignore
-
-        # Hold _history_lock around the eviction-capture + both appends so
-        # concurrent callers (worker loop and agenda speaker daemon) cannot
-        # interleave a read of historial[0]/[1] with an append from another thread.
         with self._history_lock:
             # D1 — eviction capture: before appending the new turn, check whether
             # the deque is at maxlen. If so, the oldest pair (user+assistant at
@@ -352,72 +335,52 @@ class MemoriaCaptureMixin:
             # flush: the stable_key upsert (ON CONFLICT(profile_id,stable_key)
             # ... WHERE status='draft') is idempotent, so a pair captured here
             # and again later is a no-op revision bump, never a duplicate row.
-            committed_memoria_capture = self._build_memoria_draft(
-                safe_context, dialogo, source=source, private=priv,
-            )
-            # WU1 shadow: allocate monotonic (run_id, stream_sequence) under lock, no I/O.
+            # WU1 shadow: allocate monotonic sequence and enqueue under _history_lock (pure RAM, < 5us).
             _rt = getattr(self, "_memory_runtime", None)
             _run = getattr(self, "_memory_run_id", None)
             if _rt is not None and _run is not None:
                 if source in ("direct", "ptt", "owner-bundle") and priv is False:
                     pid = getattr(self, "_current_profile_id", None)
                     if pid is not None:
-                        # two consecutive sequences, one per role
-                        self._memory_stream_seq += 1
-                        seq_u = self._memory_stream_seq
-                        self._memory_stream_seq += 1
-                        seq_a = self._memory_stream_seq
                         try:
+                            from datetime import datetime, timezone
                             from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
 
-                            shadow_snapshots.append(
-                                CommittedTurnSnapshot(
-                                    committed_turn_id=f"{_run}:{seq_u}",
-                                    profile_id=pid,
-                                    run_id=_run,
-                                    stream_sequence=seq_u,
-                                    role="user",
-                                    source=source,
-                                    occurred_at=shadow_occurred_at,
-                                    content=safe_context,
-                                    is_private=False,
-                                )
+                            shadow_occurred_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                            snap_u = CommittedTurnSnapshot(
+                                committed_turn_id="",
+                                profile_id=pid,
+                                run_id=_run,
+                                stream_sequence=0,
+                                role="user",
+                                source=source,
+                                occurred_at=shadow_occurred_at,
+                                content=safe_context,
+                                is_private=False,
                             )
-                            shadow_snapshots.append(
-                                CommittedTurnSnapshot(
-                                    committed_turn_id=f"{_run}:{seq_a}",
-                                    profile_id=pid,
-                                    run_id=_run,
-                                    stream_sequence=seq_a,
-                                    role="assistant",
-                                    source=source,
-                                    occurred_at=shadow_occurred_at,
-                                    content=dialogo,
-                                    is_private=False,
-                                )
+                            snap_a = CommittedTurnSnapshot(
+                                committed_turn_id="",
+                                profile_id=pid,
+                                run_id=_run,
+                                stream_sequence=0,
+                                role="assistant",
+                                source=source,
+                                occurred_at=shadow_occurred_at,
+                                content=dialogo,
+                                is_private=False,
                             )
+                            assigned = _rt.record_turn_exchange(snap_u, snap_a)
+                            if assigned:
+                                self._memory_stream_seq = assigned[1]
                         except Exception:
-                            # fail-open: drop snapshots if construction fails
-                            shadow_snapshots.clear()
-
-        # WU1 shadow: enqueue after lock release, non-blocking, fail-open.
-        if shadow_snapshots:
-            _rt2 = getattr(self, "_memory_runtime", None)
-            if _rt2 is not None:
-                for _snap in shadow_snapshots:
-                    try:
-                        _rt2.record_turn(_snap)
-                    except Exception:
-                        pass
+                            try:
+                                _rt.record_drop(2, "snapshot_construction_or_enqueue_exception")
+                            except Exception:
+                                pass
 
         if pending_memoria_capture is not None:
             self._capture_memoria(*pending_memoria_capture)
         if committed_memoria_capture is not None:
-            # FIX2 (memoria_quality_20260717): flag the just-committed pair ONLY
-            # when the upsert actually persisted, so eviction/flush skip the
-            # byte-identical re-upsert (revision churn / panel-order flapping).
-            # On the fail-open path the flag stays unset → eviction/flush retain
-            # their retry role (belt-and-braces preserved for the failure case).
             if self._capture_memoria(*committed_memoria_capture):
                 committed_user_entry["mem_captured"] = True
                 
