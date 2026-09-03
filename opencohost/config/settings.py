@@ -576,7 +576,7 @@ PERSONALIZATION_INSTRUCTIONS_MAX = 400
 def _resolve_memory_v5_mode() -> str:
     raw = os.environ.get("OPENCOHOST_MEMORY_V5_MODE") or os.environ.get("MEMORY_V5_MODE") or "OFF"
     v = raw.strip().upper()
-    return v if v in ("OFF", "SHADOW") else "OFF"
+    return v if v in ("OFF", "SHADOW", "ACTIVE") else "OFF"
 
 
 def _resolve_memory_v5_shadow_db() -> str:
@@ -586,8 +586,16 @@ def _resolve_memory_v5_shadow_db() -> str:
     return os.path.join(str(USER_DATA_DIR), "data", "memory_v5_shadow", "memory_v5_shadow.db")
 
 
+def _resolve_memory_v5_semantic_cache_db() -> str:
+    explicit = os.environ.get("OPENCOHOST_MEMORY_V5_SEMANTIC_CACHE_DB", "").strip()
+    if explicit:
+        return explicit
+    return os.path.join(str(USER_DATA_DIR), "data", "memory_v5_shadow", "memory_v5_semantic_cache.db")
+
+
 MEMORY_V5_MODE: str = _resolve_memory_v5_mode()
 MEMORY_V5_SHADOW_DB: str = _resolve_memory_v5_shadow_db()
+MEMORY_V5_SEMANTIC_CACHE_DB: str = _resolve_memory_v5_semantic_cache_db()
 MEMORY_V5_SHADOW_QUEUE_MAXSIZE: int = 1000
 MEMORY_V5_SHADOW_CONTROL_RESERVED: int = 100
 

@@ -335,6 +335,9 @@ class MemoriaCaptureMixin:
             # flush: the stable_key upsert (ON CONFLICT(profile_id,stable_key)
             # ... WHERE status='draft') is idempotent, so a pair captured here
             # and again later is a no-op revision bump, never a duplicate row.
+            committed_memoria_capture = self._build_memoria_draft(
+                safe_context, dialogo, source=source, private=priv,
+            )
             # WU1 shadow: allocate monotonic sequence and enqueue under _history_lock (pure RAM, < 5us).
             _rt = getattr(self, "_memory_runtime", None)
             _run = getattr(self, "_memory_run_id", None)

@@ -81,6 +81,7 @@ class PromptContextAssembler:
         watchdog_timeout: Optional[float] = None,
         personalization_enabled: Optional[bool] = None,
         memorias_enabled: Optional[bool] = None,
+        episodic_memory_block: str = "",
     ) -> GenerationSetup:
         """Assemble messages, apply context budgets, and build sampling options."""
         messages: list[dict[str, Any]] = []
@@ -176,6 +177,10 @@ class PromptContextAssembler:
         # 7. Memorias prepended before digest
         if source in MEMORIA_INJECT_SOURCES and memorias_block:
             enriched = f"{memorias_block}\n\n{enriched}"
+
+        # 7b. Episodic memory v5 block
+        if episodic_memory_block:
+            enriched = f"{episodic_memory_block}\n\n{enriched}"
 
         # 8. User message framing
         if use_system_role:

@@ -1205,6 +1205,15 @@ class EngineHost:
                     rt.shutdown(timeout=1.0)
             except Exception:
                 pass
+            try:
+                worker = getattr(self.motor, "_semantic_worker", None)
+                if worker is not None:
+                    worker.shutdown()
+                store = getattr(self.motor, "_semantic_cache_store", None)
+                if store is not None:
+                    store.close()
+            except Exception:
+                pass
         if self.monitor is not None:
             try:
                 self.monitor.stop()

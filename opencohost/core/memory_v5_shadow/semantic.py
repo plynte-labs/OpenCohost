@@ -461,4 +461,11 @@ def load_episode_evidence_events(
     ORDER BY m.sequence_index ASC
     """
     cur = conn.execute(sql, (episode_id,))
-    return [dict(r) for r in cur.fetchall()]
+    cols = [d[0] for d in cur.description] if cur.description else []
+    results = []
+    for r in cur.fetchall():
+        if hasattr(r, "keys"):
+            results.append(dict(r))
+        else:
+            results.append(dict(zip(cols, r)))
+    return results

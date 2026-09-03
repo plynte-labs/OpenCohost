@@ -19,7 +19,12 @@ logger = logging.getLogger("OpenCohost")
 
 
 class MemoryRuntime:
-    def __init__(self, db_path: Path | str | None = None, queue_maxsize: int = 1000) -> None:
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        queue_maxsize: int = 1000,
+        semantic_cache: Optional[Any] = None,
+    ) -> None:
         from opencohost.config.settings import (
             MEMORY_V5_SHADOW_CONTROL_RESERVED,
             MEMORY_V5_SHADOW_QUEUE_MAXSIZE,
@@ -58,6 +63,7 @@ class MemoryRuntime:
         self._global_purged_cutoff: int = -1
         self._session_reducer = SessionFormationReducer()
         self._episode_engine = EpisodeSegmentationEngine()
+        self._semantic_cache = semantic_cache
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._store.start_run(self.run_id, started_at)
         self._store.recover_unclean_runs(
@@ -70,6 +76,10 @@ class MemoryRuntime:
         self._worker.start()
         self._bg_latencies: list[float] = []
         self._bg_lock = threading.Lock()
+
+    @property
+    def store(self) -> ShadowStore:
+        return self._store
 
     def allocate_sequences(self, count: int = 1) -> tuple[int, ...]:
         with self._adm_lock:
@@ -353,6 +363,11 @@ class MemoryRuntime:
                         if kind == "purge":
                             self._store.purge_profile(profile_id or "")
                             self._session_reducer.purge_profile(profile_id or "")
+                            if self._semantic_cache is not None:
+                                try:
+                                    self._semantic_cache.purge_profile_cache(profile_id or "")
+                                except Exception:
+                                    pass
                             self._purged_cutoffs[profile_id or ""] = max(
                                 self._purged_cutoffs.get(profile_id or "", -1),
                                 cutoff_seq,
@@ -360,6 +375,11 @@ class MemoryRuntime:
                         else:
                             self._store.forget_all()
                             self._session_reducer.reset()
+                            if self._semantic_cache is not None:
+                                try:
+                                    self._semantic_cache.forget_all_cache()
+                                except Exception:
+                                    pass
                             self._global_purged_cutoff = max(
                                 self._global_purged_cutoff, cutoff_seq
                             )

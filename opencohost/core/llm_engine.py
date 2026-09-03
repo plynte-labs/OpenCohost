@@ -787,32 +787,79 @@ class MotorVocalIA(
         # first direct-path turn with memorias enabled. Value only; rendered
         # by the slice-7 management UI.
         self._memorias_pin_counter: Optional[tuple[int, int]] = None
-        # Memory v5 Shadow (WU1): OFF default — no runtime, no DB, no worker.
+        # Memory v5 Shadow & Episodic Recall: OFF default — no runtime, no DB, no worker.
         self._memory_runtime = None
         self._memory_run_id: Optional[str] = None
         self._memory_stream_seq: int = 0
         self._memory_init_status = {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"}
+        self._semantic_cache_store = None
+        self._semantic_worker = None
+        self._semantic_indexer = None
+        self._episodic_recall_coordinator = None
+
         try:
-            from opencohost.config.settings import MEMORY_V5_MODE, MEMORY_V5_SHADOW_DB
+            from opencohost.config.settings import (
+                MEMORY_V5_MODE,
+                MEMORY_V5_SHADOW_DB,
+                MEMORY_V5_SEMANTIC_CACHE_DB,
+            )
 
             req = str(MEMORY_V5_MODE).upper() if isinstance(MEMORY_V5_MODE, str) else "OFF"
-            if req != "SHADOW":
+            if req not in ("SHADOW", "ACTIVE"):
                 self._memory_init_status = {"requested": req, "effective": "OFF", "reason_code": "off_default"}
             else:
-                self._memory_init_status = {"requested": "SHADOW", "effective": "SHADOW", "reason_code": "ok"}
                 try:
                     from opencohost.core.memory_v5_shadow.runtime import MemoryRuntime
+                    from opencohost.core.memory_v5_shadow.semantic_cache import SemanticCacheStore
+                    from opencohost.core.memory_v5_shadow.semantic_worker import SemanticWorkerService
+                    from opencohost.core.memory_v5_shadow.semantic_indexer import IncrementalSemanticIndexer
+                    from opencohost.core.memory_v5_shadow.episodic_recall import EpisodicRecallCoordinator, RecallMode
 
-                    rt = MemoryRuntime(db_path=MEMORY_V5_SHADOW_DB)
+                    cache_store = SemanticCacheStore(db_path=MEMORY_V5_SEMANTIC_CACHE_DB)
+                    cache_store.initialize()
+                    self._semantic_cache_store = cache_store
+
+                    rt = MemoryRuntime(db_path=MEMORY_V5_SHADOW_DB, semantic_cache=cache_store)
                     self._memory_runtime = rt
                     self._memory_run_id = rt.run_id
-                    self._memory_init_status = {"requested": "SHADOW", "effective": "SHADOW", "reason_code": "ok"}
-                except Exception:
+
+                    worker = SemanticWorkerService()
+                    worker.start()
+                    self._semantic_worker = worker
+
+                    indexer = IncrementalSemanticIndexer(
+                        shadow_conn=rt._store._conn,
+                        cache_store=cache_store,
+                        worker=worker,
+                    )
+                    self._semantic_indexer = indexer
+
+                    recall_mode = RecallMode.ACTIVE if req == "ACTIVE" else RecallMode.SHADOW
+                    coord = EpisodicRecallCoordinator(
+                        shadow_conn=rt._store._conn,
+                        cache_store=cache_store,
+                        worker=worker,
+                        mode=recall_mode,
+                    )
+                    self._episodic_recall_coordinator = coord
+
+                    try:
+                        indexer.reconcile_unindexed_episodes()
+                    except Exception as rec_exc:
+                        logger.warning("Startup semantic reconciliation warning: %s", rec_exc)
+
+                    self._memory_init_status = {"requested": req, "effective": req, "reason_code": "ok"}
+                except Exception as exc:
+                    logger.warning("Memory v5 initialization failed: %s; failing open.", exc)
                     self._memory_runtime = None
                     self._memory_run_id = None
-                    self._memory_init_status = {"requested": "SHADOW", "effective": "INIT_FAILED", "reason_code": "init_exception"}
+                    self._semantic_cache_store = None
+                    self._semantic_worker = None
+                    self._semantic_indexer = None
+                    self._episodic_recall_coordinator = None
+                    self._memory_init_status = {"requested": req, "effective": "INIT_FAILED", "reason_code": "init_exception"}
         except Exception:
-            self._memory_init_status = {"requested": "SHADOW", "effective": "INIT_FAILED", "reason_code": "init_exception"}
+            self._memory_init_status = {"requested": "OFF", "effective": "INIT_FAILED", "reason_code": "init_exception"}
             self._memory_runtime = None
             self._memory_run_id = None
 
@@ -2532,6 +2579,19 @@ class MotorVocalIA(
             getattr(settings, "MEMORIAS_ENABLED", True),
         )
 
+        episodic_memory_block = ""
+        coord = getattr(self, "_episodic_recall_coordinator", None)
+        if coord is not None and memorias_profile_id:
+            try:
+                packet = coord.process_query(contexto, profile_id=memorias_profile_id)
+                if packet is not None:
+                    from opencohost.core.memory_v5_shadow.episodic_recall import RecallMode
+
+                    if packet.mode == RecallMode.ACTIVE:
+                        episodic_memory_block = packet.formatted_block
+            except Exception as e_exc:
+                logger.warning("Episodic recall query failed open: %s", e_exc)
+
         return assembler.assemble(
             contexto,
             source,
@@ -2553,6 +2613,7 @@ class MotorVocalIA(
             watchdog_timeout=watchdog_timeout,
             personalization_enabled=pers_enabled,
             memorias_enabled=mem_enabled,
+            episodic_memory_block=episodic_memory_block,
         )
 
     def _cloud_attempt_loop(
