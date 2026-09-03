@@ -18,6 +18,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from opencohost.core.memory_v5_shadow.episodes import (
+    EpisodeSegmentationEngine,
+    compute_canonical_episodes_hash,
+)
+from opencohost.core.memory_v5_shadow.sessions import (
+    SessionFormationReducer,
+    compute_canonical_sessions_hash,
+)
+
 
 def get_db_path(custom_path: str | None = None) -> Path:
     if custom_path:
@@ -32,7 +41,7 @@ def get_db_path(custom_path: str | None = None) -> Path:
         return Path(ROOT) / "data" / "memory_v5_shadow" / "memory_v5_shadow.db"
 
 
-def inspect(db_path: Path) -> int:
+def inspect(db_path: Path, verify_rebuild: bool = False) -> int:
     mode = os.environ.get("OPENCOHOST_MEMORY_V5_MODE", "OFF").upper()
     print("==================================================")
     print(" OpenCohost Memory v5 Shadow — Runtime Inspector  ")
@@ -49,11 +58,9 @@ def inspect(db_path: Path) -> int:
     conn.row_factory = sqlite3.Row
 
     try:
-        # Check tables
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         print(f"Tables present:   {', '.join(sorted(tables))}")
 
-        # Shadow Runs
         runs = conn.execute("SELECT * FROM shadow_runs ORDER BY rowid DESC LIMIT 5").fetchall()
         print(f"\n--- Shadow Runs (Total: {len(runs)}) ---")
         for r in runs:
@@ -64,7 +71,6 @@ def inspect(db_path: Path) -> int:
             print(f"  Dropped Evidence: {r['dropped_evidence_total']}")
             print(f"  Control Failures: {r['control_failures_total']}")
 
-        # Evidence Journal
         ev_count = conn.execute("SELECT COUNT(*) FROM evidence_journal").fetchone()[0]
         ev_profiles = [r[0] for r in conn.execute("SELECT DISTINCT profile_id FROM evidence_journal").fetchall()]
         last_seq = conn.execute("SELECT MAX(stream_sequence) FROM evidence_journal").fetchone()[0] or 0
@@ -82,7 +88,6 @@ def inspect(db_path: Path) -> int:
             src_summary = ", ".join(f"{r[0]}: {r[1]}" for r in sources)
             print(f"  Source Breakdown: {src_summary}")
 
-        # Lifecycle Events
         lc_count = conn.execute("SELECT COUNT(*) FROM lifecycle_events").fetchone()[0]
         print("\n--- Lifecycle Events ---")
         print(f"  Event Rows:       {lc_count}")
@@ -90,6 +95,50 @@ def inspect(db_path: Path) -> int:
             kinds = conn.execute("SELECT kind, COUNT(*) FROM lifecycle_events GROUP BY kind").fetchall()
             kind_summary = ", ".join(f"{r[0]}: {r[1]}" for r in kinds)
             print(f"  Kind Breakdown:   {kind_summary}")
+
+        sess_rows = conn.execute("SELECT * FROM sessions ORDER BY started_at, session_id").fetchall()
+        live_sessions = [dict(r) for r in sess_rows]
+        print(f"\n--- Sessions Projection (Total: {len(live_sessions)}) ---")
+        for s in live_sessions:
+            print(
+                f"  [{s['session_id'][:8]}..] Profile: {s['profile_id']} | State: {s['state']} | "
+                f"Events: {s['event_count']} | Open: {s['opened_reason']} | Close: {s['closure_reason'] or 'N/A'}"
+            )
+
+        ep_rows = conn.execute("SELECT * FROM episodes ORDER BY started_at, episode_id").fetchall()
+        live_episodes = [dict(r) for r in ep_rows]
+        print(f"\n--- Episodes Projection (Total: {len(live_episodes)}) ---")
+        for ep in live_episodes:
+            print(
+                f"  [{ep['episode_id'][:8]}..] Sess: {ep['session_id'][:8]}.. | Events: {ep['event_count']} | "
+                f"Open: {ep['opened_reason']} | Close: {ep['closure_reason']}"
+            )
+
+        if verify_rebuild:
+            reducer = SessionFormationReducer()
+            rebuilt_sessions = reducer.rebuild_from_db(db_path)
+            live_hash = compute_canonical_sessions_hash(live_sessions)
+            rebuilt_hash = compute_canonical_sessions_hash(rebuilt_sessions)
+            print("\n--- In-Memory Reconstruction Verification ---")
+            print(f"  Live Sessions Hash:    {live_hash}")
+            print(f"  Rebuilt Sessions Hash: {rebuilt_hash}")
+            if live_hash == rebuilt_hash:
+                print("  Sessions Replay:       PASS (100% Deterministic Match)")
+            else:
+                print("  Sessions Replay:       FAIL (Hash Mismatch)")
+                return 1
+
+            engine = EpisodeSegmentationEngine()
+            rebuilt_eps, _ = engine.segment_all_from_db(db_path, persist=False)
+            live_ep_hash = compute_canonical_episodes_hash(live_episodes)
+            rebuilt_ep_hash = compute_canonical_episodes_hash(rebuilt_eps)
+            print(f"  Live Episodes Hash:    {live_ep_hash}")
+            print(f"  Rebuilt Episodes Hash: {rebuilt_ep_hash}")
+            if live_ep_hash == rebuilt_ep_hash:
+                print("  Episodes Replay:       PASS (100% Deterministic Match)")
+            else:
+                print("  Episodes Replay:       FAIL (Hash Mismatch)")
+                return 1
 
         print("\n==================================================")
         print(" [METADATA-ONLY AUDIT: OK — ZERO PAYLOAD EXPOSED] ")
@@ -105,9 +154,14 @@ def inspect(db_path: Path) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Inspect OpenCohost Memory v5 Shadow DB metadata")
     parser.add_argument("--db", type=str, default=None, help="Custom shadow.db path")
+    parser.add_argument(
+        "--verify-rebuild",
+        action="store_true",
+        help="Run in-memory deterministic replay and verify SHA-256 parity against live sessions & episodes",
+    )
     args = parser.parse_args()
     db_p = get_db_path(args.db)
-    return inspect(db_p)
+    return inspect(db_p, verify_rebuild=args.verify_rebuild)
 
 
 if __name__ == "__main__":

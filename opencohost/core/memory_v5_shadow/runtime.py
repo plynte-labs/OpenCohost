@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import queue
 import threading
@@ -9,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
+from opencohost.core.memory_v5_shadow.episodes import EpisodeSegmentationEngine
 from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
+from opencohost.core.memory_v5_shadow.sessions import SessionFormationReducer
 from opencohost.core.memory_v5_shadow.store import ShadowStore
 
 logger = logging.getLogger("OpenCohost")
@@ -53,8 +56,14 @@ class MemoryRuntime:
         self._adm_lock = threading.Lock()
         self._purged_cutoffs: dict[str, int] = {}
         self._global_purged_cutoff: int = -1
+        self._session_reducer = SessionFormationReducer()
+        self._episode_engine = EpisodeSegmentationEngine()
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._store.start_run(self.run_id, started_at)
+        self._store.recover_unclean_runs(
+            self.run_id, lambda: self.allocate_sequences(1)[0]
+        )
+        self._store.reconcile_sessions_from_journals()
         self._worker = threading.Thread(
             target=self._worker_loop, daemon=True, name="memory-v5-shadow"
         )
@@ -96,6 +105,8 @@ class MemoryRuntime:
                         content=snapshot.content,
                         is_private=False,
                     )
+                else:
+                    self._stream_sequence = max(self._stream_sequence, snapshot.stream_sequence)
                 self._queue.put_nowait(("single", snapshot))
         except queue.Full:
             with self._lock:
@@ -153,6 +164,7 @@ class MemoryRuntime:
                 else:
                     seq_u = user_snap.stream_sequence
                     seq_a = asst_snap.stream_sequence
+                    self._stream_sequence = max(self._stream_sequence, seq_a)
                 self._queue.put_nowait(("exchange", (user_snap, asst_snap)))
                 return (seq_u, seq_a)
         except queue.Full:
@@ -197,8 +209,7 @@ class MemoryRuntime:
                     return None
                 s_out = seq_out if seq_out is not None else self._stream_sequence + 1
                 s_in = seq_in if seq_in is not None else self._stream_sequence + 2
-                if seq_out is None or seq_in is None:
-                    self._stream_sequence += 2
+                self._stream_sequence = max(self._stream_sequence, s_in)
                 r_id = run_id or self.run_id
                 cmd = (
                     "profile_switch_ordered",
@@ -341,12 +352,14 @@ class MemoryRuntime:
                     try:
                         if kind == "purge":
                             self._store.purge_profile(profile_id or "")
+                            self._session_reducer.purge_profile(profile_id or "")
                             self._purged_cutoffs[profile_id or ""] = max(
                                 self._purged_cutoffs.get(profile_id or "", -1),
                                 cutoff_seq,
                             )
                         else:
                             self._store.forget_all()
+                            self._session_reducer.reset()
                             self._global_purged_cutoff = max(
                                 self._global_purged_cutoff, cutoff_seq
                             )
@@ -381,7 +394,7 @@ class MemoryRuntime:
                             occ_at,
                         ) = item
                         if old_pid:
-                            self._store.insert_lifecycle_event(
+                            ok = self._store.insert_lifecycle_event(
                                 kind="PROFILE_SWITCH_OUT",
                                 owner_profile_id=old_pid,
                                 transition_id=t_id,
@@ -389,8 +402,25 @@ class MemoryRuntime:
                                 stream_sequence=s_out,
                                 occurred_at=occ_at,
                             )
+                            if ok:
+                                muts = self._session_reducer.process_event(
+                                    {
+                                        "stream_type": "lifecycle",
+                                        "kind": "PROFILE_SWITCH_OUT",
+                                        "owner_profile_id": old_pid,
+                                        "run_id": r_id,
+                                        "stream_sequence": s_out,
+                                        "occurred_at": occ_at,
+                                    }
+                                )
+                                for m in muts:
+                                    self._store.upsert_session(m)
+                            else:
+                                with self._lock:
+                                    self._control_failures += 1
+                                    self._degraded = True
                         if new_pid:
-                            self._store.insert_lifecycle_event(
+                            ok = self._store.insert_lifecycle_event(
                                 kind="PROFILE_SWITCH_IN",
                                 owner_profile_id=new_pid,
                                 transition_id=t_id,
@@ -398,6 +428,23 @@ class MemoryRuntime:
                                 stream_sequence=s_in,
                                 occurred_at=occ_at,
                             )
+                            if ok:
+                                muts = self._session_reducer.process_event(
+                                    {
+                                        "stream_type": "lifecycle",
+                                        "kind": "PROFILE_SWITCH_IN",
+                                        "owner_profile_id": new_pid,
+                                        "run_id": r_id,
+                                        "stream_sequence": s_in,
+                                        "occurred_at": occ_at,
+                                    }
+                                )
+                                for m in muts:
+                                    self._store.upsert_session(m)
+                            else:
+                                with self._lock:
+                                    self._control_failures += 1
+                                    self._degraded = True
                     except Exception:
                         with self._lock:
                             self._control_failures += 1
@@ -408,7 +455,7 @@ class MemoryRuntime:
                 if isinstance(item, tuple) and item and item[0] == "shutdown":
                     try:
                         _, s_shut, occ_at = item
-                        self._store.insert_lifecycle_event(
+                        ok = self._store.insert_lifecycle_event(
                             kind="SHUTDOWN",
                             owner_profile_id=None,
                             transition_id=None,
@@ -416,6 +463,30 @@ class MemoryRuntime:
                             stream_sequence=s_shut,
                             occurred_at=occ_at,
                         )
+                        if ok:
+                            muts = self._session_reducer.process_event(
+                                {
+                                    "stream_type": "lifecycle",
+                                    "kind": "SHUTDOWN",
+                                    "owner_profile_id": None,
+                                    "run_id": self.run_id,
+                                    "stream_sequence": s_shut,
+                                    "occurred_at": occ_at,
+                                }
+                            )
+                            for m in muts:
+                                self._store.upsert_session(m)
+                        else:
+                            with self._lock:
+                                self._control_failures += 1
+                                self._degraded = True
+                        if self.db_path:
+                            try:
+                                self._episode_engine.segment_all_from_db(
+                                    self.db_path, persist=True
+                                )
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                     finally:
@@ -454,8 +525,22 @@ class MemoryRuntime:
                             self._bg_latencies.append(dt)
                             if len(self._bg_latencies) > 1000:
                                 self._bg_latencies = self._bg_latencies[-500:]
-                        for out in outcomes:
-                            if out.outcome == "INTEGRITY_COLLISION":
+                        for out, snap in zip(outcomes, admitted):
+                            if out.outcome == "INSERTED":
+                                eid = hashlib.sha256(snap.committed_turn_id.encode()).hexdigest()[:24]
+                                muts = self._session_reducer.process_event(
+                                    {
+                                        "stream_type": "evidence",
+                                        "event_id": eid,
+                                        "profile_id": snap.profile_id,
+                                        "run_id": snap.run_id,
+                                        "stream_sequence": snap.stream_sequence,
+                                        "occurred_at": snap.occurred_at,
+                                    }
+                                )
+                                for m in muts:
+                                    self._store.upsert_session(m)
+                            elif out.outcome == "INTEGRITY_COLLISION":
                                 with self._lock:
                                     self._degraded = True
                                     self._capture_enabled = False

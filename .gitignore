@@ -168,3 +168,6 @@ docs/*technical_session*.md
 # live user data; a review candidate froze one into scope on 2026-08-11.
 *.bak-*
 *.orig
+*.db
+*.db-shm
+*.db-wal

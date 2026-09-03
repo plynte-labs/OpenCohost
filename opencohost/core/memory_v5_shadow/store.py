@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
 
@@ -100,13 +100,13 @@ class ShadowStore:
         run_id: str,
         stream_sequence: int,
         occurred_at: str,
-    ) -> None:
+    ) -> bool:
         lid_raw = f"{run_id}:{stream_sequence}:{kind}:{owner_profile_id or ''}:{transition_id or ''}"
         lid = hashlib.sha256(lid_raw.encode()).hexdigest()[:24]
         cat = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         with self._lock:
             if self._conn is None:
-                return
+                return False
             try:
                 self._conn.execute(
                     (
@@ -127,8 +127,13 @@ class ShadowStore:
                     ),
                 )
                 self._conn.commit()
+                return True
             except Exception:
-                pass
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                return False
 
     def insert_snapshot(self, snap: CommittedTurnSnapshot) -> InsertOutcome:
         eid = hashlib.sha256(snap.committed_turn_id.encode()).hexdigest()[:24]
@@ -235,12 +240,12 @@ class ShadowStore:
                 return []
             if profile_id is None:
                 cur = self._conn.execute(
-                    "SELECT * FROM evidence_journal ORDER BY stream_sequence"
+                    "SELECT * FROM evidence_journal ORDER BY occurred_at ASC, stream_sequence ASC"
                 )
             else:
                 cur = self._conn.execute(
                     "SELECT * FROM evidence_journal WHERE profile_id=? "
-                    "ORDER BY stream_sequence",
+                    "ORDER BY occurred_at ASC, stream_sequence ASC",
                     (profile_id,),
                 )
             return [dict(r) for r in cur.fetchall()]
@@ -267,6 +272,151 @@ class ShadowStore:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+    def upsert_session(self, sess: Any) -> bool:
+        d = sess.to_dict() if hasattr(sess, "to_dict") else dict(sess)
+        with self._lock:
+            if self._conn is None:
+                return False
+            try:
+                self._conn.execute(
+                    (
+                        "INSERT INTO sessions "
+                        "(session_id, run_id, profile_id, state, started_at, ended_at, "
+                        "opened_reason, closure_reason, event_count) "
+                        "VALUES (?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(session_id) DO UPDATE SET "
+                        "state=excluded.state, ended_at=excluded.ended_at, "
+                        "closure_reason=excluded.closure_reason, event_count=excluded.event_count"
+                    ),
+                    (
+                        d["session_id"],
+                        d["run_id"],
+                        d["profile_id"],
+                        d["state"],
+                        d["started_at"],
+                        d.get("ended_at"),
+                        d["opened_reason"],
+                        d.get("closure_reason"),
+                        int(d.get("event_count", 0)),
+                    ),
+                )
+                self._conn.commit()
+                return True
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                return False
+
+    def list_sessions(self, profile_id: Optional[str] = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._conn is None:
+                return []
+            if profile_id is None:
+                cur = self._conn.execute(
+                    "SELECT * FROM sessions ORDER BY started_at, session_id"
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM sessions WHERE profile_id=? ORDER BY started_at, session_id",
+                    (profile_id,),
+                )
+            return [dict(r) for r in cur.fetchall()]
+
+    def recover_unclean_runs(
+        self, new_run_id: str, get_next_seq_fn: Callable[[], int]
+    ) -> list[str]:
+        recovered_profiles: list[str] = []
+        with self._lock:
+            if self._conn is None:
+                return []
+            try:
+                cur = self._conn.execute(
+                    (
+                        "SELECT s.session_id, s.profile_id, s.run_id, s.started_at, "
+                        "(SELECT MAX(occurred_at) FROM evidence_journal WHERE profile_id=s.profile_id AND run_id=s.run_id) AS last_occ "
+                        "FROM sessions s "
+                        "WHERE s.state='OPEN' AND s.run_id != ?"
+                    ),
+                    (new_run_id,),
+                )
+                orphans = cur.fetchall()
+                if not orphans:
+                    return []
+                now_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                for o in orphans:
+                    sid = o["session_id"]
+                    pid = o["profile_id"]
+                    end_ts = o["last_occ"] or o["started_at"]
+                    self._conn.execute(
+                        (
+                            "UPDATE sessions SET state='CLOSED', "
+                            "closure_reason='CRASH_RECOVERY_CLOSED', ended_at=? "
+                            "WHERE session_id=?"
+                        ),
+                        (end_ts, sid),
+                    )
+                    seq = get_next_seq_fn()
+                    lid_raw = f"{new_run_id}:{seq}:STARTUP_RECOVERY:{pid}:"
+                    lid = hashlib.sha256(lid_raw.encode()).hexdigest()[:24]
+                    self._conn.execute(
+                        (
+                            "INSERT OR IGNORE INTO lifecycle_events "
+                            "(lifecycle_id, owner_profile_id, kind, transition_id, "
+                            "run_id, stream_sequence, occurred_at, created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?)"
+                        ),
+                        (lid, pid, "STARTUP_RECOVERY", None, new_run_id, seq, now_str, now_str),
+                    )
+                    recovered_profiles.append(pid)
+                self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+        return recovered_profiles
+
+    def reconcile_sessions_from_journals(self) -> None:
+        from opencohost.core.memory_v5_shadow.sessions import SessionFormationReducer
+        reducer = SessionFormationReducer()
+        rebuilt = reducer.rebuild_from_db(self.db_path)
+        with self._lock:
+            if self._conn is None:
+                return
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                for s in rebuilt:
+                    self._conn.execute(
+                        (
+                            "INSERT INTO sessions "
+                            "(session_id, run_id, profile_id, state, started_at, ended_at, "
+                            "opened_reason, closure_reason, event_count) "
+                            "VALUES (?,?,?,?,?,?,?,?,?) "
+                            "ON CONFLICT(session_id) DO UPDATE SET "
+                            "state=excluded.state, ended_at=excluded.ended_at, "
+                            "closure_reason=excluded.closure_reason, event_count=excluded.event_count"
+                        ),
+                        (
+                            s["session_id"],
+                            s["run_id"],
+                            s["profile_id"],
+                            s["state"],
+                            s["started_at"],
+                            s.get("ended_at"),
+                            s["opened_reason"],
+                            s.get("closure_reason"),
+                            int(s.get("event_count", 0)),
+                        ),
+                    )
+                self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
 
     def purge_profile(self, profile_id: str) -> None:
         with self._lock:
