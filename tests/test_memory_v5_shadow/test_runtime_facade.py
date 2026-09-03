@@ -130,3 +130,16 @@ def test_queue_saturation_fail_open():
         time.sleep(0.2)
         assert rt.diagnostics["dropped_evidence_total"] >= 1
         rt.shutdown()
+
+
+def test_engine_seam_architecture_contract():
+    """Architectural gate: llm_engine.py must not instantiate Memory v5 internal components directly."""
+    llm_engine_path = Path(__file__).resolve().parents[2] / "opencohost" / "core" / "llm_engine.py"
+    assert llm_engine_path.exists(), f"llm_engine.py not found at {llm_engine_path}"
+    llm_engine_source = llm_engine_path.read_text(encoding="utf-8")
+
+    assert "SemanticCacheStore(" not in llm_engine_source
+    assert "SemanticWorkerService(" not in llm_engine_source
+    assert "IncrementalSemanticIndexer(" not in llm_engine_source
+    assert "EpisodicRecallCoordinator(" not in llm_engine_source
+    assert "from opencohost.core.memory_v5_shadow.episodic_recall import RecallMode" not in llm_engine_source

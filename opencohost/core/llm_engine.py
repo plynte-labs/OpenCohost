@@ -787,81 +787,20 @@ class MotorVocalIA(
         # first direct-path turn with memorias enabled. Value only; rendered
         # by the slice-7 management UI.
         self._memorias_pin_counter: Optional[tuple[int, int]] = None
-        # Memory v5 Shadow & Episodic Recall: OFF default — no runtime, no DB, no worker.
-        self._memory_runtime = None
-        self._memory_run_id: Optional[str] = None
-        self._memory_stream_seq: int = 0
-        self._memory_init_status = {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"}
-        self._semantic_cache_store = None
-        self._semantic_worker = None
-        self._semantic_indexer = None
-        self._episodic_recall_coordinator = None
-
+        # Memory v5 Subsystem: OFF default avoids importing v5 domain modules
+        self._memory = None
+        self._memory_init_status_fallback = {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"}
         try:
-            from opencohost.config.settings import (
-                MEMORY_V5_MODE,
-                MEMORY_V5_SHADOW_DB,
-                MEMORY_V5_SEMANTIC_CACHE_DB,
-            )
+            from opencohost.config.settings import MEMORY_V5_MODE
 
             req = str(MEMORY_V5_MODE).upper() if isinstance(MEMORY_V5_MODE, str) else "OFF"
-            if req not in ("SHADOW", "ACTIVE"):
-                self._memory_init_status = {"requested": req, "effective": "OFF", "reason_code": "off_default"}
-            else:
-                try:
-                    from opencohost.core.memory_v5_shadow.runtime import MemoryRuntime
-                    from opencohost.core.memory_v5_shadow.semantic_cache import SemanticCacheStore
-                    from opencohost.core.memory_v5_shadow.semantic_worker import SemanticWorkerService
-                    from opencohost.core.memory_v5_shadow.semantic_indexer import IncrementalSemanticIndexer
-                    from opencohost.core.memory_v5_shadow.episodic_recall import EpisodicRecallCoordinator, RecallMode
+            self._memory_init_status_fallback = {"requested": req, "effective": "OFF", "reason_code": "off_default"}
+            if req in ("SHADOW", "ACTIVE"):
+                from opencohost.core.memory_v5_shadow.subsystem import MemorySubsystem
 
-                    cache_store = SemanticCacheStore(db_path=MEMORY_V5_SEMANTIC_CACHE_DB)
-                    cache_store.initialize()
-                    self._semantic_cache_store = cache_store
-
-                    rt = MemoryRuntime(db_path=MEMORY_V5_SHADOW_DB, semantic_cache=cache_store)
-                    self._memory_runtime = rt
-                    self._memory_run_id = rt.run_id
-
-                    worker = SemanticWorkerService()
-                    worker.start()
-                    self._semantic_worker = worker
-
-                    indexer = IncrementalSemanticIndexer(
-                        shadow_conn=rt._store._conn,
-                        cache_store=cache_store,
-                        worker=worker,
-                    )
-                    self._semantic_indexer = indexer
-
-                    recall_mode = RecallMode.ACTIVE if req == "ACTIVE" else RecallMode.SHADOW
-                    coord = EpisodicRecallCoordinator(
-                        shadow_conn=rt._store._conn,
-                        cache_store=cache_store,
-                        worker=worker,
-                        mode=recall_mode,
-                    )
-                    self._episodic_recall_coordinator = coord
-
-                    try:
-                        indexer.reconcile_unindexed_episodes()
-                    except Exception as rec_exc:
-                        logger.warning("Startup semantic reconciliation warning: %s", rec_exc)
-
-                    self._memory_init_status = {"requested": req, "effective": req, "reason_code": "ok"}
-                except Exception as exc:
-                    logger.warning("Memory v5 initialization failed: %s; failing open.", exc)
-                    self._memory_runtime = None
-                    self._memory_run_id = None
-                    self._semantic_cache_store = None
-                    self._semantic_worker = None
-                    self._semantic_indexer = None
-                    self._episodic_recall_coordinator = None
-                    self._memory_init_status = {"requested": req, "effective": "INIT_FAILED", "reason_code": "init_exception"}
+                self._memory = MemorySubsystem.from_settings()
         except Exception:
-            self._memory_init_status = {"requested": "OFF", "effective": "INIT_FAILED", "reason_code": "init_exception"}
-            self._memory_runtime = None
-            self._memory_run_id = None
+            self._memory_init_status_fallback = {"requested": "OFF", "effective": "INIT_FAILED", "reason_code": "init_exception"}
 
         self._lock = threading.Lock()
 
@@ -1105,6 +1044,84 @@ class MotorVocalIA(
     def current_processing_source(self):
         with self._lock:
             return self._current_processing_source
+
+    # Backward-compatible Memory v5 facade properties delegating to self._memory
+    @property
+    def _memory_runtime(self):
+        return self._memory.runtime if getattr(self, "_memory", None) is not None else None
+
+    @_memory_runtime.setter
+    def _memory_runtime(self, val):
+        if getattr(self, "_memory", None) is None:
+            from opencohost.core.memory_v5_shadow.subsystem import MemorySubsystem
+
+            self._memory = MemorySubsystem(mode="SHADOW", runtime=val)
+        else:
+            self._memory._runtime = val
+
+    @property
+    def _memory_run_id(self):
+        return self._memory.run_id if getattr(self, "_memory", None) is not None else None
+
+    @_memory_run_id.setter
+    def _memory_run_id(self, val):
+        if getattr(self, "_memory", None) is None:
+            from opencohost.core.memory_v5_shadow.subsystem import MemorySubsystem
+
+            self._memory = MemorySubsystem(mode="SHADOW")
+            self._memory._run_id = val
+        else:
+            self._memory._run_id = val
+
+    @property
+    def _memory_stream_seq(self):
+        return self._memory.stream_seq if getattr(self, "_memory", None) is not None else 0
+
+    @_memory_stream_seq.setter
+    def _memory_stream_seq(self, val):
+        if getattr(self, "_memory", None) is not None:
+            self._memory._stream_seq = val
+
+    @property
+    def _memory_init_status(self):
+        if getattr(self, "_memory", None) is not None:
+            return self._memory.status
+        return getattr(
+            self,
+            "_memory_init_status_fallback",
+            {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"},
+        )
+
+    @_memory_init_status.setter
+    def _memory_init_status(self, val):
+        self._memory_init_status_fallback = val
+        if getattr(self, "_memory", None) is not None:
+            self._memory._status = val
+
+    @property
+    def _semantic_cache_store(self):
+        return self._memory.cache_store if getattr(self, "_memory", None) is not None else None
+
+    @property
+    def _semantic_worker(self):
+        return self._memory.worker if getattr(self, "_memory", None) is not None else None
+
+    @property
+    def _semantic_indexer(self):
+        return self._memory.indexer if getattr(self, "_memory", None) is not None else None
+
+    @property
+    def _episodic_recall_coordinator(self):
+        return self._memory.coordinator if getattr(self, "_memory", None) is not None else None
+
+    @_episodic_recall_coordinator.setter
+    def _episodic_recall_coordinator(self, val):
+        if getattr(self, "_memory", None) is None:
+            from opencohost.core.memory_v5_shadow.subsystem import MemorySubsystem
+
+            self._memory = MemorySubsystem(coordinator=val)
+        else:
+            self._memory._coordinator = val
 
     def run(self):
         self._log("Inicializando cliente ligero...")
@@ -1470,15 +1487,9 @@ class MotorVocalIA(
                 self.historial.clear()
                 self._memory_digest.clear()
                 self._digested_turn_keys.clear()
-                _rt = getattr(self, "_memory_runtime", None)
-                _run = getattr(self, "_memory_run_id", None)
-                if _rt is not None and _run is not None:
-                    try:
-                        assigned = _rt._ordered_profile_switch(departing_profile_id, payload.get("id"), run_id=_run)
-                        if assigned:
-                            self._memory_stream_seq = assigned[1]
-                    except Exception:
-                        pass
+                mem = getattr(self, "_memory", None)
+                if mem is not None:
+                    mem.on_profile_switch(departing_profile_id, payload.get("id"))
             self._dispatch_switch_flush(switch_drafts, departing_profile_id, summary_titles)
             self._log(f"Perfil actualizado: {profile_name} (System Role: {self.use_system_role}). Memoria limpiada.")
             # T4 coherence gate (warn-only; the profile always wins). Flags when a
@@ -2580,17 +2591,9 @@ class MotorVocalIA(
         )
 
         episodic_memory_block = ""
-        coord = getattr(self, "_episodic_recall_coordinator", None)
-        if coord is not None and memorias_profile_id:
-            try:
-                packet = coord.process_query(contexto, profile_id=memorias_profile_id)
-                if packet is not None:
-                    from opencohost.core.memory_v5_shadow.episodic_recall import RecallMode
-
-                    if packet.mode == RecallMode.ACTIVE:
-                        episodic_memory_block = packet.formatted_block
-            except Exception as e_exc:
-                logger.warning("Episodic recall query failed open: %s", e_exc)
+        mem = getattr(self, "_memory", None)
+        if mem is not None and memorias_profile_id:
+            episodic_memory_block = mem.recall_block(contexto, profile_id=memorias_profile_id)
 
         return assembler.assemble(
             contexto,

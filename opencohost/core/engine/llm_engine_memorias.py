@@ -339,8 +339,9 @@ class MemoriaCaptureMixin:
                 safe_context, dialogo, source=source, private=priv,
             )
             # WU1 shadow: allocate monotonic sequence and enqueue under _history_lock (pure RAM, < 5us).
-            _rt = getattr(self, "_memory_runtime", None)
-            _run = getattr(self, "_memory_run_id", None)
+            mem = getattr(self, "_memory", None)
+            _rt = mem.runtime if mem is not None else getattr(self, "_memory_runtime", None)
+            _run = mem.run_id if mem is not None else getattr(self, "_memory_run_id", None)
             if _rt is not None and _run is not None:
                 if source in ("direct", "ptt", "owner-bundle") and priv is False:
                     pid = getattr(self, "_current_profile_id", None)
@@ -372,12 +373,18 @@ class MemoriaCaptureMixin:
                                 content=dialogo,
                                 is_private=False,
                             )
-                            assigned = _rt.record_turn_exchange(snap_u, snap_a)
-                            if assigned:
-                                self._memory_stream_seq = assigned[1]
+                            if mem is not None:
+                                mem.record_turn_exchange(snap_u, snap_a)
+                            else:
+                                assigned = _rt.record_turn_exchange(snap_u, snap_a)
+                                if assigned:
+                                    self._memory_stream_seq = assigned[1]
                         except Exception:
                             try:
-                                _rt.record_drop(2, "snapshot_construction_or_enqueue_exception")
+                                if mem is not None:
+                                    mem.record_drop(2, "snapshot_construction_or_enqueue_exception")
+                                else:
+                                    _rt.record_drop(2, "snapshot_construction_or_enqueue_exception")
                             except Exception:
                                 pass
 
