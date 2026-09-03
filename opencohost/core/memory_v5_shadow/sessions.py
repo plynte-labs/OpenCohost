@@ -221,17 +221,26 @@ class SessionFormationReducer:
         all_sessions.sort(key=lambda s: (s.started_at, s.session_id))
         return all_sessions
 
-    def rebuild_from_db(self, db_path: Path | str) -> list[dict[str, Any]]:
+    def rebuild_from_db(
+        self, db_path: Path | str, *, include_evidence_payload: bool = False
+    ) -> list[dict[str, Any]]:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            sql = """
+            if include_evidence_payload:
+                ev_role = "e.role"
+                ev_content = "e.content"
+            else:
+                ev_role = "NULL AS role"
+                ev_content = "NULL AS content"
+
+            sql = f"""
             SELECT events.* FROM (
-                SELECT 'evidence' AS stream_type, e.event_id, e.profile_id, e.run_id, e.stream_sequence, e.occurred_at, NULL AS kind, NULL AS owner_profile_id, COALESCE(r.started_at, e.occurred_at) AS run_started_at
+                SELECT 'evidence' AS stream_type, e.event_id, e.profile_id, e.run_id, e.stream_sequence, e.occurred_at, NULL AS kind, NULL AS owner_profile_id, COALESCE(r.started_at, e.occurred_at) AS run_started_at, {ev_role}, {ev_content}
                 FROM evidence_journal e
                 LEFT JOIN shadow_runs r ON e.run_id = r.run_id
                 UNION ALL
-                SELECT 'lifecycle' AS stream_type, NULL AS event_id, l.owner_profile_id AS profile_id, l.run_id, l.stream_sequence, l.occurred_at, l.kind, l.owner_profile_id, COALESCE(r.started_at, l.occurred_at) AS run_started_at
+                SELECT 'lifecycle' AS stream_type, NULL AS event_id, l.owner_profile_id AS profile_id, l.run_id, l.stream_sequence, l.occurred_at, l.kind, l.owner_profile_id, COALESCE(r.started_at, l.occurred_at) AS run_started_at, NULL AS role, NULL AS content
                 FROM lifecycle_events l
                 LEFT JOIN shadow_runs r ON l.run_id = r.run_id
             ) events

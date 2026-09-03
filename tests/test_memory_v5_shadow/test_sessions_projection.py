@@ -260,6 +260,20 @@ def test_deterministic_rebuild_byte_identical_hash():
         # Check parity
         assert live_hash == rebuilt_hash, f"Hash mismatch: live={live_hash} vs rebuilt={rebuilt_hash}"
 
+        # Ensure default behavior does NOT load payload content
+        for sid, ev_list in reducer.session_events.items():
+            for ev in ev_list:
+                assert ev.get("role") is None
+                assert ev.get("content") is None
+
+        # Ensure opt-in behavior loads payload content
+        reducer_with_payload = SessionFormationReducer()
+        reducer_with_payload.rebuild_from_db(db, include_evidence_payload=True)
+        for sid, ev_list in reducer_with_payload.session_events.items():
+            for ev in ev_list:
+                assert ev.get("role") is not None
+                assert ev.get("content") is not None
+
 
 def test_retention_purge_rebuilds_affected_sessions():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
