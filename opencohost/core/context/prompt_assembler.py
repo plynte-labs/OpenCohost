@@ -42,6 +42,10 @@ class GenerationSetup:
     ctx_evicted: int
     editorial_block: str
     history_snapshot: list[dict[str, Any]]
+    think: Optional[bool] = None
+    intent: str = "chat"
+    tts_eligible: bool = True
+    budget_resolution: Optional[Any] = None
 
 
 # Backward compatibility alias
@@ -82,6 +86,10 @@ class PromptContextAssembler:
         personalization_enabled: Optional[bool] = None,
         memorias_enabled: Optional[bool] = None,
         episodic_memory_block: str = "",
+        intent: str = "chat",
+        reasoning_settings_resolver: Optional[Callable[[str], dict[str, Any]]] = None,
+        telemetry_tracker: Optional[Any] = None,
+        budget_resolver: Optional[Callable[..., Any]] = None,
     ) -> GenerationSetup:
         """Assemble messages, apply context budgets, and build sampling options."""
         messages: list[dict[str, Any]] = []
@@ -100,9 +108,20 @@ class PromptContextAssembler:
             except Exception:
                 personalization_block = ""
 
-        # 2. Grounding rules
+        # 2. Grounding rules & intent adaptation
+        system_text = system_prompt
+        clean_intent = str(intent or "chat").strip().lower()
+        if clean_intent in ("drafting", "inferenceintent.drafting"):
+            for pat in (
+                "- Respondes en 2-4 oraciones. Nunca monólogos, pero tampoco monosílabos\n",
+                "- Respondes en 2-4 oraciones. Nunca monólogos, pero tampoco monosílabos",
+                "Respondes en 2-4 oraciones. Nunca monólogos, pero tampoco monosílabos",
+            ):
+                system_text = system_text.replace(pat, "")
+            system_text += "\n\nMODO REDACCIÓN: Genera respuestas completas, estructuradas y detalladas sin restricción de brevedad."
+
         grounding_block = i18n_active.grounding_rules()
-        system_parts = [system_prompt]
+        system_parts = [system_text]
         if grounding_block:
             system_parts.append(grounding_block)
         if personalization_block:
@@ -215,7 +234,13 @@ class PromptContextAssembler:
         if ctx_evicted > 0 and on_evicted_pairs is not None:
             on_evicted_pairs(evicted_pairs, native_ctx, effective_ctx)
 
-        # 10. Sampling options
+        # 10. Sampling options & budget governance
+        from opencohost.core.engine.llm_budget_engine import (
+            resolve_generation_budget,
+            InferenceIntent,
+            BudgetResolution,
+        )
+
         opciones_llm: dict[str, Any] = {
             "temperature": settings.LLM_TEMPERATURE,
             "top_p": settings.LLM_TOP_P,
@@ -227,9 +252,71 @@ class PromptContextAssembler:
             opciones_llm.pop("num_ctx", None)
             opciones_llm["temperature"] = 0.7
 
-        if is_local and is_reasoning_model is not None and is_reasoning_model(request_model):
-            opciones_llm.pop("num_predict", None)
-            logger.debug("Modelo de razonamiento detectado. Límite de tokens removido.")
+        think_param: Optional[bool] = None
+        tts_eligible: bool = (clean_intent != "drafting")
+        budget_res: Optional[BudgetResolution] = None
+
+        if budget_resolver is not None:
+            try:
+                budget_res = budget_resolver(
+                    intent=clean_intent,
+                    allocated_context=effective_ctx,
+                    request_model=request_model,
+                    is_local=is_local,
+                )
+            except Exception:
+                budget_res = None
+
+        if budget_res is None:
+            tps_ewma = 0.0
+            if telemetry_tracker is not None:
+                try:
+                    prof = telemetry_tracker.get_profile(
+                        provider="local" if is_local else "cloud",
+                        model_id=request_model,
+                        allocated_context=effective_ctx,
+                    )
+                    tps_ewma = prof.ewma_tps
+                except Exception:
+                    tps_ewma = 0.0
+
+            is_reasoning = bool(is_reasoning_model is not None and is_reasoning_model(request_model))
+            if is_reasoning:
+                r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
+                r_enabled = bool(r_cfg.get("enabled", False))
+                r_budget = r_cfg.get("budget_tokens")
+                r_preset = str(r_cfg.get("preset", "balanced"))
+            else:
+                r_enabled = False
+                r_budget = settings.LLM_MAX_TOKENS if is_local else settings.CLOUD_MAX_TOKENS
+                r_preset = "custom"
+
+            parsed_intent = InferenceIntent.CHAT
+            for it in InferenceIntent:
+                if it.value == clean_intent:
+                    parsed_intent = it
+                    break
+
+            budget_res = resolve_generation_budget(
+                intent=parsed_intent,
+                allocated_context=effective_ctx,
+                prompt_tokens=0,
+                requested_budget=r_budget,
+                preset=r_preset,
+                reasoning_enabled=r_enabled,
+                tps_ewma=tps_ewma,
+            )
+
+        if budget_res is not None:
+            opciones_llm["num_predict"] = budget_res.effective_budget
+            think_param = budget_res.think if (is_reasoning_model is not None and is_reasoning_model(request_model)) else None
+            tts_eligible = budget_res.tts_eligible
+        elif is_local and is_reasoning_model is not None and is_reasoning_model(request_model):
+            r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
+            r_enabled = bool(r_cfg.get("enabled", False))
+            r_budget = int(r_cfg.get("budget_tokens", 512))
+            think_param = r_enabled
+            opciones_llm["num_predict"] = max(32, r_budget)
 
         if source == "chat":
             opciones_llm["repeat_penalty"] = settings.CHAT_REPEAT_PENALTY
@@ -259,4 +346,8 @@ class PromptContextAssembler:
             ctx_evicted=ctx_evicted,
             editorial_block=editorial_block,
             history_snapshot=history_list,
+            think=think_param,
+            intent=clean_intent,
+            tts_eligible=tts_eligible,
+            budget_resolution=budget_res,
         )

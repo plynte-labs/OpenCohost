@@ -109,6 +109,10 @@ DEFAULT_LLM_TIERS = {
     "balanced": "llama3",
     "fast": "qwen3:1.7b",
 }
+# [DEPRECATED - ADR-056 WU2] Tier-based effective context caps.
+# Context allocation is now decoupled from tier quality/speed presets and derived
+# directly from Ollama runtime residency (/api/ps context_length) or native context (/api/show).
+# Retained only for backwards compatibility with external consumers.
 LLM_TIER_EFFECTIVE_CTX_CAPS = {
     "quality": 4096,
     "balanced": 8192,
@@ -467,6 +471,7 @@ TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only
 PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
+MODEL_PARAMETERS_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "model_parameters.json")
 
 # HTTP API bearer tokens (agent_context_gateway_20260705, design ADR-3).
 # Minted once at API lifespan start by opencohost/api/auth.py::ensure_tokens();

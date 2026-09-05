@@ -208,6 +208,18 @@ class OllamaWatchdog:
 # Ollama Residency Probe (F9 — Ollama's own accounting, never process RSS)
 # ──────────────────────────────────────────────
 
+@dataclass(frozen=True)
+class OllamaResidencySnapshot:
+    """Immutable point-in-time residency snapshot from /api/ps (ADR-056)."""
+
+    model: Optional[str]
+    digest: Optional[str]
+    size_bytes: Optional[int]
+    size_vram_bytes: Optional[int]
+    context_length: Optional[int]
+    observed_at: float
+
+
 class OllamaResidencyProbe:
     """Polls `ollama.ps()` (`/api/ps`) for the loaded model's memory split.
 
@@ -230,18 +242,26 @@ class OllamaResidencyProbe:
         except ImportError:
             logger.debug("OllamaResidencyProbe: ollama package not available")
 
+        self._model: Optional[str] = None
         self._resident_mb: Optional[float] = None
         self._vram_mb: Optional[float] = None
         self._spill_mb: Optional[float] = None
         self._processor_split: Optional[str] = None
+        self._digest: Optional[str] = None
+        self._context_length: Optional[int] = None
+        self._observed_at: float = 0.0
         self._lock = threading.Lock()
 
     def _clear(self) -> None:
         with self._lock:
+            self._model = None
             self._resident_mb = None
             self._vram_mb = None
             self._spill_mb = None
             self._processor_split = None
+            self._digest = None
+            self._context_length = None
+            self._observed_at = 0.0
 
     def poll(self, ollama_up: bool) -> None:
         """Refresh residency estimates.
@@ -292,14 +312,31 @@ class OllamaResidencyProbe:
                 else:
                     processor_split = None
 
+            digest = getattr(model, "digest", None) or None
+            model_name = getattr(model, "model", None) or getattr(model, "name", None)
+            raw_ctx = getattr(model, "context_length", None)
+            try:
+                ctx_len = int(raw_ctx) if raw_ctx is not None else None
+            except (TypeError, ValueError):
+                ctx_len = None
+
             with self._lock:
+                self._model = str(model_name).strip() if model_name else None
                 self._resident_mb = resident_mb
                 self._vram_mb = vram_mb
                 self._spill_mb = spill_mb
                 self._processor_split = processor_split
+                self._digest = str(digest).strip() if digest else None
+                self._context_length = ctx_len
+                self._observed_at = time.time()
         except Exception as e:
             logger.warning(f"OllamaResidencyProbe: poll failed: {e}")
             self._clear()
+
+    @property
+    def model(self) -> Optional[str]:
+        with self._lock:
+            return self._model
 
     @property
     def resident_mb(self) -> Optional[float]:
@@ -320,6 +357,33 @@ class OllamaResidencyProbe:
     def processor_split(self) -> Optional[str]:
         with self._lock:
             return self._processor_split
+
+    @property
+    def digest(self) -> Optional[str]:
+        with self._lock:
+            return self._digest
+
+    @property
+    def context_length(self) -> Optional[int]:
+        with self._lock:
+            return self._context_length
+
+    @property
+    def snapshot(self) -> Optional[OllamaResidencySnapshot]:
+        with self._lock:
+            if self._resident_mb is None and self._model is None:
+                return None
+            return OllamaResidencySnapshot(
+                model=self._model,
+                digest=self._digest,
+                size_bytes=int(self._resident_mb * 1024 * 1024) if self._resident_mb is not None else None,
+                size_vram_bytes=int(self._vram_mb * 1024 * 1024) if self._vram_mb is not None else None,
+                context_length=self._context_length,
+                observed_at=self._observed_at,
+            )
+
+    def get_snapshot(self) -> Optional[OllamaResidencySnapshot]:
+        return self.snapshot
 
 
 # ──────────────────────────────────────────────
@@ -886,3 +950,13 @@ class HealthMonitor(threading.Thread):
     @property
     def qwen_manager(self) -> QwenProcessManager:
         return self._qwen
+
+    @property
+    def residency_probe(self) -> OllamaResidencyProbe:
+        """Public accessor for the Ollama residency probe (ADR-056)."""
+        return self._ollama_residency
+
+    @property
+    def residency_snapshot(self) -> Optional[OllamaResidencySnapshot]:
+        """Public accessor for the latest Ollama residency snapshot (ADR-056)."""
+        return self._ollama_residency.snapshot

@@ -13,13 +13,25 @@ routers<->main module-level import cycle), so they are imported directly.
 """
 
 import dataclasses
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
 from opencohost.api import deps
 from opencohost.api.shared import _ctx_telemetry_out, _derive_session_mode, _display_model
-from opencohost.api.models import HealthResponse, HealthState, ModelsResponse, StatusResponse
+from opencohost.api.models import (
+    HealthResponse,
+    HealthState,
+    InferenceRuntimeState,
+    ModelReasoningConfig,
+    ModelsResponse,
+    StatusResponse,
+    UpdateModelReasoningRequest,
+)
+from opencohost.config.model_parameters import (
+    get_model_reasoning_settings,
+    update_model_reasoning_settings,
+)
 from opencohost.config.settings import MODELS_CATALOG, resolve_llm_tiers
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState
 
@@ -107,6 +119,59 @@ def get_status(request: Request) -> StatusResponse:
     )
 
 
+def _is_reasoning_model(host: Any, model: Optional[str]) -> bool:
+    if not model:
+        return False
+    motor = getattr(host, "motor", None)
+    resolver = getattr(motor, "_resolve_reasoning_classification", None)
+    if callable(resolver):
+        try:
+            return bool(resolver(model))
+        except Exception:
+            pass
+    name = model.lower()
+    return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
+
+
+def _extract_inference_runtime_state(host, active_model: Optional[str]) -> Optional[InferenceRuntimeState]:
+    if not host or not getattr(host, "motor", None):
+        return None
+    model_name = active_model or getattr(host.motor, "current_model", "unknown")
+    monitor = getattr(host.motor, "health_monitor", None) or getattr(host.motor, "_health_monitor", None)
+    snap = getattr(monitor, "residency_snapshot", None) if monitor else None
+
+    allocated_ctx = getattr(snap, "context_length", 0) if snap else 0
+    if allocated_ctx <= 0:
+        allocated_ctx = getattr(host.motor, "_model_ctx_limit", {}).get(model_name, 4096)
+
+    tracker = getattr(host.motor, "inference_telemetry", None)
+    ewma_tps = 0.0
+    cal_state = "COLD"
+    if tracker:
+        prof = tracker.get_profile("local", model_name, allocated_context=allocated_ctx)
+        ewma_tps = prof.ewma_tps
+        cal_state = prof.state.value
+
+    res_ratio = None
+    spill = None
+    if snap and getattr(snap, "size_bytes", 0) > 0:
+        res_ratio = min(1.0, float(snap.size_vram_bytes) / float(snap.size_bytes))
+        spill = max(0, snap.size_bytes - snap.size_vram_bytes)
+
+    r_settings = get_model_reasoning_settings(model_name)
+    effective_budget = r_settings.get("budget_tokens", 512)
+
+    return InferenceRuntimeState(
+        effective_budget=effective_budget,
+        allocated_context=allocated_ctx,
+        calibration_state=cal_state,
+        ewma_tps=ewma_tps,
+        residency_ratio=res_ratio,
+        spill_bytes=spill,
+        clamp_reason=None,
+    )
+
+
 @router.get("/api/models", response_model=ModelsResponse)
 def get_models(request: Request) -> ModelsResponse:
     host = request.app.state.host
@@ -125,12 +190,17 @@ def get_models(request: Request) -> ModelsResponse:
         # selection above (whether to skip Ollama discovery) is still the
         # persisted config's call, deliberately unchanged by this unit.
         active_model = _display_model(host)
+        r_settings = get_model_reasoning_settings(active_model)
+        is_reasoning = _is_reasoning_model(host, active_model)
         return ModelsResponse(
             catalog={},
             discovered=[active_model] if active_model else [],
             current_model=active_model,
             tiers={},
             active_tier="cloud",
+            is_reasoning_active=is_reasoning,
+            reasoning_config=ModelReasoningConfig(**r_settings),
+            runtime_state=_extract_inference_runtime_state(host, active_model),
         )
     try:
         discovered = deps.discover_ollama_models()
@@ -143,10 +213,29 @@ def get_models(request: Request) -> ModelsResponse:
     # back to its own unbounded, no-timeout `_discover_installed_model_tags()`
     # internally (settings.py) — one bounded discovery call per request.
     tiers = resolve_llm_tiers(installed_model_tags=discovered)
+    current_model = _display_model(host)
+    r_settings = get_model_reasoning_settings(current_model)
+    is_reasoning = _is_reasoning_model(host, current_model)
     return ModelsResponse(
         catalog=MODELS_CATALOG,
         discovered=discovered,
-        current_model=_display_model(host),
+        current_model=current_model,
         tiers=tiers,
         active_tier=host.motor.active_llm_tier,
+        is_reasoning_active=is_reasoning,
+        reasoning_config=ModelReasoningConfig(**r_settings),
+        runtime_state=_extract_inference_runtime_state(host, current_model),
     )
+
+
+@router.put("/api/models/reasoning", response_model=ModelReasoningConfig)
+def update_model_reasoning(
+    request: Request, body: UpdateModelReasoningRequest
+) -> ModelReasoningConfig:
+    updated = update_model_reasoning_settings(
+        enabled=body.enabled,
+        budget_tokens=body.budget_tokens,
+        preset=body.preset,
+        model=body.model,
+    )
+    return ModelReasoningConfig(**updated)

@@ -305,7 +305,7 @@ def test_non_reasoning_models_use_configured_token_cap():
     assert options["num_predict"] == 768
 
 
-def test_reasoning_models_skip_fixed_token_cap():
+def test_reasoning_models_use_governed_token_budget():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "qwen3:4b"
     motor.use_system_role = True
@@ -315,7 +315,8 @@ def test_reasoning_models_skip_fixed_token_cap():
     assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "Respuesta segura."
 
     options = motor.ollama.chat.call_args.kwargs["options"]
-    assert "num_predict" not in options
+    assert "num_predict" in options
+    assert options["num_predict"] in (512, 768)
 
 
 def test_replace_pending_keeps_latest_item_for_same_source():

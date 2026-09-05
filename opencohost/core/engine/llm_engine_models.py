@@ -671,26 +671,36 @@ class ModelManagementMixin:
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
 
     def _resolve_effective_ctx_limit(self, model: str, native_ctx: int) -> int:
-        """Return OpenCohost's runtime ctx cap for ``model`` without changing discovery."""
-        tier = None
-        tiers = getattr(self, "llm_tiers", None)
-        if tiers is not None:
-            active_model = tiers.active_model
-            if active_model == model:
-                tier = tiers.active_tier
-            else:
-                for candidate_tier, candidate_model in tiers.config.as_dict().items():
-                    if candidate_model == model:
-                        tier = candidate_tier
-                        break
-        tier_cap = _eng.LLM_TIER_EFFECTIVE_CTX_CAPS.get(tier, _eng.CTX_FALLBACK_DEFAULT)
+        """Return OpenCohost's runtime ctx cap for ``model`` decoupled from tier limits.
+
+        ADR-056 WU2: Runtime truth hierarchy:
+        1. Probe residency snapshot context_length (from /api/ps if model is currently resident)
+        2. Discovered native_ctx (from /api/show or passed in)
+        3. Fallback default (CTX_FALLBACK_DEFAULT)
+        Tier switching does NOT clamp or distort allocated context.
+        """
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        if monitor is not None:
+            snap = getattr(monitor, "residency_snapshot", None)
+            snap_ctx = getattr(snap, "context_length", 0) if snap is not None else 0
+            if isinstance(snap_ctx, (int, float)) and not isinstance(snap_ctx, bool) and snap_ctx > 0:
+                snap_model = getattr(snap, "model", None)
+                if isinstance(snap_model, str) and (snap_model == model or model.startswith(snap_model)):
+                    return int(snap_ctx)
+            probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+            probe_ctx = getattr(probe, "context_length", 0) if probe is not None else 0
+            if isinstance(probe_ctx, (int, float)) and not isinstance(probe_ctx, bool) and probe_ctx > 0:
+                probe_model = getattr(probe, "model", None)
+                if isinstance(probe_model, str) and (probe_model == model or model.startswith(probe_model)):
+                    return int(probe_ctx)
+
         try:
             native = int(native_ctx)
         except (TypeError, ValueError):
             native = _eng.CTX_FALLBACK_DEFAULT
         if native <= 0:
             native = _eng.CTX_FALLBACK_DEFAULT
-        return min(native, tier_cap)
+        return native
 
     def _discover_model_ctx(self, model: str) -> int:
         """Layer 1: return ``model``'s native context length from ``ollama.show``.

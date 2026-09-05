@@ -72,6 +72,7 @@ class CtxTelemetryData:
     prefill_ms: float
     decode_ms: float
     eval_count: int
+    eval_duration_ns: int = 0
 
 
 @dataclass
@@ -164,19 +165,27 @@ class GenerationEvaluator:
         elapsed = time.time() - start_llm
 
         # 2. Context telemetry derivation
-        _pec_raw = getattr(respuesta, "prompt_eval_count", 0) if respuesta is not None else 0
+        def _get_resp(key: str, default: Any = 0) -> Any:
+            if respuesta is None:
+                return default
+            if isinstance(respuesta, dict):
+                return respuesta.get(key, default)
+            return getattr(respuesta, key, default)
+
+        _pec_raw = _get_resp("prompt_eval_count", 0)
         _pec_final = _pec_raw if isinstance(_pec_raw, (int, float)) else 0
         telemetry_data: Optional[CtxTelemetryData] = None
 
         if _pec_final > 0:
             _util = context_budget.utilization(_pec_final, _effective_ctx)
-            _predur = getattr(respuesta, "prompt_eval_duration", 0)
+            _predur = _get_resp("prompt_eval_duration", 0)
             _prefill_ms = (_predur / 1e6) if isinstance(_predur, (int, float)) else 0.0
-            _evaldur = getattr(respuesta, "eval_duration", 0)
+            _evaldur = _get_resp("eval_duration", 0)
+            _eval_duration_ns = int(_evaldur) if isinstance(_evaldur, (int, float)) else 0
             _decode_ms = (_evaldur / 1e6) if isinstance(_evaldur, (int, float)) else 0.0
-            _loaddur = getattr(respuesta, "load_duration", 0)
+            _loaddur = _get_resp("load_duration", 0)
             _load_ms = (_loaddur / 1e6) if isinstance(_loaddur, (int, float)) else 0.0
-            _ec_raw = getattr(respuesta, "eval_count", 0)
+            _ec_raw = _get_resp("eval_count", 0)
             _ec_final = _ec_raw if isinstance(_ec_raw, (int, float)) else 0
 
             _ctx_provider = (
@@ -208,6 +217,7 @@ class GenerationEvaluator:
                 prefill_ms=_prefill_ms,
                 decode_ms=_decode_ms,
                 eval_count=_ec_final,
+                eval_duration_ns=_eval_duration_ns,
             )
 
         # 3. Model trace & mismatch diagnosis

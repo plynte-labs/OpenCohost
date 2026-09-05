@@ -378,6 +378,28 @@ class HealthResponse(BaseModel):
     engine_alive: bool
 
 
+class ModelReasoningConfig(BaseModel):
+    enabled: bool = False
+    budget_tokens: int = 512
+
+
+class InferenceRuntimeState(BaseModel):
+    effective_budget: int = 512
+    allocated_context: int = 4096
+    calibration_state: str = "COLD"
+    ewma_tps: float = 0.0
+    residency_ratio: Optional[float] = None
+    spill_bytes: Optional[int] = None
+    clamp_reason: Optional[str] = None
+
+
+class UpdateModelReasoningRequest(BaseModel):
+    enabled: Optional[bool] = None
+    budget_tokens: Optional[int] = None
+    preset: Optional[str] = None
+    model: Optional[str] = None
+
+
 class ModelsResponse(BaseModel):
     """GET /api/models (Tier B, direct read).
 
@@ -390,6 +412,9 @@ class ModelsResponse(BaseModel):
     current_model: Optional[str]
     tiers: dict[str, str]
     active_tier: str
+    is_reasoning_active: bool = False
+    reasoning_config: ModelReasoningConfig = Field(default_factory=ModelReasoningConfig)
+    runtime_state: Optional[InferenceRuntimeState] = None
 
 
 class MusicTrackOut(BaseModel):

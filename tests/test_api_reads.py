@@ -45,7 +45,18 @@ def test_models_shape_and_real_catalog():
         resp = client.get("/api/models")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"catalog", "discovered", "current_model", "tiers", "active_tier"}
+        assert set(body.keys()) == {
+            "catalog",
+            "discovered",
+            "current_model",
+            "tiers",
+            "active_tier",
+            "is_reasoning_active",
+            "reasoning_config",
+            "runtime_state",
+        }
+        assert body["is_reasoning_active"] is True
+        assert body["reasoning_config"] == {"enabled": False, "budget_tokens": 512}
         # real curated catalog, not a hand-rolled stub
         assert set(body["catalog"].keys()) == set(MODELS_CATALOG.keys())
         assert body["current_model"] == "qwen3:8b"
@@ -702,3 +713,27 @@ def test_memoria_stats_missing_db_files_return_zero_not_500(tmp_path, monkeypatc
         assert body["saved_memorias"] == 0
         assert body["pinned"] == 0
         assert body["editorial_cards_by_status"] == {}
+
+
+def test_update_model_reasoning_endpoint(tmp_path, monkeypatch):
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        # Update reasoning config via PUT
+        resp = client.put(
+            "/api/models/reasoning",
+            json={"enabled": True, "budget_tokens": 1024, "model": "qwen3:8b"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"enabled": True, "budget_tokens": 1024}
+
+        # Verify GET /api/models reflects it
+        models_resp = client.get("/api/models")
+        assert models_resp.status_code == 200
+        data = models_resp.json()
+        assert data["is_reasoning_active"] is True
+        assert data["reasoning_config"] == {"enabled": True, "budget_tokens": 1024}

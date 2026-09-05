@@ -1003,6 +1003,9 @@ class MotorVocalIA(
         # own locals and deque.append is atomic under the GIL, so no extra
         # lock is needed for the append itself.
         self._ctx_telemetry_ring = CtxTelemetryRing(maxlen=CTX_TELEMETRY_RING_MAXLEN)
+        # ADR-056 WU1: Empirical inference decode telemetry tracker (observational only)
+        from opencohost.core.engine.inference_telemetry import InferenceTelemetryTracker
+        self._inference_telemetry = InferenceTelemetryTracker()
         # Optional numeric-only payload hook for ctx_pressure_high, mirroring
         # on_guardrail_rejected above. NOT a second positional argument on
         # ui_callback: CTK's concrete callback (app_shell.py's
@@ -1044,6 +1047,24 @@ class MotorVocalIA(
     def current_processing_source(self):
         with self._lock:
             return self._current_processing_source
+
+    @property
+    def inference_telemetry(self):
+        """ADR-056 WU1: Thread-safe observational decode telemetry tracker."""
+        tracker = getattr(self, "_inference_telemetry", None)
+        if tracker is None:
+            from opencohost.core.engine.inference_telemetry import InferenceTelemetryTracker
+            tracker = InferenceTelemetryTracker()
+            self._inference_telemetry = tracker
+        return tracker
+
+    def _resolve_reasoning_settings(self, model: str) -> dict:
+        """ADR-056 WU3/WU4: Resolve reasoning and budget settings for a model."""
+        try:
+            from opencohost.config.model_parameters import get_model_reasoning_settings
+            return get_model_reasoning_settings(model)
+        except Exception:
+            return {"enabled": False, "budget_tokens": 512, "preset": "balanced"}
 
     # Backward-compatible Memory v5 facade properties delegating to self._memory
     @property
@@ -2393,12 +2414,15 @@ class MotorVocalIA(
         contexto,
         source: str = "direct",
         *,
+        intent: str = "chat",
         commit_history: bool = True,
         log_prefix: str = "LLM",
         history_text: Optional[str] = None,
         watchdog_timeout: Optional[float] = None,
     ) -> str:
         request_model = self.current_model
+        if source.startswith("kira-agenda") and intent == "chat":
+            intent = "agenda"
         # F2 posture snapshot (multi_provider_llm_20260723): read the provider
         # config AND the runtime fallback flag ONCE here, collapse them into the
         # EFFECTIVE posture `is_local`, and thread that bool through this whole
@@ -2434,6 +2458,7 @@ class MotorVocalIA(
                 setup = self._build_generation_request(
                     contexto,
                     source,
+                    intent=intent,
                     is_local=is_local,
                     provider_cfg=provider_cfg,
                     request_model=request_model,
@@ -2528,6 +2553,7 @@ class MotorVocalIA(
         contexto,
         source: str,
         *,
+        intent: str = "chat",
         is_local: bool,
         provider_cfg: dict,
         request_model: str,
@@ -2645,6 +2671,9 @@ class MotorVocalIA(
             personalization_enabled=pers_enabled,
             memorias_enabled=mem_enabled,
             episodic_memory_block=episodic_memory_block,
+            intent=intent,
+            reasoning_settings_resolver=getattr(self, "_resolve_reasoning_settings", None),
+            telemetry_tracker=getattr(self, "inference_telemetry", None),
         )
 
     def _cloud_attempt_loop(
@@ -2703,6 +2732,7 @@ class MotorVocalIA(
             and commit_history
             and self._speech_router_enabled
             and LLM_STREAMING_ENABLED
+            and getattr(setup, "tts_eligible", True)
         )
 
         for intento in range(max_intentos):
@@ -2730,12 +2760,15 @@ class MotorVocalIA(
                             self._invalidate_pregen_epoch()
                         return _GenerationAttemptOutcome(early_return="")
                 else:
+                    watchdog_opts = dict(opciones_llm)
+                    if getattr(setup, "think", None) is not None:
+                        watchdog_opts["think"] = setup.think
                     respuesta = self._ollama_chat_with_watchdog(
                         timeout=chat_timeout,
                         model=request_model,
                         messages=messages,
                         keep_alive=LLM_KEEP_ALIVE,
-                        options=opciones_llm,
+                        options=watchdog_opts,
                         provider_cfg=provider_cfg,
                         is_local=is_local,
                     )
@@ -3014,12 +3047,15 @@ class MotorVocalIA(
         accumulated = ""
         accumulated_thinking = ""
         final_chunk = None
+        stream_opts = dict(setup.opciones_llm)
+        if getattr(setup, "think", None) is not None:
+            stream_opts["think"] = setup.think
         stream = self._ollama_chat_streaming(
             timeout=setup.chat_timeout,
             model=request_model,
             messages=setup.messages,
             keep_alive=LLM_KEEP_ALIVE,
-            options=setup.opciones_llm,
+            options=stream_opts,
         )
         try:
             with contextlib.closing(stream):
@@ -3354,6 +3390,56 @@ class MotorVocalIA(
             ring = getattr(self, "_ctx_telemetry_ring", None)
             if ring is not None:
                 ring.append(tel.snapshot)
+            # ADR-056 WU1: Record empirical inference decode telemetry (observational only)
+            tracker = getattr(self, "_inference_telemetry", None)
+            if tracker is not None and tel.eval_count > 0:
+                eval_dur_ns = int(getattr(tel, "eval_duration_ns", 0) or (tel.decode_ms * 1e6))
+                if eval_dur_ns > 0:
+                    size_b = 0
+                    vram_b = 0
+                    model_digest = None
+                    monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+                    snap = getattr(monitor, "residency_snapshot", None) if monitor else None
+                    if snap is not None:
+                        size_b = snap.size_bytes or 0
+                        vram_b = snap.size_vram_bytes or 0
+                        model_digest = snap.digest
+                    else:
+                        probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None) if monitor else None
+                        if probe is not None:
+                            res_mb = probe.resident_mb
+                            v_mb = probe.vram_mb
+                            if res_mb is not None:
+                                size_b = int(res_mb * 1024 * 1024)
+                            if v_mb is not None:
+                                vram_b = int(v_mb * 1024 * 1024)
+                            model_digest = probe.digest
+
+                    if not model_digest:
+                        resp_obj = getattr(outcome, "respuesta", None)
+                        if resp_obj is not None:
+                            resp_digest = (
+                                resp_obj.get("digest") or resp_obj.get("model_digest")
+                                if isinstance(resp_obj, dict)
+                                else (getattr(resp_obj, "digest", None) or getattr(resp_obj, "model_digest", None))
+                            )
+                            model_digest = resp_digest or request_model
+                    if not model_digest:
+                        model_digest = request_model
+
+                    try:
+                        tracker.record_turn(
+                            provider="local" if is_local else "cloud",
+                            model_id=request_model,
+                            model_digest=model_digest,
+                            allocated_context=setup.effective_ctx,
+                            eval_count=tel.eval_count,
+                            eval_duration_ns=eval_dur_ns,
+                            size_bytes=size_b,
+                            size_vram_bytes=vram_b,
+                        )
+                    except Exception:
+                        logger.debug("Inference telemetry recording skipped defensively", exc_info=True)
             if tel.pressure_high:
                 logger.warning(
                     "ctx_pressure_high: utilization=%.1f%% model=%s source=%s",
@@ -3646,7 +3732,7 @@ class MotorVocalIA(
             # owes its audio to the router's growing job (submitted lazily at
             # the first clean sentence, sealed at finalize) — submitting the
             # full text again would speak the whole turn twice.
-            if streamed_job is None:
+            if streamed_job is None and getattr(setup, "tts_eligible", True):
                 self._speak_or_submit(dialogo, source=source)
         else:
             # llm_output_streaming_20260813 §7. `streamed_prefix` is NOT part
