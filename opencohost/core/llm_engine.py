@@ -124,6 +124,13 @@ from opencohost.core.engine.llm_inference_service import (
     LLMInferenceService,
     get_inference_service,
 )
+from opencohost.core.engine.generation_orchestrator import (
+    GenerationAttemptOutcome,
+    GenerationOrchestrator,
+    StreamAttemptState,
+    _GenerationAttemptOutcome,
+    _StreamAttemptState,
+)
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.profiles import personalization
 from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
@@ -350,64 +357,8 @@ _DRAIN_SAFE_COMMANDS = frozenset({
 _SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model"}
 
 
-# refactor_core_api_20260802 B7 (Phase C4): carriers for _generar_dialogo's phase split.
-# GenerationSetup is imported from opencohost.core.context.prompt_assembler.
-
-
-@dataclass
-class _StreamAttemptState:
-    """Per-attempt state of the streaming loop (llm_output_streaming_20260813
-    design §3/§5/§7). Carries everything the divergence points downstream need:
-    the lazily-created job (None until the first clean sentence closes — which
-    is what keeps every pre-commit failure path byte-identical to the buffered
-    path), the appended-sentence prefix (what Kira is owed to have said on
-    air), and the trip/abort verdicts the finalize divergence gates on.
-
-    `contexto`/`history_text` ride here because the partial-turn exit (§7)
-    commits the spoken prefix to history from exception paths that never reach
-    `_finalize_generation`.
-    """
-    source: str
-    contexto: object = None
-    history_text: Optional[str] = None
-    router: object = None
-    job: Optional[SpeechJob] = None
-    appended_sentences: list = field(default_factory=list)
-    sentence_index: int = 0
-    # Pre-submit guard trip (§5 "before anything is spoken"): silently revert
-    # to buffered semantics — keep consuming the stream, never append.
-    consume_only: bool = False
-    # Post-submit guard trip (§5 "after audio is out"):
-    # (rule_id, tripping sentence index, spoken_upto).
-    trip: Optional[tuple] = None
-    # Cancel token / append_chunks refusal (§6): the turn is dead.
-    abort_reason: Optional[str] = None
-    # True once the partial-turn exit (or the finalize divergence) ran, so the
-    # orphan belt in _generar_dialogo's catch-all never double-commits.
-    handled: bool = False
-
-    def spoken_prefix(self) -> str:
-        return " ".join(self.appended_sentences).strip()
-
-
-@dataclass
-class _GenerationAttemptOutcome:
-    """_cloud_attempt_loop's result. `early_return` mirrors the original
-    method's own control flow: every early `return` inside the retry loop
-    (watchdog timeout, transport failure exhausting the retry budget)
-    returned exactly `""`, so `is not None` on this field is the one check
-    the orchestrator needs to reproduce that identically -- it is NOT a
-    truthiness check, since `""` itself is a valid (falsy) early-return
-    value that must still short-circuit finalize.
-
-    `stream` is None for every buffered attempt; a stream-eligible attempt
-    carries its `_StreamAttemptState` so `_finalize_generation` can gate the
-    §5/§7 divergence points on `stream.job` (llm_output_streaming_20260813).
-    """
-    raw_content: str = ""
-    respuesta: object = None
-    early_return: Optional[str] = None
-    stream: Optional["_StreamAttemptState"] = None
+# Carriers for _generar_dialogo's phase split are defined in and imported from
+# opencohost.core.engine.generation_orchestrator (_StreamAttemptState, _GenerationAttemptOutcome).
 
 
 @dataclass
@@ -830,6 +781,7 @@ class MotorVocalIA(
                 sanitize_clause_repetition,
             )(text),
         )
+        self._generation_orchestrator = GenerationOrchestrator(self)
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -2666,326 +2618,16 @@ class MotorVocalIA(
         contexto=None,
         history_text: Optional[str] = None,
     ) -> "_GenerationAttemptOutcome":
-        """Phase 2 of _generar_dialogo (refactor_core_api_20260802 B7): the
-        max_intentos retry loop, including the cloud transport-failure
-        classification + rate-limited Retry-After retry branch, moved as ONE
-        piece with its comments intact. Every early `return ""` here becomes
-        `early_return=""` on the outcome -- the orchestrator propagates it
-        identically via `if outcome.early_return is not None: return ...`.
-
-        `contexto`/`history_text` exist only for the streaming path
-        (llm_output_streaming_20260813): they ride to the §7 partial-turn
-        exit, which commits the spoken prefix from exception paths that never
-        reach finalize. A buffered turn never reads them.
-        """
-        messages = setup.messages
-        opciones_llm = setup.opciones_llm
-        chat_timeout = setup.chat_timeout
-        max_intentos = setup.max_intentos
-        _effective_ctx = setup.effective_ctx
-        raw_content = ""
-        respuesta = None
-        stream_state: Optional["_StreamAttemptState"] = None
-
-        # llm_output_streaming_20260813 §3 eligibility gate. `commit_history`
-        # already tags every speculative path (pregen worker, connector
-        # upgrade) False, so those stay buffered by construction; agenda is
-        # phase 3 and chat is never (§8); cloud is phase 4 (§8);
-        # `_speech_router_enabled` is the CTk/kill-switch gate and
-        # LLM_STREAMING_ENABLED the revert lever. An ineligible turn takes the
-        # buffered call below byte-identically.
-        #
-        # Phase 2 (§10) adds OWNER_BUNDLE_SOURCE. `_process_priority_queue`
-        # relabels a bundled turn to that source before calling
-        # _ejecutar_inferencia, so the allow-list is the ONLY thing that ever
-        # gated bundles — the phase-1 `_turn_bundle_followers` check beside it
-        # was redundant and is gone with the attribute. A bundle that dies
-        # after its first submit requeues every follower (owner decision 1);
-        # the fork is resolved in _ejecutar_inferencia, which still has the
-        # followers as a local parameter.
-        stream_eligible = (
-            is_local
-            and source in ("direct", "ptt", OWNER_BUNDLE_SOURCE)
-            and commit_history
-            and self._speech_router_enabled
-            and LLM_STREAMING_ENABLED
-            and getattr(setup, "tts_eligible", True)
-        )
-
-        for intento in range(max_intentos):
-            # WU3 (design-fase2.md §2.3): mark Ollama busy tightly around the
-            # actual generation call, cleared in finally on every exit path.
-            with self._lock:
-                self._llm_generating = True
-            try:
-                if stream_eligible:
-                    respuesta, stream_state = self._run_streaming_attempt(
-                        setup,
-                        source=source,
-                        request_model=request_model,
-                        contexto=contexto,
-                        history_text=history_text,
-                    )
-                    if stream_state.abort_reason is not None:
-                        # §6: cancel token or append refusal — the turn is
-                        # dead. Post-submit, _run_streaming_attempt already
-                        # sealed and committed the spoken prefix; pre-submit
-                        # nothing was spoken and nothing committed. Either
-                        # way this is a non-committing return for the
-                        # pregen epoch, same idiom as the watchdog branch.
-                        if commit_history:
-                            self._invalidate_pregen_epoch()
-                        return _GenerationAttemptOutcome(early_return="")
-                else:
-                    watchdog_opts = dict(opciones_llm)
-                    if getattr(setup, "think", None) is not None:
-                        watchdog_opts["think"] = setup.think
-                    respuesta = self._ollama_chat_with_watchdog(
-                        timeout=chat_timeout,
-                        model=request_model,
-                        messages=messages,
-                        keep_alive=LLM_KEEP_ALIVE,
-                        options=watchdog_opts,
-                        provider_cfg=provider_cfg,
-                        is_local=is_local,
-                    )
-            except Exception as e:
-                if self._is_watchdog_timeout_error(e):
-                    # R3: a bounded connector-upgrade call (watchdog_timeout set)
-                    # abandons SILENTLY on timeout — it is cosmetic, so it must
-                    # never trigger the heavyweight stall recovery (model rollback
-                    # / UI signal) a real turn's timeout does. Just return "" so
-                    # the pool floor stands.
-                    if watchdog_timeout is None:
-                        # A cloud stall must NOT roll back a local model
-                        # (spec B): gate the heavyweight model-rollback
-                        # recovery on `is_local`. Cloud instead routes to
-                        # `_handle_cloud_failure` (Phase 4: fallback state
-                        # machine); the max_intentos retry + existing
-                        # failure contract still apply either way.
-                        if is_local:
-                            self._recover_from_stalled_inference(
-                                request_model=request_model,
-                                source=source,
-                                timeout=chat_timeout,
-                            )
-                        else:
-                            # A watchdog timeout carries no HTTP status/
-                            # headers to classify from (it never got a
-                            # response) -- `transient` is the correct
-                            # class per classify_cloud_error's own rule
-                            # ("anything without a status_code ... is
-                            # transient"), and drives exponential-backoff
-                            # auto-return (unit 2.2).
-                            self._handle_cloud_failure(
-                                source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
-                            )
-                        if commit_history:
-                            self._invalidate_pregen_epoch()
-                    return _GenerationAttemptOutcome(early_return="")
-                if not self._is_ollama_transport_error(e):
-                    raise
-                # F7b: attribute a CLOUD failure to the cloud profile model +
-                # provider id (the local current_model tag would make a cloud
-                # 401 look like a local fault). The LOCAL branch stays
-                # byte-identical (no "provider" key) so existing exact-match
-                # assertions keep passing. Full MODEL_TRACE attribution is
-                # deferred (residual).
-                _cloud_class = None
-                # Cloud-only attribution for the structured log below.
-                # MODEL_TRACE only ever fires on a SUCCESSFUL turn, so before
-                # this a failed cloud turn named neither the provider nor the
-                # model -- the 2026-08-14 session had to infer which provider
-                # returned a 429 by elimination against the surrounding
-                # successes. Empty string on the local branch keeps that log
-                # line byte-identical there.
-                _cloud_attr = ""
-                if is_local:
-                    self._last_llm_failure = {
-                        "model": self.current_model,
-                        "source": source,
-                        "attempt": intento + 1,
-                        "reason": type(e).__name__,
-                        "message": str(e),
-                    }
-                else:
-                    _fail_profile = self._cfg_active_profile(provider_cfg) or {}
-                    # F2 (runtime_findings_batch_20260731 unit 1.1): classify
-                    # from status_code/headers already carried on the
-                    # exception -- never from `str(e)`/body, which would mean
-                    # parsing a guessed provider-specific shape.
-                    _cloud_class = cloud_llm_client.classify_cloud_error(e)
-                    self._last_cloud_failure_class = _cloud_class
-                    self._last_llm_failure = {
-                        "model": _fail_profile.get("model") or self.current_model,
-                        "provider": provider_cfg.get("active_provider"),
-                        "source": source,
-                        "attempt": intento + 1,
-                        "reason": type(e).__name__,
-                        "message": str(e),
-                        "clase": _cloud_class,
-                    }
-                    _cloud_attr = " provider={} cloud_model={} error_code={}".format(
-                        provider_cfg.get("active_provider") or "unknown",
-                        _fail_profile.get("model") or "unknown",
-                        cloud_llm_client.extract_error_code(e) or "n/a",
-                    )
-                _clase_suffix = f" clase={_cloud_class}" if _cloud_class else ""
-                self._log(
-                    f"ERROR Ollama chat ({type(e).__name__}) intento {intento+1}/{max_intentos}{_clase_suffix}: {e}",
-                    level="error",
-                )
-                logger.warning(
-                    "Ollama chat transport failure: model=%s source=%s attempt=%s/%s clase=%s%s",
-                    request_model,
-                    source,
-                    intento + 1,
-                    max_intentos,
-                    _cloud_class or "n/a",
-                    _cloud_attr,
-                    exc_info=True,
-                )
-                # Unit 2.1 (runtime_findings_batch_20260731): `rate_limited`
-                # is the ONE class that spends the existing max_intentos
-                # budget instead of exiting immediately -- honour a bounded
-                # Retry-After when the budget still has an attempt left.
-                # `bad_key` / `ambiguous_429` / `transient` never retry here
-                # (the honest completion of "do not guess a provider-
-                # specific table": an unclassifiable or non-timing 429 gets
-                # conservative treatment, not a guessed wait).
-                if (
-                    not is_local
-                    and _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
-                    and intento < max_intentos - 1
-                ):
-                    _retry_after = cloud_llm_client.parse_retry_after_seconds(
-                        getattr(e, "headers", None) or {}
-                    )
-                    _wait_seconds = (
-                        _retry_after if _retry_after is not None
-                        else CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS
-                    )
-                    if _wait_seconds <= CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS:
-                        self._log(
-                            f"rate_limited: retrying in {_wait_seconds}s "
-                            f"(intento {intento+1}/{max_intentos}).",
-                            level="warning",
-                        )
-                        # Dead-air bound: this sleep runs BETWEEN attempts,
-                        # after `_ollama_chat_with_watchdog` has already
-                        # raised -- outside `_call_with_watchdog`'s own
-                        # worker thread, so the watchdog cannot kill it.
-                        time.sleep(_wait_seconds)
-                        continue
-                    self._log(
-                        f"rate_limited: Retry-After={_wait_seconds}s exceeds "
-                        f"{CLOUD_RATE_LIMIT_RETRY_MAX_SECONDS}s bound; not retrying in-turn.",
-                        level="warning",
-                    )
-                # `bad_key` never retries; surface a "check your key" banner
-                # ONCE per failure event (latch resets alongside
-                # `_last_cloud_failure_class` on the next success, above).
-                if _cloud_class == cloud_llm_client.CLOUD_ERROR_BAD_KEY and not self._cloud_bad_key_notified:
-                    self._cloud_bad_key_notified = True
-                    self.ui_callback("cloud_bad_key")
-                # F1 (multi_provider_llm_20260723): a CLOUD transport error
-                # exits the attempt loop here when not retried above -- it
-                # engages the SAME fallback state machine as a cloud timeout
-                # (spec C: fallback on "cloud timeout OR a non-2xx/connection
-                # error"). The LOCAL transport path stays byte-identical
-                # (spec B: a local fault never routes to cloud fallback /
-                # never rolls back here).
-                if not is_local:
-                    # Unit 2.2: re-derive Retry-After directly from `e` in
-                    # scope rather than the loop-local `_retry_after` --
-                    # that variable is only assigned inside the in-turn
-                    # retry branch above and can carry a stale value from
-                    # an EARLIER attempt this same call when this attempt
-                    # skipped that branch (e.g. rate_limited on the final,
-                    # budget-exhausted attempt).
-                    _probe_retry_after = (
-                        cloud_llm_client.parse_retry_after_seconds(getattr(e, "headers", None) or {})
-                        if _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
-                        else None
-                    )
-                    self._handle_cloud_failure(
-                        source,
-                        failure_class=_cloud_class or cloud_llm_client.CLOUD_ERROR_TRANSIENT,
-                        retry_after_seconds=_probe_retry_after,
-                    )
-                if commit_history:
-                    self._invalidate_pregen_epoch()
-                return _GenerationAttemptOutcome(early_return="")
-            finally:
-                with self._lock:
-                    self._llm_generating = False
-
-            msg_obj = respuesta.get('message', {})
-            if isinstance(msg_obj, dict):
-                raw_content = msg_obj.get('content', '')
-                thinking = msg_obj.get('thinking', '')
-            else:
-                raw_content = getattr(msg_obj, 'content', '')
-                thinking = getattr(msg_obj, 'thinking', '')
-
-            # Cloud usage.* is recorded to logs only (spec E) — the local
-            # ctx_utilization block below reads Ollama-only telemetry
-            # (prompt_eval_count/eval_duration) absent from cloud responses.
-            if not is_local and isinstance(respuesta, dict):
-                _usage = respuesta.get('usage')
-                if _usage:
-                    logger.info("cloud_llm_usage: %s source=%s", _usage, source)
-
-            if thinking:
-                logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
-
-            # Layer 3 reactive trim: an empty response whose prompt_eval_count
-            # plateaued at/near the context ceiling is Ollama's silent input-
-            # overflow signal. Drop the oldest in-flight pairs and retry ONCE
-            # (intento==0 guard). Inserted BEFORE the reasoning-model branch so
-            # trimming context wins over removing the output-token cap. Delegates
-            # the int-threshold comparison to context_budget.is_overflow_signal.
-            _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
-            _ctx_limit_now = _effective_ctx
-            if is_local and intento == 0 and context_budget.is_overflow_signal(
-                raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
-            ):
-                _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
-                self._log(
-                    f"ctx_overflow_reactive: prompt_eval_count={_pec} >= "
-                    f"{_ctx_limit_now}*{CTX_OVERFLOW_SIGNAL_RATIO:.2f}; dropped "
-                    f"{_dropped} pair(s) from in-flight messages, retrying.",
-                    level="warning",
-                )
-                continue
-
-            # Layer 2 self-heal: empty visible content + internal thinking means a
-            # reasoning model spent its budget thinking and hit the num_predict cap.
-            # Drop the cap, remember the classification, and retry uncapped.
-            if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
-                opciones_llm.pop('num_predict', None)
-                if is_local:
-                    # F3: never write the LOCAL reasoning cache from a CLOUD
-                    # response. On cloud request_model is the local
-                    # current_model tag, so caching True here would uncap the
-                    # local model for the rest of the session once we return
-                    # to local. The uncapped cloud retry itself may stay.
-                    self._reasoning_model_cache[request_model] = True
-                self._log(
-                    f"Auto-corrección: {request_model} devolvió contenido vacío con "
-                    f"pensamiento interno; removiendo límite de tokens y reintentando.",
-                    level="warning",
-                )
-                continue
-
-            if raw_content.strip():
-                break
-
-            self._log(f"⚠️ Intento {intento+1}: {request_model} devolvió respuesta vacía. Reintentando...", level="warning")
-            time.sleep(0.5)
-
-        return _GenerationAttemptOutcome(
-            raw_content=raw_content, respuesta=respuesta, stream=stream_state
+        return self._generation_orchestrator.execute_attempt_loop(
+            setup,
+            source=source,
+            commit_history=commit_history,
+            is_local=is_local,
+            provider_cfg=provider_cfg,
+            request_model=request_model,
+            watchdog_timeout=watchdog_timeout,
+            contexto=contexto,
+            history_text=history_text,
         )
 
     def _run_streaming_attempt(
@@ -2997,283 +2639,32 @@ class MotorVocalIA(
         contexto,
         history_text: Optional[str],
     ) -> tuple:
-        """One stream-eligible generation attempt (llm_output_streaming_20260813
-        §3): iterate `_ollama_chat_streaming` synchronously on the engine
-        thread, close sentences with the B_ws-parity SentenceSplitter, and run
-        each closed sentence through the load-bearing order cancel → sanitize →
-        guard(sanitized, sentence granularity) → fragment → lazy submit/append.
-
-        Returns `(respuesta, state)`: `respuesta` is the final (done=true)
-        chunk with `message.content` substituted by the accumulated text so
-        every downstream telemetry read works unchanged, and `state` carries
-        the job/trip/abort verdicts for the §5/§7 divergence points.
-
-        The generator is closed on EVERY exit path via contextlib.closing —
-        the socket close is the only real server-side abort for Ollama (§6),
-        so it must never be left to garbage collection. Any exception after
-        the first submit takes the §7 partial-turn exit (seal, commit the
-        spoken prefix, one metadata log line) and then re-raises unchanged, so
-        the attempt loop's watchdog/transport classification — including
-        `_recover_from_stalled_inference` — still runs exactly as today.
-        """
-        state = _StreamAttemptState(
-            source=source, contexto=contexto, history_text=history_text
+        return self._generation_orchestrator.run_streaming_attempt(
+            setup,
+            source=source,
+            request_model=request_model,
+            contexto=contexto,
+            history_text=history_text,
         )
-        self._live_stream_state = state
-        splitter = SentenceSplitter()
-        accumulated = ""
-        accumulated_thinking = ""
-        final_chunk = None
-        stream_opts = dict(setup.opciones_llm)
-        if getattr(setup, "think", None) is not None:
-            stream_opts["think"] = setup.think
-        stream = self._ollama_chat_streaming(
-            timeout=setup.chat_timeout,
-            model=request_model,
-            messages=setup.messages,
-            keep_alive=LLM_KEEP_ALIVE,
-            options=stream_opts,
-        )
-        try:
-            with contextlib.closing(stream):
-                stopped = False
-                for chunk in stream:
-                    final_chunk = chunk
-                    msg = getattr(chunk, "message", None)
-                    delta = (getattr(msg, "content", "") or "") if msg is not None else ""
-                    accumulated += delta
-                    accumulated_thinking += (
-                        (getattr(msg, "thinking", "") or "") if msg is not None else ""
-                    )
-                    if state.consume_only:
-                        # §5 pre-submit trip: buffered semantics — keep
-                        # consuming to completion, never append.
-                        continue
-                    for sentence in splitter.feed(delta):
-                        action = self._handle_stream_sentence(sentence, state, setup)
-                        if action == "revert":
-                            state.consume_only = True
-                            break
-                        if action != "continue":
-                            stopped = True
-                            break
-                    if stopped:
-                        # §5/§6: abort the stream — closing() closes the
-                        # socket, which frees the single Ollama runner.
-                        break
-                if not stopped and not state.consume_only:
-                    for sentence in splitter.flush():
-                        action = self._handle_stream_sentence(sentence, state, setup)
-                        if action != "continue":
-                            break
-        except BaseException as exc:
-            # §7: after the first submit the turn can no longer "not have
-            # happened" — seal at the last appended sentence and commit the
-            # spoken prefix BEFORE re-raising into the attempt loop's
-            # unchanged watchdog/transport handling. Pre-submit (no job),
-            # every failure keeps its exact legacy semantics: re-raise only.
-            if state.job is not None and not state.handled:
-                self._stream_partial_exit(state, reason=type(exc).__name__)
-            raise
-        if state.abort_reason is not None and state.job is not None and not state.handled:
-            self._stream_partial_exit(state, reason=state.abort_reason)
-        if state.job is not None:
-            # The closing bookend to [STREAM_TTFA]. Without it a clean streamed
-            # turn logs when it STARTED speaking and never logs when it stopped,
-            # so the one comparison this whole track exists to make — audible at
-            # N ms against the buffered path's audible-at-total — is not
-            # computable from the log. `sentences` also turns TTFA into a rate.
-            # The exception paths are covered by [STREAM_PARTIAL_EXIT] instead;
-            # a pre-submit revert never creates a job and is a buffered turn,
-            # already covered by [TURN_LATENCY].
-            logger.info(
-                "[STREAM_DONE] source=%s sentences=%d total_ms=%d outcome=%s",
-                source,
-                len(state.appended_sentences),
-                max(0, int((time.time() - setup.start_llm) * 1000)),
-                "trip" if state.trip else ("abort" if state.abort_reason else "clean"),
-            )
-        respuesta = self._rebuild_stream_response(
-            final_chunk, accumulated, accumulated_thinking
-        )
-        return respuesta, state
 
     def _handle_stream_sentence(
         self, sentence: str, state: "_StreamAttemptState", setup: "_GenerationSetup"
     ) -> str:
-        """One closed sentence through the §3 loop, in EXACTLY this order:
-
-        1. cancel-token check (§6) — set ⇒ abort the turn;
-        2. sanitize, THEN guard — the guard MUST see the SANITIZED sentence
-           (guarding raw text reproduces the markdown evasion: 'Como *IA*, no
-           puedo opinar.' passes the raw guard, the sanitizer strips the
-           asterisks, and the broadcast line is the one R9 exists to block),
-           and at SENTENCE granularity, never fragment granularity (the
-           >25-word comma sub-split cuts inside R4/R3-discourse patterns);
-        3. fragment — the `_fragment_for_tts` stage only;
-        4. lazy submit / append — the first clean sentence creates the job
-           (which is the instant the turn becomes committing, §7).
-
-        Returns "continue" | "revert" | "truncate" | "abort".
-        """
-        source = state.source
-        if self._speech_cancelled(source):
-            state.abort_reason = "speech_cancelled"
-            return "abort"
-        state.sentence_index += 1
-        pieces = [p for p in self._sanitize_for_tts(sentence) if p.strip()]
-        sanitized = " ".join(p.strip() for p in pieces)
-        if not sanitized:
-            return "continue"
-        # BOTH forms, exactly like the buffered path (`f07b360`) and the
-        # full-text backstop below: raw-only misses the markdown evasion
-        # ('Como *IA*, no puedo opinar.' passes R9 because its tokens join on
-        # `\s+` and `*` is not whitespace), and sanitized-only would miss
-        # anything the sanitizer happens to mangle out of a pattern. Guarding
-        # only the sanitized form would leave the streamed path WEAKER than
-        # the buffered one on that second axis, which is exactly the kind of
-        # asymmetry this track must not introduce.
-        allowed, reason = _output_guard_with_tts_check(sentence, source=source)
-        if not allowed:
-            if state.job is None:
-                # §5 "before anything is spoken": silently revert the whole
-                # turn to buffered semantics. No job is ever created;
-                # _finalize_generation then runs exactly as today (full
-                # guard, retry nudge, canned fallback, non-committing "").
-                return "revert"
-            state.trip = (
-                _guard_rule_id(reason),
-                state.sentence_index,
-                len(state.appended_sentences),
-            )
-            return "truncate"
-        fragments = self._fragment_for_tts(pieces)
-        if not fragments:
-            # Clean but unspeakable (len<=3 filter): nothing owed to the air.
-            return "continue"
-        if state.job is None:
-            state.router = self._ensure_router()
-            state.job = state.router.submit_streaming(
-                source, priority_for_source(source)
-            )
-            if not state.router.append_chunks(state.job, fragments):
-                state.abort_reason = "append_refused"
-                return "abort"
-            state.appended_sentences.append(sanitized)
-            # Size travels WITH the timing or the timing is unreadable: 1.5s
-            # to first audio on a four-word opener and 1.5s on a forty-word one
-            # are different systems, and only the second is evidence that the
-            # sentence boundary is where the latency actually lands. Metadata
-            # only — counts, never the text.
-            logger.info(
-                "[STREAM_TTFA] source=%s first_audio_submit_ms=%d "
-                "first_sentence_words=%d first_sentence_chars=%d fragments=%d",
-                source,
-                max(0, int((time.time() - setup.start_llm) * 1000)),
-                len(sanitized.split()),
-                len(sanitized),
-                len(fragments),
-            )
-            return "continue"
-        if not state.router.append_chunks(state.job, fragments):
-            state.abort_reason = "append_refused"
-            return "abort"
-        state.appended_sentences.append(sanitized)
-        return "continue"
+        return self._generation_orchestrator.handle_stream_sentence(
+            sentence, state, setup
+        )
 
     def _stream_partial_exit(self, state: "_StreamAttemptState", *, reason: str) -> None:
-        """§7 partial-turn exit for a streamed turn that dies AFTER its first
-        submit: seal the job at the last appended sentence and commit the
-        spoken prefix to history — Kira said it on air; the next prompt must
-        know. Never regenerates, never retries. Metadata-only log line."""
-        try:
-            state.router.seal(state.job)
-        except Exception:
-            logger.exception("stream partial exit: seal failed")
-        prefix = state.spoken_prefix()
-        if prefix:
-            self._commit_history(
-                state.contexto, prefix, source=state.source,
-                history_text=state.history_text,
-            )
-            # Publish it for `_ejecutar_inferencia`: this turn returns "" but
-            # its head ALREADY aired, so the owner must not be told the turn
-            # was dropped and the transcript must show what the audience
-            # actually heard.
-            self._streamed_turn_prefix = prefix
-        logger.warning(
-            "[STREAM_PARTIAL_EXIT] source=%s reason=%s spoken_upto=%d "
-            "sentences_closed=%d committed=%s",
-            state.source, reason, len(state.appended_sentences),
-            state.sentence_index, bool(prefix),
-        )
-        state.handled = True
-        self._live_stream_state = None
+        return self._generation_orchestrator.stream_partial_exit(state, reason=reason)
 
-    @staticmethod
-    def _rebuild_stream_response(final_chunk, accumulated: str, accumulated_thinking: str):
-        """§3 'at stream end': the final (done=true) chunk carries eval_count /
-        eval_duration / prompt_eval_* (earlier chunks have them as None), so
-        keep that chunk and substitute `message.content` with the accumulated
-        text. Every downstream `getattr(respuesta, "prompt_eval_count", 0)`
-        and the ctx_utilization / prefill-decode / load_ms telemetry then
-        work unchanged. A zero-chunk stream degrades to a dict-shaped empty
-        response, which the attempt loop's empty-retry branch already handles.
-        """
-        if final_chunk is None:
-            return {"message": {"content": accumulated, "thinking": accumulated_thinking}}
-        if isinstance(final_chunk, dict):
-            msg = final_chunk.setdefault("message", {})
-        else:
-            msg = getattr(final_chunk, "message", None)
-        if isinstance(msg, dict):
-            msg["content"] = accumulated
-            msg["thinking"] = accumulated_thinking
-        elif msg is not None:
-            msg.content = accumulated
-            msg.thinking = accumulated_thinking
-        return final_chunk
+    _rebuild_stream_response = staticmethod(GenerationOrchestrator.rebuild_stream_response)
 
     def _apply_stream_guard_verdict(
         self, state: "_StreamAttemptState", dialogo: str, source: str
     ) -> str:
-        """The §5/§7 finalize divergence for a turn whose audio is already on
-        air (a job exists). Two cases:
-
-        - No in-loop trip: run the unchanged full-text backstop. Allowed ⇒
-          success — seal the job (chunks are final) and return the full text.
-        - In-loop trip, or the backstop tripped: truncation protocol — one
-          metadata-only log line (rule id, tripping sentence index,
-          spoken_upto) via log_non_negotiable_block, seal at the last clean
-          sentence, and return the spoken prefix for the normal commit flow.
-          NO `_retry_after_guard_block` (its output has no relationship to the
-          spoken prefix — an audible non-sequitur) and NO canned fallback line
-          (the head already filled the air).
-        """
-        trip = state.trip
-        if trip is None:
-            allowed, reason = _output_guard_with_tts_check(dialogo, source=source)
-            if allowed:
-                state.router.seal(state.job)
-                state.handled = True
-                self._live_stream_state = None
-                self._streamed_turn_job = state.job
-                return dialogo
-            # Backstop trip at finalize: the sentence index is unknown by
-            # construction (the per-sentence pass allowed every sentence).
-            trip = (_guard_rule_id(reason), -1, len(state.appended_sentences))
-        rule_id, sentence_index, spoken_upto = trip
-        # Metadata only in `preview` — deliberately never the blocked text.
-        log_non_negotiable_block(
-            rule_id,
-            "stream_truncation",
-            preview=f"sentence_index={sentence_index} spoken_upto={spoken_upto}",
+        return self._generation_orchestrator.apply_stream_guard_verdict(
+            state, dialogo, source
         )
-        state.router.seal(state.job)
-        state.handled = True
-        self._live_stream_state = None
-        self._streamed_turn_job = state.job
-        return state.spoken_prefix()
 
     def _finalize_generation(
         self,
@@ -3709,7 +3100,7 @@ class MotorVocalIA(
             # owes its audio to the router's growing job (submitted lazily at
             # the first clean sentence, sealed at finalize) — submitting the
             # full text again would speak the whole turn twice.
-            if streamed_job is None and getattr(setup, "tts_eligible", True):
+            if streamed_job is None:
                 self._speak_or_submit(dialogo, source=source)
         else:
             # llm_output_streaming_20260813 §7. `streamed_prefix` is NOT part
