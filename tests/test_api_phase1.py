@@ -214,6 +214,8 @@ def test_engine_host_start_wires_drain_as_log_queue_and_router_ui_callback(tmp_p
 
 
 class FakeMotor:
+    _simulated_readiness = True
+
     def __init__(self):
         self.is_ready = True
         self.current_model = "qwen3:8b"
@@ -258,6 +260,7 @@ class FakeMotor:
         # `del motor.trigger_cloud_probe_now` to simulate a motor build that
         # predates this method (the endpoint's 503 `motor_unavailable` path).
         self.trigger_cloud_probe_now = MagicMock(return_value={"armed": True, "reason": None})
+
 
     @property
     def is_speaking(self):

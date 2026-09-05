@@ -29,6 +29,7 @@ import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import ollama
 from fastapi import FastAPI

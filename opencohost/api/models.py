@@ -1399,3 +1399,16 @@ class PttTestResponse(BaseModel):
 
     ok: bool
     detail: str
+
+
+class LlmReadinessResponse(BaseModel):
+    """GET /api/llm/readiness wire response model (llm_readiness_recovery_20260904)."""
+
+    state: str
+    provider: str
+    can_chat: bool
+    selected_model: Optional[str] = None
+    ollama: dict
+    cloud: dict
+    hardware: dict
+

@@ -829,12 +829,14 @@ def is_runtime_model_available(
     tag: str,
     installed_model_tags: Optional[Iterable[str]] = None,
 ) -> bool:
-    """Return whether a tag is safe to use as a runtime model candidate."""
+    """Return whether a tag is safe to use as a runtime model candidate.
+
+    A model is available ONLY if it is verified installed on disk.
+    Catalog presence alone never satisfies availability.
+    """
     canonical = _canonical_model_tag(tag)
     if not canonical:
         return False
-    if canonical in MODELS_CATALOG:
-        return True
 
     normalized = (
         _normalize_installed_model_tags(installed_model_tags)
