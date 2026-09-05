@@ -262,7 +262,10 @@ def test_seam_06_unrelated_query_no_recall(tmp_path: Path, mock_worker):
     packet = coord.process_query("Cuéntame un chiste de programadores.", profile_id="prof_A")
 
     assert packet is not None
-    assert packet.reason_code == "NO_RECALL_INTENT"
+    # NONE is a very strict opportunistic policy, not a hard gate: an
+    # unrelated turn with no historical anchor overlap returns NO_RECALL via
+    # the deterministic preflight, before any embedding work.
+    assert packet.reason_code == "NO_HISTORICAL_ANCHOR"
     assert packet.formatted_block == ""
     assert packet.token_estimate == 0
     conn.close()

@@ -21,6 +21,7 @@ from opencohost.core.memory_v5_shadow.query_analyzer import (
     EpisodicQuery,
     EpisodicQueryAnalyzer,
     RecallIntent,
+    RecallScope,
     TemporalConstraintType,
 )
 from opencohost.core.memory_v5_shadow.retrieval import (
@@ -38,6 +39,16 @@ from opencohost.core.memory_v5_shadow.semantic_cache import SemanticCacheStore
 from opencohost.core.memory_v5_shadow.semantic_worker import SemanticWorkerService
 
 logger = logging.getLogger(__name__)
+
+
+def _fold_token(token: str) -> str:
+    """Accent-fold + lowercase a single token (matches analyzer anchors)."""
+    try:
+        from opencohost.core.editorial.editorial_matching import _strip_accents
+    except Exception:  # fail-open: unfolded comparison still works
+        return (token or "").lower()
+
+    return _strip_accents(token or "").lower()
 
 
 class RecallMode(str, Enum):
@@ -64,6 +75,8 @@ class EpisodicRecallPacket:
     formatted_block: str
     token_estimate: int
     reason_code: str
+    scope: RecallScope = RecallScope.EPISODIC_TOPIC
+    candidate_count: int = 0
 
 
 _EPISODIC_PREAMBLE = (
@@ -75,7 +88,10 @@ _EPISODIC_PREAMBLE = (
 )
 
 
-def _format_episodic_block(episodes: list[RetrievedEpisodeContext]) -> str:
+def _format_episodic_block(
+    episodes: list[RetrievedEpisodeContext],
+    scope: RecallScope = RecallScope.EPISODIC_TOPIC,
+) -> str:
     if not episodes:
         return ""
 
@@ -83,11 +99,24 @@ def _format_episodic_block(episodes: list[RetrievedEpisodeContext]) -> str:
 
     body_parts = []
     for ep in episodes:
-        ep_header = f"\n[Episode: {ep.started_at}]"
+        # Explicit provenance: short episode/session IDs plus start date.
+        # IDs and dates are metadata, never corpus content.
+        ep_header = (
+            f"\n[Episode {ep.episode_id[:8]} | "
+            f"session {ep.session_id[:8]} | {ep.started_at}]"
+        )
         turns = []
         for ex in ep.exchanges:
             turns.append(f"User: {ex.user_text}\nKira: {ex.assistant_text}")
         body_parts.append(ep_header + "\n" + "\n\n".join(turns))
+
+    if scope == RecallScope.PROFILE_SYNTHESIS:
+        # Abstention label: the block is exactly the retrieved evidence and
+        # nothing more — unsupported biography categories stay unstated.
+        body_parts.append(
+            "\n[Coverage: only the episodes above were retrieved; "
+            "do not assert biography beyond them.]"
+        )
 
     footer = "\n</episodic_memory>"
     return header + "".join(body_parts) + footer
@@ -117,6 +146,82 @@ class EpisodicRecallCoordinator:
         self.max_exchanges_per_ep = max_exchanges_per_ep
         self.max_token_budget = max_token_budget
 
+    def _has_historical_anchor_overlap(self, query: EpisodicQuery) -> bool:
+        """Cheap deterministic preflight: do any extracted lexical anchors
+        overlap the profile's cached historical tokens?
+
+        Proves NO_RECALL without embedding when nothing historical can match.
+        Metadata-only (token sets), never corpus text.
+        """
+        anchors = {_fold_token(a) for a in query.lexical_anchors}
+        anchors.discard("")
+        if not anchors:
+            return False
+        try:
+            records = self.cache_store.get_exchange_embeddings_by_profile(
+                query.profile_id
+            )
+        except Exception:
+            return False
+        cached: set[str] = set()
+        for rec in records:
+            for tok in (rec.lexical_tokens or "").split():
+                folded = _fold_token(tok)
+                if folded:
+                    cached.add(folded)
+        return bool(anchors & cached)
+
+    def _previous_closed_session_id(self, profile_id: str) -> Optional[str]:
+        """Immediately previous compatible CLOSED session: same profile,
+        most recent start, live OPEN sessions never eligible by construction.
+        """
+        try:
+            cur = self.shadow_conn.execute(
+                "SELECT session_id FROM sessions "
+                "WHERE profile_id = ? AND state = 'CLOSED' "
+                "ORDER BY started_at DESC, session_id DESC LIMIT 1",
+                (profile_id,),
+            )
+            row = cur.fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return row[0] if isinstance(row, tuple) else row["session_id"]
+
+    def _session_episode_ids(self, session_id: str) -> set[str]:
+        try:
+            cur = self.shadow_conn.execute(
+                "SELECT episode_id FROM episodes WHERE session_id = ?",
+                (session_id,),
+            )
+            return {
+                (r[0] if isinstance(r, tuple) else r["episode_id"])
+                for r in cur.fetchall()
+            }
+        except Exception:
+            return set()
+
+    def _empty_packet(
+        self,
+        q_hash: str,
+        profile_id: str,
+        query: EpisodicQuery,
+        reason_code: str,
+        candidate_count: int = 0,
+    ) -> EpisodicRecallPacket:
+        return EpisodicRecallPacket(
+            query_hash=q_hash,
+            profile_id=profile_id,
+            mode=self.mode,
+            retrieved_episodes=[],
+            formatted_block="",
+            token_estimate=0,
+            reason_code=reason_code,
+            scope=query.scope,
+            candidate_count=candidate_count,
+        )
+
     def process_query(
         self,
         query_text: str,
@@ -128,45 +233,49 @@ class EpisodicRecallCoordinator:
 
         q_hash = hashlib.sha256(query_text.encode("utf-8")).hexdigest()[:16]
 
-        # 1. Query understanding
+        # 1. Query understanding (deterministic intent + scope + temporal)
         query = self.query_analyzer.analyze(query_text, profile_id=profile_id, reference_time=reference_time)
+        # NONE is a very strict opportunistic policy, not a hard gate: a
+        # cheap deterministic preflight decides whether any historical anchor
+        # overlaps before any embedding work happens.
         if query.recall_intent == RecallIntent.NONE:
-            return EpisodicRecallPacket(
-                query_hash=q_hash,
-                profile_id=profile_id,
-                mode=self.mode,
-                retrieved_episodes=[],
-                formatted_block="",
-                token_estimate=0,
-                reason_code="NO_RECALL_INTENT",
-            )
+            if not self._has_historical_anchor_overlap(query):
+                return self._empty_packet(
+                    q_hash, profile_id, query, "NO_HISTORICAL_ANCHOR"
+                )
 
         # 2. Query embedding via isolated worker
         query_vec = self.worker.embed_query(query.normalized_query)
         if query_vec is None:
             logger.warning("Worker embedding failed or timed out; fail-open to NO_RECALL.")
-            return EpisodicRecallPacket(
-                query_hash=q_hash,
-                profile_id=profile_id,
-                mode=self.mode,
-                retrieved_episodes=[],
-                formatted_block="",
-                token_estimate=0,
-                reason_code="WORKER_UNAVAILABLE",
-            )
+            return self._empty_packet(q_hash, profile_id, query, "WORKER_UNAVAILABLE")
 
         # 3. Candidate retrieval (same-profile + temporal hard filter)
         cand_exchanges = self.retriever.get_candidates(query, query_vector=query_vec, reference_time=reference_time)
         if not cand_exchanges:
-            return EpisodicRecallPacket(
-                query_hash=q_hash,
-                profile_id=profile_id,
-                mode=self.mode,
-                retrieved_episodes=[],
-                formatted_block="",
-                token_estimate=0,
-                reason_code="NO_CANDIDATES",
-            )
+            return self._empty_packet(q_hash, profile_id, query, "NO_CANDIDATES")
+
+        # SESSION_RECALL without an explicit date filter targets the
+        # immediately previous compatible CLOSED session — not merely any
+        # recent high-scoring episode. With a date filter, the date itself
+        # is the session selector (retriever already applied it).
+        if query.scope == RecallScope.SESSION_RECALL and (
+            query.temporal_constraint is None
+            or query.temporal_constraint.constraint_type == TemporalConstraintType.LAST_TIME
+        ):
+            prev_session = self._previous_closed_session_id(profile_id)
+            if prev_session is None:
+                return self._empty_packet(
+                    q_hash, profile_id, query, "NO_PREVIOUS_SESSION",
+                    candidate_count=len(cand_exchanges),
+                )
+            allowed = self._session_episode_ids(prev_session)
+            cand_exchanges = [c for c in cand_exchanges if c.episode_id in allowed]
+            if not cand_exchanges:
+                return self._empty_packet(
+                    q_hash, profile_id, query, "NO_CANDIDATES",
+                    candidate_count=0,
+                )
 
         # Pre-fetch episode metadata & cohesion
         ep_records = {
@@ -184,7 +293,16 @@ class EpisodicRecallCoordinator:
             _significant_tokens,
         )
 
-        q_tokens = set(_significant_tokens(query.normalized_query)) - _SCORING_STOPWORDS
+        # Corroboration requires overlap with the EXTRACTED LEXICAL ANCHORS,
+        # not with generic query tokens: `hablamos`/`sobre`-style survivors
+        # of the generic tokenizer must never substantiate a topic recall.
+        anchor_set = {_fold_token(a) for a in query.lexical_anchors}
+        anchor_set.discard("")
+        sig_set = {
+            _fold_token(t)
+            for t in _significant_tokens(query.normalized_query)
+        } - {_fold_token(t) for t in _SCORING_STOPWORDS}
+        q_tokens = anchor_set & sig_set
 
         ref_dt = reference_time or datetime.now(timezone.utc)
         if ref_dt.tzinfo is None:
@@ -198,10 +316,14 @@ class EpisodicRecallCoordinator:
             ep_cos = _cosine(query_vec, ep_rec.vector) if ep_rec else ex_cos
             cohesion = ep_rec.cohesion_mean if ep_rec else 0.8
 
-            # Real candidate-specific lexical score
+            # Real candidate-specific lexical score (both sides folded so
+            # `audifonos` matches cached `audífonos`).
             lex_score = 0.0
             if q_tokens and cand.lexical_tokens:
-                cand_tokens = set(cand.lexical_tokens.split())
+                cand_tokens = {
+                    _fold_token(t) for t in cand.lexical_tokens.split()
+                }
+                cand_tokens.discard("")
                 shared = q_tokens & cand_tokens
                 lex_score = round(len(shared) / max(1, len(q_tokens)), 4)
 
@@ -235,14 +357,9 @@ class EpisodicRecallCoordinator:
                 last_rejected_reason = score_res.reason_code
 
         if not ep_to_best:
-            return EpisodicRecallPacket(
-                query_hash=q_hash,
-                profile_id=profile_id,
-                mode=self.mode,
-                retrieved_episodes=[],
-                formatted_block="",
-                token_estimate=0,
-                reason_code=last_rejected_reason,
+            return self._empty_packet(
+                q_hash, profile_id, query, last_rejected_reason,
+                candidate_count=len(cand_exchanges),
             )
 
         # 5. Build RankedCandidateEpisode list with actual best lexical score
@@ -326,13 +443,13 @@ class EpisodicRecallCoordinator:
                 )
             )
 
-        formatted = _format_episodic_block(retrieved_contexts)
+        formatted = _format_episodic_block(retrieved_contexts, query.scope)
         tokens = len(formatted) // 4
 
         # Enforce hard token budget across episodes
         while tokens > self.max_token_budget and len(retrieved_contexts) > 1:
             retrieved_contexts.pop()
-            formatted = _format_episodic_block(retrieved_contexts)
+            formatted = _format_episodic_block(retrieved_contexts, query.scope)
             tokens = len(formatted) // 4
 
         # Enforce hard token budget within single remaining episode
@@ -347,7 +464,7 @@ class EpisodicRecallCoordinator:
                     exchanges=single_ep.exchanges[: len(single_ep.exchanges) - 1],
                 )
                 retrieved_contexts = [single_ep]
-                formatted = _format_episodic_block(retrieved_contexts)
+                formatted = _format_episodic_block(retrieved_contexts, query.scope)
                 tokens = len(formatted) // 4
 
             if tokens > self.max_token_budget and len(single_ep.exchanges) == 1:
@@ -376,7 +493,7 @@ class EpisodicRecallCoordinator:
                         exchanges=[trimmed_ex],
                     )
                     retrieved_contexts = [single_ep]
-                    formatted = _format_episodic_block(retrieved_contexts)
+                    formatted = _format_episodic_block(retrieved_contexts, query.scope)
                     tokens = len(formatted) // 4
 
         if not retrieved_contexts:
@@ -392,4 +509,6 @@ class EpisodicRecallCoordinator:
             formatted_block=formatted,
             token_estimate=tokens,
             reason_code=final_reason,
+            scope=query.scope,
+            candidate_count=len(cand_exchanges),
         )

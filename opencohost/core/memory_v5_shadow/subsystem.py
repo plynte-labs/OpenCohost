@@ -15,6 +15,8 @@ NEVER: memory domain -> llm_engine
 from __future__ import annotations
 
 import logging
+import sqlite3
+from dataclasses import dataclass
 from typing import Optional
 
 from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
@@ -25,6 +27,23 @@ from opencohost.core.memory_v5_shadow.semantic_indexer import IncrementalSemanti
 from opencohost.core.memory_v5_shadow.episodic_recall import EpisodicRecallCoordinator, RecallMode
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RecallDecision:
+    """Deterministic application-side verdict: the local LLM never decides
+    whether to call memory — this policy retrieves evidence and supplies a
+    grounded context block (or an empty one with a reason)."""
+
+    block: str
+    scope: str
+    hit: bool
+    reason: str
+    token_estimate: int
+
+    @classmethod
+    def empty(cls, scope: str = "EPISODIC_TOPIC", reason: str = "NO_RECALL") -> "RecallDecision":
+        return cls(block="", scope=scope, hit=False, reason=reason, token_estimate=0)
 
 
 class MemorySubsystem:
@@ -49,6 +68,7 @@ class MemorySubsystem:
         self._status = status or {"requested": mode, "effective": "OFF", "reason_code": "off_default"}
         self._stream_seq: int = 0
         self._run_id: Optional[str] = runtime.run_id if runtime else None
+        self._shutdown = False
 
     @classmethod
     def from_settings(
@@ -98,6 +118,20 @@ class MemorySubsystem:
                 worker=worker,
                 mode=recall_mode,
             )
+
+            # Startup crash recovery runs AFTER recovered sessions are CLOSED
+            # (MemoryRuntime.__init__ above) and BEFORE semantic
+            # reconciliation below: stale eligible episodes are deterministically
+            # materialized/closed, orphan membership pruned, and the newly
+            # closed episodes are then picked up by the reconciler. Live
+            # CURRENT open episodes are materialized OPEN and stay unindexed
+            # (the indexer only ever takes CLOSED) — never indexed to mask
+            # lifecycle defects.
+            try:
+                recovery_counts = cls.startup_episode_recovery(s_db)
+                logger.info("Memory v5 startup episode recovery: %s", recovery_counts)
+            except Exception as rec_exc:
+                logger.warning("Startup episode recovery warning: %s", rec_exc)
 
             try:
                 indexer.reconcile_unindexed_episodes()
@@ -159,17 +193,74 @@ class MemorySubsystem:
     def coordinator(self) -> Optional[EpisodicRecallCoordinator]:
         return self._coordinator
 
-    def recall_block(self, query_text: str, profile_id: Optional[str]) -> str:
-        """Query episodic memory and return formatted prompt block for ACTIVE mode."""
-        if self._coordinator is None or not profile_id or not query_text:
-            return ""
+    @staticmethod
+    def startup_episode_recovery(shadow_db_path: object) -> dict[str, int]:
+        """Deterministic crash/startup recovery on the authoritative shadow DB.
+
+        Materializes/closes stale eligible episodes from the (already
+        recovered and CLOSED) sessions and prunes orphan episode_membership
+        rows. Returns metadata-only counts — never corpus text.
+        """
+        from opencohost.core.memory_v5_shadow.episodes import (
+            EpisodeSegmentationEngine,
+        )
+
+        engine = EpisodeSegmentationEngine()
+        episodes, _memberships = engine.segment_all_from_db(
+            shadow_db_path, persist=True
+        )
+        closed = sum(1 for e in episodes if e.get("state") == "CLOSED")
+        open_n = sum(1 for e in episodes if e.get("state") == "OPEN")
+
+        pruned = 0
+        conn = sqlite3.connect(str(shadow_db_path), timeout=5.0)
         try:
-            packet = self._coordinator.process_query(query_text, profile_id=profile_id)
-            if packet is not None and packet.mode == RecallMode.ACTIVE:
-                return packet.formatted_block
+            cur = conn.execute(
+                "DELETE FROM episode_membership "
+                "WHERE episode_id NOT IN (SELECT episode_id FROM episodes)"
+            )
+            pruned = int(cur.rowcount or 0)
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return {
+            "episodes_materialized": len(episodes),
+            "closed_episodes": closed,
+            "open_episodes": open_n,
+            "pruned_orphan_membership": pruned,
+        }
+
+    def recall_decision(
+        self, query_text: str, profile_id: Optional[str], reference_time=None
+    ) -> RecallDecision:
+        """Application-side deterministic retrieval verdict for one query."""
+        if self._coordinator is None or not profile_id or not query_text:
+            return RecallDecision.empty()
+        try:
+            packet = self._coordinator.process_query(
+                query_text, profile_id=profile_id, reference_time=reference_time
+            )
+            if packet is None or packet.mode != RecallMode.ACTIVE:
+                return RecallDecision.empty()
+            scope = packet.scope.value if hasattr(packet.scope, "value") else str(packet.scope)
+            hit = bool(packet.formatted_block)
+            return RecallDecision(
+                block=packet.formatted_block,
+                scope=scope,
+                hit=hit,
+                reason=packet.reason_code,
+                token_estimate=packet.token_estimate,
+            )
         except Exception as e_exc:
             logger.warning("Episodic recall query failed open: %s", e_exc)
-        return ""
+            return RecallDecision.empty(reason="RECALL_EXCEPTION")
+
+    def recall_block(self, query_text: str, profile_id: Optional[str]) -> str:
+        """Query episodic memory and return formatted prompt block for ACTIVE mode."""
+        return self.recall_decision(query_text, profile_id).block
 
     def on_profile_switch(
         self,
@@ -260,20 +351,32 @@ class MemorySubsystem:
         return success
 
     def shutdown(self, timeout_s: float = 2.0) -> None:
-        """Gracefully shut down workers, runtime, and caches."""
-        if self._worker is not None:
-            try:
-                self._worker.stop()
-            except Exception:
-                pass
-            self._worker = None
+        """Gracefully shut down runtime, workers, and caches. Idempotent.
+
+        Ownership order (correct lifecycle): FIRST stop new memory admission
+        and quiesce the runtime — its SHUTDOWN write closes the session and
+        segments episodes — THEN shut down the semantic worker, THEN close
+        the cache. Uses only real public APIs (runtime.shutdown,
+        worker.shutdown, cache.close).
+        """
+        if self._shutdown:
+            return
+        self._shutdown = True
 
         if self._runtime is not None:
             try:
-                self._runtime.shutdown(timeout_s=timeout_s)
+                # Positional: MemoryRuntime.shutdown(timeout).
+                self._runtime.shutdown(timeout_s)
             except Exception:
                 pass
             self._runtime = None
+
+        if self._worker is not None:
+            try:
+                self._worker.shutdown()
+            except Exception:
+                pass
+            self._worker = None
 
         if self._cache_store is not None:
             try:

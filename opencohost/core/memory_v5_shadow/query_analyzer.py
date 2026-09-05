@@ -3,23 +3,43 @@ Episodic Query Analyzer for Memory v5.
 
 Analyzes current user requests to derive:
 - Recall intent: EXPLICIT, IMPLICIT, or NONE
-- Relative temporal constraints (today, yesterday, last week, N days/weeks ago, etc.)
-- Extracted lexical anchors
+- Retrieval scope: EPISODIC_TOPIC, SESSION_RECALL, or PROFILE_SYNTHESIS
+- Relative AND absolute temporal constraints (today, yesterday, last week,
+  N days/weeks ago, absolute calendar day, calendar month, etc.)
+- Extracted lexical anchors (accent-folded)
 - Normalized query text suitable for embedding
+
+Deterministic by construction: accent/case normalization plus verb-family
+stems and memory/session/temporal cue sets. There is deliberately NO
+unbounded exact-sentence regex list — coverage comes from small closed
+families, so a new conjugation is a stem hit, not a new pattern.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
+
+
+def _fold(text: str) -> str:
+    """Lowercase + accent-fold for deterministic cue matching."""
+    norm = unicodedata.normalize("NFD", text or "")
+    return "".join(c for c in norm if unicodedata.category(c) != "Mn").lower()
 
 
 class RecallIntent(str, Enum):
     EXPLICIT = "EXPLICIT"
     IMPLICIT = "IMPLICIT"
     NONE = "NONE"
+
+
+class RecallScope(str, Enum):
+    EPISODIC_TOPIC = "EPISODIC_TOPIC"
+    SESSION_RECALL = "SESSION_RECALL"
+    PROFILE_SYNTHESIS = "PROFILE_SYNTHESIS"
 
 
 class TemporalConstraintType(str, Enum):
@@ -29,12 +49,16 @@ class TemporalConstraintType(str, Enum):
     N_DAYS_AGO = "N_DAYS_AGO"
     N_WEEKS_AGO = "N_WEEKS_AGO"
     LAST_TIME = "LAST_TIME"
+    ABSOLUTE_DAY = "ABSOLUTE_DAY"
+    MONTH = "MONTH"
 
 
 @dataclass(frozen=True)
 class TemporalConstraint:
     constraint_type: TemporalConstraintType
     n_value: int = 0
+    month: int = 0
+    day: int = 0
 
     def matches(self, episode_started_at: str, reference_time: Optional[datetime] = None) -> bool:
         if reference_time is None:
@@ -78,6 +102,23 @@ class TemporalConstraint:
             delta_days = (ref_date - ep_date).days
             return delta_days == self.n_value
 
+        elif self.constraint_type == TemporalConstraintType.ABSOLUTE_DAY:
+            # Calendar day; year is always the reference year. month == 0
+            # means "day N of the reference month" (`el dia 2`).
+            try:
+                target = date(
+                    ref_date.year,
+                    self.month or reference_time.month,
+                    self.day,
+                )
+            except Exception:
+                return False
+            return ep_date == target
+
+        elif self.constraint_type == TemporalConstraintType.MONTH:
+            # Calendar month of the reference year (`en septiembre`).
+            return ep_date.year == ref_date.year and ep_date.month == self.month
+
         return True
 
 
@@ -89,29 +130,74 @@ class EpisodicQuery:
     temporal_constraint: Optional[TemporalConstraint]
     lexical_anchors: list[str]
     profile_id: str
+    scope: RecallScope = RecallScope.EPISODIC_TOPIC
 
+
+# Deterministic recall features on folded (accent-free, lowercase) text.
+# Verb families, not sentences: any conjugation carrying the stem counts.
+# Kept deliberately narrow — corroboration downstream rejects unanchored
+# false positives, but intent should not fire on topical turns.
+_RECALL_VERB_STEMS = (
+    # recordar / acordarse (all persons and tenses)
+    r"record", r"recuerd", r"acord", r"acuerd",
+)
+_CONVERSATION_VERB_STEMS = (
+    # hablar / discutir / platicar / conversar / charlar / comentar /
+    # mencionar / opinar / pensar / concluir / decir / decidir / estudiar
+    r"habl", r"discut", r"platic", r"convers", r"charl", r"coment",
+    r"mencion", r"opina", r"pens", r"conclu", r"dij", r"dich", r"decid",
+    r"estudi", r"vist",
+)
+# "tocamos el tema" and morphological siblings — the bare verb `tocar`
+# alone is too broad (topical "me toca"), so it only counts with `tema`.
+_TOCAR_TEMA_RE = re.compile(r"\btoc\w*\s+el\s+tema\b")
+# Memory / session nouns that frame a recall request.
+_MEMORY_NOUNS = (r"memoria", r"recuerdo", r"registr")
+_SESSION_NOUNS = (r"sesion", r"conversacion", r"charla", r"stream")
+# Past markers that turn a session noun into a previous-session reference.
+_PAST_MARKERS = (r"pasad", r"anterior", r"previ", r"ultim", r"otra\s+vez")
+# Profile-identity cues -> PROFILE_SYNTHESIS scope (complete regexes).
+_PROFILE_PATTERNS = (
+    r"\bdedic\w*",
+    r"\bhobb\w*",
+    r"\binteres\w*",
+    r"\bsabes\s+de\s+mi\b",
+    r"\bsabes\s+sobre\s+mi\b",
+    r"\brecuerdas\s+de\s+mi\b",
+    r"\brecordas\s+de\s+mi\b",
+    r"\bquien\s+soy\b",
+    r"\bmi\s+perfil\b",
+)
 
 _EXPLICIT_PATTERNS = [
-    r"(?i)\b(te acuerdas|recuerdas|te acord[aá]s)\b",
-    r"(?i)\bqu[eé] hab[ií]amos (dicho|hablado|decidido|visto|concluido)\b",
-    r"(?i)\bde qu[eé] hablamos\b",
-    r"(?i)\bte coment[eé]\b",
-    r"(?i)\bhablamos (de|sobre)\b",
-    r"(?i)\bdo you remember\b",
-    r"(?i)\bwhat did we (say|talk|discuss|decide)\b",
-    r"(?i)\bdid i mention\b",
+    r"\b(te acuerdas|recuerdas|te acord[aá]s)\b",
+    r"\bqu[eé] hab[ií]amos (dicho|hablado|decidido|visto|concluido)\b",
+    r"\bde qu[eé] hablamos\b",
+    r"\bte coment[eé]\b",
+    r"\bhablamos (de|sobre)\b",
+    r"\bdo you remember\b",
+    r"\bwhat did we (say|talk|discuss|decide)\b",
+    r"\bdid i mention\b",
 ]
 
 _IMPLICIT_PATTERNS = [
-    r"(?i)\bvolv[ií] a (probar|ver|checar|intentar)\b",
-    r"(?i)\bsigue (igual|fallando|con el mismo|sin)\b",
-    r"(?i)\blo que (vimos|platicamos|comentamos|hablamos|decidimos)\b",
-    r"(?i)\baquello que\b",
-    r"(?i)\baquella conversaci[oó]n\b",
-    r"(?i)\bla [uú]ltima vez\b",
-    r"(?i)\bcomo te dec[ií]a\b",
-    r"(?i)\bcomo comentamos\b",
+    r"\bvolv[ií] a (probar|ver|checar|intentar)\b",
+    r"\bsigue (igual|fallando|con el mismo|sin)\b",
+    r"\blo que (vimos|platicamos|comentamos|hablamos|decidimos)\b",
+    r"\baquello que\b",
+    r"\baquella conversaci[oó]n\b",
+    r"\bla [uú]ltima vez\b",
+    r"\bcomo te dec[ií]a\b",
+    r"\bcomo comentamos\b",
 ]
+
+_SPANISH_MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+    "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+_MONTH_ALTERNATION = "|".join(sorted(_SPANISH_MONTHS, key=len, reverse=True))
 
 _SPANISH_NUMBER_WORDS = {
     "un": 1,
@@ -179,8 +265,27 @@ class EpisodicQueryAnalyzer:
     def __init__(self) -> None:
         pass
 
-    def parse_temporal_constraint(self, text: str) -> Optional[TemporalConstraint]:
+    def _has_family_hit(self, folded: str, stems: tuple[str, ...]) -> bool:
+        return any(re.search(r"\b%s\w*" % stem, folded) for stem in stems)
+
+    def _has_session_past_reference(self, folded: str) -> bool:
+        # `la otra vez` is a standalone previous-session reference
+        # (`la ultima vez` is not — it stays episode-level LAST_TIME).
+        if re.search(r"\bla otra vez\b", folded):
+            return True
+        nouns = "|".join(_SESSION_NOUNS)
+        past = "|".join(_PAST_MARKERS)
+        if re.search(r"\b(?:%s)\w*\s+(?:%s)\w*" % (nouns, past), folded):
+            return True
+        if re.search(r"\b(?:%s)\w*\s+(?:%s)\w*" % (past, nouns), folded):
+            return True
+        return False
+
+    def parse_temporal_constraint(
+        self, text: str, reference_time: Optional[datetime] = None
+    ) -> Optional[TemporalConstraint]:
         lower = text.lower()
+        folded = _fold(text)
 
         # Hoy / Today
         if re.search(r"\b(hoy|today)\b", lower):
@@ -218,15 +323,58 @@ class EpisodicQueryAnalyzer:
                     n_val = 1
             return TemporalConstraint(constraint_type=TemporalConstraintType.N_DAYS_AGO, n_value=n_val)
 
-        # La última vez / Last time
-        if re.search(r"\b(la [uú]ltima vez|last time)\b", lower):
+        # La última vez / Last time / La otra vez
+        if re.search(r"\b(la [uú]ltima vez|la otra vez|last time)\b", lower):
             return TemporalConstraint(constraint_type=TemporalConstraintType.LAST_TIME)
+
+        # Absolute calendar day: `el 2 de septiembre`, `del dia 2 de
+        # septiembre`, `2 de septiembre`. Year is always the reference year.
+        m_abs = re.search(
+            r"\b(?:el|del)?\s*(?:dia\s+)?(\d{1,2})\s+de\s+(%s)\b" % _MONTH_ALTERNATION,
+            folded,
+        )
+        if m_abs:
+            try:
+                day = int(m_abs.group(1))
+            except ValueError:
+                day = 0
+            month = _SPANISH_MONTHS.get(m_abs.group(2), 0)
+            if 1 <= day <= 31 and month:
+                return TemporalConstraint(
+                    constraint_type=TemporalConstraintType.ABSOLUTE_DAY,
+                    month=month,
+                    day=day,
+                )
+
+        # Bare day of the reference month: `el dia 2`.
+        m_day = re.search(r"\b(?:el|del)\s+dia\s+(\d{1,2})\b", folded)
+        if m_day:
+            try:
+                day = int(m_day.group(1))
+            except ValueError:
+                day = 0
+            if 1 <= day <= 31:
+                return TemporalConstraint(
+                    constraint_type=TemporalConstraintType.ABSOLUTE_DAY,
+                    month=0,
+                    day=day,
+                )
+
+        # Calendar month of the reference year: `en septiembre`.
+        m_month = re.search(r"\ben\s+(%s)\b" % _MONTH_ALTERNATION, folded)
+        if m_month:
+            month = _SPANISH_MONTHS.get(m_month.group(1), 0)
+            if month:
+                return TemporalConstraint(
+                    constraint_type=TemporalConstraintType.MONTH, month=month
+                )
 
         return None
 
     def extract_lexical_anchors(self, text: str) -> list[str]:
-        # Tokenize words
-        words = re.findall(r"\b[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9_-]{3,}\b", text.lower())
+        # Tokenize words (2+ chars so short content tokens like `ia` survive),
+        # accent-folded so `audifonos` matches `audífonos` downstream.
+        words = re.findall(r"\b[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9_-]{2,}\b", _fold(text))
         anchors = [w for w in words if w not in _STOPWORDS]
         # De-duplicate while preserving order
         seen = set()
@@ -237,18 +385,50 @@ class EpisodicQueryAnalyzer:
                 out.append(w)
         return out
 
+    def _detect_scope(self, folded: str) -> RecallScope:
+        if any(re.search(pat, folded) for pat in _PROFILE_PATTERNS):
+            return RecallScope.PROFILE_SYNTHESIS
+        nouns = "|".join(_SESSION_NOUNS)
+        has_session_noun = re.search(r"\b(?:%s)\w*" % nouns, folded) is not None
+        if self._has_session_past_reference(folded):
+            return RecallScope.SESSION_RECALL
+        if has_session_noun and (
+            re.search(r"\b\d{1,2}\s+de\s+(?:%s)\b" % _MONTH_ALTERNATION, folded)
+            or re.search(r"\ben\s+(?:%s)\b" % _MONTH_ALTERNATION, folded)
+        ):
+            # `las sesiones del 2 de septiembre` — session scope by date.
+            return RecallScope.SESSION_RECALL
+        return RecallScope.EPISODIC_TOPIC
+
+    def _is_explicit_recall(self, text: str, folded: str) -> bool:
+        if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _EXPLICIT_PATTERNS):
+            return True
+        if self._has_family_hit(folded, _RECALL_VERB_STEMS):
+            return True
+        if self._has_family_hit(folded, _CONVERSATION_VERB_STEMS):
+            return True
+        if _TOCAR_TEMA_RE.search(folded):
+            return True
+        if self._has_family_hit(folded, _MEMORY_NOUNS):
+            return True
+        if self._has_session_past_reference(folded):
+            return True
+        return False
+
     def analyze(
         self,
         text: str,
         profile_id: str,
         reference_time: Optional[datetime] = None,
     ) -> EpisodicQuery:
-        temporal = self.parse_temporal_constraint(text)
+        folded = _fold(text)
+        temporal = self.parse_temporal_constraint(text, reference_time)
         lexical = self.extract_lexical_anchors(text)
+        scope = self._detect_scope(folded)
 
-        # Check explicit patterns
-        is_explicit = any(re.search(pat, text) for pat in _EXPLICIT_PATTERNS)
-        is_implicit = any(re.search(pat, text) for pat in _IMPLICIT_PATTERNS)
+        # Check explicit patterns (legacy list + verb families + cues)
+        is_explicit = self._is_explicit_recall(text, folded)
+        is_implicit = any(re.search(pat, text, flags=re.IGNORECASE) for pat in _IMPLICIT_PATTERNS)
 
         if is_explicit:
             intent = RecallIntent.EXPLICIT
@@ -267,4 +447,5 @@ class EpisodicQueryAnalyzer:
             temporal_constraint=temporal,
             lexical_anchors=lexical,
             profile_id=profile_id,
+            scope=scope,
         )
