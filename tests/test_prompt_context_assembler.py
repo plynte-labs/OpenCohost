@@ -138,7 +138,9 @@ def test_reasoning_model_detection_drops_num_predict():
         is_reasoning_model=lambda m: True,
     )
 
-    assert "num_predict" not in setup.opciones_llm
+    # Under ADR-056, num_predict is never dropped; it is bounded by budget governance
+    assert "num_predict" in setup.opciones_llm
+    assert setup.think is False
 
 
 def test_evicted_pairs_callback_called():

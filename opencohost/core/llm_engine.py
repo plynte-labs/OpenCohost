@@ -467,6 +467,14 @@ class MotorVocalIA(
 
     def __init__(self, log_queue, ui_callback, dialogue_callback: Optional[Callable[[str, str], None]] = None):
         super().__init__(daemon=True)
+        self._init_communication_and_events(log_queue, ui_callback, dialogue_callback)
+        self._init_provider_and_model_state()
+        self._init_speech_and_tts_state()
+        self._init_memory_and_context_state()
+        self._init_scheduler_and_prefetch_state()
+        self._init_services_and_telemetry()
+
+    def _init_communication_and_events(self, log_queue, ui_callback, dialogue_callback):
         self.log_queue = log_queue
         self.ui_callback = ui_callback
         # P3 producer (opt-in): Kira's OWN generated reply text, never raw
@@ -477,6 +485,34 @@ class MotorVocalIA(
         # while the router was speaking, parked for the next true boundary.
         # Engine-thread only (dispatch and drain both run there).
         self._deferred_control_commands: deque = deque()
+        # Optional numeric-only payload hook, mirroring on_ctx_pressure_high:
+        # fires with {"seconds": <float>} whenever a background probe is
+        # (re)scheduled, so the UI can render a countdown without polling.
+        self.on_cloud_probe_scheduled: Optional[Callable[[dict], None]] = None
+        # Optional chat-activation telemetry seams (measure-first, off-by-default).
+        # app_shell sets these ONLY when chat diagnostics are enabled; in production
+        # they stay None so the guards below skip and behavior is byte-identical.
+        # They fire from THIS worker thread into the aggregator's collector, which
+        # locks its mutation path while enabled. RECORD-ONLY — neither changes queue
+        # lifetime or speech behavior. Gated strictly on source == "chat".
+        self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
+        self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
+        # WU4 4b (design-fase2.md §3): optional operator-visibility hook, fired
+        # on the PREGEN WORKER THREAD with the rejection CODE only (never
+        # dialogue text) when the preview guardrail rejects a background draft.
+        # None = zero behavior change (mirrors the on_chat_* callbacks above).
+        self.on_guardrail_rejected: Optional[Callable[[str], None]] = None
+        # Optional numeric-only payload hook for ctx_pressure_high, mirroring
+        # on_guardrail_rejected above. NOT a second positional argument on
+        # ui_callback: CTK's concrete callback (app_shell.py's
+        # _on_motor_event(self, status: str)) takes exactly one positional
+        # argument with no *args/default, so calling self.ui_callback(status,
+        # payload) would raise TypeError there. payload is passed as a plain
+        # call argument (never shared instance state), so two threads racing
+        # here (foreground + a pregen worker) cannot clobber each other.
+        self.on_ctx_pressure_high: Optional[Callable[[dict], None]] = None
+
+    def _init_provider_and_model_state(self):
         self._reasoning_model_cache: dict[str, bool] = {}
         self._model_ctx_limit: dict[str, int] = {}
         # multi_provider_llm_20260723 Phase 3: the persisted provider config
@@ -545,42 +581,8 @@ class MotorVocalIA(
         # join may still time out and let it keep running, but none of its
         # writes can ever take effect once stale.
         self._cloud_prober_generation: int = 0
-        # Optional numeric-only payload hook, mirroring on_ctx_pressure_high:
-        # fires with {"seconds": <float>} whenever a background probe is
-        # (re)scheduled, so the UI can render a countdown without polling.
-        self.on_cloud_probe_scheduled: Optional[Callable[[dict], None]] = None
 
-        self.voz_referencia = None
         self.is_ready = not self._is_local
-        self._processing = False
-        self._speaking = False
-        # WU3 (design-fase2.md §2.3): narrow "Ollama is busy right now" flag,
-        # set/cleared tightly around the actual generation call inside
-        # _generar_dialogo (foreground AND pregen). The interactive pregen
-        # trigger reads it as the GPU-free predicate — distinct from _processing
-        # (which brackets the whole turn, generation + TTS playback).
-        self._llm_generating = False
-        self._current_speech_source: Optional[str] = None
-        # WU4 4a (design-fase2.md §3): monotonic timestamp of the last
-        # speaking_end, and the live consumer-loop progress of the CURRENT
-        # utterance (None while not speaking). Both guarded by self._lock.
-        # gap_ms telemetry derives from the former; speech_remaining_estimate
-        # from the latter — the REAL _hablar_impl loop counters, not a timer.
-        self._last_speaking_end_monotonic: Optional[float] = None
-        self._speech_progress: Optional[dict] = None
-        # T1 [v5]: speaking_start->end monotonic pair for the `speech_ms=`
-        # field of a "Pregen boundary:" line — the PREVIOUS turn's own speech
-        # duration (-1/None while unknown, e.g. the first turn of a session).
-        # Guarded by self._lock, same as the fields above.
-        self._speaking_start_monotonic: Optional[float] = None
-        self._last_speech_duration_ms: Optional[int] = None
-        # Speech-cancellation token (guarded by self._lock). Source prefixes for
-        # which _hablar() must refuse at entry — kills the Bug B straggler whose
-        # turn was popped from the priority queue during its GENERATION phase
-        # before an emergency stop landed. Set by the emergency paths BEFORE
-        # interrupt_speaking(); cleared only on agenda enable.
-        self._cancelled_speech_prefixes: tuple[str, ...] = ()
-        self._current_processing_source: Optional[str] = None
         self._downloading = False
         _startup_model, self._model_source = resolve_startup_model()
         self.current_model = _startup_model
@@ -627,6 +629,39 @@ class MotorVocalIA(
         self._awaiting_first_success_after_switch: bool = False
         self._inference_watchdog_timeout: float = float(OLLAMA_CHAT_TIMEOUT)
         self._post_switch_watchdog_timeout: float = min(float(OLLAMA_CHAT_TIMEOUT), 45.0)
+
+    def _init_speech_and_tts_state(self):
+        self.voz_referencia = None
+        self._processing = False
+        self._speaking = False
+        # WU3 (design-fase2.md §2.3): narrow "Ollama is busy right now" flag,
+        # set/cleared tightly around the actual generation call inside
+        # _generar_dialogo (foreground AND pregen). The interactive pregen
+        # trigger reads it as the GPU-free predicate — distinct from _processing
+        # (which brackets the whole turn, generation + TTS playback).
+        self._llm_generating = False
+        self._current_speech_source: Optional[str] = None
+        # WU4 4a (design-fase2.md §3): monotonic timestamp of the last
+        # speaking_end, and the live consumer-loop progress of the CURRENT
+        # utterance (None while not speaking). Both guarded by self._lock.
+        # gap_ms telemetry derives from the former; speech_remaining_estimate
+        # from the latter — the REAL _hablar_impl loop counters, not a timer.
+        self._last_speaking_end_monotonic: Optional[float] = None
+        self._speech_progress: Optional[dict] = None
+        # T1 [v5]: speaking_start->end monotonic pair for the `speech_ms=`
+        # field of a "Pregen boundary:" line — the PREVIOUS turn's own speech
+        # duration (-1/None while unknown, e.g. the first turn of a session).
+        # Guarded by self._lock, same as the fields above.
+        self._speaking_start_monotonic: Optional[float] = None
+        self._last_speech_duration_ms: Optional[int] = None
+        # Speech-cancellation token (guarded by self._lock). Source prefixes for
+        # which _hablar() must refuse at entry — kills the Bug B straggler whose
+        # turn was popped from the priority queue during its GENERATION phase
+        # before an emergency stop landed. Set by the emergency paths BEFORE
+        # interrupt_speaking(); cleared only on agenda enable.
+        self._cancelled_speech_prefixes: tuple[str, ...] = ()
+        self._current_processing_source: Optional[str] = None
+
         self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
 
         # Privacy gate: when True, Edge-TTS is NEVER invoked — all light-engine
@@ -669,6 +704,69 @@ class MotorVocalIA(
             piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
         )
 
+        # Recovery flag (guarded by self._lock, same as _speaking): set when
+        # the shared pygame mixer is suspected zombied (a chunk raised during
+        # playback, or the PTT session that just closed may have churned the
+        # WASAPI endpoint under WhisperLive's mic open/close). Consumed once,
+        # at the start of the NEXT _hablar() pipeline run, which quits+re-inits
+        # the mixer before playing the first chunk. Gated (never unconditional
+        # per turn) because the CTk app shares this same mixer with
+        # AudioBedEngine (opencohost/core/audio_bed.py) for background music —
+        # an unconditional re-init would glitch/kill that music. PTT does not
+        # exist in the CTk app, so this flag is only ever set from the
+        # headless API's PTT teardown path or an actual playback exception.
+        self._audio_reinit_needed: bool = False
+
+        # Lazily-built, cached PTT listening blip as an in-memory WAV file
+        # (immutable bytes, reinit-proof). None until the first play_ptt_cue()
+        # builds it from a pure-stdlib sine; see play_ptt_cue / _ptt_cue_wav.
+        self._ptt_cue_wav_bytes = None
+        # ...and the temp file those bytes are spilled to once, because
+        # winsound refuses SND_ASYNC from memory (see _ptt_cue_wav_file).
+        self._ptt_cue_wav_path = None
+
+        # Speech-router host flag (interruptible_speech_architecture_20260804
+        # §8 step 2): EngineHost turns it ON, CTK never does. OFF is the kill
+        # switch — `_speak_or_submit` falls back to a direct, blocking `_hablar`.
+        self._speech_router_enabled: bool = False
+        # Built (and its daemon thread started) on the FIRST routed submit.
+        self._speech_router = None
+        # llm_output_streaming_20260813 §3: per-turn handoff between
+        # _finalize_generation and _ejecutar_inferencia — the SpeechJob of a
+        # turn whose audio already went through submit_streaming/append, so
+        # _speak_or_submit must NOT run again for it. Single engine thread:
+        # written by finalize, read-and-cleared by _ejecutar_inferencia.
+        self._streamed_turn_job: Optional[SpeechJob] = None
+        # llm_output_streaming_20260813 §7: the spoken prefix of a turn that
+        # took the partial exit. Streaming creates a state that could not
+        # exist before -- generation returned "" and yet audio ALREADY went
+        # out -- so the two consumers of an empty return need to tell that
+        # case apart from a genuinely silent drop. Same single-thread
+        # write/read-and-clear discipline as `_streamed_turn_job`.
+        self._streamed_turn_prefix: Optional[str] = None
+        # Orphan belt (§7): the live _StreamAttemptState while a streamed
+        # attempt runs. If an exception escapes after the first submit but
+        # before finalize handled the job, _generar_dialogo's catch-all uses
+        # this to seal + commit the spoken prefix instead of leaving the
+        # router starving forever on an unsealed job.
+        self._live_stream_state: Optional["_StreamAttemptState"] = None
+        # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
+        # step 3), same pattern as `_speech_router_enabled` above: EngineHost
+        # turns it ON, CTK never does. OFF reproduces step 2 exactly — no
+        # pause/resume, no preemption. Read by `pause_speech_for_ptt` /
+        # `resume_speech_after_ptt` (no-op when off) and copied onto the
+        # router as `interrupt_enabled` at build time.
+        self._speech_interrupt_enabled: bool = False
+
+        # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
+        # serializes _hablar so two callers can never share the TTS/audio
+        # pipeline. After WU2 the engine worker is the ONLY _hablar caller in the
+        # API host, so this never contends there (a contention log = a bypass
+        # regression). In the CTK legacy path (play_prefetched_agenda's speaker
+        # thread) it serializes that thread against the worker — the lock WORKING.
+        self._hablar_lock = threading.Lock()
+
+    def _init_memory_and_context_state(self):
         self.system_prompt = i18n_active.system_prompt()
         self.use_system_role = False
 
@@ -732,27 +830,7 @@ class MotorVocalIA(
 
         self._lock = threading.Lock()
 
-        # Recovery flag (guarded by self._lock, same as _speaking): set when
-        # the shared pygame mixer is suspected zombied (a chunk raised during
-        # playback, or the PTT session that just closed may have churned the
-        # WASAPI endpoint under WhisperLive's mic open/close). Consumed once,
-        # at the start of the NEXT _hablar() pipeline run, which quits+re-inits
-        # the mixer before playing the first chunk. Gated (never unconditional
-        # per turn) because the CTk app shares this same mixer with
-        # AudioBedEngine (opencohost/core/audio_bed.py) for background music —
-        # an unconditional re-init would glitch/kill that music. PTT does not
-        # exist in the CTk app, so this flag is only ever set from the
-        # headless API's PTT teardown path or an actual playback exception.
-        self._audio_reinit_needed: bool = False
-
-        # Lazily-built, cached PTT listening blip as an in-memory WAV file
-        # (immutable bytes, reinit-proof). None until the first play_ptt_cue()
-        # builds it from a pure-stdlib sine; see play_ptt_cue / _ptt_cue_wav.
-        self._ptt_cue_wav_bytes = None
-        # ...and the temp file those bytes are spilled to once, because
-        # winsound refuses SND_ASYNC from memory (see _ptt_cue_wav_file).
-        self._ptt_cue_wav_path = None
-
+    def _init_scheduler_and_prefetch_state(self):
         # TurnScheduler owns dispatch queue state, sorting, TTL, and capacity bounds.
         self._turn_scheduler = TurnScheduler(
             max_items=5,
@@ -762,26 +840,6 @@ class MotorVocalIA(
             priority_resolver=turn_priority.dispatch_priority_for_source,
             stream_ttl_resolver=turn_priority.effective_stream_ttl,
         )
-        # LLMInferenceService owns pure multi-provider model execution and token streams.
-        self._inference_service = get_inference_service(self)
-        self._prompt_assembler = PromptContextAssembler(
-            sanitize_history_fn=self._sanitize_history_context
-        )
-        self._generation_evaluator = GenerationEvaluator(
-            output_guard_fn=lambda t, source="": output_guard(t, source=source),
-            guardrail_fallback_fn=self._guardrail_fallback_line,
-            detect_repetition_fn=lambda cand, rec, **kw: getattr(
-                sys.modules.get("opencohost.core.llm_engine"),
-                "detect_repetition",
-                detect_repetition,
-            )(cand, rec, **kw),
-            sanitize_clause_fn=lambda text: getattr(
-                sys.modules.get("opencohost.core.llm_engine"),
-                "sanitize_clause_repetition",
-                sanitize_clause_repetition,
-            )(text),
-        )
-        self._generation_orchestrator = GenerationOrchestrator(self)
         # Step 1 (direct_turn_preemption_20260803): serializes
         # _drain_pending_direct_into_priority_queue, which is now called from the
         # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
@@ -843,46 +901,6 @@ class MotorVocalIA(
         # never reaches a _note_detour_turn site. None when no stash is frozen.
         self._frozen_stash_at: Optional[float] = None
         self._connector_last_idx: Optional[int] = None
-        # Speech-router host flag (interruptible_speech_architecture_20260804
-        # §8 step 2): EngineHost turns it ON, CTK never does. OFF is the kill
-        # switch — `_speak_or_submit` falls back to a direct, blocking `_hablar`.
-        self._speech_router_enabled: bool = False
-        # Built (and its daemon thread started) on the FIRST routed submit.
-        self._speech_router = None
-        # llm_output_streaming_20260813 §3: per-turn handoff between
-        # _finalize_generation and _ejecutar_inferencia — the SpeechJob of a
-        # turn whose audio already went through submit_streaming/append, so
-        # _speak_or_submit must NOT run again for it. Single engine thread:
-        # written by finalize, read-and-cleared by _ejecutar_inferencia.
-        self._streamed_turn_job: Optional[SpeechJob] = None
-        # llm_output_streaming_20260813 §7: the spoken prefix of a turn that
-        # took the partial exit. Streaming creates a state that could not
-        # exist before -- generation returned "" and yet audio ALREADY went
-        # out -- so the two consumers of an empty return need to tell that
-        # case apart from a genuinely silent drop. Same single-thread
-        # write/read-and-clear discipline as `_streamed_turn_job`.
-        self._streamed_turn_prefix: Optional[str] = None
-        # Orphan belt (§7): the live _StreamAttemptState while a streamed
-        # attempt runs. If an exception escapes after the first submit but
-        # before finalize handled the job, _generar_dialogo's catch-all uses
-        # this to seal + commit the spoken prefix instead of leaving the
-        # router starving forever on an unsealed job.
-        self._live_stream_state: Optional["_StreamAttemptState"] = None
-        # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
-        # step 3), same pattern as `_speech_router_enabled` above: EngineHost
-        # turns it ON, CTK never does. OFF reproduces step 2 exactly — no
-        # pause/resume, no preemption. Read by `pause_speech_for_ptt` /
-        # `resume_speech_after_ptt` (no-op when off) and copied onto the
-        # router as `interrupt_enabled` at build time.
-        self._speech_interrupt_enabled: bool = False
-
-        # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
-        # serializes _hablar so two callers can never share the TTS/audio
-        # pipeline. After WU2 the engine worker is the ONLY _hablar caller in the
-        # API host, so this never contends there (a contention log = a bypass
-        # regression). In the CTK legacy path (play_prefetched_agenda's speaker
-        # thread) it serializes that thread against the worker — the lock WORKING.
-        self._hablar_lock = threading.Lock()
 
         # Test-only seam (agenda_no_dead_air fase 2, design-fase2.md §3 WU1):
         # fires at the pop->processing boundary in _process_priority_queue,
@@ -907,21 +925,27 @@ class MotorVocalIA(
         # bridge.commit_direct_injection by the host; stays None otherwise.
         self.direct_editorial_usage_recorder = None
 
-        # Optional chat-activation telemetry seams (measure-first, off-by-default).
-        # app_shell sets these ONLY when chat diagnostics are enabled; in production
-        # they stay None so the guards below skip and behavior is byte-identical.
-        # They fire from THIS worker thread into the aggregator's collector, which
-        # locks its mutation path while enabled. RECORD-ONLY — neither changes queue
-        # lifetime or speech behavior. Gated strictly on source == "chat".
-        self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
-        self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
-
-        # WU4 4b (design-fase2.md §3): optional operator-visibility hook, fired
-        # on the PREGEN WORKER THREAD with the rejection CODE only (never
-        # dialogue text) when the preview guardrail rejects a background draft.
-        # None = zero behavior change (mirrors the on_chat_* callbacks above).
-        self.on_guardrail_rejected: Optional[Callable[[str], None]] = None
-
+    def _init_services_and_telemetry(self):
+        # LLMInferenceService owns pure multi-provider model execution and token streams.
+        self._inference_service = get_inference_service(self)
+        self._prompt_assembler = PromptContextAssembler(
+            sanitize_history_fn=self._sanitize_history_context
+        )
+        self._generation_evaluator = GenerationEvaluator(
+            output_guard_fn=lambda t, source="": output_guard(t, source=source),
+            guardrail_fallback_fn=self._guardrail_fallback_line,
+            detect_repetition_fn=lambda cand, rec, **kw: getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "detect_repetition",
+                detect_repetition,
+            )(cand, rec, **kw),
+            sanitize_clause_fn=lambda text: getattr(
+                sys.modules.get("opencohost.core.llm_engine"),
+                "sanitize_clause_repetition",
+                sanitize_clause_repetition,
+            )(text),
+        )
+        self._generation_orchestrator = GenerationOrchestrator(self)
         # Unit 2.3 (runtime_findings_batch_20260731 F10): bounded per-request
         # context telemetry ring, appended once per completed generation whose
         # ctx_utilization line actually logs (see _generar_dialogo). NEVER a
@@ -935,15 +959,6 @@ class MotorVocalIA(
         # ADR-056 WU1: Empirical inference decode telemetry tracker (observational only)
         from opencohost.core.engine.inference_telemetry import InferenceTelemetryTracker
         self._inference_telemetry = InferenceTelemetryTracker()
-        # Optional numeric-only payload hook for ctx_pressure_high, mirroring
-        # on_guardrail_rejected above. NOT a second positional argument on
-        # ui_callback: CTK's concrete callback (app_shell.py's
-        # _on_motor_event(self, status: str)) takes exactly one positional
-        # argument with no *args/default, so calling self.ui_callback(status,
-        # payload) would raise TypeError there. payload is passed as a plain
-        # call argument (never shared instance state), so two threads racing
-        # here (foreground + a pregen worker) cannot clobber each other.
-        self.on_ctx_pressure_high: Optional[Callable[[dict], None]] = None
 
     @property
     def is_speaking(self):
