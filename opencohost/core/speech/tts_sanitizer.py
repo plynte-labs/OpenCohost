@@ -9,16 +9,48 @@ from opencohost.i18n import active as i18n_active
 
 logger = get_logger()
 
-_TTS_MARKDOWN_EMPHASIS_RE = re.compile(r"(?<![\w])(\*{1,3})(?!\s)([^*\n]+?)(?<!\s)\1(?![\w])")
-_TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/<>\\|")
+_TTS_MARKDOWN_EMPHASIS_RE = re.compile(
+    r"(?<![\w*])(\*{2,})\s*([^*\n]+?)\s*\1(?![\w*])|(?<![\w*])(\*)(?!\s)([^*\n]+?)(?<!\s)\3(?![\w*])"
+)
+_TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/\\|")
 
 # F4 (interruptible_speech_architecture_20260804) — markdown structure the TTS
 # copy must not narrate verbatim. Stage A (block rules): fenced code / tables /
 # display math collapse to one spoken notice each; headings/bullets/blockquotes/
 # hr are reshaped line-by-line. Stage B (inline): LaTeX-ish `$...$`, links,
 # inline code, `__x__`/`_x_` emphasis, residual pipes.
-_TTS_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_TTS_FENCED_CODE_RE = re.compile(r"(```+|~~~+).*?\1", re.DOTALL)
 _TTS_DISPLAY_MATH_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
+
+# Protocol tokens & think/reasoning blocks LLMs emit that must never be spoken.
+# Fail-closed: unclosed blocks drop to EOF so streaming truncation/cancels never leak.
+_TTS_THINK_BLOCK_RE = re.compile(
+    r"<(?:think|analysis|reasoning|tool_call|tool_response)(?:\s+[^>]*)?>.*?(?:</(?:think|analysis|reasoning|tool_call|tool_response)>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_TTS_SPECIAL_TOKENS_RE = re.compile(
+    r"(?i)<\|(?:assistant|user|system|im_start|im_end|endoftext)\|>|\[/?INST\]|<<?/?SYS>>?|<s>|</s>"
+)
+
+# Unsafe HTML blocks (<script>, <style>, <svg>, <template>) and comments <!-- ... -->.
+# Dropped completely with content (both complete and unclosed to EOF).
+_TTS_UNSAFE_HTML_BLOCK_RE = re.compile(
+    r"<!--.*?(-->|$)|<(?:script|style|svg|template)(?:\s+[^>]*)?>.*?(?:</(?:script|style|svg|template)>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# HTML tags: <br>, presentation tags (<b>, <strong>, <i>, <em>, <p>, <span>, <div>),
+# autolinks (<https://example.com/docs>), and placeholder angle brackets (<usuario>, <Importante>).
+_TTS_BR_RE = re.compile(r"(?i)<br\s*/?>")
+_TTS_HTML_DIV_P_CLOSE_RE = re.compile(r"(?i)</(?:p|div)>")
+_TTS_HTML_PRESENTATION_TAG_RE = re.compile(r"(?i)</?(?:b|strong|i|em|p|span|div)(?:\s+[^>]*)?>")
+_TTS_AUTOLINK_RE = re.compile(r"<((?:https?|ftp)://[^\s>]+)>", re.IGNORECASE)
+_TTS_PLACEHOLDER_RE = re.compile(
+    r"<([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_](?:[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_\s.\-]*?[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_])?)>"
+)
+
+# Strikethrough ~~texto~~ -> texto
+_TTS_STRIKETHROUGH_RE = re.compile(r"(?<!~)~~(?!\s)([^~\n]+?)(?<!\s)~~(?!~)")
 _TTS_TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 # The `|---|---|` / `|:---:|:---:|` alignment row: only pipes, dashes, colons,
 # whitespace. Used to exclude that row (and the header row) from the spoken
@@ -184,6 +216,49 @@ def _tts_ensure_terminal_punctuation(text: str) -> str:
     return text
 
 
+def _tts_process_line_structural_prefixes(line: str) -> tuple[str | None, bool]:
+    """Consume structural markdown prefixes iteratively on a single line:
+    nested blockquotes (>>), blockquote + bullet (> -), blockquote + heading (> #),
+    bullets/numbered items, and horizontal rules."""
+    curr = line
+    line_changed = False
+    needs_terminal_punct = False
+
+    while True:
+        if _TTS_HR_RE.match(curr):
+            return None, True
+
+        m = _TTS_BLOCKQUOTE_RE.match(curr)
+        if m:
+            curr = m.group(1)
+            line_changed = True
+            continue
+
+        m = _TTS_ATX_HEADING_RE.match(curr)
+        if m:
+            curr = m.group(1)
+            line_changed = True
+            needs_terminal_punct = True
+            continue
+
+        m = _TTS_BULLET_RE.match(curr) or _TTS_NUMBERED_RE.match(curr)
+        if m:
+            curr = m.group(1)
+            line_changed = True
+            needs_terminal_punct = True
+            continue
+
+        break
+
+    if not line_changed:
+        return line, False
+
+    if needs_terminal_punct:
+        curr = _tts_ensure_terminal_punctuation(curr)
+
+    return curr, True
+
+
 def _tts_stage_a_line_rules(text: str) -> tuple[str, bool]:
     """Line-based Stage A rules: A2 tables, A4 headings, A5 bullets/numbered,
     A6 blockquotes/horizontal rules. A1 (fenced code) and A3 (display math)
@@ -218,36 +293,50 @@ def _tts_stage_a_line_rules(text: str) -> tuple[str, bool]:
                 i = j
                 continue
 
-        m = _TTS_ATX_HEADING_RE.match(line)
-        if m:
-            out.append(_tts_ensure_terminal_punctuation(m.group(1)))
+        res, line_changed = _tts_process_line_structural_prefixes(line)
+        if line_changed:
             changed = True
-            i += 1
-            continue
-
-        m = _TTS_BULLET_RE.match(line) or _TTS_NUMBERED_RE.match(line)
-        if m:
-            out.append(_tts_ensure_terminal_punctuation(m.group(1)))
-            changed = True
-            i += 1
-            continue
-
-        m = _TTS_BLOCKQUOTE_RE.match(line)
-        if m:
-            out.append(m.group(1))
-            changed = True
-            i += 1
-            continue
-
-        if _TTS_HR_RE.match(line):
-            changed = True
-            i += 1
-            continue
-
-        out.append(line)
+        if res is not None:
+            out.append(res)
         i += 1
 
+    if not changed:
+        return text, False
     return "\n".join(out), changed
+
+
+def _tts_clean_residual_asterisks(text: str) -> str:
+    """Clean lone residual formatting asterisks on word boundaries that are NOT
+    math expressions (preserve 5*10=50, a*b, 2 ** 8, foo * bar, width * height)."""
+    if "*" not in text:
+        return text
+
+    working = text
+
+    # Bullet asterisks at start of string or line (e.g. "* hola" -> "hola")
+    working = re.sub(r"(^|\n)\s*\*+\s+", r"\1", working)
+
+    # Bullet asterisks after sentence punctuation (e.g. "Puntos: * uno" -> "Puntos: uno")
+    working = re.sub(r"([.,;:!?])\s*\*+\s+", r"\1 ", working)
+
+    # Lone formatting markers with 2+ asterisks (e.g. "uno ** dos" -> "uno dos")
+    # Single '*' surrounded by spaces is preserved for multiplication and code.
+    # Exponentiation like '2 ** 8' with digits is preserved.
+    working = re.sub(r"(?<!\d)\s+\*{2,}\s+(?!\d)", " ", working)
+
+    # Leading asterisks attached to a word (e.g. "*hola", "¿*seguro")
+    working = re.sub(r"(^|[\s¿¡\"'(\[])\*+([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])", r"\1\2", working)
+
+    # Trailing asterisks attached to a word (e.g. "hola*", "seguro*?")
+    working = re.sub(
+        r"([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])\*+($|[\s.,;:!?)\"'\]])",
+        r"\1\2",
+        working,
+    )
+
+    if working != text:
+        working = re.sub(r" +", " ", working).strip()
+    return working
 
 
 def _tts_normalize_markdown(text: str) -> str:
@@ -262,6 +351,18 @@ def _tts_normalize_markdown(text: str) -> str:
     working = text
     changed = False
 
+    # Protocol tokens & think/reasoning blocks: dropped completely (fail-closed to EOF)
+    working, n = _TTS_THINK_BLOCK_RE.subn("", working)
+    changed = changed or n > 0
+
+    working, n = _TTS_SPECIAL_TOKENS_RE.subn("", working)
+    changed = changed or n > 0
+
+    # Unsafe HTML blocks (<script>, <style>, <svg>, <template>) and comments <!-- ... -->
+    working, n = _TTS_UNSAFE_HTML_BLOCK_RE.subn("", working)
+    changed = changed or n > 0
+
+    # Alternative & standard fenced code: ``` and ~~~ collapse to spoken notice
     working, n = _TTS_FENCED_CODE_RE.subn(
         lambda _m: i18n_active.tts_markdown_code_notice(), working
     )
@@ -270,6 +371,24 @@ def _tts_normalize_markdown(text: str) -> str:
     working, n = _TTS_DISPLAY_MATH_RE.subn(
         lambda _m: i18n_active.tts_markdown_formula_notice(), working
     )
+    changed = changed or n > 0
+
+    # HTML breaks (<br>) and presentation tags (<b>, <i>, <p>, <span>, <div>)
+    working, n = _TTS_BR_RE.subn("\n", working)
+    changed = changed or n > 0
+
+    working, n = _TTS_HTML_DIV_P_CLOSE_RE.subn("\n", working)
+    changed = changed or n > 0
+
+    working, n = _TTS_HTML_PRESENTATION_TAG_RE.subn("", working)
+    changed = changed or n > 0
+
+    # Autolinks: <https://example.com/docs> -> https://example.com/docs
+    working, n = _TTS_AUTOLINK_RE.subn(r"\1", working)
+    changed = changed or n > 0
+
+    # Placeholder angle brackets (<usuario>, <Importante>) -> inner word
+    working, n = _TTS_PLACEHOLDER_RE.subn(r"\1", working)
     changed = changed or n > 0
 
     working, block_changed = _tts_stage_a_line_rules(working)
@@ -284,6 +403,10 @@ def _tts_normalize_markdown(text: str) -> str:
     changed = changed or n > 0
 
     working, n = _TTS_INLINE_CODE_RE.subn(r"\1", working)
+    changed = changed or n > 0
+
+    # Strikethrough ~~texto~~ -> texto
+    working, n = _TTS_STRIKETHROUGH_RE.subn(r"\1", working)
     changed = changed or n > 0
 
     working, n = _TTS_DOUBLE_UNDERSCORE_RE.subn(r"\1", working)
@@ -318,11 +441,13 @@ def _sanitize_tts_text_for_playback(text: str) -> str:
         return text
 
     def replace_emphasis(match: re.Match) -> str:
-        inner = match.group(2)
+        inner = match.group(2) if match.group(2) is not None else match.group(4)
+        inner = inner.strip()
         if not any(ch.isalpha() for ch in inner):
             return match.group(0)
         if any(ch in _TTS_MARKDOWN_OPERATOR_CHARS for ch in inner):
             return match.group(0)
         return inner
 
-    return _TTS_MARKDOWN_EMPHASIS_RE.sub(replace_emphasis, text)
+    text = _TTS_MARKDOWN_EMPHASIS_RE.sub(replace_emphasis, text)
+    return _tts_clean_residual_asterisks(text)
