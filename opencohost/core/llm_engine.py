@@ -42,7 +42,6 @@ from opencohost.config.settings import (
     CHAT_REPEAT_PENALTY, CHAT_PRESENCE_PENALTY, CHAT_FREQUENCY_PENALTY,
     CTX_FALLBACK_DEFAULT, CHAR_BUDGET_SAFETY_FACTOR,
     CTX_PRESSURE_HIGH_THRESHOLD, CTX_OVERFLOW_SIGNAL_RATIO,
-    LLM_TIER_EFFECTIVE_CTX_CAPS,
     resolve_llm_tiers,
     resolve_startup_model, save_last_model,
     load_tts_local_only, save_tts_local_only,
@@ -351,30 +350,8 @@ _DRAIN_SAFE_COMMANDS = frozenset({
 _SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model"}
 
 
-# refactor_core_api_20260802 B7 (Phase C4): _generar_dialogo's in-place phase
-# split. These two carriers exist ONLY to kill parameter sprawl between the
-# three phase methods -- they are not a data model, hold no state of their
-# own, and are never touched outside _generar_dialogo's own call chain.
-@dataclass
-class _GenerationSetup:
-    """_build_generation_request's output: everything the retry loop and/or
-    the finalize phase need that used to just be a local in the one big
-    method body. `history_snapshot` and `editorial_block` are the two
-    surprises here -- both are built during setup but read again all the way
-    down in _finalize_generation (chat-repetition window and the editorial
-    usage-recorder trigger, respectively), so they ride in this bundle
-    instead of being recomputed or promoted to an instance attribute.
-    """
-    messages: list
-    opciones_llm: dict
-    chat_timeout: float
-    max_intentos: int
-    start_llm: float
-    native_ctx: int
-    effective_ctx: int
-    ctx_evicted: int
-    editorial_block: str
-    history_snapshot: list
+# refactor_core_api_20260802 B7 (Phase C4): carriers for _generar_dialogo's phase split.
+# GenerationSetup is imported from opencohost.core.context.prompt_assembler.
 
 
 @dataclass
