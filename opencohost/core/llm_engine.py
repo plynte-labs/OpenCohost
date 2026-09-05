@@ -2592,9 +2592,37 @@ class MotorVocalIA(
 
         episodic_memory_block = ""
         mem = getattr(self, "_memory", None)
+        # v4/v5 arbitration (deterministic, application-side — the local LLM
+        # never decides whether memory applies):
+        # - confident v5 EPISODIC_TOPIC / SESSION_RECALL hit -> v5 primary;
+        #   the generic v4 meta-recall block is suppressed so it cannot
+        #   dominate or masquerade as historical proof;
+        # - v5 miss -> v4 fallback unchanged;
+        # - PROFILE_SYNTHESIS -> labeled v4 profile memories and diverse v5
+        #   evidence coexist under separate context sections.
+        # Lazy import: OFF mode (mem is None) never touches v5 modules.
+        v5_suppress_v4 = False
         if mem is not None and memorias_profile_id:
-            episodic_memory_block = mem.recall_block(contexto, profile_id=memorias_profile_id)
+            try:
+                from opencohost.core.memory_v5_shadow.query_analyzer import (
+                    RecallScope,
+                )
 
+                decision = mem.recall_decision(contexto, profile_id=memorias_profile_id)
+                episodic_memory_block = decision.block
+                v5_suppress_v4 = bool(
+                    decision.hit
+                    and decision.scope
+                    in (
+                        RecallScope.EPISODIC_TOPIC.value,
+                        RecallScope.SESSION_RECALL.value,
+                    )
+                )
+            except Exception:
+                episodic_memory_block = ""
+                v5_suppress_v4 = False
+
+        v4_builder = None if v5_suppress_v4 else getattr(self, "_build_memorias_injection_block", None)
         return assembler.assemble(
             contexto,
             source,
@@ -2606,7 +2634,7 @@ class MotorVocalIA(
             history_snapshot=history_snapshot,
             digest_block=digest_block,
             memorias_profile_id=memorias_profile_id,
-            memorias_builder=getattr(self, "_build_memorias_injection_block", None),
+            memorias_builder=v4_builder,
             editorial_provider=getattr(self, "direct_editorial_context_provider", None),
             native_ctx_resolver=_native_ctx_res,
             effective_ctx_resolver=getattr(self, "_resolve_effective_ctx_limit", None),

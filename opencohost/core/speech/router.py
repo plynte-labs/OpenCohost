@@ -246,6 +246,8 @@ class SpeechRouter:
                 and victim is not None
             )
         self._wake.set()
+        if priority == PRIORITY_OWNER:
+            self.sweep_sources(("ptt", "direct", "owner"))
         if preempt:
             # Closure M3: pass the job this submit OBSERVED. If it already
             # left ACTIVE by the time pause_speech runs, the pause aborts —
@@ -282,6 +284,8 @@ class SpeechRouter:
                 and victim is not None
             )
         self._wake.set()
+        if priority == PRIORITY_OWNER:
+            self.sweep_sources(("ptt", "direct", "owner"))
         if preempt:
             self.pause_speech("preempt", target=victim)
         return job

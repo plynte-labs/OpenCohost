@@ -153,6 +153,24 @@ live engine, then the app opens.
    or hold the push-to-talk button in the transport bar. Kira should answer with text
    and audio.
 
+> **LiveAudio (speech-to-text) starts itself.** The first push-to-talk hold
+> (or `POST /api/ptt/test`) spawns the headless `liveaudio-service` backend
+> automatically for loopback URLs, discovers its effective port, and keeps it
+> alive until OpenCohost exits — no separate app to launch, no port to copy.
+> The binary resolves in this order: explicit test/dev command,
+> `OPENCOHOST_LIVEAUDIO_CMD`, `liveaudio-service` on `PATH`, then the
+> official LiveAudio installer metadata (`LIVEAUDIO_INSTALL_ROOT` →
+> `install_location.json` → default root with `installed.json` marker,
+> sibling `liveaudio-service` next to the installed app venv). The very first
+> hold may answer `503 stt_loading` while the voice model loads — that literal
+> is retryable, just press again. Prefer your own manually launched LiveAudio?
+> Just start it first — it is detected (stdout `ws_port`, else a validated
+> `base..base+9` handshake scan) and reused. Running LiveAudio on a second
+> capture PC, or a `wss://` loopback endpoint? Those addresses are used
+> verbatim as configured/manual connections and never trigger a local spawn.
+> Worst-case HTTP budget per press: one 5 s readiness wait + one failed
+> connect + one 8 s port wait — never chained waits.
+
 If you hear silence or see a TTS error:
 
 - Check that your system default audio output is set correctly.

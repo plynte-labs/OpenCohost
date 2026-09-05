@@ -496,6 +496,16 @@ def test_dispatch_stamps_submitted_at_monotonic():
     assert before <= submitted_at <= after
 
 
+def test_dispatch_calls_drain_speech_for_new_turn():
+    disp = _RecordingDispatcher()
+    motor = MagicMock()
+    controller = PttController("ws://test/whisperlive", disp, MagicMock(), motor=motor)
+
+    controller._dispatch("hola mundo esto es una prueba")
+
+    motor.drain_speech_for_new_turn.assert_called_once_with("ptt")
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # PttController.set_ws_uri — live LiveAudio reconnect without a restart
 # (liveaudio_ws_uri_config_20260724)
@@ -1140,3 +1150,11 @@ def test_default_keepalive_timeout_is_at_least_8s():
     assert session._keepalive_timeout >= 8.0
 
 
+def test_default_grace_is_1_point_2_seconds():
+    """Verify default grace is 1.2s to balance ASR tail chunks and latency."""
+    rec = _Recorder()
+    session = PttSession("ws://dummy", rec.on_flush, rec.on_event)
+    assert session._grace == 1.2
+
+    controller = PttController("ws://dummy", MagicMock(), MagicMock())
+    assert controller._session_kwargs.get("grace") == 1.2

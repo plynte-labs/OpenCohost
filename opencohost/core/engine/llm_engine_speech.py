@@ -553,6 +553,12 @@ class SpeechPipelineMixin:
         router = self._ensure_router()
         router.set_ptt_held(False)
 
+    def drain_speech_for_new_turn(self, source: str = "ptt") -> None:
+        """Drain/sweep superseded owner speech when a new turn arrives."""
+        router = getattr(self, "_speech_router", None)
+        if router is not None:
+            router.sweep_sources(("ptt", "direct", "owner"))
+
     def _speech_cancelled(self, source: str) -> bool:
         """True when an emergency path cancelled this source's speech.
 

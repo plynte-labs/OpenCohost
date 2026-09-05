@@ -1199,19 +1199,16 @@ class EngineHost:
                     _t.sleep(0.02)
             except Exception:
                 pass
+            # Memory v5 teardown is owned by the single MemorySubsystem facade:
+            # runtime quiesce (SHUTDOWN closes the session + segments
+            # episodes), then semantic worker shutdown, then cache close.
+            # The legacy _memory_runtime / _semantic_worker /
+            # _semantic_cache_store fields must NOT be touched here — they
+            # delegate to the same facade and double-teardown races it.
             try:
-                rt = getattr(self.motor, "_memory_runtime", None)
-                if rt is not None:
-                    rt.shutdown(timeout=1.0)
-            except Exception:
-                pass
-            try:
-                worker = getattr(self.motor, "_semantic_worker", None)
-                if worker is not None:
-                    worker.shutdown()
-                store = getattr(self.motor, "_semantic_cache_store", None)
-                if store is not None:
-                    store.close()
+                mem = getattr(self.motor, "_memory", None)
+                if mem is not None:
+                    mem.shutdown(timeout_s=1.0)
             except Exception:
                 pass
         if self.monitor is not None:
