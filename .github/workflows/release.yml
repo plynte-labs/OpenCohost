@@ -112,6 +112,17 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
+      - name: Download engine payload
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-payload
+          path: build_artifacts/payloads
+
+      - name: Stage bundled installer resources
+        run: |
+          VERSION="${{ needs.build-engine-payload.outputs.version }}"
+          uv run python packaging/stage_installer_resources.py --version "$VERSION" --engine-payload "build_artifacts/payloads/engine-${VERSION}.zip"
+
       - name: Install UI dependencies
         working-directory: OpenCohost_UI
         run: pnpm install --frozen-lockfile

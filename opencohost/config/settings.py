@@ -389,12 +389,26 @@ PROFILES_FILE = os.path.join(str(USER_DATA_DIR), "perfiles.json")
 TTS_SERVER_URL = "http://127.0.0.1:5000/generar"
 TTS_HEAVY_TIMEOUT = 180
 TTS_LIGHT_TIMEOUT = 45
+def _resolve_piper_voice_file(filename: str) -> str:
+    primary = os.path.join(str(STORAGE_PATHS.cache_root), "piper", filename)
+    if os.path.isfile(primary):
+        return primary
+    res_dir = os.environ.get("OPENCOHOST_RESOURCES_DIR", "").strip()
+    if res_dir:
+        candidate = os.path.join(res_dir, "piper", filename)
+        if os.path.isfile(candidate):
+            return candidate
+    from opencohost.config.storage import BASE_DIR
+    candidate_repo = os.path.join(str(BASE_DIR), "modelos_f5", "piper", filename)
+    if os.path.isfile(candidate_repo):
+        return candidate_repo
+    return primary
+
+
 # Path to a local Piper ONNX voice model file. Resolved relative to the
-# storage cache root so packaged builds and storage.yaml overrides work.
+# storage cache root or bundled resources so packaged builds work offline.
 # If the file is missing, PiperEngine.load() disables the offline fallback.
-TTS_LOCAL_MODEL_PATH: str = os.path.join(
-    str(STORAGE_PATHS.cache_root), "piper", "es_MX-claude-high.onnx"
-)
+TTS_LOCAL_MODEL_PATH: str = _resolve_piper_voice_file("es_MX-claude-high.onnx")
 # Offline Piper voice registry for the in-app "Voz de Kira" toggle.
 PIPER_VOICES: dict[str, dict] = {
     "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx", "lang": "es"},
@@ -1161,7 +1175,7 @@ def piper_voice_path(voice_key: str) -> str:
     Unknown keys resolve to the default voice so callers never get an empty path.
     """
     voice = PIPER_VOICES.get(voice_key) or PIPER_VOICES[DEFAULT_PIPER_VOICE]
-    return os.path.join(str(STORAGE_PATHS.cache_root), "piper", voice["file"])
+    return _resolve_piper_voice_file(voice["file"])
 
 
 def load_piper_voice(config_file: Optional[str] = None, default: str = DEFAULT_PIPER_VOICE) -> str:

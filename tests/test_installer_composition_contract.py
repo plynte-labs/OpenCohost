@@ -99,6 +99,6 @@ def test_built_nsis_bundle_excludes_forbidden_blobs_and_respects_size_envelope()
     assert installer is not None, "OpenCohost_*_x64-setup.exe must exist in bundle/nsis"
     
     size_mb = installer.stat().st_size / (1024 * 1024)
-    # The lean installer should be < 50MB (contains only Tauri binary, assets, and stub)
-    assert 5 < size_mb < 50, f"Installer size {size_mb:.2f}MB is outside expected lean envelope (5MB - 50MB)"
+    # The installer contains the Tauri binary, frontend assets, runtime bootstrap, Piper offline voice models, and ONNX embedding models (<600MB)
+    assert 5 < size_mb < 600, f"Installer size {size_mb:.2f}MB is outside expected envelope (5MB - 600MB)"
 

@@ -108,9 +108,23 @@ class EmbeddingBackend(Protocol):
 
 class MiniLMEmbeddingBackend:
     def __init__(self, model_dir: Path | str | None = None) -> None:
-        from opencohost.config.settings import BASE_DIR
-        default_dir = Path(BASE_DIR) / "modelos_f5" / "minilm_l12_onnx"
-        self.model_dir = Path(model_dir) if model_dir is not None else default_dir
+        if model_dir is not None:
+            self.model_dir = Path(model_dir)
+        else:
+            from opencohost.config.settings import BASE_DIR
+            default_dir = Path(BASE_DIR) / "modelos_f5" / "minilm_l12_onnx"
+            if not (default_dir / "model.onnx").is_file():
+                import os
+                res_dir = os.environ.get("OPENCOHOST_RESOURCES_DIR", "").strip()
+                if res_dir:
+                    candidate = Path(res_dir) / "modelos_f5" / "minilm_l12_onnx"
+                    if (candidate / "model.onnx").is_file():
+                        default_dir = candidate
+                    else:
+                        candidate2 = Path(res_dir) / "minilm_l12_onnx"
+                        if (candidate2 / "model.onnx").is_file():
+                            default_dir = candidate2
+            self.model_dir = default_dir
         self.tokenizer = None
         self.session = None
         self._initialized = False
