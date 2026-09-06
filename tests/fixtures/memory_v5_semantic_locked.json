@@ -1,0 +1,2622 @@
+{
+  "schema": "memory-v5-semantic-locked/v1",
+  "case_count": 80,
+  "cases": [
+    {
+      "case_id": "lock-hard-001",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene adaptador grafico RTX 3060 ensamble",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h01_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h01_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_rtx3060",
+          "title": "Adaptador grafico RTX 3060 ensamble",
+          "content": "El adaptador grafico RTX 3060 principal en el ensamble dispone de doce gigabytes.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h01_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_rtx3060_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-002",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene estacion experimental RTX 5090 computo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h02_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h02_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_rtx5090",
+          "title": "Estacion experimental RTX 5090 computo",
+          "content": "Dispone de una estacion experimental con la tarjeta RTX 5090 para computo avanzado.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h02_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_rtx5090_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-003",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene suite difusion OBS Studio configurado",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h03_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h03_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_obs",
+          "title": "Suite difusion OBS Studio configurado",
+          "content": "La suite difusion en directo predeterminada es OBS Studio configurado en su version 30.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h03_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_obs_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-004",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene motor neuronal PiperTTS sintesis",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h04_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h04_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_piper",
+          "title": "Motor neuronal PiperTTS sintesis",
+          "content": "La sintesis local de locuciones se ejecuta mediante el motor neuronal PiperTTS instalado.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h04_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_piper_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-005",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene documento tecnico ADR-022 formalizado",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h05_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h05_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_adr022",
+          "title": "Documento tecnico ADR-022 formalizado",
+          "content": "El documento tecnico ADR-022 formaliza el bus de eventos desacoplado del sistema.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h05_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_adr022_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-006",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene instruccion chat !clip fragmento",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h06_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h06_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_cmd_clip",
+          "title": "Instruccion chat !clip fragmento",
+          "content": "La instruccion chat !clip almacena un fragmento audiovisual de los ultimos treinta segundos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h06_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_cmd_clip_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-007",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene pasarela interna tcp://localhost:8000 solicitudes",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h07_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h07_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_tcp",
+          "title": "Pasarela interna tcp://localhost:8000 solicitudes",
+          "content": "La pasarela interna de procesamiento de voz atiende solicitudes en tcp://localhost:8000.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h07_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_tcp_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-008",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene clonador timbrico F5-TTS neuronal",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h08_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h08_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_f5",
+          "title": "Clonador timbrico F5-TTS neuronal",
+          "content": "El subsistema de mimica timbrica opera con la red neuronal F5-TTS entrenada.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h08_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_f5_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-009",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene transductor dinamico Shure SM7B referencia",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h09_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h09_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_shure",
+          "title": "Transductor dinamico Shure SM7B referencia",
+          "content": "El transductor dinamico Shure SM7B de referencia instalado en el brazo articulado.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h09_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_shure_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-010",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene consola alternar Elgato StreamDeck escenas",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h10_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h10_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_deck",
+          "title": "Consola alternar Elgato StreamDeck escenas",
+          "content": "Para alternar escenas y lanzar efectos utiliza una consola Elgato StreamDeck XL.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h10_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_deck_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-011",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene digitalizacion analoga Focusrite Scarlett interfaz",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h11_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h11_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_scarlett",
+          "title": "Digitalizacion analoga Focusrite Scarlett interfaz",
+          "content": "La digitalizacion de audio analogo se realiza con una interfaz Focusrite Scarlett 2i2.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h11_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_scarlett_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-012",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene arquitectura multilingue Qwen3-TTS modelo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h12_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h12_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_qwen3",
+          "title": "Arquitectura multilingue Qwen3-TTS modelo",
+          "content": "Como alternativa multilingue pesada se evaluó la arquitectura Qwen3-TTS 0.6B.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h12_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_qwen3_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-013",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene transcripcion continua WhisperLive servidor",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h13_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h13_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_whisper",
+          "title": "Transcripcion continua WhisperLive servidor",
+          "content": "La transcripcion continua de habla a texto implementa el servidor WhisperLive local.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h13_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_whisper_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-014",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene moderacion automatica TwitchBot agente",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h14_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h14_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_twitchbot",
+          "title": "Moderacion automatica TwitchBot agente",
+          "content": "La moderacion automatica de mensajes en la sala corresponde al agente TwitchBot v2.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h14_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_twitchbot_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-015",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene asistente inteligente VoiceAI proyecto",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h15_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h15_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_voiceai",
+          "title": "Asistente inteligente VoiceAI proyecto",
+          "content": "La iniciativa integral del asistente inteligente se titula proyecto VoiceAI OpenCohost.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h15_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_voiceai_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-hard-016",
+      "family": "hard_lexical",
+      "query": "Que caracteristicas tecnicas tiene aceleracion tensores CUDA 12.1 biblioteca",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_h16_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_h16_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_cuda",
+          "title": "Aceleracion tensores CUDA 12.1 biblioteca",
+          "content": "La aceleracion por tensores en hardware Nvidia requiere la biblioteca CUDA 12.1.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_h16_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_cuda_d",
+          "title": "Nota auxiliar",
+          "content": "Detalles miscelaneos de componentes y accesorios del setup.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-001",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el cascos acolchados para escuchar sonido",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s01_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s01_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn01",
+          "title": "Auriculares de diadema",
+          "content": "Utiliza audífonos cerrados para aislar el ruido exterior mientras transmite.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s01_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn01_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-002",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el gabinete potente para procesamiento",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s02_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s02_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn02",
+          "title": "Computadora de sobremesa",
+          "content": "Ensambló un ordenador rápido con refrigeración líquida silenciosa.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s02_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn02_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-003",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el aceleradora dedicada para renderizado",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s03_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s03_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn03",
+          "title": "Placa de video",
+          "content": "Cuenta con un componente gráfico con tres ventiladores para modelado.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s03_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn03_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-004",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el mando inalambrico para entretencion",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s04_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s04_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn04",
+          "title": "Controlador bluetooth",
+          "content": "Conecta un joystick ergonómico para disfrutar de plataformas en directo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s04_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn04_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-005",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el receptores pequenos sin cables",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s05_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s05_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn05",
+          "title": "Audifonos in-ear",
+          "content": "Prefiere elementos auditivos compactos cuando realiza directos de cocina.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s05_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn05_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-006",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el botonera tactil de pulsadores",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s06_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s06_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn06",
+          "title": "Teclado mecanico",
+          "content": "Escribe sobre interruptores metálicos lubricados artesanalmente.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s06_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn06_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-007",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el focos circulares de iluminacion",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s07_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s07_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn07",
+          "title": "Paneles difusores",
+          "content": "Alumbra el espacio con lámparas regulables en temperatura cálida.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s07_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn07_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-008",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el ancho de banda para emitir",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s08_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s08_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn08",
+          "title": "Flujo de transmision",
+          "content": "Fijó la tasa de datos en ocho mil kilobits por segundo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s08_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn08_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-009",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el frecuencia de fotogramas por segundo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s09_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s09_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn09",
+          "title": "Tasa de refresco",
+          "content": "La señal se renderiza a sesenta cuadros continuos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s09_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn09_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-010",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el mecenas activos de la comunidad",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s10_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s10_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn10",
+          "title": "Suscriptores del canal",
+          "content": "Saluda de forma personalizada a los miembros que aportan mensualmente.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s10_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn10_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-011",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el stickers ilustrados para mensajes",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s11_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s11_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn11",
+          "title": "Emoticonos de chat",
+          "content": "Dibujó figuras de gatitos para que la audiencia interactúe.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s11_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn11_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-012",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el guardian oficial de la sala",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s12_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s12_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn12",
+          "title": "Administrador de chat",
+          "content": "Otorgó permisos de moderación para silenciar comportamientos ofensivos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s12_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn12_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-013",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el emision audiovisual en tiempo real",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s13_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s13_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn13",
+          "title": "Directo en vivo",
+          "content": "Inicia la transmisión puntualmente a las veinte horas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s13_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn13_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-syn-014",
+      "family": "synonym",
+      "query": "Que caracteristicas posee el marco decorativo para la pantalla",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_s14_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_s14_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn14",
+          "title": "Superposicion visual",
+          "content": "Incorporó una plantilla gráfica con estética minimalista y tonos violetas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_s14_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_syn14_d",
+          "title": "Nota miscelanea",
+          "content": "Registro archivado de compras y suministros generales de oficina.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-001",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre triunfo jugando sobre casillas en tres minutos",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p01_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p01_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para01",
+          "title": "Torneo relampago",
+          "content": "Obtuvo el primer puesto en ajedrez con tácticas agresivas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p01_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para01_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-002",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre aumento de ganancia antes de digitalizar senal",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p02_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p02_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para02",
+          "title": "Preamplificador lineal",
+          "content": "Añadió veintiocho decibeles limpios para optimizar la entrada sonora.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p02_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para02_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-003",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre vocalizacion matutina y respiracion diafragmatica",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p03_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p03_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para03",
+          "title": "Calentamiento vocal",
+          "content": "Dedica quince minutos al despertar a entonar escalas suaves.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p03_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para03_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-004",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre jornada completa de veinticuatro horas sin dormir",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p04_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p04_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para04",
+          "title": "Directo ininterrumpido",
+          "content": "Completó un maratón extenso compartiendo partidas con su público.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p04_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para04_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-005",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre atraccion por laberintos y recompensas aleatorias",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p05_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p05_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para05",
+          "title": "Genero roguelike",
+          "content": "Le apasionan las obras lúdicas donde cada intento es impredecible.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p05_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para05_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-006",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre recomendacion de serie dramatica sobre colonizacion espacial",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p06_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p06_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para06",
+          "title": "Obra cinematografica",
+          "content": "Aconsejó ver una producción sobre dilemas éticos interestelares.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p06_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para06_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-007",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre colecta comunitaria de fondos para albergue de mascotas",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p07_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p07_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para07",
+          "title": "Evento solidario",
+          "content": "Organizó una campaña benéfica para donar insumos veterinarios.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p07_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para07_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-008",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre aislamiento de silueta mediante desenfoque de fondo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p08_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p08_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para08",
+          "title": "Apertura focal",
+          "content": "Fijó el paso de luz en f1.8 para destacar ante la cámara.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p08_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para08_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-009",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre emision a altas horas en completo silencio hogareno",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p09_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p09_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para09",
+          "title": "Horario nocturno",
+          "content": "Prefiere transmitir tarde cuando nadie interrumpe en casa.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p09_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para09_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-010",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre consumo de frutos secos e infusion herbal en pausas",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p10_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p10_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para10",
+          "title": "Nutricion en descansos",
+          "content": "Come almendras deshidratadas y té tibio entre partidas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p10_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para10_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-011",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre aprendizaje de modelado digital y texturas tridimensionales",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p11_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p11_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para11",
+          "title": "Diseno de mallas",
+          "content": "Empezó a estudiar técnicas de esculpido de personajes poligonales.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p11_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para11_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-012",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre tres horas intentando descifrar el patron del adversario inicial",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p12_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p12_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para12",
+          "title": "Jefe colosal souls",
+          "content": "Le costó mucho superar el primer combate difícil del juego.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p12_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para12_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-013",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre fluidez grafica evaluando calculo volumetrico de iluminacion",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p13_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p13_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para13",
+          "title": "Trazado de rayos",
+          "content": "Midió el rendimiento de fotogramas con reflejos físicos activos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p13_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para13_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-014",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre ponencia sobre tecnologias emergentes en la convencion anual",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p14_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p14_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para14",
+          "title": "Encuentro de creadores",
+          "content": "Participó en una mesa redonda frente a otros colegas del medio.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p14_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para14_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-015",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre felino volcando un vaso con liquido sobre la botonera",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p15_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p15_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para15",
+          "title": "Accidente con mascota",
+          "content": "Su gato empujó una bebida derramándola durante la emisión.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p15_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para15_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-para-016",
+      "family": "paraphrase",
+      "query": "Que informacion recuerda sobre publicacion semanal de conversaciones y entrevistas grabadas",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_p16_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_p16_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para16",
+          "title": "Programa de debate",
+          "content": "Sube episodios de diálogo todos los martes al mediodía.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_p16_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_para16_d",
+          "title": "Anotacion secundaria",
+          "content": "Anotaciones diversas sobre la rutina de la semana y tareas pendientes.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-001",
+      "family": "no_memory",
+      "query": "Cual es la distancia media calculada hasta Jupiter",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no01_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_1_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no01_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_1_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-002",
+      "family": "no_memory",
+      "query": "Quien obtuvo el triunfo en el mundial de futbol Mexico 1986",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no02_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_2_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no02_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_2_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-003",
+      "family": "no_memory",
+      "query": "Como se formula formalmente el teorema de Pitagoras",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no03_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_3_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no03_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_3_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-004",
+      "family": "no_memory",
+      "query": "Cual es la nomenclatura quimica del acido sulfurico",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no04_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_4_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no04_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_4_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-005",
+      "family": "no_memory",
+      "query": "Quien ejercio la presidencia de Brasil en el ano 1990",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no05_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_5_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no05_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_5_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-006",
+      "family": "no_memory",
+      "query": "Cual es la altitud oficial del monte Everest sobre el mar",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no06_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_6_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no06_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_6_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-007",
+      "family": "no_memory",
+      "query": "A que velocidad viaja la luz en el vacio absoluto",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no07_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_7_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no07_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_7_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-008",
+      "family": "no_memory",
+      "query": "Como ocurre la creacion de proteinas en los ribosomas celulares",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no08_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_8_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no08_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_8_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-009",
+      "family": "no_memory",
+      "query": "Cual es la distancia orbital media de Marte al sol",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no09_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_9_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no09_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_9_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-010",
+      "family": "no_memory",
+      "query": "A quien se le atribuye la autoria de la Odisea griega",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no10_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_10_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no10_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_10_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-011",
+      "family": "no_memory",
+      "query": "Cual es la temperatura estimada en el nucleo terrestre",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no11_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_11_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no11_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_11_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-no-012",
+      "family": "no_memory",
+      "query": "Cual es la ciudad designada como capital federal de Australia",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "lock_mem_no12_d1",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_12_a",
+          "title": "Consejos de audio",
+          "content": "Recomendaciones para mantener volumen balanceado en transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_no12_d2",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_no_12_b",
+          "title": "Ajuste de camara",
+          "content": "Calibracion de sombras y saturacion de color en el software.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-001",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el auriculares obsequiados a Marcos",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw01_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw01_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw01",
+          "title": "Regalo para Marcos",
+          "content": "Regaló unos audífonos Sony a su amigo Marcos por su graduación.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw01_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw01_d",
+          "title": "Nota afin",
+          "content": "Usa a diario sus cascos Sonos para escuchar música.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-002",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el vehiculo rentado durante las vacaciones en Mendoza",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw02_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw02_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw02",
+          "title": "Camioneta alquilada",
+          "content": "Alquiló una camioneta 4x4 durante su viaje por caminos montañosos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw02_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw02_d",
+          "title": "Nota afin",
+          "content": "Maneja un auto sedán compacto en la ciudad.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-003",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el videojuego devuelto por defectos de rendimiento",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw03_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw03_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw03",
+          "title": "Reembolso solicitado",
+          "content": "Solicitó reembolso de CyberGame2077 por caídas de fotogramas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw03_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw03_d",
+          "title": "Nota afin",
+          "content": "Completó al cien por ciento el juego medieval de rol.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-004",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el silla de escritorio cedida a su primo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw04_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw04_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw04",
+          "title": "Silla entregada",
+          "content": "Le regaló su anterior silla de oficina de malla a su primo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw04_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw04_d",
+          "title": "Nota afin",
+          "content": "Compró una silla ergonómica con soporte de cuello.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-005",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el computadora portatil vendida para financiar la de escritorio",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw05_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw05_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw05",
+          "title": "Portatil vendido",
+          "content": "Vendió su laptop gamer de quince pulgadas para comprar componentes de torre.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw05_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw05_d",
+          "title": "Nota afin",
+          "content": "Conserva una notebook liviana para viajes.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-006",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el telefono secundario accidentado con agua",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw06_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw06_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw06",
+          "title": "Celular averiado",
+          "content": "Se le cayó su teléfono secundario en la piscina y no encendió más.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw06_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw06_d",
+          "title": "Nota afin",
+          "content": "Su smartphone principal tiene funda antichoque y protector.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-007",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el teclado prestado para participar en el certamen",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw07_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw07_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw07",
+          "title": "Teclado de torneo",
+          "content": "Llevó prestado un teclado de membrana para competir en el evento presencial.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw07_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw07_d",
+          "title": "Nota afin",
+          "content": "Juega en su casa con teclado óptico ultrarrápido.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-008",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el microfono de solapa colocado en la entrevista",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw08_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw08_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw08",
+          "title": "Micrófono corbatero",
+          "content": "En la entrevista televisiva le colocaron un micrófono corbatero inalámbrico.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw08_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw08_d",
+          "title": "Nota afin",
+          "content": "En su estudio habla siempre frente al micrófono dinámico.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-009",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el disco rigido entregado a Laura con fotografias",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw09_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw09_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw09",
+          "title": "Disco prestado",
+          "content": "Le prestó una unidad externa de un terabyte a Laura con fotos antiguas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw09_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw09_d",
+          "title": "Nota afin",
+          "content": "Almacena los videos de transmisiones en un almacenamiento en red NAS.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-010",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el capacitacion en programacion web interrumpida",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw10_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw10_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw10",
+          "title": "Curso abandonado",
+          "content": "Dejó a medias una capacitación de desarrollo web en PHP por falta de tiempo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw10_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw10_d",
+          "title": "Nota afin",
+          "content": "Estudia desarrollo de videojuegos en C++ y Unreal Engine.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-011",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el pista musical de relajacion para la despedida",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw11_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw11_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw11",
+          "title": "Música de cierre",
+          "content": "Puso una pista de lofi jazz relajante para la pantalla de despedida.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw11_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw11_d",
+          "title": "Nota afin",
+          "content": "Para la introducción utiliza un tema electrónico enérgico.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-near-012",
+      "family": "near_but_wrong",
+      "query": "Que detalles recuerda sobre el bebida saborizada rechazada por exceso de azucar",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_nw12_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_nw12_t",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw12",
+          "title": "Bebida descartada",
+          "content": "Probó una bebida energética con sabor a sandía y le pareció empalagosa.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_nw12_d",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_nw12_d",
+          "title": "Nota afin",
+          "content": "Toma agua mineral fresca con rodajas de limón.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-priv-001",
+      "family": "profile_privacy",
+      "query": "Cual es el videojuego predilecto de la streamer Kira",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_pr01_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_pr01_t",
+          "profile_id": "prof_kira",
+          "stable_key": "k_l_pr01",
+          "title": "Preferencia de Kira",
+          "content": "A Kira le fascina jugar aventuras gráficas de misterio.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_pr01_d",
+          "profile_id": "prof_lucas",
+          "stable_key": "k_l_pr01_d",
+          "title": "Nota de otro perfil",
+          "content": "A Lucas le gustan los simuladores de carreras de autos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-priv-002",
+      "family": "profile_privacy",
+      "query": "Cual es el meta de mecenas fijada por Kira",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_pr02_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_pr02_t",
+          "profile_id": "prof_kira",
+          "stable_key": "k_l_pr02",
+          "title": "Objetivo de Kira",
+          "content": "Kira tiene como meta mensual alcanzar ochocientos suscriptores.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_pr02_d",
+          "profile_id": "prof_lucas",
+          "stable_key": "k_l_pr02_d",
+          "title": "Nota de otro perfil",
+          "content": "Lucas busca llegar a trescientos seguidores en su nuevo canal.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-priv-003",
+      "family": "profile_privacy",
+      "query": "Cual es el dia y hora de emision de Kira los fines de semana",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_pr03_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_pr03_t",
+          "profile_id": "prof_kira",
+          "stable_key": "k_l_pr03",
+          "title": "Horario sabatino de Kira",
+          "content": "Kira transmite los sábados a las tres de la tarde.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_pr03_d",
+          "profile_id": "prof_lucas",
+          "stable_key": "k_l_pr03_d",
+          "title": "Nota de otro perfil",
+          "content": "Lucas transmite los sábados a la medianoche.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-priv-004",
+      "family": "profile_privacy",
+      "query": "Cual es el herramienta de ilustracion favorita de Kira",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_pr04_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_pr04_t",
+          "profile_id": "prof_kira",
+          "stable_key": "k_l_pr04",
+          "title": "Tableta de dibujo de Kira",
+          "content": "El periférico predilecto de Kira es su tableta digitalizadora para dibujar.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_pr04_d",
+          "profile_id": "prof_lucas",
+          "stable_key": "k_l_pr04_d",
+          "title": "Nota de otro perfil",
+          "content": "El periférico favorito de Lucas es su volante con pedales.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-priv-005",
+      "family": "profile_privacy",
+      "query": "Cual es el lugar de residencia de Kira",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_pr05_t"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_pr05_t",
+          "profile_id": "prof_kira",
+          "stable_key": "k_l_pr05",
+          "title": "Residencia de Kira",
+          "content": "Kira reside en la ciudad de Córdoba.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_pr05_d",
+          "profile_id": "prof_lucas",
+          "stable_key": "k_l_pr05_d",
+          "title": "Nota de otro perfil",
+          "content": "Lucas reside en la ciudad de Rosario.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-stale-001",
+      "family": "stale_contradiction",
+      "query": "Cual es la informacion vigente sobre el microfono de estudio actual vs antiguo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_st01_curated"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_st01_curated",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st01",
+          "title": "Vigente k_l_st01",
+          "content": "Usa un micrófono Shure SM7B profesional conectado a la interfaz Focusrite.",
+          "status": "promoted",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_st01_stale",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st01",
+          "title": "Obsoleto k_l_st01",
+          "content": "En sus primeros streams hablaba por un micrófono USB barato con ruido.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-stale-002",
+      "family": "stale_contradiction",
+      "query": "Cual es la informacion vigente sobre el placa de video actual vs GPU anterior",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_st02_curated"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_st02_curated",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st02",
+          "title": "Vigente k_l_st02",
+          "content": "Tiene instalada una RTX 3060 de doce gigabytes para sus juegos.",
+          "status": "promoted",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_st02_stale",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st02",
+          "title": "Obsoleto k_l_st02",
+          "content": "Tenía una tarjeta gráfica vieja que no permitía jugar en alta resolución.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-stale-003",
+      "family": "stale_contradiction",
+      "query": "Cual es la informacion vigente sobre el software de edicion vigente vs anterior",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_st03_curated"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_st03_curated",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st03",
+          "title": "Vigente k_l_st03",
+          "content": "Edita sus videos con DaVinci Resolve Studio con aceleración por hardware.",
+          "status": "promoted",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_st03_stale",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st03",
+          "title": "Obsoleto k_l_st03",
+          "content": "Antes utilizaba un editor gratuito de código abierto muy inestable.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-stale-004",
+      "family": "stale_contradiction",
+      "query": "Cual es la informacion vigente sobre el conexion de red de fibra optica vs enlace previo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_st04_curated"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_st04_curated",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st04",
+          "title": "Vigente k_l_st04",
+          "content": "Cuenta con fibra óptica simétrica de seiscientos megas con baja latencia.",
+          "status": "promoted",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_st04_stale",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st04",
+          "title": "Obsoleto k_l_st04",
+          "content": "Tenía conexión por cable coaxial que sufría cortes continuos.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "lock-stale-005",
+      "family": "stale_contradiction",
+      "query": "Cual es la informacion vigente sobre el horario de directo actual vs viejo horario",
+      "expected_abstain": false,
+      "expected_ids": [
+        "lock_mem_st05_curated"
+      ],
+      "candidates": [
+        {
+          "id": "lock_mem_st05_curated",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st05",
+          "title": "Vigente k_l_st05",
+          "content": "Transmite de martes a viernes a partir de las veinte horas.",
+          "status": "promoted",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "lock_mem_st05_stale",
+          "profile_id": "prof_streamer_1",
+          "stable_key": "k_l_st05",
+          "title": "Obsoleto k_l_st05",
+          "content": "Antes hacía directos sorpresa a cualquier hora de la madrugada.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    }
+  ]
+}

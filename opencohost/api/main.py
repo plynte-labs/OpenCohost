@@ -29,6 +29,7 @@ import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import ollama
 from fastapi import FastAPI
@@ -96,6 +97,8 @@ from opencohost.core.memory.memoria_store import MemoriaStore
 # `_legacy_profile_key` (refactor_core_api_20260802 B6).
 from opencohost.core.profiles.personalization import clear_personalization, save_personalization
 from opencohost.core.profiles.profiles import cargar_perfiles
+from opencohost.stt.discovery import is_loopback_uri
+from opencohost.stt.supervisor import LiveAudioSupervisor
 # `logger`, the cross-family write locks, `_PROFILE_ID_RE`, `_count_sql`,
 # `_editorial_cards_by_status`, `_MEMORIA_TITLE_MAX_LENGTH`/
 # `_MEMORIA_CONTENT_MAX_LENGTH`, and the handful of plain response-builder
@@ -300,7 +303,7 @@ def _ptt_controller_hooks(host) -> dict:
     }
 
 
-def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
+def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_factory=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _host_active
@@ -339,8 +342,37 @@ def create_app(host_factory=EngineHost, cors_origins=None) -> FastAPI:
                 getattr(host, "event_log", None) or EventLogSink(),
                 **_ptt_controller_hooks(host),
             )
+            # Local LiveAudio supervisor (liveaudio-service-client track):
+            # lazy by construction — no process spawns until a loopback PTT
+            # probe/start actually needs one. Closed in the finally below AND
+            # via its own atexit fallback (idempotent), so the service never
+            # outlives OpenCohost even on a crash path that skips lifespan
+            # teardown. Injectable for tests via liveaudio_supervisor_factory.
+            factory = liveaudio_supervisor_factory or LiveAudioSupervisor
+            try:
+                supervisor = factory()
+                app.state.liveaudio_supervisor = supervisor
+                if (
+                    supervisor is not None
+                    and os.environ.get("OPENCOHOST_PREWARM_LIVEAUDIO") == "1"
+                    and is_loopback_uri(load_ptt_ws_uri())
+                ):
+                    threading.Thread(
+                        target=supervisor.ensure_started,
+                        name="liveaudio-prewarm",
+                        daemon=True,
+                    ).start()
+            except Exception:
+                app.state.liveaudio_supervisor = None
             yield
         finally:
+            supervisor = getattr(app.state, "liveaudio_supervisor", None)
+            shutdown = getattr(supervisor, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass
             host.stop()
             _host_active = False
 

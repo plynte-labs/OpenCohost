@@ -2,7 +2,6 @@ import queue
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-from opencohost.config.settings import LLM_TIER_EFFECTIVE_CTX_CAPS
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.providers.llm_tiers import LLMTierConfig
 from opencohost.i18n import active as i18n_active
@@ -160,7 +159,7 @@ def test_qwen3_and_gemma_e_models_do_not_use_fixed_token_budget():
     assert MotorVocalIA._uses_reasoning_token_budget("llama3") is False
 
 
-def test_fast_qwen_native_ctx_is_clamped_to_effective_cap_for_options_and_budget():
+def test_fast_qwen_preserves_decoupled_native_ctx_under_tier_switch():
     motor, _ = _ready_motor()
     motor.configure_llm_tiers(
         LLMTierConfig(quality="gemma4:e4b", balanced="llama3", fast="qwen3:1.7b"),
@@ -187,11 +186,12 @@ def test_fast_qwen_native_ctx_is_clamped_to_effective_cap_for_options_and_budget
         assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "respuesta rapida"
 
     assert motor._model_ctx_limit["qwen3:1.7b"] == 40960
-    assert captured_budget["ctx_limit"] == LLM_TIER_EFFECTIVE_CTX_CAPS["fast"]
-    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == LLM_TIER_EFFECTIVE_CTX_CAPS["fast"]
+    # Decoupled from tier caps under ADR-056 WU2: preserves native/allocated ctx
+    assert captured_budget["ctx_limit"] == 40960
+    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == 40960
 
 
-def test_gemma_quality_still_omits_num_ctx_when_effective_cap_exists():
+def test_gemma_quality_preserves_num_ctx_aligned_with_effective_ctx():
     motor, _ = _ready_motor()
     motor.configure_llm_tiers(
         LLMTierConfig(quality="gemma4:e4b", balanced="llama3", fast="qwen3:1.7b"),
@@ -203,4 +203,7 @@ def test_gemma_quality_still_omits_num_ctx_when_effective_cap_exists():
 
     assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "respuesta quality"
 
-    assert "num_ctx" not in motor.ollama.chat.call_args.kwargs["options"]
+    # ADR-056 P0: Gemma preserves num_ctx, but native 131072 on cold start without /api/ps
+    # MUST NOT allocate 128K into Ollama VRAM. It safely defaults to requested context (4096).
+    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == 4096
+    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] != 131072

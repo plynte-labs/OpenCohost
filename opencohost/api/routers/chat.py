@@ -122,6 +122,7 @@ def post_command(request: Request, body: CommandRequest):
 
 
 @router.post("/api/chat/turn")
+@router.post("/api/chat/message")
 def post_chat_turn(request: Request, body: ChatTurnRequest):
     # R8-CRITICAL: this handler must never return `body.text` (or any
     # derived dialogue) in the response, and must never log it. The ack
@@ -129,6 +130,26 @@ def post_chat_turn(request: Request, body: ChatTurnRequest):
     rejection = _validate_chat_text(body.text)
     if rejection is not None:
         return JSONResponse(status_code=422, content={"detail": rejection})
+
+    host = getattr(getattr(request, "app", None), "state", None)
+    host = getattr(host, "host", None)
+    if host is not None:
+        from opencohost.core.engine import llm_readiness as llm_readiness_mod
+
+        readiness = llm_readiness_mod.resolve_llm_readiness(host)
+        if not readiness.can_chat:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "accepted": False,
+                    "detail": {
+                        "error": "ENGINE_UNAVAILABLE",
+                        "state": readiness.state,
+                        "message": "LLM engine is not ready for inference.",
+                    },
+                },
+            )
+
     key = request.headers.get("Idempotency-Key") or body.idempotency_key
     dispatcher = request.app.state.dispatcher
     host = request.app.state.host

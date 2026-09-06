@@ -9,9 +9,24 @@ Guía rápida para streamers. Todo lo que necesitás saber para usar Kira sin so
 ### Cómo funciona
 
 1. Activá PTT en la pestaña **PTT** (switch "PTT ON")
-2. La tecla por default es **F8** (podés cambiarla con "Mapear")
+2. La tecla por default es **F10** (podés cambiarla con "Mapear")
 3. **Mantené presionada** la tecla mientras hablás
 4. **Soltá** cuando terminés — Kira procesa lo que dijiste
+
+### LiveAudio: arranque automático (modo local)
+
+Ya no hace falta abrir LiveAudio por separado ni anotar su puerto: al
+mantener PTT (o probar la conexión), OpenCohost **levanta LiveAudio solo**
+como proceso hijo, detecta su puerto efectivo automáticamente y lo mantiene
+vivo hasta que cierres OpenCohost. La primera vez puede tardar unos segundos
+extra mientras el modelo de voz carga — si ves el estado de "cargando",
+esperá y reintentá.
+
+Modo manual / segunda PC: si preferís tu LiveAudio de siempre, abrilo vos
+antes de hablar — OpenCohost lo detecta y lo usa sin arrancar otro. Y si tu
+LiveAudio corre en otra PC de captura, pegá su URL en la configuración de
+PTT (`stt_ws_uri`): las direcciones remotas se usan tal cual y **nunca**
+disparan un arranque local.
 
 ### Importante: Buffer inteligente
 
@@ -35,7 +50,7 @@ Tu voz **se encola** y se procesa cuando Kira termina. No la interrumpe. Esto ev
 
 | Síntoma | Causa | Solución |
 |---------|-------|----------|
-| Kira no responde al soltar F8 | LiveAudio no está conectado | Hacé clic en "Conectar LiveAudio" primero |
+| Kira no responde al soltar F8 | LiveAudio no disponible | Probá de nuevo: OpenCohost lo arranca solo; si persiste, verificá que `liveaudio-service` esté instalado o abrí tu LiveAudio manual |
 | Kira responde frases cortadas | Soltaste F8 muy rápido | Esperá un segundo después de terminar de hablar antes de soltar |
 | Kira responde a ruido | PTT activado sin LiveAudio | Asegurate de que PTT + LiveAudio estén ambos activos |
 
@@ -199,7 +214,7 @@ Esto configura por proceso:
 |----------|-----------|
 | Kira no arranca | Verificá que Ollama esté corriendo (`ollama list`) |
 | "Ollama no disponible" | Iniciá Ollama y usá el botón de refresh en Modelos |
-| PTT no funciona | Verificá que LiveAudio esté conectado (botón "Hablar" verde) |
+| PTT no funciona | LiveAudio no disponible | OpenCohost lo arranca solo al usar PTT; si falla, instalá `liveaudio-service` en el PATH o abrí tu LiveAudio manual |
 | TTS timeout | Si usás modo pesado, verificá que `server_qwen.py` esté corriendo |
 | Chat YouTube no conecta | Verificá el video_id y que el stream esté en vivo |
 | Kira habla sola | Asegurate de que PTT esté ON y que no haya feedback micrófono-parlantes |

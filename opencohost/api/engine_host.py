@@ -1179,17 +1179,36 @@ class EngineHost:
             except Exception:
                 pass
         if self.motor is not None:
-            # B2a (memoria_quality_20260717): flush the live memorias window on a
-            # clean API shutdown BEFORE the stop sentinel, so un-evicted pairs
-            # survive. Belt-and-braces with B1 capture-at-commit (which already
-            # persists each pair at commit). flush_memorias is itself bounded +
-            # fail-open, but guard anyway so a flush error never blocks teardown.
             try:
                 self.motor.flush_memorias()
             except Exception:
                 pass
             try:
-                self.motor.command_queue.put(None)  # only engine-thread stop path
+                self.motor.command_queue.put(None)
+            except Exception:
+                pass
+            try:
+                import time as _t
+                _deadline = _t.monotonic() + 1.0
+                while _t.monotonic() < _deadline:
+                    try:
+                        if not getattr(self.motor, "is_processing", False) and not getattr(self.motor, "_speech_active", False):
+                            break
+                    except Exception:
+                        break
+                    _t.sleep(0.02)
+            except Exception:
+                pass
+            # Memory v5 teardown is owned by the single MemorySubsystem facade:
+            # runtime quiesce (SHUTDOWN closes the session + segments
+            # episodes), then semantic worker shutdown, then cache close.
+            # The legacy _memory_runtime / _semantic_worker /
+            # _semantic_cache_store fields must NOT be touched here — they
+            # delegate to the same facade and double-teardown races it.
+            try:
+                mem = getattr(self.motor, "_memory", None)
+                if mem is not None:
+                    mem.shutdown(timeout_s=1.0)
             except Exception:
                 pass
         if self.monitor is not None:

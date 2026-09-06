@@ -7,7 +7,7 @@ shortened `ready`/`speaking`/`processing` forms.
 
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # Agent provenance name — REQUIRED non-blank in every agent write (design
 # 'Provenance'). Blank/whitespace would be stored as '' — which
@@ -378,6 +378,28 @@ class HealthResponse(BaseModel):
     engine_alive: bool
 
 
+class ModelReasoningConfig(BaseModel):
+    enabled: bool = False
+    budget_tokens: int = 512
+
+
+class InferenceRuntimeState(BaseModel):
+    effective_budget: int = 512
+    allocated_context: int = 4096
+    calibration_state: str = "COLD"
+    ewma_tps: float = 0.0
+    residency_ratio: Optional[float] = None
+    spill_bytes: Optional[int] = None
+    clamp_reason: Optional[str] = None
+
+
+class UpdateModelReasoningRequest(BaseModel):
+    enabled: Optional[bool] = None
+    budget_tokens: Optional[int] = None
+    preset: Optional[str] = None
+    model: Optional[str] = None
+
+
 class ModelsResponse(BaseModel):
     """GET /api/models (Tier B, direct read).
 
@@ -390,6 +412,9 @@ class ModelsResponse(BaseModel):
     current_model: Optional[str]
     tiers: dict[str, str]
     active_tier: str
+    is_reasoning_active: bool = False
+    reasoning_config: ModelReasoningConfig = Field(default_factory=ModelReasoningConfig)
+    runtime_state: Optional[InferenceRuntimeState] = None
 
 
 class MusicTrackOut(BaseModel):
@@ -1317,6 +1342,36 @@ class PttStopResponse(BaseModel):
     state: str
 
 
+class SttServiceStatus(BaseModel):
+    """Supervised local-STT summary (liveaudio-service-client track).
+
+    Additive diagnostic payload: ``mode`` is ``auto`` (loopback managed by
+    the supervisor), ``local`` (loopback without supervisor, or ``wss://``
+    loopback — a configured/manual connection, never auto-spawned), or
+    ``remote`` (second capture PC). ``last_warning`` carries the latest
+    warning CODE only, ``returncode`` the observed child exit code — never
+    stderr text, transcripts, or paths. ``schema``/``version`` let the UI
+    (or a future API revision) detect shape drift without guessing; ``schema``
+    rides an alias so the wire key keeps the service-event convention without
+    shadowing ``BaseModel`` internals.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    status_schema: str = Field(default="opencohost.stt.status", alias="schema")
+    version: int = 1
+    mode: str = "local"
+    spawned: bool = False
+    running: bool = False
+    port: Optional[int] = None
+    base_port: Optional[int] = None
+    service_state: str = "unknown"
+    asr_state: str = "unknown"
+    fatal: Optional[str] = None
+    last_warning: Optional[str] = None
+    returncode: Optional[int] = None
+
+
 class PttStateResponse(BaseModel):
     """GET /api/ptt/state. ``buffered_chars`` is a count, NEVER the text.
 
@@ -1324,6 +1379,10 @@ class PttStateResponse(BaseModel):
     backend itself consumes — exposed so the webview can open its OWN
     recv-only connection (the OBS-browser-source pattern) for the transcript
     echo. A URL/port is not transcript text; the privacy rule is untouched.
+
+    ``stt_service`` (additive, liveaudio-service-client track) is the
+    :class:`SttServiceStatus` snapshot, or None when the router could not
+    build one.
     """
 
     state: str
@@ -1331,6 +1390,7 @@ class PttStateResponse(BaseModel):
     buffered_chars: int = 0
     last_error: Optional[str] = None
     stt_ws_url: Optional[str] = None
+    stt_service: Optional[SttServiceStatus] = None
 
 
 class PttConfigRequest(BaseModel):
@@ -1364,3 +1424,16 @@ class PttTestResponse(BaseModel):
 
     ok: bool
     detail: str
+
+
+class LlmReadinessResponse(BaseModel):
+    """GET /api/llm/readiness wire response model (llm_readiness_recovery_20260904)."""
+
+    state: str
+    provider: str
+    can_chat: bool
+    selected_model: Optional[str] = None
+    ollama: dict
+    cloud: dict
+    hardware: dict
+

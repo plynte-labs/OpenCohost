@@ -29,13 +29,23 @@ from opencohost.api.models import (
     LlmProviderProbeResponse,
     LlmProviderRequest,
     LlmProviderResponse,
+    LlmReadinessResponse,
 )
 from opencohost.config.llm_provider import save_provider_config
 from opencohost.config.settings import LLM_PROVIDER_PRESETS
+from opencohost.core.engine import llm_readiness as llm_readiness_mod
 from opencohost.stream_admin.oauth_store import OAuthStore
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
+
+
+@router.get("/api/llm/readiness", response_model=LlmReadinessResponse)
+def get_llm_readiness(request: Request) -> LlmReadinessResponse:
+    host = getattr(getattr(request, "app", None), "state", None)
+    host = getattr(host, "host", None)
+    result = llm_readiness_mod.resolve_llm_readiness(host)
+    return LlmReadinessResponse(**result.to_dict())
 
 
 @router.get("/api/llm/provider", response_model=LlmProviderResponse)

@@ -993,7 +993,7 @@ def test_stack_depth_high_water_logs_at_four(router_motors, caplog):
         router = motor._speech_router
         assert mixer.entered[0].wait(10.0)
         for i in range(1, 5):
-            motor._speak_or_submit(_text(2), source="direct")  # prio-0 preempt
+            motor._speak_or_submit(_text(2), source="custom-prio0", priority=0)  # prio-0 preempt
             assert _wait_until(lambda: len(router._stack) == i, timeout=10.0), (
                 f"depth never reached {i}"
             )
@@ -1300,3 +1300,62 @@ def test_ptt_hold_released_logs_the_held_duration(router_motors, caplog):
     router.set_ptt_held(True)
     router.set_ptt_held(False)
     assert _released()[-1] == "[SPEECH_STACK] ptt_hold released held_ms=-1", _released()
+
+
+def test_ptt_interrupts_owner_speech_suspends_and_resumes_if_not_superseded(router_motors):
+    """Owner turns (ptt, direct, owner) interrupted by PTT are suspended, and resume if not superseded."""
+    mixer = _GateMixerMusic(block_at=(0,))
+    motor, rec, _ = _armed(router_motors, mixer_music=mixer, interrupt_enabled=True)
+
+    motor._speak_or_submit(_job_text("O", 2), source="direct")
+    assert mixer.entered[0].wait(5.0)
+    router = motor._speech_router
+    job = router._active
+
+    motor.pause_speech_for_ptt()
+    assert _wait_until(lambda: job.state is SpeechJobState.SUSPENDED, timeout=5.0)
+    assert len(router._stack) == 1, "owner speech must be pushed to the stack"
+    assert router._stack[0] is job
+
+    motor.resume_speech_after_ptt()
+    assert _wait_until(lambda: job.state is SpeechJobState.FINISHED, timeout=10.0)
+    assert len(router._stack) == 0
+
+
+def test_drain_speech_for_new_turn_sweeps_owner_sources(router_motors):
+    """drain_speech_for_new_turn clears owner speech from the router stack."""
+    from opencohost.core.speech.router import SpeechJob
+    motor, _, _ = _armed(router_motors, interrupt_enabled=True)
+    router = motor._ensure_router()
+    router.set_ptt_held(True)  # Prevent _pick() from popping stack during test
+    try:
+        j_owner = SpeechJob(job_id=901, text="test", source="ptt", priority=0)
+        j_agenda = SpeechJob(job_id=902, text="test2", source="kira-agenda", priority=2)
+        router._stack.extend([j_owner, j_agenda])
+
+        motor.drain_speech_for_new_turn("ptt")
+        assert j_owner not in router._stack
+        assert j_owner.state is SpeechJobState.DISCARDED
+        assert j_agenda in router._stack
+    finally:
+        router.set_ptt_held(False)
+
+
+def test_new_owner_submit_sweeps_superseded_owner_stack(router_motors):
+    """Submitting a new owner job clears pre-existing owner jobs from _stack, preserving agenda jobs."""
+    from opencohost.core.speech.router import PRIORITY_OWNER, SpeechJob
+    motor, _, _ = _armed(router_motors, interrupt_enabled=True)
+    router = motor._ensure_router()
+    router.set_ptt_held(True)  # Hold so router loop does not pop stack
+    try:
+        j_old_owner = SpeechJob(job_id=910, text="old answer", source="direct", priority=0)
+        j_agenda = SpeechJob(job_id=911, text="agenda item", source="kira-agenda", priority=2)
+        router._stack.extend([j_old_owner, j_agenda])
+
+        router.submit("new answer", source="ptt", priority=PRIORITY_OWNER)
+
+        assert j_old_owner not in router._stack
+        assert j_old_owner.state is SpeechJobState.DISCARDED
+        assert j_agenda in router._stack
+    finally:
+        router.set_ptt_held(False)

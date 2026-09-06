@@ -8,7 +8,7 @@ verdict: ``_ws_listener`` never sends, no sounddevice/pyaudio anywhere).
 
 COMPOSITION, not extraction: the CTK ``voice_control.py`` / ``ptt_manager.py``
 classes are NOT touched. This is a ~200-line headless port that mirrors their
-PTT buffer + 5s-grace-flush + missed-key-up "guillotine" behaviour for the
+PTT buffer + 1.2s-grace-flush + missed-key-up "guillotine" behaviour for the
 FastAPI sidecar, so the Tauri client gets full parity with zero CTK regression
 risk.
 
@@ -93,7 +93,10 @@ class PttSession:
     """One recv-only WhisperLive WS connection with buffer + grace + watchdog.
 
     Timings are constructor params (with production defaults) so tests inject
-    tiny values and never need a real STT server or real 5s waits.
+    tiny values and never need a real STT server or real 5s waits. The default
+    grace (1.2s) gives adequate margin for local LiveAudio ASR tail chunks
+    (~400ms VAD silence + ~300ms Whisper transcribe) without the 5-second
+    dead latency.
 
     Callbacks (all invoked from the WS thread, all must be thread-safe):
       - ``on_flush(text)``  : dispatch the buffered dictation as ONE turn.
@@ -120,7 +123,7 @@ class PttSession:
         *,
         on_close: Optional[Callable[[Optional[str]], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
-        grace: float = 5.0,
+        grace: float = 1.2,
         keepalive_timeout: float = 8.0,
         watchdog_tick: float = 0.5,
         ws_open_timeout: float = 2.0,
@@ -450,6 +453,7 @@ class PttController:
         on_press_precheck: Optional[Callable[[], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         motor=None,
+        grace: float = 1.2,
         **session_kwargs,
     ):
         self._ws_uri = ws_uri
@@ -464,6 +468,7 @@ class PttController:
         # host doubles need not supply it.
         self._motor = motor
         self._session_factory = session_factory
+        session_kwargs.setdefault("grace", grace)
         self._session_kwargs = session_kwargs
         # Recovery hook (2026-07-15 PTT voice-death fix): the smallest
         # possible surface into MotorVocalIA — a bound
@@ -563,6 +568,13 @@ class PttController:
         # break the WS flush -- the dispatch above already succeeded, and the
         # engine-boundary drain remains the backstop this one cannot cover.
         motor = self._motor
+        if motor is not None:
+            drain_speech = getattr(motor, "drain_speech_for_new_turn", None)
+            if callable(drain_speech):
+                try:
+                    drain_speech("ptt")
+                except Exception:
+                    logger.exception("PTT dispatch drain_speech_for_new_turn failed")
         if motor is not None and (motor.is_processing or motor.is_speaking):
             drain = getattr(motor, "_drain_pending_direct_into_priority_queue", None)
             if callable(drain):

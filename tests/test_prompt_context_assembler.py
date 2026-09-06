@@ -124,7 +124,7 @@ def test_context_enrichments_ordering_memorias_before_digest_and_editorial():
     assert mem_idx < dig_idx < edt_idx
 
 
-def test_reasoning_model_detection_drops_num_predict():
+def test_reasoning_model_detection_retains_governed_num_predict():
     assembler = PromptContextAssembler()
     setup = assembler.assemble(
         "calcula algo",
@@ -138,7 +138,9 @@ def test_reasoning_model_detection_drops_num_predict():
         is_reasoning_model=lambda m: True,
     )
 
-    assert "num_predict" not in setup.opciones_llm
+    # Under ADR-056, num_predict is never dropped; it is bounded by budget governance
+    assert "num_predict" in setup.opciones_llm
+    assert setup.think is False
 
 
 def test_evicted_pairs_callback_called():
@@ -180,3 +182,44 @@ def test_cloud_assemble_applies_cloud_ceilings():
     assert setup.opciones_llm["num_predict"] == 16384
     assert setup.native_ctx == 32768
     assert setup.effective_ctx == 32768
+
+
+def test_prompt_tokens_estimated_and_drafting_budget_reserved():
+    assembler = PromptContextAssembler()
+    setup = assembler.assemble(
+        "redacta un ensayo largo sobre inteligencia artificial",
+        "direct",
+        system_prompt="Eres un redactor experto.",
+        use_system_role=True,
+        is_local=True,
+        provider_cfg={},
+        request_model="llama3",
+        history_snapshot=[],
+        intent="drafting",
+        effective_ctx_resolver=lambda m, n: 8192,
+    )
+
+    # Budget resolution was executed with non-zero prompt tokens and drafting intent
+    assert setup.budget_resolution is not None
+    assert setup.budget_resolution.prompt_tokens > 0
+    # Drafting intent reserves at least 2048 output tokens
+    assert setup.budget_resolution.effective_budget >= 2048
+    assert setup.tts_eligible is False
+
+
+def test_gemma_preserves_num_ctx_and_sets_temperature():
+    assembler = PromptContextAssembler()
+    setup = assembler.assemble(
+        "hola mundo",
+        "direct",
+        system_prompt="Eres Kira.",
+        use_system_role=True,
+        is_local=True,
+        provider_cfg={},
+        request_model="gemma4:e4b",
+        history_snapshot=[],
+        effective_ctx_resolver=lambda m, n: 16384,
+    )
+
+    assert setup.opciones_llm["num_ctx"] == 16384
+    assert setup.opciones_llm["temperature"] == 0.7

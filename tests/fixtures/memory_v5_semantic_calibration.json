@@ -1,0 +1,786 @@
+{
+  "schema": "memory-v5-semantic-calibration/v1",
+  "case_count": 24,
+  "cases": [
+    {
+      "case_id": "cal-hard-001",
+      "family": "hard_lexical",
+      "query": "Cual es el valor configurado del puerto OBS_WS_PORT para websocket",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_h01_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_h01_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_obs_ws_port",
+          "title": "Configuracion OBS_WS_PORT",
+          "content": "El valor configurado del puerto OBS_WS_PORT es 4455 para el websocket.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_h01_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_http_port",
+          "title": "Servidor HTTP puerto",
+          "content": "El servidor API HTTP escucha en el puerto 8080.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-hard-002",
+      "family": "hard_lexical",
+      "query": "Que binario ejecutable se despliega con PiperTTS_v1.3.0 en la ruta",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_h02_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_h02_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_piper_v1",
+          "title": "Despliegue PiperTTS_v1.3.0 binario",
+          "content": "Se compila y despliega el binario ejecutable PiperTTS_v1.3.0 en la ruta local.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_h02_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_edge_v",
+          "title": "Modulo EdgeTTS nube",
+          "content": "Probó EdgeTTS_v6.1.0 en la nube.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-hard-003",
+      "family": "hard_lexical",
+      "query": "Que disipador termico incorpora la placa grafica RTX4090_STRIX instalada",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_h03_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_h03_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_rtx4090_strix",
+          "title": "Placa grafica RTX4090_STRIX",
+          "content": "La placa grafica RTX4090_STRIX instalada cuenta con un disipador termico masivo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_h03_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_gtx1060",
+          "title": "Tarjeta vieja GTX1060",
+          "content": "Conservo una vieja tarjeta grafica GTX1060 de repuesto.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-hard-004",
+      "family": "hard_lexical",
+      "query": "Que protocolo de telemetria define el documento formal ADR-019 registrado",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_h04_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_h04_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_adr_019",
+          "title": "Protocolo formal ADR-019",
+          "content": "El documento formal ADR-019 define el protocolo de telemetria registrado.",
+          "status": "curated",
+          "pinned": 1,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_h04_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_adr_001",
+          "title": "Estructura inicial ADR-001",
+          "content": "El documento ADR-001 define la estructura inicial de carpetas.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-syn-001",
+      "family": "synonym",
+      "query": "Cual es el panel visual auxiliar para leer la conversacion",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_s01_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_s01_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_mon",
+          "title": "Monitor vertical",
+          "content": "Usa una pantalla secundaria orientada al chat de los espectadores.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_s01_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_tec",
+          "title": "Teclado mecanico",
+          "content": "Escribe con pulsadores silenciosos lubricados a mano.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-syn-002",
+      "family": "synonym",
+      "query": "Que aparato de captura sonora tiene instalado frente a su boca",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_s02_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_s02_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_mic",
+          "title": "Microfono Shure MV7",
+          "content": "Montó una cápsula dinámica conectada por XLR para registrar su locución.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_s02_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_mouse",
+          "title": "Raton ultraligero",
+          "content": "Usa un puntero óptico inalámbrico de cincuenta gramos.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-syn-003",
+      "family": "synonym",
+      "query": "Que lente fotografico profesional enfoca su rostro en vivo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_s03_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_s03_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_cam",
+          "title": "Camara Sony Alpha",
+          "content": "Utiliza un cuerpo mirrorless con objetivo luminoso de gran apertura.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_s03_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_light",
+          "title": "Foco LED",
+          "content": "Ilumina con panel de luz difusa regulable a 5600 kelvin.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-syn-004",
+      "family": "synonym",
+      "query": "Cual es el procesador principal del ordenador de escritorio",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_s04_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_s04_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_cpu",
+          "title": "Microchip Ryzen 9",
+          "content": "El equipo funciona con una CPU AMD de doce núcleos de alto rendimiento.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_s04_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_psu",
+          "title": "Fuente modular",
+          "content": "Suministra energía limpia mediante una fuente de poder certificada de 850 watts.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-para-001",
+      "family": "paraphrase",
+      "query": "Como ajusto los filtros sonoros para emitir su voz en directo",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_p01_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_p01_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_eq",
+          "title": "Procesamiento acustico",
+          "content": "Configuró un pasa-altos en 80Hz y compresión dinámica para mejorar la locución.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_p01_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_bgm",
+          "title": "Banda sonora",
+          "content": "Mantiene las pistas instrumentales de fondo a bajo volumen para no saturar.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-para-002",
+      "family": "paraphrase",
+      "query": "Cual fue el tiempo record completando el desafio de velocidad",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_p02_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_p02_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_speed",
+          "title": "Superacion de speedrun",
+          "content": "Consiguió terminar la partida completa en cuarenta y cinco minutos sin sufrir derrotas.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_p02_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_strat",
+          "title": "Juego de gestion",
+          "content": "Desarrolló una civilización próspera en cuatro horas continuas de estrategia.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-para-003",
+      "family": "paraphrase",
+      "query": "Que baraja de naipes digitales acostumbra emplear los viernes",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_p03_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_p03_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_deck",
+          "title": "Mazo de control",
+          "content": "Le gusta jugar combinaciones tácticas centradas en hechizos de hielo y robo de recursos.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_p03_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_chess",
+          "title": "Ajedrez relampago",
+          "content": "Emplea la apertura española cuando disputa partidas rápidas de cinco minutos.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-para-004",
+      "family": "paraphrase",
+      "query": "Que animacion en pantalla salta cuando alguien apoya monetariamente",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_p04_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_p04_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_sub",
+          "title": "Alerta de suscripcion",
+          "content": "Diseñó un gráfico pixel-art con efecto sonoro chiptune al registrarse nuevos mecenas.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_p04_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_goal",
+          "title": "Objetivo de donacion",
+          "content": "Muestra una barra verde en la esquina superior para renovar la placa de sonido.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-no-001",
+      "family": "no_memory",
+      "query": "Cual es la capital politica de Francia",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_no01_d1",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no1_a",
+          "title": "Horario de stream",
+          "content": "Emite en vivo de lunes a jueves a partir de las siete de la tarde.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_no01_d2",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no1_b",
+          "title": "Tarjeta grafica",
+          "content": "Tiene una placa de video potente para renderizar contenido.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-no-002",
+      "family": "no_memory",
+      "query": "A cuantos millones de kilometros esta el sol de nuestro planeta",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_no02_d1",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no2_a",
+          "title": "Bebida habitual",
+          "content": "Toma cafe negro sin endulzante durante las transmisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_no02_d2",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no2_b",
+          "title": "Silla ergonomica",
+          "content": "Usa una silla de oficina con soporte lumbar ajustable.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-no-003",
+      "family": "no_memory",
+      "query": "Cual es el procedimiento para elaborar pasta carbonara italiana",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_no03_d1",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no3_a",
+          "title": "Genero favorito",
+          "content": "Prefiere títulos de rol con narrativas ricas y toma de decisiones.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_no03_d2",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no3_b",
+          "title": "Disco de estado solido",
+          "content": "Instaló una unidad NVMe de dos terabytes para almacenar proyectos.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-no-004",
+      "family": "no_memory",
+      "query": "Que numero atomico le corresponde al elemento oro",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_no04_d1",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no4_a",
+          "title": "Hito de seguidores",
+          "content": "Festejó alcanzar los quinientos suscriptores activos en el canal.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_no04_d2",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_no4_b",
+          "title": "Cables blindados",
+          "content": "Conectó todos los periféricos con cables apantallados.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-near-001",
+      "family": "near_but_wrong",
+      "query": "Cual fue el periferico de escritura comprado como presente para su hermano",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_nw01_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_nw01_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_gift_kb",
+          "title": "Regalo fraternal",
+          "content": "Compró un teclado mecánico compacto de sesenta por ciento como obsequio para su hermano.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_nw01_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_own_kb",
+          "title": "Teclado propio",
+          "content": "Utiliza a diario un teclado completo con teclado numerico para programar y jugar.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-near-002",
+      "family": "near_but_wrong",
+      "query": "Que dispositivo apuntador devolvio por desperfectos tecnicos",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_nw02_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_nw02_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_ret_mouse",
+          "title": "Devolucion de raton",
+          "content": "Devolvió un ratón óptico inalámbrico porque el sensor perdía rastreo en movimientos veloces.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_nw02_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_act_mouse",
+          "title": "Raton de uso",
+          "content": "Su ratón principal funciona impecable con polling rate de mil hertz.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-near-003",
+      "family": "near_but_wrong",
+      "query": "Que pantalla cedio temporalmente a su companero de habitacion",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_nw03_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_nw03_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_loan_mon",
+          "title": "Monitor prestado",
+          "content": "Le prestó temporalmente su antiguo monitor de sesenta hertz a su compañero.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_nw03_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_main_mon",
+          "title": "Monitor de juegos",
+          "content": "Juega siempre en su pantalla principal de doscientos cuarenta hertz con panel IPS.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-near-004",
+      "family": "near_but_wrong",
+      "query": "Que equipo de grabacion usaba en sus inicios antes de adquirir la mirrorless",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_nw04_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_nw04_t",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_old_cam",
+          "title": "Camara inicial",
+          "content": "En sus primeros directos transmitía con una camarita web USB de 720p.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_nw04_d",
+          "profile_id": "prof_cal_a",
+          "stable_key": "k_cal_new_cam",
+          "title": "Camara actual",
+          "content": "Actualmente graba con una cámara mirrorless profesional con lente de 24mm.",
+          "status": "promoted",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-priv-001",
+      "family": "profile_privacy",
+      "query": "Cual es la meta de recaudacion del streamer alfa",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_pr01_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_pr01_t",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_m_alpha",
+          "title": "Meta streamer alfa",
+          "content": "El streamer alfa busca reunir fondos para renovar su placa de audio.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_pr01_d",
+          "profile_id": "prof_cal_beta",
+          "stable_key": "k_cal_m_beta",
+          "title": "Meta streamer beta",
+          "content": "El streamer beta está ahorrando para comprar una silla gamer nueva.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-priv-002",
+      "family": "profile_privacy",
+      "query": "Cual es la clave secreta del router",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_pr02_p",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_priv_pass",
+          "title": "Password confidencial",
+          "content": "Dato confidencial privado protegido.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 1,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_pr02_d",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_pub_net",
+          "title": "Red wifi invitados",
+          "content": "La red de invitados se llama StreamStudioGuest.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-priv-003",
+      "family": "profile_privacy",
+      "query": "Que titulo de aventura tiene agendado el streamer beta",
+      "expected_abstain": false,
+      "expected_ids": [
+        "cal_mem_pr03_t"
+      ],
+      "candidates": [
+        {
+          "id": "cal_mem_pr03_t",
+          "profile_id": "prof_cal_beta",
+          "stable_key": "k_cal_g_beta",
+          "title": "Aventura de beta",
+          "content": "El streamer beta tiene planeado jugar Hollow Knight Silksong cuando estrene.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        },
+        {
+          "id": "cal_mem_pr03_d",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_g_alpha",
+          "title": "Aventura de alfa",
+          "content": "El streamer alfa juega exclusivamente simuladores de vuelo.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    },
+    {
+      "case_id": "cal-priv-004",
+      "family": "profile_privacy",
+      "query": "Que aviso antiguo fue descartado y archivado",
+      "expected_abstain": true,
+      "expected_ids": [],
+      "candidates": [
+        {
+          "id": "cal_mem_pr04_inact",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_inact",
+          "title": "Aviso viejo",
+          "content": "Recordatorio descartado e inactivo del ciclo anterior.",
+          "status": "draft",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 1
+        },
+        {
+          "id": "cal_mem_pr04_norm",
+          "profile_id": "prof_cal_alpha",
+          "stable_key": "k_cal_act",
+          "title": "Aviso vigente",
+          "content": "La agenda actual contiene directos los fines de semana.",
+          "status": "curated",
+          "pinned": 0,
+          "private": 0,
+          "inactive": 0
+        }
+      ]
+    }
+  ]
+}

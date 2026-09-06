@@ -1,0 +1,14 @@
+{
+  "schema": "memory-v5-semantic-benchmark-diagnostics/v1",
+  "run_id": "run-20260831-182044",
+  "evaluation_timestamp": "2026-08-31T18:21:02Z",
+  "candidates_evaluated": [
+    "a",
+    "b",
+    "c"
+  ],
+  "counts": {
+    "calibration_cases": 24,
+    "locked_cases": 80
+  }
+}

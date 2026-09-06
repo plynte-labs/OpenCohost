@@ -225,9 +225,16 @@ def test_get_state_shape_counts_never_text():
         resp = client.get("/api/ptt/state")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error", "stt_ws_url"}
+        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error", "stt_ws_url", "stt_service"}
         assert isinstance(body["buffered_chars"], int)
         assert body["state"] == "flushing"
+        # Additive supervisor summary (liveaudio-service-client track): the
+        # real lifespan supervisor is attached, but reporting is passive —
+        # nothing was spawned (no binary installed in tests) and the fake
+        # controller keeps its configured loopback URL.
+        assert body["stt_service"]["mode"] == "auto"
+        assert body["stt_service"]["spawned"] is False
+        assert body["stt_service"]["port"] is None
         # A URL/port is NOT transcript text — the privacy rule bans text, not
         # the address of the viewer socket (same info the OBS overlay uses).
         assert body["stt_ws_url"] == "ws://127.0.0.1:8765"

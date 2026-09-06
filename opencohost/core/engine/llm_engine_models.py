@@ -1,10 +1,9 @@
-import concurrent.futures  # not bare `concurrent`: the submodule attribute only
-                           # exists because llm_engine.py:15 imports it, so a bare
-                           # import works today by side effect and AttributeErrors
-                           # the day that line goes away.
+import concurrent.futures
 import httpx
+import logging
 import requests
 import socket
+import sys
 import threading
 import time
 import types
@@ -12,26 +11,63 @@ import uuid
 from typing import Optional
 
 from opencohost.config.settings import (
+    CLOUD_CHAT_TIMEOUT,
+    CTX_FALLBACK_DEFAULT,
+    LLM_KEEP_ALIVE,
     LLM_SCOUT_TIMEOUT,
+    OLLAMA_CHAT_TIMEOUT,
+    OLLAMA_REQUEST_TIMEOUT,
     STREAM_IDLE_PROBE_SECONDS,
     STREAM_IDLE_TIMEOUT_SECONDS,
+    save_last_model,
 )
-from opencohost.core.providers.llm_tiers import LLMTierConfig
-
-# These three are imported directly, not via `_eng`, because they appear where the
-# class body evaluates: `LLMTierConfig`/`Optional` in annotations, LLM_SCOUT_TIMEOUT
-# as a default arg on `_create_ollama_scout_client`. `_eng.X` there resolves only
-# for names bound above llm_engine's mixin-import line. Nothing patches any of
-# them, and the default arg was ALREADY frozen at class-definition time before the
-# split, so this is behaviour-identical -- see llm_engine_memorias.py.
-# The two STREAM_* budgets are read inside a method body, so `_eng.X` would be
-# timing-safe -- but llm_engine.py does not re-export them, so it would also be an
-# AttributeError. They are read live from this module's globals on every call, so
-# a test (or a future settings reload) can rebind them here.
-from opencohost.core import llm_engine as _eng
+from opencohost.core.context import context_budget
 from opencohost.core.engine.llm_inference_service import get_inference_service
+from opencohost.core.providers.llm_tiers import (
+    LLMTierConfig,
+    LLMTierState,
+    LLM_TIER_LABELS,
+)
+
+logger = logging.getLogger("OpenCohost")
+
+
+def _save_last_model_compat(*args, **kwargs) -> None:
+    """Resolve save_last_model dynamically from llm_engine for test mock compatibility."""
+    target = getattr(sys.modules.get("opencohost.core.llm_engine"), "save_last_model", save_last_model)
+    return target(*args, **kwargs)
+
+def _models_match_residency(req_model: str, snap_model: str) -> bool:
+    """Return True if req_model and snap_model refer to the same model.
+
+    Handles:
+    - Case insensitivity ('gemma4:e4b' vs 'Gemma4:E4B')
+    - Stripping ':latest' suffix
+    - Delimited tag/flavor extensions (':', '-', '_') such that
+      'gemma4:e4b' matches 'gemma4:e4b-instruct' and 'gemma4:e4b:q4_k_m',
+      but 'qwen2.5:7b' NEVER matches 'qwen2.5:72b'.
+    """
+    r = str(req_model or "").strip().lower()
+    s = str(snap_model or "").strip().lower()
+    if not r or not s:
+        return False
+    if r == s:
+        return True
+    r_base = r[:-7] if r.endswith(":latest") else r
+    s_base = s[:-7] if s.endswith(":latest") else s
+    if r_base == s_base:
+        return True
+    for delim in (":", "-", "_"):
+        if s.startswith(r + delim) or r.startswith(s + delim):
+            return True
+        if s_base.startswith(r_base + delim) or r_base.startswith(s_base + delim):
+            return True
+    return False
+
 
 class ModelManagementMixin:
+    _models_match_residency = staticmethod(_models_match_residency)
+
     def _probe_ollama_service(self, timeout: float = 3.0) -> bool:
         """Pure, side-effect-free, bounded health check for Ollama daemon.
 
@@ -140,7 +176,7 @@ class ModelManagementMixin:
             try:
                 self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
             except Exception as e:
-                _eng.logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
+                logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
 
         self.current_model = new_model
         self._awaiting_first_success_after_switch = previous_model != new_model
@@ -162,7 +198,7 @@ class ModelManagementMixin:
     ) -> None:
         """Replace manual tier slots without changing prompt or conversation memory."""
         tier = active_tier or self._infer_active_tier(self.current_model, config)
-        self.llm_tiers = _eng.LLMTierState(config=config, active_tier=tier)
+        self.llm_tiers = LLMTierState(config=config, active_tier=tier)
 
     @staticmethod
     def _infer_active_tier(model: str, config: LLMTierConfig) -> str:
@@ -243,8 +279,8 @@ class ModelManagementMixin:
                 try:
                     self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
                 except Exception as e:
-                    _eng.logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
-            _eng.save_last_model(target_model, source="llm_tier_switch")
+                    logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
+            _save_last_model_compat(target_model, source="llm_tier_switch")
         except Exception as e:
             self.llm_tiers.active_tier = previous_tier
             self.current_model = previous_model
@@ -267,10 +303,10 @@ class ModelManagementMixin:
             self.ui_callback("llm_tier_switch_failed")
             return False
 
-        label = _eng.LLM_TIER_LABELS.get(target_tier, target_tier)
+        label = LLM_TIER_LABELS.get(target_tier, target_tier)
         self._last_switch_failure = None
         self._log(f"LLM tier changed: {previous_tier} -> {target_tier} ({target_model})")
-        _eng.logger.info("Manual LLM tier changed to %s (%s)", label, target_model)
+        logger.info("Manual LLM tier changed to %s (%s)", label, target_model)
         self.ui_callback("llm_tier_switch_applied")
         return True
 
@@ -328,7 +364,7 @@ class ModelManagementMixin:
         try:
             self._switch_and_prepare_model(new_model)
             self._desired_model = new_model
-            _eng.save_last_model(new_model, source=persist_source)
+            _save_last_model_compat(new_model, source=persist_source)
             self.ui_callback("model_switch_applied")
             return True
         except Exception as e:
@@ -362,13 +398,13 @@ class ModelManagementMixin:
                     self.ollama.generate,
                     model=model,
                     prompt="Responde solo: ok",
-                    keep_alive=_eng.LLM_KEEP_ALIVE,
+                    keep_alive=LLM_KEEP_ALIVE,
                     options={"num_predict": 1, "temperature": 0},
                 )
                 future.result(timeout=120)
         except Exception as e:
             self._log(f"No se pudo preparar modelo {model}: {e}", level="warning")
-            _eng.logger.warning("No se pudo preparar modelo %s: %s", model, e)
+            logger.warning("No se pudo preparar modelo %s: %s", model, e)
             self._loaded_model = None
             self._owns_ollama_model = False
             self.ui_callback("ready")
@@ -386,7 +422,7 @@ class ModelManagementMixin:
         """Best-effort unload for the model warmed by this OpenCohost session."""
         model = self._loaded_model or self._warmed_model
         if not model or not self._owns_ollama_model or not hasattr(self, "ollama"):
-            _eng.logger.info("Ollama model release skipped; no OpenCohost-owned model recorded")
+            logger.info("Ollama model release skipped; no OpenCohost-owned model recorded")
             return False
 
         result = {"released": False}
@@ -396,19 +432,19 @@ class ModelManagementMixin:
                 self.ollama.generate(model=model, prompt="", keep_alive=0)
                 result["released"] = True
             except Exception as exc:
-                _eng.logger.warning("No se pudo liberar modelo Ollama %s: %s", model, exc)
+                logger.warning("No se pudo liberar modelo Ollama %s: %s", model, exc)
 
         thread = threading.Thread(target=unload, name="OllamaModelRelease", daemon=True)
         thread.start()
         thread.join(timeout=timeout)
         if thread.is_alive():
-            _eng.logger.warning("Timeout liberando modelo Ollama %s; cierre continua", model)
+            logger.warning("Timeout liberando modelo Ollama %s; cierre continua", model)
             return False
         if result["released"]:
             self._loaded_model = None
             self._warmed_model = None
             self._owns_ollama_model = False
-            _eng.logger.info("Modelo Ollama %s liberado", model)
+            logger.info("Modelo Ollama %s liberado", model)
         return result["released"]
 
     def _download_model_worker(self, model_tag):
@@ -455,13 +491,13 @@ class ModelManagementMixin:
             self.current_model = model_tag
             self._desired_model = model_tag
             self._loaded_model = model_tag
-            _eng.save_last_model(model_tag, source="download")
+            _save_last_model_compat(model_tag, source="download")
             self._log(f"🔄 Modelo activo cambiado a: {model_tag}")
             self.ui_callback("download_done")
 
         except Exception as e:
             self._log(f"ERROR descargando '{model_tag}': {e}", level="error")
-            _eng.logger.exception(f"Error descargando modelo {model_tag}")
+            logger.exception(f"Error descargando modelo {model_tag}")
             self.ui_callback("download_error")
         finally:
             self._downloading = False
@@ -481,7 +517,7 @@ class ModelManagementMixin:
         ``_resolve_chat_watchdog_timeout`` / ``_ollama_chat``.
         """
         if timeout is None:
-            timeout = _eng.OLLAMA_CHAT_TIMEOUT
+            timeout = OLLAMA_CHAT_TIMEOUT
         cache = getattr(self, "_ollama_chat_clients", None)
         if cache is None:
             cache = {}
@@ -592,7 +628,7 @@ class ModelManagementMixin:
             is_local = self._cfg_is_local(cfg) or self._cloud_fallback_active
         if not is_local:
             # Cloud latency, not local GPU stall detection (spec C).
-            return _eng.CLOUD_CHAT_TIMEOUT
+            return CLOUD_CHAT_TIMEOUT
         if self._awaiting_first_success_after_switch and request_model == self.current_model:
             return self._post_switch_watchdog_timeout
         return self._inference_watchdog_timeout
@@ -620,7 +656,7 @@ class ModelManagementMixin:
             f"Timeout de inferencia con {request_model} tras {timeout:.2f}s. Iniciando recuperación...",
             level="error",
         )
-        _eng.logger.warning(
+        logger.warning(
             "Inference watchdog timeout: model=%s source=%s timeout=%.2fs",
             request_model,
             source,
@@ -651,7 +687,7 @@ class ModelManagementMixin:
             self._awaiting_first_success_after_switch = False
             return True
         if self.current_model != rollback_model:
-            _eng.logger.warning(
+            logger.warning(
                 "Rollback after stalled inference failed: failed_model=%s rollback_model=%s",
                 failed_model,
                 rollback_model,
@@ -662,35 +698,116 @@ class ModelManagementMixin:
 
     @staticmethod
     def _uses_reasoning_token_budget(model: str) -> bool:
-        """Return whether a model should avoid fixed num_predict limits.
+        """Return whether a model supports explicit reasoning policy and governed budgeting.
 
-        Qwen3 and Gemma E models can spend part of the budget on internal
-        reasoning. A hard low cap can yield empty or visibly truncated answers.
+        Qwen3 and Gemma E models can spend part of the budget on internal reasoning.
+        Under ADR-056, these models use adaptive governance rather than arbitrary fixed caps.
         """
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
 
-    def _resolve_effective_ctx_limit(self, model: str, native_ctx: int) -> int:
-        """Return OpenCohost's runtime ctx cap for ``model`` without changing discovery."""
-        tier = None
-        tiers = getattr(self, "llm_tiers", None)
-        if tiers is not None:
-            active_model = tiers.active_model
-            if active_model == model:
-                tier = tiers.active_tier
-            else:
-                for candidate_tier, candidate_model in tiers.config.as_dict().items():
-                    if candidate_model == model:
-                        tier = candidate_tier
-                        break
-        tier_cap = _eng.LLM_TIER_EFFECTIVE_CTX_CAPS.get(tier, _eng.CTX_FALLBACK_DEFAULT)
+    def _resolve_effective_ctx_limit(
+        self,
+        model: str,
+        native_ctx: int,
+        requested_ctx: Optional[int] = None,
+    ) -> int:
+        """Return OpenCohost's runtime context allocation for ``model``.
+
+        ADR-056: Decouples native capability ceiling from runtime context allocation:
+        - native_context_max: discovered capability ceiling (e.g. 131072 for Gemma 4)
+        - allocated_context: live runtime allocation from /api/ps if resident
+        - requested_context: what OpenCohost requests from Ollama on cold start (default CTX_FALLBACK_DEFAULT=4096)
+
+        Native context ceiling (e.g. 128K for Gemma) is NEVER used as an automatic
+        allocation fallback without /api/ps truth.
+        """
         try:
-            native = int(native_ctx)
+            native_max = int(native_ctx)
         except (TypeError, ValueError):
-            native = _eng.CTX_FALLBACK_DEFAULT
-        if native <= 0:
-            native = _eng.CTX_FALLBACK_DEFAULT
-        return min(native, tier_cap)
+            native_max = CTX_FALLBACK_DEFAULT
+        if native_max <= 0:
+            native_max = CTX_FALLBACK_DEFAULT
+
+        # 1. Live resident allocation from /api/ps probe if model is resident
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        resident_ctx: Optional[int] = None
+        if monitor is not None:
+            snap = getattr(monitor, "residency_snapshot", None)
+            if snap is None:
+                probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+                if probe is not None:
+                    snap = getattr(probe, "snapshot", None)
+            if snap is not None:
+                snap_ctx = getattr(snap, "context_length", 0) if snap is not None else 0
+                if isinstance(snap_ctx, (int, float)) and not isinstance(snap_ctx, bool) and snap_ctx > 0:
+                    snap_model = getattr(snap, "model", None)
+                    if isinstance(snap_model, str) and _models_match_residency(model, snap_model):
+                        resident_ctx = int(snap_ctx)
+
+        if resident_ctx is not None:
+            # Live residency truth from /api/ps represents what Ollama already allocated in VRAM.
+            return max(32, resident_ctx)
+
+        # 2. Cold start requested context
+        req = requested_ctx
+        if req is None:
+            req = getattr(self, "requested_context", None) or getattr(self, "_requested_context", None)
+        if req is None:
+            req = getattr(self, "_model_requested_ctx", {}).get(model)
+        if req is None:
+            # If native max is very large (e.g. Gemma 128K or >= 65536) and not resident,
+            # default to safe cold start requested context (CTX_FALLBACK_DEFAULT=4096)
+            if native_max >= 65536 or ("gemma" in model.lower() and native_max > 8192):
+                req = CTX_FALLBACK_DEFAULT
+            else:
+                req = native_max
+        try:
+            allocated = int(req)
+        except (TypeError, ValueError):
+            allocated = CTX_FALLBACK_DEFAULT
+
+        # 3. Cap cold start requested context by the model's native capability ceiling
+        allocated = min(allocated, native_max)
+        return max(32, allocated)
+
+    def _resolve_model_residency_ratio(self, model: str) -> Optional[float]:
+        """Resolve current hardware residency ratio for model if resident and fresh.
+
+        ADR-056:
+        - If matching residency snapshot exists and is valid (not stale and matching model):
+          return ratio = size_vram_bytes / size_bytes
+        - Stale or different-model residency never reaches budget resolver (returns None).
+        """
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        if monitor is None:
+            return None
+        snap = getattr(monitor, "residency_snapshot", None)
+        if snap is None:
+            probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+            if probe is not None:
+                snap = getattr(probe, "snapshot", None)
+        if snap is None:
+            return None
+
+        snap_model = getattr(snap, "model", None)
+        if not snap_model or not isinstance(snap_model, str):
+            return None
+
+        # Matching: must refer to the same model
+        if not _models_match_residency(model, snap_model):
+            return None
+
+        # Check staleness: if snapshot unobserved (<=0) or older than 60s, consider stale
+        observed_at = getattr(snap, "observed_at", 0.0) or 0.0
+        if observed_at <= 0 or (time.time() - observed_at) > 60.0:
+            return None
+
+        size = getattr(snap, "size_bytes", None)
+        size_vram = getattr(snap, "size_vram_bytes", None)
+        if size is not None and size > 0 and size_vram is not None:
+            return max(0.0, min(1.0, float(size_vram) / float(size)))
+        return None
 
     def _discover_model_ctx(self, model: str) -> int:
         """Layer 1: return ``model``'s native context length from ``ollama.show``.
@@ -711,9 +828,9 @@ class ModelManagementMixin:
             return cached
         try:
             resp = self._fetch_show(model)
-            ctx = _eng.context_budget.parse_model_ctx(resp, fallback=_eng.CTX_FALLBACK_DEFAULT)
+            ctx = context_budget.parse_model_ctx(resp, fallback=CTX_FALLBACK_DEFAULT)
         except Exception:
-            ctx = _eng.CTX_FALLBACK_DEFAULT
+            ctx = CTX_FALLBACK_DEFAULT
         cache[model] = ctx
         return ctx
 
@@ -746,12 +863,14 @@ class ModelManagementMixin:
         # recovery. A hang raises nothing, which is why the callers' try/except
         # never covered it. Timeout is the metadata budget (/api/tags class),
         # not the 180s generation budget.
-        # ponytail: a stall costs 2x this, because _check_capabilities_reasoning
-        # calls _discover_model_ctx and then _fetch_show, and a failure is not
-        # cached here. Bounded and once-per-model, so not worth restructuring.
+        timeout = getattr(
+            sys.modules.get("opencohost.core.llm_engine"),
+            "OLLAMA_REQUEST_TIMEOUT",
+            OLLAMA_REQUEST_TIMEOUT,
+        )
         resp = self._call_with_watchdog(
             ollama.show,
-            timeout=_eng.OLLAMA_REQUEST_TIMEOUT,
+            timeout=timeout,
             label="OllamaShowProbe",
             model=model,
         )
@@ -778,7 +897,7 @@ class ModelManagementMixin:
             return False
 
     def _resolve_reasoning_classification(self, model: str) -> bool:
-        """Resolve whether ``model`` should drop the num_predict cap.
+        """Resolve whether model supports reasoning policy and requires governed generation budgeting.
 
         Cache first (Layer 3); on miss combine the name heuristic with the Ollama
         capabilities check (Layer 1). The name heuristic short-circuits the ``or``

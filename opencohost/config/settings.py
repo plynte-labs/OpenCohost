@@ -109,6 +109,10 @@ DEFAULT_LLM_TIERS = {
     "balanced": "llama3",
     "fast": "qwen3:1.7b",
 }
+# [DEPRECATED - ADR-056 WU2] Tier-based effective context caps.
+# Context allocation is now decoupled from tier quality/speed presets and derived
+# directly from Ollama runtime residency (/api/ps context_length) or native context (/api/show).
+# Retained only for backwards compatibility with external consumers.
 LLM_TIER_EFFECTIVE_CTX_CAPS = {
     "quality": 4096,
     "balanced": 8192,
@@ -467,6 +471,7 @@ TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only
 PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 ACCIONES_LOG_FILE = os.path.join(str(USER_DATA_DIR), "logs", "acciones.jsonl")
+MODEL_PARAMETERS_CONFIG_FILE = os.path.join(str(USER_DATA_DIR), "config", "model_parameters.json")
 
 # HTTP API bearer tokens (agent_context_gateway_20260705, design ADR-3).
 # Minted once at API lifespan start by opencohost/api/auth.py::ensure_tokens();
@@ -569,6 +574,35 @@ PERSONALIZATION_NICKNAME_MAX = 60
 PERSONALIZATION_OCCUPATION_MAX = 120
 PERSONALIZATION_INTERESTS_MAX = 240
 PERSONALIZATION_INSTRUCTIONS_MAX = 400
+
+# ──────────────────────────────────────────────
+# Memory v5 Shadow Mode (memory-v5-shadow-formation-foundation WU1)
+# ──────────────────────────────────────────────
+def _resolve_memory_v5_mode() -> str:
+    raw = os.environ.get("OPENCOHOST_MEMORY_V5_MODE") or os.environ.get("MEMORY_V5_MODE") or "ACTIVE"
+    v = raw.strip().upper()
+    return v if v in ("OFF", "SHADOW", "ACTIVE") else "ACTIVE"
+
+
+def _resolve_memory_v5_shadow_db() -> str:
+    explicit = os.environ.get("OPENCOHOST_MEMORY_V5_SHADOW_DB", "").strip()
+    if explicit:
+        return explicit
+    return os.path.join(str(USER_DATA_DIR), "data", "memory_v5_shadow", "memory_v5_shadow.db")
+
+
+def _resolve_memory_v5_semantic_cache_db() -> str:
+    explicit = os.environ.get("OPENCOHOST_MEMORY_V5_SEMANTIC_CACHE_DB", "").strip()
+    if explicit:
+        return explicit
+    return os.path.join(str(USER_DATA_DIR), "data", "memory_v5_shadow", "memory_v5_semantic_cache.db")
+
+
+MEMORY_V5_MODE: str = _resolve_memory_v5_mode()
+MEMORY_V5_SHADOW_DB: str = _resolve_memory_v5_shadow_db()
+MEMORY_V5_SEMANTIC_CACHE_DB: str = _resolve_memory_v5_semantic_cache_db()
+MEMORY_V5_SHADOW_QUEUE_MAXSIZE: int = 1000
+MEMORY_V5_SHADOW_CONTROL_RESERVED: int = 100
 
 
 # ──────────────────────────────────────────────
@@ -800,12 +834,14 @@ def is_runtime_model_available(
     tag: str,
     installed_model_tags: Optional[Iterable[str]] = None,
 ) -> bool:
-    """Return whether a tag is safe to use as a runtime model candidate."""
+    """Return whether a tag is safe to use as a runtime model candidate.
+
+    A model is available ONLY if it is verified installed on disk.
+    Catalog presence alone never satisfies availability.
+    """
     canonical = _canonical_model_tag(tag)
     if not canonical:
         return False
-    if canonical in MODELS_CATALOG:
-        return True
 
     normalized = (
         _normalize_installed_model_tags(installed_model_tags)

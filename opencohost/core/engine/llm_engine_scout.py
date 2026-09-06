@@ -228,7 +228,8 @@ class ScoutPromotionMixin:
 
     def _promotion_now_s(self) -> int:
         """Return the injected non-negative UTC epoch second."""
-        return max(0, int(self._promotion_wall_clock()))
+        clock = getattr(self, "_promotion_wall_clock", None) or time.time
+        return max(0, int(clock()))
 
     def _promotion_diagnostic(
         self,

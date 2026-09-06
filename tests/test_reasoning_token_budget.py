@@ -161,7 +161,7 @@ def test_known_reasoning_model_skips_capabilities_call(monkeypatch):
 # ── Layer 2: runtime self-heal (drives _generar_dialogo) ────────────────────
 
 
-def test_self_heal_removes_num_predict_on_empty_content_with_thinking(monkeypatch):
+def test_self_heal_escalates_bounded_num_predict_on_empty_content_with_thinking(monkeypatch):
     import opencohost.core.llm_engine as le
 
     monkeypatch.setattr("ollama.show", _raise_show)  # caps can't classify it
@@ -180,7 +180,8 @@ def test_self_heal_removes_num_predict_on_empty_content_with_thinking(monkeypatc
 
     assert result == "Here is the real answer."
     assert "num_predict" in captured[0]          # first attempt was capped
-    assert "num_predict" not in captured[1]       # self-heal removed the cap
+    assert "num_predict" in captured[1]          # ADR-056: never uncapped; escalated boundedly
+    assert captured[1]["num_predict"] > captured[0]["num_predict"]
     assert m._reasoning_model_cache["gemma4:12b"] is True
 
 
@@ -224,3 +225,33 @@ def test_self_heal_not_triggered_on_successful_first_generation(monkeypatch):
     assert result == "immediate answer"
     assert len(captured) == 1
     assert "num_predict" in captured[0]
+
+
+def test_self_heal_honors_custom_user_budget_without_escalating(monkeypatch):
+    import opencohost.core.llm_engine as le
+
+    monkeypatch.setattr("ollama.show", _raise_show)
+    monkeypatch.setattr(le, "output_guard", lambda dialogo, source="chat": (True, ""))
+    m = _make_motor("gemma4:12b")
+    captured = []
+
+    # Configure custom user budget preset
+    monkeypatch.setattr(
+        "opencohost.config.model_parameters.get_model_reasoning_settings",
+        lambda model=None, config_dict=None, config_file=None: {
+            "enabled": True,
+            "budget_tokens": 512,
+            "preset": "custom",
+        },
+    )
+
+    def fake_chat(*, timeout, **kwargs):
+        captured.append(dict(kwargs.get("options", {})))
+        return {"message": {"content": "", "thinking": "internal thoughts only"}}
+
+    m._ollama_chat_with_watchdog = fake_chat
+    m._generar_dialogo("hola", source="chat", commit_history=False)
+
+    # Custom preset must NOT escalate; generation loop halts after 1st attempt
+    assert len(captured) == 1
+    assert captured[0]["num_predict"] == 512
