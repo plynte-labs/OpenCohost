@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import onnxruntime as ort
-from tokenizers import Tokenizer
+try:
+    from tokenizers import Tokenizer
+except ImportError:
+    Tokenizer = None  # type: ignore
 
 from opencohost.core.memory.memoria_store import (
     _MIN_SHARED_TOKENS,
