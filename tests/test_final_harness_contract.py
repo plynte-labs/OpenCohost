@@ -269,7 +269,8 @@ class TestCandidateLocalLifecycle:
                 if call_count["n"]==1:
                     return None  # B fails
                 return original_select(eval_cands)
-            with patch.object(bench, "select_best_calibration_threshold", side_effect=side_effect):
+            with patch.object(bench, "select_best_calibration_threshold", side_effect=side_effect), \
+                 patch.object(bench, "verify_runtime_lock", return_value=(True, None, "valid-lock-identity")):
                 receipt = bench.run_benchmark(docs_base_dir=docs_dir)
             assert receipt["candidates"]["b"]["execution_status"]=="NON_EVALUABLE"
             assert receipt["candidates"]["b"]["execution_reason"]=="CALIBRATION_FAILED"

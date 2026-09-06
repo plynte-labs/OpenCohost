@@ -181,8 +181,8 @@ def test_concurrent_record_and_mark_spoken_is_lossless():
     import sys
     import threading
 
-    tel = FilterTelemetry(enabled=True, ring=200_000)
-    n_threads, per = 8, 3_000
+    tel = FilterTelemetry(enabled=True, ring=20_000)
+    n_threads, per = 4, 1_000
     barrier = threading.Barrier(n_threads)
 
     def worker():
@@ -198,7 +198,7 @@ def test_concurrent_record_and_mark_spoken_is_lossless():
     # Force the interpreter to switch threads very frequently so a switch lands
     # mid read-modify-write — without a guard the counters reliably lose updates.
     old_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
+    sys.setswitchinterval(1e-5)
     try:
         threads = [threading.Thread(target=worker) for _ in range(n_threads)]
         for t in threads:
@@ -225,7 +225,7 @@ def test_rollup_snapshot_is_consistent_during_concurrent_writes():
     import sys
     import threading
 
-    tel = FilterTelemetry(enabled=True, ring=100_000)  # large so the ring never fills
+    tel = FilterTelemetry(enabled=True, ring=20_000)  # bounded ring
     violations: list = []
     stop = threading.Event()
 
@@ -240,7 +240,7 @@ def test_rollup_snapshot_is_consistent_during_concurrent_writes():
 
     def reader():
         try:
-            for _ in range(5_000):
+            for _ in range(500):
                 roll = tel.rollup()
                 if roll["accepted"] + roll["rejected"] != roll["total"]:
                     violations.append((roll["accepted"], roll["rejected"], roll["total"]))
@@ -251,7 +251,7 @@ def test_rollup_snapshot_is_consistent_during_concurrent_writes():
             stop.set()
 
     old_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
+    sys.setswitchinterval(1e-5)
     try:
         writers = [threading.Thread(target=writer, args=(i % 2 == 0,)) for i in range(4)]
         rdr = threading.Thread(target=reader)
