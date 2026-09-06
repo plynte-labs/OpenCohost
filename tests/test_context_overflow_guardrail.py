@@ -357,12 +357,13 @@ class TestRegressionGuards:
         return captured
 
     def test_num_ctx_in_opciones_uses_effective_ctx_cap(self, monkeypatch):
+        # Under ADR-056 WU2, context is decoupled from tier caps; preserves native context
         captured = self._run_dialogo(monkeypatch, model="qwen3:4b", ctx_seed=32768)
-        assert captured[0]["num_ctx"] == 4096
+        assert captured[0]["num_ctx"] == 32768
 
-    def test_gemma_still_pops_num_ctx(self, monkeypatch):
+    def test_gemma_preserves_num_ctx_aligned_with_effective_ctx(self, monkeypatch):
         captured = self._run_dialogo(monkeypatch, model="gemma4:e4b", ctx_seed=8192)
-        assert "num_ctx" not in captured[0]
+        assert captured[0]["num_ctx"] == 8192
 
     def test_chat_uses_finite_keep_alive(self, monkeypatch):
         """The chat generation call must pass the finite LLM_KEEP_ALIVE, not the
@@ -402,7 +403,8 @@ class TestRegressionGuards:
         result = m._generar_dialogo("hola", source="chat", commit_history=False)
         assert result == "the answer"
         assert "num_predict" in captured[0]
-        assert "num_predict" not in captured[1]   # self-heal removed the cap
+        assert "num_predict" in captured[1]  # ADR-056: bounded escalation, never uncapped
+        assert captured[1]["num_predict"] > captured[0]["num_predict"]
 
     def test_discover_ctx_populated_for_name_heuristic_models(self, monkeypatch):
         """Layer-1 fix: _generar_dialogo discovers ctx even when the name heuristic

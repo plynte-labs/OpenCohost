@@ -3,6 +3,7 @@ import httpx
 import logging
 import requests
 import socket
+import sys
 import threading
 import time
 import types
@@ -30,7 +31,43 @@ from opencohost.core.providers.llm_tiers import (
 
 logger = logging.getLogger("OpenCohost")
 
+
+def _save_last_model_compat(*args, **kwargs) -> None:
+    """Resolve save_last_model dynamically from llm_engine for test mock compatibility."""
+    target = getattr(sys.modules.get("opencohost.core.llm_engine"), "save_last_model", save_last_model)
+    return target(*args, **kwargs)
+
+def _models_match_residency(req_model: str, snap_model: str) -> bool:
+    """Return True if req_model and snap_model refer to the same model.
+
+    Handles:
+    - Case insensitivity ('gemma4:e4b' vs 'Gemma4:E4B')
+    - Stripping ':latest' suffix
+    - Delimited tag/flavor extensions (':', '-', '_') such that
+      'gemma4:e4b' matches 'gemma4:e4b-instruct' and 'gemma4:e4b:q4_k_m',
+      but 'qwen2.5:7b' NEVER matches 'qwen2.5:72b'.
+    """
+    r = str(req_model or "").strip().lower()
+    s = str(snap_model or "").strip().lower()
+    if not r or not s:
+        return False
+    if r == s:
+        return True
+    r_base = r[:-7] if r.endswith(":latest") else r
+    s_base = s[:-7] if s.endswith(":latest") else s
+    if r_base == s_base:
+        return True
+    for delim in (":", "-", "_"):
+        if s.startswith(r + delim) or r.startswith(s + delim):
+            return True
+        if s_base.startswith(r_base + delim) or r_base.startswith(s_base + delim):
+            return True
+    return False
+
+
 class ModelManagementMixin:
+    _models_match_residency = staticmethod(_models_match_residency)
+
     def _probe_ollama_service(self, timeout: float = 3.0) -> bool:
         """Pure, side-effect-free, bounded health check for Ollama daemon.
 
@@ -243,7 +280,7 @@ class ModelManagementMixin:
                     self.ollama.generate(model=previous_model, prompt='', keep_alive=0)
                 except Exception as e:
                     logger.warning(f"No se pudo liberar modelo {previous_model}: {e}")
-            save_last_model(target_model, source="llm_tier_switch")
+            _save_last_model_compat(target_model, source="llm_tier_switch")
         except Exception as e:
             self.llm_tiers.active_tier = previous_tier
             self.current_model = previous_model
@@ -327,7 +364,7 @@ class ModelManagementMixin:
         try:
             self._switch_and_prepare_model(new_model)
             self._desired_model = new_model
-            save_last_model(new_model, source=persist_source)
+            _save_last_model_compat(new_model, source=persist_source)
             self.ui_callback("model_switch_applied")
             return True
         except Exception as e:
@@ -454,7 +491,7 @@ class ModelManagementMixin:
             self.current_model = model_tag
             self._desired_model = model_tag
             self._loaded_model = model_tag
-            save_last_model(model_tag, source="download")
+            _save_last_model_compat(model_tag, source="download")
             self._log(f"🔄 Modelo activo cambiado a: {model_tag}")
             self.ui_callback("download_done")
 
@@ -661,45 +698,116 @@ class ModelManagementMixin:
 
     @staticmethod
     def _uses_reasoning_token_budget(model: str) -> bool:
-        """Return whether a model should avoid fixed num_predict limits.
+        """Return whether a model supports explicit reasoning policy and governed budgeting.
 
-        Qwen3 and Gemma E models can spend part of the budget on internal
-        reasoning. A hard low cap can yield empty or visibly truncated answers.
+        Qwen3 and Gemma E models can spend part of the budget on internal reasoning.
+        Under ADR-056, these models use adaptive governance rather than arbitrary fixed caps.
         """
         name = model.lower()
         return any(marker in name for marker in ("qwen3", "e2b", "e4b", "think"))
 
-    def _resolve_effective_ctx_limit(self, model: str, native_ctx: int) -> int:
-        """Return OpenCohost's runtime ctx cap for ``model`` decoupled from tier limits.
+    def _resolve_effective_ctx_limit(
+        self,
+        model: str,
+        native_ctx: int,
+        requested_ctx: Optional[int] = None,
+    ) -> int:
+        """Return OpenCohost's runtime context allocation for ``model``.
 
-        ADR-056 WU2: Runtime truth hierarchy:
-        1. Probe residency snapshot context_length (from /api/ps if model is currently resident)
-        2. Discovered native_ctx (from /api/show or passed in)
-        3. Fallback default (CTX_FALLBACK_DEFAULT)
-        Tier switching does NOT clamp or distort allocated context.
+        ADR-056: Decouples native capability ceiling from runtime context allocation:
+        - native_context_max: discovered capability ceiling (e.g. 131072 for Gemma 4)
+        - allocated_context: live runtime allocation from /api/ps if resident
+        - requested_context: what OpenCohost requests from Ollama on cold start (default CTX_FALLBACK_DEFAULT=4096)
+
+        Native context ceiling (e.g. 128K for Gemma) is NEVER used as an automatic
+        allocation fallback without /api/ps truth.
         """
+        try:
+            native_max = int(native_ctx)
+        except (TypeError, ValueError):
+            native_max = CTX_FALLBACK_DEFAULT
+        if native_max <= 0:
+            native_max = CTX_FALLBACK_DEFAULT
+
+        # 1. Live resident allocation from /api/ps probe if model is resident
         monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        resident_ctx: Optional[int] = None
         if monitor is not None:
             snap = getattr(monitor, "residency_snapshot", None)
-            snap_ctx = getattr(snap, "context_length", 0) if snap is not None else 0
-            if isinstance(snap_ctx, (int, float)) and not isinstance(snap_ctx, bool) and snap_ctx > 0:
-                snap_model = getattr(snap, "model", None)
-                if isinstance(snap_model, str) and (snap_model == model or model.startswith(snap_model)):
-                    return int(snap_ctx)
-            probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
-            probe_ctx = getattr(probe, "context_length", 0) if probe is not None else 0
-            if isinstance(probe_ctx, (int, float)) and not isinstance(probe_ctx, bool) and probe_ctx > 0:
-                probe_model = getattr(probe, "model", None)
-                if isinstance(probe_model, str) and (probe_model == model or model.startswith(probe_model)):
-                    return int(probe_ctx)
+            if snap is None:
+                probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+                if probe is not None:
+                    snap = getattr(probe, "snapshot", None)
+            if snap is not None:
+                snap_ctx = getattr(snap, "context_length", 0) if snap is not None else 0
+                if isinstance(snap_ctx, (int, float)) and not isinstance(snap_ctx, bool) and snap_ctx > 0:
+                    snap_model = getattr(snap, "model", None)
+                    if isinstance(snap_model, str) and _models_match_residency(model, snap_model):
+                        resident_ctx = int(snap_ctx)
 
+        if resident_ctx is not None:
+            # Live residency truth from /api/ps represents what Ollama already allocated in VRAM.
+            return max(32, resident_ctx)
+
+        # 2. Cold start requested context
+        req = requested_ctx
+        if req is None:
+            req = getattr(self, "requested_context", None) or getattr(self, "_requested_context", None)
+        if req is None:
+            req = getattr(self, "_model_requested_ctx", {}).get(model)
+        if req is None:
+            # If native max is very large (e.g. Gemma 128K or >= 65536) and not resident,
+            # default to safe cold start requested context (CTX_FALLBACK_DEFAULT=4096)
+            if native_max >= 65536 or ("gemma" in model.lower() and native_max > 8192):
+                req = CTX_FALLBACK_DEFAULT
+            else:
+                req = native_max
         try:
-            native = int(native_ctx)
+            allocated = int(req)
         except (TypeError, ValueError):
-            native = CTX_FALLBACK_DEFAULT
-        if native <= 0:
-            native = CTX_FALLBACK_DEFAULT
-        return native
+            allocated = CTX_FALLBACK_DEFAULT
+
+        # 3. Cap cold start requested context by the model's native capability ceiling
+        allocated = min(allocated, native_max)
+        return max(32, allocated)
+
+    def _resolve_model_residency_ratio(self, model: str) -> Optional[float]:
+        """Resolve current hardware residency ratio for model if resident and fresh.
+
+        ADR-056:
+        - If matching residency snapshot exists and is valid (not stale and matching model):
+          return ratio = size_vram_bytes / size_bytes
+        - Stale or different-model residency never reaches budget resolver (returns None).
+        """
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        if monitor is None:
+            return None
+        snap = getattr(monitor, "residency_snapshot", None)
+        if snap is None:
+            probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+            if probe is not None:
+                snap = getattr(probe, "snapshot", None)
+        if snap is None:
+            return None
+
+        snap_model = getattr(snap, "model", None)
+        if not snap_model or not isinstance(snap_model, str):
+            return None
+
+        # Matching: must refer to the same model
+        if not _models_match_residency(model, snap_model):
+            return None
+
+        # Check staleness: if snapshot unobserved (<=0) or older than 60s, consider stale
+        observed_at = getattr(snap, "observed_at", 0.0) or 0.0
+        if observed_at <= 0 or (time.time() - observed_at) > 60.0:
+            return None
+
+        size = getattr(snap, "size_bytes", None)
+        size_vram = getattr(snap, "size_vram_bytes", None)
+        if size is not None and size > 0 and size_vram is not None:
+            return max(0.0, min(1.0, float(size_vram) / float(size)))
+        return None
 
     def _discover_model_ctx(self, model: str) -> int:
         """Layer 1: return ``model``'s native context length from ``ollama.show``.
@@ -755,12 +863,14 @@ class ModelManagementMixin:
         # recovery. A hang raises nothing, which is why the callers' try/except
         # never covered it. Timeout is the metadata budget (/api/tags class),
         # not the 180s generation budget.
-        # ponytail: a stall costs 2x this, because _check_capabilities_reasoning
-        # calls _discover_model_ctx and then _fetch_show, and a failure is not
-        # cached here. Bounded and once-per-model, so not worth restructuring.
+        timeout = getattr(
+            sys.modules.get("opencohost.core.llm_engine"),
+            "OLLAMA_REQUEST_TIMEOUT",
+            OLLAMA_REQUEST_TIMEOUT,
+        )
         resp = self._call_with_watchdog(
             ollama.show,
-            timeout=OLLAMA_REQUEST_TIMEOUT,
+            timeout=timeout,
             label="OllamaShowProbe",
             model=model,
         )
@@ -787,7 +897,7 @@ class ModelManagementMixin:
             return False
 
     def _resolve_reasoning_classification(self, model: str) -> bool:
-        """Resolve whether ``model`` should drop the num_predict cap.
+        """Resolve whether model supports reasoning policy and requires governed generation budgeting.
 
         Cache first (Layer 3); on miss combine the name heuristic with the Ollama
         capabilities check (Layer 1). The name heuristic short-circuits the ``or``

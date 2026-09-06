@@ -1,7 +1,7 @@
 """Generation orchestrator extracted from MotorVocalIA (WU3).
 
 Orchestrates multi-attempt generation loops, cloud transport failure classification,
-rate-limiting backoff, context-overflow reactive trimming, uncapped reasoning recovery,
+rate-limiting backoff, context-overflow reactive trimming, governed reasoning recovery with bounded escalation,
 and sentence-level streaming generation with guardrail enforcement.
 """
 
@@ -44,7 +44,8 @@ def _engine_attr(name: str, default: Any) -> Any:
 
 
 def _output_guard_with_tts_check(text: str, source: str) -> tuple[bool, str]:
-    return _output_guard_with_tts_check_pure(text, source=source, output_guard_fn=output_guard)
+    guard_fn = _engine_attr("output_guard", output_guard)
+    return _output_guard_with_tts_check_pure(text, source=source, output_guard_fn=guard_fn)
 
 
 def _guard_rule_id(reason: str) -> str:
@@ -114,7 +115,7 @@ class GenerationOrchestrator:
     def __init__(self, host: Any) -> None:
         self._host = host
 
-    def execute_attempt_loop(
+    def execute_generation_attempt(
         self,
         setup: GenerationSetup,
         *,
@@ -147,10 +148,23 @@ class GenerationOrchestrator:
             is_local
             and source in ("direct", "ptt", OWNER_BUNDLE_SOURCE)
             and commit_history
-            and getattr(self._host, "_speech_router_enabled", True)
+            and getattr(self._host, "_speech_router_enabled", False)
             and _engine_attr("LLM_STREAMING_ENABLED", LLM_STREAMING_ENABLED)
             and getattr(setup, "tts_eligible", True)
         )
+
+        # ADR-056: BUDGET_INFEASIBLE controlled abort. Never issue Ollama requests with num_predict=0.
+        budget_res = getattr(setup, "budget_resolution", None)
+        verdict_val = getattr(getattr(budget_res, "verdict", None), "value", str(getattr(budget_res, "verdict", "")))
+        if verdict_val == "budget_infeasible" or opciones_llm.get("num_predict") == 0:
+            self._host._log(
+                f"Gobernanza de contexto: BUDGET_INFEASIBLE ({request_model}, ctx={_effective_ctx}); "
+                "abortando generación de forma controlada sin invocar a Ollama.",
+                level="warning",
+            )
+            if commit_history:
+                self._host._invalidate_pregen_epoch()
+            return GenerationAttemptOutcome(early_return="")
 
         for intento in range(max_intentos):
             with self._host._lock:
@@ -292,15 +306,15 @@ class GenerationOrchestrator:
                 with self._host._lock:
                     self._host._llm_generating = False
 
-            msg_obj = respuesta.get('message', {}) if isinstance(respuesta, dict) else getattr(respuesta, 'message', {})
-            if isinstance(msg_obj, dict):
+            msg_obj = respuesta.get('message', {}) if hasattr(respuesta, 'get') else getattr(respuesta, 'message', {})
+            if hasattr(msg_obj, 'get'):
                 raw_content = msg_obj.get('content', '')
                 thinking = msg_obj.get('thinking', '')
             else:
                 raw_content = getattr(msg_obj, 'content', '')
                 thinking = getattr(msg_obj, 'thinking', '')
 
-            if not is_local and isinstance(respuesta, dict):
+            if not is_local and hasattr(respuesta, 'get'):
                 _usage = respuesta.get('usage')
                 if _usage:
                     logger.info("cloud_llm_usage: %s source=%s", _usage, source)
@@ -308,12 +322,19 @@ class GenerationOrchestrator:
             if thinking:
                 logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
 
-            _pec = getattr(respuesta, "prompt_eval_count", 0) or 0
+            if isinstance(respuesta, dict):
+                _pec = respuesta.get("prompt_eval_count", 0)
+            else:
+                _pec = getattr(respuesta, "prompt_eval_count", None)
+                if _pec is None and hasattr(respuesta, "get"):
+                    _pec = respuesta.get("prompt_eval_count", 0)
+            _pec = _pec or 0
             _ctx_limit_now = _effective_ctx
-            if is_local and intento == 0 and context_budget.is_overflow_signal(
+            cb = _engine_attr("context_budget", context_budget)
+            if is_local and intento == 0 and cb.is_overflow_signal(
                 raw_content, _pec, _ctx_limit_now, CTX_OVERFLOW_SIGNAL_RATIO
             ):
-                _dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
+                _dropped = cb.trim_messages_reactive(messages, n_pairs=3)
                 self._host._log(
                     f"ctx_overflow_reactive: prompt_eval_count={_pec} >= "
                     f"{_ctx_limit_now}*{CTX_OVERFLOW_SIGNAL_RATIO:.2f}; dropped "
@@ -323,15 +344,44 @@ class GenerationOrchestrator:
                 continue
 
             if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
-                opciones_llm.pop('num_predict', None)
+                # ADR-056: Governed reasoning recovery. Never drop num_predict or retry uncapped.
                 if is_local and hasattr(self._host, "_reasoning_model_cache"):
                     self._host._reasoning_model_cache[request_model] = True
-                self._host._log(
-                    f"Auto-corrección: {request_model} devolvió contenido vacío con "
-                    f"pensamiento interno; removiendo límite de tokens y reintentando.",
-                    level="warning",
-                )
-                continue
+
+                current_budget = int(opciones_llm["num_predict"])
+                is_custom_user_budget = getattr(setup, "preset", "balanced") == "custom"
+                remaining_ctx = getattr(getattr(setup, "budget_resolution", None), "remaining_context", None)
+                if remaining_ctx is None or remaining_ctx <= 0:
+                    remaining_ctx = max(0, int(_effective_ctx) - int(_pec or 0) - 128)
+
+                if is_custom_user_budget:
+                    self._host._log(
+                        f"Gobernanza de razonamiento: {request_model} agotó presupuesto personalizado "
+                        f"({current_budget} tokens) en pensamiento interno; respetando límite de usuario "
+                        f"(REASONING_BUDGET_EXHAUSTED).",
+                        level="warning",
+                    )
+                    break
+
+                task_cap = 4096 if getattr(setup, "intent", "chat") == "drafting" else (2048 if getattr(setup, "intent", "chat") == "reasoning" else 1024)
+                escalated_budget = min(current_budget * 2, task_cap, remaining_ctx)
+
+                if escalated_budget > current_budget:
+                    opciones_llm["num_predict"] = escalated_budget
+                    self._host._log(
+                        f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
+                        f"en pensamiento interno; escalando a {escalated_budget} tokens gobernados "
+                        f"(intento {intento+1}/{max_intentos}).",
+                        level="warning",
+                    )
+                    continue
+                else:
+                    self._host._log(
+                        f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
+                        f"y no es posible autorizar más capacidad acotada (REASONING_BUDGET_EXHAUSTED).",
+                        level="warning",
+                    )
+                    break
 
             if raw_content.strip():
                 break
@@ -342,6 +392,8 @@ class GenerationOrchestrator:
         return GenerationAttemptOutcome(
             raw_content=raw_content, respuesta=respuesta, stream=stream_state
         )
+
+    execute_attempt_loop = execute_generation_attempt
 
     def run_streaming_attempt(
         self,
@@ -357,6 +409,19 @@ class GenerationOrchestrator:
             source=source, contexto=contexto, history_text=history_text
         )
         self._host._live_stream_state = state
+
+        # ADR-056: BUDGET_INFEASIBLE controlled abort in streaming path
+        budget_res = getattr(setup, "budget_resolution", None)
+        verdict_val = getattr(getattr(budget_res, "verdict", None), "value", str(getattr(budget_res, "verdict", "")))
+        if verdict_val == "budget_infeasible" or setup.opciones_llm.get("num_predict") == 0:
+            self._host._log(
+                f"Gobernanza de contexto: BUDGET_INFEASIBLE en streaming ({request_model}, ctx={setup.effective_ctx}); "
+                "abortando streaming de forma controlada sin invocar a Ollama.",
+                level="warning",
+            )
+            state.abort_reason = "budget_infeasible"
+            return None, state
+
         splitter = SentenceSplitter()
         accumulated = ""
         accumulated_thinking = ""
@@ -508,6 +573,11 @@ class GenerationOrchestrator:
         elif msg is not None:
             msg.content = accumulated
             msg.thinking = accumulated_thinking
+        else:
+            try:
+                final_chunk.message = {"content": accumulated, "thinking": accumulated_thinking}
+            except Exception:
+                pass
         return final_chunk
 
     def apply_stream_guard_verdict(

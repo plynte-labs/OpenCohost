@@ -43,7 +43,7 @@ from opencohost.config.settings import (
     CTX_FALLBACK_DEFAULT, CHAR_BUDGET_SAFETY_FACTOR,
     CTX_PRESSURE_HIGH_THRESHOLD, CTX_OVERFLOW_SIGNAL_RATIO,
     resolve_llm_tiers,
-    resolve_startup_model, save_last_model,
+    resolve_startup_model, save_last_model,  # Retained on module for test mock compatibility
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
     PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
@@ -511,6 +511,7 @@ class MotorVocalIA(
         # call argument (never shared instance state), so two threads racing
         # here (foreground + a pregen worker) cannot clobber each other.
         self.on_ctx_pressure_high: Optional[Callable[[dict], None]] = None
+        self._lock = threading.Lock()
 
     def _init_provider_and_model_state(self):
         self._reasoning_model_cache: dict[str, bool] = {}
@@ -827,8 +828,6 @@ class MotorVocalIA(
                 self._memory = MemorySubsystem.from_settings()
         except Exception:
             self._memory_init_status_fallback = {"requested": "OFF", "effective": "INIT_FAILED", "reason_code": "init_exception"}
-
-        self._lock = threading.Lock()
 
     def _init_scheduler_and_prefetch_state(self):
         # TurnScheduler owns dispatch queue state, sorting, TTL, and capacity bounds.
@@ -2618,6 +2617,7 @@ class MotorVocalIA(
             intent=intent,
             reasoning_settings_resolver=getattr(self, "_resolve_reasoning_settings", None),
             telemetry_tracker=getattr(self, "inference_telemetry", None),
+            residency_ratio_resolver=getattr(self, "_resolve_model_residency_ratio", None),
         )
 
     def _cloud_attempt_loop(
@@ -2633,7 +2633,11 @@ class MotorVocalIA(
         contexto=None,
         history_text: Optional[str] = None,
     ) -> "_GenerationAttemptOutcome":
-        return self._generation_orchestrator.execute_attempt_loop(
+        orchestrator = getattr(self, "_generation_orchestrator", None)
+        if orchestrator is None:
+            orchestrator = GenerationOrchestrator(self)
+            self._generation_orchestrator = orchestrator
+        return orchestrator.execute_generation_attempt(
             setup,
             source=source,
             commit_history=commit_history,

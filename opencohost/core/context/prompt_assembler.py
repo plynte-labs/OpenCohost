@@ -46,6 +46,8 @@ class GenerationSetup:
     intent: str = "chat"
     tts_eligible: bool = True
     budget_resolution: Optional[Any] = None
+    preset: str = "balanced"
+    requested_budget: Optional[int] = None
 
 
 # Backward compatibility alias
@@ -90,6 +92,8 @@ class PromptContextAssembler:
         reasoning_settings_resolver: Optional[Callable[[str], dict[str, Any]]] = None,
         telemetry_tracker: Optional[Any] = None,
         budget_resolver: Optional[Callable[..., Any]] = None,
+        residency_ratio_resolver: Optional[Callable[[str], Optional[float]]] = None,
+        residency_ratio: Optional[float] = None,
     ) -> GenerationSetup:
         """Assemble messages, apply context budgets, and build sampling options."""
         messages: list[dict[str, Any]] = []
@@ -224,21 +228,45 @@ class PromptContextAssembler:
             native_ctx = settings.CLOUD_CTX_BUDGET
             effective_ctx = settings.CLOUD_CTX_BUDGET
 
+        is_reasoning = bool(is_reasoning_model is not None and is_reasoning_model(request_model))
+        r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
+        r_enabled = bool(r_cfg.get("enabled", False))
+        if is_reasoning or r_enabled:
+            r_budget = r_cfg.get("budget_tokens")
+            r_preset = str(r_cfg.get("preset", "balanced"))
+        else:
+            r_enabled = False
+            r_budget = None if is_local else settings.CLOUD_MAX_TOKENS
+            r_preset = "balanced" if is_local else "custom"
+
+        # Determine target output reserve for the context gate based on intent and requested budget
+        if clean_intent == "drafting":
+            target_output_reserve = max(2048, int(r_budget or 2048))
+        elif r_budget is not None and int(r_budget) > 0:
+            target_output_reserve = int(r_budget)
+        else:
+            target_output_reserve = settings.LLM_MAX_TOKENS if is_local else settings.CLOUD_MAX_TOKENS
+
         messages, evicted_pairs, ctx_evicted = context_budget.apply_char_budget_pure(
             messages,
             ctx_limit=effective_ctx,
-            max_output_tokens=settings.LLM_MAX_TOKENS if is_local else settings.CLOUD_MAX_TOKENS,
+            max_output_tokens=target_output_reserve,
             safety_factor=settings.CHAR_BUDGET_SAFETY_FACTOR,
         )
 
         if ctx_evicted > 0 and on_evicted_pairs is not None:
             on_evicted_pairs(evicted_pairs, native_ctx, effective_ctx)
 
+        # Estimate prompt tokens conservatively from retained messages using the char/token safety factor
+        estimated_prompt_chars = sum(len(m.get("content", "")) for m in messages if isinstance(m, dict))
+        estimated_prompt_tokens = max(1, int(estimated_prompt_chars / max(1.0, float(settings.CHAR_BUDGET_SAFETY_FACTOR))))
+
         # 10. Sampling options & budget governance
         from opencohost.core.engine.llm_budget_engine import (
             resolve_generation_budget,
             InferenceIntent,
             BudgetResolution,
+            BudgetVerdict,
         )
 
         opciones_llm: dict[str, Any] = {
@@ -249,7 +277,8 @@ class PromptContextAssembler:
         }
 
         if is_local and "gemma" in request_model.lower():
-            opciones_llm.pop("num_ctx", None)
+            # Gemma models benefit from temperature 0.7; keep num_ctx: effective_ctx so
+            # OpenCohost allocated_context and Ollama VRAM allocation remain 100% aligned.
             opciones_llm["temperature"] = 0.7
 
         think_param: Optional[bool] = None
@@ -276,20 +305,23 @@ class PromptContextAssembler:
                         model_id=request_model,
                         allocated_context=effective_ctx,
                     )
-                    tps_ewma = prof.ewma_tps
+                    # ADR-056: Only authorize empirical EWMA TPS when profile is CALIBRATED (>= 10 samples).
+                    # COLD and WARMING profiles observe without altering generation budgets.
+                    state = getattr(prof, "state", None)
+                    state_val = getattr(state, "value", str(state))
+                    if state_val == "CALIBRATED":
+                        tps_ewma = float(getattr(prof, "ewma_tps", 0.0) or 0.0)
+                    else:
+                        tps_ewma = 0.0
                 except Exception:
                     tps_ewma = 0.0
 
-            is_reasoning = bool(is_reasoning_model is not None and is_reasoning_model(request_model))
-            if is_reasoning:
-                r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
-                r_enabled = bool(r_cfg.get("enabled", False))
-                r_budget = r_cfg.get("budget_tokens")
-                r_preset = str(r_cfg.get("preset", "balanced"))
-            else:
-                r_enabled = False
-                r_budget = settings.LLM_MAX_TOKENS if is_local else settings.CLOUD_MAX_TOKENS
-                r_preset = "custom"
+            res_ratio: Optional[float] = residency_ratio
+            if res_ratio is None and residency_ratio_resolver is not None:
+                try:
+                    res_ratio = residency_ratio_resolver(request_model)
+                except Exception:
+                    res_ratio = None
 
             parsed_intent = InferenceIntent.CHAT
             for it in InferenceIntent:
@@ -300,17 +332,42 @@ class PromptContextAssembler:
             budget_res = resolve_generation_budget(
                 intent=parsed_intent,
                 allocated_context=effective_ctx,
-                prompt_tokens=0,
+                prompt_tokens=estimated_prompt_tokens,
                 requested_budget=r_budget,
                 preset=r_preset,
                 reasoning_enabled=r_enabled,
                 tps_ewma=tps_ewma,
+                residency_ratio=res_ratio,
             )
+
+            # ADR-056: If BUDGET_INFEASIBLE, attempt emergency trimming of history pairs before abort
+            if budget_res is not None and budget_res.verdict == BudgetVerdict.BUDGET_INFEASIBLE:
+                total_dropped = 0
+                while budget_res.verdict == BudgetVerdict.BUDGET_INFEASIBLE:
+                    dropped = context_budget.trim_messages_reactive(messages, n_pairs=3)
+                    if dropped == 0:
+                        break
+                    total_dropped += dropped
+                    ctx_evicted += dropped * 2
+                    re_chars = sum(len(m.get("content", "")) for m in messages if isinstance(m, dict))
+                    re_prompt_tokens = max(1, int(re_chars / max(1.0, float(settings.CHAR_BUDGET_SAFETY_FACTOR))))
+                    budget_res = resolve_generation_budget(
+                        intent=parsed_intent,
+                        allocated_context=effective_ctx,
+                        prompt_tokens=re_prompt_tokens,
+                        requested_budget=r_budget,
+                        preset=r_preset,
+                        reasoning_enabled=r_enabled,
+                        tps_ewma=tps_ewma,
+                        residency_ratio=res_ratio,
+                    )
+                if total_dropped > 0 and on_evicted_pairs is not None:
+                    on_evicted_pairs([], native_ctx, effective_ctx)
 
         if budget_res is not None:
             opciones_llm["num_predict"] = budget_res.effective_budget
-            think_param = budget_res.think if (is_reasoning_model is not None and is_reasoning_model(request_model)) else None
-            tts_eligible = budget_res.tts_eligible
+            think_param = budget_res.think if (is_reasoning or r_enabled) else None
+            tts_eligible = budget_res.tts_eligible and (budget_res.verdict != BudgetVerdict.BUDGET_INFEASIBLE)
         elif is_local and is_reasoning_model is not None and is_reasoning_model(request_model):
             r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
             r_enabled = bool(r_cfg.get("enabled", False))
@@ -350,4 +407,6 @@ class PromptContextAssembler:
             intent=clean_intent,
             tts_eligible=tts_eligible,
             budget_resolution=budget_res,
+            preset=r_preset,
+            requested_budget=r_budget,
         )

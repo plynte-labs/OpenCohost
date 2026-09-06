@@ -30,10 +30,46 @@ class BudgetVerdict(str, enum.Enum):
 
 
 # Target latencies in seconds per preset / intent
+PRESET_TARGET_LATENCIES = {
+    "fast": 2.0,
+    "balanced": 4.0,
+    "quality": 8.0,
+}
+
+INTENT_DEFAULT_LATENCY = {
+    InferenceIntent.CHAT: 4.0,
+    InferenceIntent.REASONING: 15.0,
+    InferenceIntent.DRAFTING: 30.0,
+    InferenceIntent.AGENDA: 20.0,
+}
+
+INTENT_TARGET_LATENCIES = {
+    InferenceIntent.CHAT: {
+        "fast": 2.0,
+        "balanced": 4.0,
+        "quality": 8.0,
+    },
+    InferenceIntent.REASONING: {
+        "fast": 8.0,
+        "balanced": 15.0,
+        "quality": 30.0,
+    },
+    InferenceIntent.DRAFTING: {
+        "fast": 15.0,
+        "balanced": 30.0,
+        "quality": 60.0,
+    },
+    InferenceIntent.AGENDA: {
+        "fast": 10.0,
+        "balanced": 20.0,
+        "quality": 40.0,
+    },
+}
+
 TARGET_LATENCIES = {
-    "fast": 3.0,
-    "balanced": 6.0,
-    "quality": 12.0,
+    "fast": 2.0,
+    "balanced": 4.0,
+    "quality": 8.0,
     InferenceIntent.CHAT: 4.0,
     InferenceIntent.REASONING: 15.0,
     InferenceIntent.DRAFTING: 30.0,
@@ -52,6 +88,7 @@ class BudgetResolution:
     clamp_reason: Optional[str]
     calibrated_tps: float
     tts_eligible: bool
+    prompt_tokens: int = 0
 
 
 def resolve_generation_budget(
@@ -62,7 +99,7 @@ def resolve_generation_budget(
     requested_budget: Optional[int] = None,
     preset: str = "balanced",
     reasoning_enabled: bool = False,
-    tps_ewma: float = 0.0,
+    tps_ewma: Optional[float] = 0.0,
     residency_ratio: Optional[float] = None,
     safety_reserve: int = SAFETY_RESERVE_TOKENS,
 ) -> BudgetResolution:
@@ -76,6 +113,17 @@ def resolve_generation_budget(
     - Clamps to latency target if calibrated (tps_ewma > 0 and preset != "custom")
     - Accounts for VRAM spill / residency_ratio degradation
     """
+    # Normalize intent robustly if string passed
+    if not isinstance(intent, InferenceIntent):
+        try:
+            val = getattr(intent, "value", intent)
+            intent = InferenceIntent(str(val).strip().lower())
+        except (ValueError, TypeError, AttributeError):
+            intent = InferenceIntent.CHAT
+
+    safe_tps = float(tps_ewma or 0.0) if tps_ewma is not None else 0.0
+    safe_tps = max(0.0, safe_tps)
+
     safe_ctx = max(0, int(allocated_context or 0))
     safe_prompt = max(0, int(prompt_tokens or 0))
     remaining_context = safe_ctx - safe_prompt - max(0, int(safety_reserve))
@@ -92,8 +140,9 @@ def resolve_generation_budget(
             allocated_context=safe_ctx,
             remaining_context=max(0, remaining_context),
             clamp_reason="CONTEXT_EXHAUSTED",
-            calibrated_tps=tps_ewma,
+            calibrated_tps=safe_tps,
             tts_eligible=tts_eligible,
+            prompt_tokens=safe_prompt,
         )
 
     # 1. Base requested or preset budget
@@ -103,15 +152,17 @@ def resolve_generation_budget(
     if preset == "custom" and requested_budget is not None and requested_budget > 0:
         base_budget = int(requested_budget)
     else:
-        # Determine target latency: check intent first, then preset
-        target_lat = TARGET_LATENCIES.get(intent, TARGET_LATENCIES.get(preset, 8.0))
-        if tps_ewma > 0:
-            base_budget = int(tps_ewma * target_lat)
-            # Residency degradation: if layers spilled to CPU RAM, scale down
-            if residency_ratio is not None and residency_ratio < 1.0:
-                scale = max(0.25, min(1.0, float(residency_ratio)))
-                base_budget = int(base_budget * scale)
-                clamp_reason = "RESIDENCY_SPILL_CLAMP"
+        # Determine target latency: check intent-specific preset, then general preset, then intent default
+        clean_preset = str(preset or "balanced").strip().lower()
+        intent_map = INTENT_TARGET_LATENCIES.get(intent)
+        if intent_map and clean_preset in intent_map:
+            target_lat = intent_map[clean_preset]
+        elif clean_preset in PRESET_TARGET_LATENCIES:
+            target_lat = PRESET_TARGET_LATENCIES[clean_preset]
+        else:
+            target_lat = INTENT_DEFAULT_LATENCY.get(intent, 4.0)
+        if safe_tps > 0:
+            base_budget = int(safe_tps * target_lat)
         else:
             if requested_budget is not None and requested_budget > 0:
                 base_budget = int(requested_budget)
@@ -122,6 +173,12 @@ def resolve_generation_budget(
             else:
                 base_budget = DEFAULT_FALLBACK_BUDGET
 
+        # Residency degradation: if layers spilled to CPU RAM, scale down
+        if residency_ratio is not None and residency_ratio < 1.0:
+            scale = max(0.25, min(1.0, float(residency_ratio)))
+            base_budget = int(base_budget * scale)
+            clamp_reason = "RESIDENCY_SPILL_CLAMP"
+
     # 2. Check context ceiling clamping
     if base_budget > remaining_context:
         effective_budget = remaining_context
@@ -129,7 +186,7 @@ def resolve_generation_budget(
         clamp_reason = "CONTEXT_PRESSURE_CLAMP"
     else:
         effective_budget = base_budget
-        if clamp_reason is None and tps_ewma > 0 and preset != "custom" and requested_budget and base_budget < requested_budget:
+        if clamp_reason is None and safe_tps > 0 and preset != "custom" and requested_budget and base_budget < requested_budget:
             verdict = BudgetVerdict.CLAMPED_LATENCY
             clamp_reason = "LATENCY_TARGET_CLAMP"
         elif clamp_reason is None:
@@ -148,6 +205,7 @@ def resolve_generation_budget(
         allocated_context=safe_ctx,
         remaining_context=remaining_context,
         clamp_reason=clamp_reason,
-        calibrated_tps=tps_ewma,
+        calibrated_tps=safe_tps,
         tts_eligible=tts_eligible,
+        prompt_tokens=safe_prompt,
     )
