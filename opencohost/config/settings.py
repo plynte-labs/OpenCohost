@@ -579,9 +579,9 @@ PERSONALIZATION_INSTRUCTIONS_MAX = 400
 # Memory v5 Shadow Mode (memory-v5-shadow-formation-foundation WU1)
 # ──────────────────────────────────────────────
 def _resolve_memory_v5_mode() -> str:
-    raw = os.environ.get("OPENCOHOST_MEMORY_V5_MODE") or os.environ.get("MEMORY_V5_MODE") or "OFF"
+    raw = os.environ.get("OPENCOHOST_MEMORY_V5_MODE") or os.environ.get("MEMORY_V5_MODE") or "ACTIVE"
     v = raw.strip().upper()
-    return v if v in ("OFF", "SHADOW", "ACTIVE") else "OFF"
+    return v if v in ("OFF", "SHADOW", "ACTIVE") else "ACTIVE"
 
 
 def _resolve_memory_v5_shadow_db() -> str:
