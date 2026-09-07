@@ -361,12 +361,21 @@ class TestStartupTtsPrewarm:
         lines = _drain(log_queue)
         assert any("[TTS_PREWARM] skipped" in line for line in lines), lines
 
-    def test_run_prewarms_at_startup_without_delaying_readiness(self):
+    def test_run_prewarms_at_startup_without_delaying_readiness(self, monkeypatch):
         """The pre-warm is wired into run()'s existing startup warm-up block and
         runs OFF the startup path: a 5s pre-warm must not hold run() for 5s."""
         import queue as q
         import threading
         import time
+
+        # Dynamic audio probe: use real pygame.mixer if an endpoint exists,
+        # but fallback gracefully on headless environments (e.g., CI VMs without sound cards).
+        try:
+            import pygame
+            pygame.mixer.init()
+            pygame.mixer.quit()
+        except Exception:
+            monkeypatch.setattr("pygame.mixer.init", lambda *args, **kwargs: None)
 
         motor, _, _ = _make_motor()
 

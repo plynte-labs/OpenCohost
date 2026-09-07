@@ -665,7 +665,11 @@ class TestPersistence:
         try:
             settings.save_last_model("gemma4:e4b", source="test")
 
-            model, source = settings.resolve_startup_model()
+            with patch(
+                "opencohost.config.settings._discover_installed_model_tags",
+                return_value={"gemma4:e4b", settings.DEFAULT_MODEL},
+            ):
+                model, source = settings.resolve_startup_model()
             assert model == "gemma4:e4b"
             assert source == "saved"
 

@@ -228,7 +228,7 @@ class PromptContextAssembler:
             native_ctx = settings.CLOUD_CTX_BUDGET
             effective_ctx = settings.CLOUD_CTX_BUDGET
 
-        is_reasoning = bool(is_reasoning_model is not None and is_reasoning_model(request_model))
+        is_reasoning = bool(is_local and is_reasoning_model is not None and is_reasoning_model(request_model))
         r_cfg = reasoning_settings_resolver(request_model) if reasoning_settings_resolver else {}
         r_enabled = bool(r_cfg.get("enabled", False))
         if is_reasoning or r_enabled:

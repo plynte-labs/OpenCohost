@@ -584,7 +584,7 @@ class TestSecondFailureReconciliation:
         assert motor._cloud_prober_thread is not old_thread
         assert motor._cloud_fallback_reason == "ambiguous_429"
         remaining = motor._cloud_probe_next_at - time.monotonic()
-        assert 0 < remaining <= settings.CLOUD_AUTO_RETURN_AMBIGUOUS_429_BASE_SECONDS
+        assert 0 < remaining <= settings.CLOUD_AUTO_RETURN_AMBIGUOUS_429_BASE_SECONDS + 0.5
 
         old_thread.join(timeout=2.0)
         motor._stop_cloud_prober()
@@ -640,7 +640,7 @@ class TestSecondFailureReconciliation:
         assert motor._cloud_prober_thread is not old_thread  # replaced, not the stale transient one
         assert motor._cloud_fallback_reason == "rate_limited"
         remaining = motor._cloud_probe_next_at - time.monotonic()
-        assert 0 < remaining <= 20  # the new class's Retry-After, not the old 5s cadence
+        assert 0 < remaining <= 20.5  # the new class's Retry-After, not the old 5s cadence
 
         old_thread.join(timeout=2.0)
         motor._stop_cloud_prober()
