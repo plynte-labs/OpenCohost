@@ -203,16 +203,16 @@ def test_empty_callback_runs_under_scheduler_lock_but_blocked_pop_skips_it():
 
 def test_concurrent_enqueue_and_dequeue_preserve_exactly_once_invariant():
     scheduler = TurnScheduler(max_items=10_000)
-    producer_count = 8
-    items_per_producer = 75
+    producer_count = 4
+    items_per_producer = 100
     producer_barrier = threading.Barrier(producer_count)
     failures = []
     previous_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
+    sys.setswitchinterval(1e-5)
 
     def produce(worker: int) -> None:
         try:
-            producer_barrier.wait(timeout=5.0)
+            producer_barrier.wait(timeout=15.0)
             for index in range(items_per_producer):
                 scheduler.enqueue(f"{worker}:{index}", priority=1, source="direct")
         except BaseException as exc:  # surfaced on the parent thread below

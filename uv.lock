@@ -1557,6 +1557,7 @@ dependencies = [
     { name = "pygame" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "tokenizers" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
@@ -1607,6 +1608,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "requests", specifier = ">=2.31.0" },
+    { name = "tokenizers", specifier = ">=0.15.0" },
     { name = "torch", marker = "extra == 'heavy-tts'", specifier = ">=2.2.0" },
     { name = "transformers", marker = "extra == 'heavy-tts'", specifier = ">=4.40.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },

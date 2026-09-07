@@ -30,6 +30,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+_ONNX_MODEL_FILE = REPO_ROOT / "modelos_f5" / "minilm_l12_onnx" / "model.onnx"
+requires_minilm_onnx = pytest.mark.skipif(
+    not _ONNX_MODEL_FILE.exists(),
+    reason="MiniLM ONNX model artifacts not present on disk",
+)
+
 from tools.memory_v5_semantic_benchmark import (
     CALIBRATION_RECEIPT_KEYS,
     CANDIDATE_RECEIPT_KEYS,
@@ -100,13 +106,21 @@ class TestLock:
         with open(lock_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        valid, reason, identity = verify_runtime_lock(data)
+        matching_data = json.loads(json.dumps(data))
+        matching_data["interpreter"] = {
+            "implementation": sys.implementation.name,
+            "version": platform.python_version(),
+            "os": platform.system(),
+            "arch": platform.machine(),
+        }
+        valid, reason, identity = verify_runtime_lock(matching_data)
         assert valid is True
         assert reason is None
-        assert "cpython-3.10.20-Windows-AMD64" in identity
+        expected_ident = f"{sys.implementation.name}-{platform.python_version()}-{platform.system()}-{platform.machine()}"
+        assert identity == expected_ident
 
-        mismatched_data = json.loads(json.dumps(data))
-        mismatched_data["interpreter"]["version"] = "3.11.0"
+        mismatched_data = json.loads(json.dumps(matching_data))
+        mismatched_data["interpreter"]["version"] = "99.99.99"
         m_valid, m_reason, _ = verify_runtime_lock(mismatched_data)
         assert m_valid is False
         assert m_reason == "SHARED_CONFIG_INVALID"
@@ -237,6 +251,7 @@ class TestLexicalAdapter:
 
 
 class TestMiniLMAndArtifactVerification:
+    @requires_minilm_onnx
     def test_model_artifact_verification(self):
         lock_path = REPO_ROOT / "tools" / "memory_v5_semantic_benchmark.lock"
         with open(lock_path, "r", encoding="utf-8") as f:
@@ -254,6 +269,7 @@ class TestMiniLMAndArtifactVerification:
         assert b_valid is False
         assert b_reason == "MODEL_UNAVAILABLE"
 
+    @requires_minilm_onnx
     def test_minilm_real_onnx_execution_and_no_fallback(self):
         model_dir = REPO_ROOT / "modelos_f5" / "minilm_l12_onnx"
         retriever = MiniLMRetriever(model_dir=model_dir)
@@ -330,6 +346,7 @@ class TestReceiptAndPublication:
 
 
 class TestFullBenchmarkExecution:
+    @requires_minilm_onnx
     def test_run_benchmark_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             docs_dir = Path(tmp_dir) / "docs" / "memory_v5"
@@ -549,6 +566,7 @@ class TestExceptionalR13:
 
 
 class TestPublicationOwnership:
+    @requires_minilm_onnx
     def test_run_benchmark_with_temp_root_has_no_repo_side_effects(self):
         import hashlib
         repo_pointer = REPO_ROOT / "docs" / "memory_v5" / "current-generation.json"
@@ -592,6 +610,7 @@ class TestPublicationOwnership:
         gens_after = set((REPO_ROOT / "docs" / "memory_v5" / "generations").iterdir())
         assert gens_before == gens_after, "repo generations mutated"
 
+    @requires_minilm_onnx
     def test_publication_generation_identity_is_coherent(self):
         import hashlib
         repo_pointer = REPO_ROOT / "docs" / "memory_v5" / "current-generation.json"

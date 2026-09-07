@@ -30,6 +30,8 @@ dependencies = [
     "uvicorn>=0.32.0",
     # websockets — async client used by the headless API PTT session.
     "websockets>=12.0",
+    # tokenizers — used by MiniLM semantic worker / memory v5 semantic safety.
+    "tokenizers>=0.15.0",
 ]
 
 [project.optional-dependencies]

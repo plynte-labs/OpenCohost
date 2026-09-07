@@ -58,7 +58,11 @@ def _make_motor(*, last_model_data=None, tmp_dir=None):
 
     try:
         from opencohost.core.llm_engine import MotorVocalIA
-        motor = MotorVocalIA(log_queue, ui_callback)
+        with patch(
+            "opencohost.config.settings._discover_installed_model_tags",
+            return_value={"gemma4:e4b", "llama3", settings.DEFAULT_MODEL},
+        ):
+            motor = MotorVocalIA(log_queue, ui_callback)
     finally:
         if tmp_dir is not None:
             settings.LAST_MODEL_FILE = original_last_model_file

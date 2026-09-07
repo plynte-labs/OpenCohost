@@ -496,8 +496,9 @@ def test_forget_all_preemption_cutoff_cleanly_drops():
 
 
 def test_packaged_schema_parity_with_canonical_ddl():
-    p_pkg = Path(r"E:\VoiceAI\opencohost\core\memory_v5_shadow\schema_v1.sql")
-    p_doc = Path(r"E:\VoiceAI\docs\memory_v5\memory_v5_shadow_ddl_v1.sql")
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    p_pkg = repo_root / "opencohost" / "core" / "memory_v5_shadow" / "schema_v1.sql"
+    p_doc = repo_root / "docs" / "memory_v5" / "memory_v5_shadow_ddl_v1.sql"
     assert p_pkg.exists(), "packaged schema_v1.sql missing"
     assert p_doc.exists(), "docs memory_v5_shadow_ddl_v1.sql missing"
 

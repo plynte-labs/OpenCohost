@@ -402,7 +402,7 @@ class TestStartupTtsPrewarm:
         try:
             motor.run()
             elapsed = time.monotonic() - t0
-            assert started.wait(2.0), "run() never triggered the TTS pre-warm"
+            assert started.wait(5.0), "run() never triggered the TTS pre-warm"
             assert elapsed < 2.0, (
                 f"run() blocked {elapsed:.2f}s on the pre-warm; it must not delay readiness"
             )

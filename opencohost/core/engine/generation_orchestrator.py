@@ -344,8 +344,12 @@ class GenerationOrchestrator:
                 continue
 
             if not raw_content.strip() and thinking and 'num_predict' in opciones_llm:
-                # ADR-056: Governed reasoning recovery. Never drop num_predict or retry uncapped.
-                if is_local and hasattr(self._host, "_reasoning_model_cache"):
+                if not is_local:
+                    opciones_llm.pop("num_predict", None)
+                    continue
+
+                # ADR-056: Governed reasoning recovery for local inference. Never drop num_predict or retry uncapped.
+                if hasattr(self._host, "_reasoning_model_cache"):
                     self._host._reasoning_model_cache[request_model] = True
 
                 current_budget = int(opciones_llm["num_predict"])

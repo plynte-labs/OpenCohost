@@ -59,7 +59,8 @@ def test_semantic_worker_crash_fails_open():
 
 
 def test_semantic_worker_real_minilm_isolation():
-    model_path = Path("E:/VoiceAI/modelos_f5/minilm_l12_onnx/model.onnx")
+    from opencohost.config.settings import BASE_DIR
+    model_path = Path(BASE_DIR) / "modelos_f5" / "minilm_l12_onnx" / "model.onnx"
     if not model_path.exists():
         pytest.skip("Local MiniLM ONNX artifact not found")
 

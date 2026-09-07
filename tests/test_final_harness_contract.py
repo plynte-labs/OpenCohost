@@ -7,8 +7,16 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 import sys
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+_ONNX_MODEL_FILE = REPO_ROOT / "modelos_f5" / "minilm_l12_onnx" / "model.onnx"
+requires_minilm_onnx = pytest.mark.skipif(
+    not _ONNX_MODEL_FILE.exists(),
+    reason="MiniLM ONNX model artifacts not present on disk",
+)
 
 from tools.memory_v5_semantic_benchmark import (
     BenchmarkReceiptValidator,
@@ -216,6 +224,7 @@ class TestR13OmittedLeavesAndMarkdown:
 
 # ----- C threshold independence -----
 class TestCThresholdIndependence:
+    @requires_minilm_onnx
     def test_c_semantic_ranking_unchanged_when_b_abstains(self):
         model_dir = REPO_ROOT / "modelos_f5" / "minilm_l12_onnx"
         retriever_b = MiniLMRetriever(model_dir=model_dir)
@@ -257,6 +266,7 @@ class TestCThresholdIndependence:
 
 # ----- Candidate-local lifecycle -----
 class TestCandidateLocalLifecycle:
+    @requires_minilm_onnx
     def test_b_calibration_failed_does_not_suppress_c(self):
         # Run benchmark with B forced CALIBRATION_FAILED but C should still be EVALUABLE
         with tempfile.TemporaryDirectory() as tmp:

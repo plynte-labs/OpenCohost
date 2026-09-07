@@ -54,6 +54,8 @@ def _make_motor(tmp_path):
     motor.ollama = MagicMock()
     motor.ollama.chat = MagicMock(return_value={"message": {"content": "local", "thinking": ""}})
     motor.pygame = MagicMock()
+    motor.pygame.mixer.music.get_busy.return_value = False
+    motor._speak_or_submit = MagicMock()
     motor.is_ready = True
     motor._loaded_model = motor.current_model
     motor._provider_config = _cloud_config()
@@ -64,10 +66,15 @@ def _success_response(content="hi"):
     return {"message": {"content": content, "thinking": ""}, "usage": {}}
 
 
+def _patch_sleep(monkeypatch, sleeps):
+    recorder = lambda s: sleeps.append(s) if s >= 0.1 else None
+    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", recorder)
+    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", recorder)
+
+
 def test_rate_limited_retries_once_and_succeeds(tmp_path, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
@@ -91,8 +98,7 @@ def test_rate_limited_default_wait_used_when_header_unparseable(tmp_path, monkey
     parse_retry_after_seconds only reads `retry-after` -- this is the one
     reachable path to the CLOUD_RATE_LIMIT_RETRY_DEFAULT_SECONDS fallback."""
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     exc = CloudLLMResponseError("HTTP 429", status_code=429, headers={"x-ratelimit-reset": "1700000000"})
 
@@ -110,8 +116,7 @@ def test_rate_limited_negative_retry_after_uses_default_wait(tmp_path, monkeypat
     sleep. time.sleep(-1) raises ValueError, which the outer generic handler
     swallows into a silent empty turn with no fallback engagement."""
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     exc = CloudLLMResponseError("HTTP 429", status_code=429, headers={"retry-after": "-1"})
 
@@ -125,8 +130,7 @@ def test_rate_limited_negative_retry_after_uses_default_wait(tmp_path, monkeypat
 
 def test_rate_limited_budget_exhausted_falls_back_like_today(tmp_path, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
@@ -151,8 +155,7 @@ def test_rate_limited_budget_exhausted_falls_back_like_today(tmp_path, monkeypat
 
 def test_rate_limited_retry_after_exceeds_max_no_retry(tmp_path, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(
@@ -176,8 +179,7 @@ def test_rate_limited_retry_after_exceeds_max_no_retry(tmp_path, monkeypatch):
 
 def test_ambiguous_429_never_retries(tmp_path, monkeypatch):
     sleeps = []
-    monkeypatch.setattr("opencohost.core.llm_engine.time.sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr("opencohost.core.engine.generation_orchestrator.time.sleep", lambda s: sleeps.append(s))
+    _patch_sleep(monkeypatch, sleeps)
     motor, _ = _make_motor(tmp_path)
     handle_calls = []
     monkeypatch.setattr(

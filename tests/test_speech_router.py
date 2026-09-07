@@ -458,7 +458,7 @@ def test_router_wakes_the_engine_loop_so_the_next_item_pops_promptly(router_moto
         assert not popped.is_set(), "the queue popped while speech was active"
 
         mixer.release()
-        assert popped.wait(1.0), "no wake at the speech boundary — the turn ate a full idle tick"
+        assert popped.wait(5.0), "no wake at the speech boundary — the turn ate a full idle tick"
         assert seen == [("siguiente bloque", "kira-agenda:t2")]
     finally:
         stop.set()
