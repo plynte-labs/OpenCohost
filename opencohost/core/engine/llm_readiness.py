@@ -10,7 +10,7 @@ import logging
 import os
 import shutil
 from dataclasses import asdict, dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from opencohost.config.settings import _canonical_model_tag
 
@@ -170,6 +170,7 @@ def _check_cloud_key_configured(profile_id: str = "cloud") -> bool:
 
 
 def _probe_cloud_status(
+    profile_id: Union[str, dict[str, Any]] = "cloud",
     cloud_profile: Optional[dict[str, Any]] = None,
     timeout: float = 3.0,
 ) -> tuple[bool, Optional[str]]:
@@ -179,8 +180,12 @@ def _probe_cloud_status(
         from opencohost.api import deps
         from opencohost.stream_admin.oauth_store import OAuthStore
 
+        if isinstance(profile_id, dict):
+            cloud_profile = profile_id
+            profile_id = "cloud"
+
         store = OAuthStore(deps.llm_keys_file())
-        token = store.load("cloud")
+        token = store.load(profile_id)
         api_key = token.get("api_key") if isinstance(token, dict) else ""
         if not api_key:
             return (False, "invalid_credentials")
@@ -278,11 +283,11 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
 
     # 2. Cloud Provider
     cloud_profiles = provider_cfg.get("profiles", {})
-    cloud_profile = cloud_profiles.get("cloud") or cloud_profiles.get(active_provider) or {}
-    provider_id = cloud_profile.get("provider_id", "nvidia")
+    cloud_profile = cloud_profiles.get(active_provider) or {}
+    provider_id = cloud_profile.get("provider_id") or cloud_profile.get("preset") or active_provider
     selected_model = cloud_profile.get("model") or "meta/llama-3.1-70b-instruct"
 
-    key_configured = _check_cloud_key_configured("cloud")
+    key_configured = _check_cloud_key_configured(active_provider)
     if not key_configured:
         return LlmReadinessResult(
             state=STATE_CLOUD_UNCONFIGURED,
@@ -298,7 +303,7 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
             hardware=hardware,
         )
 
-    success, err_reason = _probe_cloud_status(cloud_profile)
+    success, err_reason = _probe_cloud_status(active_provider, cloud_profile)
     if success:
         state = STATE_CLOUD_READY
         can_chat = True

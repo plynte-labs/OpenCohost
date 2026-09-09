@@ -252,6 +252,201 @@ def test_readiness_cloud_ready(monkeypatch):
     assert res.can_chat is True
 
 
+def test_readiness_cloud_nvidia_nim_profile_and_key(monkeypatch):
+    """Dynamic profile_id nvidia_nim with key only under nvidia_nim resolves CLOUD_READY."""
+    from opencohost.core.engine.llm_readiness import resolve_llm_readiness
+
+    host = FakeHost()
+    host.motor._provider_config = {
+        "active_provider": "nvidia_nim",
+        "profiles": {
+            "nvidia_nim": {
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+            }
+        },
+    }
+
+    checked_profile_id = None
+
+    def fake_check(profile_id):
+        nonlocal checked_profile_id
+        checked_profile_id = profile_id
+        return profile_id == "nvidia_nim"
+
+    probed_profile_id = None
+
+    def fake_probe(profile_id, cloud_profile=None, timeout=3.0):
+        nonlocal probed_profile_id
+        probed_profile_id = profile_id
+        return (True, None)
+
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._check_cloud_key_configured", fake_check)
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._probe_cloud_status", fake_probe)
+
+    res = resolve_llm_readiness(host)
+    assert checked_profile_id == "nvidia_nim"
+    assert probed_profile_id == "nvidia_nim"
+    assert res.state == "CLOUD_READY"
+    assert res.can_chat is True
+    assert res.selected_model == "nvidia/nemotron-3.5-lightning-30b-a3b"
+
+
+def test_readiness_cloud_openai_profile_and_key(monkeypatch):
+    """Dynamic profile_id openai with key only under openai resolves CLOUD_READY."""
+    from opencohost.core.engine.llm_readiness import resolve_llm_readiness
+
+    host = FakeHost()
+    host.motor._provider_config = {
+        "active_provider": "openai",
+        "profiles": {
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            }
+        },
+    }
+
+    checked_profile_id = None
+
+    def fake_check(profile_id):
+        nonlocal checked_profile_id
+        checked_profile_id = profile_id
+        return profile_id == "openai"
+
+    probed_profile_id = None
+
+    def fake_probe(profile_id, cloud_profile=None, timeout=3.0):
+        nonlocal probed_profile_id
+        probed_profile_id = profile_id
+        return (True, None)
+
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._check_cloud_key_configured", fake_check)
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._probe_cloud_status", fake_probe)
+
+    res = resolve_llm_readiness(host)
+    assert checked_profile_id == "openai"
+    assert probed_profile_id == "openai"
+    assert res.state == "CLOUD_READY"
+    assert res.can_chat is True
+    assert res.selected_model == "gpt-4o-mini"
+
+
+def test_readiness_cloud_stale_cloud_profile_does_not_eclipse_active_nvidia_nim(monkeypatch):
+    """A stale legacy 'cloud' profile in profiles dict must NOT eclipse the active nvidia_nim profile."""
+    from opencohost.core.engine.llm_readiness import resolve_llm_readiness
+
+    host = FakeHost()
+    host.motor._provider_config = {
+        "active_provider": "nvidia_nim",
+        "profiles": {
+            "cloud": {
+                "base_url": "https://legacy.example.com",
+                "model": "legacy-eclipsed-model",
+            },
+            "nvidia_nim": {
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+            },
+        },
+    }
+
+    # Only nvidia_nim has a configured key; 'cloud' key is missing
+    monkeypatch.setattr(
+        "opencohost.core.engine.llm_readiness._check_cloud_key_configured",
+        lambda pid: pid == "nvidia_nim",
+    )
+    monkeypatch.setattr(
+        "opencohost.core.engine.llm_readiness._probe_cloud_status",
+        lambda pid, *a, **kw: (True, None) if pid == "nvidia_nim" else (False, "invalid_credentials"),
+    )
+
+    res = resolve_llm_readiness(host)
+    assert res.selected_model == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert res.state == "CLOUD_READY"
+    assert res.can_chat is True
+
+
+def test_readiness_cloud_valid_when_ollama_completely_absent(monkeypatch):
+    """When Ollama is completely absent from system (no binary, no daemon), cloud-only startup succeeds."""
+    from opencohost.core.engine.llm_readiness import resolve_llm_readiness
+
+    host = FakeHost()
+    host.motor._provider_config = {
+        "active_provider": "nvidia_nim",
+        "profiles": {
+            "nvidia_nim": {
+                "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+            }
+        },
+    }
+
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._detect_ollama_binary", lambda: (None, False))
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._ping_ollama", lambda: (False, None, []))
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._check_cloud_key_configured", lambda pid: True)
+    monkeypatch.setattr("opencohost.core.engine.llm_readiness._probe_cloud_status", lambda pid, *a, **kw: (True, None))
+
+    res = resolve_llm_readiness(host)
+    assert res.state == "CLOUD_READY"
+    assert res.can_chat is True
+    assert res.ollama["reachable"] is False
+
+
+def test_check_cloud_key_configured_e2e_with_oauth_store(tmp_path, monkeypatch):
+    """_check_cloud_key_configured loads real key file for specified profile_id only."""
+    from opencohost.core.engine.llm_readiness import _check_cloud_key_configured
+    from opencohost.stream_admin.oauth_store import OAuthStore
+    import opencohost.api.deps as api_deps
+
+    keys_path = str(tmp_path / "llm_keys.json")
+    monkeypatch.setattr(api_deps, "llm_keys_file", lambda: keys_path)
+
+    store = OAuthStore(keys_path)
+    store.save("nvidia_nim", {"api_key": "nvapi-secret-123"})
+
+    assert _check_cloud_key_configured("nvidia_nim") is True
+    assert _check_cloud_key_configured("cloud") is False
+    assert _check_cloud_key_configured("openai") is False
+
+
+def test_probe_cloud_status_dynamic_profile(tmp_path, monkeypatch):
+    """_probe_cloud_status loads key for dynamic profile_id and sends proper Auth header."""
+    from opencohost.core.engine.llm_readiness import _probe_cloud_status
+    from opencohost.stream_admin.oauth_store import OAuthStore
+    import opencohost.api.deps as api_deps
+
+    keys_path = str(tmp_path / "llm_keys.json")
+    monkeypatch.setattr(api_deps, "llm_keys_file", lambda: keys_path)
+
+    store = OAuthStore(keys_path)
+    store.save("nvidia_nim", {"api_key": "nvapi-test-key"})
+
+    captured_url = None
+    captured_headers = None
+
+    class FakeResponse:
+        status_code = 200
+
+    def fake_get(url, headers=None, timeout=None):
+        nonlocal captured_url, captured_headers
+        captured_url = url
+        captured_headers = headers
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    ok, reason = _probe_cloud_status("nvidia_nim", {"base_url": "https://integrate.api.nvidia.com/v1"})
+    assert ok is True
+    assert reason is None
+    assert captured_url == "https://integrate.api.nvidia.com/v1/models"
+    assert captured_headers == {"Authorization": "Bearer nvapi-test-key"}
+
+    # With missing key for openai:
+    ok2, reason2 = _probe_cloud_status("openai", {"base_url": "https://api.openai.com/v1"})
+    assert ok2 is False
+    assert reason2 == "invalid_credentials"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 3. Hardware / VRAM Guideline Calculation
 # ──────────────────────────────────────────────────────────────────────────
