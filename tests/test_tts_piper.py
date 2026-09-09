@@ -5,6 +5,7 @@ All tests mock piper-tts internals so no real model file is required.
 """
 import socket
 import ssl
+import subprocess
 import threading
 import wave
 from unittest.mock import MagicMock, patch, call
@@ -34,6 +35,52 @@ def _make_engine(model_path: str = "/fake/model.onnx"):
 # ---------------------------------------------------------------------------
 
 class TestLoad:
+    def test_native_config_import_failure_keeps_piper_optional(self):
+        """A native-load failure in the optional config import cannot abort module import."""
+        script = r'''
+import builtins
+import types
+
+real_import = builtins.__import__
+fake_voice = types.ModuleType("piper.voice")
+fake_piper = types.ModuleType("piper")
+fake_piper.voice = fake_voice
+
+def import_with_native_config_failure(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "piper.voice":
+        return fake_piper
+    if name == "piper.config":
+        raise OSError("simulated native config failure")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = import_with_native_config_failure
+module = __import__("opencohost.core.speech.backends.tts_piper", fromlist=["PiperEngine"])
+assert module._PIPER_AVAILABLE is True
+assert module._PIPER_IMPORT_ERROR is None
+assert module._SynthesisConfig is None
+assert module._PIPER_SYNTHESIS_CONFIG_IMPORT_ERROR == "OSError: simulated native config failure"
+'''
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ROOT_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False
+        )
+
+        assert result.returncode == 0, result.stderr
+
+    def test_load_distinguishes_a_missing_model_before_invoking_piper(self, caplog):
+        """A nonexistent configured model is not reported as a generic Piper import/load failure."""
+        mock_voice_cls = MagicMock()
+        mock_voice_cls.load.side_effect = FileNotFoundError("no such file")
+        with patch("opencohost.core.speech.backends.tts_piper._PIPER_AVAILABLE", True), \
+             patch("opencohost.core.speech.backends.tts_piper._piper_voice") as mock_piper_voice:
+            mock_piper_voice.PiperVoice = mock_voice_cls
+            engine = _make_engine("/missing/model.onnx")
+            assert engine.load() is False
+
+        mock_piper_voice.PiperVoice.load.assert_called_once_with("/missing/model.onnx")
+        assert "modelo no encontrado" in caplog.text.lower()
+
     def test_load_returns_false_when_piper_not_installed(self):
         """_PIPER_AVAILABLE=False → load() returns False, does not raise."""
         with patch("opencohost.core.speech.backends.tts_piper._PIPER_AVAILABLE", False):

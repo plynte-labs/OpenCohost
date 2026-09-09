@@ -13,16 +13,22 @@ logger = logging.getLogger(__name__)
 try:
     import piper.voice as _piper_voice
     _PIPER_AVAILABLE = True
-except ImportError:
+    _PIPER_IMPORT_ERROR = None
+except (ImportError, OSError) as exc:
     _piper_voice = None  # type: ignore[assignment]
     _PIPER_AVAILABLE = False
+    _PIPER_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    logger.warning("Piper import unavailable: %s", _PIPER_IMPORT_ERROR)
 
 try:
     # Available since piper-tts 1.2; older versions only support the
     # two-argument synthesize_wav call (model-default speaking rate).
     from piper.config import SynthesisConfig as _SynthesisConfig
-except ImportError:
+    _PIPER_SYNTHESIS_CONFIG_IMPORT_ERROR = None
+except (ImportError, OSError) as exc:
     _SynthesisConfig = None  # type: ignore[assignment]
+    _PIPER_SYNTHESIS_CONFIG_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    logger.warning("Piper SynthesisConfig unavailable: %s", _PIPER_SYNTHESIS_CONFIG_IMPORT_ERROR)
 
 
 class PiperEngine:
@@ -77,8 +83,7 @@ class PiperEngine:
             return True
         except FileNotFoundError:
             logger.warning(
-                "Piper: modelo no encontrado en '%s'. "
-                "Configura TTS_LOCAL_MODEL_PATH con una ruta valida.",
+                "Piper: modelo no encontrado en '%s'. Configura TTS_LOCAL_MODEL_PATH con una ruta valida.",
                 self._model_path,
             )
             return False

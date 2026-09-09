@@ -398,10 +398,19 @@ def _resolve_piper_voice_file(filename: str) -> str:
         candidate = os.path.join(res_dir, "piper", filename)
         if os.path.isfile(candidate):
             return candidate
+        candidate = os.path.join(res_dir, "resources", "piper", filename)
+        if os.path.isfile(candidate):
+            return candidate
     from opencohost.config.storage import BASE_DIR
     candidate_repo = os.path.join(str(BASE_DIR), "modelos_f5", "piper", filename)
     if os.path.isfile(candidate_repo):
         return candidate_repo
+    candidate_prefix = os.path.join(os.path.dirname(sys.prefix), "piper", filename)
+    if os.path.isfile(candidate_prefix):
+        return candidate_prefix
+    candidate_executable = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "piper", filename)
+    if os.path.isfile(candidate_executable):
+        return candidate_executable
     return primary
 
 
