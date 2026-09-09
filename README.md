@@ -41,6 +41,19 @@ OpenCohost is a local-first AI streaming co-host platform. The core product is *
 
 > **Roadmap (not in v1):** High-fidelity fully-local voice via Qwen3-TTS / F5 voice cloning is planned as an advanced opt-in in a future release. It requires a separate Python environment, ~2 GB of models, and a GPU with sufficient VRAM.
 
+## Installation (Windows)
+
+Download the standalone installer (`OpenCohost-<version>-x64-setup.exe`) from [GitHub Releases](https://github.com/plynte-labs/OpenCohost/releases).
+
+> [!NOTE]
+> **Windows SmartScreen Notice:** As an open-source project without an expensive commercial code-signing certificate, Windows Defender SmartScreen may show an *"Unrecognized app"* warning on newly released builds:
+> 1. Click **More info** (*Más información*).
+> 2. Click **Run anyway** (*Ejecutar de todas formas*).
+> 3. To verify binary integrity, compare the SHA-256 checksum with `SHA256SUMS.txt`:
+>    ```powershell
+>    Get-FileHash .\OpenCohost-*-x64-setup.exe -Algorithm SHA256
+>    ```
+
 ## Requirements
 
 ### Prerequisites

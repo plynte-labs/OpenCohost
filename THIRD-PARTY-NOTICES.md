@@ -88,17 +88,25 @@ into the bundle.
 
 ---
 
+## Bundled offline assets & models (installer)
+
+Since version 0.3.0-alpha.1, the packaged Windows installer (`OpenCohost-Setup.exe`)
+bundles the following models and tools for offline-first readiness:
+
+| Asset | Source / Model | License | Notes |
+|---|---|---|---|
+| MiniLM ONNX | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (ONNX export via Xenova) | **Apache-2.0** | Permissive; compatible with MIT binary redistribution. Powers Memory v5 local semantic search. |
+| Piper Voice | `es_MX-claude-high.onnx` (Rhasspy Piper Voices / HirCoir) | **Apache-2.0** | Permissive dataset license. Powers Kira's default offline local voice. |
+| `uv` binary | `astral-sh/uv` 0.11.6 | **MIT or Apache-2.0** | Dual-licensed tool binary used by the installer to bootstrap the local Python venv. |
+
+---
+
 ## Not covered by this file
 
-**Language models.** OpenCohost distributes no model weights. Ollama downloads
-them on your machine under their own terms, and community licenses such as
-Llama's and Gemma's are not OSI-approved and carry acceptable-use and
-redistribution conditions that MIT does not grant you. If you redistribute a
-product with a model bundled or preselected, read that model's license.
+**Conversational LLMs.** OpenCohost distributes no conversational LLM weights (e.g. Llama, Gemma, Qwen). Ollama downloads
+them on your machine under their own terms, and community licenses carry acceptable-use and redistribution conditions that MIT does not grant you.
 
-**Piper voices.** The default voices named in `opencohost/config/settings.py`
-are not shipped here. Piper voices carry per-voice licenses that vary from MIT
-to CC-BY to dataset-restricted. Check the voice you ship.
+**Additional Piper voices.** Additional or optional voices beyond the bundled `es_MX-claude-high` carry per-voice licenses that vary from MIT to CC-BY to dataset-restricted. Check the voice you ship or configure.
 
 **Kira's artwork.** The images under `assets/avatar/kira/` and
 `OpenCohost_UI/public/` have no attribution recorded in this repository. Their

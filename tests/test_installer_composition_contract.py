@@ -8,7 +8,7 @@ import re
 import tomllib
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).parent.parent.absolute()
 TAURI_DIR = ROOT / "OpenCohost_UI" / "src-tauri"
 TAURI_CONF = TAURI_DIR / "tauri.conf.json"
 PYPROJECT = ROOT / "pyproject.toml"
@@ -83,11 +83,31 @@ def test_forbidden_artifacts_are_not_in_resources_or_bundle_config():
             continue
         rel = path.relative_to(RESOURCES_DIR).as_posix().lower()
         
-        # NSIS must NOT package backend.config.json or raw developer code
-        assert rel != "backend.config.json", "backend.config.json must never be bundled into resources"
-        assert not rel.endswith(".py"), f"Raw python file '{rel}' must not be bundled in resources"
+        # NSIS must NOT package backend.config.json or active developer venvs
+        assert "backend.config.json" not in rel, "backend.config.json must never be bundled into resources"
         assert ".venv" not in rel, f"Virtual environment '{rel}' must not be in resources"
-        assert "__pycache__" not in rel, f"Python cache '{rel}' must not be in resources"
+
+        # Files outside runtime/ must not be loose python scripts or caches
+        if not rel.startswith("runtime/"):
+            assert not rel.endswith(".py"), f"Raw python file '{rel}' must not be bundled outside runtime"
+            assert "__pycache__" not in rel, f"Python cache '{rel}' must not be outside runtime in resources"
+
+
+def test_extracted_runtime_structure_when_staged():
+    runtime_dir = RESOURCES_DIR / "runtime"
+    if not runtime_dir.is_dir():
+        pytest.skip("runtime directory not yet staged in resources")
+
+    assert (runtime_dir / "opencohost").is_dir(), "runtime/opencohost directory must exist"
+    assert (runtime_dir / "opencohost" / "__init__.py").is_file(), "runtime/opencohost/__init__.py must exist"
+    assert (runtime_dir / "config").is_dir(), "runtime/config directory must exist"
+    assert (runtime_dir / "data" / "editorial_cards").is_dir(), "runtime/data/editorial_cards must exist"
+    assert (runtime_dir / "data" / "memorias").is_dir(), "runtime/data/memorias must exist"
+    assert (runtime_dir / "logs").is_dir(), "runtime/logs directory must exist"
+
+    python_exe = runtime_dir / "python" / "python.exe"
+    if python_exe.is_file():
+        assert (runtime_dir / "python" / "Lib").is_dir(), "runtime/python/Lib must exist"
 
 
 def test_built_nsis_bundle_excludes_forbidden_blobs_and_respects_size_envelope():

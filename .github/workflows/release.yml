@@ -118,6 +118,14 @@ jobs:
           name: engine-payload
           path: build_artifacts/payloads
 
+      - name: Prepare standalone Python runtime
+        run: |
+          uv python install 3.12.4 --install-dir packaging/embedded_runtime/python
+          mkdir -p packaging/standalone_python
+          cp -r packaging/embedded_runtime/python/cpython-3.12.4-windows-x86_64-none/* packaging/standalone_python/
+          rm -f packaging/standalone_python/Lib/EXTERNALLY-MANAGED
+          uv pip install --break-system-packages ".[local-tts,cloud-tts]" --python packaging/standalone_python/python.exe
+
       - name: Stage bundled installer resources
         run: |
           VERSION="${{ needs.build-engine-payload.outputs.version }}"

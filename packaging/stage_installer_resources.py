@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import urllib.request
+import zipfile
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TAURI_RESOURCES = REPO_ROOT / "OpenCohost_UI" / "src-tauri" / "resources"
@@ -42,7 +44,11 @@ def _download_or_copy(local_candidate: Path, destination: Path, download_url: st
         shutil.copyfileobj(resp, out)
 
 
-def stage_resources(version: str, engine_payload: Path | None = None) -> None:
+def stage_resources(
+    version: str,
+    engine_payload: Path | None = None,
+    skip_python: bool = False,
+) -> None:
     TAURI_RESOURCES.mkdir(parents=True, exist_ok=True)
 
     # 1. Engine payload
@@ -101,16 +107,104 @@ def stage_resources(version: str, engine_payload: Path | None = None) -> None:
         dest_file = TAURI_RESOURCES / "modelos_f5" / "minilm_l12_onnx" / filename
         _download_or_copy(local_file, dest_file, f"{MINILM_BASE_URL}/{remote_subpath}")
 
+    # 5. Pre-extracted Runtime (resources/runtime/)
+    runtime_dest = TAURI_RESOURCES / "runtime"
+    runtime_dest.mkdir(parents=True, exist_ok=True)
+
+    # 5a. Extract opencohost package from engine payload into runtime/
+    print(f"Unpacking engine into {runtime_dest}")
+    with zipfile.ZipFile(engine_dest, "r") as z:
+        for member in z.infolist():
+            if member.filename == "payload-manifest.json":
+                continue
+            z.extract(member, runtime_dest)
+
+    # 5b. Default directory structure and config
+    (runtime_dest / "logs").mkdir(parents=True, exist_ok=True)
+    (runtime_dest / "data" / "editorial_cards").mkdir(parents=True, exist_ok=True)
+    (runtime_dest / "data" / "memorias").mkdir(parents=True, exist_ok=True)
+    (runtime_dest / "config").mkdir(parents=True, exist_ok=True)
+
+    default_profiles_src = REPO_ROOT / "opencohost" / "config" / "default_profiles.json"
+    default_profiles_dest = runtime_dest / "config" / "default_profiles.json"
+    if default_profiles_src.is_file() and not default_profiles_dest.is_file():
+        shutil.copy2(default_profiles_src, default_profiles_dest)
+
+    # 5c. Standalone Python distribution (runtime/python)
+    if not skip_python:
+        python_dest = runtime_dest / "python"
+        _stage_standalone_python(python_dest)
+
     print("Staging complete! All bundled resources are ready in OpenCohost_UI/src-tauri/resources/")
+
+
+def _ignore_python_junk(dirpath: str, contents: list[str]) -> set[str]:
+    ignored = set()
+    for c in contents:
+        if c in ("__pycache__", ".git", ".pytest_cache", ".lock", "EXTERNALLY-MANAGED"):
+            ignored.add(c)
+        elif c.endswith((".pyc", ".pyo")):
+            ignored.add(c)
+    return ignored
+
+
+def _stage_standalone_python(python_dest: Path) -> None:
+    py_exe = python_dest / "python.exe"
+    if py_exe.is_file():
+        res = subprocess.run([str(py_exe), "-c", "import fastapi, uvicorn; print('ok')"], capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"Standalone Python runtime already functional at {python_dest}")
+            return
+
+    standalone_src = REPO_ROOT / "packaging" / "standalone_python"
+    embedded_src = REPO_ROOT / "packaging" / "embedded_runtime" / "python" / "cpython-3.12.4-windows-x86_64-none"
+
+    source_dir = None
+    if (standalone_src / "python.exe").is_file():
+        source_dir = standalone_src
+    elif (embedded_src / "python.exe").is_file():
+        source_dir = embedded_src
+
+    if source_dir is not None:
+        print(f"Copying Python distribution from {source_dir} -> {python_dest}")
+        shutil.copytree(source_dir, python_dest, dirs_exist_ok=True, ignore=_ignore_python_junk)
+    else:
+        print(f"No local Python distribution found, downloading via uv into {python_dest}...")
+        python_dest.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["uv", "python", "install", "3.12.4", "--install-dir", str(python_dest.parent)],
+            check=True,
+        )
+        installed_dir = python_dest.parent / "cpython-3.12.4-windows-x86_64-none"
+        if installed_dir.is_dir() and installed_dir.resolve() != python_dest.resolve():
+            shutil.copytree(installed_dir, python_dest, dirs_exist_ok=True, ignore=_ignore_python_junk)
+            shutil.rmtree(installed_dir, ignore_errors=True)
+
+    externally_managed = python_dest / "Lib" / "EXTERNALLY-MANAGED"
+    if externally_managed.is_file():
+        externally_managed.unlink()
+
+    py_exe = python_dest / "python.exe"
+    if py_exe.is_file():
+        res = subprocess.run([str(py_exe), "-c", "import fastapi, uvicorn; print('ok')"], capture_output=True, text=True)
+        if res.returncode != 0:
+            print("Installing dependencies into staged Python...")
+            subprocess.run(
+                ["uv", "pip", "install", "--break-system-packages", ".[local-tts,cloud-tts]", "--python", str(py_exe)],
+                cwd=str(REPO_ROOT),
+                check=True,
+            )
+            print("Dependencies successfully installed into staged Python.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage bundled installer resources for Tauri build.")
     parser.add_argument("--version", default="0.3.0-alpha.1", help="Release semver string")
     parser.add_argument("--engine-payload", type=Path, default=None, help="Prebuilt engine payload zip")
+    parser.add_argument("--skip-python", action="store_true", help="Skip copying heavy Python runtime")
     args = parser.parse_args()
 
-    stage_resources(args.version, args.engine_payload)
+    stage_resources(args.version, args.engine_payload, skip_python=args.skip_python)
     return 0
 
 
