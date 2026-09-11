@@ -146,7 +146,9 @@ Backing: OBS client + `avatar.yaml` (shared file; writes under `_config_lock`).
 |---|---|---|
 | GET / PUT | `/api/obs/config` | Read/update OBS config (password is write-only). |
 | POST | `/api/obs/test` | Test OBS connection (bounded, 5s timeout). |
-| GET / PUT | `/api/avatar/config` | Read/update avatar config (enabled, mode, `state_images`). |
+| GET / PUT | `/api/avatar/config` | Read/update avatar config (enabled, mode, `state_images`). PUT values are paths only. |
+| POST | `/api/avatar/upload` | Upload image bytes `{state, filename, content_b64}` for one state; validated + copied into the user avatar dir (10MB cap). |
+| GET | `/api/avatar/image?state=` | Served image bytes for a state (map → user dir → bundled defaults → idle); ETag revalidation, 404 when missing. |
 
 ---
 

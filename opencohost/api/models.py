@@ -742,13 +742,28 @@ class AvatarConfigRequest(BaseModel):
     """PUT /api/avatar/config body — a partial update.
 
     `state_images` keys are validated against `VALID_STATES` server-side
-    (unknown state -> 422) before anything is applied. Image UPLOAD is
-    deferred (owner decision) — values are paths only, never multipart.
+    (unknown state -> 422) before anything is applied. Values are paths only.
+    For real uploads (bytes copied server-side into user-data) use
+    POST /api/avatar/upload (`AvatarUploadRequest`).
     """
 
     enabled: Optional[bool] = None
     mode: Optional[str] = None
     state_images: Optional[dict[str, str]] = None
+
+
+class AvatarUploadRequest(BaseModel):
+    """POST /api/avatar/upload body — Tauri avatar upload (bytes, not paths).
+
+    `content_b64` is the raw image file bytes (base64). The server validates
+    state/extension/size/magic and copies into the user avatar dir as
+    `<state><ext>`, so the original file can be moved or deleted afterwards.
+    Cap: 10MB (`MAX_UPLOAD_BYTES`).
+    """
+
+    state: str
+    filename: str
+    content_b64: str
 
 
 class AgendaTopicOut(BaseModel):

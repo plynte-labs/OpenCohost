@@ -100,6 +100,7 @@ VoiceAItemp*/
 
 # ── User assets ──
 assets/music/
+assets/avatar/user/
 opencohost/config/music_library.json
 Documents/
 WhatIs.md

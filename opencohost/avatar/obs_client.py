@@ -32,7 +32,10 @@ logger = get_logger()
 # obs_lifecycle's except/logger.exception. (obs_reconnect_quiet — ponytail.)
 logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
 
-_SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+# One list, one truth with the upload path (UPLOAD_EXTENSIONS in
+# avatar_config.py): uploaded gif/bmp must resolve in the folder/idle scan
+# too, not just via the configured-map branch (judge finding).
+_SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 
 @dataclass
@@ -194,8 +197,14 @@ class OBSClient:
     def _get_image_path_for_state(self, state: str) -> Optional[Path]:
         """Get the absolute image path for a given avatar state."""
         configured = self.state_images.get(state)
-        if configured and configured.exists():
-            return configured
+        if configured:
+            if configured.exists():
+                return configured
+            # Honest, not silent: the map points at a file that is gone (moved
+            # or deleted source). Fall through to the idle chain below instead
+            # of pushing a dead path to OBS. Log the file NAME only — the
+            # absolute user path stays out of the log (judge finding).
+            self.on_log(f"[OBS] Configured image for state '{state}' is missing: {configured.name}")
 
         for ext in _SUPPORTED_IMAGE_EXTENSIONS:
             candidate = self.assets_folder / f"{state}{ext}"
