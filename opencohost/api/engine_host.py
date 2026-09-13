@@ -152,6 +152,9 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         # retry -- surfaced so the owner sees it instead of inferring the
         # loss from silence. Detail stays None (same privacy gate).
         "turn_dropped",
+        # ADR-056: Bounded reasoning recovery terminal exhaustion notification
+        # for owner-visible turns (direct, ptt, owner_bundle). Detail stays None.
+        "reasoning_budget_exhausted",
     }
 )
 

@@ -384,3 +384,9 @@ class MemorySubsystem:
             except Exception:
                 pass
             self._cache_store = None
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown(timeout_s=0.5)
+        except Exception:
+            pass

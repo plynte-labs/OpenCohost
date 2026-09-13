@@ -26,6 +26,17 @@ MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt", settings.OWNER_BUNDLE_SOURC
 DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt", settings.OWNER_BUNDLE_SOURCE})
 EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt", settings.OWNER_BUNDLE_SOURCE})
 HISTORY_ASSISTANT_ONLY_SOURCES = frozenset({"chat"})
+OWNER_POLICY_SOURCES = frozenset({"direct", "ptt", settings.OWNER_BUNDLE_SOURCE})
+
+OWNER_RESPONSE_POLICY = (
+    "For owner conversations, prioritize answering the current request over maintaining banter. "
+    "Preserve the active persona’s language and voice, but never let humor, novelty, or conversational engagement replace a useful answer.\n\n"
+    "Give the requested answer directly before optional commentary. When a list, explanation, comparison, or example is requested, provide it rather than criticizing the request.\n\n"
+    "Infer the desired depth from the full conversation. Treat brevity as a default, not a restriction against requested detail. When elaborating, add useful information or examples rather than longer introductions. When the owner expresses confusion, reconsider the explanation instead of merely making it longer.\n\n"
+    "Distinguish supplied evidence from inference. Do not invent personal memories, project details, dates, or architecture. If the available context lacks a requested detail, state that limitation narrowly; do not claim that no memory exists.\n\n"
+    "Treat explicit owner corrections as corrections, including transcription mistakes. Do not continue reasoning from the corrected premise.\n\n"
+    "Avoid repetitive openings, unnecessary analogies, condescension, and obligatory follow-up questions. Ask for clarification only when needed to answer usefully."
+)
 
 
 @dataclass
@@ -128,6 +139,8 @@ class PromptContextAssembler:
         system_parts = [system_text]
         if grounding_block:
             system_parts.append(grounding_block)
+        if source in OWNER_POLICY_SOURCES:
+            system_parts.append(OWNER_RESPONSE_POLICY)
         if personalization_block:
             system_parts.append(personalization_block)
         system_content = "\n\n".join(system_parts)

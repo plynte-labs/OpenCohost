@@ -76,7 +76,7 @@ CHAT_FREQUENCY_PENALTY = 0.5
 # actually closes the window and supersedes further tuning pressure on this
 # knob. Do not re-tune this value as a substitute for that fix.
 HISTORY_MAX_TURNS = 3
-DEFAULT_MODEL = "llama3"
+DEFAULT_MODEL = "gemma4:e4b"
 
 # ──────────────────────────────────────────────
 # Topic Scout (topic_scout_llm_20260629)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import re
 import threading
 import time
 from typing import Any, Callable, Iterator, Optional
@@ -33,6 +34,35 @@ from opencohost.core.speech.sentence_splitter import SentenceSplitter
 from opencohost.stream_admin.oauth_store import OAuthStore
 
 logger = logging.getLogger("OpenCohost")
+
+
+# ── Immutable cloud sampling params (evidence 2026-09-09, NVIDIA NIM) ──────
+#
+# Some OpenAI-compatible providers pin sampling knobs per model and answer a
+# fast HTTP 400 naming the required value instead of coercing, e.g. NIM:
+#   "Validation: `top_p` is immutable for this model and must be 0.95, got 0.9"
+# Our engine always sends its own `LLM_TOP_P` (0.9), so EVERY turn to such a
+# model burns instantly with `cloud_llm_error` — no timeout, no retry, just a
+# dead provider that looks configured. `readiness` cannot catch it: the
+# `GET /models` probe never validates sampling params.
+#
+# `cloud_chat` below therefore retries a 400 that names an immutable param,
+# bounded (1 original + up to 3 single-param corrections) and cached per
+# (base_url, model) so later turns skip the 400 round-trip. Anything without a
+# parseable `must be <number>` requirement re-raises untouched.
+
+_IMMUTABLE_PARAM_RE = re.compile(r"`([A-Za-z_]\w*)`[^`]{0,200}?must be (\d+(?:\.\d+)?)")
+
+# OpenAI body name -> Ollama-shaped options key used by our callers.
+_IMMUTABLE_PARAM_MAP = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "max_tokens": "num_predict",
+}
+
+_MAX_IMMUTABLE_FIXES = 3
 
 
 @dataclass(frozen=True)
@@ -113,6 +143,9 @@ class LLMInferenceService:
         self._api_key_resolver = api_key_resolver or self._default_cloud_api_key
         self._ollama_chat_clients: dict[float, Any] = {}
         self._default_ollama_client: Any = None
+        # (base_url, model) -> {ollama-option: required value} learned from
+        # 400 immutable-param rejections (see module note above).
+        self._immutable_param_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _get_ollama(self) -> Any:
         if self._ollama_resolver is not None:
@@ -230,6 +263,44 @@ class LLMInferenceService:
             raise RuntimeError("No Ollama client available for local chat")
         return client.chat(**kwargs)
 
+    def _immutable_fix(
+        self,
+        cache_key: tuple[str, str],
+        options: dict[str, Any],
+        exc: Exception,
+    ) -> Optional[dict[str, Any]]:
+        """Corrected Ollama-shaped options for a 400 immutable-param rejection.
+
+        Returns None when the error is not a parseable `must be <number>`
+        requirement (caller re-raises the original), or when the requirement
+        already holds (nothing to correct — retrying would loop).
+        """
+        if getattr(exc, "status_code", None) != 400:
+            return None
+        excerpt = str(getattr(exc, "body_excerpt", "") or "")
+        match = _IMMUTABLE_PARAM_RE.search(excerpt)
+        if match is None:
+            return None
+        openai_name, raw_value = match.group(1), match.group(2)
+        ollama_name = _IMMUTABLE_PARAM_MAP.get(openai_name)
+        if ollama_name is None:
+            return None
+        value: Any = float(raw_value) if "." in raw_value else int(raw_value)
+        if options.get(ollama_name) == value:
+            return None
+        fixed = dict(options)
+        fixed[ollama_name] = value
+        learned = dict(self._immutable_param_cache.get(cache_key, {}))
+        learned[ollama_name] = value
+        self._immutable_param_cache[cache_key] = learned
+        logger.warning(
+            "cloud immutable param: %s must be %r for model %s; retrying with corrected options",
+            ollama_name,
+            value,
+            cache_key[1],
+        )
+        return fixed
+
     def cloud_chat(
         self,
         *,
@@ -249,13 +320,44 @@ class LLMInferenceService:
                 "cloud provider active but no profile configured"
             )
         api_key = self._api_key_resolver(active_id) if active_id else ""
-        return self._cloud_client.send_chat_completion(
-            base_url=str(profile.get("base_url") or ""),
-            api_key=api_key,
-            model=str(profile.get("model") or ""),
-            messages=messages,
-            options=options or {},
-            timeout=timeout or OLLAMA_REQUEST_TIMEOUT,
+        base_url = str(profile.get("base_url") or "")
+        model = str(profile.get("model") or "")
+        cache_key = (base_url, model)
+        opts = dict(options or {})
+        for cached_name, cached_value in self._immutable_param_cache.get(cache_key, {}).items():
+            opts[cached_name] = cached_value
+        err_cls = getattr(self._cloud_client, "CloudLLMResponseError", None)
+        if not (isinstance(err_cls, type) and issubclass(err_cls, Exception)):
+            # Test doubles without a real exception type: single direct call,
+            # byte-identical to the pre-fix behavior.
+            return self._cloud_client.send_chat_completion(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                options=opts,
+                timeout=timeout or OLLAMA_REQUEST_TIMEOUT,
+            )
+        attempts = 1 + _MAX_IMMUTABLE_FIXES
+        for _ in range(attempts):
+            try:
+                return self._cloud_client.send_chat_completion(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    messages=messages,
+                    options=opts,
+                    timeout=timeout or OLLAMA_REQUEST_TIMEOUT,
+                )
+            except err_cls as exc:
+                fixed = self._immutable_fix(cache_key, opts, exc)
+                if fixed is None:
+                    raise
+                opts = fixed
+        # Unreachable: the loop above either returns or raises (a no-op fix
+        # also raises). Kept as a defensive tail instead of trusting that.
+        raise self._cloud_client.CloudLLMResponseError(
+            "cloud immutable-param retry budget exhausted"
         )
 
     def chat_streaming(

@@ -104,6 +104,21 @@ class GenerationAttemptOutcome:
     respuesta: object = None
     early_return: Optional[str] = None
     stream: Optional[StreamAttemptState] = None
+    failure_reason: Optional[str] = None
+
+
+class GenerationResult(str):
+    """Invocation-local generation outcome transporting dialogue text and failure reason.
+
+    Subclasses str so all existing string operations, comparisons, truthiness,
+    and mock expectations remain 100% backward-compatible without shared instance state.
+    """
+    failure_reason: Optional[str] = None
+
+    def __new__(cls, text: str = "", failure_reason: Optional[str] = None):
+        instance = super().__new__(cls, text or "")
+        instance.failure_reason = failure_reason
+        return instance
 
 
 _GenerationAttemptOutcome = GenerationAttemptOutcome
@@ -143,6 +158,7 @@ class GenerationOrchestrator:
         raw_content = ""
         respuesta = None
         stream_state: Optional[StreamAttemptState] = None
+        failure_reason: Optional[str] = None
 
         stream_eligible = (
             is_local
@@ -320,7 +336,8 @@ class GenerationOrchestrator:
                     logger.info("cloud_llm_usage: %s source=%s", _usage, source)
 
             if thinking:
-                logger.debug(f"Pensamiento interno detectado ({len(thinking)} chars)")
+                t_len = len(thinking) if isinstance(thinking, (str, bytes, list)) else len(str(thinking))
+                logger.debug(f"Pensamiento interno detectado ({t_len} chars)")
 
             if isinstance(respuesta, dict):
                 _pec = respuesta.get("prompt_eval_count", 0)
@@ -357,6 +374,8 @@ class GenerationOrchestrator:
                 remaining_ctx = getattr(getattr(setup, "budget_resolution", None), "remaining_context", None)
                 if remaining_ctx is None or remaining_ctx <= 0:
                     remaining_ctx = max(0, int(_effective_ctx) - int(_pec or 0) - 128)
+                elif _pec and _pec > 0:
+                    remaining_ctx = min(remaining_ctx, max(0, int(_effective_ctx) - int(_pec) - 128))
 
                 if is_custom_user_budget:
                     self._host._log(
@@ -365,12 +384,18 @@ class GenerationOrchestrator:
                         f"(REASONING_BUDGET_EXHAUSTED).",
                         level="warning",
                     )
-                    break
+                    return GenerationAttemptOutcome(
+                        raw_content="",
+                        early_return="",
+                        respuesta=respuesta,
+                        stream=stream_state,
+                        failure_reason="reasoning_budget_exhausted",
+                    )
 
                 task_cap = 4096 if getattr(setup, "intent", "chat") == "drafting" else (2048 if getattr(setup, "intent", "chat") == "reasoning" else 1024)
                 escalated_budget = min(current_budget * 2, task_cap, remaining_ctx)
 
-                if escalated_budget > current_budget:
+                if intento + 1 < max_intentos and escalated_budget > current_budget:
                     opciones_llm["num_predict"] = escalated_budget
                     self._host._log(
                         f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
@@ -380,12 +405,26 @@ class GenerationOrchestrator:
                     )
                     continue
                 else:
-                    self._host._log(
-                        f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
-                        f"y no es posible autorizar más capacidad acotada (REASONING_BUDGET_EXHAUSTED).",
-                        level="warning",
+                    if intento + 1 >= max_intentos:
+                        self._host._log(
+                            f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
+                            f"en pensamiento interno y se alcanzó el límite de intentos ({max_intentos}/{max_intentos}) "
+                            f"(REASONING_BUDGET_EXHAUSTED).",
+                            level="warning",
+                        )
+                    else:
+                        self._host._log(
+                            f"Gobernanza de razonamiento: {request_model} agotó presupuesto ({current_budget} tokens) "
+                            f"y no es posible autorizar más capacidad acotada (REASONING_BUDGET_EXHAUSTED).",
+                            level="warning",
+                        )
+                    return GenerationAttemptOutcome(
+                        raw_content="",
+                        early_return="",
+                        respuesta=respuesta,
+                        stream=stream_state,
+                        failure_reason="reasoning_budget_exhausted",
                     )
-                    break
 
             if raw_content.strip():
                 break
@@ -394,7 +433,10 @@ class GenerationOrchestrator:
             time.sleep(0.5)
 
         return GenerationAttemptOutcome(
-            raw_content=raw_content, respuesta=respuesta, stream=stream_state
+            raw_content=raw_content,
+            respuesta=respuesta,
+            stream=stream_state,
+            failure_reason=failure_reason,
         )
 
     execute_attempt_loop = execute_generation_attempt

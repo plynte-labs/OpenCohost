@@ -309,6 +309,19 @@ class PregenCacheMixin:
                         payload, source=source, commit_history=False, log_prefix=log_prefix
                     )
                     if not dialogo:
+                        failure_reason = getattr(dialogo, "failure_reason", None)
+                        if failure_reason == "reasoning_budget_exhausted" and not is_agenda:
+                            with self._prefetch_lock:
+                                if self._prefetch_epoch == epoch:
+                                    self._prefetched_agenda = {
+                                        "payload": payload,
+                                        "dialogo": "",
+                                        "priority": priority,
+                                        "source": source,
+                                        "history_text": history_text,
+                                        "gen_ms": int((time.monotonic() - gen_start) * 1000),
+                                        "failure_reason": failure_reason,
+                                    }
                         return
                     if is_agenda and not self._preview_accept_agenda_output(dialogo):
                         self._log(f"Agenda: prefetch rechazado ({self._format_agenda_rejection()}).", level="warning")
@@ -422,7 +435,11 @@ class PregenCacheMixin:
             # F5 [v4]: this is the CTK legacy agenda consume path — report ready
             # ONLY for an agenda-source draft. An interactive (chat/ptt) occupant
             # is invisible here; it pops through the worker's own queue path.
-            return cached is not None and str(cached.get("source", "")).startswith("kira-agenda")
+            return (
+                cached is not None
+                and str(cached.get("source", "")).startswith("kira-agenda")
+                and not cached.get("failure_reason")
+            )
 
     def prefetch_pending(self) -> bool:
         """True while a prefetch worker is still generating (no draft yet).
@@ -489,7 +506,7 @@ class PregenCacheMixin:
             # F5 [v4]: pop ONLY agenda-source drafts. An interactive occupant is
             # left intact (never spoken as an agenda turn) for its own worker-path
             # pop — return False without popping.
-            if not item or not str(item.get("source", "")).startswith("kira-agenda"):
+            if not item or not str(item.get("source", "")).startswith("kira-agenda") or item.get("failure_reason"):
                 return False
             self._prefetched_agenda = None
             self._prefetch_done.clear()

@@ -127,6 +127,7 @@ from opencohost.core.engine.llm_inference_service import (
 from opencohost.core.engine.generation_orchestrator import (
     GenerationAttemptOutcome,
     GenerationOrchestrator,
+    GenerationResult,
     StreamAttemptState,
     _GenerationAttemptOutcome,
     _StreamAttemptState,
@@ -1983,20 +1984,27 @@ class MotorVocalIA(
             self._note_detour_turn(source)
             try:
                 if cached is not None:
-                    # F8 optional (runtime_findings_batch_20260807): a pregen
-                    # hit skips _ejecutar_inferencia entirely, so it never hit
-                    # the [TURN_LATENCY] emit above -- 6 of ~15 answers were
-                    # invisible to the metric. `submitted_at` is already in
-                    # hand from the unpack above; this is the tts-handoff
-                    # instant for a cache hit. path=pregen distinguishes it
-                    # from the foreground metric's two-field split (no
-                    # separate generation phase to subtract here).
-                    if submitted_at is not None:
-                        logger.info(
-                            "[TURN_LATENCY] source=%s request_to_tts_total_ms=%d path=pregen",
-                            source, int((time.monotonic() - submitted_at) * 1000),
+                    if cached.get("failure_reason") == "reasoning_budget_exhausted":
+                        self._log(
+                            f"Pregen agotó presupuesto de razonamiento [{source_label}]; no se reintenta en vivo."
                         )
-                    self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
+                        if source in ("ptt", "direct", OWNER_BUNDLE_SOURCE):
+                            self.ui_callback("reasoning_budget_exhausted")
+                    else:
+                        # F8 optional (runtime_findings_batch_20260807): a pregen
+                        # hit skips _ejecutar_inferencia entirely, so it never hit
+                        # the [TURN_LATENCY] emit above -- 6 of ~15 answers were
+                        # invisible to the metric. `submitted_at` is already in
+                        # hand from the unpack above; this is the tts-handoff
+                        # instant for a cache hit. path=pregen distinguishes it
+                        # from the foreground metric's two-field split (no
+                        # separate generation phase to subtract here).
+                        if submitted_at is not None:
+                            logger.info(
+                                "[TURN_LATENCY] source=%s request_to_tts_total_ms=%d path=pregen",
+                                source, int((time.monotonic() - submitted_at) * 1000),
+                            )
+                        self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
                 else:
                     # T1(d) [v5]: the worker's PLAIN foreground fallback for an
                     # INTERACTIVE item — no cache hit, not even an in-flight
@@ -2443,7 +2451,8 @@ class MotorVocalIA(
                     or not self._cloud_fallback_active
                     or self._cloud_fallback_reason != cloud_llm_client.CLOUD_ERROR_TRANSIENT
                 ):
-                    return result
+                    failure_reason = getattr(outcome, "failure_reason", None)
+                    return GenerationResult(result, failure_reason=failure_reason)
                 # The cloud attempt above failed and `_handle_cloud_failure`
                 # engaged auto-fallback (fallback_mode=="manual" leaves
                 # `_cloud_fallback_active` False, which the check above
@@ -2489,7 +2498,7 @@ class MotorVocalIA(
                     logger.exception("stream orphan belt failed")
             if commit_history:
                 self._invalidate_pregen_epoch()
-            return ""
+            return GenerationResult("")
 
     def _build_generation_request(
         self,
@@ -3053,6 +3062,7 @@ class MotorVocalIA(
         self._streamed_turn_job = None
         streamed_prefix = self._streamed_turn_prefix
         self._streamed_turn_prefix = None
+        failure_reason = getattr(dialogo, "failure_reason", None)
         if dialogo:
             engine_ms = int((time.monotonic() - request_start) * 1000)
             if queue_wait_ms is not None:
@@ -3163,14 +3173,17 @@ class MotorVocalIA(
                 # after its first submit, on top of the emit above. Owner
                 # decision 1, 2026-08-13 — see `_requeue_owner_bundle_followers`.
                 self._requeue_owner_bundle_followers(bundle_followers)
-            elif source in ("ptt", "direct") and not streamed_prefix:
-                # F1 companion (runtime-findings 2026-08-07): a plain ptt/direct
-                # turn matches no branch above when generation still comes back
-                # empty (guardrail block with no fallback line, or both the cloud
-                # attempt AND its one-shot local retry failing) -- tell the owner
-                # the turn was dropped instead of leaving them to infer it from
-                # silence. Not when a prefix aired: it audibly did not drop.
-                self.ui_callback("turn_dropped")
+                if failure_reason == "reasoning_budget_exhausted" and not streamed_prefix:
+                    self.ui_callback("reasoning_budget_exhausted")
+                elif not streamed_prefix:
+                    self.ui_callback("turn_dropped")
+            elif source in ("ptt", "direct", OWNER_BUNDLE_SOURCE) and not streamed_prefix:
+                # ADR-056: When reasoning budget is exhausted, notify via
+                # reasoning_budget_exhausted rather than generic turn_dropped.
+                if failure_reason == "reasoning_budget_exhausted":
+                    self.ui_callback("reasoning_budget_exhausted")
+                else:
+                    self.ui_callback("turn_dropped")
 
 
     def _emit_dialogue(

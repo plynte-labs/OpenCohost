@@ -13,6 +13,11 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+# Force Memory v5 to OFF by default across the entire test suite unless a test
+# explicitly opts in. Avoids spawning unisolated child worker processes that
+# allocate ~800 MB each and exhaust system RAM.
+os.environ.setdefault("OPENCOHOST_MEMORY_V5_MODE", "OFF")
+
 
 # Per-test wall-clock ceiling, in seconds. Deliberately generous: this is a
 # runaway backstop, not a performance budget. Override with
@@ -272,6 +277,22 @@ def _isolate_api_log_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
         settings_mod, "ACCIONES_LOG_FILE", str(log_dir / "acciones.jsonl")
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_v5_mode(monkeypatch):
+    """Keep Memory v5 subsystem OFF by default across all tests.
+
+    When MEMORY_V5_MODE is ACTIVE or SHADOW, MotorVocalIA initializes
+    MemorySubsystem, which spawns SemanticWorkerService in an uncollected
+    child process holding ~800 MB for ONNX + tokenizers. Over hundreds of tests,
+    uncollected child processes exhaust all system RAM and cause system OOM crashes.
+    Tests specifically asserting Memory v5 functionality monkeypatch this per-test.
+    """
+    from opencohost.config import settings as settings_mod
+
+    monkeypatch.setenv("OPENCOHOST_MEMORY_V5_MODE", "OFF")
+    monkeypatch.setattr(settings_mod, "MEMORY_V5_MODE", "OFF")
 
 
 @pytest.fixture(scope="session")

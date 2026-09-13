@@ -2,6 +2,7 @@
 (Phase C2, refactor_core_api_20260802/proposal.md). No state, no locks;
 MotorVocalIA keeps thin delegating staticmethods so no caller/test changes.
 """
+
 import re
 
 from opencohost.config.logger import get_logger
@@ -22,28 +23,29 @@ _TTS_MARKDOWN_OPERATOR_CHARS = set("=+*/\\|")
 _TTS_FENCED_CODE_RE = re.compile(r"(```+|~~~+).*?\1", re.DOTALL)
 _TTS_DISPLAY_MATH_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
 
-# Protocol tokens & think/reasoning blocks LLMs emit that must never be spoken.
-# Fail-closed: unclosed blocks drop to EOF so streaming truncation/cancels never leak.
-_TTS_THINK_BLOCK_RE = re.compile(
-    r"<(?:think|analysis|reasoning|tool_call|tool_response)(?:\s+[^>]*)?>.*?(?:</(?:think|analysis|reasoning|tool_call|tool_response)>|$)",
-    re.DOTALL | re.IGNORECASE,
+# Protocol/reasoning and unsafe HTML blocks must never be spoken.  Matching is
+# stack-based below, rather than a cross-tag regex: a mismatched closer cannot
+# establish a safe boundary, so the opener drops through EOF.
+_TTS_CONTROL_BLOCK_TAG_RE = re.compile(
+    r"</(?P<closing>think|analysis|reasoning|tool_call|tool_response|script|style|svg|template)\s*>"
+    r"|<(?P<opening>think|analysis|reasoning|tool_call|tool_response|script|style|svg|template)(?=[\s/>])[^>]*>",
+    re.IGNORECASE,
 )
 _TTS_SPECIAL_TOKENS_RE = re.compile(
     r"(?i)<\|(?:assistant|user|system|im_start|im_end|endoftext)\|>|\[/?INST\]|<<?/?SYS>>?|<s>|</s>"
 )
 
-# Unsafe HTML blocks (<script>, <style>, <svg>, <template>) and comments <!-- ... -->.
-# Dropped completely with content (both complete and unclosed to EOF).
-_TTS_UNSAFE_HTML_BLOCK_RE = re.compile(
-    r"<!--.*?(-->|$)|<(?:script|style|svg|template)(?:\s+[^>]*)?>.*?(?:</(?:script|style|svg|template)>|$)",
-    re.DOTALL | re.IGNORECASE,
-)
+# Comments are separately fail-closed; their `-->` delimiter has no tag name
+# to balance. Unsafe HTML tags share `_TTS_CONTROL_BLOCK_TAG_RE` above.
+_TTS_HTML_COMMENT_RE = re.compile(r"<!--.*?(-->|$)", re.DOTALL)
 
 # HTML tags: <br>, presentation tags (<b>, <strong>, <i>, <em>, <p>, <span>, <div>),
 # autolinks (<https://example.com/docs>), and placeholder angle brackets (<usuario>, <Importante>).
 _TTS_BR_RE = re.compile(r"(?i)<br\s*/?>")
 _TTS_HTML_DIV_P_CLOSE_RE = re.compile(r"(?i)</(?:p|div)>")
-_TTS_HTML_PRESENTATION_TAG_RE = re.compile(r"(?i)</?(?:b|strong|i|em|p|span|div)(?:\s+[^>]*)?>")
+_TTS_HTML_PRESENTATION_TAG_RE = re.compile(
+    r"(?i)</?(?:b|strong|i|em|p|span|div)(?:\s+[^>]*)?>"
+)
 _TTS_AUTOLINK_RE = re.compile(r"<((?:https?|ftp)://[^\s>]+)>", re.IGNORECASE)
 _TTS_PLACEHOLDER_RE = re.compile(
     r"<([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_](?:[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_\s.\-]*?[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9_])?)>"
@@ -64,8 +66,9 @@ _TTS_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*)$")
 _TTS_NUMBERED_RE = re.compile(r"^\s*\d{1,3}[.)]\s+(.*)$")
 _TTS_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
 _TTS_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
-# B1: requires a TeX-ish char inside the $...$ span so dollar amounts ("$5 y
-# $10") are never touched -- only the display ($$...$$) form is unconditional.
+# B1 candidates are checked by `_tts_is_inline_latex_body`: prose between two
+# currency markers may contain an underscore (for example `plan_basico`) but is
+# not enough evidence to replace the whole span with a formula notice.
 _TTS_INLINE_LATEX_RE = re.compile(r"\$([^$\n]*[\\_^{][^$\n]*)\$")
 _TTS_LINK_RE = re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)")
 _TTS_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
@@ -104,22 +107,36 @@ _TTS_MATH_SYMBOL_VERBALIZATION = {
 # Hebrew/Greek/Cyrillic (all BMP, all below 0x2600) would sail through, and it
 # raises rather than returning cleaned text.
 _TTS_NON_LATIN_RANGES = (
-    (0x0300, 0x036F, None),        # combining diacritics — handled as "keep" below, not here
-    (0x0370, 0x03FF, "greek"), (0x1F00, 0x1FFF, "greek"),
+    (0x0300, 0x036F, None),  # combining diacritics — handled as "keep" below, not here
+    (0x0370, 0x03FF, "greek"),
+    (0x1F00, 0x1FFF, "greek"),
     (0x0400, 0x052F, "cyrillic"),
     (0x0590, 0x05FF, "hebrew"),
-    (0x0600, 0x06FF, "arabic"), (0x0750, 0x077F, "arabic"),
-    (0xFB50, 0xFDFF, "arabic"), (0xFE70, 0xFEFF, "arabic"),
-    (0x1100, 0x11FF, "hangul"), (0x3130, 0x318F, "hangul"), (0xAC00, 0xD7A3, "hangul"),
-    (0x3040, 0x309F, "kana"), (0x30A0, 0x30FF, "kana"),
-    (0x2E80, 0x2EFF, "cjk"), (0x3000, 0x303F, "cjk"), (0x3400, 0x4DBF, "cjk"),
-    (0x4E00, 0x9FFF, "cjk"), (0xF900, 0xFAFF, "cjk"), (0x20000, 0x2FFFF, "cjk"),
-    (0x2600, 0x27BF, "emoji"), (0x1F000, 0x1FFFF, "emoji"), (0x1F1E6, 0x1F1FF, "emoji"),
+    (0x0600, 0x06FF, "arabic"),
+    (0x0750, 0x077F, "arabic"),
+    (0xFB50, 0xFDFF, "arabic"),
+    (0xFE70, 0xFEFF, "arabic"),
+    (0x1100, 0x11FF, "hangul"),
+    (0x3130, 0x318F, "hangul"),
+    (0xAC00, 0xD7A3, "hangul"),
+    (0x3040, 0x309F, "kana"),
+    (0x30A0, 0x30FF, "kana"),
+    (0x2E80, 0x2EFF, "cjk"),
+    (0x3000, 0x303F, "cjk"),
+    (0x3400, 0x4DBF, "cjk"),
+    (0x4E00, 0x9FFF, "cjk"),
+    (0xF900, 0xFAFF, "cjk"),
+    (0x20000, 0x2FFFF, "cjk"),
+    (0x2600, 0x27BF, "emoji"),
+    (0x1F000, 0x1FFFF, "emoji"),
+    (0x1F1E6, 0x1F1FF, "emoji"),
     (0x2500, 0x259F, "symbol"),
 )
 # Smart punctuation LLMs commonly emit that is not ASCII but is speakable/
 # harmless to keep as-is (dashes, curly quotes, ellipsis).
-_TTS_KEEP_PUNCT_CODEPOINTS = frozenset({0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026})
+_TTS_KEEP_PUNCT_CODEPOINTS = frozenset(
+    {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026}
+)
 
 
 def _tts_is_keep_char(ch: str) -> bool:
@@ -129,7 +146,9 @@ def _tts_is_keep_char(ch: str) -> bool:
     cp = ord(ch)
     if cp < 0x80:  # Basic Latin: ASCII letters/digits/punctuation
         return True
-    if 0x00A1 <= cp <= 0x00FF:  # Latin-1 Supplement: á é í ó ú ñ ü ¿ ¡ « » ° ... (× ÷ verbalized earlier)
+    if (
+        0x00A1 <= cp <= 0x00FF
+    ):  # Latin-1 Supplement: á é í ó ú ñ ü ¿ ¡ « » ° ... (× ÷ verbalized earlier)
         return True
     if 0x0100 <= cp <= 0x024F:  # Latin Extended-A/B
         return True
@@ -156,12 +175,65 @@ def _tts_cleanup_punctuation(text: str) -> str:
     """
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"\.{3,}", ",", text)              # ellipsis → comma pause (Piper reads "..." as "punto")
-    text = text.replace("\u2026", ",")                    # Unicode ellipsis (…) → same comma pause
-    text = re.sub(r"\.{2}(?!\.)", ".", text)          # exactly two dots -> one; ellipsis already handled above
+    text = re.sub(
+        r"\.{3,}", ",", text
+    )  # ellipsis → comma pause (Piper reads "..." as "punto")
+    text = text.replace("\u2026", ",")  # Unicode ellipsis (…) → same comma pause
+    text = re.sub(
+        r"\.{2}(?!\.)", ".", text
+    )  # exactly two dots -> one; ellipsis already handled above
     text = re.sub(r"([,;:!?])\1+", r"\1", text)
     text = re.sub(r"^[\s,;:]+", "", text)
     return text.strip()
+
+
+def _tts_drop_control_blocks(text: str) -> tuple[str, bool]:
+    """Drop recognized private/unsafe blocks with nested-tag balancing.
+
+    An unmatched opener or a closer for a different tag fails closed through
+    EOF.  Orphaned recognized closers are removed without discarding following
+    public text.
+    """
+    safe_parts: list[str] = []
+    cursor = 0
+    stack: list[str] = []
+
+    for match in _TTS_CONTROL_BLOCK_TAG_RE.finditer(text):
+        opening = match.group("opening")
+        tag = (opening or match.group("closing")).lower()
+
+        if stack:
+            if opening:
+                stack.append(tag)
+                continue
+            if tag != stack[-1]:
+                return "".join(safe_parts), True
+            stack.pop()
+            if not stack:
+                cursor = match.end()
+            continue
+
+        safe_parts.append(text[cursor : match.start()])
+        cursor = match.end()
+        if opening:
+            stack.append(tag)
+
+    if stack:
+        return "".join(safe_parts), True
+
+    result = "".join(safe_parts) + text[cursor:]
+    return result, result != text
+
+
+def _tts_is_inline_latex_body(body: str) -> bool:
+    """Accept explicit TeX syntax, plus compact ``x_2``-style subscripts.
+
+    A dollar-delimited span with prose is ambiguous; leave it intact unless it
+    carries a stronger TeX signal, so money amounts stay speakable.
+    """
+    if any(marker in body for marker in ("\\", "^", "{", "}")):
+        return True
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9]+", body))
 
 
 def _tts_strip_non_latin(text: str) -> str:
@@ -194,7 +266,8 @@ def _tts_strip_non_latin(text: str) -> str:
         # Metadata only — counts and category names, never the removed text.
         logger.debug(
             "[TTS_SANITIZE] non_latin_stripped chars=%d categories=%s",
-            sum(removed_counts.values()), ",".join(sorted(removed_counts)),
+            sum(removed_counts.values()),
+            ",".join(sorted(removed_counts)),
         )
     return cleaned
 
@@ -202,7 +275,7 @@ def _tts_strip_non_latin(text: str) -> str:
 def _first_sentence(text: str) -> str:
     """Return the first sentence of text (split on . ! ?)."""
     # Split on sentence-ending punctuation followed by whitespace or end-of-string
-    match = re.search(r'[.!?](?:\s|$)', text)
+    match = re.search(r"[.!?](?:\s|$)", text)
     if match:
         return text[: match.start() + 1].strip()
     return text.strip()
@@ -279,7 +352,9 @@ def _tts_stage_a_line_rules(text: str) -> tuple[str, bool]:
             if len(block) >= 2:
                 # n = data rows only: the alignment separator and the header
                 # row are structure, not rows Kira should claim exist.
-                non_separator = [ln for ln in block if not _TTS_TABLE_SEPARATOR_RE.match(ln)]
+                non_separator = [
+                    ln for ln in block if not _TTS_TABLE_SEPARATOR_RE.match(ln)
+                ]
                 data_row_count = max(len(non_separator) - 1, 0)
                 notice_template = i18n_active.tts_markdown_table_notice()
                 try:
@@ -351,15 +426,16 @@ def _tts_normalize_markdown(text: str) -> str:
     working = text
     changed = False
 
-    # Protocol tokens & think/reasoning blocks: dropped completely (fail-closed to EOF)
-    working, n = _TTS_THINK_BLOCK_RE.subn("", working)
-    changed = changed or n > 0
+    # Private protocol/reasoning and unsafe HTML blocks are balanced by name;
+    # an unclosed or mismatched block drops to EOF.
+    working, block_changed = _tts_drop_control_blocks(working)
+    changed = changed or block_changed
 
     working, n = _TTS_SPECIAL_TOKENS_RE.subn("", working)
     changed = changed or n > 0
 
-    # Unsafe HTML blocks (<script>, <style>, <svg>, <template>) and comments <!-- ... -->
-    working, n = _TTS_UNSAFE_HTML_BLOCK_RE.subn("", working)
+    # Comments have no named close tag, but are also fail-closed to EOF.
+    working, n = _TTS_HTML_COMMENT_RE.subn("", working)
     changed = changed or n > 0
 
     # Alternative & standard fenced code: ``` and ~~~ collapse to spoken notice
@@ -383,6 +459,12 @@ def _tts_normalize_markdown(text: str) -> str:
     working, n = _TTS_HTML_PRESENTATION_TAG_RE.subn("", working)
     changed = changed or n > 0
 
+    # Presentation-tag stripping can expose a previously split control tag
+    # (for example `<thi<b></b>nk>`). Re-check before placeholder cleanup can
+    # remove its angle brackets and make the private text look innocuous.
+    working, block_changed = _tts_drop_control_blocks(working)
+    changed = changed or block_changed
+
     # Autolinks: <https://example.com/docs> -> https://example.com/docs
     working, n = _TTS_AUTOLINK_RE.subn(r"\1", working)
     changed = changed or n > 0
@@ -394,10 +476,16 @@ def _tts_normalize_markdown(text: str) -> str:
     working, block_changed = _tts_stage_a_line_rules(working)
     changed = changed or block_changed
 
-    working, n = _TTS_INLINE_LATEX_RE.subn(
-        lambda _m: i18n_active.tts_markdown_formula_inline(), working
+    before_latex = working
+    working = _TTS_INLINE_LATEX_RE.sub(
+        lambda match: (
+            i18n_active.tts_markdown_formula_inline()
+            if _tts_is_inline_latex_body(match.group(1))
+            else match.group(0)
+        ),
+        working,
     )
-    changed = changed or n > 0
+    changed = changed or working != before_latex
 
     working, n = _TTS_LINK_RE.subn(r"\1", working)
     changed = changed or n > 0
@@ -437,6 +525,11 @@ def _sanitize_tts_text_for_playback(text: str) -> str:
         text = str(text)
     text = _tts_normalize_markdown(text)
     text = _tts_strip_non_latin(text)
+    # Non-Latin stripping can remove zero-width obfuscators and reconstruct a
+    # control tag. Re-check the final speech-bound text in the same call.
+    text, block_changed = _tts_drop_control_blocks(text)
+    if block_changed:
+        text = _tts_cleanup_punctuation(text)
     if "*" not in text:
         return text
 
@@ -450,4 +543,10 @@ def _sanitize_tts_text_for_playback(text: str) -> str:
         return inner
 
     text = _TTS_MARKDOWN_EMPHASIS_RE.sub(replace_emphasis, text)
-    return _tts_clean_residual_asterisks(text)
+    text = _tts_clean_residual_asterisks(text)
+    # Emphasis cleanup can remove the characters splitting a control tag
+    # (for example `<**think**>`). This is the final text-producing stage.
+    text, block_changed = _tts_drop_control_blocks(text)
+    if block_changed:
+        return _tts_cleanup_punctuation(text)
+    return text

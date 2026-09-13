@@ -18,6 +18,7 @@ coverage therefore splits across `_tts_normalize_markdown` directly
 (`__x__`/`_x_`, the genuinely new capability) and `_sanitize_tts_text_for_playback`
 (confirming `**x**` still resolves end-to-end).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -39,6 +40,7 @@ def _reset_active_locale():
 # ---------------------------------------------------------------------------
 # Stage A1 — fenced code blocks
 # ---------------------------------------------------------------------------
+
 
 def test_fenced_code_block_becomes_one_sentence():
     text = "```python\nprint('hi')\n```"
@@ -63,6 +65,7 @@ def test_fenced_code_runs_first_so_inline_rules_never_touch_the_interior():
 # ---------------------------------------------------------------------------
 # Stage A2 — markdown tables (>=2 contiguous pipe lines)
 # ---------------------------------------------------------------------------
+
 
 def test_markdown_table_becomes_one_sentence_with_row_count():
     """n counts DATA rows only -- header and the `|---|---|` alignment
@@ -102,6 +105,7 @@ def test_single_pipe_line_is_not_treated_as_a_table():
 # Stage A3 — display LaTeX $$...$$
 # ---------------------------------------------------------------------------
 
+
 def test_display_math_block_becomes_one_sentence():
     text = "$$E = mc^2$$"
     assert _tts_normalize_markdown(text) == i18n_active.tts_markdown_formula_notice()
@@ -110,6 +114,7 @@ def test_display_math_block_becomes_one_sentence():
 # ---------------------------------------------------------------------------
 # Stage A4 — ATX headings
 # ---------------------------------------------------------------------------
+
 
 def test_atx_heading_strips_marker_and_adds_terminal_period():
     assert _tts_normalize_markdown("## Introducción") == "Introducción."
@@ -122,6 +127,7 @@ def test_atx_heading_does_not_double_existing_terminal_punctuation():
 # ---------------------------------------------------------------------------
 # Stage A5 — bullets / numbered items
 # ---------------------------------------------------------------------------
+
 
 def test_bullet_item_strips_marker_and_ensures_terminal_punctuation():
     assert _tts_normalize_markdown("- Comprar leche") == "Comprar leche."
@@ -159,6 +165,7 @@ def test_four_digit_year_mid_text_survives_alongside_a_real_line_above_it():
 # Stage A6 — blockquote markers stripped, horizontal rules dropped
 # ---------------------------------------------------------------------------
 
+
 def test_blockquote_marker_is_stripped_without_forcing_punctuation():
     assert _tts_normalize_markdown("> Cita textual") == "Cita textual"
 
@@ -171,6 +178,7 @@ def test_horizontal_rule_is_dropped():
 # ---------------------------------------------------------------------------
 # Stage B1 — inline LaTeX (TeX-ish char required; dollar amounts untouched)
 # ---------------------------------------------------------------------------
+
 
 def test_inline_latex_with_texish_char_becomes_formula_phrase():
     text = "El área es $x^2$ metros"
@@ -187,6 +195,7 @@ def test_dollar_amounts_are_untouched_identity():
 # Stage B2 — links
 # ---------------------------------------------------------------------------
 
+
 def test_markdown_link_becomes_its_text():
     text = "Mira [este enlace](https://example.com) ahora"
     assert _tts_normalize_markdown(text) == "Mira este enlace ahora"
@@ -195,6 +204,7 @@ def test_markdown_link_becomes_its_text():
 # ---------------------------------------------------------------------------
 # Stage B3 — inline code
 # ---------------------------------------------------------------------------
+
 
 def test_inline_code_becomes_its_inner_text():
     text = "Corré `python script.py` en la terminal"
@@ -205,6 +215,7 @@ def test_inline_code_becomes_its_inner_text():
 # Stage B4 — __x__ / _x_ (snake_case untouched); **x** stays with the
 # pre-existing asterisk regex, confirmed via the full pipeline below.
 # ---------------------------------------------------------------------------
+
 
 def test_double_underscore_emphasis_becomes_its_inner_text():
     text = "Esto es __muy importante__ ahora"
@@ -233,6 +244,7 @@ def test_full_pipeline_still_converts_double_asterisk_bold():
 # Stage B5 — residual pipes -> space
 # ---------------------------------------------------------------------------
 
+
 def test_residual_pipe_characters_become_spaces():
     text = "Opciones: A | B | C"
     assert _tts_normalize_markdown(text) == "Opciones: A B C"
@@ -241,6 +253,7 @@ def test_residual_pipe_characters_become_spaces():
 # ---------------------------------------------------------------------------
 # Hard constraint — identity fast-path (same object) when no rule fires
 # ---------------------------------------------------------------------------
+
 
 def test_identity_fast_path_returns_same_object_when_no_rule_fires():
     text = "Respuesta normal sin marcado especial."
@@ -252,6 +265,7 @@ def test_identity_fast_path_returns_same_object_when_no_rule_fires():
 # Ordering — markdown detection must run before the non-Latin strip collapses
 # newlines, else a heading line fuses with the body that follows it.
 # ---------------------------------------------------------------------------
+
 
 def test_heading_and_non_latin_glyph_both_normalize_in_the_correct_order():
     text = "## Título 😀\n\nBody text aquí."
@@ -267,6 +281,7 @@ def test_heading_and_non_latin_glyph_both_normalize_in_the_correct_order():
 # handful of sentences.
 # ---------------------------------------------------------------------------
 
+
 def test_integration_wide_table_and_fenced_code_collapse_to_a_handful_of_sentences():
     text = (
         "## Resumen\n"
@@ -277,12 +292,14 @@ def test_integration_wide_table_and_fenced_code_collapse_to_a_handful_of_sentenc
         "| Total | $10 |\n"
         "\n"
         "```python\n"
-        "print(\"done\")\n"
+        'print("done")\n'
         "```\n"
         "\n"
         "Gracias por leer."
     )
-    table_notice = i18n_active.tts_markdown_table_notice().format(n=2)  # 2 data rows, header+separator excluded
+    table_notice = i18n_active.tts_markdown_table_notice().format(
+        n=2
+    )  # 2 data rows, header+separator excluded
     code_notice = i18n_active.tts_markdown_code_notice()
     expected = f"Resumen. {table_notice} {code_notice} Gracias por leer."
 
@@ -297,6 +314,7 @@ def test_integration_wide_table_and_fenced_code_collapse_to_a_handful_of_sentenc
 # ---------------------------------------------------------------------------
 # Protocol tokens & think blocks
 # ---------------------------------------------------------------------------
+
 
 def test_think_blocks_are_dropped_completely():
     text = "<think>\nEste es un razonamiento interno del modelo.\n</think>\nHola, ¿cómo estás?"
@@ -328,8 +346,20 @@ def test_model_special_tokens_are_dropped():
     result = _sanitize_tts_text_for_playback(text)
     assert "system" in result
     assert "adiós" in result
-    for token in ("<|im_start|>", "<|im_end|>", "<|assistant|>", "<|user|>", "<|system|>",
-                  "<|endoftext|>", "[INST]", "[/INST]", "<<SYS>>", "<</SYS>>", "<s>", "</s>"):
+    for token in (
+        "<|im_start|>",
+        "<|im_end|>",
+        "<|assistant|>",
+        "<|user|>",
+        "<|system|>",
+        "<|endoftext|>",
+        "[INST]",
+        "[/INST]",
+        "<<SYS>>",
+        "<</SYS>>",
+        "<s>",
+        "</s>",
+    ):
         assert token not in result
 
 
@@ -337,10 +367,13 @@ def test_model_special_tokens_are_dropped():
 # Alternative code fences (~~~)
 # ---------------------------------------------------------------------------
 
+
 def test_tilde_fenced_code_block_collapses_to_notice():
     text = "~~~python\nprint('hello')\n~~~"
     assert _tts_normalize_markdown(text) == i18n_active.tts_markdown_code_notice()
-    assert _sanitize_tts_text_for_playback(text) == i18n_active.tts_markdown_code_notice()
+    assert (
+        _sanitize_tts_text_for_playback(text) == i18n_active.tts_markdown_code_notice()
+    )
 
 
 def test_mixed_fenced_code_blocks_collapse():
@@ -355,6 +388,7 @@ def test_mixed_fenced_code_blocks_collapse():
 # Strikethrough (~~texto~~)
 # ---------------------------------------------------------------------------
 
+
 def test_strikethrough_becomes_inner_text():
     text = "Esto es ~~texto tachado~~ y esto no."
     assert _tts_normalize_markdown(text) == "Esto es texto tachado y esto no."
@@ -365,10 +399,16 @@ def test_strikethrough_becomes_inner_text():
 # HTML tags & placeholders
 # ---------------------------------------------------------------------------
 
+
 def test_html_br_tags_become_whitespace():
     text = "Primera línea.<br>Segunda línea.<br/>Tercera línea."
-    assert _tts_normalize_markdown(text) == "Primera línea. Segunda línea. Tercera línea."
-    assert _sanitize_tts_text_for_playback(text) == "Primera línea. Segunda línea. Tercera línea."
+    assert (
+        _tts_normalize_markdown(text) == "Primera línea. Segunda línea. Tercera línea."
+    )
+    assert (
+        _sanitize_tts_text_for_playback(text)
+        == "Primera línea. Segunda línea. Tercera línea."
+    )
 
 
 def test_html_presentation_tags_stripped_preserving_content():
@@ -401,6 +441,7 @@ def test_angle_bracket_inside_emphasis_strips_both():
 # Arbitrary asterisk emphasis & edge cases
 # ---------------------------------------------------------------------------
 
+
 def test_arbitrary_asterisk_emphasis_strips_cleanly():
     text = "Esto es ****hola**** y esto *****más*****."
     assert _sanitize_tts_text_for_playback(text) == "Esto es hola y esto más."
@@ -414,8 +455,14 @@ def test_spanish_punctuation_and_quotes_touching_emphasis():
 
 
 def test_bullet_points_with_bold_italic_headings():
-    assert _sanitize_tts_text_for_playback("* ****1. Título****: texto") == "1. Título: texto."
-    assert _sanitize_tts_text_for_playback("* ***hola***: descripción") == "hola: descripción."
+    assert (
+        _sanitize_tts_text_for_playback("* ****1. Título****: texto")
+        == "1. Título: texto."
+    )
+    assert (
+        _sanitize_tts_text_for_playback("* ***hola***: descripción")
+        == "hola: descripción."
+    )
     assert _sanitize_tts_text_for_playback("### **Resultado**") == "Resultado."
 
 
@@ -423,7 +470,10 @@ def test_lone_residual_formatting_asterisks_cleaned():
     assert _sanitize_tts_text_for_playback("* hola") == "hola."
     assert _sanitize_tts_text_for_playback("*hola") == "hola"
     assert _sanitize_tts_text_for_playback("hola*") == "hola"
-    assert _sanitize_tts_text_for_playback("Opciones: ** uno ** dos") == "Opciones: uno dos"
+    assert (
+        _sanitize_tts_text_for_playback("Opciones: ** uno ** dos")
+        == "Opciones: uno dos"
+    )
 
 
 def test_math_expressions_with_asterisks_preserved():
@@ -434,6 +484,7 @@ def test_math_expressions_with_asterisks_preserved():
 # ---------------------------------------------------------------------------
 # Finding 1: Incomplete think / protocol blocks fail-closed to EOF
 # ---------------------------------------------------------------------------
+
 
 def test_incomplete_think_block_drops_to_eof_without_leaking():
     text = "<think>razon secreto\nRespuesta parcial"
@@ -457,6 +508,7 @@ def test_complete_think_block_preserves_trailing_response():
 # Finding 2: Operator preservation in code and math
 # ---------------------------------------------------------------------------
 
+
 def test_single_asterisks_between_words_preserved_as_operators():
     assert _sanitize_tts_text_for_playback("foo * bar") == "foo * bar"
     assert _sanitize_tts_text_for_playback("width * height") == "width * height"
@@ -465,12 +517,16 @@ def test_single_asterisks_between_words_preserved_as_operators():
 
 def test_inline_code_single_asterisk_preserved():
     assert _sanitize_tts_text_for_playback("`foo * bar`") == "foo * bar"
-    assert _sanitize_tts_text_for_playback("Usa `width * height` en el código.") == "Usa width * height en el código."
+    assert (
+        _sanitize_tts_text_for_playback("Usa `width * height` en el código.")
+        == "Usa width * height en el código."
+    )
 
 
 # ---------------------------------------------------------------------------
 # Finding 3: Nested structural markdown
 # ---------------------------------------------------------------------------
+
 
 def test_nested_blockquotes_iteratively_consumed():
     assert _tts_normalize_markdown(">> Cita anidada.") == "Cita anidada."
@@ -492,6 +548,7 @@ def test_blockquote_with_heading():
 # ---------------------------------------------------------------------------
 # Finding 4: Unsafe HTML blocks and comments dropped completely
 # ---------------------------------------------------------------------------
+
 
 def test_unsafe_html_script_and_style_dropped_with_content():
     text = "<script>alert('xss');</script>Hola mundo"
@@ -517,16 +574,22 @@ def test_unclosed_unsafe_html_and_comments_fail_closed_to_eof():
     assert _sanitize_tts_text_for_playback("<style>.clase { display: none;") == ""
     assert _sanitize_tts_text_for_playback("<svg><circle r=5") == ""
     assert _sanitize_tts_text_for_playback("<template><p>incompleto") == ""
-    assert _sanitize_tts_text_for_playback("<!-- comentario sin cierre\notro texto") == ""
+    assert (
+        _sanitize_tts_text_for_playback("<!-- comentario sin cierre\notro texto") == ""
+    )
 
 
 # ---------------------------------------------------------------------------
 # Finding 5: Formatting with spaces inside emphasis
 # ---------------------------------------------------------------------------
 
+
 def test_spaced_double_asterisk_emphasis_stripped():
     assert _sanitize_tts_text_for_playback("** hola **") == "hola"
-    assert _sanitize_tts_text_for_playback("Esto es ** hola ** mundo.") == "Esto es hola mundo."
+    assert (
+        _sanitize_tts_text_for_playback("Esto es ** hola ** mundo.")
+        == "Esto es hola mundo."
+    )
     assert _sanitize_tts_text_for_playback("*** hola ***") == "hola"
 
 
@@ -534,10 +597,125 @@ def test_spaced_double_asterisk_emphasis_stripped():
 # Finding 6: Autolinks strip angle brackets
 # ---------------------------------------------------------------------------
 
+
 def test_autolink_angle_brackets_stripped():
-    assert _tts_normalize_markdown("<https://example.com/docs>") == "https://example.com/docs"
-    assert _sanitize_tts_text_for_playback("<https://example.com/docs>") == "https://example.com/docs"
+    assert (
+        _tts_normalize_markdown("<https://example.com/docs>")
+        == "https://example.com/docs"
+    )
+    assert (
+        _sanitize_tts_text_for_playback("<https://example.com/docs>")
+        == "https://example.com/docs"
+    )
     text = "Visita <https://example.com/docs> para más detalles."
-    assert _sanitize_tts_text_for_playback(text) == "Visita https://example.com/docs para más detalles."
+    assert (
+        _sanitize_tts_text_for_playback(text)
+        == "Visita https://example.com/docs para más detalles."
+    )
     assert "<" not in _sanitize_tts_text_for_playback(text)
     assert ">" not in _sanitize_tts_text_for_playback(text)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed control blocks: malformed nesting and delimiter obfuscation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tag,wrong_closer",
+    [
+        ("think", "analysis"),
+        ("analysis", "reasoning"),
+        ("reasoning", "tool_call"),
+        ("tool_call", "tool_response"),
+        ("tool_response", "think"),
+    ],
+)
+def test_mismatched_protocol_closer_drops_to_eof(tag, wrong_closer):
+    text = f"<{tag}>private</{wrong_closer}>must not be spoken"
+    assert _sanitize_tts_text_for_playback(text) == ""
+
+
+def test_nested_protocol_block_with_unclosed_outer_drops_to_eof():
+    assert (
+        _sanitize_tts_text_for_playback("<think>A<think>B</think>must not be spoken")
+        == ""
+    )
+
+
+def test_protocol_block_with_matching_close_preserves_trailing_response():
+    assert (
+        _sanitize_tts_text_for_playback("<analysis>private</analysis>Public.")
+        == "Public."
+    )
+
+
+@pytest.mark.parametrize(
+    "tag,wrong_closer",
+    [
+        ("script", "style"),
+        ("style", "svg"),
+        ("svg", "template"),
+        ("template", "script"),
+    ],
+)
+def test_mismatched_unsafe_html_closer_drops_to_eof(tag, wrong_closer):
+    text = f"<{tag}>private</{wrong_closer}>must not be spoken"
+    assert _sanitize_tts_text_for_playback(text) == ""
+
+
+def test_recognized_unsafe_html_delimiter_bypass_drops_its_content():
+    assert (
+        _sanitize_tts_text_for_playback("<script/x>private</script>Public.")
+        == "Public."
+    )
+
+
+def test_zero_width_obfuscated_protocol_tag_is_removed_in_one_pass():
+    assert _sanitize_tts_text_for_playback("<th\u200bink>private") == ""
+
+
+def test_presentation_tag_removal_cannot_reconstruct_a_protocol_tag():
+    assert _sanitize_tts_text_for_playback("<thi<b></b>nk>private") == ""
+
+
+@pytest.mark.parametrize(
+    "tag",
+    (
+        "think",
+        "analysis",
+        "reasoning",
+        "tool_call",
+        "tool_response",
+        "script",
+        "style",
+        "svg",
+        "template",
+    ),
+)
+@pytest.mark.parametrize("emphasis", ("*", "**"))
+def test_final_emphasis_cleanup_cannot_reconstruct_control_tag(tag, emphasis):
+    text = f"<{emphasis}{tag}{emphasis}>private"
+    assert _sanitize_tts_text_for_playback(text) == ""
+
+
+def test_dropping_a_matched_control_block_cannot_join_another_control_tag():
+    text = "<scr<script>private</script>ipt>must not be spoken"
+    assert _sanitize_tts_text_for_playback(text) == ""
+
+
+# ---------------------------------------------------------------------------
+# Inline math: prose between money delimiters is not a formula
+# ---------------------------------------------------------------------------
+
+
+def test_money_delimiters_with_snake_case_prose_are_not_inline_latex():
+    text = "Cuesta $5 en plan_basico y $10 en premium."
+    assert _tts_normalize_markdown(text) is text
+    assert _sanitize_tts_text_for_playback(text) is text
+
+
+def test_compact_underscore_subscript_remains_inline_latex():
+    text = "El valor es $x_2$."
+    phrase = i18n_active.tts_markdown_formula_inline()
+    assert _tts_normalize_markdown(text) == f"El valor es {phrase}."

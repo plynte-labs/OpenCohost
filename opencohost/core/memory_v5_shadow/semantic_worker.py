@@ -186,3 +186,9 @@ class SemanticWorkerService:
 
         self._req_queue = None
         self._resp_queue = None
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception:
+            pass
