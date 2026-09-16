@@ -1113,9 +1113,9 @@ class MotorVocalIA(
             self._log(f"FATAL: No se pudo inicializar pygame.mixer: {e}", level="error")
             return
 
-        self._check_ollama_service()
         if TTS_LOCAL_MODEL_PATH:
             self._piper.load()
+        self._check_ollama_service()
         # llm_output_streaming_20260813 (design.md §1 non-goals, §10): pay
         # Piper's 2.25s first-synthesis cost off-air now instead of on the
         # session's first turn. Same neighbourhood as the a8830bb chat-client

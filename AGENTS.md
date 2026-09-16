@@ -15,9 +15,8 @@
 ## Known Project Context
 
 - OpenCohost has prior work to make TTS usable without internet after the first model download.
-- Cached Qwen3-TTS models are stored under `modelos_f5/hub` inside the project directory (path is machine-local and gitignored).
-- When the model is already cached, startup should prefer local resolution and force HF/Transformers offline mode to avoid unnecessary network access.
-- Heavy TTS requests may need longer timeouts to avoid chunk failures.
+- Qwen3-TTS is officially DEPRECATED for OpenCohost (will not be packaged due to weight, excessive dependencies, and chunking complexity).
+- Official TTS standards today are Edge-TTS (online/default) and PiperTTS (offline/local). Kokoro is only a potential future alternative.
 
 ## SDD / Skills Workflow
 

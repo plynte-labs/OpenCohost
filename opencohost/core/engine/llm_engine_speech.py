@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from typing import TYPE_CHECKING, Optional
+from opencohost.core.speech.vrm_audio import prepare_audio, publish_started, publish_ended
 
 if TYPE_CHECKING:  # never imported at runtime
     from opencohost.core.speech.router import SpeechRouter
@@ -1077,8 +1078,10 @@ class SpeechPipelineMixin:
                             if self._speech_progress is not None:
                                 self._speech_progress["first_play"] = time.monotonic()
 
+                    vrm_audio = prepare_audio(archivo_chunk)
                     self.pygame.mixer.music.load(archivo_chunk)
                     self.pygame.mixer.music.play()
+                    publish_started(self, vrm_audio)
 
                     while self.pygame.mixer.music.get_busy():
                         # Bug 4 fix: honour external _speaking=False inside the
@@ -1131,6 +1134,7 @@ class SpeechPipelineMixin:
                     # control-flow change, the loop continues to the next item.
                     skipped.append(idx)
                 finally:
+                    publish_ended(self)
                     try:
                         if os.path.exists(archivo_chunk):
                             os.remove(archivo_chunk)

@@ -22,6 +22,7 @@ BASE_DIR = str(get_app_dir())
 # User-writable state files (perfiles.json, etc.) go to USER_DATA_DIR.
 PACKAGE_CONFIG_DIR = str(Path(__file__).resolve().parent)
 TEMP_DIR = str(STORAGE_PATHS.temp_root)
+VRM_MODEL_DIR = Path(os.environ.get("OPENCOHOST_VRM_MODEL_DIR", str(Path.home() / "Downloads" / "modelos vrm")))
 LOG_DIR = os.path.join(str(USER_DATA_DIR), "logs")
 HF_CACHE_DIR = str(STORAGE_PATHS.hf_home)
 HF_HUB_DIR = str(STORAGE_PATHS.hf_hub_cache)

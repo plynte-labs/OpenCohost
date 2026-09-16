@@ -1,8 +1,47 @@
 # Specification: Modular VRM 3D Avatar & LipSync Integration
 
+## Implemented quick path (2026-09-13)
+
+1. Put self-contained `.vrm` files in `~/Downloads/modelos vrm`, or set
+   `OPENCOHOST_VRM_MODEL_DIR` before launching the backend.
+2. Run the existing backend and serve the UI. Point OBS Browser Source to
+   `/overlay/vrm` on the UI server; optionally select `?model=filename.vrm`.
+3. Open OBS **Interact**, confirm the loopback backend origin (default
+   `http://127.0.0.1:8765`), select the model, and enter the operator token from
+   your existing local operator setup. Click **Enable silent analysis**.
+   The password is held only in runtime memory and sent only as an Authorization
+   header to a validated loopback origin. Never put a token in a URL.
+4. Controls disappear after enabling analysis. Reload/visibility suspension
+   requires Interact setup again. Missing files, auth errors and WebGL failures
+   reopen visible diagnostics; do not capture setup controls in the final scene.
+
+### Boundaries and verification
+
+- `/overlay/vrm` is isolated before normal shell/CSS imports. Normal routes keep
+  the original shell bootstrap. The prepaint guard only suppresses the opaque
+  splash on this exact route and preserves existing theme selection.
+- Browser audio always passes through a hardcoded zero-gain node. Python remains
+  the audible source. This is amplitude-driven lip sync, not phoneme alignment.
+- Interruption latency is polling (100 ms) plus transport/browser scheduling,
+  **not zero latency**. A 1.5 s watchdog clears the mouth if a request hangs.
+  Suspended/hidden browser sources stop analysis rather than replay stale audio.
+- Audio copies over 8 MiB or unreadable chunks degrade to idle animation without
+  preventing Python speech. Completed chunk bytes are cleared, not archived.
+- VRM external resource URLs are rejected; use self-contained GLB/VRM files.
+  WebGL context loss cancels rendering and invalidates pending loads; restoration
+  rebuilds the renderer and reloads the model. Late loads are disposed.
+- Automated tests exercise fake WebAudio, consumer playback, clocks and context
+  lifecycle. Actual VRM 0.x/1.0 model rendering, OBS transparency, gesture policy,
+  hair physics and audible echo must still be checked on the target machine.
+- No normal dev/prebuild hooks are needed for checks: use `pnpm exec vitest run
+  src/features/avatar-vrm`, `pnpm exec tsc --noEmit`, and `pnpm exec vite build`.
+
+The WU descriptions below retain the original implementation boundaries, with
+the producer-path, legacy expression API and spectral-RMS mistakes corrected.
+
 - **Target Systems**: OpenCohost Backend (FastAPI/Python) & OpenCohost UI (Tauri / React / Three.js)
-- **Status**: Ready for Codex Implementation
-- **Architecture Pattern**: Decoupled WebGL Overlay + Silent WebAudio LipSync Analyser
+- **Status**: WU1–WU4 implemented, verified with dual blind adversarial review (Judgment Day: APPROVED), automated suites (179 passed, 1 skipped). Live OBS runtime validation is deferred by user decision.
+- **Architecture Pattern**: Decoupled WebGL Overlay + Silent WebAudio LipSync Analyser (100 ms nominal polling interval)
 
 ---
 
@@ -56,8 +95,8 @@ OpenCohost currently supports 2D static avatar states (`IDLE`, `THINKING`, `SPEA
 - **Endpoints**:
   - `GET /api/avatar/vrm/list`: Scans configured directory and returns list of `.vrm` files with basic metadata (`filename`, `size_mb`, `modified_at`).
   - `GET /api/avatar/vrm/model?name=<filename>`: Streams the `.vrm` file with MIME `model/gltf-binary` or `application/octet-stream`. Includes ETag / Cache-Control headers.
-  - `GET /api/avatar/vrm/audio/last`: Returns the binary bytes of the most recently synthesized speech chunk from `TEMP_DIR` for spectral analysis.
-- **Engine Seam**: In `opencohost/core/engine/llm_engine_speech.py`, when a chunk is enqueued for playback, record the path of the active chunk in an atomic variable/property `last_speech_chunk_path` accessible by the API host.
+  - `GET /api/avatar/vrm/audio/last`: Returns a bounded immutable copy of the current playback chunk, pinned with `?sequence=N`. Requires an operator bearer token, never an agent token. Inactive audio returns 404; replaced sequence returns 409; responses are no-store.
+- **Engine Seam**: In `opencohost/core/engine/llm_engine_speech.py`, prepare at most 8 MiB before playback, publish an immutable snapshot immediately after `mixer.music.play()`, and clear bytes at chunk completion. The single serialized consumer owns publication. `GET /api/avatar/vrm/audio/state` returns `{sequence, active, elapsed_ms}` without text or paths. Cancellation also gates `active` on the existing speaking flag. Producer enqueue is NOT playback: synthesis can run several chunks ahead and cleanup deletes paths.
 
 ### WU2: Frontend VRM Domain Architecture & Three.js Loader
 **Target Directory**: `OpenCohost_UI/src/features/avatar-vrm/`
@@ -67,7 +106,7 @@ OpenCohost currently supports 2D static avatar states (`IDLE`, `THINKING`, `SPEA
     - Wraps `GLTFLoader` with `VRMLoaderPlugin`.
     - Handles VRM 0.x and VRM 1.0 schema differences.
     - Normalizes blendshape targets:
-      - VRM 0.x: `vrm.blendShapeProxy.setValue(VRMSchema.BlendShapePresetName.A, weight)`
+      - VRM 0.x: modern `VRMLoaderPlugin` converts expressions to unified `expressionManager`; call `VRMUtils.rotateVRM0` for orientation.
       - VRM 1.0: `vrm.expressionManager.setValue('aa', weight)`
     - Centers model geometry and positions camera at portrait framing (bust/headshot).
   - `domain/vrmAnimator.ts`:
@@ -78,19 +117,19 @@ OpenCohost currently supports 2D static avatar states (`IDLE`, `THINKING`, `SPEA
 ### WU3: Silent Analyser LipSync Pipeline
 **Target File**: `OpenCohost_UI/src/features/avatar-vrm/domain/vrmLipSync.ts`
 - **Audio Decoding**:
-  - When `useAvatarLiveState` signals `speaking === true`, fetch `/api/avatar/vrm/audio/last`.
-  - Instantiate singleton `AudioContext`.
+  - Poll authoritative `/audio/state` every 100 ms (serialized requests), independently of the coarse shell speaking store. Fetch each new sequence once, then recheck state after decoding and offset playback by current `elapsed_ms`.
+  - Instantiate one disposable `AudioContext` per enabled overlay session, resumed from an explicit user gesture.
   - Decode binary array buffer via `audioContext.decodeAudioData(bytes)`.
 - **Silent Node Graph**:
   ```
   AudioBufferSourceNode ──> AnalyserNode ──> GainNode (gain=0.0) ──> AudioContext.destination
   ```
 - **Formant & RMS Extraction**:
-  - `analyser.getByteFrequencyData(dataArray)`: Compute average RMS power.
+  - `analyser.getFloatTimeDomainData(samples)`: compute `sqrt(mean(sample²))` time-domain RMS. Frequency-bin averages are not RMS.
   - Apply noise floor threshold (ignore background noise < 0.05).
   - Map energy to mouth blendshape (`aa` / `oh`) using exponential smoothing:
     $$\text{mouthOpening} = \text{lerp}(\text{current}, \text{targetEnergy}, 0.3)$$
-- **Cleanup**: Disconnect nodes and reset mouth expression to 0.0 immediately upon `speaking === false`.
+- **Cleanup**: Disconnect nodes and reset mouth expression to 0.0 when authoritative chunk state becomes inactive, the buffer ends, or the session is disposed. Interruption detection is subject to polling and browser scheduling latency.
 
 ### WU4: Canvas Component & Transparent OBS Route
 **Target Files**:
@@ -102,7 +141,7 @@ OpenCohost currently supports 2D static avatar states (`IDLE`, `THINKING`, `SPEA
 - **WebGL Context Loss Handler**:
   - Attach `webglcontextlost` event listener (`event.preventDefault()`).
   - Attach `webglcontextrestored` event listener to re-initialize scene and reload active VRM without crashing the browser view.
-- **Route**: Expose `/overlay/vrm` in the UI router so OBS Browser Source can point to `http://localhost:5173/overlay/vrm` (or production port).
+- **Route**: Expose `/overlay/vrm` through the isolated UI entry so OBS Browser Source can point to `http://127.0.0.1:1420/overlay/vrm` while the UI HTTP server is running. Packaged Tauri assets alone do not provide that HTTP server.
 
 ---
 
@@ -114,7 +153,13 @@ OpenCohost currently supports 2D static avatar states (`IDLE`, `THINKING`, `SPEA
 | **SpringBone Explosion** | Framerate dips in OBS cause large `dt` spikes in physics simulation | Enforce `const dt = Math.min(clock.getDelta(), 0.05);` before calling `vrm.update(dt)`. |
 | **Black Screen of Death** | GPU overload by game triggers WebGL context loss | Implement explicit `webglcontextlost` and `webglcontextrestored` lifecycle listeners. |
 | **Mouth Stuck Open** | Interrupted turn stops audio fetch without zeroing blendshapes | Enforce `vrm.expressionManager.setValue('aa', 0)` on `speaking_end` or audio buffer end. |
-| **VRM Version Mismatch** | Models from VRoid or Booth using either 0.x or 1.0 format | Use `@pixiv/three-vrm` 2.x which auto-detects version and exposes unified expression interfaces. |
+| **VRM Version Mismatch** | Models from VRoid or Booth using either 0.x or 1.0 format | Use exact `@pixiv/three-vrm` 3.5.5 with Three.js 0.186.0 and matching types; unified expression interfaces cover both versions. |
+| **Transient 404/409 Disruption** | Chunk finishes playing or replaced mid-fetch | Return `null` from `vrmApi.audio`, defer `lastSequence` update until byte retrieval, and retry on next tick without calling `onError`. |
+| **Corrupt Audio Chunk Crash** | Malformed audio bytes throw in `decodeAudioData` | Wrap `decodeAudioData` in try/catch and degrade to idle animation without terminating overlay session. |
+| **Polling Runaway on Fatal Auth Error** | 401 / bad token keeps scheduling fetch every 100ms | Enforce `this.stopped = true` before calling `onError`, halting polling loop immediately. |
+| **Premature Sequence Consumption** | Post-decode abort causes skipped chunk | Defer `this.lastSequence = state.sequence` until `source.start()` begins analysis or chunk is explicitly expired. |
+| **Async Decode Error Cross-Generation Leak** | Stale decode failure from superseded generation clears active source of new session | Guard `catch` block with `if (!this.stopped && generation === this.generation)`. |
+
 
 ---
 

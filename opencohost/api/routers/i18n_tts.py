@@ -79,6 +79,8 @@ def set_i18n(body: I18nSetLocaleRequest):
 def get_tts_config(request: Request) -> TTSConfigResponse:
     host = request.app.state.host
     piper = getattr(host.motor, "_piper", None)
+    if piper is not None and not piper.is_available() and hasattr(piper, "load"):
+        piper.load()
     piper_available = piper.is_available() if piper is not None else False
     edge_tts_offline = bool(getattr(host.motor, "_edge_tts_offline", False))
     return TTSConfigResponse(
