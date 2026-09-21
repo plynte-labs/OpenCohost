@@ -3,6 +3,8 @@ __________________
 ![Intro Opencohost](images/introOpencohost.png)
 OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor). Kira uses a **local LLM brain via Ollama** and **free cloud voice (Microsoft Edge-TTS) in v1**. With the shipped defaults, your viewer chat, prompts, and conversation memory never leave your machine — only Kira's outgoing spoken text is sent to Edge-TTS for synthesis. Inference can optionally be pointed at a cloud LLM provider instead, which does send the prompt off-machine; that is off by default and covered in [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
+<img width="1800" height="1125" alt="image" src="https://github.com/user-attachments/assets/0b5e6d6d-be66-422b-b1c6-32fea83e573e" />
+
 ## Most Stable Version: v0.3.0-alpha.4 It's alpha could have some bugs and some mismatch translations, notify me if you see any.
 
 - **Memory v5** — Shadow Retrieval-Augmented Episodic Contextual Memory: Kira recalls past episodes with hybrid ranking (lexical + semantic + temporal + recency).
