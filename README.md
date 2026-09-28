@@ -11,7 +11,7 @@ to Edge-TTS for audio synthesis. Inference can optionally route to a cloud LLM p
 default and detailed under [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
 <img width="1800" height="1125" alt="image" src="https://github.com/user-attachments/assets/0b5e6d6d-be66-422b-b1c6-32fea83e573e" />
-_________
+
 ## Release Status
 ### Current Release: `v0.3.0-alpha.4`
 > **Note:** As an early alpha release, you may encounter minor bugs or translation mismatches. If you spot anything unexpected, please [open an
