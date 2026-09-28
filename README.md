@@ -1,6 +1,6 @@
 # OpenCohost — Local-First AI Streaming or Companion Co-Host
 __________________
-<img width="1917" height="1020" alt="image" src="https://github.com/user-attachments/assets/4d15b27f-f09a-4249-8948-e71ab5c908cf" />
+<img width="1533" height="875" alt="Screenshot 2026-09-28 020033" src="https://github.com/user-attachments/assets/73b63de6-1fc1-4226-9604-f0345c662656" />
 
 OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
 personality (dry sarcasm, sharp humor). Kira runs on a **local LLM brain via Ollama** and uses **free cloud voice synthesis (Microsoft Edge-TTS)** by
