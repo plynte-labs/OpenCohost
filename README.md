@@ -1,5 +1,4 @@
 # OpenCohost — Local-First AI Streaming or Companion Co-Host
-__________________
 <img width="1533" height="875" alt="Screenshot 2026-09-28 020033" src="https://github.com/user-attachments/assets/73b63de6-1fc1-4226-9604-f0345c662656" />
 
 OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
