@@ -1,6 +1,6 @@
 # OpenCohost — Local-First AI Streaming or Companion Co-Host
 __________________
-<img width="1917" height="1022" alt="image" src="https://github.com/user-attachments/assets/bc3a189e-eebc-4437-9cc2-03f7b1c872cd" />
+<img width="1917" height="1020" alt="image" src="https://github.com/user-attachments/assets/4d15b27f-f09a-4249-8948-e71ab5c908cf" />
 
 OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
 personality (dry sarcasm, sharp humor). Kira runs on a **local LLM brain via Ollama** and uses **free cloud voice synthesis (Microsoft Edge-TTS)** by
@@ -10,7 +10,7 @@ With default settings, your chat interactions, prompts, and conversation history
 to Edge-TTS for audio synthesis. Inference can optionally route to a cloud LLM provider, which does transmit prompts off-machine; this is disabled by
 default and detailed under [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
-<img width="1800" height="1125" alt="image" src="https://github.com/user-attachments/assets/0b5e6d6d-be66-422b-b1c6-32fea83e573e" />
+<img width="1917" height="1020" alt="image" src="https://github.com/user-attachments/assets/ea5a2336-7f36-4b4f-ad9b-59bbe255bc69" />
 
 ## Release Status
 ### Current Release: `v0.3.0-alpha.4`
@@ -27,9 +27,8 @@ Key highlights coming in `v0.5.0-alpha`:
 - **VRAM-Aware Context & Adaptive Reasoning:** Automatic context scaling up to 16k tokens, spill protection, and adaptive reasoning budgets with manual ceilings.
 - **Flexible Profile System:** Clean, modular persona prompts removing legacy hardcoded constraints.
 - **Memory v5:** End-to-end all-MiniLM embedding integration for improved semantic indexing and recall.
-- **Speech Flow Controls:** Option to discard audio residues on interruption and purge stale speech on fast regenerations
-- **Memory v5** — Shadow Retrieval-Augmented Episodic Contextual Memory: Kira recalls past episodes with hybrid ranking (lexical + semantic + temporal + recency).
 - **Local embedding** — MiniLM-L12 ONNX served by an isolated background worker (no cloud, no extra VRAM on the LLM runner).
+- **Speech Flow Controls:** Option to discard audio residues on interruption and purge stale speech on fast regenerations
 - **`/setup` command** — first-run LLM configuration (provider, Ollama, models) from the chat palette.
 
 📥 Windows installer: [OpenCohost-0.3.0-alpha.4-x64-setup.exe](https://github.com/plynte-labs/OpenCohost/releases/download/v0.3.0-alpha.4/OpenCohost-0.3.0-alpha.4-x64-setup.exe)
