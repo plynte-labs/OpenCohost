@@ -1,12 +1,33 @@
-# OpenCohost — Local-First AI Streaming Co-Host
+# OpenCohost — Local-First AI Streaming or Companion Co-Host
 __________________
-![Intro Opencohost](images/introOpencohost.png)
-OpenCohost is a local-first AI streaming co-host platform. The core product is **Kira**, an AI co-host with a defined personality (dry sarcasm, sharp humor). Kira uses a **local LLM brain via Ollama** and **free cloud voice (Microsoft Edge-TTS) in v1**. With the shipped defaults, your viewer chat, prompts, and conversation memory never leave your machine — only Kira's outgoing spoken text is sent to Edge-TTS for synthesis. Inference can optionally be pointed at a cloud LLM provider instead, which does send the prompt off-machine; that is off by default and covered in [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
+<img width="1917" height="1022" alt="image" src="https://github.com/user-attachments/assets/bc3a189e-eebc-4437-9cc2-03f7b1c872cd" />
+
+OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
+personality (dry sarcasm, sharp humor). Kira runs on a **local LLM brain via Ollama** and uses **free cloud voice synthesis (Microsoft Edge-TTS)** by
+default in v1, with offline local voice (PiperTTS) also supported.
+  
+With default settings, your chat interactions, prompts, and conversation history never leave your machine — only Kira's outgoing spoken lines are sent
+to Edge-TTS for audio synthesis. Inference can optionally route to a cloud LLM provider, which does transmit prompts off-machine; this is disabled by
+default and detailed under [Privacy](#privacy). High-fidelity fully-local voice is planned as an advanced opt-in in a future release.
 
 <img width="1800" height="1125" alt="image" src="https://github.com/user-attachments/assets/0b5e6d6d-be66-422b-b1c6-32fea83e573e" />
+_________
+## Release Status
+### Current Release: `v0.3.0-alpha.4`
+> **Note:** As an early alpha release, you may encounter minor bugs or translation mismatches. If you spot anything unexpected, please [open an
+  issue](https://github.com/plynte-labs/OpenCohost/issues).
 
-## Most Stable Version: v0.3.0-alpha.4 It's alpha could have some bugs and some mismatch translations, notify me if you see any.
+### In Development: `v0.5.0-alpha` (Upcoming)
+*Star or follow the repository to track upcoming releases.*
 
+Key highlights coming in `v0.5.0-alpha`:
+- **Dedicated VRM & Expression Engine:** Custom 3D model designed specifically for Kira, featuring synchronized lip-sync and audio visemes.
+- **Desktop Companion Mode:** Interact with Kira in an independent, floating companion overlay synchronized with the main timeline.
+- **In-App Model Downloader:** Search and pull Ollama models directly from the application interface.
+- **VRAM-Aware Context & Adaptive Reasoning:** Automatic context scaling up to 16k tokens, spill protection, and adaptive reasoning budgets with manual ceilings.
+- **Flexible Profile System:** Clean, modular persona prompts removing legacy hardcoded constraints.
+- **Memory v5:** End-to-end all-MiniLM embedding integration for improved semantic indexing and recall.
+- **Speech Flow Controls:** Option to discard audio residues on interruption and purge stale speech on fast regenerations
 - **Memory v5** — Shadow Retrieval-Augmented Episodic Contextual Memory: Kira recalls past episodes with hybrid ranking (lexical + semantic + temporal + recency).
 - **Local embedding** — MiniLM-L12 ONNX served by an isolated background worker (no cloud, no extra VRAM on the LLM runner).
 - **`/setup` command** — first-run LLM configuration (provider, Ollama, models) from the chat palette.
