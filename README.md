@@ -29,7 +29,6 @@ Key highlights coming in `v0.5.0-alpha`:
 - **Local embedding** — MiniLM-L12 ONNX served by an isolated background worker (no cloud, no extra VRAM on the LLM runner).
 - **Speech Flow Controls:** Option to discard audio residues on interruption and purge stale speech on fast regenerations
 - **`/setup` command** — first-run LLM configuration (provider, Ollama, models) from the chat palette.
-
 - Median time-to-first-speech: ~2.4 s, down from ~20 s two weeks earlier — same model (Qwen3.8-9B Q4, local) on the same RTX 3060 12GB. Full replies finish in ~7 s.
 
 📥 Windows installer: [OpenCohost-0.3.0-alpha.4-x64-setup.exe](https://github.com/plynte-labs/OpenCohost/releases/download/v0.3.0-alpha.4/OpenCohost-0.3.0-alpha.4-x64-setup.exe)
