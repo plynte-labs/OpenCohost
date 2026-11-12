@@ -2,6 +2,7 @@
 <img width="1533" height="875" alt="Screenshot 2026-09-28 020033" src="https://github.com/user-attachments/assets/73b63de6-1fc1-4226-9604-f0345c662656" />
 
 [Opencohost v0.5.0 maybe came next week (November Q3)]
+- [11/12/2026] It's a rought week but i'm seeing a lot of new concepts, and try to polish this fking proyect
 
 OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
 personality (dry sarcasm, sharp humor). Kira runs on a **local LLM brain via Ollama** and uses **free cloud voice synthesis (Microsoft Edge-TTS)** by
