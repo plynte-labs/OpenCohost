@@ -3,6 +3,7 @@
 
 [Opencohost v0.5.0 maybe came next week (November Q3)]
 - [11/12/2026] It's a rought week but i'm seeing a lot of new concepts, and try to polish this fking proyect
+- [11/15/2026] Added safety filters, fixed i18n profiles (semantic, locate bugs and filters between en/es in backend and frontend app), new maze v5 to play cards on agenda mode (fixing and mitigate skeletical repetition of content in agenda mode) [you can make mini podcast without reprompting or interacting opencohost, just make the agenda and listen and relax or brb], added support for google gemini api from google ai studio (tested on free usage with gemini 3.5 flash), and fixed more files.
 
 OpenCohost is a local-first AI streaming and desktop companion co-host platform. The core product is **Kira**, an AI co-host with a distinct
 personality (dry sarcasm, sharp humor). Kira runs on a **local LLM brain via Ollama** and uses **free cloud voice synthesis (Microsoft Edge-TTS)** by
