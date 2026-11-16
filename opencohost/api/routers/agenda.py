@@ -21,6 +21,7 @@ routers/music.py, routers/perfiles.py, routers/agent.py, routers/memoria.py).
 """
 
 import threading
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +29,8 @@ from fastapi.responses import JSONResponse
 from opencohost.api.agenda_driver import enqueue_agenda_action
 from opencohost.api.models import (
     AgendaMetrics,
+    AgendaProgressionRequest,
+    AgendaProgressionResponse,
     AgendaResponse,
     AgendaSessionActionRequest,
     AgendaSessionRequest,
@@ -41,6 +44,7 @@ from opencohost.api.models import (
     CohostProfileSelectResponse,
     CohostProfilesResponse,
 )
+from opencohost.config import settings
 from opencohost.core.profiles.cohost_profiles import (
     load_cohost_profiles,
     normalize_cohost_profile,
@@ -230,12 +234,40 @@ def put_agenda_session(request: Request, body: AgendaSessionRequest):
         return _agenda_response(agenda)
 
 
+def _progression_response() -> AgendaProgressionResponse:
+    return AgendaProgressionResponse(
+        enabled=settings.load_agenda_progression_enabled(),
+        variant=settings.get_agenda_progression_variant(),
+        env_override=settings.agenda_progression_env_override(),
+    )
+
+
+@router.get("/api/agenda/progression", response_model=AgendaProgressionResponse)
+def get_agenda_progression() -> AgendaProgressionResponse:
+    # Global (not per-locale), disk-backed like tts_settings.json; no host needed.
+    return _progression_response()
+
+
+@router.put("/api/agenda/progression", response_model=AgendaProgressionResponse)
+def put_agenda_progression(request: Request, body: AgendaProgressionRequest):
+    if not settings.save_agenda_progression_enabled(body.enabled):
+        return JSONResponse(status_code=503, content={"detail": "agenda_settings_write_failed"})
+    # Applies to the running process: the controller reads the variant per turn.
+    settings.apply_agenda_progression_enabled(body.enabled)
+    # A turn prefetched under the old variant must not air under the new one.
+    motor = getattr(getattr(request.app.state, "host", None), "motor", None)
+    clear = getattr(motor, "clear_prefetched_agenda", None)
+    if callable(clear):
+        clear()
+    return _progression_response()
+
+
 @router.get("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
-def get_cohost_profiles() -> CohostProfilesResponse:
+def get_cohost_profiles(locale: Optional[str] = None) -> CohostProfilesResponse:
     # Disk-only read; no host needed. Falls back to the 3 defaults when the
     # file is absent. No `selected` field -- selection is stateless (RAM).
     with _cohost_profiles_lock:
-        return _cohost_profiles_response(load_cohost_profiles())
+        return _cohost_profiles_response(load_cohost_profiles(locale=locale))
 
 
 @router.post("/api/agenda/cohost-profiles", response_model=CohostProfilesResponse)
@@ -244,15 +276,20 @@ def save_cohost_profile(body: CohostProfileSaveRequest):
     if not clean:
         return JSONResponse(status_code=422, content={"detail": "empty profile name"})
     with _cohost_profiles_lock:
-        profiles = load_cohost_profiles()
+        profiles = load_cohost_profiles(locale=body.locale)
+        existing = profiles.get(clean)
+        style = body.style if (body.style or "").strip() else ((existing or {}).get("style") or "")
+        priority = body.priority if body.priority is not None else (existing or {}).get("default_priority", "normal")
+        length = body.length if body.length is not None else (existing or {}).get("default_response_length", "normal")
         profiles[clean] = normalize_cohost_profile(
             {
-                "style": body.style,
-                "default_priority": body.priority or "normal",
-                "default_response_length": body.length or "normal",
-            }
+                "style": style,
+                "default_priority": priority or "normal",
+                "default_response_length": length or "normal",
+            },
+            locale=body.locale,
         )
-        if not save_cohost_profiles(profiles):
+        if not save_cohost_profiles(profiles, locale=body.locale):
             return JSONResponse(status_code=503, content={"detail": "cohost_write_failed"})
         return _cohost_profiles_response(profiles)
 
@@ -265,15 +302,16 @@ def select_cohost_profile(request: Request, body: CohostProfileSelectRequest):
         return JSONResponse(status_code=503, content={"detail": "agenda_unavailable"})
     # Load under the disk lock but NEVER write -- selection is stateless.
     with _cohost_profiles_lock:
-        profiles = load_cohost_profiles()
-    if body.name not in profiles:
+        profiles = load_cohost_profiles(locale=body.locale)
+    clean = body.name if body.name in profiles else sanitize_profile_name(body.name)
+    if not clean or clean not in profiles:
         return JSONResponse(status_code=404, content={"detail": "profile not found"})
     with host.agenda_lock:
         try:
-            agenda.set_profile({"style": profiles[body.name]["style"]})
+            agenda.set_profile({"style": profiles[clean]["style"]})
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"detail": str(exc)})
-    return CohostProfileSelectResponse(selected=body.name)
+    return CohostProfileSelectResponse(selected=clean)
 
 
 @router.post("/api/agenda/session/action", response_model=AgendaResponse)

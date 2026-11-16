@@ -99,6 +99,7 @@ def test_memoria_list_shape_includes_title_but_not_content(tmp_path, monkeypatch
                 "imported",
                 "draft",
                 "promoted",
+                "superseded_by",
             }
         # memoria_import_20260718 (WU3): a non-imported (draft/curated) row
         # carries imported=False; the imported=True case is covered in

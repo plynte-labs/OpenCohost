@@ -131,6 +131,9 @@ class EpisodicQuery:
     lexical_anchors: list[str]
     profile_id: str
     scope: RecallScope = RecallScope.EPISODIC_TOPIC
+    # Telemetry only: the fixed family code that produced the intent
+    # (`recall_verb`, `conversation_stem`, ...), never a matched word.
+    trigger: str = "-"
 
 
 # Deterministic recall features on folded (accent-free, lowercase) text.
@@ -400,20 +403,27 @@ class EpisodicQueryAnalyzer:
             return RecallScope.SESSION_RECALL
         return RecallScope.EPISODIC_TOPIC
 
-    def _is_explicit_recall(self, text: str, folded: str) -> bool:
+    def _explicit_trigger(self, text: str, folded: str) -> str:
+        """Fixed family code of the first explicit cue that fires, else "-".
+
+        Same cues, same order as before: this only names the winner.
+        """
         if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _EXPLICIT_PATTERNS):
-            return True
+            return "legacy"
         if self._has_family_hit(folded, _RECALL_VERB_STEMS):
-            return True
+            return "recall_verb"
         if self._has_family_hit(folded, _CONVERSATION_VERB_STEMS):
-            return True
+            return "conversation_stem"
         if _TOCAR_TEMA_RE.search(folded):
-            return True
+            return "touch_topic"
         if self._has_family_hit(folded, _MEMORY_NOUNS):
-            return True
+            return "memory_noun"
         if self._has_session_past_reference(folded):
-            return True
-        return False
+            return "session_past"
+        return "-"
+
+    def _is_explicit_recall(self, text: str, folded: str) -> bool:
+        return self._explicit_trigger(text, folded) != "-"
 
     def analyze(
         self,
@@ -427,13 +437,15 @@ class EpisodicQueryAnalyzer:
         scope = self._detect_scope(folded)
 
         # Check explicit patterns (legacy list + verb families + cues)
-        is_explicit = self._is_explicit_recall(text, folded)
+        trigger = self._explicit_trigger(text, folded)
+        is_explicit = trigger != "-"
         is_implicit = any(re.search(pat, text, flags=re.IGNORECASE) for pat in _IMPLICIT_PATTERNS)
 
         if is_explicit:
             intent = RecallIntent.EXPLICIT
         elif is_implicit or (temporal is not None and len(lexical) > 0):
             intent = RecallIntent.IMPLICIT
+            trigger = "implicit_pattern" if is_implicit else "temporal"
         else:
             intent = RecallIntent.NONE
 
@@ -448,4 +460,5 @@ class EpisodicQueryAnalyzer:
             lexical_anchors=lexical,
             profile_id=profile_id,
             scope=scope,
+            trigger=trigger,
         )

@@ -394,8 +394,29 @@ def test_cloud_failure_log_names_provider_and_error_code(tmp_path, caplog):
 
     assert any("error_code=insufficient_quota" in record.message for record in caplog.records)
     assert any("provider=" in record.message for record in caplog.records)
-    # The message the code came from still must not be anywhere in the log.
+    # setup-wizard-simple S8: the chat path logs the status and the provider's
+    # machine-readable code/type/status only -- never its free-text message,
+    # which can quote the request (project rule: no raw chat in logs).
+    warn = next(r.message for r in caplog.records if "transport failure" in r.message)
+    assert "http_status=429" in warn
     assert not any("You exceeded your current quota" in record.message for record in caplog.records)
+
+
+def test_cloud_failure_log_carries_provider_status_but_no_message(tmp_path, caplog):
+    motor = _make_motor(tmp_path)
+    exc = CloudLLMResponseError(
+        "cloud chat HTTP 400: Bad Request",
+        status_code=400,
+        body_excerpt='{"error": {"code": 400, "message": "bad key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456 '
+        'near hola Kira", "status": "INVALID_ARGUMENT"}}',
+    )
+    with caplog.at_level(logging.WARNING, logger="OpenCohost"):
+        with patch(_SEND, side_effect=exc):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+    warn = next(r.message for r in caplog.records if "transport failure" in r.message)
+    assert "http_status=400" in warn and "provider_status=INVALID_ARGUMENT" in warn
+    assert "bad key" not in warn and "hola Kira" not in warn
+    assert "AIzaSyABCDEF" not in warn
 
 
 def test_body_excerpt_and_headers_never_appear_in_logs(tmp_path, caplog):
@@ -417,6 +438,7 @@ def test_body_excerpt_and_headers_never_appear_in_logs(tmp_path, caplog):
     log_lines = list(motor.log_queue.queue)
     assert not any(sensitive_body in item for item in log_lines)
     assert not any(sensitive_body in record.message for record in caplog.records)
+    assert not any("x-ratelimit" in record.message for record in caplog.records)
     # Retry-After seconds specifically is safe to have surfaced (F2 spec);
     # the raw header dict repr is not something this unit logs at all.
     assert not any("x-ratelimit-remaining" in item for item in log_lines)

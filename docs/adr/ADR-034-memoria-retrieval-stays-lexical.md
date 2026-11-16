@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-16
 **Status:** Accepted (no code change — assessment + decision record)
+**Superseded in part**: prompt assembly (lexical-only injection) superseded by ADR-059 (2026-09-23) — lexical facts + semantic episodes merged under one budget; lexical `select_top_k` over memorias rows remains in force
 **Driver:** Owner question: is the memoria subsystem's storage/retrieval (informally "the RAG")
 optimal as-is, or does it need an upgrade to embeddings/semantic search? Answered by a double
 independent review — a deep-dive agent plus an independent Codex CLI second opinion — both run

@@ -1,5 +1,6 @@
 """/api/memoria/* -- stats, list, row, purge, flags, delete, update, import,
-capture, notice (moved verbatim from main.py, refactor_core_api_20260802 B6).
+capture, notice (moved verbatim from main.py, refactor_core_api_20260802 B6),
+settings (per-layer memory controls, memory-semantic-recall T4).
 
 `MEMORIAS_DB`, `MEMORIAS_ENABLED`, `MEMORIAS_IMPORT_CAP` ARE monkeypatched
 directly on `opencohost.api.main` (test_api_memoria_*.py, test_api_reads.py,
@@ -75,6 +76,8 @@ from opencohost.api.models import (
     MemoriaPurgeRequest,
     MemoriaPurgeResponse,
     MemoriaRowResponse,
+    MemoriaSettingsRequest,
+    MemoriaSettingsResponse,
     MemoriaStatsResponse,
     MemoriaUpdateRequest,
 )
@@ -96,6 +99,15 @@ from opencohost.core.memory.memoria_import import parse_import, strip_control_ch
 from opencohost.core.memory.memoria_store import build_signature, build_title, derive_import_key, is_capturable
 
 router = APIRouter()
+
+
+def _reset_session_topics(request: Request) -> None:
+    """Drop the in-session topic copy (index + session.md) after a memory
+    purge/delete: engine-facing reset, best effort, never raises."""
+    try:
+        request.app.state.host.motor.reset_session_topics()
+    except Exception:
+        pass
 
 # POST /api/memoria/purge -- mirrors memoria_store.py's WRITE_TIMEOUT_SECONDS.
 _MEMORIA_WRITE_TIMEOUT_SECONDS = 1.0
@@ -126,11 +138,13 @@ def _list_memoria_metadata(db_path: str, profile_id: str) -> list[dict]:
     try:
         with closing(sqlite3.connect(db_path, timeout=_STATS_DB_READ_TIMEOUT_SECONDS)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, title, created_at, updated_at, revision, pinned, private, inactive, status "
-                "FROM memorias WHERE profile_id = ? ORDER BY updated_at DESC, id ASC",
-                (profile_id,),
-            ).fetchall()
+            cols = "id, title, created_at, updated_at, revision, pinned, private, inactive, status"
+            order = "FROM memorias WHERE profile_id = ? ORDER BY updated_at DESC, id ASC"
+            try:
+                rows = conn.execute(f"SELECT {cols}, superseded_by {order}", (profile_id,)).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-v6 db (column not migrated yet): no row is superseded.
+                rows = conn.execute(f"SELECT {cols} {order}", (profile_id,)).fetchall()
             return [dict(row) for row in rows]
     except sqlite3.Error:
         return []
@@ -146,6 +160,58 @@ def _purge_memoria(db_path: str, profile_id: str) -> int:
             return cur.rowcount
     except sqlite3.Error:
         return 0
+
+
+def _v5_memory(request: Request):
+    """The engine's Memory v5 subsystem, or None (OFF / not initialised)."""
+    try:
+        return getattr(request.app.state.host.motor, "_memory", None)
+    except Exception:
+        return None
+
+
+def _purge_v5_profile(request: Request, profile_id: str) -> "bool | None":
+    """Forget the profile in Memory v5 too: the evidence journal (verbatim owner
+    turns and Kira replies), sessions, episodes and the semantic cache.
+
+    True = purged, False = attempted and failed (logged by type only),
+    None = no v5 subsystem to purge. Never raises."""
+    mem = _v5_memory(request)
+    if mem is None:
+        return None
+    try:
+        return bool(mem.purge_profile(profile_id))
+    except Exception as exc:
+        logger.warning("memory_v5: purge failed exc=%s", type(exc).__name__)
+        return False
+
+
+def _forget_v5_row(request: Request, profile_id: str, stable_key: "str | None") -> None:
+    """Best-effort v5 cleanup for ONE deleted memoria row.
+
+    v5 stores no link from a row to the turns it came from. The row's
+    stable_key is derived deterministically from the owner's words, so every
+    v5 owner turn of this profile that derives the same key (and the Kira reply
+    committed right after it) is the evidence behind the row and is removed,
+    together with the affected episodes' embeddings. Rows without such turns
+    (imports, summaries, reflection facts) change nothing in v5. Never raises."""
+    mem = _v5_memory(request)
+    if mem is None or not stable_key:
+        return
+    from opencohost.core.memory.memoria_store import derive_stable_key
+
+    # The key is "{profile_or_legacy_name}|tokens": compare the token part only,
+    # so a legacy name-keyed row still matches.
+    tokens = stable_key.split("|", 1)[-1]
+
+    def _matches(text: str) -> bool:
+        key = derive_stable_key("", text)
+        return key is not None and key.split("|", 1)[-1] == tokens
+
+    try:
+        mem.forget_user_turns(profile_id, _matches)
+    except Exception as exc:
+        logger.warning("memory_v5: row forget failed exc=%s", type(exc).__name__)
 
 
 def _legacy_profile_key(profile_id: str) -> "str | None":
@@ -279,6 +345,7 @@ def get_memoria_list(profile_id: str) -> MemoriaListResponse:
                 imported=bool(row["status"] == "imported"),
                 draft=bool(row["status"] == "draft"),
                 promoted=bool(row["status"] == "promoted"),
+                superseded_by=row.get("superseded_by"),
             )
             for row in rows
         ]
@@ -317,15 +384,20 @@ def get_memoria_row(row_id: str, profile_id: str):
         inactive=bool(row["inactive"]),
         draft=bool(row["status"] == "draft"),
         promoted=bool(row["status"] == "promoted"),
+        superseded_by=row["superseded_by"] if "superseded_by" in row.keys() else None,
     )
 
 
 @router.post("/api/memoria/purge", response_model=MemoriaPurgeResponse)
-def post_memoria_purge(body: MemoriaPurgeRequest) -> MemoriaPurgeResponse:
+def post_memoria_purge(request: Request, body: MemoriaPurgeRequest) -> MemoriaPurgeResponse:
+    # Forgetting must reach v5 even when the memorias feature is switched off:
+    # the evidence journal is written independently of it.
+    v5_purged = _purge_v5_profile(request, body.profile_id)
     if not deps.memorias_enabled():
-        return MemoriaPurgeResponse(deleted=0)
+        return MemoriaPurgeResponse(deleted=0, v5_purged=v5_purged)
     deleted = _purge_memoria(deps.memorias_db(), body.profile_id)
-    return MemoriaPurgeResponse(deleted=deleted)
+    _reset_session_topics(request)
+    return MemoriaPurgeResponse(deleted=deleted, v5_purged=v5_purged)
 
 
 @router.post("/api/memoria/flags", response_model=MemoriaMutationResponse)
@@ -365,7 +437,7 @@ def post_memoria_flags(body: MemoriaFlagsRequest):
 
 
 @router.post("/api/memoria/delete", response_model=MemoriaMutationResponse)
-def post_memoria_delete(body: MemoriaDeleteRequest):
+def post_memoria_delete(request: Request, body: MemoriaDeleteRequest):
     if not deps.memorias_enabled():
         return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors flags/purge
     store = deps.memoria_store_or_none()
@@ -383,6 +455,8 @@ def post_memoria_delete(body: MemoriaDeleteRequest):
         return JSONResponse(status_code=404, content={"detail": "memoria not found"})
     if not store.delete_row(body.id):
         return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+    _forget_v5_row(request, body.profile_id, row["stable_key"] if "stable_key" in row.keys() else None)
+    _reset_session_topics(request)
     return MemoriaMutationResponse(ok=True)
 
 
@@ -568,3 +642,42 @@ def post_memoria_notice(body: MemoriaNoticeRequest) -> MemoriaNoticeResponse:
     # state (save swallows write errors by design -- CTK fail-open parity).
     save_memorias_notice_dismissed(body.dismissed)
     return MemoriaNoticeResponse(dismissed=load_memorias_notice_dismissed())
+
+
+def _memoria_settings_response() -> MemoriaSettingsResponse:
+    from opencohost.config import settings as _settings
+
+    return MemoriaSettingsResponse(
+        memorias_enabled=bool(deps.memorias_enabled()),
+        **_settings.current_memory_layers(),
+    )
+
+
+@router.get("/api/memoria/settings", response_model=MemoriaSettingsResponse)
+def get_memoria_settings() -> MemoriaSettingsResponse:
+    # Effective runtime flags (what the engine reads each turn). EngineHost
+    # applies MEMORY_LAYERS_FILE at start, so these match disk. No host state.
+    return _memoria_settings_response()
+
+
+@router.post("/api/memoria/settings", response_model=MemoriaSettingsResponse)
+def post_memoria_settings(body: MemoriaSettingsRequest):
+    # Late module import (not a from-import): tests patch MEMORY_LAYERS_FILE
+    # and the MEMORY_*_ENABLED flags on the settings module itself.
+    from opencohost.config import settings as _settings
+
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return JSONResponse(status_code=422, content={"detail": "no memory layer provided"})
+    merged = {**_settings.current_memory_layers(), **updates}
+    # Persist first, apply only on success: a runtime-only change would be
+    # silently lost on restart. Single-file atomic write (os.replace).
+    if not _settings.save_memory_layers(merged):
+        logger.warning("memory_layers: save failed (runtime unchanged)")
+        return JSONResponse(status_code=503, content={"detail": "memory_settings_write_failed"})
+    _settings.apply_memory_layers(merged)
+    logger.info(
+        "memory_layers: facts=%s episodes=%s semantic=%s source=api",
+        merged["facts"], merged["episodes"], merged["semantic"],
+    )
+    return _memoria_settings_response()

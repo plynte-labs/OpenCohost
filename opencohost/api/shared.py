@@ -255,6 +255,7 @@ def _llm_provider_response(cfg: dict, key_store: OAuthStore) -> LlmProviderRespo
             base_url=str(prof.get("base_url", "")),
             model=str(prof.get("model", "")),
             preset=prof.get("preset"),
+            model_vision=prof.get("model_vision") is True,
             api_key_set=key_store.has_token(pid),
         )
         for pid, prof in cfg.get("profiles", {}).items()
@@ -263,6 +264,9 @@ def _llm_provider_response(cfg: dict, key_store: OAuthStore) -> LlmProviderRespo
         active_provider=cfg.get("active_provider", "local"),
         fallback_mode=cfg.get("fallback_mode", "auto"),
         pregen_enabled=bool(cfg.get("pregen_enabled", False)),
+        discard_stale_speech_on_regenerated_reply=bool(
+            cfg.get("discard_stale_speech_on_regenerated_reply", False)
+        ),
         profiles=profiles_out,
     )
 
@@ -295,3 +299,30 @@ def _avatar_config_response(cfg) -> AvatarConfigResponse:
         assets_folder=str(cfg.assets_folder),
         state_images={state: str(path) for state, path in cfg.state_images.items()},
     )
+
+
+def engine_settling(host) -> bool:
+    """True while the engine is still starting: Ollama is being woken or the
+    motor has not finished its first service check. Doubles that lack the
+    flags count as settled."""
+    if getattr(host, "ollama_warming", False):
+        return True
+    motor = getattr(host, "motor", None)
+    return getattr(motor, "startup_check_done", True) is False
+
+
+def engine_startup_state(host) -> str:
+    """``starting | loading_model | ready | unavailable`` for ``/api/health``."""
+    motor = getattr(host, "motor", None)
+    is_alive = getattr(motor, "is_alive", None)
+    if not (callable(is_alive) and is_alive()):
+        return "unavailable"
+    if getattr(host, "ollama_warming", False):
+        return "starting"
+    is_ready = bool(getattr(motor, "is_ready", False))
+    if getattr(motor, "startup_check_done", True) is False:
+        # Ollama answered the first check but the model warm-up is running.
+        if is_ready and getattr(motor, "_is_local", False):
+            return "loading_model"
+        return "starting"
+    return "ready" if is_ready else "unavailable"

@@ -3,7 +3,7 @@ track model_switch_memory_continuity_20260723).
 
 Owner-chosen behavior: a model switch must feel invisible — `historial`
 carries over verbatim to the new model, on both the success path
-(`switch_model`) and the implicit-activation path (`download_model`), and a
+(`switch_model`), and a
 FAILED switch must never lose history either (the old unconditional
 `.clear()` ran before the new model was even confirmed to load).
 """
@@ -84,23 +84,4 @@ class TestModelSwitchHistorialContinuity:
         assert result is False
         assert motor.current_model == previous_model
         assert motor._desired_model == previous_desired
-        assert list(motor.historial) == historial_before
-
-    def test_historial_carries_over_download_activate(self):
-        """D2: the download-then-activate path (_download_model_worker) must
-        preserve historial too — same 'model changed mid-session' event
-        family as switch_model."""
-        motor, _, _ = _make_motor()
-        _seed_historial(motor)
-        historial_before = list(motor.historial)
-
-        fake_progress = MagicMock()
-        fake_progress.status = "success"
-        fake_progress.total = None
-        fake_progress.completed = None
-        motor.ollama.pull.return_value = iter([fake_progress])
-
-        with patch("opencohost.core.llm_engine.save_last_model"):
-            motor._download_model_worker("nuevo-modelo:latest")
-
         assert list(motor.historial) == historial_before

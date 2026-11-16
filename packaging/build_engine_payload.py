@@ -13,9 +13,15 @@ import zipfile
 
 SCHEMA = 1
 MANIFEST_NAME = "payload-manifest.json"
-_ROOT_FILES = ("LICENSE", "README.md", "pyproject.toml", "uv.lock")
+_ROOT_FILES = ("LICENSE", "README.md", "pyproject.toml", "uv.lock", "THIRD-PARTY-NOTICES.md")
 _EXCLUDED_PACKAGE_PARTS = {"ui", "data", "runtime", "logs", "user", "cache", "__pycache__"}
-_EXCLUDED_PACKAGE_FILES = {"server_qwen.py"}
+# RETIRED 2026-09-21: server_qwen.py moved to a separate legacy repository — nothing to
+# exclude anymore. Kept as an empty set so the filter below stays intact.
+_EXCLUDED_PACKAGE_FILES: set[str] = set()
+# Owner decision D7 (2026-11-16): the offline agenda benchmark is developer
+# tooling (scripts/benchmark_agenda_deck.py) and never ships in the engine zip.
+# Nothing under opencohost/ imports it at runtime.
+_EXCLUDED_PACKAGE_PATHS = {"tools/agenda_benchmark.py"}
 
 
 def _payload_paths(source_root: Path) -> list[tuple[str, Path]]:
@@ -36,6 +42,8 @@ def _payload_paths(source_root: Path) -> list[tuple[str, Path]]:
         if any(part in _EXCLUDED_PACKAGE_PARTS for part in relative.parts):
             continue
         if relative.name in _EXCLUDED_PACKAGE_FILES:
+            continue
+        if relative.as_posix() in _EXCLUDED_PACKAGE_PATHS:
             continue
         archive_name = PurePosixPath("opencohost", *relative.parts).as_posix()
         entries.append((archive_name, path))

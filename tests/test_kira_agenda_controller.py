@@ -458,7 +458,11 @@ def test_alternating_content_and_empty_never_valve_kills_but_budget_terminates()
     assert action.source == "kira-agenda-stop"
 
 
-def test_prefetch_action_preview_does_not_mutate_speaking_state():
+def test_prefetch_action_preview_does_not_mutate_speaking_state(monkeypatch):
+    # Legacy continuation wording; progression is ON by default (2026-11-16).
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "AGENDA_PROGRESSION_ENABLED", False, raising=False)
     controller = KiraAgendaController(max_turns_per_topic=5)
     topic = controller.add_topic("Tema con prefetch", approved=True)
     controller.queue_topic(topic.id)
@@ -616,6 +620,50 @@ def test_topic_input_rejects_untrusted_content(bad_title):
 
     with pytest.raises(ValueError):
         controller.add_topic(bad_title, approved=True)
+
+
+# K4 (G4b): code detection is structural, not a bare keyword list -- plain
+# English topics that contain "from", "update", "class" or "select" are fine.
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Games from the 90s",
+        "Patch update thoughts",
+        "The class system",
+        "Is it worth it to select a main?",
+        "Drop rates in the new season",
+        "Delete or keep the old build?",
+        "Juegos de los 90 y su música",
+    ],
+)
+def test_plain_topics_are_not_code(title):
+    controller = KiraAgendaController()
+
+    topic = controller.add_topic(title, approved=True)
+
+    assert topic.title == title
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "function hack() { return true; }",
+        "<script>alert(1)</script>",
+        "`rm -rf /`",
+        "const f = () => 1",
+        "def main(): pass",
+        "import x from 'y'",
+        "console.log(hola)",
+        "SELECT * FROM users;",
+        "DROP TABLE users",
+        "x = {a: 1; b: 2}",
+        "import os; print('hack')",
+    ],
+)
+def test_code_snippets_still_rejected(snippet):
+    assert KiraAgendaController.looks_like_code(snippet) is True
+    with pytest.raises(ValueError):
+        KiraAgendaController().add_topic(snippet, approved=True)
 
 
 def test_controller_does_not_enqueue_while_motor_busy_or_kira_speaking():

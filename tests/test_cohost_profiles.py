@@ -5,9 +5,12 @@ import pytest
 from opencohost.core.profiles.cohost_profiles import (
     DEFAULT_COHOST_PROFILES,
     DEFAULT_COHOST_PROFILES_EN,
+    _cohost_profiles_path,
     _default_cohost_profiles,
+    load_cohost_profiles,
     normalize_cohost_profile,
     sanitize_profile_name,
+    save_cohost_profiles,
 )
 from opencohost.i18n import active
 from opencohost.i18n.contract import TIER_OFFICIAL, LocaleBundle
@@ -77,3 +80,48 @@ def test_sanitize_profile_name_is_compact_and_capped():
 
     assert "  " not in name
     assert len(name) <= 40
+
+
+def test_cohost_profiles_path_none_follows_active_locale(official, tmp_path, monkeypatch):
+    import opencohost.core.profiles.cohost_profiles as cp_mod
+
+    base = tmp_path / "cohost_profiles.json"
+    monkeypatch.setattr(cp_mod, "COHOST_PROFILES_FILE", str(base))
+
+    _activate("es", official)
+    assert _cohost_profiles_path() == base
+
+    _activate("en", official)
+    assert _cohost_profiles_path() == tmp_path / "cohost_profiles_en.json"
+    assert _cohost_profiles_path("es-MX") == base
+    assert _cohost_profiles_path("en-US") == tmp_path / "cohost_profiles_en.json"
+
+
+def test_load_and_save_cohost_profiles_none_follow_active_locale(official, tmp_path, monkeypatch):
+    import opencohost.core.profiles.cohost_profiles as cp_mod
+
+    base = tmp_path / "cohost_profiles.json"
+    en_path = tmp_path / "cohost_profiles_en.json"
+    monkeypatch.setattr(cp_mod, "COHOST_PROFILES_FILE", str(base))
+
+    _activate("en", official)
+    defaults = load_cohost_profiles()
+    assert set(defaults.keys()) == {"Natural", "Spicy with nuance", "Entertaining teacher"}
+
+    defaults["Dry EN"] = {"style": "Dry wit", "default_priority": "alta", "default_response_length": "corta"}
+    assert save_cohost_profiles(defaults) is True
+    assert en_path.exists()
+    assert not base.exists()
+
+    reloaded = load_cohost_profiles()
+    assert reloaded["Dry EN"]["style"] == "Dry wit"
+    # Explicit es stays isolated even when active runtime locale is en
+    assert "Dry EN" not in load_cohost_profiles("es")
+
+
+def test_normalize_cohost_profile_whitespace_and_bcp47_locale(official):
+    _activate("en", official)
+    assert normalize_cohost_profile({"style": ""}, locale="   ")["style"] == DEFAULT_COHOST_PROFILES_EN["Natural"]["style"]
+
+    _activate("es", official)
+    assert normalize_cohost_profile({"style": ""}, locale="en-US")["style"] == DEFAULT_COHOST_PROFILES_EN["Natural"]["style"]

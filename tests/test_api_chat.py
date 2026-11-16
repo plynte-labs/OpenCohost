@@ -88,9 +88,11 @@ def test_typed_turn_commits_history_text_naming_the_speaker():
         # element — see test_valid_text_accepted_and_enqueued_as_process_context.
         # Unit 4.2 (F12 closure): a 6th (submitted_under_provider) rides
         # alongside it now — the provider posture at submit time.
-        command, payload, history_text, source, submitted_at, submitted_under_provider = (
+        # runtime-fixes-20261110 T2: a 7th element, the origin stamped by this route.
+        command, payload, history_text, source, submitted_at, submitted_under_provider, origin = (
             app.state.host.motor.command_queue.get_nowait()
         )
+        assert origin == "desktop"
         assert command == "process_context"
         assert payload == text  # prompt unchanged — generation behavior untouched
         assert history_text == i18n_active.typed_history_wrapper().format(text=text)

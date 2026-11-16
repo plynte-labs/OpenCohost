@@ -9,9 +9,7 @@ description = "OpenCohost — local-first AI streaming co-host"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-authors = [
-    { name = "plynte-labs / OpenCohost Contributors" }
-]
+authors = [{ name = "plynte-labs / FranGuh / OpenCohost Contributors" }]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: Microsoft :: Windows",
@@ -32,6 +30,8 @@ dependencies = [
     "websockets>=12.0",
     # tokenizers — used by MiniLM semantic worker / memory v5 semantic safety.
     "tokenizers>=0.15.0",
+    # keyring — secure OS credential storage for cloud API keys.
+    "keyring>=24.0.0",
 ]
 
 [project.optional-dependencies]
@@ -47,14 +47,25 @@ local-tts = [
 # cloud-tts: enables Edge-TTS (Microsoft cloud text-to-speech).
 # When absent, the app falls back to Piper (local-tts) automatically.
 cloud-tts = [
-    "edge-tts>=6.1.0",
+    "edge-tts>=7.3.1",
 ]
 # integrations: optional platform integrations; none required for core operation.
-#   obsws-python — OBS WebSocket control (opencohost/avatar/obs_client.py)
 #   nvidia-ml-py — NVIDIA VRAM monitoring; installs as the `pynvml` module (opencohost/core/health_monitor.py)
 integrations = [
-    "obsws-python>=1.7.0",
     "nvidia-ml-py>=12.0.0",
+]
+# obs: OBS WebSocket control (opencohost/avatar/obs_client.py). DELIBERATELY
+# SEPARATE and never staged into the installer: obsws-python is GPL-3.0-only and
+# would make the whole installer GPL-3.0-only. Opt-in for source installs until
+# an MIT obs-websocket v5 client replaces it.
+obs = [
+    "obsws-python>=1.7.0",
+]
+# vision: on-demand screen vision (opencohost/core/vision). Imported lazily;
+# the app runs unchanged without it.
+vision = [
+    "mss>=10.2.0",
+    "pillow>=10.0.0",
 ]
 # youtube-chat: DELIBERATELY SEPARATE, opt-in only. pytchat reads YouTube's
 # unofficial live-chat endpoint, which YouTube's Terms of Service do not permit.
@@ -62,6 +73,10 @@ integrations = [
 # explicit choice to accept that risk on your own channel. See docs/PRIVACY.md.
 youtube-chat = [
     "pytchat>=0.5.5",
+]
+# mcp: for the owner-local MCP dev servers (not part of the public tree); optional, never imported by the app.
+mcp = [
+    "mcp>=1.0,<2",  # 2.x renamed FastMCP (server.py targets 1.x)
 ]
 dev = [
     "pre-commit>=4.6.0",

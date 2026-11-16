@@ -27,13 +27,14 @@ except ImportError:
 from collections import deque, Counter
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from opencohost.config import settings
 from opencohost.config.settings import (
     DEFAULT_MODEL, SYSTEM_PROMPT, HISTORY_MAX_TURNS, LLM_TEMPERATURE,
     LLM_TOP_P, LLM_MAX_TOKENS, LLM_KEEP_ALIVE, TEMP_DIR, TTS_SERVER_URL,
     TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT,
+    EDGE_BREAKER_THRESHOLD, EDGE_BREAKER_COOLDOWN_S, EDGE_BREAKER_MAX_COOLDOWN_S,
     OLLAMA_CHAT_TIMEOUT, OLLAMA_REQUEST_TIMEOUT,
     SCOUT_ENABLED, LLM_SCOUT_TIMEOUT, LLM_SCOUT_NUM_PREDICT,
     LLM_SCOUT_TEMPERATURE, LLM_SCOUT_MIN_DIGEST_LINES,
@@ -46,10 +47,13 @@ from opencohost.config.settings import (
     resolve_startup_model, save_last_model,  # Retained on module for test mock compatibility
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
+    load_discard_speech_residue, save_discard_speech_residue,
+    load_motor_tts, save_motor_tts,
     PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
-    MEMORIAS_ENABLED, MEMORIAS_DB, MEMORY_PROMOTION_DIAGNOSTICS,
-    MEMORIAS_PROFILE_CAP,
+    MEMORIAS_ENABLED, MEMORIAS_DB,
+    MEMORIAS_PROFILE_CAP, MEMORIAS_PROMOTION_REARM_S,
+    MEMORIAS_PROMOTION_QUIET_S,
     MEMORIAS_SUMMARY_MIN_TITLES,
     PERSONALIZATION_ENABLED,
     PTT_CUE_ENABLED, PTT_CUE_VOLUME,
@@ -67,9 +71,12 @@ from opencohost.config.settings import (
     CLOUD_PROBER_JOIN_TIMEOUT_SECONDS,
     DIRECT_ANSWER_MAX_WAIT_SECONDS,
     OWNER_BUNDLE_SOURCE, OWNER_BUNDLE_MAX_ITEMS, OWNER_BUNDLE_MAX_CHARS,
-    LLM_STREAMING_ENABLED,
+    LLM_STREAMING_ENABLED, CLOUD_STREAMING_ENABLED,
 )
 from opencohost.core.context import context_budget
+from opencohost.core.context import echo_guard as _echo_guard
+from opencohost.core.context import prompt_echo as _prompt_echo
+from opencohost.core.context import search_claim as _search_claim
 # Module import, never a from-import of the values: STREAM_OVER_AGENDA /
 # STREAM_TTL_SECONDS are runtime-mutable (PUT /api/stream/chat-live/limits
 # rebinds them), and the functions read the module globals live.
@@ -83,6 +90,7 @@ from opencohost.core.turn_scheduler import (
 from opencohost.core.memory.promotion_parser import (
     _PROMOTION_JUDGE_PROMPT as _PROMOTION_JUDGE_PROMPT,
     _PROMOTION_FENCE_RE as _PROMOTION_FENCE_RE,
+    _PROMOTION_EXISTING_BLOCK as _PROMOTION_EXISTING_BLOCK,
     PromotionParseDiagnostics as PromotionParseDiagnostics,
     _PromotionState as _PromotionState,
     _parse_promotion_decisions as _parse_promotion_decisions,
@@ -96,6 +104,9 @@ from opencohost.core.context.injection_markers import (
 from opencohost.core.speech.speech_rate import (
     edge_rate_for_length_scale as edge_rate_for_length_scale,
     _is_connection_error as _is_connection_error,
+    classify_edge_failure as classify_edge_failure,
+    EdgeBreaker as EdgeBreaker,
+    calculate_speech_pause as calculate_speech_pause,
 )
 from opencohost.core.context.repetition_guard import (
     DEFAULT_CONFIG as REPETITION_CONFIG,
@@ -116,24 +127,40 @@ from opencohost.core.context.prompt_assembler import (
     DIGEST_INJECT_SOURCES,
     EDITORIAL_INJECT_SOURCES,
     HISTORY_ASSISTANT_ONLY_SOURCES,
+    OWNER_POLICY_SOURCES,
+    SCREEN_INJECT_SOURCES,
     GenerationSetup,
     _GenerationSetup,
     PromptContextAssembler,
 )
+from opencohost.core.context import prompt_profile as _prompt_profile
+from opencohost.core.context.reply_length import resolve_reply_level
+from opencohost.core.engine import prompt_trace, turn_state, turn_timing
+from opencohost.core.usage import ledger as usage_ledger
+from opencohost.core.engine.turn_state import TurnEvent
 from opencohost.core.engine.llm_inference_service import (
     LLMInferenceService,
+    configured_cloud_model,
     get_inference_service,
 )
+from opencohost.core.web import sources as _web_sources
 from opencohost.core.engine.generation_orchestrator import (
     GenerationAttemptOutcome,
     GenerationOrchestrator,
+    GenerationResult,
     StreamAttemptState,
     _GenerationAttemptOutcome,
     _StreamAttemptState,
 )
 from opencohost.core.providers.cloud import cloud_llm_client
+from opencohost.core.providers.think_tags import strip_think_blocks
 from opencohost.core.profiles import personalization
-from opencohost.core.speech.tts_sanitizer import _first_sentence, _sanitize_tts_text_for_playback
+from opencohost.core.speech.tts_sanitizer import (
+    _first_sentence,
+    _sanitize_tts_text_for_display,
+    _sanitize_tts_text_for_playback,
+    _spoken_text_for_fragment,
+)
 from opencohost.core.speech.router import (
     SPEECH_BOUNDARY_COMMAND,
     SpeechJob,
@@ -151,7 +178,7 @@ from opencohost.core.providers.llm_tiers import LLMTierConfig, LLMTierState, LLM
 from opencohost.core.memory.memory_digest import MemoryDigest
 from opencohost.core.memory.memoria_store import (
     MemoriaStore, derive_stable_key, build_title, build_signature,
-    build_injection_lines, build_recency_lines, is_meta_recall_query,
+    build_injection_lines, build_recency_lines, is_clarification_turn, is_meta_recall_query,
     pinned_injection_counter, significant_token_count, strip_history_wrapper,
 )
 from opencohost.core.context.repetition_guard import (
@@ -161,13 +188,25 @@ from opencohost.core.context.repetition_guard import (
 )
 from opencohost.config.logger import get_logger, _debug_enabled
 from opencohost.config.validation import log_non_negotiable_block, output_guard
+from opencohost.core.safety.crisis import detect_crisis
+from opencohost.core.safety.turn import crisis_turn, is_crisis_turn
+from opencohost.config import reply_length as reply_length_setting
+from opencohost.config import warmth as warmth_state
+from opencohost.config.owner_gender import DEFAULT_OWNER_GENDER, normalize_owner_gender
+from opencohost.config.warmth import DEFAULT_WARMTH, normalize_warmth
 from opencohost.core.engine.llm_engine_scout import ScoutPromotionMixin
 from opencohost.core.engine.llm_engine_memorias import MemoriaCaptureMixin
+from opencohost.core.engine.llm_engine_reflection import OwnerReflectionMixin
 from opencohost.core.engine.llm_engine_agenda import AgendaStashMixin
 from opencohost.core.engine.llm_engine_models import ModelManagementMixin
 from opencohost.core.engine.llm_engine_cloud import CloudFallbackMixin
 from opencohost.core.engine.llm_engine_pregen import PregenCacheMixin
 from opencohost.core.engine.llm_engine_speech import SpeechPipelineMixin
+from opencohost.core.engine.llm_engine_vision import NO_LOOK, VisionTurnMixin
+from opencohost.core.vision import direct_cloud
+from opencohost.core.engine.llm_engine_decisions import DecisionTurnMixin, decision_kwargs
+from opencohost.core.engine.llm_engine_web import WebTurnMixin
+from opencohost.core.decision.consumers import apply_reply_length, memory_recall_skipped
 
 logger = get_logger()
 
@@ -176,114 +215,85 @@ logger = get_logger()
 # than the producer's configured request timeout.
 TTS_AUDIO_QUEUE_TIMEOUT = max(TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT) + 15
 
-# interruptible_speech_architecture_20260804 §5.1 — WHY "owner-bundle" joins
-# all five frozensets below while "accumulated" still cannot. The two look
-# alike (both merge several messages into one turn) and are opposites on the
-# only axis that matters here: _flush_accumulation bundles VERBATIM VIEWER CHAT
-# (i18n LEGACY_ACCUMULATION_CHAT), whereas an owner bundle is composed ONLY
-# from queue items whose source is in _OWNER_QUESTION_SOURCES — the prefix scan
-# in _take_owner_bundle_prefix stops at the first non-owner item, so viewer text
-# is structurally incapable of reaching an owner-bundle payload, and therefore
-# of reaching persistence through one. That containment is why the owner ruled
-# against simply reusing the "accumulated" tag; it is pinned by the T3.4 privacy
-# test in tests/test_owner_question_bundling.py. Leaving the tag OUT would be
-# the real defect: the host's own burst would be answered with no profile, no
-# memorias, no digest and no cue-card context — Kira blanked precisely on the
-# turns where the owner asked the most.
-#
-# D1 — eviction source-gating (privacy_prereq_fixes_20260701). Only these
-# origins may be promoted into the MemoryDigest when their history pair is
-# evicted. "accumulated" must NEVER be added here: _flush_accumulation
-# (see below, ~line 700) bundles verbatim viewer chat text into it, so
-# capturing it would leak raw chat into the digest. "chat" is excluded for
-# the same reason. Missing/unknown source values are fail-closed (not
-# captured) — see the eviction gate in _commit_history.
 _DIGEST_CAPTURE_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
-# kira_personalization_onboarding_20260705 — sources that qualify for the
-# <perfil_streamer> injection. Deliberately its OWN gate (not nested inside
-# `source == "direct"` below): ptt gains this block too — a deliberate,
-# test-covered behavioral change (design §2). The digest/editorial enrichments
-# were direct-only when this landed; F1 moved them onto the same direct+ptt
-# footing (see _DIGEST_INJECT_SOURCES / _EDITORIAL_INJECT_SOURCES below).
-# owner-bundle IS a host turn, so <perfil_streamer> applies (§5.1).
 _PERSONALIZATION_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
-# memoria_rag_followups_20260716 candidate 1 — sources that qualify for the
-# <memorias_guardadas> injection. Widened from direct-only to direct+ptt
-# (same precedent as _PERSONALIZATION_INJECT_SOURCES above): voice turns now
-# recall stored memorias too, under the SAME shared 700-char budget. This
-# gate has THREE sites: the profile-id snapshot, the injection call, and the
-# prompt prepend — all must use this frozenset or the ptt path stays dead.
-# Same three-site warning applies to owner-bundle (§5.1): the test asserts an
-# injected memoria reaches the BUILT prompt, not merely frozenset membership.
 _MEMORIA_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
-# F1 (turn provenance follow-up) — sources that qualify for the L1
-# <memoria_de_fondo> digest block and for the ARMED editorial cue-card block.
-# These were exact-literal `source == "direct"` compares, which was harmless
-# only while the dispatcher hardcoded source="direct" for EVERY process_context
-# turn. The moment it started threading the real source, both enrichments went
-# voice-blind: an F10 PTT question about an armed card got none of the card's
-# facts (defeating the point of arming it), and a PTT "what were we talking
-# about a while ago" got no digest at all — while the SAME question typed still
-# got both. ptt is already in _DIGEST_CAPTURE_SOURCES, so voice turns FEED the
-# digest; they must be able to READ it. Same precedent as the two frozensets
-# above. NOT widened beyond direct+ptt+owner-bundle: chat/accumulated/agenda
-# stay excluded (the digest may hold host-turn text and the card is
-# host-editorial context). owner-bundle joins both because "¿de qué hablábamos
-# hace rato?" and a question about an armed cue card can each be one of the N
-# a burst merges (§5.1) — the bundle must not answer them memory-blind.
 _DIGEST_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 _EDITORIAL_INJECT_SOURCES = frozenset({"direct", "ptt", OWNER_BUNDLE_SOURCE})
 
-# tauri_stream_chat_20260812 §3.2 phase 2 (owner Q3): sources whose prompt
-# keeps ONLY the assistant slots of `historial` — Kira's own last replies —
-# and drops the user slots. Unlike the five allowlists above, this is a
-# DENY-list of exactly the evidenced source: in the 2026-08-12 42-turn Twitch
-# session (logs/opencohost_20260812_194539.log) every chat prompt carried
-# ~2400 chars of stored user slots that were pure waste — a chat user slot is
-# _sanitize_history_context's 800-char cut of the ~1200-char RF3 task
-# template, so the chat fence and all viewer content fall past the cut — and
-# the source-mixed deque made chat replies continue agenda monologues instead
-# of the chat (22:07:04, 22:13:52, at 2838-2906 prompt tokens). Assistant
-# slots MUST stay: FIX 2 (_finalize_generation's chat repetition guard) and
-# the model's own don't-repeat-yourself signal both live on them — gate the
-# APPEND, never the history_snapshot in _GenerationSetup.
-# NOT widened to "accumulated" (also viewer chat) or unknown sources: the
-# owner ruled on stream turns only, and a mutating gate ships armed only
-# where the incident evidence is. A plain constant, not a turn_priority-style
-# runtime knob: stream-vs-agenda order is a streamer preference; what history
-# a chat prompt carries is a settled engine decision with no live-tuning ask.
 _HISTORY_ASSISTANT_ONLY_SOURCES = frozenset({"chat"})
 
-# interruptible_speech_architecture_20260804 §3.1 — the single definition of
-# "a question the owner asked" (typed OR spoken). TurnScheduler now owns that
-# queue policy; the imported private alias preserves the engine's non-queue
-# source gates without redeclaring it.
-
-# W2a (memoria_recall_20260718): max captured titles retained per session for
-# the mechanical session summary. Bounds the RAM held between summaries; the
-# summary keeps only the newest this-many when a long session overflows it.
 _SESSION_MEMORIA_TITLES_CAP = 40
 
-# W2a (memoria_recall_20260718): the close-flush session summary is ONE more
-# bounded disk write (~MemoriaStore.WRITE_TIMEOUT_SECONDS = 1.0s). Attempt it
-# only when at least this much of the flush budget remains, so the durable-tier
-# write can never push app close past the budget (R4: flush never blocks close).
 _MEMORIA_SUMMARY_WRITE_BUDGET_SECONDS = 1.1
 
-# guardrail_tuning_20260724 (owner decision "afinar + reintento"): appended as
-# a trailing system message for the ONE extra generation attempt after an
-# output_guard block. Never spoken/sent to TTS itself -- only the model sees
-# it. Spanish, in-character-neutral (a correction to the model, not a Kira
-# line): no promises, no guarantees, no absolute certainty about outcomes.
-_GUARDRAIL_RETRY_NUDGE = (
-    "Nota interna: tu respuesta anterior prometía, garantizaba o daba por "
-    "seguro un resultado, premio o acción para la audiencia. Respondé de "
-    "nuevo sin prometer ni garantizar nada y sin afirmar con certeza "
-    "absoluta lo que va a pasar; mantené el resto del tono."
-)
+# guardrail_tuning_20260724 (owner decision "afinar + reintento") and
+# S1: sources whose text is the owner's own words (the only turns that can be
+# marked as a crisis turn).
+_CRISIS_SOURCES = frozenset({"direct", "ptt", settings.OWNER_BUNDLE_SOURCE})
+
+# qwen-runtime-fixes-20260928 T2: ONE extra generation after an output_guard
+# block, with a rule-aware corrective note appended to the last user message.
+# Only the model sees it; it is never spoken. K4 (warmth-guardrails-runtime-
+# 20261006): the notes live in the locale manifests
+# (`llm.guardrail_retry_nudges`, keys never_promise / no_ai_self_identification
+# / generic) and are read through `i18n_active.guardrail_retry_nudge`, so an
+# en session no longer gets a Spanish (voseo) correction.
+# Parses the rule id out of an `output_guard` block reason, formatted as
+# "Non-negotiable violation [<rule_id>]: ..." (opencohost/config/validation.py).
+_GUARD_REASON_RULE_ID_RE = re.compile(r"^Non-negotiable violation \[([^\]]+)\]")
+
+
+def _guardrail_retry_nudge_for_reason(guard_reason: Optional[str]) -> str:
+    """Pick the active locale's retry nudge for the rule named in ``guard_reason``.
+
+    Falls back to the locale's generic nudge when ``guard_reason`` is missing,
+    does not match the expected "Non-negotiable violation [<rule_id>]: ..."
+    shape, or names a rule with no dedicated nudge.
+    """
+    rule_id = None
+    if isinstance(guard_reason, str):
+        match = _GUARD_REASON_RULE_ID_RE.match(guard_reason)
+        if match:
+            rule_id = match.group(1)
+    return i18n_active.guardrail_retry_nudge(rule_id)
+
+
+def _append_guardrail_nudge(messages: list, nudge: str) -> list:
+    """Return a NEW messages list with ``nudge`` appended to the LAST user
+    message's content -- never a trailing system message (Qwen3.5's chat
+    template raises HTTP 400 "System message must be at the beginning" on
+    one; other families silently drop it) and never mutating ``messages``
+    or any dict inside it.
+    """
+    new_messages = list(messages)
+    last_user_idx = None
+    for i in range(len(new_messages) - 1, -1, -1):
+        msg = new_messages[i]
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx is None:
+        # No user message found (should not happen in practice) -- append a
+        # new user turn rather than ever emitting a system message here.
+        new_messages.append({"role": "user", "content": nudge})
+        return new_messages
+
+    original = new_messages[last_user_idx]
+    if isinstance(original, dict):
+        updated = dict(original)
+        original_content = updated.get("content", "") or ""
+        updated["content"] = f"{original_content}\n\n{nudge}"
+        new_messages[last_user_idx] = updated
+    else:
+        original_content = getattr(original, "content", "") or ""
+        new_messages[last_user_idx] = {"role": "user", "content": f"{original_content}\n\n{nudge}"}
+    return new_messages
 
 
 # ── memoria draft promotion (memory_promotion_20260725) ─────────────────────
@@ -295,9 +305,19 @@ _GUARDRAIL_RETRY_NUDGE = (
 
 from opencohost.core.memory.promotion_backoff_store import PromotionBackoffStore
 
-_PROMOTION_DRAFT_BATCH = 8
+# Batch and output cap are sized together: one KEEP decision (index, verdict,
+# rewritten text up to _PROMOTION_TEXT_MAX_CHARS, ADR-062 `origin`) costs
+# ~70-90 output tokens, so 8 decisions overflowed 512 and the array came back
+# truncated (live: `considered=8 decided=1 missing_decision=7`). 4 x ~120
+# worst-case tokens fits 1024 with headroom.
+_PROMOTION_DRAFT_BATCH = 4
+# Monotonic clock for the sweep's drain/skip cooldowns (a test seam).
+_promotion_monotonic = time.monotonic
+# S1: clock for the v5 evidence-retention job (patched in tests).
+_retention_monotonic = time.monotonic
+_MEMORY_RETENTION_INTERVAL_S = 6 * 3600
 _PROMOTION_DRAFT_CHARS = 5000
-_PROMOTION_NUM_PREDICT = 512
+_PROMOTION_NUM_PREDICT = 1024
 _PROMOTION_TEXT_MAX_CHARS = 220
 _PROMOTION_RESIDENCY_TIMEOUT_SECONDS = 2.0
 
@@ -313,9 +333,16 @@ _JUDGE_BUDGET_CEILING_SECONDS = 90.0
 
 # Reject reasons the judge itself may return. Anything else (including the
 # parser-owned `not_self_contained`) collapses to "unspecified" so the counter
-# can never be poisoned by an invented label.
+# can never be poisoned by an invented label. `assistant_sourced` (T1,
+# memory-noise-amplification-20260928) may ALSO be applied deterministically,
+# after the fact, by `_apply_assistant_subject_guard` when a KEEP's own
+# rewritten text has Kira/the assistant as its subject — so this reason can
+# show up even when the judge itself answered keep:true. `duplicate` (T2) is
+# applied only by the store's post-judge dedup check and is never emitted by
+# the judge model, so it is intentionally absent from this set.
 _PROMOTION_JUDGE_REASONS = frozenset({
     "vague", "speculative", "trivial", "transient", "not_attributable",
+    "assistant_sourced", "general_knowledge",
 })
 
 _PromotionParseDiagnostics = PromotionParseDiagnostics
@@ -347,6 +374,7 @@ _DRAIN_SAFE_COMMANDS = frozenset({
     "clear_history",
     "switch_llm_tier",
     "switch_model",
+    "set_discard_speech_residue",
 })
 
 # §11 B4 primary path: verbs `_dispatch_command` parks while speech is
@@ -354,7 +382,9 @@ _DRAIN_SAFE_COMMANDS = frozenset({
 # mid-speech gate (`_pending_model_switch`: dedupes repeats, cancels on a
 # switch-back) — a blind FIFO defer would apply every queued reload in
 # sequence at the boundary instead of collapsing to the latest.
-_SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model"}
+# `set_discard_speech_residue` is also excluded: the operator's toggle is
+# immediately effective under `_lock` rather than delayed until speech boundary.
+_SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model", "set_discard_speech_residue"}
 
 
 # Carriers for _generar_dialogo's phase split are defined in and imported from
@@ -388,6 +418,23 @@ class SpeechOutcome:
     error: Optional[str] = None
 
 
+def _note_turn_arrival(engine) -> None:
+    """Tell the owner-reflection job a turn is arriving (ADR-065). Tolerates the lightweight
+    harnesses that call ``MotorVocalIA`` methods on a bare namespace."""
+    hook = getattr(engine, "note_owner_turn_arrival", None)
+    if hook is not None:
+        hook()
+
+
+def _log_turn_outcome(source: str, event: TurnEvent) -> None:
+    """A turn that ends before it runs (refused, expired): its begin line and
+    its one terminal line. Module level so engine stand-ins need no method.
+    Never raises."""
+    turn_state.open_turn(source)
+    turn_state.emit(event)
+    turn_state.close_turn()
+
+
 def _get_turn_scheduler(engine) -> TurnScheduler:
     """Return the TurnScheduler for engine or bind one for test harnesses."""
     scheduler = getattr(engine, "_turn_scheduler", None)
@@ -415,14 +462,31 @@ def _get_turn_scheduler(engine) -> TurnScheduler:
     return scheduler
 
 
+def _reply_sources(web_look, setup, source: str) -> tuple:
+    """The sources that ride this turn's reply (runtime-fixes-20261110 T5): those of
+    the web step, only when its text really is in the prompt. Logs one line with a
+    count and the bare hosts; a URL is never logged."""
+    found = getattr(web_look, "sources", ())
+    if not isinstance(found, tuple) or not found or not _web_sources.carries_web_context(setup):
+        return ()
+    logger.info(
+        "[WEB_SOURCES] source=%s count=%d hosts=%s", source, len(found), _web_sources.hosts_for_log(found)
+    )
+    return found
+
+
 class MotorVocalIA(
     ScoutPromotionMixin,
     MemoriaCaptureMixin,
+    OwnerReflectionMixin,
     AgendaStashMixin,
     ModelManagementMixin,
     CloudFallbackMixin,
     PregenCacheMixin,
     SpeechPipelineMixin,
+    VisionTurnMixin,
+    DecisionTurnMixin,
+    WebTurnMixin,
     threading.Thread,
 ):
     """
@@ -465,6 +529,20 @@ class MotorVocalIA(
     def _pq_ttl_seconds(self, value: float) -> None:
         self._turn_scheduler.default_ttl_seconds = value
 
+    def _register_usage_profile_provider(self) -> None:
+        """Let the usage ledger read the active profile id (id only; weakly held)."""
+        try:
+            import weakref
+
+            from opencohost.core.usage import ledger
+
+            ref = weakref.ref(self)
+            ledger.set_profile_provider(
+                lambda: getattr(ref(), "_current_profile_id", None) if ref() is not None else None
+            )
+        except Exception:
+            logger.debug("usage ledger profile provider failed", exc_info=True)
+
     def __init__(self, log_queue, ui_callback, dialogue_callback: Optional[Callable[[str, str], None]] = None):
         super().__init__(daemon=True)
         self._init_communication_and_events(log_queue, ui_callback, dialogue_callback)
@@ -485,83 +563,24 @@ class MotorVocalIA(
         # while the router was speaking, parked for the next true boundary.
         # Engine-thread only (dispatch and drain both run there).
         self._deferred_control_commands: deque = deque()
-        # Optional numeric-only payload hook, mirroring on_ctx_pressure_high:
-        # fires with {"seconds": <float>} whenever a background probe is
-        # (re)scheduled, so the UI can render a countdown without polling.
         self.on_cloud_probe_scheduled: Optional[Callable[[dict], None]] = None
-        # Optional chat-activation telemetry seams (measure-first, off-by-default).
-        # app_shell sets these ONLY when chat diagnostics are enabled; in production
-        # they stay None so the guards below skip and behavior is byte-identical.
-        # They fire from THIS worker thread into the aggregator's collector, which
-        # locks its mutation path while enabled. RECORD-ONLY — neither changes queue
-        # lifetime or speech behavior. Gated strictly on source == "chat".
         self.on_chat_item_expired = None   # (info: dict) — a chat queue item expired (TTL)
         self.on_chat_turn_spoken = None    # () — a chat turn finished speaking
-        # WU4 4b (design-fase2.md §3): optional operator-visibility hook, fired
-        # on the PREGEN WORKER THREAD with the rejection CODE only (never
-        # dialogue text) when the preview guardrail rejects a background draft.
-        # None = zero behavior change (mirrors the on_chat_* callbacks above).
         self.on_guardrail_rejected: Optional[Callable[[str], None]] = None
-        # Optional numeric-only payload hook for ctx_pressure_high, mirroring
-        # on_guardrail_rejected above. NOT a second positional argument on
-        # ui_callback: CTK's concrete callback (app_shell.py's
-        # _on_motor_event(self, status: str)) takes exactly one positional
-        # argument with no *args/default, so calling self.ui_callback(status,
-        # payload) would raise TypeError there. payload is passed as a plain
-        # call argument (never shared instance state), so two threads racing
-        # here (foreground + a pregen worker) cannot clobber each other.
         self.on_ctx_pressure_high: Optional[Callable[[dict], None]] = None
         self._lock = threading.Lock()
 
     def _init_provider_and_model_state(self):
         self._reasoning_model_cache: dict[str, bool] = {}
         self._model_ctx_limit: dict[str, int] = {}
-        # multi_provider_llm_20260723 Phase 3: the persisted provider config
-        # drives `_is_local` gating. Loaded once here (defaults to local-only
-        # when absent/corrupt); PUT /api/llm/provider live-swaps it via
-        # `set_provider_config` (attribute swap under `_lock`, next-call effective).
         self._provider_config: dict = load_provider_config()
-        # Phase 4 (multi_provider_llm_20260723): runtime-only cloud->local
-        # fallback flag (design 'Fallback switch semantics'). NEVER persisted
-        # and NEVER mutates `self._provider_config['active_provider']` — a
-        # restart (fresh __init__, defaults False) or an operator
-        # `set_provider_config` call (also resets it) returns to the owner's
-        # chosen provider. Read by `_cfg_is_local` so a posture snapshot taken
-        # AFTER `_handle_cloud_failure` engages resolves to local.
         self._cloud_fallback_active: bool = False
-        # F2 (runtime_findings_batch_20260731 unit 1.1): the class the last
-        # CLOUD transport failure was sorted into (bad_key/rate_limited/
-        # ambiguous_429/transient), so 2.1/2.2 can act on a reason instead of
-        # re-deriving one. Cleared on the next successful generation, same as
-        # `_last_llm_failure`. Never set on a LOCAL failure.
         self._last_cloud_failure_class: Optional[str] = None
         # Unit 2.1: "check your key" banner latch for `bad_key` -- one
         # ui_callback per failure EVENT, not per retried/repeated turn.
         # Resets alongside `_last_cloud_failure_class` on the next success.
         self._cloud_bad_key_notified: bool = False
-        # Unit 2.2 (runtime_findings_batch_20260731 F3/F12): WHY the current
-        # fallback engaged -- one of the 1.1 classes, or None outside
-        # fallback. Distinct from `_last_cloud_failure_class` above: that one
-        # resets on every successful generation (including LOCAL ones during
-        # an active fallback), so it cannot describe "why we are still in
-        # fallback" -- only this field, cleared solely by a successful
-        # auto-return probe or an explicit provider PUT, can. All of
-        # `_cloud_fallback_reason`/`provider_epoch`/`_cloud_probe_next_at`/
-        # `_cloud_prober_stop` are guarded by `self._lock` -- reused rather
-        # than a new lock, matching how `is_speaking`/`is_processing`/
-        # `_llm_generating`/the provider-config swap in `set_provider_config`
-        # already use it for exactly this class of tiny attribute
-        # get/set-only critical sections (no network call is ever made while
-        # holding it).
         self._cloud_fallback_reason: Optional[str] = None
-        # Bumped on every provider TRANSITION (cloud<->local, in either
-        # direction) -- fallback engaging, an auto-return, or a manual PUT
-        # that changes active_provider. Purely observational (exposed via
-        # provider_runtime_state()); the F12 draft-safety contract itself is
-        # met by unconditional invalidation at each transition (see
-        # `_handle_cloud_failure`/`_on_cloud_probe_success`/
-        # `set_provider_config`), not by tagging stash entries with this
-        # number -- simpler, and sufficient per the plan.
         self.provider_epoch: int = 0
         # Monotonic deadline of the next scheduled background probe, or None
         # when no probe is scheduled (no active fallback, or a
@@ -573,28 +592,35 @@ class MotorVocalIA(
         # it no longer owns (`set_provider_config` below).
         self._cloud_prober_stop: Optional[threading.Event] = None
         self._cloud_prober_thread: Optional[threading.Thread] = None
-        # Unit 2.2 fix (runtime_findings_batch_20260731 findings 1/2/4/6):
-        # bumped every time a prober is stopped or a new one is started.
-        # Every prober captures its OWN generation at creation and every
-        # state-mutating write it makes re-checks it under `_lock` first --
-        # a superseded prober (stopped, replaced by a new failure class, or
-        # raced by a concurrent stop/start) becomes a harmless zombie: its
-        # join may still time out and let it keep running, but none of its
-        # writes can ever take effect once stale.
         self._cloud_prober_generation: int = 0
+        self._pending_fallback_notice_job: Optional[SpeechJob] = None
 
         self.is_ready = not self._is_local
-        self._downloading = False
+        # False until run() finishes the first service check (and model warm-up).
+        self.startup_check_done: bool = False
         _startup_model, self._model_source = resolve_startup_model()
+        # S5: a startup model picked while Ollama could not be verified is
+        # re-resolved once Ollama reports ready (_check_ollama_service).
+        self._startup_model_value: str = _startup_model
+        self._startup_model_unverified: bool = self._model_source in (
+            "default", "invalid_saved_fallback", "saved_unverified",
+        )
         self.current_model = _startup_model
         self._desired_model: str = _startup_model
         self._loaded_model: Optional[str] = None  # set after _prepare_model succeeds
         self._owns_ollama_model: bool = False
         self._current_profile_name: str = "default"
+        self._current_profile_locale: Optional[str] = None
+        self._extended_responses: bool = False
+        # K5: per-profile warmth level ("cold" until a profile sets one).
+        self._warmth: str = DEFAULT_WARMTH
+        # P5 (kira-personal-tone-20261007): optional owner grammatical gender.
+        self._owner_gender: str = DEFAULT_OWNER_GENDER
         # Stable profile UUID (R12) — written under _history_lock in
         # set_profile. Slice 1 introduces the field + lock-guarded write only;
         # the full snapshot/swap/clear critical section lands in slice 4.
         self._current_profile_id: str | None = None
+        self._register_usage_profile_provider()
         _tier_config = LLMTierConfig(**resolve_llm_tiers())
         self.llm_tiers = LLMTierState(
             config=_tier_config,
@@ -605,13 +631,11 @@ class MotorVocalIA(
         self._pending_model_switch: Optional[str] = None
         self._pending_switch_next_at: float = 0.0
         self._pending_switch_not_ready_logged: bool = False
+        self._pending_ctx_reload_model: Optional[str] = None
         # Last switch failure info (read by UI handler, cleared after read)
         self._last_switch_failure: Optional[dict] = None
         self._warmed_model: Optional[str] = None
         self._ollama_chat_client = None
-        # Topic Scout: dedicated short-timeout client (built in run()); its HTTP
-        # timeout closes the socket so Ollama cancels the generation and frees the
-        # single runner slot. Lazily created in scout_digest if run() did not.
         self._ollama_scout_client = None
         # memory_promotion_20260725: same shape as the scout client, but built
         # per sweep with the adaptive judge budget (_judge_timeout_seconds).
@@ -620,6 +644,16 @@ class MotorVocalIA(
         self._promotion_idle_since: Optional[float] = None
         self._promotion_ptt_held: bool = False
         self._promotion_swept: bool = False
+        # memory-write-quality-20261020 (T2), monotonic deadlines: when a swept
+        # backlog may be drained again, and when a gated (skipped) sweep may
+        # retry. None = no deadline.
+        self._promotion_drain_at: Optional[float] = None
+        self._promotion_skip_until: Optional[float] = None
+        # S4: set when a new draft is captured; re-arms a drained sweep after
+        # the quiet window. Consumed by the sweep it triggers.
+        self._promotion_dirty: bool = False
+        # Monotonic time the run() loop last finished a dequeued command.
+        self._last_command_at: Optional[float] = None
         # Last gate name reported by _promotion_gate, so a permanently inert
         # sweep logs once per CHANGED state instead of once per idle tick.
         self._promotion_last_gate: str = ""
@@ -628,6 +662,7 @@ class MotorVocalIA(
         self._last_llm_failure: Optional[dict] = None
         self._last_known_good_model: Optional[str] = _startup_model
         self._awaiting_first_success_after_switch: bool = False
+        self._cold_warming_notified: bool = False
         self._inference_watchdog_timeout: float = float(OLLAMA_CHAT_TIMEOUT)
         self._post_switch_watchdog_timeout: float = min(float(OLLAMA_CHAT_TIMEOUT), 45.0)
 
@@ -635,40 +670,26 @@ class MotorVocalIA(
         self.voz_referencia = None
         self._processing = False
         self._speaking = False
-        # WU3 (design-fase2.md §2.3): narrow "Ollama is busy right now" flag,
-        # set/cleared tightly around the actual generation call inside
-        # _generar_dialogo (foreground AND pregen). The interactive pregen
-        # trigger reads it as the GPU-free predicate — distinct from _processing
-        # (which brackets the whole turn, generation + TTS playback).
         self._llm_generating = False
         self._current_speech_source: Optional[str] = None
-        # WU4 4a (design-fase2.md §3): monotonic timestamp of the last
-        # speaking_end, and the live consumer-loop progress of the CURRENT
-        # utterance (None while not speaking). Both guarded by self._lock.
-        # gap_ms telemetry derives from the former; speech_remaining_estimate
-        # from the latter — the REAL _hablar_impl loop counters, not a timer.
+        # Source of the most recent speech boundary; kept past its end (see
+        # `_speech_boundary_start`). None until the first boundary.
+        self._speech_boundary_source: Optional[str] = None
         self._last_speaking_end_monotonic: Optional[float] = None
         self._speech_progress: Optional[dict] = None
-        # T1 [v5]: speaking_start->end monotonic pair for the `speech_ms=`
-        # field of a "Pregen boundary:" line — the PREVIOUS turn's own speech
-        # duration (-1/None while unknown, e.g. the first turn of a session).
-        # Guarded by self._lock, same as the fields above.
         self._speaking_start_monotonic: Optional[float] = None
         self._last_speech_duration_ms: Optional[int] = None
-        # Speech-cancellation token (guarded by self._lock). Source prefixes for
-        # which _hablar() must refuse at entry — kills the Bug B straggler whose
-        # turn was popped from the priority queue during its GENERATION phase
-        # before an emergency stop landed. Set by the emergency paths BEFORE
-        # interrupt_speaking(); cleared only on agenda enable.
         self._cancelled_speech_prefixes: tuple[str, ...] = ()
         self._current_processing_source: Optional[str] = None
 
-        self.motor_tts = "ligero"  # Default 'ligero' (edge-tts)
+        self.motor_tts = load_motor_tts()  # Default 'ligero' (edge-tts)
 
-        # Privacy gate: when True, Edge-TTS is NEVER invoked — all light-engine
-        # synthesis routes to Piper regardless of online status. Default False
-        # preserves existing behavior. Loaded from disk; updated via set_tts_local_only.
         self.tts_local_only: bool = load_tts_local_only()
+
+        # Discard speech residue: when True, residual audio chunks from non-agenda
+        # turns are discarded on interruption/arrival. Default False.
+        with self._lock:
+            self._discard_speech_residue: bool = load_discard_speech_residue()
 
         # Offline fallback: latches True on first Edge-TTS connection error;
         # subsequent chunks skip Edge-TTS for the rest of the session.
@@ -678,16 +699,23 @@ class MotorVocalIA(
             self._edge_tts_offline: bool = True
         else:
             self._edge_tts_offline: bool = False
-        # An explicit user pick (persisted piper_voice.json) always wins; only
-        # when NO persisted choice exists does the active locale pick the
-        # default (es -> neutral, en -> english).
-        self._piper_voice_key: str = load_piper_voice(
-            default=default_piper_voice_for_locale(i18n_active.get_active_bundle().code)
+        # Transient Edge failures (HTTP 403/429/5xx, timeouts, unknown) never latch
+        # the flag above; this breaker skips Edge for a cooldown after N in a row.
+        self._edge_breaker = EdgeBreaker(
+            EDGE_BREAKER_THRESHOLD, EDGE_BREAKER_COOLDOWN_S, EDGE_BREAKER_MAX_COOLDOWN_S
         )
-        # Single source of truth for the current speed setting, shared by
-        # Piper (length_scale, above) and Edge-TTS (rate string, derived via
-        # edge_rate_for_length_scale). Piper's own _length_scale is a mirror,
-        # never read back.
+        # An explicit user pick (persisted piper_voice.json) wins if its
+        # language is coherent with the active locale; if it belongs to a
+        # different language, fall back to the active locale's default voice.
+        active_lang = i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
+        default_voice = default_piper_voice_for_locale(active_lang)
+        persisted_voice = load_piper_voice(default=default_voice)
+        persisted_lang = PIPER_VOICES.get(persisted_voice, {}).get("lang")
+        if persisted_lang and active_lang and persisted_lang != active_lang:
+            self._piper_voice_key = default_voice
+            save_piper_voice(default_voice)
+        else:
+            self._piper_voice_key = persisted_voice
         self._tts_length_scale: float = load_tts_speed()
         self._piper = PiperEngine(
             piper_voice_path(self._piper_voice_key), length_scale=self._tts_length_scale
@@ -705,18 +733,8 @@ class MotorVocalIA(
             piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
         )
 
-        # Recovery flag (guarded by self._lock, same as _speaking): set when
-        # the shared pygame mixer is suspected zombied (a chunk raised during
-        # playback, or the PTT session that just closed may have churned the
-        # WASAPI endpoint under WhisperLive's mic open/close). Consumed once,
-        # at the start of the NEXT _hablar() pipeline run, which quits+re-inits
-        # the mixer before playing the first chunk. Gated (never unconditional
-        # per turn) because the CTk app shares this same mixer with
-        # AudioBedEngine (opencohost/core/audio_bed.py) for background music —
-        # an unconditional re-init would glitch/kill that music. PTT does not
-        # exist in the CTk app, so this flag is only ever set from the
-        # headless API's PTT teardown path or an actual playback exception.
         self._audio_reinit_needed: bool = False
+        self._audio_disabled: bool = False
 
         # Lazily-built, cached PTT listening blip as an in-memory WAV file
         # (immutable bytes, reinit-proof). None until the first play_ptt_cue()
@@ -732,51 +750,29 @@ class MotorVocalIA(
         self._speech_router_enabled: bool = False
         # Built (and its daemon thread started) on the FIRST routed submit.
         self._speech_router = None
-        # llm_output_streaming_20260813 §3: per-turn handoff between
-        # _finalize_generation and _ejecutar_inferencia — the SpeechJob of a
-        # turn whose audio already went through submit_streaming/append, so
-        # _speak_or_submit must NOT run again for it. Single engine thread:
-        # written by finalize, read-and-cleared by _ejecutar_inferencia.
         self._streamed_turn_job: Optional[SpeechJob] = None
-        # llm_output_streaming_20260813 §7: the spoken prefix of a turn that
-        # took the partial exit. Streaming creates a state that could not
-        # exist before -- generation returned "" and yet audio ALREADY went
-        # out -- so the two consumers of an empty return need to tell that
-        # case apart from a genuinely silent drop. Same single-thread
-        # write/read-and-clear discipline as `_streamed_turn_job`.
         self._streamed_turn_prefix: Optional[str] = None
-        # Orphan belt (§7): the live _StreamAttemptState while a streamed
-        # attempt runs. If an exception escapes after the first submit but
-        # before finalize handled the job, _generar_dialogo's catch-all uses
-        # this to seal + commit the spoken prefix instead of leaving the
-        # router starving forever on an unsealed job.
         self._live_stream_state: Optional["_StreamAttemptState"] = None
-        # Step-3 kill switch (interruptible_speech_architecture_20260804 §8
-        # step 3), same pattern as `_speech_router_enabled` above: EngineHost
-        # turns it ON, CTK never does. OFF reproduces step 2 exactly — no
-        # pause/resume, no preemption. Read by `pause_speech_for_ptt` /
-        # `resume_speech_after_ptt` (no-op when off) and copied onto the
-        # router as `interrupt_enabled` at build time.
         self._speech_interrupt_enabled: bool = False
-
-        # WU2b belt lock (agenda_no_dead_air fase 2, design-fase2.md §2.5):
-        # serializes _hablar so two callers can never share the TTS/audio
-        # pipeline. After WU2 the engine worker is the ONLY _hablar caller in the
-        # API host, so this never contends there (a contention log = a bypass
-        # regression). In the CTK legacy path (play_prefetched_agenda's speaker
-        # thread) it serializes that thread against the worker — the lock WORKING.
         self._hablar_lock = threading.Lock()
 
     def _init_memory_and_context_state(self):
         self.system_prompt = i18n_active.system_prompt()
         self.use_system_role = False
-
-        self.historial = deque(maxlen=HISTORY_MAX_TURNS * 2)
+        self._max_turns: int = HISTORY_MAX_TURNS
+        # Profile-requested turns, clamped to ``_max_turns_cap`` into
+        # ``_max_turns``. The cap follows the active model's effective ctx
+        # (``_refresh_max_turns_cap``); 10 until Ollama is ready.
+        self._requested_max_turns: int = HISTORY_MAX_TURNS
+        self._max_turns_cap: int = context_budget.MAX_TURNS_CAP_FLOOR
+        self.historial = deque(maxlen=self._history_maxlen(self._max_turns))
 
         # L1 pipeline memory — intra-session truncation ledger (D1/D2/D3).
         # Survives model switch / watchdog recovery; dies on set_profile,
         # clear_history, and app restart (RAM-only, never persisted to disk).
         self._memory_digest: MemoryDigest = MemoryDigest()
+        # F4: a view file from a previous run never outlives it (best effort).
+        self._session_topics_remove_view()
         # Sidecar watermark tracking turns already converted to digest lines
         # to prevent duplicate digest entries when deque rotates later (INV-DEDUP).
         self._digested_turn_keys: set[str] = set()
@@ -785,37 +781,27 @@ class MotorVocalIA(
         # any path that calls _commit_history.
         self._history_lock = threading.Lock()
 
-        # Memorias capture (R1-R4). MEMORIAS_ENABLED is True as of slice 8.
-        # Session-scoped privacy switch: False = capturing (default), True =
-        # paused. Tagged onto BOTH pair entries at append time in
-        # _commit_history (state-at-event) — forward-only, never re-gated on
-        # the CURRENT switch state at eviction time (the T1 lesson).
         self._memorias_private: bool = False
-        # W2a (memoria_recall_20260718): titles of this session's captured
-        # memorias, appended in _capture_memoria on success and snapshotted+
-        # cleared under _history_lock at profile switch (set_profile) / close
-        # (flush_memorias) to synthesize ONE mechanical session summary. A
-        # summary row is written via MemoriaStore.insert_summary, NOT through
-        # _capture_memoria, so it is never fed back here → never re-summarized.
-        # Capped at _SESSION_MEMORIA_TITLES_CAP (newest wins) to bound RAM.
         self._session_memoria_titles: list[str] = []
-        # Lazy — only instantiated the first time the full capture gate chain
-        # passes, so a run with MEMORIAS_ENABLED=False (e.g. tests that
-        # monkeypatch it) never touches disk for this store (zero
-        # instantiation cost on the hot path).
         self._memoria_store: Optional[MemoriaStore] = None
-        # Dedicated lock for the lazy-store check-then-act (mirrors
-        # api/main.py's _memoria_store_lock precedent): the switch-flush
-        # worker thread can race the main thread's first use. NEVER reuse
-        # _history_lock here — independent locks avoid ordering deadlocks.
         self._memoria_store_lock = threading.Lock()
-        # Slice 5 (R9): honest pin/injection counter from the most recent
-        # direct-path retrieval — (total_pinned, injected). None until the
-        # first direct-path turn with memorias enabled. Value only; rendered
-        # by the slice-7 management UI.
         self._memorias_pin_counter: Optional[tuple[int, int]] = None
-        # Memory v5 Subsystem: OFF default avoids importing v5 domain modules
+        self._init_memory_v5()
+
+    def _init_memory_v5(self) -> None:
+        """Build the Memory v5 subsystem and log ONE startup line.
+
+        Fail-open (a failure never blocks the engine) but never silent: the
+        line goes to the ``OpenCohost`` logger, the only one routed to
+        ``logs/opencohost_*.log``. It carries mode/status codes and, on
+        failure, the exception TYPE name only -- never a message, path or
+        content.
+        """
+        # OFF default avoids importing v5 domain modules.
         self._memory = None
+        self._memory_v5_logged_reasons = set()
+        req = "OFF"
+        exc_type: Optional[str] = None
         self._memory_init_status_fallback = {"requested": "OFF", "effective": "OFF", "reason_code": "off_default"}
         try:
             from opencohost.config.settings import MEMORY_V5_MODE
@@ -826,8 +812,57 @@ class MotorVocalIA(
                 from opencohost.core.memory_v5_shadow.subsystem import MemorySubsystem
 
                 self._memory = MemorySubsystem.from_settings()
+                exc_type = getattr(self._memory, "init_exception_type", None)
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            self._memory = None
+            self._memory_init_status_fallback = {"requested": req, "effective": "INIT_FAILED", "reason_code": "init_exception"}
+
+        status = self._memory_init_status
+        effective = status.get("effective", "OFF")
+        failed = effective == "INIT_FAILED"
+        line = "memory_v5: mode=%s effective=%s init=%s reason=%s" % (
+            status.get("requested", req),
+            effective,
+            "failed" if failed else "ok",
+            status.get("reason_code", "unknown"),
+        )
+        if exc_type:
+            line += " exc=%s" % exc_type
+        line += " " + self._memory_v5_db_fields()
+        if failed:
+            logger.warning(line)
+        else:
+            logger.info(line)
+
+    @staticmethod
+    def _memory_v5_db_fields() -> str:
+        """Startup-line suffix naming the Memory v5 DBs in use. Never raises.
+
+        Basenames only (full paths carry the OS username). ``override`` says
+        which of the two env vars is set, so an inherited override pointing at
+        a stale DB is visible. Reuses the paths already resolved by settings.
+        """
+        shadow, cache, override = "unknown", "unknown", "none"
+        try:
+            import os
+
+            from opencohost.config import settings as _settings
+
+            def _base(value: object) -> str:
+                text = str(value).strip() if isinstance(value, (str, os.PathLike)) else ""
+                if not text:
+                    return "unknown"
+                return text.replace("\\", "/").rsplit("/", 1)[-1] or "unknown"
+
+            shadow = _base(getattr(_settings, "MEMORY_V5_SHADOW_DB", None))
+            cache = _base(getattr(_settings, "MEMORY_V5_SEMANTIC_CACHE_DB", None))
+            s_set = bool(os.environ.get("OPENCOHOST_MEMORY_V5_SHADOW_DB", "").strip())
+            c_set = bool(os.environ.get("OPENCOHOST_MEMORY_V5_SEMANTIC_CACHE_DB", "").strip())
+            override = "both" if s_set and c_set else "shadow" if s_set else "cache" if c_set else "none"
         except Exception:
-            self._memory_init_status_fallback = {"requested": "OFF", "effective": "INIT_FAILED", "reason_code": "init_exception"}
+            pass
+        return "shadow_db=%s cache_db=%s override=%s" % (shadow, cache, override)
 
     def _init_scheduler_and_prefetch_state(self):
         # TurnScheduler owns dispatch queue state, sorting, TTL, and capacity bounds.
@@ -839,15 +874,6 @@ class MotorVocalIA(
             priority_resolver=turn_priority.dispatch_priority_for_source,
             stream_ttl_resolver=turn_priority.effective_stream_ttl,
         )
-        # Step 1 (direct_turn_preemption_20260803): serializes
-        # _drain_pending_direct_into_priority_queue, which is now called from the
-        # HTTP thread (api/routers/chat.py) as well as from the engine boundary.
-        # The drain's pop (under command_queue.mutex) and its enqueue (under
-        # _pq_lock) are two separate critical sections; without this lock two
-        # concurrent drains can pop directs A then B and enqueue them B then A,
-        # inverting the FIFO order of two questions typed seconds apart
-        # (enqueue sorts by insertion time). Held across the whole drain — the
-        # only acquirer, so it can never participate in a lock cycle.
         self._direct_drain_lock = threading.Lock()
 
         # Accumulation buffer for discarded/overflowed messages
@@ -865,63 +891,25 @@ class MotorVocalIA(
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetched_agenda: Optional[dict] = None
         self._prefetch_epoch: int = 0
-        # WU3 (design-fase2.md §2.3 [v2] slot eviction / §3 AC3.2): the in-flight
-        # pregen request identity (payload/source/priority) while a worker runs
-        # but has not stored yet — lets pregenerate() compare priorities for
-        # eviction and lets the pop-side wait-or-fallback recognise a worker
-        # generating THIS exact item. Cleared implicitly by the thread dying.
         self._pregen_inflight: Optional[dict] = None
-        # WU4 4c (design-fase2.md §3): one retry-on-reject per pregen spawn.
-        # Reset at the top of pregenerate(); the worker sets it True the
-        # moment it actually retries so a second reject never retries again.
+        # pregen-retrigger P3: (source, hash(payload)) of the last head whose cloud-gate
+        # refusal was logged, so a retrigger does not repeat the line for the same head.
+        self._pregen_refusal_logged_key: Optional[tuple] = None
         self._pregen_retried: bool = False
-        # T2(a) [v5]: seconds of the last COMPLETED generation (foreground or
-        # pregen), set in _generar_dialogo right where elapsed is known. Feeds
-        # the adaptive retry gate (1.2x this value); None on a cold start
-        # (falls back to RETRY_MIN_REMAINING_SECONDS). Simple float — no lock
-        # (atomic assignment under the GIL, single-Ollama-runner invariant
-        # means at most one writer at a time).
         self._pregen_last_gen_duration: Optional[float] = None
-
-        # WU5 D2/D3 (ADR-038): interruption detour + connector-based return.
-        # All guarded by _prefetch_lock. _frozen_stash holds the NEXT-turn
-        # agenda draft moved OUT of the active _prefetched_agenda slot when a
-        # direct turn takes the slot, so it survives the interactive
-        # detour (exempt from the _commit_history epoch bump and interactive-pregen
-        # eviction, which only touch _prefetched_agenda) and the answer's own
-        # pregen can use the freed slot. {payload, dialogo, source, priority,
-        # gen_ms, connector}. _detour_turns counts interactive turns spoken
-        # since the freeze (D2 skip when it exceeds RETURN_MAX_DETOUR_TURNS).
-        # _connector_last_idx rotates the D3 floor pool without immediate repeats.
         self._frozen_stash: Optional[dict] = None
         self._detour_turns: int = 0
-        # R1 deadline backstop: monotonic timestamp of the last freeze, so the
-        # driver can bound how long a return may HOLD when the interruption answer
-        # never reaches a _note_detour_turn site. None when no stash is frozen.
         self._frozen_stash_at: Optional[float] = None
         self._connector_last_idx: Optional[int] = None
 
-        # Test-only seam (agenda_no_dead_air fase 2, design-fase2.md §3 WU1):
-        # fires at the pop->processing boundary in _process_priority_queue,
-        # after the item is popped (pq_lock released) and before _processing
-        # is set True. None/no-op in production; lets a test hold that window
-        # open to pin the speech-overlap race deterministically.
         self._test_pop_boundary_hook: Optional[Callable[[], None]] = None
-        # Test-only seam (design-fase2.md §3 WU4-T5 [v5]): fires on the
-        # pregen worker thread right after it stores a draft, before its
-        # `finally` clears the in-flight marker — lets a test pin the real
-        # store-to-finally race window where a successor spawn can take the
-        # slot. None/no-op in production.
         self._test_store_to_finally_hook: Optional[Callable[[], None]] = None
         self.agenda_output_validator = None
         self.agenda_output_preview_validator = None
         self.agenda_output_recorder = None
         self.agenda_output_transformer = None
-        self.agenda_controller = None               # Phase 0: metrics access
+        self.agenda_controller = None
         self.direct_editorial_context_provider = None  # set externally by app_shell
-        # Direct-turn editorial USED trigger (D2): fired once after a successful
-        # direct generation that injected a card block. Wired to
-        # bridge.commit_direct_injection by the host; stays None otherwise.
         self.direct_editorial_usage_recorder = None
 
     def _init_services_and_telemetry(self):
@@ -945,17 +933,7 @@ class MotorVocalIA(
             )(text),
         )
         self._generation_orchestrator = GenerationOrchestrator(self)
-        # Unit 2.3 (runtime_findings_batch_20260731 F10): bounded per-request
-        # context telemetry ring, appended once per completed generation whose
-        # ctx_utilization line actually logs (see _generar_dialogo). NEVER a
-        # single self.last_* scalar: pregenerate's background worker
-        # (~:1773) calls _generar_dialogo concurrently with the foreground
-        # turn, so a scalar would be silently clobbered mid-turn by a draft
-        # nobody has spoken yet. Each entry is built entirely from one call's
-        # own locals and deque.append is atomic under the GIL, so no extra
-        # lock is needed for the append itself.
         self._ctx_telemetry_ring = CtxTelemetryRing(maxlen=CTX_TELEMETRY_RING_MAXLEN)
-        # ADR-056 WU1: Empirical inference decode telemetry tracker (observational only)
         from opencohost.core.engine.inference_telemetry import InferenceTelemetryTracker
         self._inference_telemetry = InferenceTelemetryTracker()
 
@@ -1109,20 +1087,18 @@ class MotorVocalIA(
         try:
             self.pygame.mixer.init()
         except Exception as e:
-            self._log(f"FATAL: No se pudo inicializar pygame.mixer: {e}", level="error")
-            return
+            self._log(
+                f"ADVERTENCIA: No se pudo inicializar pygame.mixer ({e}). Continuando en modo headless/audio deshabilitado.",
+                level="warning",
+            )
+            self._audio_disabled = True
 
-        self._check_ollama_service()
         if TTS_LOCAL_MODEL_PATH:
             self._piper.load()
-        # llm_output_streaming_20260813 (design.md §1 non-goals, §10): pay
-        # Piper's 2.25s first-synthesis cost off-air now instead of on the
-        # session's first turn. Same neighbourhood as the a8830bb chat-client
-        # pre-warm above, but on a daemon thread -- that one is a cheap object
-        # construction while this one is real inference, and the "Motor IA
-        # inicializado" line below must not wait 2.25s for it. `_prewarm_tts`
-        # no-ops when Piper never loaded, so this needs no TTS_LOCAL_MODEL_PATH
-        # guard of its own.
+        try:
+            self._check_ollama_service()
+        finally:
+            self.startup_check_done = True
         threading.Thread(target=self._prewarm_tts, name="TTSPrewarm", daemon=True).start()
         self._log(f"Modelo inicial: {self.current_model} (fuente: {self._model_source})")
         self._log("Motor IA inicializado. Esperando comandos...")
@@ -1131,36 +1107,13 @@ class MotorVocalIA(
             try:
                 comando = self.command_queue.get(timeout=1.0)
             except queue.Empty:
-                # Check priority queue and accumulation buffer when idle.
-                # §11 B4 backstop: apply verbs deferred mid-utterance even if
-                # no further boundary ever runs (CTK detached playback; a
-                # lost wake sentinel). Gated inside on _speech_active.
                 self._drain_control_commands()
                 self._process_priority_queue()
                 self._check_pending_model_switch()
-                # memory_promotion_20260725 (owner decision 7): the FIRST idle
-                # tick of the process is the guaranteed-idle, pre-stream moment
-                # the draft-promotion sweep needs. Both surfaces (GUI app_shell
-                # and the API engine_host) drive this same run(), so there is no
-                # call site to add in either — and unlike a hasattr-guarded call
-                # in a constructor that has not run yet, deleting this line makes
-                # its test fail.
-                # Latch on the OUTCOME, never on the attempt: on the API surface
-                # `_seed_startup_profile` (the only setter of
-                # `_current_profile_id`) runs AFTER `motor.start()` and after the
-                # health monitor, agenda and music library are built, so this
-                # tick routinely fires first with no profile; on the GUI one
-                # Ollama may not be up yet. Arming here would disable promotion
-                # for the whole process on a transient not-ready first tick.
-                if not self._promotion_swept:
-                    try:
-                        if not self.promote_pending_drafts().get("skipped"):
-                            self._promotion_swept = True
-                    except Exception as exc:
-                        self._promotion_swept = True  # a raising sweep is an attempt
-                        logger.warning(
-                            "memoria promotion sweep escaped isolation: %s", type(exc).__name__
-                        )
+                self._ollama_reprobe_tick()
+                self._owner_reflection_tick()
+                self._promotion_idle_step()
+                self._memory_retention_tick()
                 continue
 
             if comando is None:
@@ -1168,6 +1121,89 @@ class MotorVocalIA(
                 break
 
             self._consume_command(comando)
+            # Stamped after the command (not at dequeue) so a long turn counts
+            # from when it ended, which is when the owner is likely to speak again.
+            self._stamp_command_done()
+
+    def _stamp_command_done(self) -> None:
+        self._last_command_at = _promotion_monotonic()
+
+    def _promotion_quiet(self, now: float) -> bool:
+        """True when no command finished within MEMORIAS_PROMOTION_QUIET_S."""
+        last = self._last_command_at
+        return last is None or now - last >= MEMORIAS_PROMOTION_QUIET_S
+
+    def _memory_retention_tick(self) -> None:
+        """Engine thread, idle tick: run the bounded v5 evidence-retention job
+        at most once per _MEMORY_RETENTION_INTERVAL_S (first run on the first
+        idle tick after startup). Fail-open; logs counts only."""
+        mem = getattr(self, "_memory", None)
+        if mem is None:
+            return
+        now = _retention_monotonic()
+        last = getattr(self, "_memory_retention_at", None)
+        if last is not None and now - last < _MEMORY_RETENTION_INTERVAL_S:
+            return
+        self._memory_retention_at = now
+        try:
+            out = mem.run_retention()
+            if out.get("events") or out.get("error"):
+                logger.info(
+                    "memory_v5: retention events=%d episodes=%d%s",
+                    int(out.get("events", 0)),
+                    int(out.get("episodes", 0)),
+                    f" error={out['error']}" if out.get("error") else "",
+                )
+        except Exception as exc:
+            logger.warning("memory_v5: retention failed exc=%s", type(exc).__name__)
+
+    def _promotion_mark_dirty(self) -> None:
+        """A draft was captured: a drained sweep may re-arm after the quiet window."""
+        self._promotion_dirty = True
+
+    def _promotion_idle_step(self) -> None:
+        """Engine thread, idle tick only: run at most one bounded promotion batch.
+
+        A sweep leaves ``_promotion_swept`` set; while it left unjudged drafts
+        behind, ``_promotion_drain_at`` re-arms it once MEMORIAS_PROMOTION_REARM_S
+        have passed since it finished. A drained sweep re-arms only when a new
+        draft was captured (``_promotion_dirty``), after the quiet window. A gated (skipped) sweep waits the same
+        cooldown before retrying. A queued command always wins the tick.
+        """
+        if not self.command_queue.empty():
+            return
+        now = _promotion_monotonic()
+        if self._promotion_swept:
+            if self._promotion_drain_at is None:
+                # Drained: only a freshly captured draft re-arms it.
+                if not self._promotion_dirty:
+                    return
+            elif now < self._promotion_drain_at:
+                return
+            if not self._promotion_quiet(now):
+                return
+            self._promotion_swept = False
+        elif self._promotion_skip_until is not None:
+            if now < self._promotion_skip_until or not self._promotion_quiet(now):
+                return
+        self._promotion_drain_at = None
+        self._promotion_skip_until = None
+        self._promotion_dirty = False
+        try:
+            result = self.promote_pending_drafts()
+        except Exception as exc:
+            self._promotion_swept = True  # a raising sweep is an attempt
+            logger.warning(
+                "memoria promotion sweep escaped isolation: %s", type(exc).__name__
+            )
+            return
+        finished = _promotion_monotonic()
+        if result.get("skipped"):
+            self._promotion_skip_until = finished + MEMORIAS_PROMOTION_REARM_S
+            return
+        self._promotion_swept = True
+        if result.get("unjudged_remaining", 0) > 0:
+            self._promotion_drain_at = finished + MEMORIAS_PROMOTION_REARM_S
 
     def _consume_command(self, comando) -> None:
         """Unpack one command tuple and dispatch it. Extracted from run() for
@@ -1187,18 +1223,15 @@ class MotorVocalIA(
         tipo, payload, *rest = comando
         history_text = rest[0] if rest else None
         source = rest[1] if len(rest) > 1 and rest[1] else "direct"
-        # Unit 4.1: OPTIONAL 5th element, the monotonic submit stamp (dispatch.py).
-        # Omitted -> None, so a control/legacy 2-4 tuple is unchanged.
         submitted_at = rest[2] if len(rest) > 2 else None
-        # Unit 4.2 (F12 closure): OPTIONAL 6th element, the provider posture at
-        # submit time (dispatch.py). Omitted -> None, so a shorter tuple (every
-        # caller before this unit) is unchanged.
         submitted_under_provider = rest[3] if len(rest) > 3 else None
-        # C1 (refactor_core_api_20260802): the two optional stamp fields collapse
-        # into ONE optional TurnStamp -- None (never a stamp with a None
-        # submitted_at) for a tuple that never carried a submit-time stamp.
+        # runtime-fixes-20261110 T2: the door the turn came through, stamped by
+        # the receiving route (core/turn_origin.py). Absent -> unknown -> not desktop.
+        origin = rest[4] if len(rest) > 4 else None
         stamp = (
-            TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+            TurnStamp(
+                submitted_at=submitted_at, submitted_under_provider=submitted_under_provider, origin=origin
+            )
             if submitted_at is not None else None
         )
         self._dispatch_command(tipo, payload, history_text=history_text, source=source, stamp=stamp)
@@ -1236,23 +1269,9 @@ class MotorVocalIA(
         user-content dump (memory_inspector_snapshot), which is a privacy
         display gate, not a prompt gate."""
         if tipo == SPEECH_BOUNDARY_COMMAND:
-            # §11 B5: the router's wake sentinel. Without it the post-boundary
-            # tail (control drain, direct drain, pending model switch,
-            # priority-queue re-entry) would only re-enter through run()'s 1 s
-            # `command_queue.get` idle tick — up to a second of NEW dead air at
-            # every turn boundary. `emit_idle=False`: the router already
-            # emitted 'idle' at job completion (B3), and a second one would
-            # flicker the avatar.
             self._complete_processing_cycle(emit_idle=False)
             return
 
-        # §11 B4, PRIMARY path (closure finding 2026-08-05): with the router
-        # armed the engine loop is FREE during playback, so this dispatch can
-        # run MID-UTTERANCE — set_piper_voice would reload the very Piper
-        # object the producer is synthesizing on. Park drain-safe verbs until
-        # the boundary drain (wake sentinel / idle tick), exactly when a
-        # pre-router engine — blocked inside `_hablar` — applied them.
-        # Payload never logged (set_profile carries a prompt).
         if self._speech_active and tipo in _SPEECH_DEFER_COMMANDS:
             self._deferred_control_commands.append((tipo, payload))
             logger.info("Control command '%s' deferred until the speech boundary", tipo)
@@ -1268,63 +1287,34 @@ class MotorVocalIA(
             self._check_ollama_service()
 
         elif tipo == "process_context":
+            if not self.is_ready and self._is_local:
+                # Stale flag recovery: Ollama may have come up after the startup
+                # check failed. At most one probe per window; refusals stay cheap.
+                now = time.monotonic()
+                if now >= self._turn_recover_next_at:
+                    self._turn_recover_next_at = now + self._TURN_RECOVER_MIN_INTERVAL_S
+                    self._recover_local_readiness()
             if not self.is_ready:
-                # R1: an interruption answer dropped here never reaches a
-                # _note_detour_turn site, so a frozen return would HOLD forever.
-                # The driver's FROZEN_STASH_MAX_HOLD_SECONDS deadline backstop
-                # (agenda_driver._maybe_return_frozen_stash) covers this lost answer.
-                self._log("Ollama no esta listo. Usa el boton de Ollama/modelo para iniciarlo.", level="warning")
+                self._log(
+                    "Ollama no esta listo. Se reintenta en segundo plano; "
+                    "verifica que Ollama este en ejecucion.",
+                    level="warning",
+                )
                 self.ui_callback("ollama_unavailable")
+                _log_turn_outcome(source, TurnEvent.REFUSE)
                 return
             if self._processing or self._speech_active:
                 # Motor busy — enqueue to priority queue instead of dropping
                 self._log("Ya procesando. Encolando en cola prioritaria...", level="debug")
-                # C1 (refactor_core_api_20260802): forward the stamp's fields ONLY
-                # when a stamp is present, so a caller/test that stubs enqueue()
-                # with the pre-C1 signature (no submitted_at/submitted_under_provider
-                # params) is unaffected by an unstamped turn.
-                #
-                # Step-4 batch-1 blocker (2026-08-05): this branch hardcoded
-                # `priority=1` for EVERY source, including "ptt" — the same
-                # bug class direct_turn_preemption_20260803 Step 1 fixed at
-                # `_drain_pending_direct_into_priority_queue` (:3471,
-                # "the priority is now the item's OWN documented one") and
-                # never mirrored here. At priority 1 a busy-enqueued PTT
-                # question was TTL-expirable (the sweep's `prio > 0` guard,
-                # against its own "Expire stale non-PTT items" contract) and
-                # invisible to the widened §5.2 pop gate. Same expression as
-                # the sibling: PTT 0, everything else its documented 1.
-                # Unarmed consequence, INTENDED (judge pass): at priority 0 a
-                # busy-enqueued PTT is TTL-EXEMPT, so a receipted owner
-                # question stranded behind a long block is now spoken late
-                # rather than silently discarded — matching the boundary
-                # drain's existing behavior and the sweep's own wording.
-                #
-                # Tier split (tauri_stream_chat_20260812): the sibling
-                # expression was `0 if ptt else 1`, which promoted ANY
-                # non-ptt source (chat included) into the direct tier.
-                # Resolve the item's OWN documented tier instead — same
-                # principle the Step-4 fix above established for PTT.
                 busy_priority = turn_priority.dispatch_priority_for_source(source)
                 if stamp is not None:
                     self.enqueue(
                         payload, priority=busy_priority, source=source, history_text=history_text,
                         submitted_at=stamp.submitted_at, submitted_under_provider=stamp.submitted_under_provider,
+                        **({"origin": stamp.origin} if stamp.origin is not None else {}),
                     )
                 else:
                     self.enqueue(payload, priority=busy_priority, source=source, history_text=history_text)
-                # Step 4 (interruptible_speech_architecture_20260804,
-                # step4-plan.md batch 1 item 2): without this, an item
-                # re-enqueued here strands until run()'s 1s idle tick
-                # (command_queue.get(timeout=1.0)) even when the widened
-                # §5.2 gate would admit it immediately. Flat call -- same
-                # depth as run()'s own idle-branch call to this method.
-                # Conjunction-gated (judge pass): unarmed, the widened gate
-                # never admits anything mid-speech, so the only thing an
-                # unconditional call could do is run a full legacy turn
-                # nested here when speech happens to end inside the
-                # check-to-call window — a new unarmed execution path for
-                # zero gain. Legacy keeps run()'s idle tick, byte-identical.
                 if self._speech_interrupt_enabled and self._speech_router_enabled:
                     self._process_priority_queue()
                 return
@@ -1332,30 +1322,37 @@ class MotorVocalIA(
                 self._processing = True
                 self._current_processing_source = source
             self.ui_callback("processing")
-            # WU5: the PTT/typed interruption answer taken on the foreground path
-            # (idle at command-read time) still counts as a detour turn (no-op
-            # unless a frozen return is pending). The connector upgrade fires at
-            # speaking_start so it never races this turn's own generation.
             self._note_detour_turn(source)
+            turn_state.open_turn(source)
             try:
-                # C1 (refactor_core_api_20260802): same conditional-forward
-                # rationale as enqueue() above.
                 if stamp is not None:
                     self._ejecutar_inferencia(payload, source=source, history_text=history_text, stamp=stamp)
                 else:
                     self._ejecutar_inferencia(payload, source=source, history_text=history_text)
             finally:
+                turn_state.close_turn()
                 self._complete_processing_cycle()
 
         elif tipo == "clear_history":
             self.historial.clear()
             self._memory_digest.clear()
             self._digested_turn_keys.clear()
+            self._session_topics_reset()
+            self._owner_reflection_reset()
             self._log("Historial de conversación limpiado.")
 
         elif tipo == "switch_model":
             new_model = payload
             if self._is_model_switch_noop(new_model):
+                if not self.is_ready and self._is_local:
+                    # Same model while not ready: the owner is retrying a
+                    # recovery, so reconcile instead of swallowing the request.
+                    if not self._recover_local_readiness():
+                        self._log(
+                            f"Switch a {new_model} rechazado: Ollama no esta listo.",
+                            level="warning",
+                        )
+                        self.ui_callback("model_switch_failed")
                 return
 
             if not self.is_ready and self._is_local:
@@ -1368,7 +1365,14 @@ class MotorVocalIA(
 
             self._desired_model = new_model
 
-            if self._processing or self._speech_active:
+            if not self._processing and self._speech_active:
+                # K2: only speaking, no generation in flight -> cut the
+                # playback and switch now instead of waiting out the speech
+                # (a 76 s stall in the 2026-10-05 session).
+                self._log(f"Switch a {new_model}: deteniendo el habla para aplicarlo ya.", level="info")
+                self._pending_model_switch = None
+                self.stop_all_speech()
+            elif self._processing:
                 if self._pending_model_switch == new_model:
                     self._log(f"Switch a {new_model} ya esta pendiente; ignorando duplicado.", level="debug")
                     return
@@ -1388,9 +1392,16 @@ class MotorVocalIA(
             self.switch_llm_tier(str(payload))
 
         elif tipo == "set_motor_tts":
-            self.motor_tts = payload
-            nombre = "Ligero (Edge-TTS)" if payload == "ligero" else "Pesado (Qwen3-TTS)"
-            self._log(f"Motor de Voz cambiado a: {nombre}")
+            choice = str(payload).strip() if isinstance(payload, str) else ""
+            if choice not in ("ligero", "pesado"):
+                logger.warning("Ignoring invalid motor_tts payload: %r", payload)
+            elif choice == "pesado" and not settings.EXPERIMENTAL_HEAVY_TTS_ENABLED:
+                logger.warning("Ignoring set_motor_tts='pesado' while heavy TTS is disabled")
+            else:
+                self.motor_tts = choice
+                save_motor_tts(choice)
+                nombre = "Ligero (Edge-TTS)" if choice == "ligero" else "Pesado (Qwen3-TTS)"
+                self._log(f"Motor de Voz cambiado a: {nombre}")
 
         elif tipo == "set_tts_local_only":
             enabled = bool(payload)
@@ -1401,6 +1412,13 @@ class MotorVocalIA(
                 "ON" if enabled else "OFF",
                 "disabled — all light synthesis via Piper" if enabled else "enabled",
             )
+
+        elif tipo == "set_discard_speech_residue":
+            val = bool(payload)
+            with self._lock:
+                self._discard_speech_residue = val
+            save_discard_speech_residue(val)
+            logger.info("Discard speech residue set to %s", val)
 
         elif tipo == "set_tts_speed":
             scale = float(payload)
@@ -1413,13 +1431,19 @@ class MotorVocalIA(
             raw_key = str(payload)
             voice_key = raw_key if raw_key in PIPER_VOICES else DEFAULT_PIPER_VOICE
             path = piper_voice_path(voice_key)
-            if self._piper.reload(path):
+            try:
+                reload_ok = bool(self._piper.reload(path))
+            except Exception as exc:
+                logger.warning("Piper voice reload failed for %s: %s", voice_key, type(exc).__name__)
+                reload_ok = False
+            if reload_ok:
                 save_piper_voice(voice_key)
                 self._piper_voice_key = voice_key
                 label = PIPER_VOICES.get(voice_key, {}).get("label", voice_key)
                 self._log(f"Voz de Kira cambiada a: {label}")
                 logger.info("Piper voice switched to %s (%s)", voice_key, path)
             else:
+                logger.warning("Piper voice switch rejected for %s (%s)", voice_key, path)
                 self._log(
                     f"No se pudo cambiar la voz de Kira a '{voice_key}'",
                     level="warning",
@@ -1432,25 +1456,48 @@ class MotorVocalIA(
             prompt_override_active = "prompt" in payload
             self.system_prompt = payload.get("prompt", i18n_active.system_prompt())
             self.use_system_role = payload.get("use_system", False)
+            # kira-identity-core-rules-20261007 C1: only a persona that really
+            # differs from the locale prompt gets the harness core rules.
+            self._persona_custom = bool(
+                prompt_override_active
+                and str(self.system_prompt).strip() != str(i18n_active.system_prompt()).strip()
+            )
+            self._extended_responses = bool(payload.get("extended_responses", False))
+            # K5: a missing/unknown warmth is cold; the output guard reads the
+            # same level (human/body-claim check runs only while warm).
+            self._warmth = normalize_warmth(payload.get("warmth"))
+            warmth_state.set_active_warmth(self._warmth)
+            self._owner_gender = normalize_owner_gender(payload.get("owner_gender"))
             profile_name = payload.get("_profile_name", "desconocido")
             self._current_profile_name = profile_name
-            # RC-2 (slice 4, task 4.14): snapshot the departing profile's live
-            # window (drafts built with the OLD _current_profile_id), swap the
-            # id, and clear historial/_memory_digest as ONE atomic critical
-            # section under _history_lock. This widens the narrow lock block
-            # slice 1 introduced (which guarded only the id write) — closing
-            # the misattribution/loss window where a concurrent _commit_history
-            # could previously land between the id swap and the historial
-            # clear (tracked in apply-progress #2780, judge notes A-N2/B-S1).
+            self._departing_switch_locale = self._resolve_turn_lang()
+            raw_locale = payload.get("locale")
+            self._current_profile_locale = (
+                i18n_coherence.primary_subtag(raw_locale) if raw_locale else None
+            )
+            raw_max_turns = payload.get("max_turns")
+            try:
+                requested_turns = (
+                    max(1, int(raw_max_turns)) if raw_max_turns is not None else HISTORY_MAX_TURNS
+                )
+            except (ValueError, TypeError):
+                requested_turns = HISTORY_MAX_TURNS
+            self._requested_max_turns = requested_turns
+            # Cap derived from the active model's effective ctx (10 at 4096 or
+            # when unknown); recomputed on model switch / engine ready.
+            self._max_turns_cap = self._compute_max_turns_cap()
+            self._max_turns = min(requested_turns, self._max_turns_cap)
             with self._history_lock:
                 switch_drafts = self._collect_flush_drafts()
                 departing_profile_id = self._current_profile_id
                 summary_titles = list(self._session_memoria_titles)
                 self._session_memoria_titles.clear()
                 self._current_profile_id = payload.get("id")
-                self.historial.clear()
+                self.historial = deque(maxlen=self._history_maxlen(self._max_turns))
                 self._memory_digest.clear()
                 self._digested_turn_keys.clear()
+                self._session_topics_reset()
+                self._owner_reflection_reset()
                 mem = getattr(self, "_memory", None)
                 if mem is not None:
                     mem.on_profile_switch(departing_profile_id, payload.get("id"))
@@ -1466,21 +1513,6 @@ class MotorVocalIA(
                 piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
             )
 
-        elif tipo == "download_model":
-            if not self.is_ready:
-                self._log("No se puede descargar modelo: Ollama no esta listo.", level="warning")
-                self.ui_callback("ollama_unavailable")
-                return
-            model_tag = payload
-            if self._downloading:
-                self._log("Ya hay una descarga en curso.", level="warning")
-                return
-            threading.Thread(
-                target=self._download_model_worker,
-                args=(model_tag,),
-                daemon=True
-            ).start()
-
     def enqueue(
         self,
         payload: str,
@@ -1489,6 +1521,7 @@ class MotorVocalIA(
         history_text: Optional[str] = None,
         submitted_at: Optional[float] = None,
         submitted_under_provider: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> None:
         """Add a message to the priority queue.
 
@@ -1517,7 +1550,12 @@ class MotorVocalIA(
                 that happens while the item sits queued can be disclosed on
                 the reply instead of silently answering under a different
                 provider. None for every internally-generated item.
+            origin: runtime-fixes-20261110 T2 -- the door the turn came through
+                ("desktop" / "remote", core/turn_origin.py), carried to the
+                pop so a link is read only for a desktop turn. None = unknown
+                = not desktop.
         """
+        _note_turn_arrival(self)
         result = _get_turn_scheduler(self).enqueue(
             payload,
             priority=priority,
@@ -1525,6 +1563,7 @@ class MotorVocalIA(
             history_text=history_text,
             submitted_at=submitted_at,
             submitted_under_provider=submitted_under_provider,
+            **({"origin": origin} if origin is not None else {}),
         )
         for dropped in result.dropped:
             self._log(f"Cola prioritaria llena. Descartado (baja prioridad): {dropped[3]}")
@@ -1537,14 +1576,9 @@ class MotorVocalIA(
         This keeps product features such as Agenda Mode from stacking old
         autonomous turns while preserving unrelated higher-priority items.
         """
+        _note_turn_arrival(self)
         _get_turn_scheduler(self).drop_source(source)
         if source.startswith("kira-agenda"):
-            # WU2 (design-fase2.md §2.2/§2.3): match-aware clear. The API-host
-            # consume path routes a ready draft by enqueueing its OWN
-            # (payload, source) through replace_pending; clearing here would nuke
-            # the very draft the worker is about to match at pop (the trap). Skip
-            # the clear only when this IS that draft; a genuine new turn (any
-            # mismatch) still supersedes it.
             self._clear_prefetch_unless_matches(payload, source)
         self.enqueue(payload, priority=priority, source=source)
 
@@ -1584,15 +1618,8 @@ class MotorVocalIA(
 
         if any("kira-agenda".startswith(prefix) or prefix.startswith("kira-agenda") for prefix in prefixes):
             self.clear_prefetched_agenda()
-            # WU5 D2: a session/emergency stop that drops pending agenda must also
-            # drop a pending interruption-return (the stashed beat is now stale).
             self._invalidate_frozen_stash()
 
-        # Step 3 (design §4 sweeps): a SUSPENDED stack entry at any depth is
-        # pending work too, matching this method's own docstring — dropped
-        # the same way, never counted in the dispatch-queue `removed` return
-        # (its own docstring stays honest: pending priority/accumulation
-        # items only).
         router = self._speech_router
         if router is not None:
             router.sweep_sources(prefixes)
@@ -1611,6 +1638,7 @@ class MotorVocalIA(
             payload: The text to accumulate.
             source: Origin identifier for grouping.
         """
+        _note_turn_arrival(self)
         now = time.time()
         with self._accum_lock:
             self._accumulation_buffer.append((now, payload, source))
@@ -1753,41 +1781,6 @@ class MotorVocalIA(
 
     def _requeue_owner_bundle_followers(self, followers: list) -> None:
         """Put a FAILED bundle's followers back into _priority_queue.
-
-        interruptible_speech_architecture_20260804, closing a hole the design's
-        §7 table does not cover. The bundle is frame-local by construction
-        (§3.4): `_take_owner_bundle_prefix` pops the followers OUT of
-        `_priority_queue` and `members` becomes the only reference to those
-        tuples. That is safe exactly as long as the turn commits — and it does
-        not always. Every non-committing return `_invalidate_pregen_epoch`
-        enumerates (inference-watchdog timeout, exhausted transport retries,
-        empty model body, guardrail-no-fallback, chat-repetition fallback, the
-        outer exception handler) reaches `_ejecutar_inferencia` as a falsy
-        `dialogo`, and without this hook the whole bundle — up to
-        OWNER_BUNDLE_MAX_ITEMS owner questions — evaporates: no answer, no
-        `Item expirado y omitido`, no re-queue, no TTL rescue.
-
-        Not theoretical: logs/opencohost_20260617_175453.log at 18:05:24 —
-        `qwopus` hung, the watchdog fired at 45.00 s, the engine rolled back to
-        `gemma4:e2b` and queue processing continued. Pre-bundling that incident
-        consumed exactly ONE question and the rest were answered on following
-        boundaries. That is the invariant restored here, and §7's "a question
-        can be neither lost nor double-answered" depends on it.
-
-        AMENDED for streamed bundle turns (llm_output_streaming_20260813 phase
-        2, owner decision 1, ratified 2026-08-13). On a bundle that STREAMS and
-        dies after its first `submit_streaming`, the composed answer may have
-        addressed a follower inside the already-spoken prefix, so requeuing it
-        can answer that question twice on air. The owner ruled: requeue anyway.
-        For those turns the invariant reads "a question can never be LOST; it
-        may be double-answered on a partially-spoken streamed bundle death."
-        Rationale on the record — loss is the incident-grade failure this
-        function exists to prevent, a double answer is recoverable social
-        awkwardness on air, and a mid-stream death implies a short spoken
-        prefix. Scope is strictly streamed bundle turns: on the buffered path
-        nothing was spoken before the failure, so "neither lost nor
-        double-answered" holds there exactly as written above.
-
         The HEAD is deliberately NOT re-queued. Each failure still burns exactly
         one question, so a persistently failing model DRAINS the backlog instead
         of spinning on it forever.
@@ -1803,6 +1796,10 @@ class MotorVocalIA(
         next `enqueue()` trims back to `_pq_max_items` on its own.
         """
         _get_turn_scheduler(self).requeue(followers)
+        # pregen-retrigger: no re-evaluation here on purpose. The failed turn is
+        # still _processing, so the armed trigger would refuse; the drain's
+        # blocked-head hook (_retrigger_interactive_pregen_for_blocked_head)
+        # re-evaluates the requeued head right after this turn's cycle closes.
         # METADATA ONLY, same rule as [BUNDLE] and [CLAUSE_SANITIZER]. WARNING,
         # not INFO: a silent recovery is only marginally better than a silent
         # loss, and this line is how the owner greps that it happened at all.
@@ -1837,26 +1834,7 @@ class MotorVocalIA(
         while True:
             if self._processing:
                 return
-            # §5.2 (interruptible_speech_architecture_20260804 step 4): the
-            # judge-closure conjunction (engram 5589). Either flag off must
-            # reproduce today's combined guard BYTE-IDENTICAL -- no priority-0
-            # item pops early, and the TTL sweep below stays gated exactly as
-            # before. Armed, `_speech_active` alone no longer stops the loop
-            # here: the actual priority-0-only restriction is applied
-            # atomically with the pop, under `_pq_lock` below (no
-            # peek-then-pop TOCTOU on a head that could change).
             widened_pop_armed = self._speech_interrupt_enabled and self._speech_router_enabled
-            # Judge pass (step 4, convergent): `_speech_active` acquires
-            # `_lock` and then the router's `_sched_lock` — a leaf that must
-            # never be taken under another engine lock (design §4 I10), so
-            # the gate below must NOT read the property while holding
-            # `_pq_lock`. Read ONCE here, outside every lock, and use the
-            # snapshot in the gate. Staleness is benign in both directions
-            # and identical in class to the legacy loop-top read: speech
-            # ending after the read costs one extra restricted iteration
-            # (the completion cycle re-enters); speech starting after the
-            # read lets this iteration pop unrestricted, exactly as the
-            # legacy gate always could.
             speech_busy = self._speech_active
             if not widened_pop_armed and speech_busy:
                 return
@@ -1866,6 +1844,7 @@ class MotorVocalIA(
             for exp in expired_turns:
                 prio, ts, payload, source = exp.item[:4]
                 self._log(f"Item expirado y omitido (TTL {exp.ttl_seconds:.0f}s): {source}")
+                _log_turn_outcome(source, TurnEvent.EXPIRE)
                 if source == "chat":
                     expired_chat_infos.append({"age_sec": exp.age_seconds, "ttl_sec": exp.ttl_seconds})
                 self._clear_prefetch_if_matches(payload, source)
@@ -1884,43 +1863,25 @@ class MotorVocalIA(
                 required_priority=0 if (widened_pop_armed and speech_busy) else None,
             )
             if dequeue_res.blocked:
+                self._retrigger_interactive_pregen_for_blocked_head()
                 return
             if dequeue_res.empty:
                 queue_empty = True
                 accumulated = dequeue_res.empty_value
             else:
                 item = dequeue_res.item
-                # Unpack tolerating the legacy 4-tuple, the 5-tuple (payload,
-                # source, history_text), the 6-tuple that adds submitted_at
-                # (Unit 4.1), and the current 7-tuple that adds
-                # submitted_under_provider (Unit 4.2, F12), all produced by
-                # enqueue().
                 priority, ts, payload, source, *rest = item
                 history_text = rest[0] if rest else None
                 submitted_at = rest[1] if len(rest) > 1 else None
                 submitted_under_provider = rest[2] if len(rest) > 2 else None
-                # C1 (refactor_core_api_20260802): build the stamp at unpack —
-                # enqueue()'s public signature and internal tuple storage stay
-                # unchanged, only the downstream threading collapses to one object.
+                origin = rest[3] if len(rest) > 3 else None
                 stamp = (
-                    TurnStamp(submitted_at=submitted_at, submitted_under_provider=submitted_under_provider)
+                    TurnStamp(
+                        submitted_at=submitted_at, submitted_under_provider=submitted_under_provider, origin=origin
+                    )
                     if submitted_at is not None else None
                 )
 
-            # Step 0 (interruptible_speech_architecture_20260804, design §2b):
-            # the accumulated turn runs OUTSIDE _pq_lock. It used to run inside,
-            # and so did its `finally` -> _complete_processing_cycle ->
-            # _drain_pending_direct_into_priority_queue -> enqueue(), which opens
-            # `with self._pq_lock` (:1754). _pq_lock is a plain Lock (:744), NOT
-            # reentrant: the engine thread blocked on a lock it already held and
-            # Kira went permanently silent with no error. The two-thread variant
-            # was live too — the HTTP arrival drain (api/routers/chat.py:184-191)
-            # takes _direct_drain_lock then wants _pq_lock while this thread held
-            # _pq_lock and wanted _direct_drain_lock (ABBA), hanging
-            # POST /api/chat/turn as well. Milder but constant: holding _pq_lock
-            # across a whole generate-and-speak turn blocked EVERY enqueue() for
-            # 15-100s. Early-return semantics are unchanged — an empty queue still
-            # returns here whether or not there was anything to flush.
             if queue_empty:
                 if accumulated:
                     self._log(f"Procesando acumulación ({self._last_accumulation_flush_count} mensajes compactados)...")
@@ -1928,33 +1889,19 @@ class MotorVocalIA(
                         self._processing = True
                         self._current_processing_source = "accumulated"
                     self.ui_callback("processing")
+                    turn_state.open_turn("accumulated")
                     try:
                         self._ejecutar_inferencia(accumulated, source="accumulated")
                     finally:
+                        turn_state.close_turn()
                         self._complete_processing_cycle(process_queue=False)
                 return
 
-            # Test-only pin (see _test_pop_boundary_hook in __init__): the item is
-            # popped but _processing is still False here — this is exactly the
-            # window a concurrent consumer (e.g. play_prefetched_agenda) could
-            # observe as "clear to speak". No-op in production.
             if self._test_pop_boundary_hook is not None:
                 self._test_pop_boundary_hook()
-
-            # WU2 (design-fase2.md §2.2): pop-time pregen cache. A hit means this turn
-            # was pregenerated during the prior turn's TTS — speak it on THIS worker
-            # thread (no parallel speaker), skipping generation. A miss keeps the
-            # existing generation path unchanged.
             cached = self._take_pregen_if_match(payload, source)
-            # WU4 4a: "late" (below) already reports the boundary telemetry
-            # for a wait-then-hit resolution — _speak_pregenerated must not
-            # also log "used" for the SAME pop ("a single INFO log line...
-            # per turn boundary").
             already_reported_boundary = False
             if cached is None:
-                # AC3.2 (design-fase2.md §3 WU3): a pregen for THIS exact item may
-                # still be generating. Wait a bounded time for it rather than
-                # starting a second generation (never two generations per item).
                 cached = self._wait_or_invalidate_pregen(payload, source)
                 already_reported_boundary = cached is not None
             source_label = "PTT" if source == "ptt" else source
@@ -1965,70 +1912,35 @@ class MotorVocalIA(
             with self._lock:
                 self._processing = True
                 self._current_processing_source = source
-            # Judge pass (step 4, BLOCKER): mirror of the §11 B3 idle gate in
-            # _complete_processing_cycle. ObsRuntime maps "processing" to
-            # AvatarState.THINKING + _stop_speaking_alt; a widened pop reaches
-            # this line WHILE the router audibly plays, the D4 inner answer
-            # job never emits speaking_start, and the resumed outer job
-            # (job.started True) never re-emits — so the avatar would freeze
-            # mouth-still on THINKING for the rest of the block, live on
-            # stream. Unarmed this guard is a no-op: the legacy gate never
-            # let this line run while `_speech_active`.
             if not self._speech_active:
                 self.ui_callback("processing")
-            # WU5 (design-fase2.md §3 WU5): an interactive turn spoken during an
-            # interruption detour counts toward the return-skip budget (no-op
-            # unless a frozen stash is pending; skips agenda sources). The
-            # connector upgrade is triggered later, at speaking_start.
             self._note_detour_turn(source)
+            turn_state.open_turn(source)
             try:
                 if cached is not None:
-                    # F8 optional (runtime_findings_batch_20260807): a pregen
-                    # hit skips _ejecutar_inferencia entirely, so it never hit
-                    # the [TURN_LATENCY] emit above -- 6 of ~15 answers were
-                    # invisible to the metric. `submitted_at` is already in
-                    # hand from the unpack above; this is the tts-handoff
-                    # instant for a cache hit. path=pregen distinguishes it
-                    # from the foreground metric's two-field split (no
-                    # separate generation phase to subtract here).
-                    if submitted_at is not None:
-                        logger.info(
-                            "[TURN_LATENCY] source=%s request_to_tts_total_ms=%d path=pregen",
-                            source, int((time.monotonic() - submitted_at) * 1000),
+                    if cached.get("failure_reason") == "reasoning_budget_exhausted":
+                        self._log(
+                            f"Pregen agotó presupuesto de razonamiento [{source_label}]; no se reintenta en vivo."
                         )
-                    self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
+                        if source in ("ptt", "direct", OWNER_BUNDLE_SOURCE):
+                            self.ui_callback("reasoning_budget_exhausted")
+                        turn_state.emit(TurnEvent.DROP)
+                    else:
+                        if submitted_at is not None:
+                            logger.info(
+                                "[TURN_LATENCY] source=%s request_to_tts_total_ms=%d path=pregen %s%s",
+                                source, int((time.monotonic() - submitted_at) * 1000),
+                                turn_timing.stage_fields({}),
+                                f" tid={turn_state.current_tid()}" if turn_state.current_tid() else "",
+                            )
+                        self._speak_pregenerated(cached, already_reported_boundary=already_reported_boundary)
+                        turn_state.emit(TurnEvent.SERVED_PREGEN)
                 else:
-                    # T1(d) [v5]: the worker's PLAIN foreground fallback for an
-                    # INTERACTIVE item — no cache hit, not even an in-flight
-                    # pregen to wait for. This is the highest-dead-air
-                    # boundary and used to be entirely invisible. Agenda's own
-                    # "none" boundary is already reported by the driver before
-                    # the item is ever enqueued (AgendaDriver._maybe_consume_
-                    # prefetch), so this is gated to non-agenda sources to
-                    # avoid a double report for the same turn.
                     if not source.startswith("kira-agenda"):
                         self._log(
                             f"Pregen boundary: draft=none source={source} gap_ms=-1 "
                             f"gen_ms=-1 speech_ms={self._speech_ms_for_boundary()}"
                         )
-                    # interruptible_speech_architecture_20260804 §4 step 10 —
-                    # THE BUNDLER. Reached only on a pregen MISS, which is Rule
-                    # 1: the engine was about to pay for a generation anyway, so
-                    # absorbing the owner questions queued behind this one costs
-                    # nothing extra and buys back N-1 spoken answers of ~108s
-                    # each. A draft that exists never gets here (it was spoken
-                    # above), so no paid GPU work is ever discarded.
-                    #
-                    # Frame-local by construction: the bundle is three locals,
-                    # created here and consumed by _ejecutar_inferencia below in
-                    # the same iteration. No window, no TTL, no second store —
-                    # which is precisely why a question can be neither lost nor
-                    # answered twice (§3.4, §7). Do NOT promote it to an
-                    # instance attribute; that reintroduces every pathology
-                    # _accumulation_buffer already has.
-                    #
-                    # N == 1 takes none of this: `taken` is empty, nothing is
-                    # reassigned, and the call below is byte-identical to today.
                     taken: list = []
                     if source in _OWNER_QUESTION_SOURCES:
                         taken = self._take_owner_bundle_prefix(item)
@@ -2036,27 +1948,10 @@ class MotorVocalIA(
                             members = [item] + taken
                             payload, history_text, stamp = self._compose_owner_bundle(members)
                             source = OWNER_BUNDLE_SOURCE
-                            # An absorbed member's orphaned draft must not keep
-                            # holding the single pregen slot. OUTSIDE _pq_lock,
-                            # mirroring the TTL sweep's own cleanup above. A
-                            # no-op in practice — the slot only ever drafts for
-                            # the head — but a stale entry blocks every later
-                            # prefetch until an unrelated enqueue clears it.
                             for member in taken:
                                 self._clear_prefetch_if_matches(member[2], member[3])
                             self._log_owner_bundle(members, payload)
-                    # C1 (refactor_core_api_20260802): conditional forward (see
-                    # _dispatch_command) — a stubbed _ejecutar_inferencia in
-                    # existing tests never sees the new kwarg unless a real
-                    # stamp was queued. `bundle_followers` rides the SAME rule:
-                    # it is forwarded only when a bundle actually formed, so a
-                    # non-bundled turn's call is byte-identical to before.
-                    #
-                    # It is forwarded at all because the failure is detected
-                    # THERE (a falsy `dialogo`) while the members only exist
-                    # HERE — and _ejecutar_inferencia's `elif` chain is already
-                    # the house hook for a non-committing return (the agenda
-                    # recovery next to it). See _requeue_owner_bundle_followers.
+
                     forward = {"stamp": stamp} if stamp is not None else {}
                     if taken:
                         forward["bundle_followers"] = taken
@@ -2068,19 +1963,15 @@ class MotorVocalIA(
                 # ready item, keeping the stack flat (F1). The per-item idle
                 # callback + control-command drain + model-switch check still run
                 # here, once per item — the same cadence the old recursion had.
+                turn_state.close_turn()
                 self._complete_processing_cycle(process_queue=False)
 
     def _complete_processing_cycle(self, *, process_queue: bool = True, emit_idle: bool = True) -> None:
         with self._lock:
             self._processing = False
             self._current_processing_source = None
-        # §11 B3: this cycle no longer ends when the speech does — under the
-        # router it ends the moment `submit` returns. ObsRuntime maps 'idle' to
-        # AvatarState.IDLE + _stop_speaking_alt (the mouth stops mid-sentence,
-        # visibly) and CTK re-enables input, so it must not fire mid-speech.
-        # The router emits it at job completion instead; a cycle that never
-        # spoke still emits it here, exactly as today.
-        # `emit_idle=False` is the router's own wake path — it already emitted.
+        self._owner_reflection_stamp_turn_done()
+        self._stamp_command_done()  # opens the promotion quiet window (priority-queue turns too)
         if emit_idle and not self._speech_active:
             self.ui_callback("idle")
         self._drain_control_commands()
@@ -2090,6 +1981,40 @@ class MotorVocalIA(
         self._check_pending_model_switch()
         if process_queue:
             self._process_priority_queue()
+
+    def _retrigger_interactive_pregen_for_blocked_head(self) -> None:
+        """pregen-retrigger: re-evaluate the queue head the drain refused to pop.
+
+        The interactive trigger used to fire only from `enqueue()` and from a
+        pregen worker releasing the slot. A turn that arrived while a
+        FOREGROUND generation ran was refused (`llm_generating` / armed
+        `is_processing`) and never looked at again, so Kira then spoke for 20s+
+        with an idle GPU and generated that answer serially at the boundary.
+
+        Why here: the drain's `dequeue_or_else(...).blocked` return is exactly
+        "armed, speech busy, head is not priority 0": the head must wait for the
+        boundary, so a background draft is the only way to use the wait. It is
+        reached after `_complete_processing_cycle` cleared `_processing` (the
+        first instant every gate in `_maybe_trigger_interactive_pregen` can
+        pass) and also after a `[BUNDLE_FAILED]` requeue. Hooking the
+        `_llm_generating` clear instead would run while `_processing` is still
+        set (refused by the armed gate) and inside the retry loop; hooking the
+        cycle end would draft a priority-0 head the very next loop iteration
+        pops, moving its generation off the foreground path for no gain.
+
+        Safe by construction: same trigger, same gates (speaking, not
+        generating, armed `is_processing`, bundling, slot occupancy,
+        still-head), so it cannot start a second generation on the single
+        runner; a head that already has a draft or a worker in flight is a
+        no-op (idempotent), which also covers the repeated idle-tick drains.
+        Never raises into the drain.
+        """
+        try:
+            with self._pq_lock:
+                head_snapshot = self._head_snapshot_locked()
+            self._maybe_trigger_interactive_pregen(head_snapshot)
+        except Exception:
+            logger.exception("Interactive pregen re-trigger for blocked head failed")
 
     def _drain_control_commands(self) -> None:
         """Apply a contiguous run of whitelisted control commands from the
@@ -2102,41 +2027,10 @@ class MotorVocalIA(
         is a true idle point (_processing and _speaking both False), so a leading
         run of whitelisted commands is applied now, before the next turn dispatches.
 
-        Stops at the first non-whitelisted verb (process_context — dispatches a
-        turn and would recurse; check_ollama — network), the None shutdown
-        sentinel, or any unknown type, and leaves it AND everything behind it
-        untouched, in original queue order. This preserves FIFO relative to
-        that earlier-queued item — otherwise a later whitelisted command (e.g.
-        set_profile) could jump ahead and mutate state before the earlier item
-        runs (e.g. answering a queued process_context under a just-switched
-        profile with wiped history).
-
-        Peeks under command_queue.mutex before popping, so a stopping item is
-        never removed and never needs to be re-queued (no put_nowait tail
-        re-insertion, which would itself reorder it behind whatever else
-        arrived while draining). Bounded by a qsize() snapshot so it can never
-        loop indefinitely even under a sustained stream of whitelisted commands.
-
-        §11 B4: "true idle point" is now enforced, not assumed. Under the
-        router this runs while speech may still be pending or playing, and
-        `_DRAIN_SAFE_COMMANDS` includes `set_piper_voice` (-> `_piper.reload`)
-        and `set_tts_speed` (-> `set_length_scale`) on the very Piper object
-        the producer is mid-utterance on — the producer snapshots
-        `tts_local_only`/`edge_rate` at start precisely because drains were
-        boundary-only. Deferred drains are picked up by the router's wake
-        sentinel at the real boundary (B5). The PRIMARY consume path defers
-        here too: `_dispatch_command` parks drain-safe verbs while
-        `_speech_active` (closure finding 2026-08-05) and this drain applies
-        them FIRST, ahead of the queue front-run.
         """
         if self._speech_active:
             return
         applied = 0
-        # §11 B4 primary path: verbs run() consumed mid-utterance and
-        # `_dispatch_command` parked. FIFO holds: anything still sitting in
-        # command_queue arrived AFTER these were popped, so they apply first.
-        # Bounded snapshot — an item re-deferred by a submit racing this
-        # flush goes to the back and the loop still exits.
         for _ in range(len(self._deferred_control_commands)):
             tipo, payload = self._deferred_control_commands.popleft()
             self._dispatch_command(tipo, payload)
@@ -2149,12 +2043,6 @@ class MotorVocalIA(
                 if comando is None or comando[0] not in _DRAIN_SAFE_COMMANDS:
                     break
                 self.command_queue.queue.popleft()
-            # F3: tolerant unpack, mirroring _consume_command. The queue item has
-            # grown twice already (history_text, then source); a strict 2-unpack
-            # here raises ValueError inside _complete_processing_cycle, which
-            # run() does NOT guard — that kills the worker thread for good and
-            # Kira goes permanently mute. Drain-safe commands are plain setters
-            # that read neither extra slot, so discarding them is correct.
             tipo, payload, *_extra = comando
             self._dispatch_command(tipo, payload)
             applied += 1
@@ -2166,78 +2054,6 @@ class MotorVocalIA(
         """Unit 4.2 (runtime_findings_batch_20260731, D3b): move a queued
         source=direct command from `command_queue` into `_priority_queue` at
         every turn boundary.
-
-        Root cause (F5, and the F12 follow-up this closes): WU2's
-        consume-at-event (the speaking_end boundary emission — the
-        SPEECHROUTER thread when the router is armed, `_hablar`'s tail on the
-        legacy path; see the comment on `AgendaDriver._prefetch` in
-        `api/agenda_driver.py`) adopts the NEXT agenda block straight into
-        `_priority_queue` SYNCHRONOUSLY before this boundary ever runs — the
-        router preserves the ordering by enqueueing its wake sentinel AFTER
-        the boundary event. As long as that keeps
-        succeeding (the 2026-07-30 run pregenerated 87 of 126 blocks),
-        `_process_priority_queue`'s drain loop never finds `_priority_queue`
-        empty and never returns to `run()`'s `command_queue.get()` -- so a
-        `source=direct` command sitting in `command_queue` (put there by
-        `Dispatcher.dispatch`, api/dispatch.py) is never even looked at for
-        as long as agenda content keeps flowing. `_priority_queue`'s own
-        priority sort (0=PTT, 1=direct, 2/3=stream-vs-agenda per the
-        streamer's STREAM_OVER_AGENDA setting; see `enqueue()` and the
-        turn_priority module) is
-        completely correct once an item actually reaches it -- the 2026-07-30
-        defect (four direct questions waiting 13.8-29.1 minutes) was a direct
-        item that never got there at all, not a sort-order bug.
-
-        Fix: peek `command_queue`'s FRONT (mirrors `_drain_control_commands`'s
-        mutex-peek, called immediately before this at every boundary) and, if
-        it is a `process_context` command whose source is an owner question
-        (`_OWNER_QUESTION_SOURCES` -- "direct" or "ptt"), pop it and
-        `enqueue()` it into `_priority_queue` at ITS documented priority --
-        the SAME conversion `_dispatch_command`'s busy branch already does for
-        a command read the normal way. Once queued, the priority sort
-        guarantees it is served ahead of any further agenda action
-        (the agenda tier), even if an agenda block was already re-queued earlier
-        in this same boundary (insertion order does not matter, only the
-        sort key does).
-
-        Scoped strictly to an EXPLICIT owner-question source tag (D3, widened
-        by interruptible_speech_architecture_20260804 Step 1) -- the 4th tuple
-        element must literally be "direct" or "ptt", never the tolerant-unpack
-        default `_consume_command` falls back to for a bare/legacy tuple. A
-        plain `("process_context", payload)` 2-tuple (the CTK/legacy internal
-        dispatch shape, still used by a few call sites/tests) is NOT an API
-        turn tagged by `Dispatcher.dispatch` and must stay deferred exactly as
-        before (WU1's command-starvation fix, tests/test_command_drain.py) --
-        only a real `/api/chat/turn` turn (which always dispatches an
-        explicit 4+ tuple) qualifies. Stops at the first non-matching front
-        item so nothing else is reordered -- notably, a NON-owner item (e.g.
-        `chat`) at the front still stops the scan, same as before. Bounded by
-        a qsize() snapshot, mirroring `_drain_control_commands`, so a
-        sustained stream can never loop indefinitely.
-
-        Step 1 (direct_turn_preemption_20260803): this is now called from TWO
-        threads — the engine boundary (unchanged, still the starvation backstop
-        for a non-owner-question command sitting ahead in FIFO) and the HTTP
-        thread right after an accepted /api/chat/turn dispatch, so the turn
-        reaches `_priority_queue` at ARRIVAL and `enqueue()`'s own
-        interactive-pregen trigger can see it as the head while the agenda is
-        still speaking. `_direct_drain_lock` makes each pop->enqueue pair
-        atomic across those callers: the pop (command_queue.mutex) and the
-        enqueue (_pq_lock) are separate critical sections, so two
-        unserialized drains could otherwise pop directs A then B and enqueue
-        them B then A, inverting FIFO.
-
-        Step 1 (interruptible_speech_architecture_20260804): widened from
-        "direct" only to `_OWNER_QUESTION_SOURCES` ("direct" + "ptt"), and the
-        priority is now the item's OWN documented one (0 for ptt, 1 for
-        direct) instead of a hardcoded 1. PTT DOES reach this path now, in the
-        deferred case (a PTT command sitting in `command_queue` because the
-        arrival-time hook in `api/ptt_session.py` missed it or hasn't run
-        yet) -- the earlier claim that "PTT never reaches this path" was true
-        only for the CUT case (WU5's own interrupt mechanism, untouched here
-        and still the only thing that can cut mid-speech). A leading `ptt`
-        item no longer blocks a `direct` sitting right behind it: both are
-        owner questions, so the scan keeps going.
         """
         with self._direct_drain_lock:
             for _ in range(self.command_queue.qsize()):
@@ -2255,18 +2071,13 @@ class MotorVocalIA(
                     _tipo, payload, history_text, source, *rest = comando
                     submitted_at = rest[0] if rest else None
                     submitted_under_provider = rest[1] if len(rest) > 1 else None
+                    origin = rest[2] if len(rest) > 2 else None
                     self.command_queue.queue.popleft()
-                # C1 (refactor_core_api_20260802): enqueue()'s own signature keeps the
-                # two separate kwargs (public API, unchanged) — both default to None,
-                # so passing them unconditionally is byte-identical to the old
-                # branch-per-presence idiom.
                 self.enqueue(
-                    # Only _OWNER_QUESTION_SOURCES reach here (guard above), so
-                    # this resolves to ptt=0 / direct=1 — same numbers as the
-                    # old `0 if ptt else 1`, now via the single tier resolver.
                     payload, priority=turn_priority.dispatch_priority_for_source(source),
                     source=source, history_text=history_text,
                     submitted_at=submitted_at, submitted_under_provider=submitted_under_provider,
+                    **({"origin": origin} if origin is not None else {}),
                 )
                 self._log(f"Boundary drain: turno {source} movido a cola prioritaria (D3b).", level="debug")
 
@@ -2279,7 +2090,7 @@ class MotorVocalIA(
 
         D4 (memoria_quality_20260717): the memory-flavored last bundle line is
         reserved for turns blocked by the R9 AI-self-ID rule — the only guard
-        reason a "my memories got tangled" deflection actually fits. Every other
+        reason a plain in-character AI disclosure actually fits (S3). Every other
         block reason (and the reason-less chat-repetition path) round-robins over
         the FIRST FOUR generic lines only, so the memory line is never a
         non-sequitur for an unrelated block. Bundles that ship fewer than five
@@ -2291,11 +2102,21 @@ class MotorVocalIA(
         """
         if source.startswith("kira-agenda"):
             return ""
+        # S1: a crisis turn never falls back to a joke or a "tongue-tied" line.
+        if is_crisis_turn():
+            return i18n_active.crisis_reply()
         lines = i18n_active.guardrail_fallback_lines()
         # R9 self-ID block -> the memory-flavored line (bundle index 4), when the
         # bundle actually ships it. Does not advance the generic rotation.
         if "no_ai_self_identification" in reason and len(lines) >= 5:
             return lines[4]
+        # no_code_output block -> its dedicated lines (bundle indexes 5-6), when
+        # the bundle ships them; same rotation counter, separate pool.
+        if "no_code_output" in reason and len(lines) >= 7:
+            code_lines = lines[5:7]
+            idx = getattr(self, "_guardrail_fallback_idx", 0)
+            self._guardrail_fallback_idx = idx + 1
+            return code_lines[idx % len(code_lines)]
         generic = lines[:4] if len(lines) >= 5 else lines
         idx = getattr(self, "_guardrail_fallback_idx", 0)
         self._guardrail_fallback_idx = idx + 1
@@ -2310,49 +2131,94 @@ class MotorVocalIA(
         chat_timeout: float,
         provider_cfg: dict,
         is_local: bool,
+        guard_reason: Optional[str] = None,
+        think: Optional[bool] = None,
+        prompt_profile: Optional[str] = None,
     ) -> str:
         """ONE extra generation after an output_guard block (owner decision
-        "afinar + reintento", guardrail_tuning_20260724): same prompt +
-        `_GUARDRAIL_RETRY_NUDGE` appended as a trailing system message.
-
-        A single standalone call to `_ollama_chat_with_watchdog` -- NEVER
-        wrapped in the caller's `max_intentos` transport-retry loop, so it
-        never consumes that separate budget. Posture (`provider_cfg`/
-        `is_local`) is the caller's F2 entry snapshot, never re-read live.
+        "afinar + reintento", guardrail_tuning_20260724): same prompt + a
+        rule-aware nudge appended to the LAST USER message's content.
 
         Returns the stripped content, or "" on any failure (transport error,
         timeout, empty response) so the caller falls through to the existing
         canned-line fallback unchanged.
         """
-        retry_messages = messages + [
-            {"role": "system", "content": _GUARDRAIL_RETRY_NUDGE}
-        ]
+        nudge = _guardrail_retry_nudge_for_reason(guard_reason)
+        retry_messages = _append_guardrail_nudge(messages, nudge)
+        # K2: carry the turn's resolved think exactly like the main attempt
+        # (inside options; `_lift_think` moves it to the top-level kwarg), on a
+        # copy so the caller's options are never mutated.
+        retry_options = dict(opciones_llm)
+        if think is not None:
+            retry_options["think"] = think
         with self._lock:
             self._llm_generating = True
         try:
-            respuesta = self._ollama_chat_with_watchdog(
-                timeout=chat_timeout,
-                model=request_model,
-                messages=retry_messages,
-                keep_alive=LLM_KEEP_ALIVE,
-                options=opciones_llm,
-                provider_cfg=provider_cfg,
+            _trace = prompt_trace.begin(
+                source="guardrail_retry",
+                model=usage_ledger.call_model_name(
+                    request_model, is_local=is_local, provider_cfg=provider_cfg
+                ),
                 is_local=is_local,
+                messages=retry_messages,
+                options=retry_options,
+                path="buffered",
+                # compact-prompt-profile-20261009: the retry resends the turn's
+                # own messages/options, so it ran under the turn's profile.
+                profile=prompt_profile,
             )
+            try:
+                respuesta = self._ollama_chat_with_watchdog(
+                    timeout=chat_timeout,
+                    model=request_model,
+                    messages=retry_messages,
+                    keep_alive=LLM_KEEP_ALIVE,
+                    options=retry_options,
+                    provider_cfg=provider_cfg,
+                    is_local=is_local,
+                )
+            except BaseException as _trace_exc:
+                if _trace is not None:
+                    _trace.fail(_trace_exc)
+                raise
+            if _trace is not None:
+                _trace.finish(respuesta)
             msg_obj = respuesta.get('message', {})
             if isinstance(msg_obj, dict):
                 content = msg_obj.get('content', '')
             else:
                 content = getattr(msg_obj, 'content', '')
+            if is_local:
+                # L1 (live-session-fixes-20261005): same think split as the
+                # main local attempt -- reasoning never becomes the reply.
+                content, _ = strip_think_blocks(content or "", "")
             return (content or "").strip().strip('\x00\ufeff')
-        except Exception:
+        except Exception as retry_exc:
+            turn_state.fail_reason("guard_retry_failed", retry_exc)
             logger.warning("Guardrail retry generation failed", exc_info=True)
             return ""
         finally:
             with self._lock:
                 self._llm_generating = False
 
-    def _generar_dialogo(
+    def _generar_dialogo(self, contexto, source: str = "direct", **kwargs):
+        """S1 (guardrails-vulnerable-users): mark the whole generation as a
+        crisis turn when the OWNER's own words signal self-harm, then run the
+        normal funnel. Owner turns only (direct, ptt, owner bundle; the remote
+        gateway submits "direct"); chat and agenda text never mark a turn.
+        The flag is read by output_guard, the stream guard and the fallback
+        line, and is gone when the generation returns. Logs carry no text."""
+        crisis = (
+            source in _CRISIS_SOURCES
+            and isinstance(contexto, str)
+            and detect_crisis(contexto)
+        )
+        if crisis:
+            logger.warning("[CRISIS_TURN] source=%s detected=yes", source)
+        with crisis_turn(crisis):
+            return self._generar_dialogo_core(contexto, source=source, **kwargs)
+
+    def _generar_dialogo_core(
         self,
         contexto,
         source: str = "direct",
@@ -2362,42 +2228,84 @@ class MotorVocalIA(
         log_prefix: str = "LLM",
         history_text: Optional[str] = None,
         watchdog_timeout: Optional[float] = None,
+        allow_vision: Optional[bool] = None,
+        origin: Optional[str] = None,
     ) -> str:
         request_model = self.current_model
         if source.startswith("kira-agenda") and intent == "chat":
             intent = "agenda"
-        # F2 posture snapshot (multi_provider_llm_20260723): read the provider
-        # config AND the runtime fallback flag ONCE here, collapse them into the
-        # EFFECTIVE posture `is_local`, and thread that bool through this whole
-        # generation + dispatch. The config dict is swapped wholesale by
-        # set_provider_config (never mutated in place) and the flag is read
-        # exactly once at this snapshot instant, so neither a racing PUT nor a
-        # mid-turn `_cloud_fallback_active` flip can tear this generation between
-        # local/cloud — it is pinned to `provider_cfg`/`is_local`; only the NEXT
-        # call sees the change. INVARIANT: every mid-generation posture read
-        # below uses this `is_local` bool, never the live `self._is_local`
-        # property and never a re-derivation from `provider_cfg`.
         provider_cfg = self._provider_config
         is_local = self._cfg_is_local(provider_cfg) or self._cloud_fallback_active
         self._log(f"Analizando contexto con {request_model}...")
-        # F1 (interruptible_speech_architecture_20260804, runtime-findings
-        # 2026-08-07): a CLOUD attempt failing here used to burn the turn
-        # outright (return ""), even though `_handle_cloud_failure` had just
-        # armed a known-good LOCAL fallback for every SUBSEQUENT turn — the
-        # owner's question was the one turn that never got to use it. This
-        # loop is the generation funnel all three cloud-failure exits pass
-        # through (watchdog timeout / transport error -> outcome.early_return;
-        # well-formed-but-empty 2xx body -> _finalize_generation's own ""),
-        # so ONE retry here covers all three. The burn-the-turn policy for
-        # LOCAL persistent failures (:3055-3057, `_requeue_owner_bundle_
-        # followers`'s docstring) is untouched: `attempt_was_cloud` is only
-        # True when THIS attempt actually dispatched to the cloud transport,
-        # so a local failure never loops. `cloud_fallback_retry_done` bounds
-        # it to exactly one retry per call.
         cloud_fallback_retry_done = False
+        # V1.33: a turn never inherits the previous turn's reading token.
+        # V1.34: only a FOREGROUND turn (commit_history) clears it. A pregen or
+        # connector generation (commit_history=False) can run between the
+        # reading and the same turn's buffered reaction submit; clearing there
+        # would let the reaction cut its own reading when the toggle is on.
+        if commit_history:
+            self._vision_read_turn_id = None
         try:
+            # vision-on-demand V1.5: at most one look per turn, finished BEFORE
+            # any generation attempt (buffered and streaming share this funnel)
+            # and reused by the cloud->local retry below instead of looking twice.
+            # V1.13: `allow_vision` (None = the old `commit_history` default) lets
+            # interactive owner pregen look too; a pregen look is stashed so a
+            # discarded draft regenerated for the same payload does not look twice.
+            if allow_vision is None:
+                allow_vision = commit_history
+            # laya-decision-layer-20261009: one decide() per turn, before the
+            # look, reused by the cloud->local retry below. None = base path:
+            # no new kwarg reaches any seam.
+            decision_kw = decision_kwargs(
+                self._turn_decisions(contexto, source, allow_vision=allow_vision)
+            )
+            look = (
+                self._run_vision_look(contexto, source, stash=not commit_history, **decision_kw)
+                if allow_vision
+                else NO_LOOK
+            )
+            screen_block, vision_note = look.block, look.note
+            vision_read_note = look.read_note
+            # P2: images for the cloud call: the direct screen look's frames, then
+            # the owner's pasted images for this exact turn text (direct only).
+            turn_images = list(look.images)
+            if source == "direct":
+                turn_images += self.peek_turn_images(contexto)
+            # V1.15: a failed REQUESTED look never reaches the LLM; the canned
+            # line is the reply (None = the shortcut failed, generate normally).
+            if look.fail_line:
+                fail_reply = self._vision_fail_reply(
+                    look, contexto, source,
+                    commit_history=commit_history, history_text=history_text,
+                )
+                if fail_reply is not None:
+                    return fail_reply
+            # web-fetch-laya-20261009: at most one web lookup per turn, after
+            # the look and reused by the cloud->local retry. Switch off (the
+            # default) = no kwarg reaches any seam.
+            # runtime-fixes-20261110 T2: ``origin`` (desktop / remote) decides
+            # whether a link in the message may be read; None is not desktop.
+            web_look = self._run_web_step(
+                contexto, source, speak=commit_history,
+                **({"origin": origin} if origin is not None else {}), **decision_kw
+            )
+            web_kw = web_look.kwargs()
             while True:
                 attempt_was_cloud = not is_local
+                build_mark = turn_timing.mark(exclude="recall_ms")
+                # P2: images only ride a cloud attempt. A local attempt (cloud fell
+                # back) drops them and carries a fixed note instead of the claim
+                # that an image is attached.
+                attempt_block, attempt_note = screen_block, vision_note
+                direct_kw: dict = {}
+                if turn_images and is_local:
+                    if look.images:
+                        attempt_block = ""
+                    if not attempt_block:
+                        attempt_note = direct_cloud.IMAGE_UNSEEN_NOTE
+                elif look.images:
+                    direct_kw["screen_direct"] = True
                 setup = self._build_generation_request(
                     contexto,
                     source,
@@ -2405,8 +2313,28 @@ class MotorVocalIA(
                     is_local=is_local,
                     provider_cfg=provider_cfg,
                     request_model=request_model,
+                    identity_model=(
+                        request_model if is_local else configured_cloud_model(provider_cfg)
+                    ),
                     watchdog_timeout=watchdog_timeout,
+                    screen_block=attempt_block,
+                    vision_note=attempt_note,
+                    vision_read_note=vision_read_note,
+                    **direct_kw,
+                    **decision_kw,
+                    **web_kw,
                 )
+                if turn_images and not is_local:
+                    setup.cloud_images = tuple(turn_images)
+                turn_timing.close(build_mark, "prompt_build_ms")
+                if commit_history:
+                    turn_state.note(
+                        model=request_model if is_local else configured_cloud_model(provider_cfg)
+                    )
+                    turn_state.emit(
+                        TurnEvent.PROMPT_BUILT,
+                        ms=int((time.monotonic() - build_mark[0]) * 1000),
+                    )
                 outcome = self._cloud_attempt_loop(
                     setup,
                     source=source,
@@ -2442,27 +2370,25 @@ class MotorVocalIA(
                     or not attempt_was_cloud
                     or not self._cloud_fallback_active
                     or self._cloud_fallback_reason != cloud_llm_client.CLOUD_ERROR_TRANSIENT
+                    or (outcome.stream is not None and outcome.stream.job is not None)
                 ):
-                    return result
-                # The cloud attempt above failed and `_handle_cloud_failure`
-                # engaged auto-fallback (fallback_mode=="manual" leaves
-                # `_cloud_fallback_active` False, which the check above
-                # already excludes) -- retry ONCE on the known-good local
-                # model instead of discarding the question.
-                #
-                # Ceiling (runtime evidence 2026-08-07, F1/F12): retry is
-                # TRANSIENT-ONLY. All three evidenced silent-turn incidents
-                # were watchdog timeouts (class=transient); bad_key and
-                # ambiguous_429 turns still burn (the pre-existing contract).
-                # `_cloud_fallback_reason` is the class `_handle_cloud_failure`
-                # was JUST invoked with for THIS attempt -- set synchronously
-                # under `_lock` before that call's background warm-up thread
-                # even starts (~5230), unlike `_last_cloud_failure_class`,
-                # which the watchdog-timeout branch never touches and which a
-                # rescued LOCAL success on the retry itself clears (finalize,
-                # ~4985) before this gate could read it. Widening this ceiling
-                # to other failure classes needs owner ratification first.
+                    failure_reason = getattr(outcome, "failure_reason", None)
+                    answered_by_provider = (
+                        "local" if is_local else (provider_cfg.get("active_provider") or "local")
+                    )
+                    answered_by_transport = "local" if is_local else "cloud"
+                    return GenerationResult(
+                        result,
+                        failure_reason=failure_reason,
+                        answered_by_provider=answered_by_provider,
+                        answered_by_transport=answered_by_transport,
+                        cloud_fallback_retry=cloud_fallback_retry_done,
+                        web_searched=bool(getattr(setup, "web_searched", False)),
+                        web_sources=_reply_sources(web_look, setup, source) if result else (),
+                    )
                 cloud_fallback_retry_done = True
+                if commit_history:
+                    turn_state.emit(TurnEvent.CLOUD_RETRY)
                 is_local = True
                 request_model = self._last_known_good_model or self.current_model
                 self._log(
@@ -2472,13 +2398,16 @@ class MotorVocalIA(
                 )
 
         except Exception as e:
-            self._log(f"ERROR Ollama: {e}", level="error")
-            logger.exception("Error en inferencia LLM")
-            # llm_output_streaming_20260813 §7 orphan belt: if a streamed turn
-            # created a job and the exception escaped every closer hook (e.g.
-            # finalize itself raised), the job must still be sealed and the
-            # spoken prefix committed — an unsealed ACTIVE job would starve
-            # the router forever (no idle, mouth stuck "speaking").
+            # Class and site only: the message can quote the prompt or the reply.
+            self._log(
+                f"ERROR Ollama: {type(e).__name__} code=engine_error", level="error"
+            )
+            logger.error(
+                "Error en inferencia LLM: %s site=%s", type(e).__name__, turn_state.exc_site(e)
+            )
+            if commit_history:
+                turn_state.fail_reason("engine_error", e)
+                turn_state.emit(TurnEvent.FAIL)
             _orphan = getattr(self, "_live_stream_state", None)
             if _orphan is not None and _orphan.job is not None and not _orphan.handled:
                 try:
@@ -2489,7 +2418,13 @@ class MotorVocalIA(
                     logger.exception("stream orphan belt failed")
             if commit_history:
                 self._invalidate_pregen_epoch()
-            return ""
+            return GenerationResult("")
+        finally:
+            # V1.13: the reply is ready to play; a status line that never started is moot.
+            self._retire_vision_status()
+            # P2: the committed turn is done with its pasted images.
+            if commit_history and source == "direct":
+                self.take_turn_images(contexto)
 
     def _build_generation_request(
         self,
@@ -2500,10 +2435,23 @@ class MotorVocalIA(
         is_local: bool,
         provider_cfg: dict,
         request_model: str,
+        identity_model: Optional[str] = None,
         watchdog_timeout: Optional[float],
+        screen_block: str = "",
+        vision_note: str = "",
+        vision_read_note: str = "",
+        screen_direct: bool = False,
+        decisions=None,
+        web_block: str = "",
+        web_note: str = "",
+        link_block: str = "",
+        link_note: str = "",
     ) -> "_GenerationSetup":
         """Phase 1 of _generar_dialogo: build message list, sampling options, and timeout.
         Delegates pure assembly to PromptContextAssembler while taking minimal lock snapshots.
+        ``decisions`` is the turn's TurnDecisions (laya-decision-layer-20261009);
+        None is the base behavior. ``web_block``/``web_note`` carry this turn's
+        web lookup (web-fetch-laya-20261009); "" is the base behavior.
         """
         with self._history_lock:
             history_snapshot = list(self.historial)
@@ -2532,10 +2480,15 @@ class MotorVocalIA(
                     a_content = a_msg.get("content", "") if isinstance(a_msg, dict) else ""
                     if not u_content or u_content.startswith("[agenda segura"):
                         continue
-                    turn_key = f"{u_content}::{a_content}"
+                    from opencohost.core.engine.llm_engine_memorias import _digest_fragment_key
+                    from opencohost.core.memory.memoria_store import strip_history_wrapper
+                    clean_u = strip_history_wrapper(u_content)
+                    turn_key = f"{clean_u}::{a_content}"
                     if turn_key not in self._digested_turn_keys:
-                        ledger_line = self._build_ledger_line(u_content, a_content)
-                        self._memory_digest.append(ledger_line)
+                        ledger_line = self._build_ledger_line(clean_u, a_content)
+                        self._memory_digest.append(
+                            ledger_line, key=_digest_fragment_key(clean_u)
+                        )
                         self._digested_turn_keys.add(turn_key)
 
         def _native_ctx_res(model_name: str) -> int:
@@ -2561,38 +2514,55 @@ class MotorVocalIA(
 
         episodic_memory_block = ""
         mem = getattr(self, "_memory", None)
-        # v4/v5 arbitration (deterministic, application-side — the local LLM
-        # never decides whether memory applies):
-        # - confident v5 EPISODIC_TOPIC / SESSION_RECALL hit -> v5 primary;
-        #   the generic v4 meta-recall block is suppressed so it cannot
-        #   dominate or masquerade as historical proof;
-        # - v5 miss -> v4 fallback unchanged;
-        # - PROFILE_SYNTHESIS -> labeled v4 profile memories and diverse v5
-        #   evidence coexist under separate context sections.
-        # Lazy import: OFF mode (mem is None) never touches v5 modules.
-        v5_suppress_v4 = False
-        if mem is not None and memorias_profile_id:
+        # v4/v5 memory selection is deterministic and application-side — the
+        # local LLM never decides whether memory applies (ADR-059 below).
+        clean_contexto = contexto
+        if source in ("ptt", "direct", settings.OWNER_BUNDLE_SOURCE):
             try:
-                from opencohost.core.memory_v5_shadow.query_analyzer import (
-                    RecallScope,
-                )
+                from opencohost.core.memory.memoria_store import strip_history_wrapper
+                clean_contexto = strip_history_wrapper(contexto)
+            except Exception:
+                clean_contexto = contexto
 
-                decision = mem.recall_decision(contexto, profile_id=memorias_profile_id)
-                episodic_memory_block = decision.block
-                v5_suppress_v4 = bool(
-                    decision.hit
-                    and decision.scope
-                    in (
-                        RecallScope.EPISODIC_TOPIC.value,
-                        RecallScope.SESSION_RECALL.value,
-                    )
+        recall = None
+        # T3: a short "that made no sense / what did you say" turn has no topic
+        # of its own; recall against it only surfaces unrelated memory.
+        inject_skip = (
+            "correction_turn"
+            if memorias_profile_id and is_clarification_turn(clean_contexto)
+            else None
+        )
+        # laya-decision-layer-20261009: Laya may only skip a recall the rule runs.
+        if memorias_profile_id and not inject_skip and not memory_recall_skipped(decisions):
+            recall = self._run_episodic_recall(mem, clean_contexto, memorias_profile_id)
+        raw_profile_locale = getattr(self, "_current_profile_locale", None)
+        effective_lang = (
+            i18n_coherence.primary_subtag(raw_profile_locale) if raw_profile_locale else None
+        )
+        if not effective_lang:
+            try:
+                effective_lang = i18n_coherence.primary_subtag(
+                    i18n_active.get_active_bundle().code
                 )
             except Exception:
-                episodic_memory_block = ""
-                v5_suppress_v4 = False
-
-        v4_builder = None if v5_suppress_v4 else getattr(self, "_build_memorias_injection_block", None)
-        return assembler.assemble(
+                effective_lang = "es"
+        v4_builder, recall_stats = self._memorias_builder_with_recall(
+            recall, skip_reason=inject_skip, lang=effective_lang
+        )
+        self._bind_active_card_vector(clean_contexto, recall)
+        profile = self._resolve_prompt_profile(request_model, is_local)
+        session_topics_block = self._session_topics_block(
+            source, recall, history_snapshot, query_text=clean_contexto,
+            compact=bool(is_local) and profile.profile == _prompt_profile.PROFILE_COMPACT,
+        )
+        # The memory builder runs later (inside assemble): tell it this turn
+        # already carries earlier-session context so it never claims "nothing".
+        recall_stats["session_topics"] = bool(session_topics_block)
+        reply_level = self._resolve_reply_level(
+            source, clean_contexto, screen_block, **decision_kwargs(decisions)
+        )
+        clock_kw = self._clock_kwargs(source, clean_contexto, decisions)
+        setup = assembler.assemble(
             contexto,
             source,
             system_prompt=self.system_prompt,
@@ -2600,6 +2570,7 @@ class MotorVocalIA(
             is_local=is_local,
             provider_cfg=provider_cfg,
             request_model=request_model,
+            identity_model=identity_model,
             history_snapshot=history_snapshot,
             digest_block=digest_block,
             memorias_profile_id=memorias_profile_id,
@@ -2614,11 +2585,134 @@ class MotorVocalIA(
             personalization_enabled=pers_enabled,
             memorias_enabled=mem_enabled,
             episodic_memory_block=episodic_memory_block,
+            session_topics_block=session_topics_block,
             intent=intent,
             reasoning_settings_resolver=getattr(self, "_resolve_reasoning_settings", None),
             telemetry_tracker=getattr(self, "inference_telemetry", None),
             residency_ratio_resolver=getattr(self, "_resolve_model_residency_ratio", None),
+            extended_responses=getattr(self, "_extended_responses", False),
+            warmth=getattr(self, "_warmth", DEFAULT_WARMTH),
+            owner_gender=getattr(self, "_owner_gender", DEFAULT_OWNER_GENDER),
+            screen_block=screen_block,
+            vision_note=vision_note,
+            vision_enabled=self._vision_enabled(),
+            vision_read_note=vision_read_note,
+            **({"screen_direct": True} if screen_direct else {}),
+            self_knowledge=getattr(self, "self_knowledge_service", None),
+            active_card_context=getattr(self, "active_card_service", None),
+            persona_custom=bool(getattr(self, "_persona_custom", False)),
+            reply_level=reply_level,
+            prompt_profile=profile.profile,
+            web_block=web_block,
+            web_note=web_note,
+            link_block=link_block,
+            link_note=link_note,
+            lang=effective_lang,
+            **clock_kw,
         )
+        if recall is not None or inject_skip:
+            self._log_recall_telemetry(recall, recall_stats)
+        if decisions is not None:
+            try:  # prompt-trace opt-in record: outcomes only, never new text
+                setup.decisions = decisions.outcomes()
+            except Exception:
+                pass
+        return setup
+
+    def _resolve_prompt_profile(self, request_model: str, is_local: bool):
+        """compact-prompt-profile-20261009: the prompt profile for this turn.
+
+        The parameter size comes from the ``ollama.show`` response that
+        ``_discover_model_ctx`` already fetches and caches for the context
+        budget (the assembler calls it on every local turn anyway), so this
+        adds no RPC. The size is cached per model name. Cloud turns skip the
+        lookup. Logs one content-free ``[PROMPT_PROFILE]`` line. Never raises:
+        any failure is the full profile.
+        """
+        try:
+            size = None
+            if is_local:
+                cache = getattr(self, "_prompt_profile_sizes", None)
+                if cache is None:
+                    cache = {}
+                    self._prompt_profile_sizes = cache
+                if request_model in cache:
+                    size = cache[request_model]
+                else:
+                    try:
+                        self._discover_model_ctx(request_model)
+                        show = (getattr(self, "_ctx_show_cache", None) or {}).get(request_model)
+                        size = _prompt_profile.parameter_size_from_show(show)
+                    except Exception:
+                        size = None
+                    cache[request_model] = size
+            decision = _prompt_profile.resolve(
+                request_model,
+                is_local=is_local,
+                override=getattr(settings, "PROMPT_PROFILE", "auto"),
+                parameter_size=size,
+                max_b=getattr(settings, "PROMPT_COMPACT_MAX_B", _prompt_profile.DEFAULT_COMPACT_MAX_B),
+            )
+        except Exception:
+            decision = _prompt_profile.FULL_UNKNOWN
+        try:
+            # ADR-064: the layout this turn will use (compact and single-prompt
+            # turns stay legacy), appended to the profile line.
+            layout = _prompt_profile.resolve_layout(
+                getattr(settings, "PROMPT_LAYOUT", _prompt_profile.LAYOUT_LEGACY),
+                compact=bool(is_local) and decision.profile == _prompt_profile.PROFILE_COMPACT,
+                use_system_role=bool(getattr(self, "use_system_role", True)),
+            )
+            logger.info(decision.log_line(layout=layout))
+        except Exception:
+            pass
+        return decision
+
+    def _resolve_reply_level(
+        self, source: str, clean_text: str, screen_block: str, decisions=None
+    ) -> Optional[str]:
+        """reply-length-selector-20261009: the reply level for an owner turn,
+        from the owner's setting (in memory) and the clean user text; None for
+        every other source, which keeps their prompt unchanged. Logs one line
+        with the mode, level and reason only, never the user text.
+        laya-decision-layer-20261009: ``decisions`` may replace an auto pick."""
+        if source not in OWNER_POLICY_SOURCES:
+            return None
+        try:
+            mode = reply_length_setting.get_reply_length_mode()
+            level, reason = resolve_reply_level(
+                mode,
+                clean_text,
+                vision_turn=bool(screen_block) and source in SCREEN_INJECT_SOURCES,
+                extended_responses=bool(getattr(self, "_extended_responses", False)),
+            )
+            if decisions is not None:
+                level, reason = apply_reply_length(decisions, level, reason)
+        except Exception:
+            return None
+        logger.info("[REPLY_LENGTH] mode=%s level=%s reason=%s", mode, level, reason)
+        return level
+
+    def _bind_active_card_vector(self, text: str, recall) -> None:
+        """Hand the turn's recall query vector to the active-card service.
+
+        Active-card retrieval reuses the MiniLM query vector the memory recall
+        already computed for this turn (no second embed on the turn path). With
+        no recall (viewer chat, agenda) nothing is bound and the service embeds
+        the query itself, bounded. Never raises.
+        """
+        bind = getattr(getattr(self, "active_card_service", None), "bind_turn_vector", None)
+        if bind is None or recall is None:
+            return
+        try:
+            # Cold fact index: reuse the turn vector so cards never embed twice.
+            vec = recall.fact_query_vec
+            if vec is None:
+                vec = recall.query_vec
+            attempted = vec is not None or recall.fact_fallback in ("none", "timeout", "error")
+            bind(text, vec, attempted=attempted)
+        except Exception:
+            pass
 
     def _cloud_attempt_loop(
         self,
@@ -2657,6 +2751,8 @@ class MotorVocalIA(
         request_model: str,
         contexto,
         history_text: Optional[str],
+        is_local: bool = True,
+        provider_cfg: Optional[dict] = None,
     ) -> tuple:
         return self._generation_orchestrator.run_streaming_attempt(
             setup,
@@ -2664,6 +2760,8 @@ class MotorVocalIA(
             request_model=request_model,
             contexto=contexto,
             history_text=history_text,
+            is_local=is_local,
+            provider_cfg=provider_cfg,
         )
 
     def _handle_stream_sentence(
@@ -2684,6 +2782,56 @@ class MotorVocalIA(
         return self._generation_orchestrator.apply_stream_guard_verdict(
             state, dialogo, source
         )
+
+    def _apply_echo_guard(
+        self,
+        setup: "_GenerationSetup",
+        dialogo: str,
+        *,
+        source: str,
+        streamed: bool,
+        messages: list,
+        opciones_llm: dict,
+        request_model: str,
+        provider_cfg: dict,
+        is_local: bool,
+    ) -> str:
+        """kira-personal-tone-20261007 P4: a reply near-identical to the
+        previous assistant turn gets ONE retry with the `no_echo` nudge. A retry
+        that is empty or blocked by the output guard keeps the original reply;
+        a retry that echoes again is accepted -- never a loop.
+
+        Streamed turns (`streamed=True`) already put their audio on air before
+        any verdict, so they cannot be retried: the echo is only logged
+        (`[ECHO_GUARD] observed`). Agenda sources are exempt (their state
+        machine owns acceptance). Logs carry source and ratio, never text.
+        """
+        if not dialogo or source.startswith("kira-agenda"):
+            return dialogo
+        previous = _echo_guard.last_assistant_text(getattr(setup, "history_snapshot", None))
+        echo, ratio = _echo_guard.is_echo(dialogo, previous)
+        if not echo:
+            return dialogo
+        if streamed:
+            logger.warning("[ECHO_GUARD] observed source=%s ratio=%.2f streamed=1", source, ratio)
+            return dialogo
+        logger.warning("[ECHO_GUARD] blocked source=%s ratio=%.2f", source, ratio)
+        retry_content = self._retry_after_guard_block(
+            messages=messages,
+            opciones_llm=opciones_llm,
+            request_model=request_model,
+            chat_timeout=setup.chat_timeout,
+            provider_cfg=provider_cfg,
+            is_local=is_local,
+            guard_reason=f"Non-negotiable violation [{_echo_guard.ECHO_RULE_ID}]: echo",
+            think=getattr(setup, "think", None),
+            prompt_profile=getattr(setup, "prompt_profile", None),
+        )
+        if retry_content:
+            retry_allowed, _ = _output_guard_with_tts_check(retry_content, source=source)
+            if retry_allowed:
+                return retry_content
+        return dialogo
 
     def _finalize_generation(
         self,
@@ -2755,6 +2903,17 @@ class MotorVocalIA(
         )
 
         dialogo = eval_res.dialogo
+        if dialogo:
+            try:
+                from opencohost.core.speech.tts_sanitizer import _tts_strip_speaker_prefix
+                dialogo = _tts_strip_speaker_prefix(dialogo)
+            except Exception:
+                pass
+        if dialogo and _web_sources.carries_web_context(setup):
+            # runtime-fixes-20261110 T5: the app shows the real sources itself, so a
+            # trailing "Fuente: ..." line the model wrote (it can be invented) is
+            # removed before the reply is spoken, shown or committed.
+            dialogo = self._drop_source_line(dialogo, source)
         elapsed = eval_res.elapsed
         self._pregen_last_gen_duration = elapsed
 
@@ -2852,16 +3011,49 @@ class MotorVocalIA(
         else:
             logger.info(f"Motor: {eval_res.model_trace.trace_msg}")
 
+        # runtime-fixes-20261110 T1: a streamed attempt reverted by a guard before any
+        # audio. The carried rule id drives the buffered recovery below, so it never
+        # depends on the text (an unterminated dump can be empty after trimming).
+        reverted_rule = (
+            getattr(outcome.stream, "reverted_rule", None)
+            if streamed_job is None and outcome.stream is not None
+            else None
+        )
+
         # 4. Empty output handling
-        if not dialogo:
+        if not dialogo and not reverted_rule:
             self._log(f"⚠️ {request_model} devolvió respuesta vacía ({elapsed:.2f}s).", level="warning")
             logger.warning(f"Empty LLM response. Raw repr: {repr(outcome.raw_content)}")
+            if getattr(self, "_cold_warming_notified", False):
+                self._cold_warming_notified = False
+                if getattr(self, "ui_callback", None) is not None:
+                    self.ui_callback("ready")
             if not is_local:
                 if getattr(self, "ui_callback", None) is not None:
                     self.ui_callback("cloud_llm_error")
                 self._handle_cloud_failure(
                     source, failure_class=cloud_llm_client.CLOUD_ERROR_TRANSIENT
                 )
+            if (
+                streamed_job is not None
+                and outcome.stream is not None
+                and not outcome.stream.handled
+            ):
+                # tts-first-chunk-boost-20261015 C2: audio is already on air
+                # (e.g. a soft first chunk) but the final text is empty (a
+                # length cut with no terminator). Seal the job and commit the
+                # spoken prefix, or the router waits on it forever.
+                self._stream_partial_exit(outcome.stream, reason="empty_final_text")
+            elif is_crisis_turn() and streamed_job is None:
+                # S1: a crisis message is never answered with silence.
+                crisis_line = self._guardrail_fallback_line(source, "")
+                if crisis_line:
+                    turn_timing.mark_outcome("fallback")
+                    if commit_history:
+                        self._commit_history(
+                            contexto, crisis_line, source=source, history_text=history_text,
+                        )
+                    return crisis_line
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
@@ -2895,8 +3087,19 @@ class MotorVocalIA(
         else:
             allowed = eval_res.guard_allowed
 
+        guard_reason = eval_res.guard_reason
+        if reverted_rule:
+            allowed = False
+            guard_reason = (
+                f"Non-negotiable violation [{reverted_rule}]: "
+                "streamed attempt reverted before any audio"
+            )
+
         if not allowed:
-            self._log(f"Salida bloqueada por guardrail: {eval_res.guard_reason}", level="warning")
+            self._log(f"Salida bloqueada por guardrail: {guard_reason}", level="warning")
+            if commit_history:
+                turn_state.emit(TurnEvent.GUARD_BLOCK)
+                turn_state.emit(TurnEvent.GUARD_RETRY)
             retry_content = self._retry_after_guard_block(
                 messages=setup.messages,
                 opciones_llm=setup.opciones_llm,
@@ -2904,6 +3107,9 @@ class MotorVocalIA(
                 chat_timeout=setup.chat_timeout,
                 provider_cfg=provider_cfg,
                 is_local=is_local,
+                guard_reason=guard_reason,
+                think=getattr(setup, "think", None),
+                prompt_profile=getattr(setup, "prompt_profile", None),
             )
             if retry_content and source.startswith("kira-agenda"):
                 retry_content = self._sanitize_agenda_output(retry_content)
@@ -2911,18 +3117,42 @@ class MotorVocalIA(
                 if transformer is not None:
                     try:
                         retry_content = transformer(retry_content)
-                    except Exception:
+                    except Exception as transform_exc:
+                        turn_state.fail_reason("agenda_transform_failed", transform_exc)
                         logger.exception("Agenda output transformer failed (guardrail retry)")
             if retry_content:
                 retry_allowed, _ = _output_guard_with_tts_check(retry_content, source=source)
+                retry_claim = _search_claim.violated_rule(retry_content, setup) if retry_allowed else None
+                if retry_claim is not None:
+                    _search_claim.log_claim(
+                        retry_claim, stage="guard_retry", source=source, chars=len(retry_content)
+                    )
+                    retry_allowed = False
+                if retry_allowed and _prompt_echo.detector_for(setup).text_has_echo(retry_content):
+                    _prompt_echo.log_prompt_echo(
+                        stage="guard_retry", source=source, chars=len(retry_content)
+                    )
+                    retry_allowed = False
+                retry_leak = _prompt_echo.leak_kind(retry_content, source) if retry_allowed else None
+                if retry_leak is not None:
+                    _prompt_echo.log_prompt_leak(
+                        stage="guard_retry", source=source, kind=retry_leak, chars=len(retry_content)
+                    )
+                    retry_allowed = False
                 if retry_allowed:
                     self._log("Guardrail retry: respuesta corregida aceptada tras un intento adicional.")
+                    turn_timing.mark_outcome("retried")
                     dialogo = retry_content
+                    if _web_sources.carries_web_context(setup):
+                        dialogo = self._drop_source_line(dialogo, source)
                     allowed = True
+            if not allowed and commit_history:
+                turn_state.emit(TurnEvent.GUARD_BLOCK)
 
         if not allowed:
-            fallback = self._guardrail_fallback_line(source, eval_res.guard_reason)
+            fallback = self._guardrail_fallback_line(source, guard_reason)
             if fallback:
+                turn_timing.mark_outcome("fallback")
                 self._log("Guardrail fallback: usando línea neutral sin LLM.")
                 if commit_history:
                     self._commit_history(
@@ -2932,6 +3162,12 @@ class MotorVocalIA(
             if commit_history:
                 self._invalidate_pregen_epoch()
             return ""
+
+        dialogo = self._apply_echo_guard(
+            setup, dialogo, source=source, streamed=(streamed_job is not None),
+            messages=setup.messages, opciones_llm=setup.opciones_llm,
+            request_model=request_model, provider_cfg=provider_cfg, is_local=is_local,
+        )
 
         self._last_llm_failure = None
         self._last_cloud_failure_class = None
@@ -2946,7 +3182,10 @@ class MotorVocalIA(
             )
             if commit_history:
                 self._invalidate_pregen_epoch()
-            return self._guardrail_fallback_line(source) or ""
+            repetition_line = self._guardrail_fallback_line(source) or ""
+            if repetition_line:
+                turn_timing.mark_outcome("fallback")
+            return repetition_line
 
         # 8. Agenda acceptance
         if source.startswith("kira-agenda") and commit_history and not self._accept_agenda_output(dialogo):
@@ -2965,6 +3204,16 @@ class MotorVocalIA(
             self._commit_history(contexto, dialogo, source=source, history_text=history_text)
 
         return dialogo
+
+    @staticmethod
+    def _drop_source_line(dialogo: str, source: str) -> str:
+        """``dialogo`` without a trailing source attribution. Logs a char count only."""
+        stripped = _web_sources.strip_trailing_source(dialogo)
+        if stripped != dialogo:
+            logger.info(
+                "[SOURCE_LINE] removed source=%s chars=%d", source, len(dialogo) - len(stripped)
+            )
+        return stripped
 
     def ctx_telemetry_snapshot(self, sources: Optional[tuple] = None) -> dict:
         """Unit 2.3 (runtime_findings_batch_20260731 F10): read-only view of the
@@ -2990,188 +3239,120 @@ class MotorVocalIA(
         stamp: Optional[TurnStamp] = None,
         bundle_followers: Optional[list] = None,
     ):
-        # `bundle_followers` (interruptible_speech_architecture_20260804): the
-        # ORIGINAL queue tuples absorbed behind this turn's head when an owner
-        # bundle formed, forwarded so a non-committing return can hand them back
-        # to _priority_queue instead of dropping them — they exist nowhere else.
-        # None/empty on every other turn. See _requeue_owner_bundle_followers.
-        #
-        # §7 instrument: the request -> TTS-receives-text span. A LOCAL, not an
-        # instance slot: _hablar has four callers and two of them run on
-        # background threads (play_prefetched_agenda's detached speaker at :1883
-        # and the CloudFallbackWarm worker at :3715), so a shared slot read
-        # inside _hablar could be consumed by a turn that never opened it. This
-        # is the only path that generates and speaks on one thread, and the only
-        # one where the span means anything — a pregenerated draft is spoken much
-        # later by design (that overlap IS the feature).
         request_start = time.monotonic()
-        # C1 (refactor_core_api_20260802): the two submit-time fields now ride
-        # in ONE optional TurnStamp instead of two independently-optional
-        # kwargs. None (no stamp) is the same "never submitted through that
-        # seam" state the old submitted_at=None / submitted_under_provider=None
-        # pair encoded.
         submitted_at = stamp.submitted_at if stamp is not None else None
         submitted_under_provider = stamp.submitted_under_provider if stamp is not None else None
-        # Unit 4.1 (runtime_findings_batch_20260731, F5): the ORIGINAL bug —
-        # TURN_LATENCY measured engine-receipt -> TTS only, so the queue wait
-        # before this method ever ran (13.8-29.1 min in the 2026-07-30 run) was
-        # invisible. submitted_at (monotonic, stamped at the API dispatch entry
-        # in dispatch.py) lets us report the FULL wait as an ADDITIVE field —
-        # None for any item with no stamp (agenda-internal turns, the
-        # accumulation-buffer flush) logs with no fake value, never a fake 0.
         queue_wait_ms: Optional[int] = None
         if submitted_at is not None:
             queue_wait_ms = max(0, int((request_start - submitted_at) * 1000))
-        # Unit 4.2 (F12 closure): capture the ANSWERING provider posture right
-        # before generation -- the same `_provider_config`/
-        # `_cloud_fallback_active` snapshot `_generar_dialogo` takes a moment
-        # later at its own entry (F15: collapsed to one `is_local` bool),
-        # so this is honest disclosure of what generation is ABOUT to use,
-        # not a second, possibly-drifted read taken after the (possibly
-        # long) generation call returns. None unless this turn was actually
-        # tagged at submit time (`submitted_under_provider`) -- an
-        # agenda/accumulated turn was never "submitted" through that seam.
-        answered_by_provider: Optional[str] = None
-        answered_by_transport: Optional[str] = None
-        provider_changed_while_queued: Optional[bool] = None
-        if submitted_under_provider is not None:
-            _answer_state = self.provider_runtime_state()
-            answered_by_provider = _answer_state["provider"]
-            answered_by_transport = _answer_state["transport"]
-            provider_changed_while_queued = submitted_under_provider != answered_by_provider
-        # llm_output_streaming_20260813: fresh turn — clear the streamed-turn
-        # handoffs BEFORE generating so a stale value from a direct
-        # _generar_dialogo call (tests, future callers) can never leak into
-        # this turn's speak decision. Single engine thread, so the write/read
-        # pair cannot interleave with another turn.
         self._streamed_turn_job = None
         self._streamed_turn_prefix = None
-        dialogo = self._generar_dialogo(
-            contexto, source=source, commit_history=True, history_text=history_text
-        )
+        origin = stamp.origin if stamp is not None else None
+        with turn_timing.turn_clock() as stage_ms:
+            dialogo = self._generar_dialogo(
+                contexto, source=source, commit_history=True, history_text=history_text,
+                **({"origin": origin} if origin is not None else {}),
+            )
         streamed_job = self._streamed_turn_job
         self._streamed_turn_job = None
         streamed_prefix = self._streamed_turn_prefix
         self._streamed_turn_prefix = None
+        failure_reason = getattr(dialogo, "failure_reason", None)
+        answered_by_provider: Optional[str] = None
+        answered_by_transport: Optional[str] = None
+        provider_changed_while_queued: Optional[bool] = None
+        if submitted_under_provider is not None:
+            answered_by_provider = getattr(dialogo, "answered_by_provider", None)
+            answered_by_transport = getattr(dialogo, "answered_by_transport", None)
+            if answered_by_provider is None:
+                _answer_state = self.provider_runtime_state()
+                answered_by_provider = _answer_state["provider"]
+                answered_by_transport = _answer_state["transport"]
+            provider_changed_while_queued = submitted_under_provider != answered_by_provider
+        # Every foreground turn ends with exactly one [TURN_LATENCY] line: ok,
+        # retried or fallback when it produced a reply, dropped when it did not.
+        engine_ms = int((time.monotonic() - request_start) * 1000)
+        turn_path = "stream" if streamed_job is not None else "buffered"
         if dialogo:
-            engine_ms = int((time.monotonic() - request_start) * 1000)
-            if queue_wait_ms is not None:
-                logger.info(
-                    "[TURN_LATENCY] source=%s request_to_tts_ms=%d queue_wait_ms=%d request_to_tts_total_ms=%d",
-                    source, engine_ms, queue_wait_ms, queue_wait_ms + engine_ms,
+            self._log_turn_latency(
+                source, engine_ms, queue_wait_ms, stage_ms, turn_path,
+                turn_timing.outcome_of(stage_ms),
+            )
+            turn_state.emit(TurnEvent.COMPLETE, ms=engine_ms)
+            if queue_wait_ms is not None and source == "direct" and queue_wait_ms > DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000:
+                logger.warning(
+                    "[DIRECT_WAIT_EXCEEDED] source=direct queue_wait_ms=%d bound_ms=%d",
+                    queue_wait_ms, int(DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000),
                 )
-                # Unit 4.2 (D3b): the documented bound is "current block's
-                # remaining speech + one generation" (DIRECT_ANSWER_MAX_WAIT_
-                # SECONDS, settings.py) -- NOT an enforcement timer, nothing is
-                # cancelled or retried because of this. Metadata-only WARNING,
-                # scoped strictly to source=="direct" per D3, so the claim
-                # stays honest without ever touching the reply itself.
-                if source == "direct" and queue_wait_ms > DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000:
-                    logger.warning(
-                        "[DIRECT_WAIT_EXCEEDED] source=direct queue_wait_ms=%d bound_ms=%d",
-                        queue_wait_ms, int(DIRECT_ANSWER_MAX_WAIT_SECONDS * 1000),
-                    )
-            else:
-                logger.info(
-                    "[TURN_LATENCY] source=%s request_to_tts_ms=%d",
-                    source, engine_ms,
-                )
-            # FIX-B2: single emit chokepoint for every spoken live line — the
-            # main reply AND the guardrail/repetition fallbacks all arrive here
-            # as a non-empty `dialogo` and are spoken below, so last-reply stays
-            # in sync with what Kira actually says. Agenda prefetch playback
-            # emits from its own speaker (play_prefetched_agenda). Guarded, so a
-            # raising callback never blocks speech. R8: Kira's own text only.
-            #
-            # The TRUE source travels — this used to relabel every non-agenda
-            # source to "kira" right here, which destroyed the only record of
-            # whether a reply answered chat, direct or PTT before any consumer
-            # could read it. The uniform "kira" attribution is a PRESENTATION
-            # concern of the one thing that surfaces it, so it now lives at that
-            # boundary (ChatReplySink.record, api/engine_host.py) where the
-            # published `source` field is still byte-identical. Anything wired
-            # here that wants uniform attribution must derive it the same way,
-            # NOT push the relabel back up into the engine.
-            # C1 (refactor_core_api_20260802): _emit_dialogue's OWN branching
-            # (kept, see its docstring) is entirely value-based — gated on
-            # `queue_wait_ms is not None` / `submitted_under_provider is not
-            # None`, not on how many kwargs the caller bothered to pass. So the
-            # caller can pass every field unconditionally: an unstamped turn
-            # has queue_wait_ms=None and the rest None too, which routes
-            # _emit_dialogue into its own no-kwargs branch exactly as before —
-            # a pinned dialogue_callback spy assertion (2 positional args)
-            # never sees a surprise kwarg.
-            self._emit_dialogue(
+            feed_turn_id = self._emit_dialogue(
                 dialogo, source, queue_wait_ms=queue_wait_ms,
                 answered_by_provider=answered_by_provider,
                 answered_by_transport=answered_by_transport,
                 submitted_under_provider=submitted_under_provider,
                 provider_changed_while_queued=provider_changed_while_queued,
+                web_searched=bool(getattr(dialogo, "web_searched", False)),
+                web_sources=getattr(dialogo, "web_sources", ()),
             )
 
-            # Step 2: playback (and, with it, the chat spoken clock) moved
-            # behind `_speak_or_submit`. Under the router this returns while
-            # the job is still QUEUED, so nothing after this line may assume
-            # speech completed — see `_complete_processing_cycle`'s idle gate
-            # and `_drain_control_commands`' `_speech_active` gate.
-            #
-            # llm_output_streaming_20260813 §3: a turn that STREAMED already
-            # owes its audio to the router's growing job (submitted lazily at
-            # the first clean sentence, sealed at finalize) — submitting the
-            # full text again would speak the whole turn twice.
             if streamed_job is None:
-                self._speak_or_submit(dialogo, source=source)
+                if getattr(dialogo, "cloud_fallback_retry", False):
+                    self._maybe_discard_stale_fallback_notice(source)
+                if feed_turn_id is not None:
+                    self._speak_or_submit(dialogo, source=source, feed_turn_id=feed_turn_id)
+                else:
+                    self._speak_or_submit(dialogo, source=source)
         else:
-            # llm_output_streaming_20260813 §7. `streamed_prefix` is NOT part
-            # of the chain below — phase 2 (owner decision 1) proved it must
-            # not be. A streamed BUNDLE that partial-exits has both a spoken
-            # prefix and followers, and as an `elif` the prefix branch
-            # swallowed the requeue and lost every absorbed owner question
-            # silently: the exact incident-grade failure
-            # `_requeue_owner_bundle_followers` exists to prevent. Emitting
-            # and requeueing are independent facts about the same turn, so
-            # they are independent statements.
+            self._log_turn_latency(source, engine_ms, queue_wait_ms, stage_ms, turn_path, "dropped")
+            turn_state.emit(TurnEvent.DROP, ms=engine_ms)
             if streamed_prefix:
-                # Partial-turn exit: generation returned "" but this turn's
-                # head ALREADY went out through the router's growing job, and
-                # `_stream_partial_exit` already sealed it and committed the
-                # prefix to history.
-                #
-                # The chain below was written on the premise that an empty
-                # return means SILENCE — the `turn_dropped` toast says so in
-                # its own comment ("instead of leaving them to infer it from
-                # silence"). That premise is false here: the audience heard
-                # the head, so the transcript must show what was spoken.
-                self._emit_dialogue(streamed_prefix, source)
+                self._emit_dialogue(
+                    streamed_prefix, source,
+                    web_searched=bool(getattr(dialogo, "web_searched", False)),
+                )
             if source.startswith("kira-agenda"):
-                # Empty or guardrail-blocked agenda generation: _generar_dialogo
-                # returned "", so _hablar never runs and no speaking_start event
-                # fires. Signal the failure through the SAME validator hook the
-                # success path uses (_accept_agenda_output at line ~1156) so the
-                # controller leaves GENERATING and its recovery ladder engages,
-                # instead of stalling the autonomous loop silently.
                 self._accept_agenda_output("")
             elif bundle_followers:
-                # The same non-committing return, for an owner bundle: the head
-                # is spent (exactly what a failed single turn spent before
-                # bundling) and the followers go back to the queue rather than
-                # dying with this frame. Mutually exclusive with the branch
-                # above by construction — a bundle is tagged
-                # OWNER_BUNDLE_SOURCE, never "kira-agenda*".
-                #
-                # Phase 2: this now ALSO runs when the bundle streamed and died
-                # after its first submit, on top of the emit above. Owner
-                # decision 1, 2026-08-13 — see `_requeue_owner_bundle_followers`.
                 self._requeue_owner_bundle_followers(bundle_followers)
-            elif source in ("ptt", "direct") and not streamed_prefix:
-                # F1 companion (runtime-findings 2026-08-07): a plain ptt/direct
-                # turn matches no branch above when generation still comes back
-                # empty (guardrail block with no fallback line, or both the cloud
-                # attempt AND its one-shot local retry failing) -- tell the owner
-                # the turn was dropped instead of leaving them to infer it from
-                # silence. Not when a prefix aired: it audibly did not drop.
-                self.ui_callback("turn_dropped")
+                if failure_reason == "reasoning_budget_exhausted" and not streamed_prefix:
+                    self.ui_callback("reasoning_budget_exhausted")
+                elif not streamed_prefix:
+                    self.ui_callback("turn_dropped")
+            elif source in ("ptt", "direct", OWNER_BUNDLE_SOURCE) and not streamed_prefix:
+                if failure_reason == "reasoning_budget_exhausted":
+                    self.ui_callback("reasoning_budget_exhausted")
+                else:
+                    self.ui_callback("turn_dropped")
 
+
+    def _log_turn_latency(
+        self,
+        source: str,
+        engine_ms: int,
+        queue_wait_ms: Optional[int],
+        stage_ms: dict,
+        turn_path: str,
+        outcome: str,
+    ) -> None:
+        """The one ``[TURN_LATENCY]`` line of a foreground turn. Numbers and enum
+        codes only: no reply text is logged on any exit. ``tid=`` (when a
+        foreground turn is open) joins it to the other per-turn lines."""
+        tid = turn_state.current_tid()
+        tid_part = f" tid={tid}" if tid else ""
+        turn_state.record_latency(
+            engine_ms=engine_ms, queue_wait_ms=queue_wait_ms, stage_ms=stage_ms,
+            path=turn_path, outcome=outcome,
+        )
+        if queue_wait_ms is not None:
+            logger.info(
+                "[TURN_LATENCY] source=%s request_to_tts_ms=%d queue_wait_ms=%d request_to_tts_total_ms=%d %s path=%s outcome=%s%s",
+                source, engine_ms, queue_wait_ms, queue_wait_ms + engine_ms,
+                turn_timing.stage_fields(stage_ms), turn_path, outcome, tid_part,
+            )
+        else:
+            logger.info(
+                "[TURN_LATENCY] source=%s request_to_tts_ms=%d %s path=%s outcome=%s%s",
+                source, engine_ms, turn_timing.stage_fields(stage_ms), turn_path, outcome, tid_part,
+            )
 
     def _emit_dialogue(
         self,
@@ -3182,7 +3363,9 @@ class MotorVocalIA(
         answered_by_transport: Optional[str] = None,
         submitted_under_provider: Optional[str] = None,
         provider_changed_while_queued: Optional[bool] = None,
-    ) -> None:
+        web_searched: bool = False,
+        web_sources: tuple = (),
+    ) -> Optional[int]:
         """P3 producer sink: forwards Kira's own generated reply text.
 
         Opt-in (dialogue_callback defaults to None). A raising callback must
@@ -3197,25 +3380,76 @@ class MotorVocalIA(
         provider-disclosure kwargs together (Unit 4.2, F12 closure) — so
         every existing caller/test pinned on an exact shape (e.g.
         ChatReplySink.record's 2-positional assert) stays byte-identical.
+
+        Returns the feed turn id the sink recorded (a real int), else None, so
+        the caller can tag the speech job it submits for the same reply.
         """
         if self.dialogue_callback is None:
-            return
+            return None
+        # web_searched is this turn's own value (never instance state, so pregen
+        # daemon threads cannot steal or clear a foreground turn's flag). The
+        # kwarg is only sent when True so every existing callback shape holds.
+        web_kw = {"web_searched": True} if web_searched else {}
+        if web_sources:
+            # runtime-fixes-20261110 T5: only the desktop reply sink gets them, and
+            # only when a lookup produced some (an exact-shape callback is unchanged).
+            web_kw["web_sources"] = _web_sources.as_dicts(web_sources)
         try:
             if queue_wait_ms is not None:
                 if submitted_under_provider is not None:
-                    self.dialogue_callback(
+                    recorded = self.dialogue_callback(
                         text, source, queue_wait_ms=queue_wait_ms,
                         answered_by_provider=answered_by_provider,
                         answered_by_transport=answered_by_transport,
                         submitted_under_provider=submitted_under_provider,
                         provider_changed_while_queued=provider_changed_while_queued,
+                        **web_kw,
                     )
                 else:
-                    self.dialogue_callback(text, source, queue_wait_ms=queue_wait_ms)
+                    recorded = self.dialogue_callback(
+                        text, source, queue_wait_ms=queue_wait_ms, **web_kw
+                    )
             else:
-                self.dialogue_callback(text, source)
-        except Exception:
+                recorded = self.dialogue_callback(text, source, **web_kw)
+        except Exception as callback_exc:
+            turn_state.fail_reason("dialogue_callback_failed", callback_exc)
             logger.exception("dialogue_callback failed")
+            return None
+        if isinstance(recorded, int) and not isinstance(recorded, bool):
+            return recorded
+        return None
+
+    def _emit_stream_chunk(self, state: Any) -> None:
+        """Forward in-flight streaming chunks to ChatReplySink if supported."""
+        if self.dialogue_callback is None:
+            return
+        stream_sink = getattr(self.dialogue_callback, "__self__", None)
+        recorder = getattr(stream_sink, "record_stream_chunk", None)
+        if callable(recorder):
+            job_id = getattr(getattr(state, "job", None), "job_id", id(state))
+            stream_id = f"stream-job-{job_id}"
+            display_text = getattr(state, "display_prefix", lambda: "")()
+            if not display_text:
+                display_text = getattr(state, "spoken_prefix", lambda: "")()
+            if not display_text and hasattr(state, "raw_sentences") and state.raw_sentences:
+                display_text = " ".join(state.raw_sentences).strip()
+            if not display_text and hasattr(state, "appended_sentences"):
+                display_text = " ".join(state.appended_sentences).strip()
+            chunks = list(getattr(getattr(state, "job", None), "chunks", []))
+            try:
+                recorded_turn_id = recorder(
+                    stream_id=stream_id,
+                    text=display_text,
+                    fragments=chunks,
+                    source=getattr(state, "source", "direct"),
+                    web_searched=bool(getattr(state, "web_searched", False)),
+                )
+                if state.job is not None and getattr(state.job, "turn_id", None) is None and recorded_turn_id:
+                    state.job.turn_id = int(recorded_turn_id)
+                if state.job is not None and recorded_turn_id:
+                    state.job.feed_turn_id = int(recorded_turn_id)
+            except Exception:
+                logger.exception("record_stream_chunk failed")
 
     def _log(self, msg, level="info"):
         prefix = "[IA]"

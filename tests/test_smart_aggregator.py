@@ -15,6 +15,7 @@ import json
 import logging
 import sqlite3
 import time
+from pathlib import Path
 from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,69 @@ from opencohost.smart_aggregator.aggregator import Aggregator
 from opencohost.smart_aggregator.intent_aggregator import IntentAggregator, IntentClassifier
 from opencohost.smart_aggregator.filter_policy import get_preset, list_presets, PRESETS
 from opencohost.smart_aggregator.diagnostics import FilterDiagnostics
+
+
+def _packaged_aggregator_fixture(tmp_path, monkeypatch, config):
+    import opencohost.smart_aggregator.aggregator as module
+    from opencohost.config import storage
+
+    package = tmp_path / "install" / "runtime" / "opencohost"
+    (package / "config").mkdir(parents=True)
+    (package / "smart_aggregator").mkdir()
+    (package / "config" / "smart_aggregator.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(module, "__file__", str(package / "smart_aggregator" / "aggregator.py"))
+    external = tmp_path / "external"
+    monkeypatch.setattr(storage, "USER_DATA_DIR", external)
+    return package, external
+
+
+def test_packaged_aggregator_relative_history_uses_external_data_root(tmp_path, monkeypatch, smart_aggregator_config):
+    config = deepcopy(smart_aggregator_config)
+    config["history"].update(db_path="data/smart_aggregator/sessions.db", jsonl_path="data/smart_aggregator/chat_log.jsonl")
+    package, external = _packaged_aggregator_fixture(tmp_path, monkeypatch, config)
+
+    aggregator = Aggregator()
+    session = aggregator.history.start_session("test", "synthetic")
+    aggregator.history.add_context_snapshot(session, "Compact synthetic context")
+
+    assert Path(aggregator.history.db_path) == external / "data/smart_aggregator/sessions.db"
+    assert Path(aggregator.history.jsonl_path) == external / "data/smart_aggregator/chat_log.jsonl"
+    assert not (package / "data").exists()
+    assert aggregator.history.get_recent_context_snapshots(session, 1)[0]["summary"] == "Compact synthetic context"
+
+
+def test_packaged_aggregator_reads_preserved_history_at_exact_active_path(tmp_path, monkeypatch, smart_aggregator_config):
+    import shutil
+
+    config = deepcopy(smart_aggregator_config)
+    config["history"].update(db_path="data/smart_aggregator/sessions.db", jsonl_path="data/smart_aggregator/chat_log.jsonl")
+    package, external = _packaged_aggregator_fixture(tmp_path, monkeypatch, config)
+    legacy = package / "data/smart_aggregator"
+    history = SessionHistory(str(legacy / "sessions.db"), str(legacy / "chat_log.jsonl"), 168)
+    session = history.start_session("test", "synthetic")
+    history.add_context_snapshot(session, "Preserved compact context")
+    destination = external / "data/smart_aggregator/sessions.db"
+    destination.parent.mkdir(parents=True)
+    shutil.copyfile(legacy / "sessions.db", destination)
+
+    aggregator = Aggregator()
+
+    assert Path(aggregator.history.db_path) == destination
+    assert aggregator.history.get_recent_context_snapshots(session, 1)[0]["summary"] == "Preserved compact context"
+
+
+def test_packaged_aggregator_keeps_explicit_absolute_history_paths(tmp_path, monkeypatch, smart_aggregator_config):
+    config = deepcopy(smart_aggregator_config)
+    chosen = tmp_path / "chosen-history"
+    config["history"].update(db_path=str(chosen / "sessions.db"), jsonl_path=str(chosen / "chat_log.jsonl"))
+    package, external = _packaged_aggregator_fixture(tmp_path, monkeypatch, config)
+
+    aggregator = Aggregator()
+
+    assert Path(aggregator.history.db_path) == chosen / "sessions.db"
+    assert Path(aggregator.history.jsonl_path) == chosen / "chat_log.jsonl"
+    assert not external.exists()
+    assert not (package / "data").exists()
 
 MOCK_MESSAGES_20 = [
     {"user": f"user{i}", "text": f"Mensaje de prueba numero {i} para Kira", "timestamp": time.time() + i}

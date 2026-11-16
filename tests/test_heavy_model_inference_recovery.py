@@ -1,8 +1,9 @@
 """Regression specs for stuck heavy-model inference recovery.
 
-These tests intentionally describe the desired recovery contract before the
-implementation exists. They are marked xfail so the repo can keep moving while
-the bug track is documented and prioritized.
+These tests pin the watchdog + rollback recovery contract (fix ``a8830bb``,
+runtime-validated 2026-08-13). The model-metadata probe (``_fetch_show``,
+module-level ``ollama.show``) is stubbed so the suite stays hermetic: without a
+local Ollama daemon each probe blocks ~2s and the recovery overruns the waits.
 """
 
 from __future__ import annotations
@@ -46,6 +47,10 @@ def _make_motor(*, last_model_data=None, tmp_dir=None):
             settings.LAST_MODEL_FILE = original_last_model_file
 
     motor.ollama = MagicMock()
+    # Hermetic: ``_fetch_show`` calls module-level ``ollama.show``, which
+    # ``motor.ollama`` does not cover. ``{}`` degrades to the fallback ctx and
+    # no reasoning capabilities, like a cloud provider.
+    motor._fetch_show = MagicMock(return_value={})
     motor.pygame = MagicMock()
     motor.is_ready = True
     return motor, log_queue, ui_events

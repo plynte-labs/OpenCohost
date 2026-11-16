@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 from opencohost.config.settings import (
@@ -28,6 +31,7 @@ from opencohost.config.settings import (
 )
 from opencohost.config.logger import get_logger
 from opencohost.i18n import active as i18n_active
+from opencohost.i18n.tags import primary as i18n_primary
 
 logger = get_logger()
 
@@ -40,8 +44,26 @@ _FIELD_LABELS = (
     ("custom_instructions", "style"),
 )
 
-# mtime cache — per-turn engine reads are usually zero-I/O (design §1).
-_cache_state: dict = {"path": None, "mtime": None, "data": None}
+# Task B (kira-natural-replies-20261111): identity/directive fields stay in the
+# stable system message; topic facts (occupation, interests) are conditional.
+_IDENTITY_FIELDS = frozenset({"nickname", "custom_instructions"})
+_FACT_FIELDS = frozenset({"occupation", "interests"})
+
+# Per-path mtime cache — per-turn engine reads are usually zero-I/O (design §1)
+# while keeping es and en entries strictly isolated.
+_cache_state: dict[str, dict] = {}
+
+
+def _resolve_locale(locale: str | None = None) -> str:
+    tag = locale if locale is not None else i18n_active.get_active_bundle().code
+    return "en" if i18n_primary(tag) == "en" else "es"
+
+
+def _personalization_path(locale: str | None = None) -> str:
+    if _resolve_locale(locale) == "en":
+        base = Path(PERSONALIZATION_FILE)
+        return str(base.with_name(f"{base.stem}_en{base.suffix}"))
+    return PERSONALIZATION_FILE
 
 
 def _defaults() -> dict:
@@ -77,16 +99,17 @@ def _clamp(data: dict) -> dict:
     return clamped
 
 
-def load_personalization() -> dict:
+def load_personalization(locale: str | None = None) -> dict:
     """Load the personalization store. Fail-open to defaults on any error —
     absent file, corrupt JSON, or a non-dict payload never raises.
 
-    Cached on the file's mtime: repeated calls within the same turn (or
-    across turns with no intervening save) never re-hit disk.
+    Cached on the file's mtime per path: repeated calls within the same turn
+    (or across turns with no intervening save) never re-hit disk, while es and
+    en entries stay isolated.
     """
-    path = PERSONALIZATION_FILE
+    path = _personalization_path(locale)
     if not os.path.exists(path):
-        _cache_state.update(path=path, mtime=None, data=None)
+        _cache_state.pop(path, None)
         return _defaults()
 
     try:
@@ -95,12 +118,9 @@ def load_personalization() -> dict:
         logger.warning(f"Could not stat personalization file {path}: {type(e).__name__}")
         return _defaults()
 
-    if (
-        _cache_state["path"] == path
-        and _cache_state["mtime"] == mtime
-        and _cache_state["data"] is not None
-    ):
-        return dict(_cache_state["data"])
+    cached = _cache_state.get(path)
+    if cached is not None and cached["mtime"] == mtime and cached["data"] is not None:
+        return dict(cached["data"])
 
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -112,17 +132,17 @@ def load_personalization() -> dict:
         logger.warning(f"Could not load personalization from {path}: {type(e).__name__}")
         return _defaults()
 
-    _cache_state.update(path=path, mtime=mtime, data=data)
+    _cache_state[path] = {"mtime": mtime, "data": data}
     return dict(data)
 
 
-def save_personalization(data: dict) -> bool:
+def save_personalization(data: dict, locale: str | None = None) -> bool:
     """Write the personalization store atomically. Never raises; returns
     False on failure so callers (the API handlers) can surface a 503 instead
     of a false 200. Never logs field content — only the path and exception
     type (CLAUDE.md: never expose raw chat/profile content in logs).
     """
-    path = PERSONALIZATION_FILE
+    path = _personalization_path(locale)
     target_dir = os.path.dirname(path) or "."
     payload = _clamp({**_defaults(), **data})
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -147,16 +167,20 @@ def save_personalization(data: dict) -> bool:
         mtime = os.stat(path).st_mtime
     except OSError:
         mtime = None
-    _cache_state.update(path=path, mtime=mtime, data=payload)
+    _cache_state[path] = {"mtime": mtime, "data": payload}
     return True
 
 
-def clear_personalization() -> bool:
+def clear_personalization(locale: str | None = None) -> bool:
     """Reset the store to defaults (purge action)."""
-    return save_personalization(_defaults())
+    return save_personalization(_defaults(), locale=locale)
 
 
-def build_injection_block(sanitize_fn: Callable[[str], str]) -> str:
+def build_injection_block(
+    sanitize_fn: Callable[[str], str],
+    part: str = "all",
+    locale: str | None = None,
+) -> str:
     """Build the read-only <perfil_streamer> block, or "" when disabled/empty.
 
     Each non-empty field is sanitized independently (data-not-instructions,
@@ -171,14 +195,23 @@ def build_injection_block(sanitize_fn: Callable[[str], str]) -> str:
     label/delimiter overhead (149 chars), so worst case at max caps is 969
     chars. The backstop truncates the joined field lines — never the
     closing tag — so the read-only wrapper is always syntactically closed.
+
+    ``part`` selects the fields: "all" (default, every field), "identity"
+    (nickname + style, the stable system part) or "facts" (occupation +
+    interests, the conditional preamble part). Each part gets the same
+    backstop independently.
     """
     try:
-        data = load_personalization()
+        data = load_personalization() if locale is None else load_personalization(locale=locale)
         if not data.get("enabled", True):
             return ""
 
         lines = []
         for field, label in _FIELD_LABELS:
+            if part == "identity" and field not in _IDENTITY_FIELDS:
+                continue
+            if part == "facts" and field not in _FACT_FIELDS:
+                continue
             value = (data.get(field) or "").strip()
             if not value:
                 continue
@@ -203,3 +236,56 @@ def build_injection_block(sanitize_fn: Callable[[str], str]) -> str:
     except Exception as e:
         logger.warning(f"Failed to build personalization injection block: {type(e).__name__}")
         return ""
+
+
+# --- conditional facts gate (task B) ---------------------------------------
+
+_SELF_REFERENCE = re.compile(
+    r"\b(?:"
+    r"quien\s+soy|que\s+sabes\s+de\s+mi|me\s+conoces|a\s+que\s+me\s+dedico"
+    r"|mi\s+trabajo|mi\s+profesion|mis\s+gustos|mis\s+intereses"
+    r"|who\s+am\s+i|what\s+do\s+you\s+know\s+about\s+me|do\s+you\s+know\s+me"
+    r"|my\s+job|my\s+work|my\s+interests"
+    r")\b"
+)
+
+_STOPWORDS = frozenset(
+    """
+    para como pero porque cuando donde desde hasta sobre entre este esta estos estas esto
+    ese esa esos esas aquel con sin por que del las los una unos unas muy mas menos tambien
+    sido ser son era fue hay tiene tengo tienes algo todo todos nada otro otra cada solo
+    that this these those with from have has had been being were was will would could should
+    about into over than then them they their there what when where which while your yours
+    some such only also just very more most much many each other
+    """.split()
+)
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _stems(text: str) -> set[str]:
+    return {
+        tok[:5]
+        for tok in re.findall(r"[a-z0-9]+", _fold(text))
+        if len(tok) >= 4 and tok not in _STOPWORDS
+    }
+
+
+def facts_gate(user_text: str, data: dict) -> str | None:
+    """Deterministic relevance gate for the occupation/interests block.
+
+    Returns "self_reference" when the user text asks about the owner,
+    "overlap" when it shares a content-token stem with the facts, else None.
+    """
+    folded = _fold(user_text)
+    if not folded.strip():
+        return None
+    if _SELF_REFERENCE.search(folded):
+        return "self_reference"
+    fact_stems = _stems(" ".join(str(data.get(f) or "") for f in ("occupation", "interests")))
+    if fact_stems and (_stems(user_text) & fact_stems):
+        return "overlap"
+    return None

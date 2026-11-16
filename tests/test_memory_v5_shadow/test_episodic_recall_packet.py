@@ -149,8 +149,19 @@ def test_episodic_recall_expansion_and_packet_builder(tmp_path: Path):
         history_snapshot=[],
         episodic_memory_block=packet.formatted_block,
     )
+    from opencohost.i18n import active as i18n_active
+    assert len(setup_active.messages) == 2
     last_msg = setup_active.messages[-1]["content"]
+    assert setup_active.messages[-1]["role"] == "user"
     assert "<episodic_memory>" in last_msg
+    # fb7e1b6: a v2 owner turn ("ptt") carries the generic owner role label.
+    label = f"[{i18n_active.owner_role_label()}]:"
+    assert label in last_msg
+    idx_ep = last_msg.index("<episodic_memory>")
+    idx_lbl = last_msg.index(label)
+    assert idx_ep < idx_lbl
+    after_label = last_msg[idx_lbl + len(label):].strip()
+    assert after_label == "¿Qué me recomiendas hacer?"
 
     # In SHADOW mode: coordinator generates packet, but prompt remains byte-identical to baseline
     coord_shadow = EpisodicRecallCoordinator(

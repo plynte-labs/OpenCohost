@@ -190,7 +190,7 @@ def test_flush_mixed_window_persists_only_eligible_direct_pair_per_pair_selectiv
 
     rows = _store(tmp_path).list_for_profile("profile-1")
     assert len(rows) == 1
-    expected_key = derive_stable_key("profile-1", f"{_ELIGIBLE_USER} {_ELIGIBLE_ASST}")
+    expected_key = derive_stable_key("profile-1", f"{_ELIGIBLE_USER} ")  # owner-only-drafts
     assert rows[0]["stable_key"] == expected_key
 
 
@@ -443,6 +443,7 @@ def test_close_flush_secret_sentinel_absent_from_logs_on_failure_path(monkeypatc
 # R14 — documented crash residual bound (4.11)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("legacy_prompt_layout")  # B-W4: the legacy one-pair deque sets the live window
 def test_hard_crash_loses_at_most_current_live_window(monkeypatch, tmp_path):
     """Documented accepted bound (design v2.1 SS6, residual risk #2): a hard
     crash/kill with no clean close and no profile switch loses at most the

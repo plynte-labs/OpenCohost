@@ -16,13 +16,33 @@ response/request-free ``CloudLLMResponseError`` via ``raise ... from None``).
 """
 
 import json
+import re
 
 import requests
+
+from opencohost.core.providers.think_tags import (
+    THINK_BLOCK_RE,
+    THINK_CLOSE_TAG,
+    THINK_OPEN_TAG,
+    ThinkTagStreamSplitter,
+    strip_think_blocks,
+)
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 
 # Options that pass through unchanged to an OpenAI-compatible chat body.
 _PASSTHROUGH_OPTION_KEYS = ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+
+# Inline reasoning stripping (nim-cloud-reasoning-off, T3): a NIM reasoning
+# model that still reasons emits it as a <think>...</think> block inside
+# `content` rather than (or in addition to) `reasoning_content`. The helpers
+# live in a shared, equally pure module so the local Ollama path uses the
+# same split (live-session-fixes-20261005 L1); the private names stay.
+_THINK_BLOCK_RE = THINK_BLOCK_RE
+_THINK_OPEN_TAG = THINK_OPEN_TAG
+_THINK_CLOSE_TAG = THINK_CLOSE_TAG
+_strip_think_blocks = strip_think_blocks
+_ThinkTagStreamSplitter = ThinkTagStreamSplitter
 
 
 class CloudLLMResponseError(requests.exceptions.RequestException):
@@ -59,7 +79,15 @@ class CloudLLMResponseError(requests.exceptions.RequestException):
         self.body_excerpt = body_excerpt
 
 
-def map_options_to_openai(model: str, messages: list, options: dict) -> dict:
+def map_options_to_openai(
+    model: str,
+    messages: list,
+    options: dict,
+    *,
+    disable_reasoning: bool = True,
+    reasoning_style: str | None = None,
+    drop_params=None,
+) -> dict:
     """Pure mapping: Ollama-shaped (model, messages, options) -> OpenAI-compatible request body.
 
     - ``num_predict`` -> ``max_tokens`` (renamed; omitted entirely when absent
@@ -69,6 +97,19 @@ def map_options_to_openai(model: str, messages: list, options: dict) -> dict:
       with no OpenAI-compatible equivalent -- dropped, never sent.
     - ``temperature`` / ``top_p`` / ``presence_penalty`` / ``frequency_penalty``
       pass through unchanged when present.
+    - ``reasoning_style`` (from the provider preset) picks the wire form of
+      "reasoning off": ``nim_kwargs`` (also the default for ``None``, i.e. a
+      custom profile) sends ``chat_template_kwargs``; ``deepseek_thinking``
+      sends ``thinking: {"type": "disabled"}``; ``openrouter_exclude`` sends
+      ``reasoning: {"exclude": true}``; ``none`` sends nothing.
+      ``drop_params`` names body keys to remove (e.g. sampling params a
+      provider rejects).
+    - ``think`` (nim-cloud-reasoning-off, T1) is never sent as a top-level
+      body key. ``options["think"] is True`` -> ``chat_template_kwargs``
+      turns reasoning ON. Otherwise, when ``disable_reasoning`` is on (NIM
+      evidence 2026-09-25, ``CLOUD_DISABLE_REASONING``), it turns reasoning
+      OFF. ``disable_reasoning`` off and ``think`` not True -> no
+      ``chat_template_kwargs`` key at all, byte-identical to before T1.
     """
     options = options or {}
     body = {"model": model, "messages": messages}
@@ -77,7 +118,44 @@ def map_options_to_openai(model: str, messages: list, options: dict) -> dict:
             body[key] = options[key]
     if "num_predict" in options:
         body["max_tokens"] = options["num_predict"]
+    style = reasoning_style or "nim_kwargs"
+    think_on = options.get("think") is True
+    if style == "nim_kwargs":
+        if think_on:
+            body["chat_template_kwargs"] = {"enable_thinking": True, "thinking": True}
+        elif disable_reasoning:
+            body["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
+    elif disable_reasoning and not think_on:
+        if style == "deepseek_thinking":
+            body["thinking"] = {"type": "disabled"}
+        elif style == "openrouter_exclude":
+            body["reasoning"] = {"exclude": True}
+    for name in drop_params or ():
+        body.pop(name, None)
     return body
+
+
+def preset_request_kwargs(preset) -> dict:
+    """The per-preset request shaping every cloud chat call site forwards
+    (``reasoning_style`` / ``extra_headers`` / ``drop_params``). One builder so
+    the chat path, the setup speed test and the provider key test cannot
+    drift apart (gemini-chat-parity-20261112 G1). ``None`` / empty (a custom,
+    preset-less profile) keeps the plain call shape: ``{}``."""
+    if not preset:
+        return {}
+    return {
+        "reasoning_style": preset["reasoning_style"],
+        "extra_headers": dict(preset["extra_headers"]),
+        "drop_params": list(preset["drop_params"]),
+    }
+
+
+def _request_headers(api_key: str, extra_headers) -> dict:
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    for name, value in (extra_headers or {}).items():
+        if name.lower() != "authorization":
+            headers[name] = value
+    return headers
 
 
 def _extract_relevant_headers(headers) -> dict:
@@ -100,11 +178,11 @@ def _adapt_response(data: dict) -> dict:
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise CloudLLMResponseError("cloud LLM response missing 'choices[0].message'")
+    content, thinking = _strip_think_blocks(
+        message.get("content") or "", message.get("reasoning_content") or ""
+    )
     return {
-        "message": {
-            "content": message.get("content") or "",
-            "thinking": message.get("reasoning_content") or "",
-        },
+        "message": {"content": content, "thinking": thinking},
         "usage": data.get("usage") or {},
     }
 
@@ -116,6 +194,11 @@ def send_chat_completion(
     messages: list,
     options: dict,
     timeout: float,
+    *,
+    disable_reasoning: bool = True,
+    reasoning_style: str | None = None,
+    extra_headers=None,
+    drop_params=None,
 ) -> dict:
     """Non-streaming POST to ``{base_url}/chat/completions``. Returns an Ollama-shaped dict.
 
@@ -125,9 +208,20 @@ def send_chat_completion(
     subclass) -- all are instances the engine's existing transport-error
     contract already classifies without any change. The api_key never
     appears in any raised message.
+
+    ``disable_reasoning`` (nim-cloud-reasoning-off, T1) forwards to
+    ``map_options_to_openai`` -- see that function for the exact kwargs
+    behavior.
     """
-    body = map_options_to_openai(model, messages, options)
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = map_options_to_openai(
+        model,
+        messages,
+        options,
+        disable_reasoning=disable_reasoning,
+        reasoning_style=reasoning_style,
+        drop_params=drop_params,
+    )
+    headers = _request_headers(api_key, extra_headers)
     url = f"{base_url.rstrip('/')}{CHAT_COMPLETIONS_PATH}"
     resp = requests.post(url, json=body, headers=headers, timeout=timeout)
     http_error_detail = None
@@ -169,6 +263,130 @@ def send_chat_completion(
             headers=_extract_relevant_headers(resp.headers),
         )
     return _adapt_response(data)
+
+
+def stream_chat_completion(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list,
+    options: dict,
+    timeout,
+    *,
+    disable_reasoning: bool = True,
+    reasoning_style: str | None = None,
+    extra_headers=None,
+    drop_params=None,
+):
+    """Streaming POST to ``{base_url}/chat/completions`` (live_session_fixes_20260925 T8).
+
+    Generator yielding Ollama-shaped chunks: ``{"message": {"content": ...,
+    "thinking": ...}, "done": False}`` for each SSE data event that carries a
+    content/reasoning_content delta, then exactly one final ``{"done": True,
+    "usage": ...}`` marker chunk (no ``message`` key -- callers reconstructing
+    a full response, e.g. ``GenerationOrchestrator.rebuild_stream_response``,
+    fill it in from the accumulated deltas). Same security posture as
+    ``send_chat_completion``: the api_key never appears in any raised message,
+    and a non-2xx status raises the SAME sanitized ``CloudLLMResponseError``
+    -- BEFORE any chunk is yielded, since Python does not execute a generator
+    function's body (including the HTTP call) until the caller starts
+    iterating it.
+
+    ``timeout`` is forwarded verbatim to ``requests.post(..., stream=True,
+    timeout=timeout)`` -- typically a ``(connect, read)`` tuple so the caller
+    can bound the first-chunk/idle read differently from the connect phase.
+    The response is always closed (``finally: resp.close()``), including when
+    the caller closes this generator early (an abort mid-stream) or an
+    exception propagates -- freeing the connection the same way an aborted
+    non-streaming call already does.
+    """
+    body = map_options_to_openai(
+        model,
+        messages,
+        options,
+        disable_reasoning=disable_reasoning,
+        reasoning_style=reasoning_style,
+        drop_params=drop_params,
+    )
+    body["stream"] = True
+    body["stream_options"] = {"include_usage": True}
+    # A preset may reject stream_options too; "stream" itself is never
+    # droppable because this client parses the SSE body.
+    for name in drop_params or ():
+        if name != "stream":
+            body.pop(name, None)
+    headers = _request_headers(api_key, extra_headers)
+    url = f"{base_url.rstrip('/')}{CHAT_COMPLETIONS_PATH}"
+    resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
+    try:
+        http_error_detail = None
+        http_error_status_code = None
+        http_error_headers = {}
+        http_error_body_excerpt = None
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            # Same rationale as send_chat_completion: extracting only plain
+            # values here, then exiting this except block (rather than
+            # raising inside it), is what keeps the original HTTPError --
+            # whose .response.request.headers carries the Authorization
+            # bearer key -- out of __context__, not just __cause__.
+            http_error_detail = f"cloud chat HTTP {exc.response.status_code}: {exc.response.reason}"
+            http_error_status_code = exc.response.status_code
+            http_error_headers = _extract_relevant_headers(exc.response.headers)
+            http_error_body_excerpt = (exc.response.text or "")[:500]
+        if http_error_detail is not None:
+            raise CloudLLMResponseError(
+                http_error_detail,
+                status_code=http_error_status_code,
+                headers=http_error_headers,
+                body_excerpt=http_error_body_excerpt,
+            )
+
+        splitter = _ThinkTagStreamSplitter()
+        usage: dict = {}
+        # SSE is UTF-8 by spec, but NIM sends text/event-stream without a
+        # charset and requests then decodes as ISO-8859-1 (mojibake). Decode
+        # each byte line ourselves; newline splits never cut a UTF-8 sequence.
+        for raw_line in resp.iter_lines():
+            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+            if not line or line.startswith(":"):
+                continue  # blank line (SSE frame separator) or a comment/keepalive
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            choices = chunk.get("choices")
+            if not choices or not isinstance(choices[0], dict):
+                continue
+            delta = choices[0].get("delta") or {}
+            content_piece, thinking_piece = splitter.feed(delta.get("content") or "")
+            reasoning_piece = delta.get("reasoning_content") or ""
+            if reasoning_piece:
+                thinking_piece = f"{thinking_piece}{reasoning_piece}" if thinking_piece else reasoning_piece
+            if content_piece or thinking_piece:
+                yield {
+                    "message": {"content": content_piece, "thinking": thinking_piece},
+                    "done": False,
+                }
+        tail_content, tail_thinking = splitter.flush()
+        if tail_content or tail_thinking:
+            yield {
+                "message": {"content": tail_content, "thinking": tail_thinking},
+                "done": False,
+            }
+        yield {"done": True, "usage": usage}
+    finally:
+        resp.close()
 
 
 # ── F2 taxonomy (runtime_findings_batch_20260731 Batch 1 unit 1.1) ──────────
@@ -254,6 +472,150 @@ def extract_error_code(exc: Exception) -> str | None:
         return None
     code = error.get("code") or error.get("type")
     return str(code)[:64] if code else None
+
+
+# --- sanitized provider error text (setup-wizard-simple S1) -----------------
+# The user (setup speed test) and the log need the provider's REASON for a
+# failure (e.g. a Gemini 400), but never a credential. One shared helper strips
+# anything key-like, collapses whitespace and bounds the length.
+PROVIDER_MESSAGE_MAX_CHARS = 200
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)\bbearer\s+[^\s\"',;]+"),
+    # ``Authorization: Basic ...`` / ``"authorization": "..."``: the scheme word
+    # is optional so a bare credential after the header is dropped too.
+    re.compile(
+        r"(?i)\b(authorization)[\"']?\s*[:=]\s*[\"']?(?:(?:basic|bearer|token)\s+)?[^\s\"',;]+"
+    ),
+    # ``key=...``, ``"api_key": "..."``, ``x-api-key: ...``, ``'apiKey' = '...'``.
+    re.compile(
+        r"(?i)\b((?:x-)?(?:api[_-]?)?key|token|access_token|auth|secret|password)"
+        r"[\"']?\s*[:=]\s*[\"']?[^&\s\"',;]+"
+    ),
+    # Google / OpenAI-style keys, including the short fragments a length cap
+    # can leave behind at the end of a truncated body.
+    re.compile(r"\bAIza[0-9A-Za-z_\-]*"),
+    re.compile(r"\bsk-[0-9A-Za-z_\-]*"),
+    re.compile(r"\bAQ\.[0-9A-Za-z_.\-]{12,}"),
+    # Any other long opaque run (hex/base64/base64url/JWT-like) is a token.
+    re.compile(r"(?<![0-9A-Za-z_\-+/])[0-9A-Za-z_\-+/]{32,}={0,2}"),
+)
+
+
+def sanitize_provider_text(
+    text: object, api_key: str | None = None, limit: int = PROVIDER_MESSAGE_MAX_CHARS
+) -> str:
+    """Make provider error text safe to log and show: no key, one line, bounded."""
+    if text is None:
+        return ""
+    out = str(text)
+    if api_key and len(api_key) >= 4:
+        out = out.replace(api_key, _REDACTED)
+    for pattern in _SECRET_PATTERNS:
+        if pattern.groups:
+            out = pattern.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+        else:
+            out = pattern.sub(_REDACTED, out)
+    out = " ".join(out.split())
+    return out[: max(0, int(limit))]
+
+
+_MESSAGE_FIELD_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)')
+_STATUS_FIELD_RE = re.compile(r'"status"\s*:\s*"([A-Za-z0-9_.\-]{1,64})"')
+# Body fields that echo the REQUEST (chat text). A truncated body carrying any
+# of them is never shown raw, and an inline ``input=...`` echo is dropped.
+_ECHO_FIELD_RE = re.compile(r'"(?:input|messages|content|contents|detail|prompt)"\s*:')
+_INPUT_ECHO_RE = re.compile(
+    r"""(?i)["']?\b(input(?:_value)?|content|contents|messages|prompt)["']?\s*[:=]\s*"""
+    r"""(?:'[^']*'?|"[^"]*"?|\[[^\]]*\]?|\{[^}]*\}?|\S+)"""
+)
+_OMITTED = "[omitted]"
+_STATUS_LABEL_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+
+
+def _message_from_json(data: object) -> str | None:
+    if isinstance(data, list):
+        data = next((d for d in data if isinstance(d, dict)), None)
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        label = error.get("status") or error.get("code") or error.get("type")
+        if message and label and str(label) not in str(message):
+            return f"{message} [{label}]"
+        return str(message or label) if (message or label) else None
+    if isinstance(error, str) and error:
+        return error
+    if isinstance(data.get("message"), str) and data["message"]:
+        return data["message"]
+    detail = data.get("detail")
+    if isinstance(detail, str) and detail:
+        return detail
+    if isinstance(detail, list):
+        # Validation-error lists (pydantic/FastAPI shape): only ``msg``, never
+        # the ``input`` they echo back.
+        first = next((d for d in detail if isinstance(d, dict)), None)
+        if first and isinstance(first.get("msg"), str) and first["msg"]:
+            return first["msg"]
+    return None
+
+
+def extract_error_status(exc: Exception) -> str | None:
+    """The provider's machine status label (Gemini ``error.status``), or ``None``.
+
+    Enum-like only (``[A-Za-z0-9_.-]{1,64}``), so it is safe to log beside the
+    HTTP status: it never carries request text.
+    """
+    excerpt = getattr(exc, "body_excerpt", None)
+    if not excerpt or not isinstance(excerpt, str):
+        return None
+    status = None
+    try:
+        data = json.loads(excerpt)
+        if isinstance(data, list):
+            data = next((d for d in data if isinstance(d, dict)), None)
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict) and isinstance(error.get("status"), str):
+            status = error["status"]
+    except ValueError:
+        match = _STATUS_FIELD_RE.search(excerpt)
+        status = match.group(1) if match else None
+    if status and _STATUS_LABEL_RE.fullmatch(status):
+        return status
+    return None
+
+
+def extract_provider_message(exc: Exception, api_key: str | None = None) -> str | None:
+    """Sanitized, bounded excerpt of the provider's error body, or ``None``.
+
+    Prefers the JSON error ``message`` (+ ``status``/``code``); a body the
+    500-char excerpt truncated mid-object still yields its ``message`` field.
+    A JSON body without a message, or a truncated one carrying request-echo
+    fields (``input``/``messages``/``content``/``detail``), yields ``None``:
+    only a non-JSON body (e.g. an HTML error page) falls back to the raw
+    excerpt. Inline ``input=...`` echoes are dropped. Always goes through
+    ``sanitize_provider_text``. Shown to the user by the setup speed test
+    (fixed prompt) only; the chat path never logs it (no raw chat in logs).
+    """
+    excerpt = getattr(exc, "body_excerpt", None)
+    if not excerpt or not isinstance(excerpt, str):
+        return None
+    message = None
+    try:
+        message = _message_from_json(json.loads(excerpt))
+        if not message:
+            return None
+    except ValueError:
+        match = _MESSAGE_FIELD_RE.search(excerpt)
+        if match:
+            message = match.group(1).replace('\\"', '"')
+        elif excerpt.lstrip()[:1] in ("{", "[") or _ECHO_FIELD_RE.search(excerpt):
+            return None
+    text = message if message else excerpt
+    text = _INPUT_ECHO_RE.sub(lambda m: f"{m.group(1)}={_OMITTED}", text)
+    cleaned = sanitize_provider_text(text, api_key)
+    return cleaned or None
 
 
 def parse_retry_after_seconds(headers: dict) -> int | None:

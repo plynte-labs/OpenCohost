@@ -618,3 +618,52 @@ Aplicar patrones de agrupamiento y throttling en el pipeline de la UI:
 **Status:** Accepted / Implemented
 
 For full details, see: [`docs/adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md`](./adr/ADR-048-ptt-physical-hold-contract-fault-tolerance-and-exactly-once-release.md)
+
+---
+
+## ADR-058: Clean Transport Turn Provenance, Decontaminate RAG/History, and Harden Speaker-Prefix Sanitization
+
+**Status:** Accepted / Implemented
+
+For full details, see: [`docs/adr/ADR-058-clean-transport-turn-provenance-and-prefix-sanitization.md`](./adr/ADR-058-clean-transport-turn-provenance-and-prefix-sanitization.md)
+
+---
+
+## ADR-059: Episodic Recall Merged Into the Memorias Block
+
+**Status:** Accepted (2026-09-23; supersedes ADR-034 for the prompt-assembly path)
+
+For full details, see: [`docs/adr/ADR-059-episodic-recall-merge.md`](./adr/ADR-059-episodic-recall-merge.md)
+
+---
+
+## ADR-060: Semantic Ranking Over the Fact Notebook
+
+**Status:** Accepted (2026-09-23; hybrid semantic+lexical automatic top-k over durable memorias rows, lexical fallback byte-identical)
+
+For full details, see: [`docs/adr/ADR-060-fact-notebook-semantic-ranking.md`](./adr/ADR-060-fact-notebook-semantic-ranking.md)
+
+---
+
+## ADR-061: A Correction Supersedes the Previous Draft
+
+**Status:** Accepted (2026-09-23; explicit correction cue rewrites the immediately preceding draft in place, durable rows immune; draft cap stays 300 on measurement)
+
+For full details, see: [`docs/adr/ADR-061-draft-correction-supersede.md`](./adr/ADR-061-draft-correction-supersede.md)
+
+---
+
+## ADR-062: Drafts Stop Carrying the User's Words, and Kept Facts Record Their Origin
+
+**Status:** Accepted (2026-09-23; judge rejects scrub the draft, unjudged drafts never injected, judge emits origin in schema v5 with shared_content fail-safe and injection tag)
+
+For full details, see: [`docs/adr/ADR-062-draft-scrub-and-fact-origin.md`](./adr/ADR-062-draft-scrub-and-fact-origin.md)
+
+---
+
+## ADR-063: OpenCohost Downloads Models In-App (Resumable, One at a Time)
+
+**Status:** Accepted / Implemented (backend + API; UI pending)
+
+Supersedes the "OpenCohost does not download models" decision. For full details, see: [`docs/adr/ADR-063-in-app-model-downloads.md`](./adr/ADR-063-in-app-model-downloads.md)
+

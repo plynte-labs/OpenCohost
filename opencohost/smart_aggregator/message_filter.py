@@ -2,6 +2,8 @@ import re
 from typing import Optional
 from collections import Counter
 
+from opencohost.core.context.injection_markers import sanitize_chat_username
+
 class MessageFilter:
     def __init__(self, config: dict):
         self.min_words = config.get("min_words", 3)
@@ -56,7 +58,10 @@ class MessageFilter:
 
     def filter(self, message: dict) -> Optional[dict]:
         self._last_rejection_reason = None
-        user = message.get("user", "")
+        raw_user = message.get("user", "")
+        # S7: the name ends up in prompts as "user: text" lines; keep it
+        # recognisable but never let it carry newlines, brackets or colons.
+        user = sanitize_chat_username(raw_user) if isinstance(raw_user, str) else raw_user
         text = message.get("text", "")
         timestamp = message.get("timestamp", 0)
 
@@ -75,7 +80,7 @@ class MessageFilter:
             self._last_rejection_reason = "empty"
             return None
 
-        if self.whitelist_enabled and user.lower() in self.whitelist_users:
+        if self.whitelist_enabled and str(raw_user).lower() in self.whitelist_users:
             return {"user": user, "text": text_stripped, "timestamp": timestamp}
 
         if self.discard_emojis_only and self._has_only_emojis(text_stripped):

@@ -358,10 +358,21 @@ def test_seam_10_active_mode_prompt_injection(tmp_path: Path, mock_worker):
         history_snapshot=[],
         episodic_memory_block=packet.formatted_block,
     )
+    from opencohost.i18n import active as i18n_active
+    assert len(setup.messages) == 2
     user_content = setup.messages[-1]["content"]
+    assert setup.messages[-1]["role"] == "user"
     assert "<episodic_memory>" in user_content
     assert "Prefer the current user message over old memory" in user_content
     assert "</episodic_memory>" in user_content
+    # fb7e1b6: a v2 owner turn ("ptt") carries the generic owner role label.
+    label = f"[{i18n_active.owner_role_label()}]:"
+    assert label in user_content
+    idx_ep = user_content.index("<episodic_memory>")
+    idx_lbl = user_content.index(label)
+    assert idx_ep < idx_lbl
+    after_label = user_content[idx_lbl + len(label):].strip()
+    assert after_label == "¿Qué hacemos con ellos?"
     conn.close()
     cache.close()
 
@@ -622,11 +633,14 @@ def test_seam_19_motor_vocalia_runtime_seam_active_and_shadow(tmp_path: Path, mo
         watchdog_timeout=10.0,
     )
 
-    # ACTIVE messages MUST contain <episodic_memory> with Sonos context
+    # ACTIVE messages MUST carry the recalled Sonos context. ADR-059: it is
+    # merged into the memorias block as one compact "[past chat …]" line
+    # (not a standalone <episodic_memory> block) under the shared budget.
     active_prompt = setup_active.messages[-1]["content"]
-    assert "<episodic_memory>" in active_prompt
-    assert "Sonos" in active_prompt
-    assert "graves" in active_prompt
+    assert "<episodic_memory>" not in active_prompt
+    episode_lines = [ln for ln in active_prompt.split("\n") if ln.startswith("[past chat ")]
+    assert len(episode_lines) == 1
+    assert "Sonos" in episode_lines[0]
     conn.close()
     cache.close()
 

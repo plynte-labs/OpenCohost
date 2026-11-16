@@ -336,3 +336,15 @@ contract via `curl`/`fetch` with zero new surface to install or run; an MCP
 server is a second process with its own lifecycle to maintain. Ship it only
 if v1 REST usage shows real friction — the contract above is designed so the
 MCP tool schemas would fall out of it 1:1 later.
+
+## Active cards (operator-only controls)
+
+An active card is verified streamer data for the current stream (a sponsor's price and code, a game's facts). Several cards may be active; each is surfaced only when the turn is relevant to it. An agent may DRAFT card fields through `POST /api/agent/cards` (optional `must_say`, `forbidden_claims`, `discount_code`, `link`). It can never activate, deactivate, disable, delete or edit a card: those live under `/api/editorial/cards/...` and refuse the agent token with `403 {"detail": "operator token required"}` whatever `OPENCOHOST_API_AUTH` says. An agent upsert over an active card deactivates it (`deactivated: true` in the response) because unreviewed content must not keep speaking as verified streamer data; the operator re-activates after review. The agent list projection exposes `active`.
+
+| Route | Effect |
+|---|---|
+| `POST /api/editorial/cards` | Create or upsert a card with its fields (draft, inactive, operator provenance) |
+| `GET /api/editorial/cards/active` / `GET .../{id}` | Read every active card (`{"cards": []}` when none) or one card |
+| `PUT .../{id}/fields` | Partial update of `must_say`, `forbidden_claims`, `discount_code`, `link` |
+| `POST .../{id}/activate` / `deactivate` | Activate (other active cards stay; 409 `card_not_activatable` for an expired card) / deactivate (idempotent) |
+| `POST .../{id}/disable` / `DELETE .../{id}` | Expire (409 `card_not_disableable` for a USED card) / hard delete; both deactivate the card |

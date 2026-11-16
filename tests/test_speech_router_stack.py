@@ -20,7 +20,7 @@ import time
 import pytest
 
 from opencohost.core import llm_engine
-from opencohost.core.speech.router import SpeechJobState
+from opencohost.core.speech.router import SpeechJob, SpeechJobState
 from tests.test_speech_outcome_capture import _make_motor, _sentences, _write_wav
 from tests.test_speech_router import _GateMixerMusic, _ScriptedMixerMusic, _Recorder, _pump
 
@@ -471,6 +471,106 @@ def test_discarding_the_boundary_owner_at_depth_ends_its_pair_once(router_motors
         "idle fired before the owed speaking_end -- " + repr(names)
     )
     motor.clear_speech_cancel()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# (7b) T4 (live_session_fixes_20260925) — discard_job, identity-based
+# discard for the cloud-fallback-notice fix. Unlike the D3 preempt tests
+# above (which SUSPEND the victim onto the stack, then let it resume and
+# play again -- the exact bug T4 exists to fix), `discard_job` must remove
+# the target job for good, wherever it currently lives, and never let it
+# resume.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_discard_job_removes_an_incoming_job_before_it_is_picked(router_motors):
+    mixer = _GateMixerMusic(block_at=(0,))
+    synth_log: list = []
+    motor, rec, _ = _armed(
+        router_motors, mixer_music=mixer, synthesize=_synth_logger(synth_log), interrupt_enabled=True
+    )
+
+    motor._speak_or_submit(_job_text("AGENDA", 1), source="kira-agenda:a")
+    assert mixer.entered[0].wait(5.0)
+
+    chat_job = motor._speak_or_submit(_job_text("CHAT", 1), source="chat")
+    router = motor._speech_router
+    assert _wait_until(lambda: len(router._incoming) == 1)
+    assert router._incoming[0] is chat_job
+
+    router.discard_job(chat_job)
+
+    assert chat_job.state == SpeechJobState.DISCARDED
+    assert router._incoming == []
+
+    mixer.release(0)
+    assert rec.wait_for("speaking_end", 1, timeout=10.0), rec.names()
+    assert _job_text("CHAT", 1) not in synth_log, "a discarded INCOMING job must never be synthesized"
+
+
+def test_discard_job_cuts_the_active_job_without_suspending_it(router_motors):
+    mixer = _GateMixerMusic(block_at=(0,))
+    motor, rec, _ = _armed(router_motors, mixer_music=mixer, interrupt_enabled=True)
+
+    job = motor._speak_or_submit(_job_text("NOTICE", 2), source="direct")
+    assert mixer.entered[0].wait(5.0)
+
+    router = motor._speech_router
+    assert _wait_until(lambda: router._active is job)
+
+    router.discard_job(job)
+
+    assert rec.wait_for("speaking_end", 1, timeout=10.0), rec.names()
+    assert job.state == SpeechJobState.DISCARDED
+    assert router._stack == [], "a discarded ACTIVE job must be CUT, never pushed onto the stack"
+    assert router._active is None
+
+
+def test_discard_job_removes_a_suspended_stack_entry_and_it_never_resumes(router_motors):
+    mixer = _GateMixerMusic(block_at=(0, 1))
+    synth_log: list = []
+    motor, rec, _ = _armed(
+        router_motors, mixer_music=mixer, synthesize=_synth_logger(synth_log), interrupt_enabled=True
+    )
+
+    notice_job = motor._speak_or_submit(_job_text("NOTICE", 2), source="direct")
+    assert mixer.entered[0].wait(5.0)
+    motor._speak_or_submit(_job_text("REPLY", 1), source="direct")  # preempts -> NOTICE suspended
+    assert mixer.entered[1].wait(5.0), "REPLY never reached playback"
+
+    router = motor._speech_router
+    assert _wait_until(lambda: len(router._stack) == 1)
+    assert router._stack[0] is notice_job
+
+    router.discard_job(notice_job)
+
+    assert notice_job.state == SpeechJobState.DISCARDED
+    assert router._stack == []
+
+    mixer.release(1)  # let REPLY finish naturally
+    assert rec.wait_for("speaking_end", 1, timeout=10.0), rec.names()
+    # `mixer.load()` fires once per fragment that actually reaches PLAYBACK
+    # (unlike `synth_log`, which the pipeline's synthesis lookahead can fill
+    # for a fragment that is never played -- exactly what happened to
+    # NOTICE's second fragment here, and is not the bug under test). Only
+    # NOTICE's first fragment (idx 0) and REPLY's one fragment (idx 1) may
+    # ever load: NOTICE's discarded remainder must never resume and load a
+    # THIRD time after the reply -- the exact bug this method exists to fix.
+    assert mixer.load_count == 2, "the discarded notice's remaining fragment must never reach playback"
+
+
+def test_discard_job_on_an_unrelated_or_foreign_job_is_a_silent_noop(router_motors):
+    motor, rec, _ = _armed(router_motors, interrupt_enabled=True)
+    router = motor._ensure_router()  # lazily builds + starts; nothing submitted yet
+
+    foreign = SpeechJob(job_id=999999, text="nunca ingresado", source="direct", priority=0)
+
+    router.discard_job(foreign)  # must not raise
+
+    assert foreign.state == SpeechJobState.QUEUED, "a job the router never tracked must be left untouched"
+    assert router._incoming == []
+    assert router._stack == []
+    assert router._active is None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1359,3 +1459,31 @@ def test_new_owner_submit_sweeps_superseded_owner_stack(router_motors):
         assert j_agenda in router._stack
     finally:
         router.set_ptt_held(False)
+
+
+def test_submit_streaming_preempts_active_interactive_turn_losslessly(router_motors):
+    """submit_streaming preempts an active interactive turn with 'preempt' to suspend onto the stack."""
+    from opencohost.core.speech.router import PRIORITY_OWNER, SpeechJob
+    motor, _, _ = _armed(router_motors, interrupt_enabled=True)
+    router = motor._ensure_router()
+    router.set_ptt_held(True)
+    try:
+        j_active = SpeechJob(job_id=925, text="active answer", source="direct", priority=0)
+        router._active = j_active
+        router.submit_streaming(source="direct", priority=PRIORITY_OWNER)
+        assert j_active.pause_requested == "preempt"
+    finally:
+        router.set_ptt_held(False)
+
+
+def test_speech_progress_tracks_turn_id():
+    """speech_progress returns turn_id when active speech has an assigned turn."""
+    motor, _, _ = _make_motor(mixer_music=_ScriptedMixerMusic())
+    motor._speech_progress = {"total": 5, "played": 1, "start": time.time(), "current_idx": 1, "turn_id": 42}
+    motor._speaking = True
+    prog = motor.speech_progress()
+    assert prog is not None
+    assert prog["turn_id"] == 42
+    assert prog["current_idx"] == 1
+
+

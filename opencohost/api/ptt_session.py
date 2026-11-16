@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -33,9 +34,15 @@ from typing import Callable, Optional
 
 import websockets
 
+from opencohost.config.logger import get_logger
 from opencohost.i18n import active as i18n_active
 
 logger = logging.getLogger("opencohost.api.ptt_session")
+# K2 (warmth-guardrails-runtime-20261006): the `opencohost.api.*` tree only
+# reaches `opencohost_api.log`, so silent PTT drops were invisible in the
+# session log (`logs/opencohost_*.log`). Outcome lines go to the session
+# logger instead. COUNTS AND OUTCOMES ONLY -- never transcript text.
+_session_log = get_logger()
 
 # Anti-Loop Whisper filter, copied verbatim from voice_control.py:456 — collapse
 # a phrase/word repeated 3+ times in a row down to one occurrence. WhisperLive
@@ -53,6 +60,77 @@ _FLUSHING = "flushing"
 # Minimum words before a flush is dispatched as a turn (CTK parity,
 # voice_control.py:232-235). Under two words -> honest no-op, no LLM call.
 _MIN_WORDS = 2
+
+# Upper bound on the post-grace drain for a final STT segment already in
+# flight when the grace deadline hits (K2). Hard-capped so the added latency
+# can never exceed 500 ms.
+_MAX_LATE_DRAIN = 0.5
+
+# A segment arriving during grace pushes the deadline out by at most this much
+# (ptt-grace-latency-20261013). The adaptive grace (silence_timeout + margin,
+# ~2.1s) exists to outlast the FIRST ASR tail after release; re-arming the full
+# value on every arrival compounded the release->flush delay to ~2x grace.
+_TAIL_EXTENSION_S = 0.8
+
+# Flush outcome literal for a hold whose words go to the chat composer instead
+# of becoming a turn (ptt-dictation-20261111). Fixed literal, never text.
+_DICTATED = "dictated"
+
+
+def _liveaudio_config_path(environ) -> str:
+    """Same resolution as LiveAudio's get_data_home() (config/mod.rs)."""
+    home = (environ.get("LIVEAUDIO_HOME") or "").strip()
+    if home:
+        return os.path.join(home, "config.json")
+    base = environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "LiveAudio", "config.json")
+
+
+def _read_silence_timeout(path: str) -> Optional[float]:
+    """LiveAudio ``silence_timeout`` or None (missing/invalid/out of range)."""
+    from opencohost.config import settings as _s
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        v = data["silence_timeout"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = float(v)
+    except Exception:
+        return None
+    lo, hi = _s.LIVEAUDIO_SILENCE_TIMEOUT_RANGE_S
+    return v if lo <= v <= hi else None
+
+
+def _env_float(environ, name: str) -> Optional[float]:
+    try:
+        v = float(str(environ.get(name, "")).strip())
+    except ValueError:
+        return None
+    return v if v == v and v >= 0 else None
+
+
+def resolve_ptt_grace(environ=None, config_path: Optional[str] = None):
+    """Return ``(grace_s, source, silence_timeout_s)``; never raises.
+
+    source: ``override`` | ``liveaudio_config`` | ``default``.
+    """
+    from opencohost.config import settings as _s
+
+    env = os.environ if environ is None else environ
+    st = _read_silence_timeout(config_path or _liveaudio_config_path(env))
+    source = "liveaudio_config"
+    if st is None:
+        st, source = _s.LIVEAUDIO_DEFAULT_SILENCE_TIMEOUT_S, "default"
+    override = _env_float(env, "OPENCOHOST_PTT_GRACE_S")
+    if override is not None:
+        return override, "override", st
+    margin = _env_float(env, "OPENCOHOST_PTT_ASR_MARGIN_S")
+    if margin is None:
+        margin = _s.PTT_ASR_MARGIN_S
+    grace = max(_s.PTT_GRACE_MIN_S, min(_s.PTT_GRACE_MAX_S, st + margin))
+    return grace, source, st
 
 
 class PttUnreachable(Exception):
@@ -101,10 +179,13 @@ class PttSession:
     Callbacks (all invoked from the WS thread, all must be thread-safe):
       - ``on_flush(text)``  : dispatch the buffered dictation as ONE turn.
                               Called only when the buffer holds >= 2 words.
+                              Returning "dictated" means no turn was made
+                              (dictation mode); the event is then "dictated"
+                              instead of "flushed".
       - ``on_event(action)``: record a lifecycle event. ``action`` is one of the
                               fixed literals started|stopped|auto_stopped|
-                              flushed|empty|error|buffer_full. NEVER carries
-                              transcript text.
+                              flushed|dictated|empty|error|buffer_full. NEVER
+                              carries transcript text.
       - ``on_close(err)``   : (optional) the slot is now free; ``err`` is the
                               final ``last_error`` (None on a clean stop).
       - ``on_release()``    : (optional, interruptible_speech_architecture_
@@ -124,6 +205,8 @@ class PttSession:
         on_close: Optional[Callable[[Optional[str]], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         grace: float = 1.2,
+        late_drain: float = 0.4,
+        tail_extension: float = _TAIL_EXTENSION_S,
         keepalive_timeout: float = 8.0,
         watchdog_tick: float = 0.5,
         ws_open_timeout: float = 2.0,
@@ -135,6 +218,8 @@ class PttSession:
         self._on_close = on_close
         self._on_release = on_release
         self._grace = grace
+        self._tail_extension = max(0.0, min(float(tail_extension), float(grace)))
+        self._late_drain = max(0.0, min(float(late_drain), _MAX_LATE_DRAIN))
         self._keepalive_timeout = keepalive_timeout
         self._watchdog_tick = watchdog_tick
         self._ws_open_timeout = ws_open_timeout
@@ -142,17 +227,28 @@ class PttSession:
 
         self.session_id = f"ptt_{uuid.uuid4().hex}"
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._state = _IDLE
         self._buffer = ""
         self._grace_deadline = 0.0
         self._last_keepalive = 0.0
         self._last_error: Optional[str] = None
         self._cap_emitted = False
+        self._hold_started = 0.0
+        # Timing instrumentation (numbers only): see _timing_fields().
+        self._stop_at = 0.0
+        self._extensions = 0
+        self._late_segments = 0
+        self._replays_dropped = 0
+        self._replay_max_delay_ms = 0
+        self._replays_live_kept = 0
+        # Wall clock (LiveAudio's created_at is epoch seconds) at WS connect.
+        self._connected_wall = 0.0
 
         self._thread: Optional[threading.Thread] = None
         self._connected_evt = threading.Event()
         self._connect_ok = False
+        self._stop_requested: bool = False
 
     # ------------------------------------------------------------------
     # Thread-safe read surface (HTTP handlers touch these from other threads)
@@ -211,6 +307,8 @@ class PttSession:
         ensure the physical release is still delivered to clear any speech hold."""
         with self._lock:
             listening = self._state == _LISTENING
+            if not listening:
+                self._stop_requested = True
         if listening:
             self._begin_grace("stopped")
         else:
@@ -254,9 +352,19 @@ class PttSession:
                 with self._lock:
                     self._state = _LISTENING
                     self._last_keepalive = time.monotonic()
+                    self._hold_started = self._last_keepalive
+                    self._connected_wall = time.time()
                 self._connect_ok = True
-                self._connected_evt.set()
+                # Emit BEFORE releasing start(): the "started" event is then
+                # always observable once start() returns (the session-log write
+                # widened the old set-then-emit race).
+                _session_log.info("[PTT] started")
                 self._emit("started")
+                self._connected_evt.set()
+                with self._lock:
+                    if self._stop_requested:
+                        self._begin_grace("stopped_early")
+                        return
                 # Runs listening + grace; returns with the WS still open so a
                 # segment arriving during grace can extend the deadline.
                 await self._recv_loop(ws)
@@ -275,9 +383,11 @@ class PttSession:
             logger.exception("PTT WS session error after connect")
             # Best-effort deliver whatever we heard before the failure.
             self._flush_buffer()
-        with self._lock:
-            self._state = _IDLE
-        self._notify_close()
+        finally:
+            if connected:
+                with self._lock:
+                    self._state = _IDLE
+                self._notify_close()
 
     async def _recv_loop(self, ws) -> None:
         """Drain segments until the grace period expires (or the WS drops).
@@ -299,8 +409,10 @@ class PttSession:
             if state == _LISTENING and (now - last_ka) > self._keepalive_timeout:
                 self._begin_grace("auto_stopped")
                 continue
-            # Grace expired -> return so the caller flushes + closes.
+            # Grace expired -> drain briefly for a final segment already in
+            # flight (K2), then return so the caller flushes + closes.
             if state == _FLUSHING and now >= deadline:
+                await self._drain_late_segments(ws)
                 return
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=self._watchdog_tick)
@@ -316,17 +428,67 @@ class PttSession:
                 return
             self._ingest(msg)
 
+    async def _drain_late_segments(self, ws) -> None:
+        """Bounded post-grace drain (K2, warmth-guardrails-runtime-20261006).
+
+        WhisperLive can emit the FINAL segment of an utterance a few hundred ms
+        after the grace window closes; the UI echo showed it but Kira never got
+        it. Keep receiving for at most ``late_drain`` (<= 500 ms) so a segment
+        already in flight is still buffered. Not extended by arrivals: the cap
+        is absolute, so added latency is bounded."""
+        if self._late_drain <= 0:
+            return
+        end = time.monotonic() + self._late_drain
+        while True:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=min(remaining, self._watchdog_tick))
+            except asyncio.TimeoutError:
+                continue
+            except (websockets.exceptions.ConnectionClosed, ConnectionError, OSError):
+                return
+            self._ingest(msg)
+
     # ------------------------------------------------------------------
     # Buffer + flush
     # ------------------------------------------------------------------
 
     def _ingest(self, msg) -> None:
+        # LiveAudio replays recent cues to every late-joining client (and each
+        # PTT hold opens a new socket). Those frames carry ``is_replay: true``;
+        # they are the previous hold's utterance and must never be dispatched.
+        # Frames without the field (older LiveAudio builds) are kept.
         try:
             data = json.loads(msg)
         except (json.JSONDecodeError, TypeError, ValueError):
             return
         if not isinstance(data, dict):
             return
+        if data.get("is_replay") is True:
+            # LiveAudio also flags delayed LIVE cues (age > 1 s under its auto
+            # backlog policy). A cue created after this socket connected is the
+            # owner's own speech from this hold: keep it. Older cues (or ones
+            # without created_at) are the late-joiner replay burst: drop them.
+            # Counted either way, numbers only.
+            created = data.get("created_at")
+            with self._lock:
+                connected_wall = self._connected_wall
+            if (
+                isinstance(created, (int, float))
+                and connected_wall > 0
+                and created >= connected_wall
+            ):
+                with self._lock:
+                    self._replays_live_kept += 1
+            else:
+                delay = data.get("total_delay")
+                delay_ms = int(delay * 1000) if isinstance(delay, (int, float)) and delay > 0 else 0
+                with self._lock:
+                    self._replays_dropped += 1
+                    self._replay_max_delay_ms = max(self._replay_max_delay_ms, delay_ms)
+                return
         raw_text = data.get("text")
         text = raw_text.strip() if isinstance(raw_text, str) else ""
         if not text and "segments" in data and isinstance(data["segments"], list):
@@ -358,7 +520,14 @@ class PttSession:
                 # A segment arriving during grace extends the deadline (CTK
                 # voice_control.py:500-501 parity).
                 if self._state == _FLUSHING:
-                    self._grace_deadline = time.monotonic() + self._grace
+                    now = time.monotonic()
+                    if now < self._grace_deadline:
+                        self._extensions += 1
+                    else:
+                        self._late_segments += 1
+                    self._grace_deadline = max(
+                        self._grace_deadline, now + self._tail_extension
+                    )
                 buffered = len(self._buffer)
         if emit_cap:
             # Once per instance (guarded by self._cap_emitted above), emitted
@@ -368,6 +537,21 @@ class PttSession:
             return
         logger.debug("[PTT] buffered %d chars", buffered)
 
+    def _timing_fields(self) -> str:
+        """Numbers-only release->flush timing for the [PTT] outcome lines."""
+        with self._lock:
+            stop_at = self._stop_at
+            ext = self._extensions
+            late = self._late_segments
+            replays = self._replays_dropped
+            replay_delay = self._replay_max_delay_ms
+            live_kept = self._replays_live_kept
+        since = int((time.monotonic() - stop_at) * 1000) if stop_at else 0
+        return (
+            "since_stop_ms=%d grace_ms=%d extensions=%d late_segments=%d "
+            "replays_dropped=%d replay_max_delay_ms=%d replays_live_kept=%d"
+        ) % (since, int(self._grace * 1000), ext, late, replays, replay_delay, live_kept)
+
     def _flush_buffer(self) -> None:
         with self._lock:
             text = self._buffer.strip()
@@ -375,14 +559,27 @@ class PttSession:
         words = text.split()
         if len(words) < _MIN_WORDS:
             # Honest no-op: under two words is not a turn. No LLM call.
+            _session_log.info(
+                "[PTT] empty words=%d reason=%s %s",
+                len(words),
+                "below_min_words" if words else "no_transcript",
+                self._timing_fields(),
+            )
             self._emit("empty")
             return
         logger.info("[PTT] flushing %d chars as one turn", len(text))
+        _session_log.info(
+            "[PTT] flushed words=%d chars=%d %s", len(words), len(text), self._timing_fields()
+        )
+        outcome = None
         try:
-            self._on_flush(text)
+            outcome = self._on_flush(text)
         except Exception:
             logger.exception("PTT flush dispatch failed")
-        self._emit("flushed")
+        # The callback may report the closed alternative outcome "dictated"
+        # (ptt-dictation-20261111): the words went to the composer, not to a
+        # turn. Anything else, None included, keeps the "flushed" literal.
+        self._emit(_DICTATED if outcome == _DICTATED else "flushed")
 
     def _begin_grace(self, action: str, last_error: Optional[str] = None) -> None:
         """Transition listening -> flushing exactly once (first caller wins).
@@ -393,13 +590,21 @@ class PttSession:
         with self._lock:
             if self._state == _LISTENING:
                 self._state = _FLUSHING
-                self._grace_deadline = time.monotonic() + self._grace
+                self._stop_at = time.monotonic()
+                self._grace_deadline = self._stop_at + self._grace
                 if last_error:
                     self._last_error = last_error
                 elif action == "auto_stopped":
                     self._last_error = "keepalive_starvation"
                 emit = True
         if emit:
+            hold_ms = int((time.monotonic() - self._hold_started) * 1000)
+            if action == "error":
+                _session_log.warning(
+                    "[PTT] error last_error=%s hold_ms=%d", last_error or "unknown", hold_ms
+                )
+            else:
+                _session_log.info("[PTT] %s hold_ms=%d", action, hold_ms)
             self._emit(action)
             # Physical release contract: only explicit "stopped" (PTT_UP) clears the
             # speech hold immediately. Transport anomalies ("auto_stopped", "error")
@@ -453,10 +658,33 @@ class PttController:
         on_press_precheck: Optional[Callable[[], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         motor=None,
-        grace: float = 1.2,
+        grace: Optional[float] = None,
+        dictation_mode: str = "send",
+        companion_dictation: bool = False,
+        focus_clock: Optional[Callable[[], float]] = None,
         **session_kwargs,
     ):
+        from opencohost.config import settings as _s
+
         self._ws_uri = ws_uri
+        # Dictation mode (ptt-dictation-20261111). In memory; seeded from
+        # ptt_settings.json at boot and live-applied by PUT /api/ptt/config.
+        if dictation_mode not in _s.PTT_DICTATION_MODES:
+            dictation_mode = _s.PTT_DEFAULT_DICTATION_MODE
+        self._dictation_mode = dictation_mode
+        # P8: whether a companion hold may dictate (in `always` mode only).
+        self._companion_dictation = companion_dictation is True
+        self._focus_stale_s = float(_s.PTT_FOCUS_STALE_S)
+        self._focus_clock = focus_clock or time.monotonic
+        # Latest main-window focus report: (focused, monotonic_at) or None.
+        # Memory only; never persisted.
+        self._focus: Optional[tuple] = None
+        # Decision taken at the explicit release of a press: (epoch, dictate).
+        self._release_decision: Optional[tuple] = None
+        # Press epoch of a hold made from the desktop companion window, which
+        # counts as background in `foreground` mode (it never takes focus, so
+        # the main window may still report focused while it is used).
+        self._background_epoch: Optional[int] = None
         self._dispatcher = dispatcher
         self._event_log = event_log
         # Step 1 (interruptible_speech_architecture_20260804): the motor
@@ -468,7 +696,9 @@ class PttController:
         # host doubles need not supply it.
         self._motor = motor
         self._session_factory = session_factory
-        session_kwargs.setdefault("grace", grace)
+        # None -> resolved adaptively per press (resolve_ptt_grace).
+        if grace is not None:
+            session_kwargs.setdefault("grace", grace)
         self._session_kwargs = session_kwargs
         # Recovery hook (2026-07-15 PTT voice-death fix): the smallest
         # possible surface into MotorVocalIA — a bound
@@ -535,7 +765,104 @@ class PttController:
         except Exception:
             logger.exception("PTT on_release hook failed")
 
+    # ------------------------------------------------------------------
+    # Dictation mode (ptt-dictation-20261111)
+    # ------------------------------------------------------------------
+
+    @property
+    def dictation_mode(self) -> str:
+        with self._lock:
+            return self._dictation_mode
+
+    def set_dictation_mode(self, mode: str) -> None:
+        """Live-apply a dictation mode. A hold already released keeps the
+        decision it took at release; a hold still open picks this up when it
+        is released."""
+        from opencohost.config import settings as _s
+
+        if mode not in _s.PTT_DICTATION_MODES:
+            raise ValueError(f"Invalid dictation mode: {mode}")
+        with self._lock:
+            self._dictation_mode = mode
+
+    @property
+    def companion_dictation(self) -> bool:
+        with self._lock:
+            return self._companion_dictation
+
+    def set_companion_dictation(self, value: bool) -> None:
+        """Live-apply the companion switch; read at release like the mode."""
+        if not isinstance(value, bool):
+            raise ValueError("companion_dictation must be a boolean")
+        with self._lock:
+            self._companion_dictation = value
+
+    def report_focus(self, focused: bool) -> None:
+        """The main webview's focus state (memory only, time-stamped)."""
+        with self._lock:
+            self._focus = (bool(focused), self._focus_clock())
+
+    def focus_is_fresh_and_focused(self) -> bool:
+        with self._lock:
+            return self._focus_fresh_locked()
+
+    def _focus_fresh_locked(self) -> bool:
+        # Unknown or stale counts as background: the turn is sent.
+        if self._focus is None:
+            return False
+        focused, at = self._focus
+        return focused and (self._focus_clock() - at) <= self._focus_stale_s
+
+    def mark_hold_background(self, session_id: str) -> bool:
+        """Flag the live hold as made outside the main window (companion)."""
+        with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                return False
+            self._background_epoch = self._press_epoch
+            return True
+
+    def _should_dictate_locked(self, epoch: Optional[int]) -> bool:
+        mode = self._dictation_mode
+        companion = epoch is not None and epoch == self._background_epoch
+        if mode == "always":
+            # A companion hold dictates only when the owner switched it on.
+            return self._companion_dictation if companion else True
+        if mode == "foreground":
+            if companion:
+                return False
+            return self._focus_fresh_locked()
+        return False
+
+    def _on_flush(self, text: str, epoch: Optional[int] = None) -> Optional[str]:
+        """Session flush callback: dictate (no turn) or dispatch.
+
+        Uses the decision taken at the explicit release of this press when one
+        exists; exits that never reach ``stop()`` (keepalive starvation, WS
+        drop) decide here. Dictation skips the dispatch AND both drain hooks:
+        those exist to make room for a new turn, and none is created. The
+        speech-hold release is not on this path (ADR-048), so it is untouched.
+        """
+        with self._lock:
+            decision = self._release_decision
+            if decision is not None and decision[0] == epoch:
+                self._release_decision = None
+                dictate = decision[1]
+            else:
+                dictate = self._should_dictate_locked(epoch)
+            mode = self._dictation_mode
+        if dictate and text and text.strip():
+            # Literals only: never the words, never their count beyond what
+            # the session's own "[PTT] flushed" line already records.
+            _session_log.info("[PTT] dictated mode=%s", mode)
+            return _DICTATED
+        self._dispatch(text)
+        return None
+
     def _dispatch(self, text: str) -> None:
+        if not text or not text.strip():
+            logger.debug("PTT dispatch dropped: empty transcript")
+            return
         # Honest history_text (memoria_quality_20260717 A1): the motor commits
         # "El streamer dijo (PTT): ..." to historial instead of the raw
         # "acaba de decir (PTT)" prompt wrapper, so PTT-derived memorias no
@@ -609,13 +936,21 @@ class PttController:
             # yet, so this press holds nothing (judge closure — the old
             # "raising factory escapes with the hold set" hole is now
             # unreachable by construction, not by a compensating release).
+            kwargs = dict(self._session_kwargs)
+            if "grace" not in kwargs:
+                eff, src, st = resolve_ptt_grace()
+                kwargs["grace"] = eff
+                _session_log.info(
+                    "[PTT] grace effective=%.2fs source=%s silence_timeout=%.2f",
+                    eff, src, st,
+                )
             session = self._session_factory(
                 self._ws_uri,
-                on_flush=self._dispatch,
+                on_flush=lambda text, _e=epoch: self._on_flush(text, _e),
                 on_event=self._record_event,
                 on_close=lambda err, _e=epoch: self._on_session_closed(err, _e),
                 on_release=lambda _e=epoch: self._release_hold(_e),
-                **self._session_kwargs,
+                **kwargs,
             )
             self._session = session
             self._last_session_id = session.session_id
@@ -683,6 +1018,14 @@ class PttController:
                 if session_id is None or session_id == self._session.session_id:
                     session = self._session
                     epoch_to_release = self._press_epoch
+                    # Dictation is decided at RELEASE (ptt-dictation-20261111).
+                    # The first stop of a press wins; a bridge retry keeps it.
+                    rd = self._release_decision
+                    if rd is None or rd[0] != epoch_to_release:
+                        self._release_decision = (
+                            epoch_to_release,
+                            self._should_dictate_locked(epoch_to_release),
+                        )
             else:
                 # If session already idled/closed, release if session_id matches the last session (or was omitted)
                 if session_id is None or session_id == self._last_session_id:
@@ -747,10 +1090,13 @@ class PttController:
             self._last_error = last_error
         # Physical hold fail-safe:
         # If clean close (last_error is None), release immediately as backstop.
-        # If abnormal close on transport drop/starvation (last_error is not None),
-        # do NOT release hold immediately; arm the deadman fail-safe timer instead.
+        # Keepalive starvation (auto_stopped): the STT session is already closed
+        # and flushed, so there is no live mic left to talk over; release now
+        # instead of making the reply wait for the 15 s deadman (ptt-stall G1).
+        # _release_hold's epoch guard keeps a newer press untouched.
+        # Other abnormal closes (transport drop, error) keep the deadman timer.
         if epoch is not None:
-            if last_error is None:
+            if last_error is None or last_error == "keepalive_starvation":
                 self._release_hold(epoch)
             else:
                 self._arm_deadman(epoch, timeout=15.0)

@@ -243,12 +243,6 @@ class TestLocalOnlyMachineryGated:
         ]
         assert warmed == ["qwen3:1.7b"]
 
-    def test_cloud_download_worker_skips_pull(self, tmp_path):
-        motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
-        motor.ollama.pull = MagicMock()
-        motor._download_model_worker("some:model")
-        motor.ollama.pull.assert_not_called()
-
     def test_cloud_fetch_show_skips_ollama_show(self, tmp_path):
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         import ollama
@@ -574,21 +568,6 @@ class TestCloudSuccessGating:
 
 
 # ---------------------------------------------------------------------------
-# 12. Cloud download refusal surfaces operator feedback (F6)
-# ---------------------------------------------------------------------------
-
-class TestCloudDownloadFeedback:
-    def test_cloud_download_worker_emits_refusal_feedback(self, tmp_path):
-        motor, log_queue, ui_events = _make_motor(tmp_path, provider_config=_cloud_config())
-        motor.ollama.pull = MagicMock()
-        motor._download_model_worker("some:model")
-        motor.ollama.pull.assert_not_called()
-        assert "download_error" in ui_events
-        logged = list(log_queue.queue)
-        assert any("cloud" in m.lower() for m in logged)
-
-
-# ---------------------------------------------------------------------------
 # 13. Cloud failure degrade + attribution (F7, F8)
 # ---------------------------------------------------------------------------
 
@@ -638,7 +617,6 @@ class TestCloudFailureDegrade:
             "source": "direct",
             "attempt": 1,
             "reason": "ConnectionError",
-            "message": "ollama refused",
         }
 
     def test_cloud_response_error_no_rollback_no_health_change(self, tmp_path):
@@ -681,6 +659,34 @@ class TestCloudTokenCap:
         motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
         captured = {}
 
+    def test_cloud_dispatch_ignores_local_reasoning_override(self, tmp_path):
+        """Live-session regression (2026-09-25, 17:00:36 kimi-k3 turn): a cloud
+        turn was capped at 32 tokens. Root cause -- ``request_model`` stays the
+        LOCAL desired model name (``self.current_model``) even when the active
+        provider is cloud, and a per-model reasoning override keyed by that
+        local model name (e.g. an owner override for ``gemma4:e4b``,
+        budget_tokens=2048) leaked into the cloud num_predict budget instead of
+        CLOUD_MAX_TOKENS. This must never happen regardless of what local
+        reasoning overrides exist on disk -- hermetic via a stubbed resolver,
+        no dependency on real config/model_parameters.json state."""
+        from opencohost.config.settings import CLOUD_MAX_TOKENS
+        motor, _, _ = _make_motor(tmp_path, provider_config=_cloud_config())
+        motor._resolve_reasoning_settings = lambda model: {
+            "enabled": True,
+            "budget_tokens": 2048,
+            "preset": "custom",
+        }
+        captured = {}
+
+        def fake_send(**kwargs):
+            captured.update(kwargs)
+            return {"message": {"content": "cloud reply", "thinking": ""}, "usage": {}}
+
+        with patch(_SEND, side_effect=fake_send):
+            motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        assert captured["options"]["num_predict"] == CLOUD_MAX_TOKENS
+
         def fake_send(**kwargs):
             captured.update(kwargs)
             return {"message": {"content": "cloud reply", "thinking": ""}, "usage": {}}
@@ -695,6 +701,7 @@ class TestCloudTokenCap:
         motor, _, _ = _make_motor(
             tmp_path, provider_config={"active_provider": "local", "profiles": {}}
         )
+        motor.current_model = "llama3"
         captured = {}
 
         def local_chat(**kwargs):
@@ -702,7 +709,10 @@ class TestCloudTokenCap:
             return {"message": {"content": "local reply", "thinking": ""}}
 
         motor.ollama.chat.side_effect = local_chat
-        motor._generar_dialogo("hola", source="direct", commit_history=False)
+        # "chat" is not an owner-policy source. Owner turns ("direct", "ptt")
+        # are capped per reply-length level since 9b27e73, which is a separate,
+        # intended local cap; this test pins the base local cap only.
+        motor._generar_dialogo("hola", source="chat", commit_history=False)
 
         assert captured["options"]["num_predict"] == LLM_MAX_TOKENS
 

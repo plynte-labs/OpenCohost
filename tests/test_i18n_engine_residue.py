@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from unittest.mock import MagicMock
@@ -24,6 +25,7 @@ from opencohost.i18n.contract import TIER_OFFICIAL, LocaleBundle, resolve
 from opencohost.i18n.registry import build_chain, discover_bundles, official_locales_dir
 from opencohost.i18n.startup import resolve_active_bundle
 from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+from opencohost.smart_aggregator.chat_reaction import ChatReactionCore
 
 
 @pytest.fixture
@@ -361,7 +363,7 @@ def test_ptt_history_wrapper_en_formats_without_keyerror(official):
 def test_typed_history_wrapper_es_matches_legacy(official):
     _activate("es", official)
     assert active.typed_history_wrapper() == active.LEGACY_TYPED_HISTORY_WRAPPER
-    assert active.typed_history_wrapper().format(text="hola") == "El streamer escribió: hola"
+    assert active.typed_history_wrapper().format(text="hola") == "El host escribió: hola"
 
 
 def test_typed_history_wrapper_differs_from_ptt_history_wrapper(official):
@@ -453,7 +455,7 @@ def test_engine_guardrail_fallback_en_lines_pass_output_guard(official):
     # after D4 never emits the 5th memory-flavored line for a generic reason) so
     # every line — including that 5th line — is verified guard-safe.
     lines = active.guardrail_fallback_lines()
-    assert len(lines) == 5  # 4 generic + 1 memory-flavored (D4)
+    assert len(lines) == 7  # 4 generic + 1 memory-flavored (D4) + 2 no_code_output
     for line in lines:
         allowed, reason = output_guard(line, source="direct")
         assert allowed, f"en fallback line blocked: {line!r} — {reason}"
@@ -635,7 +637,7 @@ def test_controller_ptt_history_text_uses_own_wrapper_en(official):
 def test_es_manifest_has_guardrail_fallback_lines():
     es = build_chain("es", discover_bundles(official_locales_dir(), "official"))
     lines = resolve(es, "llm.guardrail_fallback_lines")
-    assert isinstance(lines, list) and len(lines) == 5  # +1 memory-flavored line (D4)
+    assert isinstance(lines, list) and len(lines) == 7  # +1 memory-flavored (D4) +2 no_code_output
 
 
 def test_es_manifest_guardrail_fallback_lines_are_spanish():
@@ -653,7 +655,7 @@ def test_es_manifest_guardrail_fallback_lines_are_spanish():
 def test_en_manifest_has_guardrail_fallback_lines():
     en = build_chain("en", discover_bundles(official_locales_dir(), "official"))
     lines = resolve(en, "llm.guardrail_fallback_lines")
-    assert isinstance(lines, list) and len(lines) == 5  # +1 memory-flavored line (D4)
+    assert isinstance(lines, list) and len(lines) == 7  # +1 memory-flavored (D4) +2 no_code_output
 
 
 def test_en_manifest_guardrail_fallback_lines_are_english():
@@ -711,3 +713,67 @@ def test_en_manifest_has_wrapper_slots():
     assert "{text}" in resolve(en, "llm.scaffolding.live_voice_wrapper")
     assert "{text}" in resolve(en, "llm.scaffolding.ptt_history_wrapper")
     assert "{text}" in resolve(en, "llm.scaffolding.typed_history_wrapper")
+
+
+# ---------------------------------------------------------------------------
+# 9. chat_reaction prompt (smart_aggregator/chat_reaction.py): the task text,
+#    the highlight/anti-repeat labels and the context header come from the
+#    locale bundle (llm.chat_reaction.*). es is neutral Spanish, no voseo.
+# ---------------------------------------------------------------------------
+
+_CHAT_REACTION_SLOTS = (
+    "llm.chat_reaction.task",
+    "llm.chat_reaction.highlight_line",
+    "llm.chat_reaction.anti_repeat_header",
+    "llm.chat_reaction.context_header",
+)
+_ES_VOSEO = re.compile(
+    r"(respondé|respondés|podés|tenés|decí|hacé|variá|señalalo|querés|sabés|mirá|escribí|vos)",
+    re.IGNORECASE,
+)
+_ES_TASK_WORDS = re.compile(r"(TAREA|PROHIBIDO|respondé|Mensajes recientes|ÚLTIMAS)")
+
+
+def _chat_reaction_prompt() -> str:
+    return ChatReactionCore._build_kira_chat_prompt(
+        "Recent chat messages:\n- alice: why is the stream so quiet?",
+        "alice: why is the stream so quiet?",
+        "- Old reply",
+    )
+
+
+def test_chat_reaction_prompt_en_has_no_spanish_task_words(official):
+    _activate("en", official)
+    prompt = _chat_reaction_prompt()
+    assert "TASK:" in prompt
+    assert "Respond in 1-2 short sentences" in prompt
+    assert not _ES_TASK_WORDS.search(prompt), _ES_TASK_WORDS.search(prompt).group()
+
+
+def test_chat_reaction_prompt_es_has_no_voseo(official):
+    _activate("es", official)
+    prompt = _chat_reaction_prompt()
+    assert "Responde en 1-2 frases cortas" in prompt
+    assert not _ES_VOSEO.search(prompt), _ES_VOSEO.search(prompt).group()
+
+
+def test_chat_reaction_prompt_missing_slots_fall_back_to_neutral_es():
+    active.set_active_bundle(_bare_bundle())
+    prompt = _chat_reaction_prompt()
+    assert "Responde en 1-2 frases cortas" in prompt
+    assert not _ES_VOSEO.search(prompt), _ES_VOSEO.search(prompt).group()
+
+
+@pytest.mark.parametrize("slot", _CHAT_REACTION_SLOTS)
+def test_chat_reaction_slots_ship_in_both_locales(official, slot):
+    es_value = resolve(build_chain("es", official), slot)
+    en_value = resolve(build_chain("en", official), slot)
+    assert es_value and en_value
+    assert es_value != en_value
+    assert not any(ch in en_value for ch in "¿¡"), f"en slot is not English: {en_value!r}"
+
+
+@pytest.mark.parametrize("slot", _CHAT_REACTION_SLOTS)
+def test_chat_reaction_es_slots_have_no_voseo(official, slot):
+    es_value = resolve(build_chain("es", official), slot)
+    assert not _ES_VOSEO.search(es_value), _ES_VOSEO.search(es_value).group()

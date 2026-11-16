@@ -217,7 +217,10 @@ def test_keep_text_over_the_char_cap_is_skipped_without_losing_valid_sibling() -
     ]
 
 
-@pytest.mark.parametrize("reason", ["vague", "speculative", "trivial", "transient", "not_attributable"])
+@pytest.mark.parametrize("reason", [
+    "vague", "speculative", "trivial", "transient", "not_attributable",
+    "assistant_sourced", "general_knowledge", "duplicate",
+])
 def test_known_reject_reasons_round_trip(reason: str) -> None:
     text = _payload({"i": 1, "keep": False, "reason": reason})
     assert _parse_promotion_decisions(text, 1) == [(1, None, False, reason)]
@@ -378,16 +381,26 @@ def test_out_of_range_entry_never_charges_complete_current_siblings() -> None:
 # The prompt constant
 # ---------------------------------------------------------------------------
 
-def test_prompt_carries_the_draft_block_placeholder_only() -> None:
+def test_prompt_carries_the_draft_and_optional_existing_placeholders() -> None:
     assert "{draft_block}" in _PROMOTION_JUDGE_PROMPT
-    # Step 4 dedups arithmetically via stable_key — the judge is never asked to.
-    assert "{existing_block}" not in _PROMOTION_JUDGE_PROMPT
+    # F2: the EXISTING FACTS section is spliced in ahead of CANDIDATES only
+    # when related facts were found; otherwise the placeholder is blanked.
+    assert "{existing_block}CANDIDATES:" in _PROMOTION_JUDGE_PROMPT
 
 
 def test_prompt_keeps_the_self_contained_criterion_and_the_uncertain_field() -> None:
     lowered = _PROMOTION_JUDGE_PROMPT.lower()
     assert "self-contained" in lowered
     assert "uncertain" in lowered
+
+
+def test_prompt_rejects_assistant_sourced_and_general_knowledge_items() -> None:
+    """T1 (memory-noise-amplification-20260928): new judge rules."""
+    lowered = _PROMOTION_JUDGE_PROMPT.lower()
+    assert "not about the assistant" in lowered
+    assert "general knowledge" in lowered
+    assert "assistant_sourced" in _PROMOTION_JUDGE_PROMPT
+    assert "general_knowledge" in _PROMOTION_JUDGE_PROMPT
 
 
 def test_prompt_no_longer_rejects_names_that_appear_only_once() -> None:

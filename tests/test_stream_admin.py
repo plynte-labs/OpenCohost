@@ -15,8 +15,8 @@ import yaml
 
 from opencohost.stream_admin import AdminManager
 from opencohost.stream_admin.moderation import ModerationEngine
-from opencohost.stream_admin.oauth_store import OAuthStore
-from opencohost.stream_admin.providers import ProviderUnsupportedError
+from opencohost.stream_admin.oauth_store import OAuthStore, restrict_file_permissions
+from opencohost.stream_admin.providers import ProviderAuthError, ProviderUnsupportedError
 
 
 def write_config(path, token_path):
@@ -205,3 +205,169 @@ class TestAnalytics:
         context = manager.analytics_context_if_due()
         assert context is not None
         assert "Analiticas stream" in context
+
+
+class TestOAuthClientPermissions:
+    """Cross-platform permission hardening for stream admin credentials."""
+
+    def test_save_oauth_client_config_creates_file_and_calls_restrict(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "stream_admin.yaml"
+        token_path = tmp_path / "tokens.json"
+        client_path = tmp_path / "oauth_client.json"
+        write_config(str(cfg_path), str(token_path))
+
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        cfg["oauth"]["client_config_path"] = str(client_path)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+
+        manager = AdminManager(str(cfg_path))
+        restricted_paths = []
+        monkeypatch.setattr(
+            "opencohost.stream_admin.admin_manager.restrict_file_permissions",
+            lambda p: restricted_paths.append(str(p)) or True,
+        )
+
+        manager.save_oauth_client_config("my_id", "my_secret")
+
+        assert client_path.exists()
+        with open(client_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert data == {"client_id": "my_id", "client_secret": "my_secret"}
+        assert restricted_paths == [str(client_path)]
+        assert manager.config["youtube"]["client_id"] == "my_id"
+        assert manager.config["youtube"]["client_secret"] == "my_secret"
+
+    def test_restrict_file_permissions_windows_calls_icacls(self, tmp_path, monkeypatch):
+        test_file = tmp_path / "test.json"
+        test_file.write_text("{}", encoding="utf-8")
+
+        calls = []
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setenv("USERNAME", "testuser")
+
+        import subprocess
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "whoami":
+                return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        success = restrict_file_permissions(str(test_file))
+
+        assert success is True
+        assert len(calls) == 1
+        assert calls[0] == [
+            "icacls",
+            str(test_file),
+            "/inheritance:r",
+            "/grant:r",
+            "testuser:(R,W,D)",
+        ]
+
+    def test_restrict_file_permissions_windows_nonzero_returncode_returns_false_and_warns(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        test_file = tmp_path / "secret.json"
+        test_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setenv("USERNAME", "testuser")
+
+        import subprocess
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "whoami":
+                return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(cmd, 5, stdout=b"", stderr=b"Access is denied. SECRET-STDERR")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("WARNING"):
+            assert restrict_file_permissions(str(test_file)) is False
+        assert any("icacls" in r.getMessage() for r in caplog.records)
+        assert all("SECRET-STDERR" not in r.getMessage() for r in caplog.records)
+
+    def test_restrict_file_permissions_windows_exception_returns_false_and_warns(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        test_file = tmp_path / "secret.json"
+        test_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setenv("USERNAME", "testuser")
+
+        import subprocess
+
+        def boom(cmd, *args, **kwargs):
+            raise OSError("icacls missing")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        with caplog.at_level("WARNING"):
+            assert restrict_file_permissions(str(test_file)) is False
+        assert caplog.records
+
+    def test_restrict_file_permissions_windows_prefers_sid_when_available(self, tmp_path, monkeypatch):
+        test_file = tmp_path / "secret.json"
+        test_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setenv("USERNAME", "testuser")
+
+        import subprocess
+
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd and cmd[0] == "whoami":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=b'"host\\testuser","S-1-5-21-1-2-3-1001"\r\n', stderr=b""
+                )
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert restrict_file_permissions(str(test_file)) is True
+        assert calls[-1][-1] == "*S-1-5-21-1-2-3-1001:(R,W,D)"
+
+    def test_restrict_file_permissions_posix_calls_chmod(self, tmp_path, monkeypatch):
+        test_file = tmp_path / "test.json"
+        test_file.write_text("{}", encoding="utf-8")
+
+        chmod_calls = []
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(os, "chmod", lambda p, mode: chmod_calls.append((str(p), mode)))
+
+        success = restrict_file_permissions(str(test_file))
+
+        assert success is True
+        assert chmod_calls == [(str(test_file), 0o600)]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows NTFS live ACL test")
+    def test_save_oauth_client_config_real_windows_acl(self, tmp_path):
+        username = os.environ.get("USERNAME", "")
+        if not username:
+            pytest.skip("no USERNAME in environment")
+
+        cfg_path = tmp_path / "stream_admin.yaml"
+        token_path = tmp_path / "tokens.json"
+        client_path = tmp_path / "oauth_client.json"
+        write_config(str(cfg_path), str(token_path))
+
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        cfg["oauth"]["client_config_path"] = str(client_path)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+
+        manager = AdminManager(str(cfg_path))
+        manager.save_oauth_client_config("real_client_id", "real_client_secret")
+
+        assert client_path.exists()
+        import subprocess
+        result = subprocess.run(
+            ["icacls", str(client_path)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert username.lower() in result.stdout.lower()
+

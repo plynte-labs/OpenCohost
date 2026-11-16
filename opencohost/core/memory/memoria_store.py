@@ -1,7 +1,7 @@
 """MemoriaStore — SQLite-backed store for Kira's auto-captured + curated memorias.
 
 Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
-  - Own unshared SQLite file (memorias.db), PRAGMA user_version=4.
+  - Own unshared SQLite file (memorias.db), PRAGMA user_version=8.
   - Single guarded upsert: INSERT .. ON CONFLICT(profile_id, stable_key) DO
     UPDATE .. WHERE status='draft' — curated rows are immune by construction
     (the conflict resolves to a no-op when the WHERE clause is false, so no
@@ -39,7 +39,9 @@ Owner-approved design (engram sdd/kira-memory-persistence-20260701/design v2.1):
     ("{profile_id}|{sorted-tokens}", no ':' after the '|'); a 'summary' row
     embeds _SESSION_SUMMARY_MARKER ("{profile_id}|session_summary:{utc-ts}");
     an 'imported' row embeds _IMPORT_MARKER ("{profile_id}|import:{sorted-
-    tokens}"). The three namespaces never collide, so a plain
+    tokens}"); a judge-rejected draft, once scrubbed (ADR-062), carries
+    _SCRUBBED_MARKER ("{profile_id}|scrubbed:{sha256}"). The namespaces never
+    collide, so a plain
     `MARKER in stable_key` substring test classifies any row unambiguously
     (build_recency_lines and the UI rely on exactly this).
   - stable_key / title derivation applies a small domain-stopword list on
@@ -62,6 +64,7 @@ and opencohost/ui/inspector_memory.py.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -73,7 +76,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal, Optional
 from uuid import uuid4
 
 from opencohost.config.settings import (
@@ -92,8 +95,20 @@ from opencohost.core.editorial.editorial_matching import _strip_accents, normali
 # History-wrapper templates (see strip_history_wrapper below). Import-safe:
 # i18n.active resolves its bundle lazily on first accessor call, never at import.
 from opencohost.i18n import active as i18n_active
+from opencohost.i18n import tags as i18n_tags
 
 logger = logging.getLogger(__name__)
+
+# Locale tag stored on every row (schema v8 CHECK: 2..12 chars of [a-zA-Z0-9_-]).
+# Rows carry the PRIMARY language subtag only ("en-US"/"en_US"/"EN" -> "en") so
+# an English turn and an English capture always agree on the key.
+_MEMORIA_LANG_RE = re.compile(r"^[a-z0-9]{2,12}$")
+
+
+def normalize_memoria_lang(lang: Optional[str]) -> str:
+    """Primary language subtag for a memoria row; anything unusable -> 'unknown'."""
+    primary = i18n_tags.primary(lang) if lang else ""
+    return primary if _MEMORIA_LANG_RE.match(primary) else "unknown"
 
 # Saves/reads can fire from multiple threads; never wait longer than these
 # (sqlite default is 5s — a visible freeze). Mirrors agenda_persistence.py.
@@ -107,11 +122,49 @@ PROMOTION_DRAFT_FAILURE_CODES = frozenset({
 })
 PROMOTION_DRAFT_RETRY_DELAYS_S = (300, 1800)
 
+# T2 (memory-noise-amplification-20260928): a KEEP that near-duplicates an
+# already-durable row for the SAME profile never becomes a second durable row.
+# Durable = the tiers a pruner never touches (see the module docstring's
+# provenance-tiers note); a blank-content row (a scrubbed rejection) can never
+# match anything so it is excluded up front by the SQL filter, not the score.
+_DEDUP_DURABLE_STATUSES = ("promoted", "imported", "curated", "summary")
+# Cosine similarity on MiniLM-L12 sentence embeddings (ADR-060) when a caller
+# wires in `semantic_similarity_fn`. Calibrated (F1,
+# memory-paraphrase-contradiction-20260928) on the synthetic es/en pair set in
+# tests/fixtures/memoria_dedup_pairs.json via
+# scripts/calibrate_memoria_dedup_threshold.py: numeric UPDATES score very
+# high on this model ("tiene 24 anos" vs "25 anos" = 0.955, "two cats" vs
+# "four cats" = 0.856..0.911), above many true paraphrases (0.853..0.989).
+# A lost update costs more than a surviving duplicate, so the threshold sits
+# above EVERY update/negation pair (max 0.955 + 0.01 margin, rounded up) and
+# accepts the low paraphrase recall (5/20 = 0.25 on that set). The old 0.90
+# would have silently dropped three numeric updates.
+_DEDUP_SEMANTIC_THRESHOLD = 0.97
+# Fallback (parent review 2026-09-28, replaces a raw shared/union Jaccard
+# ratio): a plain "how many words overlap" score treats "El operador tiene 24
+# anos" vs "...25 anos", or "no le gusta" vs "le gusta", as ~60-80% the same
+# text and collapses them -- silently dropping the NEW value, the negation,
+# or the changed detail. Since contradiction-supersede (T3) is deferred, a
+# candidate dropped here is lost forever, which costs strictly more than one
+# duplicate row surviving. So the fallback below only ever calls two texts
+# duplicates when the CANDIDATE's significant-token set is fully CONTAINED in
+# the existing durable row's (containment ratio == 1.0, i.e. a true subset)
+# and neither text negates what the other says -- never a fuzzy overlap
+# score. 1.0 is exact by design; this is not a tunable similarity knob.
+_DEDUP_CONTAINMENT_THRESHOLD = 1.0
+
 _MIN_SIGNIFICANT_TOKENS = 3
 _STABLE_KEY_TOKEN_COUNT = 6
 _TITLE_TOKEN_COUNT = 3
 _SIGNATURE_TOKEN_COUNT = 12  # within the design's 8-16 window
 _MIN_SHARED_TOKENS = 2
+# T3 (web-trigger-memory-relevance): when the semantic recall side was rejected
+# or timed out, the lexical fact path is the ONLY signal left, and two shared
+# significant tokens (the legacy gate) are routinely coincidence on a short,
+# topic-free question. Three is the smallest count a single incidental
+# function-word-like overlap cannot reach; a query that names the stored topic
+# shares its distinctive tokens (>= 3) and still injects.
+STRONG_LEXICAL_SHARED_TOKENS = 3
 
 # Closed list (design v2.1 residual risk #3): near-ubiquitous tokens in
 # captured co-host turns — Kira's own name, streaming tooling, and
@@ -158,6 +211,22 @@ _HISTORY_WRAPPER_ACCESSORS = (
     i18n_active.live_voice_wrapper,
 )
 _WRAPPER_TEXT_PLACEHOLDER = "{text}"
+_STATIC_HISTORY_PREFIXES = (
+    "El host escribió:",
+    "El streamer acaba de decir (PTT):",
+    "The streamer just said (PTT):",
+    "El streamer dijo (PTT):",
+    "The streamer said (PTT):",
+    "El streamer acaba de decir:",
+    "The streamer just said:",
+    "El streamer dijo:",
+    "The streamer said:",
+    "El streamer escribió:",
+    "The streamer typed:",
+    "LiveVoice:",
+    "(PTT):",
+    "(PTT)",
+)
 
 
 def strip_history_wrapper(text: str) -> str:
@@ -169,19 +238,39 @@ def strip_history_wrapper(text: str) -> str:
     tokens a capture needs, and keeps the filler gate's remainder non-empty so a
     wrapped pure greeting survives as a memoria.
 
-    Resolves the prefixes from the ACTIVE locale's templates — the same
-    accessors that produced the text — and strips the longest match. Text with
-    no wrapper (chat, agenda, a bare typed turn) is returned unchanged.
+    Resolves the prefixes from the ACTIVE locale's templates and cross-locale
+    static fallbacks, stripping the longest match case-insensitively while
+    tolerating leading whitespace. Text with no wrapper is returned unchanged.
     """
-    raw = text or ""
+    if not text:
+        return ""
+    raw = text.strip()
+    if not raw:
+        return ""
     longest = ""
+    candidate_prefixes = set(_STATIC_HISTORY_PREFIXES)
     for accessor in _HISTORY_WRAPPER_ACCESSORS:
-        # _slot-backed accessors swallow every failure and fall back to their
-        # legacy es literal, so this cannot raise.
-        prefix = accessor().split(_WRAPPER_TEXT_PLACEHOLDER)[0]
-        if prefix and len(prefix) > len(longest) and raw.startswith(prefix):
-            longest = prefix
-    return raw[len(longest):].lstrip() if longest else raw
+        try:
+            val = accessor()
+            prefix = val.split(_WRAPPER_TEXT_PLACEHOLDER)[0].strip()
+            if prefix:
+                candidate_prefixes.add(prefix)
+        except Exception:
+            pass
+
+    raw_lower = raw.lower()
+    for prefix in candidate_prefixes:
+        p_clean = prefix.strip()
+        if raw_lower.startswith(p_clean.lower()) and len(p_clean) > len(longest):
+            longest = p_clean
+
+    if longest:
+        stripped = raw[len(longest):].lstrip()
+        if stripped.startswith(":"):
+            stripped = stripped[1:].lstrip()
+        return stripped
+    return raw
+
 
 
 class MemoriaValidationError(ValueError):
@@ -399,6 +488,104 @@ def derive_import_key(profile_id: str, claim: str) -> str | None:
     return f"{profile_id}{_IMPORT_MARKER}{'-'.join(key_tokens)}"
 
 
+# T6(a) (ADR-062): the stable_key infix of a judge-REJECTED draft after its
+# scrub. A plain draft key is built from the exchange's own significant tokens,
+# so a scrubbed row keeps only a hash of it: f"{profile_id}|scrubbed:{sha256}".
+# Deterministic, so a re-capture of the same exchange finds and reopens the
+# scrubbed row (see _restore_scrubbed_key). A fourth namespace next to the
+# plain, session-summary and import keys; it never collides with them.
+_SCRUBBED_MARKER = "|scrubbed:"
+
+
+def scrubbed_stable_key(stable_key: str) -> str:
+    """Content-free replacement for a rejected draft's *stable_key*.
+
+    Pseudonymization, not encryption: the hash of a known key is reproducible,
+    which is exactly what dedup needs. It only stops the store from keeping
+    the exchange's words in clear.
+    """
+    profile_id = stable_key.split("|", 1)[0]
+    digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:32]
+    return f"{profile_id}{_SCRUBBED_MARKER}{digest}"
+
+
+def _restore_scrubbed_key(conn: sqlite3.Connection, profile_id: str, stable_key: str) -> None:
+    """Give a scrubbed rejected draft its plain key back, inside the caller's
+    transaction, so the following upsert/supersede lands on the SAME row (one
+    row per exchange, as before the scrub). No-op when a row already owns the
+    plain key; the live row wins and the scrubbed one stays scrubbed."""
+    conn.execute(
+        "UPDATE memorias SET stable_key = ? WHERE profile_id = ? "
+        "AND stable_key = ? AND status = 'draft' AND NOT EXISTS ("
+        "SELECT 1 FROM memorias WHERE profile_id = ? AND stable_key = ?)",
+        (stable_key, profile_id, scrubbed_stable_key(stable_key), profile_id, stable_key),
+    )
+
+
+# ---------------------------------------------------------------------------
+# T2 lexical dedup (memory-noise-amplification-20260928, parent review fix)
+# ---------------------------------------------------------------------------
+
+# es/en negation markers. Checked on the RAW text (see _has_negation_marker),
+# never on `_significant_tokens` output: whether "no" happens to survive
+# stopword filtering must never decide this. "n['']t\\b" covers isn't/
+# doesn't/won't/can't after lowercasing; the curly apostrophe is included
+# because _strip_accents does not fold it to ASCII.
+_NEGATION_MARKER_PATTERNS: tuple[str, ...] = (
+    r"\bno\b", r"\bnunca\b", r"\bjamas\b", r"\bya\s+no\b", r"\btampoco\b",
+    r"\bnot\b", r"\bnever\b", r"\bno\s+longer\b", r"n['’]?t\b",
+)
+_NEGATION_RE = re.compile("|".join(_NEGATION_MARKER_PATTERNS), re.IGNORECASE)
+
+
+def _has_negation_marker(text: str) -> bool:
+    """True when *text* carries a Spanish/English negation marker."""
+    return bool(_NEGATION_RE.search(_strip_accents(text or "").lower()))
+
+
+def _is_lexical_duplicate(candidate_text: str, existing_text: str) -> bool:
+    """T2 Jaccard-fallback replacement: True only when *candidate_text* adds
+    NO durable information beyond *existing_text*.
+
+    Two gates, both required:
+    1. Neither text negates what the other says (``_has_negation_marker``
+       differs) -- "no le gusta" vs "le gusta" must never collapse in
+       EITHER direction, regardless of how many words they share.
+    2. *candidate_text*'s significant-token set is fully CONTAINED in
+       *existing_text*'s (containment ratio >= ``_DEDUP_CONTAINMENT_THRESHOLD``,
+       i.e. a true subset) -- "El operador tiene 24 anos" vs "...25 anos" and
+       "...Hades 2" vs "...Hades 1" each keep their own differing token
+       (the number), so neither is ever a subset of the other.
+
+    A candidate under ``_MIN_SIGNIFICANT_TOKENS`` is never treated as a
+    duplicate (too small to reliably judge, and the RC-1 capture gate already
+    keeps genuinely empty candidates out).
+    """
+    if _has_negation_marker(candidate_text) != _has_negation_marker(existing_text):
+        return False
+    candidate_tokens = set(_significant_tokens(candidate_text))
+    if len(candidate_tokens) < _MIN_SIGNIFICANT_TOKENS:
+        return False
+    existing_tokens = set(_significant_tokens(existing_text))
+    if not existing_tokens:
+        return False
+    containment = len(candidate_tokens & existing_tokens) / len(candidate_tokens)
+    return containment >= _DEDUP_CONTAINMENT_THRESHOLD
+
+
+# T6(a) (ADR-062): judge-emitted provenance of a kept fact. NULL = not
+# recorded (every row written before schema v5, and non-judge writers).
+MEMORIA_ORIGINS = ("self_stated", "shared_content")
+# A missing or invalid origin on a KEEP is stored as shared_content: tagging
+# an operator fact as shared content costs a little personalization, while the
+# opposite error presents someone else's words as a fact about the operator.
+MEMORIA_ORIGIN_DEFAULT = "shared_content"
+# Fixed prefix of a shared_content row's injected line, so the model never
+# reads it as a fact about the operator. English on purpose, like the
+# episode line tag "[past chat ...]" (ADR-059); it is prompt-internal.
+_SHARED_CONTENT_TAG = "[shared content] "
+
+
 def _now_text() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -446,14 +633,14 @@ def _compute_candidate_idf(rows) -> dict[str, float]:
     }
 
 
-def select_top_k(topic_text: str, rows, k: int = 3) -> list:
-    """Lexical top-k of *rows* against *topic_text* by Raw IDF Sum.
+def _lexical_scores(
+    topic_text: str, rows, min_shared: int = _MIN_SHARED_TOKENS
+) -> list[tuple[float, object]]:
+    """(score, row) for every row passing the lexical gate, input order.
 
-    Candidate A (2026-08-21): each row is scored by the sum of inverse document
-    frequency (IDF) weights of the shared significant tokens between topic and
-    the candidate's signature (title fallback). Requires >= _MIN_SHARED_TOKENS
-    shared tokens. Preserves input order on score ties (Timsort stability).
-    Returns up to *k* rows.
+    Raw IDF Sum over the shared significant tokens between topic and the
+    row's signature (title fallback); requires >= *min_shared* shared
+    (default _MIN_SHARED_TOKENS).
     """
     topic = set(_significant_tokens(topic_text)) - _SCORING_STOPWORDS
     if not topic or not rows:
@@ -463,11 +650,70 @@ def select_top_k(topic_text: str, rows, k: int = 3) -> list:
     for row in rows:
         sig = set((row["signature"] or row["title"]).split()) - _SCORING_STOPWORDS
         shared = topic & sig
-        if len(shared) >= _MIN_SHARED_TOKENS:
-            score = sum(idf_map[token] for token in shared)
-            scored.append((score, row))
+        if len(shared) >= min_shared:
+            scored.append((sum(idf_map[token] for token in shared), row))
+    return scored
+
+
+def select_top_k(
+    topic_text: str, rows, k: int = 3, min_shared: int = _MIN_SHARED_TOKENS
+) -> list:
+    """Lexical top-k of *rows* against *topic_text* by Raw IDF Sum.
+
+    Candidate A (2026-08-21): each row is scored by the sum of inverse document
+    frequency (IDF) weights of the shared significant tokens between topic and
+    the candidate's signature (title fallback). Requires >= _MIN_SHARED_TOKENS
+    shared tokens. Preserves input order on score ties (Timsort stability).
+    Returns up to *k* rows.
+    """
+    scored = _lexical_scores(topic_text, rows, min_shared)
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [row for _, row in scored[:k]]
+
+
+def select_top_k_hybrid(
+    topic_text: str,
+    rows,
+    semantic_scores: dict,
+    k: int = 3,
+    *,
+    min_score: float | None = None,
+    lexical_weight: float | None = None,
+    stats: dict | None = None,
+) -> list:
+    """Hybrid top-k (ADR-060): semantic score with lexical corroboration.
+
+    *semantic_scores* maps row id -> query cosine for rows with a VALID
+    fact embedding (drafts and stale rows are simply absent). A row
+    qualifies when its cosine reaches *min_score* OR it passes the lexical
+    gate of select_top_k. Score = max(cosine, min_score if lexical-pass)
+    + lexical_weight * (lexical score / best lexical score): a lexical-only
+    row (e.g. a draft) ranks like a threshold-level semantic hit, and
+    lexical overlap breaks near ties between semantic hits. Stable on ties.
+    *stats* (optional) receives ``semantic``: selected rows whose cosine
+    reached *min_score*.
+    """
+    if min_score is None:
+        from opencohost.config.settings import MEMORY_FACT_SEMANTIC_MIN_SCORE as min_score
+    if lexical_weight is None:
+        from opencohost.config.settings import MEMORY_FACT_LEXICAL_WEIGHT as lexical_weight
+    lexical = {id(row): score for score, row in _lexical_scores(topic_text, rows)}
+    best_lex = max(lexical.values(), default=0.0)
+    scored = []
+    for row in rows:
+        sem = semantic_scores.get(row["id"])
+        semantic_pass = sem is not None and sem >= min_score
+        lex = lexical.get(id(row))
+        if not semantic_pass and lex is None:
+            continue
+        base = max(sem if semantic_pass else 0.0, min_score if lex is not None else 0.0)
+        bonus = lexical_weight * (lex / best_lex) if lex and best_lex > 0 else 0.0
+        scored.append((base + bonus, semantic_pass, row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[:k]
+    if stats is not None:
+        stats["semantic"] = sum(1 for _, semantic_pass, _ in top if semantic_pass)
+    return [row for _, _, row in top]
 
 
 def _clip_for_injection(text: str, limit: int) -> str:
@@ -503,6 +749,18 @@ def _append_within_budget(
     return used + sep + len(text)
 
 
+def _injection_text(row) -> str:
+    """The text a row contributes to the memorias block: its content, tagged
+    when the judge recorded it as shared content (ADR-062). Tolerant of row
+    mappings without an ``origin`` column (pre-v5 fixtures)."""
+    try:
+        origin = row["origin"]
+    except (IndexError, KeyError):
+        origin = None
+    content = row["content"]
+    return _SHARED_CONTENT_TAG + content if origin == "shared_content" else content
+
+
 def pinned_injection_counter(rows, max_pinned: int = MEMORIAS_MAX_PINNED_INJECT) -> tuple[int, int]:
     """Honest pin/injection counter value (F6) — (total_pinned, injected).
 
@@ -523,6 +781,9 @@ def build_injection_lines(
     max_pinned: int = MEMORIAS_MAX_PINNED_INJECT,
     pinned_clip_chars: int = MEMORIAS_PINNED_CLIP_CHARS,
     top_k: int = 3,
+    semantic_scores: dict | None = None,
+    stats: dict | None = None,
+    min_shared: int = _MIN_SHARED_TOKENS,
 ) -> list[str]:
     """Assemble the injected memorias lines under pinned policy A (F6).
 
@@ -537,6 +798,12 @@ def build_injection_lines(
     max_pinned * pinned_clip_chars, automatic top-k always keeps a floor of
     at least (max_chars - max_pinned * pinned_clip_chars) chars, regardless
     of how many rows are pinned.
+
+    ADR-060: with a non-empty *semantic_scores* (row id -> query cosine from
+    the fact index) the automatic top-k is select_top_k_hybrid; without it
+    the lexical select_top_k runs exactly as before. Pinned rows are never
+    ranked. *stats* (optional) receives ``semantic``. *min_shared* only
+    tightens the lexical (no semantic scores) top-k gate.
     """
     pinned_rows = sorted(
         (row for row in rows if row["pinned"]),
@@ -553,11 +820,23 @@ def build_injection_lines(
     # pre-clipped to pinned_clip_chars).
     for row in pinned_rows:
         used = _append_within_budget(
-            lines, used, _clip_for_injection(row["content"], pinned_clip_chars), max_chars,
+            lines, used, _clip_for_injection(_injection_text(row), pinned_clip_chars), max_chars,
         )
+    if stats is not None:
+        stats["pinned"] = len(lines)
 
-    for row in select_top_k(topic_text, non_pinned_rows, k=top_k):
-        used = _append_within_budget(lines, used, row["content"], max_chars, clip_to_remaining=True)
+    if semantic_scores:
+        selected = select_top_k_hybrid(
+            topic_text, non_pinned_rows, semantic_scores, k=top_k, stats=stats,
+        )
+    else:
+        selected = select_top_k(topic_text, non_pinned_rows, k=top_k, min_shared=min_shared)
+        if stats is not None:
+            stats["semantic"] = 0
+    for row in selected:
+        used = _append_within_budget(
+            lines, used, _injection_text(row), max_chars, clip_to_remaining=True,
+        )
 
     return lines
 
@@ -642,6 +921,12 @@ _META_RECALL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p i
     # immediately followed by another word, while still matching phrase-final
     # forms like "lo último de tu memoria" / "¿qué hay en tu memoria?".
     r"\b(mi|tu)\s+memoria\b(?!\s+\w)",
+    # K2 (warmth-guardrails-runtime-20261006): "do you remember me" as a whole
+    # question. Phrase-final only: "me recuerdas a mi primo" (resemblance)
+    # continues with another word and must stay out.
+    r"\bme\s+(recuerdas?|recordas)\b(?!\s+\w)",
+    r"\bte\s+(acuerdas?|acordas)\s+de\s+mi\b",
+    r"\bdo\s+you\s+remember\s+me\b(?!\s+\w)",
 ))
 
 
@@ -658,6 +943,187 @@ def is_meta_recall_query(text: str) -> bool:
     normalized = _strip_accents(text.lower())
     return any(pattern.search(normalized) for pattern in _META_RECALL_PATTERNS)
 
+
+# memory-grounding-and-recall-budget (M5): an EXPLICIT recall question, wider
+# than the summary-routing list above (which stays untouched): it also covers
+# the tuteo "te acuerdas" / "recuerdas" and "the X we discussed". Closed list,
+# accent-stripped lowercase, linear-time. The imperative "recuerda que ..."
+# (the owner telling Kira to remember) is deliberately NOT a question.
+_RECALL_QUESTION_EXTRA_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in (
+    r"\bte\s+acuerd\w*",
+    r"\brecuerdas\b",
+    r"\brecordas\b",
+    r"\b(que|lo\s+que|del\s+que|de\s+lo\s+que)\s+(hablamos|discutimos|comentamos|platicamos|charlamos|dijimos)\b",
+    r"\bque\s+te\s+(conte|dije|comente|hable|mencione)\b",
+    r"\bdo\s+you\s+(remember|recall)\b(?!\s+me\s+\w)",
+    r"\bwhat\s+(did|do)\s+we\s+(say|discuss|talk)\b",
+    r"\bwe\s+(discussed|talked\s+about|spoke\s+about|were\s+talking\s+about)\b",
+    r"\b(did|have)\s+i\s+(tell|told|mention|mentioned)\s+you\b",
+))
+
+# Patterns that are only a recall question when the sentence is ALSO a
+# question ("?" present or an interrogative opener): "la serie que vimos ayer
+# me encanto" and "last time I played chess I lost" are narration, not recall.
+_RECALL_CUED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in (
+    r"\b(que|lo\s+que|del\s+que|de\s+lo\s+que)\s+vimos\b",
+    r"\bte\s+(hable|conte|comente|dije|mencione)\s+(de|del|sobre|acerca)\b",
+    r"\blast\s+(session|time|stream)\b",
+))
+_QUESTION_OPENER = re.compile(
+    r"^\W*(y\s+)?(de\s+)?(que|cual|cuando|como|what|when|did|do|have|te|se|me)\b")
+
+# "me recordas al profe" / "me recuerdas mucho a mi primo": resemblance, not
+# memory. Bare "recordas" followed by a/al only counts with the "me" pronoun.
+_RESEMBLANCE = re.compile(r"\bme\s+(recuerdas|recordas)\b(?:\s+\w+)?\s+(a|al)\b")
+
+
+# Words of the recall frame itself (and bilingual function words): never a
+# topic. Folded (accent-stripped lowercase) tokens as normalize_tokens yields.
+_RECALL_FRAME_TOKENS: frozenset[str] = frozenset({
+    "te", "acuerdas", "acuerdo", "acuerda", "acordas", "recuerdas", "recuerdo",
+    "recuerda", "recordas", "recordar", "recordamos", "acordamos",
+    "hablamos", "hablo", "hablar", "hablado", "comentamos", "discutimos",
+    "platicamos", "charlamos", "dijimos", "vimos", "dijo", "conto", "comento",
+    "sesion", "sesiones", "pasada", "pasado", "pasadas", "anterior", "anteriores",
+    "previa", "previo", "otra", "vez", "ayer", "hoy", "antes", "charla",
+    "stream", "conversacion", "memoria", "memorias", "tu", "tus", "mis",
+    "del", "los", "las", "una", "uno", "sobre", "con", "por", "lo", "le", "me",
+    "nos", "ya", "si", "no", "es", "fue", "era",
+    "what", "do", "you", "your", "remember", "recall", "about", "we", "did", "say",
+    "said", "discuss", "discussed", "talk", "talked", "spoke", "last", "session",
+    "time", "the", "that", "this", "our", "us", "was", "were", "me", "my", "of",
+    "to", "in", "on", "and", "or", "yesterday", "earlier", "before",
+    # judge round 1: general-question vocabulary that is never a topic.
+    "sabes", "sabe", "sabias", "sabian", "hay", "ultimo", "ultima", "otro",
+    "dia", "dias", "rato", "hace", "conte", "dije", "contame", "cuentame",
+    "vos", "base", "hola", "usa", "responder", "respondeme", "responde",
+    "acuerdan", "acuerdo", "hable", "comente", "mencione", "dijeron",
+    "today", "tonight", "i", "told", "tell", "anything", "mention", "mentioned",
+    "have", "had", "know", "knew", "tell",
+})
+
+
+def is_recall_question(text: str) -> bool:
+    """True when *text* is an explicit question about earlier conversation:
+    a summary-routing meta query OR one of the wider recall phrasings above.
+    Accent-insensitive, wrapper-tolerant, pure. Empty text is never one."""
+    if not text:
+        return False
+    if is_meta_recall_query(text):
+        return True
+    raw = strip_history_wrapper(text)
+    normalized = _strip_accents(raw.lower())
+    if _RESEMBLANCE.search(normalized):
+        return False
+    if any(p.search(normalized) for p in _RECALL_QUESTION_EXTRA_PATTERNS):
+        return True
+    if any(p.search(normalized) for p in _RECALL_CUED_PATTERNS):
+        return "?" in raw or "¿" in raw or bool(_QUESTION_OPENER.search(normalized))
+    return False
+
+
+def recall_topic_anchors(text: str) -> tuple[str, ...]:
+    """The topic words of a recall question: significant tokens minus the
+    recall frame and scoring stopwords, first-occurrence order. Empty for a
+    general question ("what do you remember about me")."""
+    if not text:
+        return ()
+    anchors = [
+        t for t in _significant_tokens(text)
+        if t not in _RECALL_FRAME_TOKENS and t not in _SCORING_STOPWORDS
+    ]
+    return tuple(anchors)
+
+
+def is_topical_recall_question(text: str) -> bool:
+    """An explicit recall question that names a topic (owner decision M5:
+    the only turns that may receive the no-match note)."""
+    return is_recall_question(text) and bool(recall_topic_anchors(text))
+
+
+
+# T6(b) memory-semantic-recall (ADR-061): EXPLICIT self-correction cues. Same
+# discipline as _META_RECALL_PATTERNS: anchored phrases matched with re.search
+# on accent-stripped lowercase text (so the PTT wrapper prefix is tolerated),
+# never bare words. "no," alone, "en realidad" alone ("en realidad virtual",
+# "en realidad es bueno"), "perdón" alone and "actually" alone are NOT cues:
+# a false positive rewrites the previous draft, so the list stays closed and
+# conservative. Extend only in lockstep with the positive/negative tables in
+# tests/test_memory_correction_supersede.py. Linear-time patterns only.
+_CORRECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in (
+    r"\bme\s+(equivoque|confundi)\b",
+    r"\bquise\s+decir\b",
+    r"\bcorrijo\b",
+    r"\bcorreccion\s*[:,]",
+    r"\bno,?\s+en\s+realidad\s+(es|era|son|eran|fue|fueron)\b",
+    r"\bperdon,\s+(es|era|son|eran|fue)\b",
+    r"\bi\s+meant\b",
+    r"\bcorrection\s*[:,]",
+    r"\bi\s+was\s+wrong\b",
+    r"\bi\s+misspoke\b",
+    r"\bactually,\s+(it'?s|it\s+(is|was)|that'?s|my\s+\w+\s+(is|was))\b",
+))
+
+
+def is_correction_turn(text: str) -> bool:
+    """True when *text* explicitly corrects something the speaker just said.
+
+    Pure, no I/O. Accent-insensitive and wrapper-tolerant, like
+    is_meta_recall_query. Empty/None text is never a correction.
+    """
+    if not text:
+        return False
+    normalized = _strip_accents(text.lower())
+    return any(pattern.search(normalized) for pattern in _CORRECTION_PATTERNS)
+
+
+# T3 (web-trigger-memory-relevance): CLARIFICATION turns. A short owner turn
+# that only complains about / asks to repeat Kira's previous reply ("no tiene
+# sentido lo que dijiste", "what do you mean") carries no topic of its own, so
+# recall against it can only surface unrelated memory that the model then
+# echoes. Distinct from is_correction_turn (the owner correcting a FACT).
+# Rule: after accent folding and punctuation stripping the WHOLE turn must be
+#   [up to 2 lead words] + [one cue phrase] + [up to 4 closed filler words]
+# (fullmatch). A cue buried in a longer topical sentence therefore does not
+# match and recall stays allowed. Linear-time patterns only.
+_CLARIF_LEAD = (
+    r"(?:(?:no|pues|oye|ey|y|pero|a\s+ver|mira|perdon|ok|bueno|well|but|so|hey|wait|sorry)\s+){0,2}"
+)
+_CLARIF_CUES = (
+    r"(?:(?:eso|esto)\s+)?no\s+tiene\s+(?:ningun\s+)?sentido",
+    r"no\s+(?:te\s+|lo\s+|me\s+)?(?:entendi|entendiste|entiendo|entiendes)",
+    r"(?:que|q)\s+(?:dijiste|dices|has\s+dicho|acabas\s+de\s+decir)",
+    r"no\s+es\s+eso",
+    r"no\s+es\s+lo\s+que\s+(?:quise\s+decir|queria\s+decir|dije|te\s+pregunte)",
+    r"a\s+que\s+te\s+refieres",
+    r"que\s+quieres\s+decir",
+    r"that\s+makes\s+no\s+sense",
+    r"(?:that\s+)?(?:doesnt|does\s+not)\s+make\s+(?:any\s+)?sense",
+    r"what\s+did\s+you\s+(?:just\s+)?say",
+    r"(?:thats|that\s+is)\s+not\s+what\s+i\s+(?:meant|said|asked)",
+    r"what\s+do\s+you\s+mean",
+    r"you\s+(?:didnt|did\s+not)\s+understand",
+)
+_CLARIF_FILLER = (
+    r"(?:\s+(?:eso|esto|lo|que|dijiste|dices|dicho|has|acabas|de|decir|dije|nada|"
+    r"ahora|entonces|absoluto|that|this|you|said|say|just|by|at|all|now|then|me)){0,4}"
+)
+_CLARIFICATION_RE = re.compile(
+    "^" + _CLARIF_LEAD + "(?:" + "|".join(_CLARIF_CUES) + ")" + _CLARIF_FILLER + "$"
+)
+_CLARIF_STRIP_RE = re.compile(r"[^a-z0-9\s]")
+
+
+def is_clarification_turn(text: str) -> bool:
+    """True when *text* is a short "that made no sense / what did you say"
+    turn (see _CLARIFICATION_RE). Pure, no I/O, accent- and case-insensitive.
+    Empty/None text is never a clarification.
+    """
+    if not text:
+        return False
+    folded = _strip_accents(text.lower()).replace("'", "")
+    folded = " ".join(_CLARIF_STRIP_RE.sub(" ", folded).split())
+    return bool(folded) and _CLARIFICATION_RE.match(folded) is not None
 
 # 4R correction WU4 (finding C): summaries' share of the k recency slots.
 # MEMORIAS_META_RECALL_K=5 slots under a 700-char budget: 2 summaries answer
@@ -773,7 +1239,7 @@ def build_recency_lines(
     used = 0
     for row in pinned_rows:
         used = _append_within_budget(
-            lines, used, _clip_for_injection(row["content"], pinned_clip_chars), max_chars,
+            lines, used, _clip_for_injection(_injection_text(row), pinned_clip_chars), max_chars,
         )
     ordered = (
         summaries[:_META_RECALL_MAX_SUMMARIES]
@@ -781,7 +1247,9 @@ def build_recency_lines(
         + regular
     )[: max(k - len(lines), 0)]
     for row in ordered:
-        used = _append_within_budget(lines, used, row["content"], max_chars, clip_to_remaining=True)
+        used = _append_within_budget(
+            lines, used, _injection_text(row), max_chars, clip_to_remaining=True,
+        )
     return lines
 
 
@@ -792,11 +1260,23 @@ def build_recency_lines(
 class MemoriaStore:
     """SQLite-backed store for Kira memorias (own unshared DB, schema v4)."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        semantic_similarity_fn: "Callable[[str, str], float | None] | None" = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._warn_lock = threading.Lock()
         self._write_failure_warned = False
+        # T2 (memory-noise-amplification-20260928): optional synchronous
+        # embedding-similarity hook for `_is_near_duplicate` (ADR-060's MiniLM
+        # path). None by default -- the production semantic path only runs
+        # inside the async worker process today (IPC, fail-open), so there is
+        # no cheap synchronous embed-and-compare over two arbitrary strings
+        # yet. When absent, dedup always falls back to token Jaccard.
+        self._semantic_similarity_fn = semantic_similarity_fn
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -806,6 +1286,8 @@ class MemoriaStore:
     def upsert_draft(
         self, profile_id: str, stable_key: str, title: str, content: str, *,
         signature: str = "", return_created: bool = False,
+        provenance: "str | None" = None,
+        lang: str = "unknown",
     ) -> "str | None | tuple[str | None, bool]":
         """Insert a new draft or refresh an existing draft sharing stable_key.
 
@@ -816,6 +1298,11 @@ class MemoriaStore:
         required inputs. *signature* (candidate 2) is the optional retrieval
         signature (build_signature of the full pair); "" is valid — scoring
         falls back to the title.
+
+        *provenance* (owner-reflection-memory, ADR-065, schema v7) is an optional
+        JSON list of opaque owner-turn ids stamped by the owner-reflection job.
+        None leaves an existing value untouched on a draft refresh; ordinary
+        captures never pass it.
 
         *return_created* (E1, memoria_quality_20260717) is an OPT-IN widening:
         when True, returns ``(row_id, created)`` where ``created`` is True only
@@ -842,6 +1329,7 @@ class MemoriaStore:
         title = " ".join((title or "").split())
         content = " ".join((content or "").split())
         signature = " ".join((signature or "").split())
+        clean_lang = normalize_memoria_lang(lang)
         if not profile_id or not stable_key or not title or not content:
             raise MemoriaValidationError(
                 "memoria upsert requires profile_id, stable_key, title, and content"
@@ -851,16 +1339,20 @@ class MemoriaStore:
         row_id = f"mem_{uuid4().hex}"
         try:
             with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                _restore_scrubbed_key(conn, profile_id, stable_key)
                 cur = conn.execute(
                     """
                     INSERT INTO memorias (
                         id, profile_id, stable_key, revision, title, content, status,
-                        pinned, private, inactive, created_at, updated_at, signature
-                    ) VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?, ?)
+                        pinned, private, inactive, created_at, updated_at, signature,
+                        provenance, lang
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'draft', 0, 0, 0, ?, ?, ?, ?, ?)
                     ON CONFLICT(profile_id, stable_key) DO UPDATE SET
                         content = excluded.content,
                         title = excluded.title,
                         signature = excluded.signature,
+                        provenance = COALESCE(excluded.provenance, memorias.provenance),
+                        lang = excluded.lang,
                         revision = memorias.revision + 1,
                         updated_at = excluded.updated_at,
                         judged_at = '',
@@ -869,7 +1361,8 @@ class MemoriaStore:
                     WHERE memorias.status = 'draft'
                     RETURNING id, revision
                     """,
-                    (row_id, profile_id, stable_key, title, content, now, now, signature),
+                    (row_id, profile_id, stable_key, title, content, now, now, signature,
+                     provenance, clean_lang),
                 )
                 result = cur.fetchone()
                 if result is not None and result["revision"] > 1:
@@ -902,8 +1395,110 @@ class MemoriaStore:
             logger.debug("memoria upsert conflict id=%s revision=%s", written_id, revision)
         return (written_id, revision == 1) if return_created else written_id
 
+    def supersede_draft(
+        self, profile_id: str, stable_key: str, title: str, content: str, *,
+        signature: str = "",
+    ) -> tuple[str, int] | None:
+        """T6(b) (ADR-061): replace the DRAFT keyed by *stable_key* with a
+        correction, in place: same row id and stable_key, revision + 1, new
+        title/content/signature, re-judged at the next sweep.
+
+        Only a non-private draft of *profile_id* is ever rewritten; any durable
+        row (promoted, curated, imported, summary) is immune and the call
+        returns None, so the caller falls back to an ordinary new draft. Same
+        judged_at / inactive / retry-verdict semantics as upsert_draft's
+        revision bump: a judge-hidden draft is un-hidden for a re-judge, an
+        operator-muted one stays hidden. Returns ``(row_id, revision)``, or None
+        when nothing was rewritten (no such draft, or a fail-open write error).
+        """
+        profile_id = (profile_id or "").strip()
+        stable_key = (stable_key or "").strip()
+        title = " ".join((title or "").split())
+        content = " ".join((content or "").split())
+        signature = " ".join((signature or "").split())
+        if not profile_id or not stable_key or not title or not content:
+            raise MemoriaValidationError(
+                "memoria supersede requires profile_id, stable_key, title, and content"
+            )
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                _restore_scrubbed_key(conn, profile_id, stable_key)
+                result = conn.execute(
+                    """
+                    UPDATE memorias SET
+                        content = ?, title = ?, signature = ?,
+                        revision = revision + 1,
+                        updated_at = ?,
+                        judged_at = '',
+                        inactive = CASE WHEN judged_at != '' THEN 0 ELSE inactive END
+                    WHERE profile_id = ? AND stable_key = ?
+                      AND status = 'draft' AND private = 0
+                    RETURNING id, revision
+                    """,
+                    (content, title, signature, _now_text(), profile_id, stable_key),
+                ).fetchone()
+                if result is not None:
+                    conn.execute(
+                        "DELETE FROM memoria_promotion_attempts WHERE memoria_id = ?",
+                        (result["id"],),
+                    )
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store supersede failed (fail-open): {type(exc).__name__}")
+            return None
+        self._clear_warn()
+        if result is None:
+            return None
+        return result["id"], int(result["revision"])
+
+    def insert_curated(
+        self, profile_id: str, title: str, content: str, *,
+        signature: str = "", stable_key: str | None = None,
+        lang: str = "unknown",
+    ) -> str | None:
+        """Insert ONE operator-curated row (status='curated').
+
+        Curated rows are immune to prune and upsert-overwrites.
+        """
+        profile_id = (profile_id or "").strip()
+        title = " ".join((title or "").split())
+        content = " ".join((content or "").split())
+        signature = " ".join((signature or "").split())
+        clean_lang = normalize_memoria_lang(lang)
+        if not profile_id or not title or not content:
+            raise MemoriaValidationError(
+                "memoria curated requires profile_id, title, and content"
+            )
+
+        now = _now_text()
+        stable_key = (stable_key or "").strip() or derive_stable_key(profile_id, f"{title} {content}") or f"{profile_id}|curated|{uuid4().hex}"
+        row_id = f"mem_{uuid4().hex}"
+        try:
+            with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
+                conn.execute(
+                    """
+                    INSERT INTO memorias (
+                        id, profile_id, stable_key, revision, title, content, status,
+                        pinned, private, inactive, created_at, updated_at, signature, lang
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'curated', 0, 0, 0, ?, ?, ?, ?)
+                    ON CONFLICT(profile_id, stable_key) DO UPDATE SET
+                        content = excluded.content,
+                        title = excluded.title,
+                        signature = excluded.signature,
+                        lang = excluded.lang,
+                        updated_at = excluded.updated_at,
+                        status = 'curated'
+                    """,
+                    (row_id, profile_id, stable_key, title, content, now, now, signature, clean_lang),
+                )
+        except sqlite3.Error as exc:
+            logger.warning(f"memoria curated write failed (fail-open): {type(exc).__name__}")
+            return None
+        self._clear_warn()
+        return row_id
+
     def insert_summary(
         self, profile_id: str, title: str, content: str, *, signature: str = "",
+        lang: str = "unknown",
     ) -> str | None:
         """W2a (memoria_recall_20260718): insert ONE machine-authored
         session-summary row (status='summary').
@@ -932,6 +1527,7 @@ class MemoriaStore:
         title = " ".join((title or "").split())
         content = " ".join((content or "").split())
         signature = " ".join((signature or "").split())
+        clean_lang = normalize_memoria_lang(lang)
         if not profile_id or not title or not content:
             raise MemoriaValidationError(
                 "memoria summary requires profile_id, title, and content"
@@ -946,10 +1542,10 @@ class MemoriaStore:
                     """
                     INSERT INTO memorias (
                         id, profile_id, stable_key, revision, title, content, status,
-                        pinned, private, inactive, created_at, updated_at, signature
-                    ) VALUES (?, ?, ?, 1, ?, ?, 'summary', 0, 0, 0, ?, ?, ?)
+                        pinned, private, inactive, created_at, updated_at, signature, lang
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'summary', 0, 0, 0, ?, ?, ?, ?)
                     """,
-                    (row_id, profile_id, stable_key, title, content, now, now, signature),
+                    (row_id, profile_id, stable_key, title, content, now, now, signature, clean_lang),
                 )
         except sqlite3.Error as exc:
             # R4: ALWAYS warn (bypass the shared warn-once flag) — losing a
@@ -963,6 +1559,7 @@ class MemoriaStore:
     def insert_imported(
         self, profile_id: str, title: str, content: str, *,
         signature: str = "", source_key: str = "",
+        lang: str = "unknown",
     ) -> Literal["created", "duplicate", "skipped", "error"]:
         """memoria_import_20260718: insert ONE imported row (status='imported').
 
@@ -1003,6 +1600,7 @@ class MemoriaStore:
         title = " ".join((title or "").split())
         content = " ".join((content or "").split())
         signature = " ".join((signature or "").split())
+        clean_lang = normalize_memoria_lang(lang)
         if not profile_id or not title or not content:
             raise MemoriaValidationError(
                 "memoria import requires profile_id, title, and content"
@@ -1019,12 +1617,12 @@ class MemoriaStore:
                     """
                     INSERT INTO memorias (
                         id, profile_id, stable_key, revision, title, content, status,
-                        pinned, private, inactive, created_at, updated_at, signature
-                    ) VALUES (?, ?, ?, 1, ?, ?, 'imported', 0, 0, 0, ?, ?, ?)
+                        pinned, private, inactive, created_at, updated_at, signature, lang
+                    ) VALUES (?, ?, ?, 1, ?, ?, 'imported', 0, 0, 0, ?, ?, ?, ?)
                     ON CONFLICT(profile_id, stable_key) DO NOTHING
                     RETURNING id
                     """,
-                    (row_id, profile_id, stable_key, title, content, now, now, signature),
+                    (row_id, profile_id, stable_key, title, content, now, now, signature, clean_lang),
                 )
                 created = cur.fetchone() is not None
         except sqlite3.Error as exc:
@@ -1098,15 +1696,34 @@ class MemoriaStore:
         if touch_updated_at:
             set_clauses.append("updated_at = ?")
             params.append(_now_text())
-        if title is not None:
+        clean_title = " ".join(title.split()) if title is not None else None
+        clean_content = " ".join(content.split()) if content is not None else None
+        if clean_title is not None:
             set_clauses.append("title = ?")
-            params.append(" ".join(title.split()))
-        if content is not None:
+            params.append(clean_title)
+        if clean_content is not None:
             set_clauses.append("content = ?")
-            params.append(" ".join(content.split()))
+            params.append(clean_content)
         if signature is not None:
             set_clauses.append("signature = ?")
             params.append(" ".join(signature.split()))
+        elif clean_title is not None or clean_content is not None:
+            # Recompute lexical retrieval signature on operator edit to prevent stale index
+            sig_source = f"{clean_title or ''} {clean_content or ''}".strip()
+            if clean_title is None or clean_content is None:
+                try:
+                    with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                        row = conn.execute(
+                            "SELECT title, content FROM memorias WHERE id = ?", (memoria_id,)
+                        ).fetchone()
+                        if row:
+                            t = clean_title if clean_title is not None else (row["title"] or "")
+                            c = clean_content if clean_content is not None else (row["content"] or "")
+                            sig_source = f"{t} {c}".strip()
+                except Exception:
+                    pass
+            set_clauses.append("signature = ?")
+            params.append(build_signature(sig_source))
         where = "id = ?"
         params.append(memoria_id)
         if if_revision is not None:
@@ -1192,6 +1809,139 @@ class MemoriaStore:
         self._clear_warn()
         return max(stamped, 0)
 
+    def _is_near_duplicate(
+        self,
+        text_a: str,
+        text_b: str,
+        *,
+        similarity_fn: "Callable[[str, str], float | None] | None" = None,
+        stats: Counter | None = None,
+    ) -> bool:
+        """T2/F1 -- True when *text_a* (the KEEP candidate) is a near-duplicate
+        of *text_b* (an existing durable row).
+
+        Prefers *similarity_fn* when given (F1: a per-sweep precomputed-score
+        closure built by the engine layer from MiniLM embeddings -- see
+        ``apply_promotion_batch``'s ``semantic_similarity_fn`` parameter),
+        else ``self._semantic_similarity_fn`` (a persistent instance-level
+        hook, still supported for direct/test callers), and only when one is
+        wired in AND it actually returns a score for this pair; falls back to
+        ``_is_lexical_duplicate`` (containment, not raw overlap -- parent
+        review 2026-09-28) otherwise. Never raises -- a broken similarity hook
+        degrades to the lexical fallback instead of blocking promotion. The
+        fallback rule change applies ONLY here; the semantic branch above is
+        untouched.
+
+        *stats* (optional, F1) is a plain counts-only ``Counter`` the caller
+        accumulates across a whole sweep for logging (RC-8: never fed text).
+        """
+        fn = similarity_fn if similarity_fn is not None else self._semantic_similarity_fn
+        if fn is not None:
+            try:
+                score = fn(text_a, text_b)
+            except Exception:
+                score = None
+            if score is not None:
+                if stats is not None:
+                    stats["semantic_scored"] += 1
+                if score >= _DEDUP_SEMANTIC_THRESHOLD:
+                    if stats is not None:
+                        stats["semantic_hits"] += 1
+                    return True
+                # F2: a below-threshold score no longer VETOES the lexical
+                # check (duplicate = semantic >= threshold OR containment).
+                # Safe: the containment rule keeps its own negation and
+                # numeric-difference gates, so this never adds a false hit.
+        is_duplicate = _is_lexical_duplicate(text_a, text_b)
+        if stats is not None:
+            stats["lexical_scored"] += 1
+            if is_duplicate:
+                stats["lexical_hits"] += 1
+        return is_duplicate
+
+    def _has_duplicate_durable_row(
+        self,
+        conn: sqlite3.Connection,
+        profile_id: str,
+        judged_text: str,
+        *,
+        similarity_fn: "Callable[[str, str], float | None] | None" = None,
+        stats: Counter | None = None,
+    ) -> bool:
+        """T2/F1 -- True when *judged_text* near-duplicates one of
+        *profile_id*'s existing durable rows (``_DEDUP_DURABLE_STATUSES``,
+        non-blank content).
+
+        Queried on *conn* INSIDE the caller's open transaction: a row this
+        SAME sweep already promoted a few iterations earlier is written on
+        this same connection, so it is already visible here too -- covering
+        intra-batch dedup (two keepers in one sweep that duplicate each
+        other) for free, with no separate in-memory tracking. *similarity_fn*
+        and *stats* (F1) are forwarded to every ``_is_near_duplicate`` call
+        unchanged.
+        """
+        placeholders = ", ".join("?" for _ in _DEDUP_DURABLE_STATUSES)
+        rows = conn.execute(
+            f"SELECT content FROM memorias WHERE profile_id = ? "
+            f"AND status IN ({placeholders}) AND content != '' "
+            f"AND superseded_by IS NULL",
+            (profile_id, *_DEDUP_DURABLE_STATUSES),
+        ).fetchall()
+        return any(
+            self._is_near_duplicate(
+                judged_text, row["content"], similarity_fn=similarity_fn, stats=stats,
+            )
+            for row in rows
+        )
+
+    def list_durable_rows_for_dedup(self, profile_id: str) -> list[sqlite3.Row]:
+        """F1 -- (id, revision, content, status) of *profile_id*'s existing
+        durable rows (``_DEDUP_DURABLE_STATUSES``, non-blank content).
+
+        Read-only helper for the ENGINE layer (never called by
+        ``apply_promotion_batch`` itself): building a per-sweep semantic
+        similarity closure needs each row's id/revision/content to validate a
+        cached MiniLM vector's freshness (FactSemanticIndex's own
+        revision+content-hash contract) BEFORE the promotion transaction
+        opens. Bounded read, fail-open to [] (mirrors list_injection_candidates).
+        """
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                placeholders = ", ".join("?" for _ in _DEDUP_DURABLE_STATUSES)
+                return conn.execute(
+                    f"SELECT id, revision, content, status FROM memorias "
+                    f"WHERE profile_id = ? AND status IN ({placeholders}) "
+                    f"AND content != '' AND superseded_by IS NULL",
+                    (profile_id, *_DEDUP_DURABLE_STATUSES),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            self._warn_once(
+                f"memoria store list_durable_rows_for_dedup failed (fail-open): {type(exc).__name__}"
+            )
+            return []
+
+    def list_supersede_candidates(self, profile_id: str) -> list[sqlite3.Row]:
+        """F2 -- (id, profile_id, revision, content, status) of *profile_id*'s
+        existing facts the promotion judge may be shown as EXISTING: promoted,
+        imported or curated, active (inactive=0), non-private, non-blank.
+        Curated rows are listed so the judge can call a paraphrase a
+        duplicate, but the validator never lets one be superseded. Bounded
+        read, fail-open to []."""
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                return conn.execute(
+                    "SELECT id, profile_id, revision, content, status FROM memorias "
+                    "WHERE profile_id = ? AND status IN ('promoted', 'imported', 'curated') "
+                    "AND inactive = 0 AND private = 0 AND content != '' "
+                    "AND superseded_by IS NULL ORDER BY updated_at DESC, id ASC",
+                    (profile_id,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            self._warn_once(
+                f"memoria store list_supersede_candidates failed (fail-open): {type(exc).__name__}"
+            )
+            return []
+
     def apply_promotion_batch(
         self,
         profile_id: str,
@@ -1200,14 +1950,62 @@ class MemoriaStore:
         decisions: list[tuple[int, str | None, bool, str]],
         unresolved: dict[int, str],
         now_s: int,
+        origins: dict[int, str | None] | None = None,
+        semantic_similarity_fn: "Callable[[str, str], float | None] | None" = None,
+        updates: dict[int, tuple[str, int]] | None = None,
+        langs: dict[int, str] | None = None,
     ) -> PromotionBatchApplyResult:
         """Atomically apply decisions and charge attributable current drafts.
+
+        F2 (memory-paraphrase-contradiction-20260928): *updates* maps a draft
+        index to ``(target row id, target revision)`` for a KEEP the judge
+        called an update of an existing fact (already validated by
+        ``promotion_related.resolve_judge_actions``). In the SAME transaction
+        as the promote, the target is set ``inactive=1`` and
+        ``superseded_by=<promoted row id>`` -- reversible, never a delete. The
+        store re-checks the target inside the transaction (same profile,
+        promoted/imported, active, public, not already superseded, unchanged
+        revision); any failed check leaves the target alone, counts
+        ``update_target_stale`` and the keep simply stays a new row. ``curated``
+        rows can never match.
+
+        F1 (memory-paraphrase-contradiction-20260928): *semantic_similarity_fn*
+        is a PER-CALL override of ``self._semantic_similarity_fn`` -- the
+        engine layer builds one fresh precomputed-score closure per sweep
+        (embedding this batch's keeper texts once, reusing cached
+        FactSemanticIndex vectors for existing durable rows) and passes it in
+        here instead of mutating the long-lived store instance. Chosen over
+        widening the constructor hook because a sweep's embeddings are only
+        valid for THIS batch/profile at THIS moment -- storing them on
+        ``self`` would either go stale across sweeps/profiles or need manual
+        invalidation the store has no way to know is needed. None here (the
+        default) falls back to whatever ``self._semantic_similarity_fn`` the
+        instance was constructed with, unchanged from T2.
+
+        ADR-062 (T6 a): a terminal REJECT scrubs the row in the same UPDATE:
+        title, content and signature become '' and stable_key becomes
+        scrubbed_stable_key(stable_key). id, profile, status, revision,
+        timestamps, judged_at and inactive stay, so the row is never re-judged
+        on its own and a re-capture of the same exchange reopens it. A KEEP
+        stores *origins*[index] (MEMORIA_ORIGINS); a missing or invalid one
+        is stored as MEMORIA_ORIGIN_DEFAULT and counted as
+        ``origin_defaulted``. Unresolved (retryable) entries are never
+        scrubbed.
 
         The model call belongs outside this method. Every row is revalidated
         inside one write transaction against profile, id, revision, draft
         provenance, judgment, privacy, and visibility. Any SQL or commit error
         propagates after rollback; callers then apply profile infrastructure
         backoff without reporting partial decisions.
+
+        T2 (memory-noise-amplification-20260928): a confident KEEP is checked
+        against this profile's existing durable rows (see
+        ``_has_duplicate_durable_row``) before it is allowed to become a NEW
+        'promoted' row. A near-duplicate is scrubbed and hidden through the
+        SAME reject path as a judge REJECT, with reason ``"duplicate"`` --
+        never counted as ``kept``. Two keepers in the SAME batch that
+        duplicate each other also collapse to one durable row, because the
+        check reads the transaction's own uncommitted writes.
         """
         now_s = int(now_s)
         if now_s < 0:
@@ -1238,8 +2036,31 @@ class MemoriaStore:
         deferred = 0
         reasons: Counter = Counter()
         judged_at = _now_text()
+        # F1: counts-only dedup telemetry for this call (RC-8 -- never text).
+        dedup_stats: Counter = Counter()
 
         with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn:
+            def _scrub_reject(memoria_id: str, revision: int, stable_key: str) -> bool:
+                """Scrub-and-hide UPDATE shared by the null-text (judge) reject
+                path and the T2 duplicate-reject path below. True on success
+                (exactly one still-current draft row matched)."""
+                written = conn.execute(
+                    "UPDATE memorias SET judged_at = ?, "
+                    "inactive = 1, title = '', content = '', "
+                    "signature = '', stable_key = ? WHERE id = ? "
+                    "AND profile_id = ? AND revision = ? "
+                    "AND status = 'draft' AND judged_at = '' "
+                    "AND private = 0 AND inactive = 0",
+                    (
+                        judged_at,
+                        scrubbed_stable_key(stable_key),
+                        memoria_id,
+                        profile_id,
+                        revision,
+                    ),
+                ).rowcount
+                return written == 1
+
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 for index, snapshot in enumerate(batch, start=1):
@@ -1265,20 +2086,9 @@ class MemoriaStore:
                     if decision is not None:
                         _, judged_text, uncertain, reason = decision
                         if judged_text is None:
-                            written = conn.execute(
-                                "UPDATE memorias SET judged_at = ?, "
-                                "inactive = 1 WHERE id = ? "
-                                "AND profile_id = ? AND revision = ? "
-                                "AND status = 'draft' AND judged_at = '' "
-                                "AND private = 0 AND inactive = 0",
-                                (
-                                    judged_at,
-                                    memoria_id,
-                                    profile_id,
-                                    revision,
-                                ),
-                            ).rowcount
-                            if written != 1:
+                            if not _scrub_reject(
+                                memoria_id, revision, snapshot["stable_key"],
+                            ):
                                 stale += 1
                                 reasons["stale"] += 1
                                 continue
@@ -1286,31 +2096,91 @@ class MemoriaStore:
                             reasons[reason or "unspecified"] += 1
                         else:
                             status = "draft" if uncertain else "promoted"
-                            written = conn.execute(
-                                "UPDATE memorias SET title = ?, content = ?, "
-                                "signature = ?, status = ?, judged_at = ? "
-                                "WHERE id = ? AND profile_id = ? "
-                                "AND revision = ? AND status = 'draft' "
-                                "AND judged_at = '' AND private = 0 "
-                                "AND inactive = 0",
-                                (
-                                    build_title(judged_text),
-                                    judged_text,
-                                    build_signature(judged_text),
-                                    status,
-                                    judged_at,
-                                    memoria_id,
-                                    profile_id,
-                                    revision,
-                                ),
-                            ).rowcount
-                            if written != 1:
-                                stale += 1
-                                reasons["stale"] += 1
-                                continue
-                            kept += 1
-                            if uncertain:
-                                reasons["uncertain_entity"] += 1
+                            # T2 (memory-noise-amplification-20260928): a KEEP
+                            # about to become a NEW durable row is checked
+                            # against this profile's existing durable rows
+                            # first (uncertain keeps stay drafts, never
+                            # durable, so they skip this check entirely).
+                            is_duplicate = (
+                                status == "promoted"
+                                and self._has_duplicate_durable_row(
+                                    conn, profile_id, judged_text,
+                                    similarity_fn=semantic_similarity_fn,
+                                    stats=dedup_stats,
+                                )
+                            )
+                            if is_duplicate:
+                                if not _scrub_reject(
+                                    memoria_id, revision, snapshot["stable_key"],
+                                ):
+                                    stale += 1
+                                    reasons["stale"] += 1
+                                    continue
+                                rejected += 1
+                                reasons["duplicate"] += 1
+                            else:
+                                origin = (origins or {}).get(index)
+                                origin_defaulted = origin not in MEMORIA_ORIGINS
+                                if origin_defaulted:
+                                    origin = MEMORIA_ORIGIN_DEFAULT
+                                row_lang = (langs or {}).get(index)
+                                if row_lang is None:
+                                    if hasattr(snapshot, "__getitem__"):
+                                        try:
+                                            row_lang = snapshot["lang"]
+                                        except (KeyError, IndexError, TypeError):
+                                            pass
+                                if row_lang is not None and not (
+                                    isinstance(row_lang, str)
+                                    and 2 <= len(row_lang) <= 12
+                                    and not any(c for c in row_lang if not (c.isalnum() or c in "_-"))
+                                ):
+                                    row_lang = None
+                                written = conn.execute(
+                                    "UPDATE memorias SET title = ?, content = ?, "
+                                    "signature = ?, status = ?, judged_at = ?, "
+                                    "origin = ?, lang = COALESCE(?, lang) "
+                                    "WHERE id = ? AND profile_id = ? "
+                                    "AND revision = ? AND status = 'draft' "
+                                    "AND judged_at = '' AND private = 0 "
+                                    "AND inactive = 0",
+                                    (
+                                        build_title(judged_text),
+                                        judged_text,
+                                        build_signature(judged_text),
+                                        status,
+                                        judged_at,
+                                        origin,
+                                        row_lang,
+                                        memoria_id,
+                                        profile_id,
+                                        revision,
+                                    ),
+                                ).rowcount
+                                if written != 1:
+                                    stale += 1
+                                    reasons["stale"] += 1
+                                    continue
+                                kept += 1
+                                target = (updates or {}).get(index)
+                                if target is not None and status == "promoted":
+                                    superseded = conn.execute(
+                                        "UPDATE memorias SET inactive = 1, "
+                                        "superseded_by = ? WHERE id = ? "
+                                        "AND profile_id = ? AND revision = ? "
+                                        "AND status IN ('promoted', 'imported') "
+                                        "AND inactive = 0 AND private = 0 "
+                                        "AND superseded_by IS NULL",
+                                        (memoria_id, target[0], profile_id, int(target[1])),
+                                    ).rowcount
+                                    reasons[
+                                        "superseded" if superseded == 1
+                                        else "update_target_stale"
+                                    ] += 1
+                                if uncertain:
+                                    reasons["uncertain_entity"] += 1
+                                if origin_defaulted:
+                                    reasons["origin_defaulted"] += 1
                         conn.execute(
                             "DELETE FROM memoria_promotion_attempts "
                             "WHERE memoria_id = ?",
@@ -1376,6 +2246,25 @@ class MemoriaStore:
                 raise
 
         self._clear_warn()
+        if dedup_stats:
+            # F1: ONE counts-only line per call, never memory text (RC-8).
+            # A batch with dedup_stats["semantic_scored"] == 0 despite a
+            # non-empty dict fully fell back to lexical for every pair
+            # checked -- readable directly off these four numbers, no
+            # separate "fallback reason" enum needed at the store layer (the
+            # engine layer logs WHY the closure was unavailable, if it was).
+            try:
+                logger.info(
+                    "memoria dedup: profile_hash=%s semantic_scored=%d "
+                    "semantic_hits=%d lexical_scored=%d lexical_hits=%d",
+                    hashlib.sha256(profile_id.encode("utf-8")).hexdigest()[:12],
+                    dedup_stats.get("semantic_scored", 0),
+                    dedup_stats.get("semantic_hits", 0),
+                    dedup_stats.get("lexical_scored", 0),
+                    dedup_stats.get("lexical_hits", 0),
+                )
+            except Exception:
+                pass
         return PromotionBatchApplyResult(
             kept=kept,
             rejected=rejected,
@@ -1400,7 +2289,8 @@ class MemoriaStore:
         statement (F5, unified freeze rule) — a content judgment the engine
         must never overwrite again. Un-pinning/un-marking-private never
         demotes a curated row back to draft (one-way). `inactive` is a pure
-        visibility flag and never touches status.
+        visibility flag and never touches status. ``inactive=False`` also
+        clears ``superseded_by`` (F3 restore of a superseded row).
 
         MUTING (``inactive=True``) additionally CLEARS ``judged_at``, which is
         what makes the operator's mute self-identifying (memory_promotion
@@ -1437,6 +2327,12 @@ class MemoriaStore:
             params.append(1 if inactive else 0)
             if inactive:
                 set_clauses.append("judged_at = ''")
+            else:
+                # F3: un-hiding is also the RESTORE of a superseded row. Drop
+                # the supersede link so the row is durable again; the newer
+                # row is untouched (the operator decides which to keep).
+                # Status is unchanged (restore is a visibility action).
+                set_clauses.append("superseded_by = NULL")
         if promotes:
             set_clauses.append("status = 'curated'")
         params.append(memoria_id)
@@ -1576,25 +2472,79 @@ class MemoriaStore:
             self._warn_once(f"memoria store count_imported failed (fail-open): {type(exc).__name__}")
             return -1
 
-    def list_injection_candidates(self, profile_id: str) -> list[sqlite3.Row]:
+    def list_injection_candidates(self, profile_id: str, lang: Optional[str] = None) -> list[sqlite3.Row]:
         """Eligible rows for retrieval injection (R9): private=0 AND
         inactive=0, scoped to profile_id, capped at MEMORIAS_PROFILE_CAP.
 
+        ADR-062 (T6 a): an UNJUDGED draft (status='draft', judged_at='') is
+        never a candidate; it still holds the raw exchange. A judged draft
+        (an uncertain keep, already rewritten by the judge) still is. A row
+        with blank content (a scrubbed reject the operator un-hid) never is.
+        Lexical, hybrid and meta-recall injection all read this list.
+
         Pinned rows sort first (ORDER BY pinned DESC), so they are never
-        pushed out by the cap ahead of unpinned rows — pinned rows are
-        always in the candidate set before the cap is applied. Bounded
+        pushed out by the cap ahead of unpinned rows. Durable memories
+        (curated, promoted, imported) sort next, ensuring verified knowledge
+        is not displaced by a burst of fresh auto-captured drafts. Bounded
         read, fail-open to [] (mirrors list_for_profile).
         """
         try:
             with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
-                return conn.execute(
+                query = (
                     "SELECT * FROM memorias WHERE profile_id = ? AND private = 0 AND inactive = 0 "
-                    "ORDER BY pinned DESC, updated_at DESC, id ASC LIMIT ?",
-                    (profile_id, MEMORIAS_PROFILE_CAP),
-                ).fetchall()
+                    "AND content != '' AND NOT (status = 'draft' AND judged_at = '') "
+                )
+                params: list[object] = [profile_id]
+                if lang is not None:
+                    # Primary-subtag match plus legacy regional rows written
+                    # before normalization ("en-US" / "en_US"), plus 'unknown'.
+                    clean_lang = normalize_memoria_lang(lang)
+                    if clean_lang == "unknown":
+                        query += "AND lang = 'unknown' "
+                    else:
+                        query += (
+                            "AND (LOWER(lang) = ? OR LOWER(lang) LIKE ? ESCAPE '\\' "
+                            "OR LOWER(lang) LIKE ? ESCAPE '\\' OR lang = 'unknown') "
+                        )
+                        params.extend([clean_lang, f"{clean_lang}-%", f"{clean_lang}\\_%"])
+                query += (
+                    "ORDER BY pinned DESC, CASE WHEN status IN ('curated', 'promoted', 'imported') THEN 1 ELSE 0 END DESC, "
+                    "updated_at DESC, id ASC LIMIT ?"
+                )
+                params.append(MEMORIAS_PROFILE_CAP)
+                return conn.execute(query, tuple(params)).fetchall()
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store injection-candidate list failed (fail-open): {type(exc).__name__}")
             return []
+
+    def any_row_mentions(self, profile_id: str, tokens) -> bool | None:
+        """True when any visible row of *profile_id* (private=0, inactive=0,
+        unjudged drafts INCLUDED, session-summary keyword bags excluded: they
+        are never injected) carries one of *tokens* in its signature,
+        title or content tokens. None when the lookup failed (the caller then
+        withholds the no-match note: a false "nothing stored" is worse than
+        none). Bounded read of at most MEMORIAS_PROFILE_CAP rows; never logs
+        or returns any row content."""
+        wanted = {t for t in tokens if t}
+        if not wanted:
+            return False
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                rows = conn.execute(
+                    "SELECT signature, title, content FROM memorias WHERE profile_id = ? "
+                    "AND private = 0 AND inactive = 0 AND status != 'summary' "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (profile_id, MEMORIAS_PROFILE_CAP),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            self._warn_once(f"memoria store anchor lookup failed (fail-open): {type(exc).__name__}")
+            return None
+        for sig, title, content in rows:
+            if wanted & set((sig or "").split()):
+                return True
+            if wanted & set(normalize_tokens(f"{title or ''} {content or ''}")):
+                return True
+        return False
 
     def list_unjudged_drafts(
         self,
@@ -1761,23 +2711,29 @@ class MemoriaStore:
     # ------------------------------------------------------------------
 
     def _prune_profile(self, profile_id: str) -> None:
-        """Delete oldest unpinned drafts beyond MEMORIAS_PROFILE_CAP for profile_id.
+        """Delete the excess unpinned drafts beyond MEMORIAS_PROFILE_CAP for profile_id.
 
-        Curated and pinned rows are excluded from both sides of this query,
-        so they are never candidates for deletion (R16).
+        Scrubbed judged-rejected drafts (judged_at set, inactive) go first,
+        oldest first: they hold no text and only a dedup tombstone. Unjudged
+        drafts go only once those are exhausted, oldest first. Curated and
+        pinned rows are excluded from both sides of this query, so they are
+        never candidates for deletion (R16).
         """
         try:
             with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
                 conn.execute(
                     """
                     DELETE FROM memorias
-                    WHERE profile_id = ? AND status = 'draft' AND pinned = 0
-                      AND id NOT IN (
-                        SELECT id FROM memorias
+                    WHERE id IN (
+                      SELECT id FROM memorias
+                      WHERE profile_id = ? AND status = 'draft' AND pinned = 0
+                      ORDER BY (judged_at != '' AND inactive = 1) DESC,
+                               updated_at ASC, id ASC
+                      LIMIT MAX(0, (
+                        SELECT COUNT(*) FROM memorias
                         WHERE profile_id = ? AND status = 'draft' AND pinned = 0
-                        ORDER BY updated_at DESC, id DESC
-                        LIMIT ?
-                      )
+                      ) - ?)
+                    )
                     """,
                     (profile_id, profile_id, MEMORIAS_PROFILE_CAP),
                 )
@@ -1942,6 +2898,67 @@ class MemoriaStore:
                     "(prior user_version=%d)",
                     prior_version,
                 )
+            # v4 -> v5 (ADR-062, T6 a): the judge's origin of a kept fact.
+            # Same idempotent, duplicate-column-tolerant shape as v2/v3. NULL
+            # for every existing row (never judged for origin); no backfill.
+            if prior_version < 5:
+                try:
+                    conn.execute(
+                        "ALTER TABLE memorias ADD COLUMN origin TEXT "
+                        "CHECK(origin IS NULL OR origin IN "
+                        "('self_stated', 'shared_content'))"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise  # genuinely broken db: keep the construction-raises contract
+                conn.execute("PRAGMA user_version = 5")
+                logger.info(
+                    "memorias.db migrated to schema v5 (prior user_version=%d)",
+                    prior_version,
+                )
+            # v5 -> v6 (F2, memory-paraphrase-contradiction-20260928): the id
+            # of the row that superseded this one (NULL = never superseded).
+            # Additive, idempotent and resumable like v2/v3/v5; no backfill.
+            if prior_version < 6:
+                try:
+                    conn.execute("ALTER TABLE memorias ADD COLUMN superseded_by TEXT")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise  # genuinely broken db: keep the construction-raises contract
+                conn.execute("PRAGMA user_version = 6")
+                logger.info(
+                    "memorias.db migrated to schema v6 (prior user_version=%d)",
+                    prior_version,
+                )
+            # v6 -> v7 (owner-reflection-memory, ADR-065): the opaque owner-turn ids a
+            # distilled draft came from (JSON list, NULL for every other row). Additive,
+            # idempotent and resumable like v2/v3/v5/v6; no backfill.
+            if prior_version < 7:
+                try:
+                    conn.execute("ALTER TABLE memorias ADD COLUMN provenance TEXT")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise  # genuinely broken db: keep the construction-raises contract
+                conn.execute("PRAGMA user_version = 7")
+                logger.info(
+                    "memorias.db migrated to schema v7 (prior user_version=%d)",
+                    prior_version,
+                )
+            # v7 -> v8: language classification tag for strict locale isolation.
+            # Historical rows default to 'unknown' to preserve access across all locales.
+            if prior_version < 8:
+                try:
+                    conn.execute(
+                        "ALTER TABLE memorias ADD COLUMN lang TEXT NOT NULL DEFAULT 'unknown' "
+                        "CHECK(length(lang) BETWEEN 2 AND 12 AND lang NOT GLOB '*[^a-zA-Z0-9_-]*')"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc):
+                        raise
+                # Place CREATE INDEX outside try/except so it is never skipped if migration resumes
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memorias_profile_lang ON memorias(profile_id, lang)")
+                conn.execute("PRAGMA user_version = 8")
+                logger.info("memorias.db migrated to schema v8 (prior user_version=%d)", prior_version)
 
     def _connect(self, timeout: float) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=timeout)

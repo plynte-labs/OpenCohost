@@ -682,3 +682,252 @@ class TestGuardrailTtsSanitizedLeak:
         assert "no_ai_self_identification" in blocked_lines[0]
         # Distinguishable from a raw-text block, which carries no such marker.
         assert "tts-sanitized" in blocked_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# 10. Guardrail retry message shape (qwen-runtime-fixes-20260928 T2). Qwen3.5's
+#    chat template raises HTTP 400 "System message must be at the beginning"
+#    on a trailing system message; other families silently drop it. The nudge
+#    must land on the LAST user message's content instead, on a COPIED
+#    list/dict (never mutating the caller's `messages`), and it must be
+#    chosen per blocked rule rather than always the promise-specific text.
+# ---------------------------------------------------------------------------
+
+_NEVER_PROMISE_REASON = (
+    "Non-negotiable violation [never_promise]: response contains a promise "
+    "or guarantee"
+)
+_NO_AI_SELF_ID_REASON = (
+    "Non-negotiable violation [no_ai_self_identification]: response "
+    "contains AI self-identification"
+)
+_NO_DOXXING_REASON = (
+    "Non-negotiable violation [no_doxxing]: response contains personal data"
+)
+
+
+class TestGuardrailRetryMessageShape:
+    def test_retry_has_no_trailing_system_message(self, tmp_path):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        captured = {}
+
+        def _fake_watchdog(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _content_response(_CLEAN_TEXT)
+
+        motor._ollama_chat_with_watchdog = _fake_watchdog
+
+        original_messages = [
+            {"role": "system", "content": "persona"},
+            {"role": "user", "content": "hola"},
+        ]
+        result = motor._retry_after_guard_block(
+            messages=original_messages,
+            opciones_llm={},
+            request_model="qwen35",
+            chat_timeout=5.0,
+            provider_cfg=_LOCAL_CONFIG,
+            is_local=True,
+            guard_reason=_NEVER_PROMISE_REASON,
+        )
+
+        assert result == _CLEAN_TEXT
+        retry_messages = captured["messages"]
+        system_indices = [i for i, m in enumerate(retry_messages) if m.get("role") == "system"]
+        # Only allowed to be at index 0 (or absent) -- never trailing.
+        assert system_indices in ([], [0])
+        assert retry_messages[-1]["role"] == "user"
+        assert retry_messages[-1]["content"] != "hola"
+        assert "hola" in retry_messages[-1]["content"]
+
+    def test_retry_never_introduces_system_message_when_none_present(self, tmp_path):
+        """`use_system_role=False` path: no system message at all in the
+        original list -- the nudge must not introduce one."""
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        captured = {}
+
+        def _fake_watchdog(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _content_response(_CLEAN_TEXT)
+
+        motor._ollama_chat_with_watchdog = _fake_watchdog
+
+        original_messages = [{"role": "user", "content": "hola, contame algo"}]
+        motor._retry_after_guard_block(
+            messages=original_messages,
+            opciones_llm={},
+            request_model="qwen35",
+            chat_timeout=5.0,
+            provider_cfg=_LOCAL_CONFIG,
+            is_local=True,
+            guard_reason=_NEVER_PROMISE_REASON,
+        )
+
+        retry_messages = captured["messages"]
+        assert all(m.get("role") != "system" for m in retry_messages)
+
+    def test_retry_never_mutates_caller_messages(self, tmp_path):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(return_value=_content_response(_CLEAN_TEXT))
+
+        original_messages = [
+            {"role": "system", "content": "persona"},
+            {"role": "user", "content": "hola"},
+        ]
+        snapshot = [dict(m) for m in original_messages]
+
+        motor._retry_after_guard_block(
+            messages=original_messages,
+            opciones_llm={},
+            request_model="qwen35",
+            chat_timeout=5.0,
+            provider_cfg=_LOCAL_CONFIG,
+            is_local=True,
+            guard_reason=_NEVER_PROMISE_REASON,
+        )
+
+        assert original_messages == snapshot
+
+
+class TestGuardrailRetryPerRuleNudge:
+    def _retry_and_capture_last_user_content(self, tmp_path, *, guard_reason):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        captured = {}
+
+        def _fake_watchdog(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return _content_response(_CLEAN_TEXT)
+
+        motor._ollama_chat_with_watchdog = _fake_watchdog
+
+        kwargs = dict(
+            messages=[{"role": "user", "content": "hola"}],
+            opciones_llm={},
+            request_model="m",
+            chat_timeout=5.0,
+            provider_cfg=_LOCAL_CONFIG,
+            is_local=True,
+        )
+        if guard_reason is not None:
+            kwargs["guard_reason"] = guard_reason
+        motor._retry_after_guard_block(**kwargs)
+        return captured["messages"][-1]["content"]
+
+    def test_promise_rule_keeps_existing_promise_nudge_text(self, tmp_path):
+        content = self._retry_and_capture_last_user_content(
+            tmp_path, guard_reason=_NEVER_PROMISE_REASON,
+        )
+        assert "promet" in content and "garantiz" in content
+
+    def test_no_ai_self_identification_rule_uses_dedicated_nudge(self, tmp_path):
+        content = self._retry_and_capture_last_user_content(
+            tmp_path, guard_reason=_NO_AI_SELF_ID_REASON,
+        )
+        assert "promet" not in content
+        assert "disclaimer" in content.lower() or "modelo de lenguaje" in content.lower()
+
+    def test_unknown_rule_uses_generic_fallback_nudge(self, tmp_path):
+        content = self._retry_and_capture_last_user_content(
+            tmp_path, guard_reason=_NO_DOXXING_REASON,
+        )
+        assert "promet" not in content
+        assert "disclaimer" not in content.lower()
+        assert "regla" in content.lower() or "no negociable" in content.lower()
+
+    def test_missing_guard_reason_uses_generic_fallback(self, tmp_path):
+        content = self._retry_and_capture_last_user_content(tmp_path, guard_reason=None)
+        assert "promet" not in content
+
+    # K4 (G6): the nudges come from the active locale manifest.
+    def _content_under_locale(self, tmp_path, locale, guard_reason):
+        from opencohost.i18n.registry import discover_bundles, official_locales_dir
+        from opencohost.i18n.startup import resolve_active_bundle
+
+        official = discover_bundles(official_locales_dir(), "official")
+        i18n_active.set_active_bundle(resolve_active_bundle(locale=locale, registry=official))
+        try:
+            return self._retry_and_capture_last_user_content(
+                tmp_path, guard_reason=guard_reason,
+            )
+        finally:
+            i18n_active.reset_active_bundle()
+
+    def test_en_locale_retry_uses_english_nudge_and_no_spanish(self, tmp_path):
+        for guard_reason in (
+            _NEVER_PROMISE_REASON, _NO_AI_SELF_ID_REASON, _NO_DOXXING_REASON, None,
+        ):
+            content = self._content_under_locale(tmp_path, "en", guard_reason)
+            assert "Internal note" in content, guard_reason
+            for spanish in ("Nota interna", "respuesta", "Respond", "mantené", "mantén", " tono"):
+                assert spanish not in content, (guard_reason, spanish)
+
+    def test_en_locale_nudges_are_rule_specific(self, tmp_path):
+        promise = self._content_under_locale(tmp_path, "en", _NEVER_PROMISE_REASON)
+        self_id = self._content_under_locale(tmp_path, "en", _NO_AI_SELF_ID_REASON)
+        generic = self._content_under_locale(tmp_path, "en", _NO_DOXXING_REASON)
+        assert "promise" in promise.lower()
+        assert "disclaimer" in self_id.lower()
+        assert "promise" not in generic.lower() and "disclaimer" not in generic.lower()
+
+    def test_es_locale_retry_nudge_uses_tu_not_voseo(self, tmp_path):
+        for guard_reason in (_NEVER_PROMISE_REASON, _NO_AI_SELF_ID_REASON, _NO_DOXXING_REASON):
+            content = self._content_under_locale(tmp_path, "es", guard_reason)
+            assert "Nota interna" in content, guard_reason
+            for voseo in ("Respondé", "mantené", "podés", "corrés"):
+                assert voseo not in content, (guard_reason, voseo)
+
+
+class TestGuardrailRetryReasonThreadedFromCaller:
+    def test_generar_dialogo_passes_guard_reason_to_retry(self, tmp_path):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_BLOCKED_TEXT),
+                _content_response(_CLEAN_TEXT),
+            ]
+        )
+        motor._retry_after_guard_block = MagicMock(wraps=motor._retry_after_guard_block)
+
+        motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        _, kwargs = motor._retry_after_guard_block.call_args
+        assert "guard_reason" in kwargs
+        assert "never_promise" in kwargs["guard_reason"]
+
+
+class TestGuardrailRetryCarriesTurnThink:
+    """K2 (warmth-guardrails-runtime-20261006): the retry must request the same
+    think setting as the main attempt, or gemma4 thinks by default on retry."""
+
+    def test_retry_call_carries_the_turn_think_false(self, tmp_path):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(
+            side_effect=[
+                _content_response(_BLOCKED_TEXT),
+                _content_response(_CLEAN_TEXT),
+            ]
+        )
+
+        motor._generar_dialogo("hola", source="direct", commit_history=False)
+
+        first, retry = motor._ollama_chat_with_watchdog.call_args_list
+        assert first.kwargs["options"].get("think") is False
+        assert retry.kwargs["options"].get("think") is False
+
+    def test_retry_does_not_mutate_caller_options(self, tmp_path):
+        motor, _, _ = _make_motor(tmp_path, provider_config=_LOCAL_CONFIG)
+        motor._ollama_chat_with_watchdog = MagicMock(return_value=_content_response(_CLEAN_TEXT))
+        opts = {"num_predict": 50}
+
+        motor._retry_after_guard_block(
+            messages=[{"role": "user", "content": "hola"}],
+            opciones_llm=opts,
+            request_model="m",
+            chat_timeout=5.0,
+            provider_cfg=_LOCAL_CONFIG,
+            is_local=True,
+            think=False,
+        )
+
+        assert opts == {"num_predict": 50}
+        assert motor._ollama_chat_with_watchdog.call_args.kwargs["options"]["think"] is False

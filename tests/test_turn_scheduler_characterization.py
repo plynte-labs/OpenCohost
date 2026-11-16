@@ -78,6 +78,7 @@ def _ttl_harness(items: list[tuple]) -> SimpleNamespace:
         lambda payload, source: harness.cleared_prefetch.append((payload, source))
     )
     harness._flush_accumulation = lambda: None
+    harness._retrigger_interactive_pregen_for_blocked_head = lambda: None
     return harness
 
 
@@ -320,12 +321,18 @@ def test_failed_bundle_requeues_original_followers_in_scheduler_order():
         priority=1,
         timestamp=20.0,
     )
+    ui_events: list = []
     harness = SimpleNamespace(
         _pq_lock=threading.Lock(),
         _priority_queue=[latecomer],
         _streamed_turn_job=None,
         _streamed_turn_prefix=None,
         _generar_dialogo=lambda *args, **kwargs: "",
+        # 9dad677: a failed owner bundle also tells the UI the turn was dropped.
+        ui_callback=ui_events.append,
+        # 305b66c: every foreground turn ends with one [TURN_LATENCY] line,
+        # including a dropped bundle. Observability only; not under test here.
+        _log_turn_latency=lambda *args, **kwargs: None,
     )
     harness._requeue_owner_bundle_followers = (
         lambda followers: MotorVocalIA._requeue_owner_bundle_followers(
@@ -344,3 +351,4 @@ def test_failed_bundle_requeues_original_followers_in_scheduler_order():
     assert harness._priority_queue[0] is ptt
     assert harness._priority_queue[1] is direct
     assert harness._priority_queue[2] is latecomer
+    assert ui_events == ["turn_dropped"]

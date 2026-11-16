@@ -53,15 +53,37 @@ WRITE_TIMEOUT_SECONDS: float = 1.0
 
 # ---------------------------------------------------------------------------
 # Code/HTML detection patterns
-# NOTE: these patterns are mirrored in opencohost/ui/cohost_agenda_panel.py (BULK_CODE_PATTERNS). Keep in sync manually.
+# K4 (warmth-guardrails-runtime-20261006): STRUCTURAL signals only. The old
+# bare keyword list rejected plain topics ("Games from the 90s", "Patch update
+# thoughts", "The class system"). A keyword now counts only when two distinct
+# ones appear together with code punctuation. Shared with
+# KiraAgendaController.looks_like_code and agent_notices, so every topic entry
+# point agrees. The frozen CTk panel (opencohost/ui/cohost_agenda_panel.py,
+# BULK_CODE_PATTERNS) keeps its old list; it is not maintained.
 # ---------------------------------------------------------------------------
 
 INBOX_CODE_PATTERNS = (
-    r"```",
-    r"<\/?[a-z][^>]*>",
-    r"\b(function|class|import|from|select|insert|update|delete|drop|script|console\.log)\b",
-    r"=>",
+    r"`",                                               # backticks / fences
+    r"<\/?[a-z][^>]*>",                                 # markup tags
+    r"=>",                                              # arrow functions
+    r"[{};]{3,}",
+    r"\{[^{}]*;|;\s*\}",                                # braces with statements
+    r"\bdef\s+\w+\s*\(",                                # python def
+    r"\bfunction\s*\w*\s*\(",                           # js function
+    r"\bimport\s+[\w{}*,\s]+?\s+from\s+['\"]",          # js import ... from '...'
+    r"\b[a-z_]\w*(?:\.[a-z_]\w*)+\s*\(",                # dotted call: console.log(
+    r"\bselect\s+(?:\*|[\w,\s]+?)\s+from\s+\w+\s*(?:;|\bwhere\b|$)",
+    r"\b(?:insert\s+into\s+\w+\s*(?:\(|values\b)|delete\s+from\s+\w+\s*(?:;|\bwhere\b|$)|"
+    r"drop\s+table\b|update\s+\w+\s+set\s+\w+\s*=)",
 )
+
+# Keywords that only count in pairs, and only next to code punctuation.
+_CODE_KEYWORD_RE = re.compile(
+    r"\b(function|class|import|from|select|insert|update|delete|drop|script|"
+    r"console|def|return|print|var|let|const|null|true|false)\b",
+    re.IGNORECASE,
+)
+_CODE_PUNCTUATION_RE = re.compile(r"[(){}\[\];=<>]")
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +387,12 @@ def _is_valid_inbox_id(value: object) -> bool:
 
 
 def _looks_like_code(text: str) -> bool:
-    """Return True if text matches any code/HTML detection pattern."""
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in INBOX_CODE_PATTERNS)
+    """Return True if text shows a structural code/markup signal, or two
+    distinct code keywords alongside code punctuation."""
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in INBOX_CODE_PATTERNS):
+        return True
+    keywords = {m.lower() for m in _CODE_KEYWORD_RE.findall(text)}
+    return len(keywords) >= 2 and bool(_CODE_PUNCTUATION_RE.search(text))
 
 
 def _utc_now() -> str:

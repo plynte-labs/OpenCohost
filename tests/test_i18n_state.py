@@ -22,9 +22,12 @@ def _isolate_profiles_file(tmp_path, monkeypatch):
     never touch the real on-disk perfiles.json (USER_DATA_DIR resolves to
     the repo root in dev mode, so an unpatched PROFILES_FILE IS the
     developer's real file)."""
+    import opencohost.config.settings as settings_mod
     import opencohost.core.profiles.profiles as prof_mod
 
     monkeypatch.setattr(prof_mod, "PROFILES_FILE", str(tmp_path / "perfiles.json"))
+    monkeypatch.setattr(settings_mod, "LAST_PROFILE_FILE", str(tmp_path / "last_profile.json"))
+    monkeypatch.setattr(settings_mod, "PIPER_VOICE_FILE", str(tmp_path / "piper_voice.json"))
 
 
 # --- state -----------------------------------------------------------------

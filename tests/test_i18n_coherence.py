@@ -238,16 +238,19 @@ class TestPiperVoiceStartupCoherence:
         motor = _make_motor()
         assert motor._piper_voice_key == "english"
 
-    def test_init_logs_mismatch_when_persisted_choice_disagrees(self, tmp_path, monkeypatch, caplog):
+    def test_init_falls_back_when_persisted_choice_is_another_language(self, tmp_path, monkeypatch):
+        # Release-050 D16: the engine (llm_engine.py, bd9ad94) no longer keeps a
+        # persisted pick in another language. The active locale's default voice
+        # wins and the file is rewritten. The old expectation (pick wins, mismatch
+        # logged at init) predates that change.
         from opencohost.config import settings as settings_mod
 
         path = str(tmp_path / "piper_voice.json")
         settings_mod.save_piper_voice("neutral", config_file=path)
         monkeypatch.setattr(settings_mod, "PIPER_VOICE_FILE", path)
-        with caplog.at_level(logging.WARNING, logger="OpenCohost"):
-            motor = _make_motor()
-        assert motor._piper_voice_key == "neutral"  # explicit user pick always wins
-        assert PIPER_VOICE_LOCALE_MISMATCH in caplog.text
+        motor = _make_motor()
+        assert motor._piper_voice_key == "english"
+        assert settings_mod.load_piper_voice(config_file=path) == "english"
 
     def test_init_silent_when_persisted_choice_matches_locale(self, tmp_path, monkeypatch, caplog):
         from opencohost.config import settings as settings_mod

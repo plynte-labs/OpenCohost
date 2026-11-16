@@ -396,7 +396,7 @@ def test_pregen_completion_retriggers_for_a_direct_head_that_arrived_mid_flight(
     agenda_generating = threading.Event()
     let_agenda_finish = threading.Event()
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         generated.append((contexto, source))
         if source == "kira-agenda":
             motor._llm_generating = True  # the single-Ollama runner flag
@@ -585,7 +585,7 @@ def test_direct_pregen_never_preempts_a_generation_already_in_flight():
     agenda_generating = threading.Event()
     let_agenda_finish = threading.Event()
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         if source == "kira-agenda":
             agenda_generating.set()
             assert let_agenda_finish.wait(5.0)

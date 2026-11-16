@@ -179,6 +179,10 @@ def test_endpoint_empty_before_any_turn():
             "answered_by_transport": None,
             "submitted_under_provider": None,
             "provider_changed_while_queued": None,
+            "fragments": None,
+            "is_streaming": None,
+            "web_searched": None,
+            "web_sources": None,
         }
 
 
@@ -322,3 +326,150 @@ def test_engine_to_sink_wire_delivers_the_true_origin_end_to_end():
     # longer indistinguishable by the time they reach the API consumer.
     assert chat_turn["source"] == direct_turn["source"]
     assert chat_turn["origin"] != direct_turn["origin"]
+
+
+def test_chat_last_reply_includes_fragments():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.chat_sink.record(
+            "Primera oración. Segunda oración.",
+            "kira",
+        )
+        resp = client.get("/api/chat/last-reply")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fragments"] == ["Primera oración.", "Segunda oración."]
+
+
+def test_chat_speech_progress_idle():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._is_speaking = False
+        resp = client.get("/api/chat/speech-progress")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["speaking"] is False
+        assert body["current_idx"] is None
+
+
+def test_chat_speech_progress_speaking():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._is_speaking = True
+        resp = client.get("/api/chat/speech-progress")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["speaking"] is True
+        assert body["current_idx"] == 0
+
+
+def test_sink_record_stream_chunk_and_finalize_in_place():
+    sink = ChatReplySink()
+    stream_id = "stream-job-101"
+
+    # Chunk 1 arrives
+    sink.record_stream_chunk(
+        stream_id=stream_id,
+        text="Primera frase.",
+        fragments=["Primera frase."],
+        source="direct",
+    )
+    first = sink.last()
+    assert first["turn_id"] == 1
+    assert first["text"] == "Primera frase."
+    assert first["fragments"] == ["Primera frase."]
+    assert first["is_streaming"] is True
+
+    # Chunk 2 arrives on the same stream_id
+    sink.record_stream_chunk(
+        stream_id=stream_id,
+        text="Primera frase. Segunda frase.",
+        fragments=["Primera frase.", "Segunda frase."],
+        source="direct",
+    )
+    second = sink.last()
+    # Stays on turn_id 1
+    assert second["turn_id"] == 1
+    assert second["text"] == "Primera frase. Segunda frase."
+    assert second["fragments"] == ["Primera frase.", "Segunda frase."]
+    assert second["is_streaming"] is True
+
+    # Turn finalizes
+    sink.record(
+        "Primera frase. Segunda frase.",
+        source="direct",
+        queue_wait_ms=42,
+    )
+    final = sink.last()
+    assert final["turn_id"] == 1
+    assert final["text"] == "Primera frase. Segunda frase."
+    assert final["fragments"] == ["Primera frase.", "Segunda frase."]
+    assert final["is_streaming"] is False
+    assert final["queue_wait_ms"] == 42
+
+
+def test_stream_chunk_preserves_latex_math_formulas_in_sink():
+    """Formulas in raw text remain intact for ChatReplySink while fragments receive TTS chunks."""
+    sink = ChatReplySink()
+    stream_id = "stream-job-math-42"
+    raw_math_text = "La fórmula de Einstein es $E = mc^2$ y $$E = \\sqrt{m^2 c^4 + p^2 c^2}$$."
+    tts_spoken_fragments = ["La fórmula de Einstein es una fórmula y Te dejé una fórmula en el chat."]
+
+    sink.record_stream_chunk(
+        stream_id=stream_id,
+        text=raw_math_text,
+        fragments=tts_spoken_fragments,
+        source="direct",
+    )
+    current = sink.last()
+    assert current["turn_id"] == 1
+    assert current["text"] == raw_math_text
+    assert "$E = mc^2$" in current["text"]
+    assert current["fragments"] == tts_spoken_fragments
+    assert current["is_streaming"] is True
+
+    # Finalize with raw text
+    sink.record(
+        raw_math_text,
+        source="direct",
+    )
+    final = sink.last()
+    assert final["turn_id"] == 1
+    assert final["text"] == raw_math_text
+    assert "$E = mc^2$" in final["text"]
+    assert final["is_streaming"] is False
+
+
+def test_chat_last_reply_records_and_surfaces_web_searched():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.chat_sink.record(
+            "Buscando en la web...",
+            "direct",
+            web_searched=True,
+        )
+        resp = client.get("/api/chat/last-reply")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["text"] == "Buscando en la web..."
+        assert body["web_searched"] is True
+
+
+def test_chat_last_reply_stream_chunk_preserves_web_searched():
+    sink = ChatReplySink()
+    sink.record_stream_chunk(
+        stream_id="stream-web-1",
+        text="Parte 1",
+        fragments=["Parte 1"],
+        source="direct",
+        web_searched=True,
+    )
+    assert sink.last()["web_searched"] is True
+    sink.record(
+        "Parte 1 y final",
+        source="direct",
+        web_searched=True,
+    )
+    assert sink.last()["web_searched"] is True
+
+

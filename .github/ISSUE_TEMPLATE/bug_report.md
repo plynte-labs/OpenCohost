@@ -44,9 +44,9 @@ labels: bug
 
 Log files are written to:
 
-- **Windows:** `%APPDATA%\OpenCohost\logs\`
-  (e.g. `C:\Users\<you>\AppData\Roaming\OpenCohost\logs\`)
-- **Linux / macOS:** `~/.local/share/OpenCohost/logs/`
+- **Installed desktop app (Windows):** `%LOCALAPPDATA%\OpenCohost\data\logs\`
+  (unless you chose another data folder during first run; see `OPENCOHOST_DATA_ROOT`)
+- **Running from source:** the `logs/` folder at the repository root
 
 Files to check:
 
@@ -54,20 +54,11 @@ Files to check:
 |---|---|
 | `opencohost_<YYYYMMDD_HHMMSS>.log` | Main runtime log — start here |
 | `acciones.jsonl` | Action/event log with structured entries |
-| `crash.log` | Crash summary (if the app exited unexpectedly) |
-| `fatal.log` | Low-level fault handler output (hard crashes only) |
 
-For verbose output, set `OPENCOHOST_DEBUG=1` before launching:
-
-```powershell
-# Windows PowerShell
-$env:OPENCOHOST_DEBUG=1; python -m opencohost
-```
-
-```bash
-# Linux / macOS
-OPENCOHOST_DEBUG=1 python -m opencohost
-```
+For verbose output when running from source, use `pnpm tauri:debug` in `OpenCohost_UI/`
+(it sets `OPENCOHOST_DEBUG=1` for the backend it spawns). For a backend started
+separately with `run-api.bat`, set `OPENCOHOST_DEBUG=1` in that shell first.
+Installed builds log at the default level; attach the latest runtime log.
 
 <details>
 <summary>Paste log excerpt here (redact any personal info)</summary>

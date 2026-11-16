@@ -158,6 +158,39 @@ def test_en_negative_corpus_is_not_flagged(official):
         assert _first_category(cc, line) is None, line
 
 
+# --- K4 (G4): word boundaries on the identity nouns ---------------------------
+
+@pytest.mark.parametrize("locale,line", [
+    ("en", "I'm Aiden and welcome back to the stream"),
+    ("en", "I'm AIsha's friend, by the way"),
+    ("en", "As a model of consistency, this team never misses"),
+    ("en", "I am an aimbot hater, report him"),
+    ("es", "Lo tomo como modelo de referencia para el build"),
+    ("es", "Lo veo como iaio, una broma del chat"),
+    ("es", "Como asistentes al evento, la pasamos increíble"),
+])
+def test_identity_nouns_need_a_word_boundary(official, locale, line):
+    _activate(locale, official)
+    cc = active.agenda_guardrails()
+    assert _first_category(cc, line) is None, line
+
+
+@pytest.mark.parametrize("locale,line", [
+    ("en", "I am an AI"),
+    ("en", "I'm an AI, I can't stream"),
+    ("en", "As a model, I cannot have opinions"),
+    ("en", "As an AI, I don't watch games"),
+    ("es", "Soy una IA"),
+    ("es", "Como IA, no puedo opinar"),
+    ("es", "Como modelo, no tengo opiniones"),
+    ("es", "Como modelo de lenguaje no puedo"),
+])
+def test_real_identity_breaks_still_flagged(official, locale, line):
+    _activate(locale, official)
+    cc = active.agenda_guardrails()
+    assert _first_category(cc, line) == "assistant_identity", line
+
+
 def test_en_banned_closures_are_authored(official):
     _activate("en", official)
     banned = active.agenda_banned_closures()

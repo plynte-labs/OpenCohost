@@ -116,7 +116,10 @@ def _seed_rows(db_path, rows: list[dict]) -> None:
                 (
                     row["id"], row["profile_id"], f"{row['profile_id']}|{row['id']}",
                     row.get("title", "titulo"), row.get("content", "contenido"),
-                    row.get("status", "draft"),
+                    # ADR-062: unjudged drafts are no longer injection
+                    # candidates; these retrieval-mechanics tests seed judged
+                    # (promoted) rows unless a test asks for another status.
+                    row.get("status", "promoted"),
                     1 if row.get("pinned") else 0,
                     1 if row.get("private") else 0,
                     1 if row.get("inactive") else 0,
@@ -502,6 +505,22 @@ def test_memorias_wrapper_open_tag_carries_fallibility_wording():
 # 5.5 — combined injection stays within the existing ctx-budget ceiling
 # ---------------------------------------------------------------------------
 
+def _final_turn_content_without_injection(monkeypatch, root):
+    """The same turn as the combined-injection test, with no memorias, digest or editorial."""
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(llm_engine, "output_guard", lambda dialogo, source="chat": (True, ""))
+    # The caller already enabled memorias globally; switch it off for this baseline.
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", False)
+    motor, _, _ = _make_motor()
+    motor._model_ctx_limit[motor.current_model] = 4096
+    big = "x" * 4000
+    for _ in range(4):
+        motor.historial.append({"role": "user", "content": big, "source": "direct"})
+        motor.historial.append({"role": "assistant", "content": big, "source": "direct"})
+    messages = _capture_messages(motor, "quiero hablar de musica synthwave ahora", source="direct")
+    return messages[-1]["content"]
+
+
 def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch, tmp_path):
     monkeypatch.setattr(llm_engine, "output_guard", lambda dialogo, source="chat": (True, ""))
     motor, _, _ = _make_motor()
@@ -552,17 +571,16 @@ def test_combined_injection_stays_within_existing_ctx_budget_ceiling(monkeypatch
     # as ready-made table rows and Kira tabulated it.)
     assert "<memoria_de_fondo nota=" in final_content
     assert "editorial: dato relevante" in final_content
-    # Sanity ceiling: combined stacking (memorias ~700 + digest ~600 +
-    # editorial + contexto) does not blow up unbounded. Bumped from 3000 for the
-    # D1 announce rule (~93 chars added to the always-present system prompt).
+    # Sanity ceiling on what the injection ADDS: combined stacking (memorias ~700 +
+    # digest ~600 + editorial + contexto) must not blow up unbounded.
     #
-    # grounding_authority_temporal_humility added a second always-present system
-    # section (~728 chars, es). Rather than hardcoding a new number — which would
-    # silently absorb future injection bloat too — the ceiling stays 3200 for
-    # everything this test actually stacks, plus exactly the measured length of
-    # the new system block. A regression in memorias/digest/editorial sizing still
-    # trips it.
-    assert len(final_content) < 3200 + len(i18n_active.grounding_rules())
+    # Measured as a delta, not as an absolute length. The final turn also carries
+    # the persona and the grounding rules (about 5200 chars today, and growing with
+    # the persona), so an absolute ceiling measured the persona and went red as it
+    # grew (release-050 D9). The same turn without memorias, digest or editorial
+    # carries identical persona text, so the difference is exactly the injection.
+    baseline = _final_turn_content_without_injection(monkeypatch, tmp_path / "baseline")
+    assert len(final_content) - len(baseline) < 3200
 
 
 # ---------------------------------------------------------------------------

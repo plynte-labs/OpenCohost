@@ -654,8 +654,8 @@ def _motor_with_v5(tmp_path, monkeypatch, query_routes, seed_fn):
     calls = []
     canned = _V4_CANNED
 
-    def fake_v4(profile_id, contexto):
-        calls.append((profile_id, contexto))
+    def fake_v4(profile_id, contexto, episodes=None, recall_stats=None, **_kwargs):
+        calls.append((profile_id, contexto, tuple(episodes or ())))
         return canned
 
     monkeypatch.setattr(motor, "_build_memorias_injection_block", fake_v4)
@@ -677,7 +677,10 @@ def _seed_heap(conn, cache, worker):
 
 
 class TestArbitration:
-    def test_confident_v5_hit_suppresses_generic_v4(self, tmp_path, monkeypatch):
+    def test_confident_v5_hit_merges_into_v4_block(self, tmp_path, monkeypatch):
+        """ADR-059 (supersedes the old suppression contract): a confident v5
+        hit no longer suppresses the v4 builder — the recalled episodes are
+        handed to it and merged after the facts under one budget."""
         vec_h = [0.0, 0.0, 1.0] + [0.0] * 381
         motor, calls, conn, cache = _motor_with_v5(
             tmp_path, monkeypatch, {"heap": vec_h, "stack": vec_h}, _seed_heap)
@@ -685,11 +688,9 @@ class TestArbitration:
             "hablamos sobre el heap o stack?", source="ptt", is_local=True,
             provider_cfg={}, request_model="m", watchdog_timeout=10.0)
         prompt = setup.messages[-1]["content"]
-        assert "<episodic_memory>" in prompt
-        # Suppression is proven by the builder never being called (the
-        # literal marker also lives in the default system prompt text, so
-        # marker absence cannot prove it).
-        assert calls == []
+        assert "v4 line" in prompt
+        assert len(calls) == 1
+        assert [e.episode_id for e in calls[0][2]] == ["ep_heap"]
         conn.close()
         cache.close()
 
@@ -739,9 +740,11 @@ class TestArbitration:
             "A que me dedico?", source="ptt", is_local=True,
             provider_cfg={}, request_model="m", watchdog_timeout=10.0)
         prompt = setup.messages[-1]["content"]
-        assert "<episodic_memory>" in prompt
-        # PROFILE_SYNTHESIS coexists: v4 builder still runs (separate section).
+        assert "v4 line" in prompt
+        # PROFILE_SYNTHESIS coexists: v4 builder runs and receives the v5
+        # evidence to merge (ADR-059: one block, one budget).
         assert len(calls) == 1
+        assert [e.episode_id for e in calls[0][2]] == ["ep_work"]
         conn.close()
         cache.close()
 

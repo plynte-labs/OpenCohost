@@ -499,6 +499,18 @@ def test_put_agenda_session_503_when_agenda_none():
         assert resp.status_code == 503
 
 
+def test_put_agenda_session_rejects_out_of_range_turns():
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        # Below minimum (ge=1)
+        resp = client.put("/api/agenda/session", json={"max_turns_per_topic": 0})
+        assert resp.status_code == 422
+        # Above maximum (le=20)
+        resp = client.put("/api/agenda/session", json={"max_turns_per_topic": 21})
+        assert resp.status_code == 422
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # POST /api/agenda/session/action — enable / soft_stop / emergency_stop
 # ──────────────────────────────────────────────────────────────────────────

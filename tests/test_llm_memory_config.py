@@ -12,4 +12,4 @@ def test_keep_alive_default_is_finite():
     """LLM_KEEP_ALIVE must be a finite keep_alive, never the -1 'pin forever'
     value that keeps the model weights resident in RAM for the whole session."""
     assert settings.LLM_KEEP_ALIVE not in (-1, "-1", 0, "0")
-    assert settings.LLM_KEEP_ALIVE == "7m"
+    assert settings.LLM_KEEP_ALIVE == "21m"

@@ -307,7 +307,13 @@ def test_audit_middleware_does_not_change_response(tmp_path, monkeypatch, clean_
     with TestClient(app) as client:
         resp = client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "engine_alive": True}
+    body = resp.json()
+    # S6: build_version/install_id are additive identity fields; the audit
+    # middleware must leave the rest of the body untouched.
+    assert {k: v for k, v in body.items() if k not in ("build_version", "install_id")} == {
+        "status": "ok", "engine_alive": True, "engine_state": "ready",
+    }
+    assert "build_version" in body and "install_id" in body
 
 
 def test_audit_middleware_logs_500_and_reraises_for_unhandled_exception(

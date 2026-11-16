@@ -11,6 +11,7 @@ retryable ``stt_loading`` path.
 import io
 import json
 import os
+import sys
 import threading
 
 import pytest
@@ -19,6 +20,7 @@ from fastapi.testclient import TestClient
 import opencohost.api.ptt_session as ptt_session_mod
 from opencohost.config import settings
 from opencohost.stt import discovery
+from opencohost.stt import supervisor as supervisor_mod
 from opencohost.stt.discovery import (
     base_port_of,
     ensure_local_service,
@@ -944,3 +946,224 @@ def test_api_state_carries_diagnostic_fields():
         assert svc["last_warning"] is None and svc["returncode"] is None
     finally:
         client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Installed headless CLI (``liveaudio-cli serve``) routing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _cli_exe_name(platform):
+    return "liveaudio-cli.exe" if platform == "win32" else "liveaudio-cli"
+
+
+def _touch_file(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"MZ")
+    return str(path)
+
+
+def _empty_root(tmp_path):
+    root = tmp_path / "LiveAudio"
+    root.mkdir(exist_ok=True)
+    return root
+
+
+def _isolated_env(tmp_path, **extra):
+    """Environ whose metadata locations hold nothing, so only extra resolves."""
+    env = {
+        "APPDATA": str(tmp_path / "appdata"),
+        "LOCALAPPDATA": str(tmp_path / "localappdata"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+    }
+    env.update(extra)
+    return env
+
+
+def _isolate_default_resolution(monkeypatch, tmp_path, install_root=None):
+    """Pin the default LiveAudioSupervisor() lookup to install_root only:
+    no PATH liveaudio-service, no explicit override, no real metadata file,
+    no real default install root. The registry is stubbed by conftest."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.delenv(EXPLICIT_ENV_VAR, raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    if install_root is None:
+        monkeypatch.delenv("LIVEAUDIO_INSTALL_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("LIVEAUDIO_INSTALL_ROOT", str(install_root))
+
+
+def test_cli_resolves_via_install_root_env(tmp_path):
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / "liveaudio-cli.exe")
+    found = supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(root)),
+        platform="win32",
+        registry_reader=lambda: None,
+    )
+    assert found == [exe, "serve"]
+
+
+def test_cli_resolves_via_quoted_registry_install_location(tmp_path):
+    # NSIS writes InstallLocation WITH literal double quotes; they are stripped.
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / "liveaudio-cli.exe")
+    found = supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path),
+        platform="win32",
+        registry_reader=lambda: f"\"{root}\"",
+    )
+    assert found == [exe, "serve"]
+
+
+def test_cli_resolves_via_install_location_json(tmp_path):
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / "liveaudio-cli.exe")
+    meta = tmp_path / "appdata" / "LiveAudio"
+    meta.mkdir(parents=True)
+    (meta / "install_location.json").write_text(
+        json.dumps({"install_root": str(root)}), encoding="utf-8"
+    )
+    found = supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path), platform="win32", registry_reader=lambda: None
+    )
+    assert found == [exe, "serve"]
+
+
+def test_cli_resolver_returns_none_when_nothing_resolves(tmp_path):
+    empty = _empty_root(tmp_path)
+    assert supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(empty)),
+        platform="win32",
+        registry_reader=lambda: str(empty),
+    ) is None
+    assert supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path), platform="win32", registry_reader=lambda: None
+    ) is None
+
+
+def test_cli_resolver_needs_a_real_sibling_file_no_recursion(tmp_path):
+    root = _empty_root(tmp_path)
+    _touch_file(root / "nested" / "liveaudio-cli.exe")
+    (root / "liveaudio-cli.exe").mkdir()
+    assert supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(root)),
+        platform="win32",
+        registry_reader=lambda: None,
+    ) is None
+
+
+def test_cli_resolver_consults_registry_only_on_windows(tmp_path):
+    root = _empty_root(tmp_path)
+    _touch_file(root / "liveaudio-cli")
+    assert supervisor_mod.resolve_liveaudio_cli(
+        environ=_isolated_env(tmp_path), platform="linux", registry_reader=lambda: str(root)
+    ) is None
+
+
+def test_cli_resolver_unbalanced_quote_does_not_crash(tmp_path):
+    root = _empty_root(tmp_path)
+    for bad in (f"\"{root}", f"{root}\"", "\"", "\"\""):
+        assert supervisor_mod.resolve_liveaudio_cli(
+            environ=_isolated_env(tmp_path),
+            platform="win32",
+            registry_reader=lambda b=bad: b,
+        ) is None
+
+
+def test_default_supervisor_spawns_cli_serve_with_parent_pid(monkeypatch, tmp_path):
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / _cli_exe_name(sys.platform))
+    _isolate_default_resolution(monkeypatch, tmp_path, install_root=root)
+    sup = LiveAudioSupervisor(popen_factory=FakePopen, parent_pid=4242)
+    assert sup.ensure_started() is True
+    argv = FakePopen.instances[0].argv
+    assert argv == [exe, "serve", "--parent-pid", "4242"]
+    assert "--autostart-service" not in argv
+
+
+def test_cli_stdout_ws_port_is_consumed_like_the_service(monkeypatch, tmp_path):
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / _cli_exe_name(sys.platform))
+    _isolate_default_resolution(monkeypatch, tmp_path, install_root=root)
+    FakePopen.script = [_event_line(type="ws_port", effective_port=8771, base_port=8765)]
+    sup = LiveAudioSupervisor(popen_factory=FakePopen, parent_pid=4242)
+    assert sup.ensure_started() is True
+    assert sup.wait_for_port(timeout=2.0) == 8771
+    assert FakePopen.instances[0].argv[:2] == [exe, "serve"]
+
+
+def test_legacy_service_keeps_priority_over_cli(monkeypatch, tmp_path):
+    root = _empty_root(tmp_path)
+    legacy = _touch_file(root / "app" / ".venv" / "Scripts" / "liveaudio-service.exe")
+    _touch_file(root / "liveaudio-cli.exe")
+    _isolate_default_resolution(monkeypatch, tmp_path)
+    found = resolve_liveaudio_command(
+        environ=_isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(root)),
+        platform="win32",
+    )
+    assert found == [legacy]
+
+
+def test_cli_is_the_last_fallback_in_resolve_liveaudio_command(monkeypatch, tmp_path):
+    root = _empty_root(tmp_path)
+    exe = _touch_file(root / "liveaudio-cli.exe")
+    _isolate_default_resolution(monkeypatch, tmp_path)
+    found = resolve_liveaudio_command(
+        environ=_isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(root)),
+        platform="win32",
+    )
+    assert found == [exe, "serve"]
+
+
+def test_explicit_and_env_overrides_still_beat_cli(tmp_path):
+    root = _empty_root(tmp_path)
+    _touch_file(root / "liveaudio-cli.exe")
+    env = _isolated_env(tmp_path, LIVEAUDIO_INSTALL_ROOT=str(root))
+    assert resolve_liveaudio_command(
+        explicit="custom-svc --x", environ=env, platform="win32"
+    ) == ["custom-svc", "--x"]
+    assert resolve_liveaudio_command(
+        environ=dict(env, **{EXPLICIT_ENV_VAR: "custom-svc"}), platform="win32"
+    ) == ["custom-svc"]
+
+
+def test_desktop_app_in_install_root_is_never_launched(monkeypatch, tmp_path):
+    root = _empty_root(tmp_path)
+    _touch_file(root / "liveaudio-desktop.exe")
+    _isolate_default_resolution(monkeypatch, tmp_path, install_root=root)
+    sup = LiveAudioSupervisor(popen_factory=FakePopen, parent_pid=4242)
+    assert sup.ensure_started() is False
+    assert FakePopen.instances == []
+    assert sup.wait_for_port(timeout=0.05) is None
+
+
+def test_missing_cli_reports_unreachable_without_desktop_fallback(monkeypatch, tmp_path):
+    _isolate_default_resolution(monkeypatch, tmp_path, install_root=_empty_root(tmp_path))
+    sup = LiveAudioSupervisor(popen_factory=FakePopen, parent_pid=4242)
+    outcome = ensure_local_service(
+        configured_uri="ws://127.0.0.1:8765",
+        controller=_FakeController(),
+        supervisor=sup,
+        probe=lambda uri: (False, "unreachable"),
+        scan=lambda base: None,
+    )
+    assert outcome.spawned is False and outcome.available is False
+    assert outcome.detail == "stt_unreachable"
+    assert FakePopen.instances == []
+
+
+def test_desktop_launch_mode_symbols_are_removed():
+    for name in (
+        "resolve_desktop_exe",
+        "DESKTOP_EXE_NAME",
+        "DESKTOP_AUTOSTART_FLAG",
+        "DESKTOP_LOADING_WINDOW",
+        "DESKTOP_SCAN_INTERVAL",
+    ):
+        assert not hasattr(supervisor_mod, name), name
+    assert not hasattr(LiveAudioSupervisor, "_scan_port")

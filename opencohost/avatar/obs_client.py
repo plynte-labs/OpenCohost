@@ -32,7 +32,17 @@ logger = get_logger()
 # obs_lifecycle's except/logger.exception. (obs_reconnect_quiet — ponytail.)
 logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
 
-_SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+# obsws-python is GPL-3.0-only and ships only as the opt-in ``obs`` extra, never
+# in the installer runtime, where ``pip install`` is not possible.
+_OBS_UNAVAILABLE_MESSAGE = (
+    "OBS control is not included in the installer build yet. "
+    "Source installs: install the 'obs' extra."
+)
+
+# One list, one truth with the upload path (UPLOAD_EXTENSIONS in
+# avatar_config.py): uploaded gif/bmp must resolve in the folder/idle scan
+# too, not just via the configured-map branch (judge finding).
+_SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 
 @dataclass
@@ -98,7 +108,7 @@ class OBSClient:
             return True
         except ImportError as e:
             if log_failures:
-                self.on_log(f"[OBS] obsws-python not installed. Run: pip install obsws-python ({e})")
+                self.on_log(f"[OBS] {_OBS_UNAVAILABLE_MESSAGE} ({e})")
                 logger.error("obsws-python not installed: %s", e)
             return False
         except ConnectionRefusedError:
@@ -194,8 +204,14 @@ class OBSClient:
     def _get_image_path_for_state(self, state: str) -> Optional[Path]:
         """Get the absolute image path for a given avatar state."""
         configured = self.state_images.get(state)
-        if configured and configured.exists():
-            return configured
+        if configured:
+            if configured.exists():
+                return configured
+            # Honest, not silent: the map points at a file that is gone (moved
+            # or deleted source). Fall through to the idle chain below instead
+            # of pushing a dead path to OBS. Log the file NAME only — the
+            # absolute user path stays out of the log (judge finding).
+            self.on_log(f"[OBS] Configured image for state '{state}' is missing: {configured.name}")
 
         for ext in _SUPPORTED_IMAGE_EXTENSIONS:
             candidate = self.assets_folder / f"{state}{ext}"
@@ -237,7 +253,7 @@ class OBSClient:
             obs_version = getattr(version, 'obs_version', '?') or '?'
             return True, f"Conectado a OBS {obs_version}"
         except ImportError:
-            return False, "obsws-python no instalado"
+            return False, _OBS_UNAVAILABLE_MESSAGE
         except ConnectionRefusedError:
             return False, f"Conexión rechazada en {self.config.host}:{self.config.port}"
         except Exception as e:

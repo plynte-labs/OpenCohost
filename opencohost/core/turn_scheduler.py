@@ -32,8 +32,10 @@ HeadSnapshot = tuple[int, str, str, str | None]
 
 def compose_owner_bundle(members: list[TurnItem]) -> tuple[str, str, TurnStamp | None]:
     """Render queue tuples into one (payload, history_text, stamp). Pure: no locks, no I/O."""
+    from opencohost.core.memory.memoria_store import strip_history_wrapper
+
     ordered = sorted(members, key=lambda it: it[1])
-    numbered = "\n".join(f"{i}. {it[2]}" for i, it in enumerate(ordered, 1))
+    numbered = "\n".join(f"{i}. {strip_history_wrapper(it[2])}" for i, it in enumerate(ordered, 1))
     payload = i18n_active.owner_bundle_header().format(
         count=len(ordered), questions=numbered,
     )
@@ -134,6 +136,7 @@ class TurnScheduler:
         history_text: str | None = None,
         submitted_at: float | None = None,
         submitted_under_provider: str | None = None,
+        origin: str | None = None,
     ) -> EnqueueResult:
         if priority is None:
             priority = self._priority_resolver(source)
@@ -146,6 +149,10 @@ class TurnScheduler:
             submitted_at,
             submitted_under_provider,
         )
+        if origin is not None:
+            # Appended only when known, so every item without one keeps its
+            # seven-element shape.
+            item = item + (origin,)
         with self._sched_lock:
             self._items.append(item)
             self._items.sort(key=lambda queued: (queued[0], queued[1]))

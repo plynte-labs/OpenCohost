@@ -363,72 +363,10 @@ class TestSnapshotSemantics:
 
 
 # ===========================================================================
-# 8. server_qwen.py — structural guard: tts_local_only blocks Edge-TTS
+# 8. server_qwen.py guard — RETIRED 2026-09-21 to
+# the legacy repository (tests/test_server_qwen_local_only_guard.py) alongside the
+# retired server. The product never calls that server.
 # ===========================================================================
-
-class TestServerQwenLocalOnlyGuardStructural:
-    """Structural tests for the server_qwen.py tts_local_only privacy guard.
-
-    server_qwen.py runs in a separate Python environment (xtts_env) that does
-    NOT have opencohost installed, so it cannot be imported in flux_env.
-    These tests inspect the source text to verify the guard is present and
-    correctly ordered relative to the edge_tts.Communicate call.
-
-    Pattern mirrors TestTtsLocalOnlyUISwitchWiring above.
-    """
-
-    SERVER_PATH = os.path.join(ROOT_DIR, "opencohost", "server_qwen.py")
-
-    def _source(self):
-        with open(self.SERVER_PATH, "r", encoding="utf-8") as f:
-            return f.read()
-
-    def test_flag_file_read_present(self):
-        """server_qwen.py reads tts_local_only.json using stdlib (os/json) only."""
-        source = self._source()
-        assert "tts_local_only.json" in source, (
-            "server_qwen.py must read the tts_local_only.json flag file directly "
-            "(cross-env, stdlib-only read)"
-        )
-        # The guard must use inline stdlib json — not opencohost.config.settings.
-        # Verify by checking that `load_tts_local_only` (the settings helper) is
-        # NOT called anywhere in the file (it would require the opencohost package).
-        assert "load_tts_local_only" not in source, (
-            "server_qwen.py must NOT call load_tts_local_only() — that function "
-            "lives in opencohost.config.settings which is unavailable in xtts_env"
-        )
-
-    def test_400_error_returned_when_flag_on(self):
-        """server_qwen.py returns a 400 JSON error when tts_local_only is ON."""
-        source = self._source()
-        assert "tts_local_only is enabled" in source, (
-            "server_qwen.py must return a 400 error with "
-            "'tts_local_only is enabled' when the flag is ON"
-        )
-        assert "400" in source, (
-            "server_qwen.py must return HTTP 400 when tts_local_only flag is ON"
-        )
-
-    def test_guard_appears_before_communicate_call(self):
-        """The privacy guard must come BEFORE edge_tts.Communicate in the source."""
-        source = self._source()
-        guard_pos = source.find("tts_local_only is enabled")
-        communicate_pos = source.find("edge_tts.Communicate")
-        assert guard_pos != -1, "Privacy guard text not found in server_qwen.py"
-        assert communicate_pos != -1, "edge_tts.Communicate not found in server_qwen.py"
-        assert guard_pos < communicate_pos, (
-            "The tts_local_only guard must appear BEFORE edge_tts.Communicate "
-            f"(guard at {guard_pos}, Communicate at {communicate_pos})"
-        )
-
-    def test_stdlib_only_comment_present(self):
-        """server_qwen.py documents WHY the read is duplicated (cross-env note)."""
-        source = self._source()
-        has_comment = "cross-env" in source or "separate Python" in source or "xtts_env" in source
-        assert has_comment, (
-            "server_qwen.py must have a comment explaining the duplicated read "
-            "(cross-env / separate Python environment)"
-        )
 
 
 # ===========================================================================

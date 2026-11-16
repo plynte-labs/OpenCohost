@@ -7,12 +7,14 @@ MotorVocalIA.
 """
 import os
 import queue
+import random
 import re
 import requests
 import threading
 import time
 import uuid
 from typing import TYPE_CHECKING, Optional
+from opencohost.core.speech.vrm_audio import prepare_audio, publish_started, publish_ended
 
 if TYPE_CHECKING:  # never imported at runtime
     from opencohost.core.speech.router import SpeechRouter
@@ -38,6 +40,7 @@ if TYPE_CHECKING:  # never imported at runtime
 # spy)`, test_ptt_cue.py:131 and :189), so a local import would keep the real
 # module and drive a real audio device. Both reasons point the same way: `_eng`.
 from opencohost.core import llm_engine as _eng
+from opencohost.core.engine import turn_state
 
 
 class SpeechPipelineMixin:
@@ -77,6 +80,21 @@ class SpeechPipelineMixin:
         """
         with self._lock:
             self._speaking = False
+
+    def stop_all_speech(self) -> None:
+        """Cut current playback and drop everything queued behind it.
+
+        K2: used by a model switch requested while Kira is only speaking (no
+        generation in flight). Router path: `discard_all` (the router's own
+        discard primitive, so boundary/idle events stay consistent). The raw
+        `_speaking` flag is also cleared (`interrupt_speaking`) so the legacy
+        direct-`_hablar` path, which has no router, stops too.
+        NOTE: takes `_lock` -- never call while already holding it.
+        """
+        router = self._speech_router
+        if router is not None:
+            router.discard_all()
+        self.interrupt_speaking()
 
     def speech_remaining_estimate(self) -> Optional[float]:
         """WU4 4c seam (design-fase2.md §3): best-effort remaining-playback
@@ -131,6 +149,45 @@ class SpeechPipelineMixin:
         remaining_fragments = max(0, progress["total"] - played)
         return remaining_fragments * mean_per_fragment
 
+    def speech_progress(self) -> Optional[dict]:
+        """WU-SPEECH-SYNC: atomic read of the active playback sentence index and counters."""
+        with self._lock:
+            if not self._speaking or not self._speech_progress:
+                return None
+            return {
+                "speaking": True,
+                "turn_id": self._speech_progress.get("turn_id"),
+                "current_idx": self._speech_progress.get("current_idx"),
+                "played": self._speech_progress.get("played", 0),
+                "total": self._speech_progress.get("total", 0),
+                "feed_turn_id": self._feed_turn_for_progress(),
+                "job_id": self._speech_progress.get("job_id"),
+                "source": self._speech_progress.get("source"),
+                "fragment": self._progress_fragment(),
+            }
+
+    def _feed_turn_for_progress(self) -> Optional[int]:
+        """Feed turn of the job being spoken, read live from the router's
+        ACTIVE job (a streamed turn is recorded in the feed after playback may
+        already have started). Caller holds `_lock`."""
+        job_id = self._speech_progress.get("job_id")
+        router = getattr(self, "_speech_router", None)
+        active = router.active_job() if router is not None else None
+        if job_id is None or active is None or active.job_id != job_id:
+            return None
+        return getattr(active, "feed_turn_id", None)
+
+    def _progress_fragment(self) -> Optional[str]:
+        """The exact TTS fragment playing now (the string handed to synthesis
+        for `current_idx`), or None. Caller holds `_lock`."""
+        progress = self._speech_progress
+        fragments = progress.get("fragments")
+        idx = progress.get("current_idx")
+        if not fragments or idx is None:
+            return None
+        pos = idx - progress.get("base", 0)
+        return fragments[pos] if 0 <= pos < len(fragments) else None
+
     # ── WU5 D2/D3: frozen-stash detour return + connector (ADR-038; the D1
     # position cut was retired at router step 5) ──
 
@@ -146,6 +203,8 @@ class SpeechPipelineMixin:
         pygame.mixer.quit()/init() only ever runs on this engine's own
         thread, inside _hablar — external callers never touch pygame.
         """
+        if getattr(self, "_audio_disabled", False):
+            return
         with self._lock:
             self._audio_reinit_needed = True
 
@@ -347,7 +406,7 @@ class SpeechPipelineMixin:
                 pass
 
     @staticmethod
-    def _sanitize_tts_text_for_playback(text: str) -> str:
+    def _sanitize_tts_text_for_playback(text: str, lang: Optional[str] = None) -> str:
         """Strip Markdown emphasis markers and non-Latin script glyphs, without
         deleting otherwise-speakable text.
 
@@ -355,7 +414,7 @@ class SpeechPipelineMixin:
         already forwarded the original (unfiltered) string to the screen sink —
         the screen keeps CJK/etc glyphs, only the TTS-bound copy is filtered.
         """
-        return _eng._sanitize_tts_text_for_playback(text)
+        return _eng._sanitize_tts_text_for_playback(text, lang=lang)
 
     @staticmethod
     def _split_for_tts(texto_a_generar: str) -> list:
@@ -384,34 +443,50 @@ class SpeechPipelineMixin:
         )
 
     @staticmethod
-    def _sanitize_for_tts(texto_a_generar: str) -> list:
-        """Stage 1: strip markdown/quotes/newlines, then split into
+    def _sanitize_for_tts(texto_a_generar: str, lang: Optional[str] = None) -> list:
+        r"""Stage 1: strip markdown/quotes/newlines, then split into
         sentences on terminator+whitespace (B_ws -- the same boundary
-        production TTS ships today, `re.split(r'(?<=[.!?])\\s+', ...)`).
+        production TTS ships today, `re.split(r'(?<=[.!?…])\s+', ...)`).
 
         Returns the sentence list: the granularity the output_guard is
         meant to run at, once that seam is wired.
+
+        Display text: no pronunciation dictionary here. Fragments cut from
+        this text are what speech progress and the reply sink report, so they
+        must match the reply the UI shows; the dictionary is applied per
+        fragment at synthesis (`_spoken_text_for_tts`).
         """
-        texto_limpio = SpeechPipelineMixin._sanitize_tts_text_for_playback(texto_a_generar)
+        texto_limpio = _eng._sanitize_tts_text_for_display(texto_a_generar, lang=lang)
         texto_limpio = texto_limpio.replace('"', '').replace('\n', ' ')
-        return re.split(r'(?<=[.!?])\s+', texto_limpio)
+        return [s.strip() for s in re.split(r'(?<=[.!?…])\s+', texto_limpio) if s.strip()]
+
+    @staticmethod
+    def _spoken_text_for_tts(fragmento: str, lang: Optional[str] = None) -> str:
+        """The text handed to the synthesizer for one display fragment: the
+        owner pronunciation dictionary applied after every safety stage, plus
+        the same quote/newline scrub `_sanitize_for_tts` applies. Fragment
+        boundaries never move; only the audio changes."""
+        hablado = _eng._spoken_text_for_fragment(fragmento, lang=lang)
+        if hablado is fragmento:
+            return fragmento
+        return hablado.replace('"', '').replace('\n', ' ').strip()
 
     @staticmethod
     def _fragment_for_tts(oraciones_saneadas: list) -> list:
-        """Stage 2: sub-split any sentence over 25 words on internal
-        commas/semicolons, regrouping at >=8 words, producing the final
+        """Stage 2: sub-split any sentence over 20 words on internal
+        commas/semicolons/colons, regrouping at >=8 words, producing the final
         TTS-synthesizable chunks."""
         oraciones = []
 
         MIN_PALABRAS_POR_CHUNK = 8
-        MAX_PALABRAS_POR_CHUNK = 25
+        MAX_PALABRAS_POR_CHUNK = 20
 
         for frag in oraciones_saneadas:
             frag = frag.strip()
             if not frag: continue
 
             if len(frag.split()) > MAX_PALABRAS_POR_CHUNK:
-                sub_frags = re.split(r'(?<=[,;])\s+', frag)
+                sub_frags = re.split(r'(?<=[,;:])\s+', frag)
                 temp_chunk = ""
                 for sub in sub_frags:
                     temp_chunk += sub + " "
@@ -459,20 +534,36 @@ class SpeechPipelineMixin:
             result.original_len, result.remaining_len, result.removed_pct,
         )
 
-    def _speak_or_submit(self, dialogo, source: str = "direct", priority: Optional[int] = None) -> None:
+    def _speak_or_submit(self, dialogo, source: str = "direct", priority: Optional[int] = None,
+                         feed_turn_id: Optional[int] = None):
         """The ONE seam every spoken line goes through (design §8 step 2).
 
         Router armed: hand the text to the router thread and return
-        immediately — playback no longer occupies the calling thread.
+        immediately — playback no longer occupies the calling thread. Returns
+        the created `SpeechJob` (T4, live_session_fixes_20260925: callers that
+        may need to later `discard_job()` a job they submitted -- e.g. the
+        cloud-fallback notice -- capture this return value; every pre-existing
+        caller ignores it, so this is purely additive).
         Kill switch OFF: the legacy direct, BLOCKING `_hablar`, byte-identical
-        to what each of the four converted call sites did before.
+        to what each of the four converted call sites did before -- including
+        the return value, which stays None (there is no job to hand back).
 
         `priority` defaults to the source's band; a caller passes it
         explicitly when the source tag would lie about the content's urgency
         (see the cloud-fallback notice).
         """
         if not self._speech_router_enabled:
-            self._hablar(dialogo, source=source)
+            # Router off: the blocking inline path has no job; the engine
+            # thread logs the turn's speech start/end itself (job=-).
+            tid = turn_state.current_tid()
+            turn_state.log_speech(tid, None, "started", "activated")
+            try:
+                self._hablar(dialogo, source=source)
+            except BaseException as speak_exc:
+                turn_state.fail_reason("tts_submit_failed", speak_exc)
+                turn_state.log_speech(tid, None, "lost", "error")
+                raise
+            turn_state.log_speech(tid, None, "finished", "complete")
             # Measure-first telemetry seam: a chat turn actually played to
             # completion — advance the spoken clock so secs_since_last_spoken
             # stays honest vs a should_call that may later expire via TTL.
@@ -486,13 +577,87 @@ class SpeechPipelineMixin:
                     self.on_chat_turn_spoken()
                 except Exception:
                     pass
-            return
+            return None
+        if priority is None:
+            priority = _eng.priority_for_source(source)
+        # vision-on-demand V1.15: a canned reply may carry its own speech tag
+        # (`<source>-vision-fail`). The band stays the turn source's own, so the
+        # tag only distinguishes the line in logs and keeps the owner prefix.
+        speak_source = getattr(dialogo, "speak_source", None)
+        if isinstance(speak_source, str) and speak_source:
+            source = speak_source
         router = self._ensure_router()
-        router.submit(
-            dialogo,
-            source,
-            _eng.priority_for_source(source) if priority is None else priority,
-        )
+        # V1.33: a reply of the turn that read the screen aloud carries that
+        # turn's token so it never cuts its own reading (None: no kwarg).
+        read_turn = getattr(self, "_vision_read_turn_id", None)
+        kwargs = {}
+        if read_turn is not None:
+            kwargs["turn_id"] = read_turn
+        if feed_turn_id is not None:
+            kwargs["feed_turn_id"] = feed_turn_id
+        return router.submit(dialogo, source, priority, **kwargs)
+
+    def _maybe_discard_stale_fallback_notice(self, source: str) -> None:
+        """T4 (owner setting, live_session_fixes_20260925, default OFF):
+        "discard stale speech when a regenerated reply arrives".
+
+        Root cause this exists to fix: `_handle_cloud_failure`'s async
+        worker speaks `i18n_active.provider_fallback_notice()` through
+        `_speak_or_submit(..., priority=1)` (CHAT band, even though it
+        inherits the failed turn's own source, e.g. "direct"/"ptt" --
+        `llm_engine_cloud.py`'s own comment on that call explains why: the
+        OWNER band would make it preemptive, which is wrong for a chat-band
+        notice). `_generar_dialogo`'s same-call `cloud_fallback_retry` branch
+        races that worker on a SEPARATE thread and, on success, this turn's
+        own `_ejecutar_inferencia` submits the regenerated reply with NO
+        explicit priority -- `priority_for_source(source)` resolves a
+        direct/ptt source to the OWNER band, so `SpeechRouter.submit`'s D3
+        preempt cuts the still-active (or still-queued) notice job. Cutting
+        via `pause_speech`'s "preempt" reason SUSPENDS rather than discards
+        (router.py `_reconcile`), so the notice's remaining chunks (e.g. "...
+        Give me a moment.") resume and play again AFTER the reply -- the
+        exact "Kira repeats herself" the owner heard live.
+
+        ON: discard whatever is left of the tracked notice job (in-flight,
+        still queued, or already suspended on the stack) via the router's
+        job-IDENTITY `discard_job` -- never a source-prefix sweep, since the
+        notice and the reply share the same source tag -- then speak one
+        short transitional phrase (`provider_fallback_transition_notice`)
+        before the caller submits the reply itself. Always speaks the
+        transition when armed, even if there was nothing left to discard
+        (the notice already finished on its own): it is the "reply is
+        landing now" marker, not conditioned on the notice's exact timing.
+
+        OFF (default): a no-op. Today's behavior is unchanged, byte-for-byte
+        -- this method is only ever called from a call site gated on the
+        setting being True in the first place, but the router/setting
+        re-checks here make it safe to call unconditionally too.
+
+        Gated on `_speech_router_enabled`: without the router as the
+        playback path there is no queue/stack to discard from, and the
+        legacy blocking `_hablar` path has no interleaving to fix.
+        """
+        if not self._speech_router_enabled:
+            return
+        if not bool(
+            self._provider_config.get("discard_stale_speech_on_regenerated_reply", False)
+        ):
+            return
+        with self._lock:
+            job = self._pending_fallback_notice_job
+            self._pending_fallback_notice_job = None
+        router = self._speech_router
+        if job is not None and router is not None:
+            router.discard_job(job)
+        try:
+            self._speak_or_submit(
+                _eng.i18n_active.provider_fallback_transition_notice(),
+                source=source, priority=1,
+            )
+        except Exception:
+            _eng.logger.exception(
+                "Cloud fallback: could not speak provider_fallback_transition_notice"
+            )
 
     def _ensure_router(self) -> "SpeechRouter":
         """Lazy-build-then-start, extracted from `_speak_or_submit` (step 3)
@@ -531,6 +696,7 @@ class SpeechPipelineMixin:
         The promotion scheduler's physical-hold bit is independent of those
         playback switches: a real open mic blocks maintenance even when router
         behavior is disabled."""
+        _eng._note_turn_arrival(self)
         with self._lock:
             self._promotion_ptt_held = True
             promotion_state = getattr(self, "_promotion_state", None)
@@ -552,6 +718,73 @@ class SpeechPipelineMixin:
             return
         router = self._ensure_router()
         router.set_ptt_held(False)
+
+    # ── read-aloud (readaloud-speech T2) ─────────────────────────────────
+    # Owner-selected text spoken straight through the router, bypassing the
+    # LLM. Privacy: the text goes ONLY to `router.submit`; it is never logged,
+    # added to historial, emitted as dialogue or kept as a last reply.
+
+    READALOUD_SOURCE = "readaloud"
+
+    def speak_readaloud(self, text: str, mode: str = "queue"):
+        """Submit read-aloud text. `queue` rides the CHAT band (plays behind
+        current speech), `now` the OWNER band (preempts: the cut job is
+        suspended and resumes afterwards). Never `direct`: an owner-band
+        submit sweeps `ptt`/`direct`/`owner` off the stack, and read-aloud
+        must not eat the owner's suspended turns.
+
+        Router required: returns None when it is disabled, and NEVER falls
+        back to a blocking `_hablar` on the caller's (HTTP) thread."""
+        if not self._speech_router_enabled:
+            return None
+        from opencohost.core.speech.router import PRIORITY_CHAT, PRIORITY_OWNER
+
+        priority = PRIORITY_OWNER if mode == "now" else PRIORITY_CHAT
+        job = self._ensure_router().submit(text, self.READALOUD_SOURCE, priority)
+        _eng.logger.info(
+            "[READALOUD] submit job=%d mode=%s priority=%d",
+            job.job_id, "now" if mode == "now" else "queue", priority,
+        )
+        return job
+
+    def stop_readaloud(self) -> int:
+        """Discard every read-aloud job (active, queued, suspended). Returns
+        the count targeted; 0 when there is no router."""
+        router = self._speech_router
+        if router is None:
+            return 0
+        removed = router.discard_source(self.READALOUD_SOURCE)
+        _eng.logger.info("[READALOUD] stop discarded=%d", removed)
+        return removed
+
+    def user_pause_speech(self) -> bool:
+        """Owner Pause: engage the router's user hold. False when the router
+        is disabled (nothing to hold)."""
+        if not self._speech_router_enabled:
+            return False
+        self._ensure_router().engage_user_pause()
+        return True
+
+    def user_resume_speech(self) -> bool:
+        """Owner Resume: release the router's user hold. False when the
+        router is disabled."""
+        if not self._speech_router_enabled:
+            return False
+        self._ensure_router().release_user_pause()
+        return True
+
+    def readaloud_state(self) -> dict:
+        """`{paused, readaloud_active, readaloud_pending}` for the playback
+        bar. Never creates the router just to answer a poll."""
+        router = self._speech_router
+        if router is None:
+            return {"paused": False, "readaloud_active": False, "readaloud_pending": 0}
+        active, pending = router.source_counts(self.READALOUD_SOURCE)
+        return {
+            "paused": router.user_paused,
+            "readaloud_active": bool(active),
+            "readaloud_pending": pending,
+        }
 
     def drain_speech_for_new_turn(self, source: str = "ptt") -> None:
         """Drain/sweep superseded owner speech when a new turn arrives."""
@@ -604,6 +837,11 @@ class SpeechPipelineMixin:
         with self._lock:
             self._speaking = True
             self._current_speech_source = source
+            # Kept AFTER the boundary ends (never cleared): the `speaking_end`
+            # handlers run once `_current_speech_source` is already None, so
+            # this is the only place they can still learn whose boundary it
+            # was (read-aloud must not drive the agenda controller).
+            self._speech_boundary_source = source
             # T1(a) [v5]: monotonic start of THIS turn's speech, paired with
             # `_speech_boundary_end` to record the previous turn's own speech
             # duration for the `speech_ms=` boundary telemetry field.
@@ -640,7 +878,8 @@ class SpeechPipelineMixin:
         self.ui_callback("speaking_end")
 
     def _hablar(self, texto_a_generar, source: str = "direct", *, emit_boundary: bool = True,
-                pre_split: Optional[list] = None, cursor_base: int = 0):
+                pre_split: Optional[list] = None, cursor_base: int = 0,
+                turn_id: Optional[int] = None, job_id: Optional[int] = None):
         """WU2b belt lock (design-fase2.md §2.5): serialize every _hablar caller.
 
         Thin wrapper around _hablar_impl. After WU2 the engine worker is the ONLY
@@ -688,12 +927,18 @@ class SpeechPipelineMixin:
                 # always forwarding `pre_split=None` broke that pre-existing,
                 # unrelated stub with a TypeError. The router is the only
                 # caller that ever passes a non-None slice.
+                kwargs = {}
+                if turn_id is not None:
+                    kwargs["turn_id"] = turn_id
+                if job_id is not None:
+                    kwargs["job_id"] = job_id
                 if pre_split is not None:
                     return self._hablar_impl(
                         texto_a_generar, source=source,
                         pre_split=pre_split, cursor_base=cursor_base,
+                        **kwargs,
                     )
-                return self._hablar_impl(texto_a_generar, source=source)
+                return self._hablar_impl(texto_a_generar, source=source, **kwargs)
             finally:
                 if emit_boundary:
                     self._speech_boundary_end()
@@ -701,7 +946,8 @@ class SpeechPipelineMixin:
             self._hablar_lock.release()
 
     def _hablar_impl(self, texto_a_generar, source: str = "direct", *,
-                     pre_split: Optional[list] = None, cursor_base: int = 0):
+                     pre_split: Optional[list] = None, cursor_base: int = 0,
+                     turn_id: Optional[int] = None, job_id: Optional[int] = None):
         # Bug B fix (second line of defence): the token can still be set in the
         # window between the caller's own check and this frame. Mid-playback
         # truncation is handled separately by the _speaking guard in the
@@ -782,6 +1028,11 @@ class SpeechPipelineMixin:
             self._speech_progress = {
                 "total": cursor_base + len(oraciones), "played": cursor_base,
                 "start": start_tts, "first_play": None, "base": cursor_base,
+                "current_idx": cursor_base,
+                "turn_id": turn_id,
+                "job_id": job_id,
+                "source": source,
+                "fragments": list(oraciones),
             }
 
         cola_audios = queue.Queue(maxsize=3)
@@ -818,6 +1069,27 @@ class SpeechPipelineMixin:
             # Same snapshot contract for the Edge-TTS rate: a mid-utterance
             # speed change applies from the next utterance only.
             edge_rate = _eng.edge_rate_for_length_scale(self._tts_length_scale)
+
+            def _edge_breaker_allows():
+                allowed, transition = self._edge_breaker.try_acquire()
+                if transition:
+                    _eng.logger.warning("[EDGE_TTS_BREAKER] state=%s cooldown_s=%d",
+                                        transition, int(self._edge_breaker.cooldown_s))
+                return allowed
+
+            def _speak_piper(i, oracion, fragmento, synth_failed_why, unavailable_why):
+                """Synthesize one fragment with Piper (Edge failed or is being skipped)."""
+                if not self._piper.is_available():
+                    _drop(i, unavailable_why)
+                    return
+                archivo_chunk_wav = os.path.join(
+                    _eng.TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
+                )
+                oracion_piper = re.sub(r"\.{3,}", ".", oracion).replace("…", ".")
+                if self._piper.synthesize(oracion_piper, archivo_chunk_wav):
+                    cola_audios.put((archivo_chunk_wav, i, fragmento))
+                else:
+                    _drop(i, synth_failed_why)
 
             # Determine effective motor for this request
             effective_motor = self.motor_tts
@@ -857,9 +1129,17 @@ class SpeechPipelineMixin:
                     else:
                         self._log("TTS efectivo: requested=pesado effective=pesado")
 
-            for i, oracion in enumerate(oraciones):
+            for i, fragmento in enumerate(oraciones):
                 if not self._speaking:
                     break
+
+                # follow-reading-pronunciation R1: `oraciones` is display text
+                # (progress, sink, outcome ledgers). Only the synthesizer input
+                # gets the pronunciation dictionary.
+                oracion = self._spoken_text_for_tts(fragmento)
+                if not re.search(r"\w", oracion):
+                    _drop(i, "silenced_by_dictionary")
+                    continue
 
                 # Privacy fast-path: local_only is a snapshot taken at utterance
                 # start (see top of productor()).  Using the snapshot ensures a
@@ -873,8 +1153,9 @@ class SpeechPipelineMixin:
                         _eng.TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
                     )
                     if self._piper.is_available():
-                        if self._piper.synthesize(oracion, archivo_chunk_wav):
-                            cola_audios.put((archivo_chunk_wav, i, oracion))
+                        oracion_piper = re.sub(r"\.{3,}", ".", oracion).replace("…", ".")
+                        if self._piper.synthesize(oracion_piper, archivo_chunk_wav):
+                            cola_audios.put((archivo_chunk_wav, i, fragmento))
                         else:
                             _drop(i, "piper_synth_failed")
                     else:
@@ -882,21 +1163,16 @@ class SpeechPipelineMixin:
                     continue
 
                 # Fast-path: Edge-TTS is known offline for this session (or the
-                # package is not installed) — go straight to Piper without
-                # attempting a network call.
-                if effective_motor == "ligero" and (self._edge_tts_offline or _eng.edge_tts is None):
+                # package is not installed), or its breaker is open (transient
+                # failures; only skipped when Piper can take over) — go straight
+                # to Piper without attempting a network call.
+                if effective_motor == "ligero" and (
+                    self._edge_tts_offline
+                    or _eng.edge_tts is None
+                    or (self._piper.is_available() and not _edge_breaker_allows())
+                ):
                     self._maybe_notify_piper_locale_mismatch()
-                    archivo_chunk_wav = os.path.join(
-                        _eng.TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-                    )
-                    if self._piper.is_available():
-                        if self._piper.synthesize(oracion, archivo_chunk_wav):
-                            cola_audios.put((archivo_chunk_wav, i, oracion))
-                        else:
-                            _drop(i, "piper_synth_failed")
-                    else:
-                        # Piper gone / never loaded.
-                        _drop(i, "piper_unavailable")
+                    _speak_piper(i, oracion, fragmento, "piper_synth_failed", "piper_unavailable")
                     continue
 
                 ext = ".mp3" if effective_motor == "ligero" else ".wav"
@@ -910,7 +1186,9 @@ class SpeechPipelineMixin:
                             await communicate.save(archivo_chunk)
 
                         _eng.asyncio.run(_eng.asyncio.wait_for(generar_edge(), timeout=_eng.TTS_LIGHT_TIMEOUT))
-                        cola_audios.put((archivo_chunk, i, oracion))
+                        if self._edge_breaker.record_success():
+                            _eng.logger.info("[EDGE_TTS_BREAKER] state=closed cooldown_s=0")
+                        cola_audios.put((archivo_chunk, i, fragmento))
                     else:
                         # Heavy TTS path — measure generation time for RTF
                         gen_start = time.time()
@@ -927,7 +1205,7 @@ class SpeechPipelineMixin:
                         if respuesta.status_code == 200:
                             with open(archivo_chunk, 'wb') as f:
                                 f.write(respuesta.content)
-                            cola_audios.put((archivo_chunk, i, oracion))
+                            cola_audios.put((archivo_chunk, i, fragmento))
 
                             # Record RTF measurement
                             hm = getattr(self, "health_monitor", None)
@@ -950,35 +1228,42 @@ class SpeechPipelineMixin:
                     _drop(i, "heavy_timeout")
 
                 except Exception as e:
-                    # Connection-error detection: only network-offline errors trigger
-                    # Piper fallback. asyncio.TimeoutError and other errors do NOT.
-                    if effective_motor == "ligero" and _eng._is_connection_error(e):
-                        self._edge_tts_offline = True
-                        self._maybe_notify_piper_locale_mismatch()
-                        if self._piper.is_available():
-                            self._log(
-                                "Edge-TTS sin conexion; usando TTS local (Piper) "
-                                "por el resto de la sesion."
-                            )
-                            archivo_chunk_wav = os.path.join(
-                                _eng.TEMP_DIR, f"tts_chunk_{i}_{uuid.uuid4().hex[:4]}.wav"
-                            )
-                            if self._piper.synthesize(oracion, archivo_chunk_wav):
-                                cola_audios.put((archivo_chunk_wav, i, oracion))
-                            else:
-                                _drop(i, "edge_fallback_piper_synth_failed")
-                        else:
-                            self._log(
-                                "TTS local no disponible: instala piper-tts y "
-                                "configura TTS_LOCAL_MODEL_PATH",
-                                level="warning",
-                            )
-                            _drop(i, "edge_fallback_piper_unavailable")
-                        continue
-
                     if effective_motor == "ligero":
-                        self._log("ERROR: Edge-TTS requiere internet. Si estas offline usa Pesado (Qwen3-TTS).", level="error")
-                        _drop(i, "edge_ligero_failed")
+                        # Any Edge failure falls back to Piper. Only a true offline
+                        # failure is session-permanent; the rest feed the breaker.
+                        # PRIVACY: log the type, HTTP status and fixed codes only
+                        # (never the text, never repr(e): it can carry URLs/tokens).
+                        failure = _eng.classify_edge_failure(e)
+                        if failure.permanent:
+                            self._edge_tts_offline = True
+                            opened = None
+                        else:
+                            opened = self._edge_breaker.record_failure(failure.code)
+                        piper_ok = self._piper.is_available()
+                        _eng.logger.warning(
+                            "[EDGE_TTS_FAIL] idx=%d type=%s status=%s kind=%s consecutive=%d "
+                            "breaker=%s fallback=%s",
+                            i, type(e).__name__, failure.status or "-", failure.kind,
+                            self._edge_breaker.consecutive,
+                            "open" if self._edge_breaker.degraded else "closed",
+                            "piper" if piper_ok else "none",
+                        )
+                        if opened:
+                            _eng.logger.warning(
+                                "[EDGE_TTS_BREAKER] state=open cooldown_s=%d",
+                                int(self._edge_breaker.cooldown_s),
+                            )
+                        try:
+                            os.remove(archivo_chunk)  # partial .mp3 from the failed attempt
+                        except OSError:
+                            pass
+                        if not self._speaking:
+                            break  # barge-in during the failed attempt: do not start Piper
+                        self._maybe_notify_piper_locale_mismatch()
+                        _speak_piper(
+                            i, oracion, fragmento,
+                            "edge_fallback_piper_synth_failed", "edge_fallback_piper_unavailable",
+                        )
                         continue
                     _drop(i, "heavy_unexpected_error", e)
 
@@ -996,11 +1281,13 @@ class SpeechPipelineMixin:
         with self._lock:
             reinit_needed = self._audio_reinit_needed
             self._audio_reinit_needed = False
-        if reinit_needed:
+        if reinit_needed and not getattr(self, "_audio_disabled", False):
             try:
+                _reinit_t0 = time.monotonic()
                 self.pygame.mixer.quit()
                 self.pygame.mixer.init()
-                self._log("Audio device re-inicializado (recovery)")
+                _reinit_ms = int((time.monotonic() - _reinit_t0) * 1000)
+                self._log(f"Audio device re-inicializado (recovery) reinit_ms={_reinit_ms}")
             except Exception as e:
                 _eng.logger.warning(f"No se pudo re-inicializar pygame.mixer: {e}")
 
@@ -1077,27 +1364,74 @@ class SpeechPipelineMixin:
                             if self._speech_progress is not None:
                                 self._speech_progress["first_play"] = time.monotonic()
 
-                    self.pygame.mixer.music.load(archivo_chunk)
-                    self.pygame.mixer.music.play()
-
-                    while self.pygame.mixer.music.get_busy():
-                        # Bug 4 fix: honour external _speaking=False inside the
-                        # busy-wait so a playing chunk is stopped promptly on
-                        # emergency teardown instead of draining to completion.
+                    vrm_audio = prepare_audio(archivo_chunk)
+                    audio_disabled = (
+                        getattr(self, "_audio_disabled", False)
+                        or getattr(self, "pygame", None) is None
+                        or getattr(self.pygame, "mixer", None) is None
+                        or self.pygame.mixer.get_init() is None
+                    )
+                    if not audio_disabled:
                         with self._lock:
                             if not self._speaking:
+                                # Stop landed while prepare_audio ran: this fragment
+                                # never started, so report it as the resume cursor
+                                # (mirrors the pre_play branch above).
+                                was_interrupted = True
+                                cursor = idx
+                                _eng.logger.info(
+                                    f"[SPEECH_STACK] cut source={source} cursor={cursor} at=pre_load"
+                                )
+                                try:
+                                    if os.path.exists(archivo_chunk):
+                                        os.remove(archivo_chunk)
+                                except (OSError, TypeError):
+                                    pass
                                 break
-                        time.sleep(0.05)
+                        self.pygame.mixer.music.load(archivo_chunk)
+                        try:
+                            self.pygame.mixer.music.set_volume(0.88)
+                        except Exception:
+                            pass
+                        with self._lock:
+                            if self._speech_progress is not None:
+                                self._speech_progress["current_idx"] = cursor_base + idx
+                        self.pygame.mixer.music.play()
+                        publish_started(self, vrm_audio)
 
-                    # Bug 4 fix: if _speaking was cleared externally, stop the
-                    # mixer explicitly before unload() — pygame keeps playing
-                    # until stop() or end-of-track; unload() alone does not stop.
-                    with self._lock:
-                        interrupted = not self._speaking
-                    if interrupted:
-                        self.pygame.mixer.music.stop()
+                        while self.pygame.mixer.music.get_busy():
+                            # Bug 4 fix: honour external _speaking=False inside the
+                            # busy-wait so a playing chunk is stopped promptly on
+                            # emergency teardown instead of draining to completion.
+                            with self._lock:
+                                if not self._speaking:
+                                    break
+                            time.sleep(0.05)
 
-                    self.pygame.mixer.music.unload()
+                        # Bug 4 fix: if _speaking was cleared externally, stop the
+                        # mixer explicitly before unload() — pygame keeps playing
+                        # until stop() or end-of-track; unload() alone does not stop.
+                        with self._lock:
+                            interrupted = not self._speaking
+                        if interrupted:
+                            self.pygame.mixer.music.stop()
+
+                        self.pygame.mixer.music.unload()
+                    else:
+                        with self._lock:
+                            if self._speech_progress is not None:
+                                self._speech_progress["current_idx"] = cursor_base + idx
+                        publish_started(self, vrm_audio)
+                        # Simulate audio duration for headless mode (~16 characters/second, clamped between 0.2s and 4.0s)
+                        est_duration = max(0.2, min(4.0, len(oracion_texto) / 16.0))
+                        deadline = time.monotonic() + est_duration
+                        while time.monotonic() < deadline:
+                            with self._lock:
+                                if not self._speaking:
+                                    break
+                            time.sleep(0.05)
+                        with self._lock:
+                            interrupted = not self._speaking
                     chunks_played += 1
                     with self._lock:
                         if self._speech_progress is not None:
@@ -1115,6 +1449,23 @@ class SpeechPipelineMixin:
                         break
                     spoken.append(idx)
 
+                    # Pausa natural jerárquica entre oraciones (evita sensación acelerada/ametralladora)
+                    if not interrupted and idx + 1 < len(oraciones):
+                        base_pause = _eng.calculate_speech_pause(oracion_texto)
+                        queue_backlog = cola_audios.qsize()
+                        remaining = len(oraciones) - (idx + 1)
+                        if queue_backlog >= 2 or remaining > 3:
+                            # Compress pause by 50% down to a floor of 80ms when queue is backlogged
+                            pause_duration = max(0.08, base_pause * 0.5)
+                        else:
+                            pause_duration = base_pause
+                        pause_deadline = time.monotonic() + pause_duration
+                        while time.monotonic() < pause_deadline:
+                            with self._lock:
+                                if not self._speaking:
+                                    break
+                            time.sleep(0.02)
+
                 except Exception as e:
                     # Bug fix (2026-07-15 PTT voice-death): a playback
                     # exception must count as a failed fragment, not just a
@@ -1131,6 +1482,7 @@ class SpeechPipelineMixin:
                     # control-flow change, the loop continues to the next item.
                     skipped.append(idx)
                 finally:
+                    publish_ended(self)
                     try:
                         if os.path.exists(archivo_chunk):
                             os.remove(archivo_chunk)

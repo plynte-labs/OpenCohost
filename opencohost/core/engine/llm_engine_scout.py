@@ -4,6 +4,7 @@ Mixin extracted from llm_engine.py.
 All runtime state stays on MotorVocalIA.
 """
 import hashlib
+import math
 import re
 import sqlite3
 import time
@@ -11,32 +12,58 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from opencohost.config import settings as _settings
 
-_PROMOTION_DIAGNOSTIC_EVENTS = frozenset({
-    "eligible", "started", "completed", "deferred",
-})
-_PROMOTION_DIAGNOSTIC_REASONS = frozenset({
-    "none", "memorias_disabled", "model_not_loaded",
-    "model_switch_pending", "no_profile", "profile_backoff",
-    "model_not_resident", "no_drafts", "no_due", "input_cap",
-    "success", "semantic_partial", "store_read_failed", "judge_failed",
-    "protocol_malformed", "store_write_failed", "unexpected_failure",
-})
-_PROMOTION_DIAGNOSTIC_FAILURES = frozenset({
-    "none", "residency_timeout", "residency_offline",
-    "residency_malformed", "sqlite_read", "judge_watchdog",
-    "model_unavailable", "model_server_error", "model_transport",
-    "unexpected_precommit", "protocol_malformed", "sqlite_write",
-    "backoff_reset_failed",
-})
-_PROMOTION_DIAGNOSTIC_LOG = (
-    "[MEMORY_SWEEP] operation=memory_promotion "
-    "event=%s profile_hash=%s model_hash=%s drafts_count=%d "
-    "input_chars=%d reasoning_mode=%s output_budget=%d duration_ms=%d "
-    "decided_count=%d kept_count=%d rejected_count=%d charged_count=%d "
-    "deferred_count=%d stale_count=%d remaining_count=%d reason=%s "
-    "failure_class=%s"
-)
+
+# F1 (memory-paraphrase-contradiction-20260928): bounded timeout for the ONE
+# embed_batch IPC round trip that embeds this sweep's up-to-_PROMOTION_DRAFT_BATCH
+# (4) keeper texts. fact_index.py's own reconcile batching estimates ~90ms/row
+# at 256-token padding once the MiniLM worker is warm (its _BATCH_SIZE=8
+# docstring), and embed_query's measured p50 is 78ms for a SINGLE text
+# (ADR-060) -- so 4 short keeper texts land well under 500ms in the warm case.
+# 2s gives roughly 4x headroom for a cold or momentarily-contended worker
+# (the reconcile background job and a turn's query embedding share the same
+# lock) while still keeping this SYNCHRONOUS engine-thread sweep bounded: a
+# promotion sweep that stalls the chat thread for several seconds is worse
+# than one duplicate row surviving on the lexical fallback for one sweep.
+_DEDUP_EMBED_BATCH_TIMEOUT_S = 2.0
+
+
+def _cosine_similarity(vec_a, vec_b):
+    """Pure-Python cosine of two equal-length vectors, or None.
+
+    No numpy dependency at this layer (the engine only ever holds plain
+    lists handed back over the semantic-worker IPC boundary). None on a
+    length mismatch, a missing vector, or a (near-)zero norm -- never
+    raises, so a malformed vector degrades the ONE pair it belongs to,
+    never the whole dedup pass.
+    """
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return None
+    dot = sum(x * y for x, y in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(x * x for x in vec_a))
+    norm_b = math.sqrt(sum(y * y for y in vec_b))
+    if norm_a <= 1e-9 or norm_b <= 1e-9:
+        return None
+    return dot / (norm_a * norm_b)
+
+
+def _cached_vector_if_fresh(rec, row, fact_index):
+    """The cached fact vector *rec* for durable *row*, or None when it is
+    missing or stale (revision / content hash / model id+version mismatch --
+    FactSemanticIndex's own freshness contract)."""
+    from opencohost.core.memory_v5_shadow.fact_index import content_fingerprint
+
+    if (
+        rec is None
+        or rec.revision != int(row["revision"])
+        or rec.content_hash != content_fingerprint(row["content"])
+        or rec.model_id != fact_index.model_id
+        or rec.model_version != fact_index.model_version
+    ):
+        return None
+    return rec.vector
+
 
 # Module object, not names off it: `_eng.X` resolves at CALL time, so the suite's
 # monkeypatches on llm_engine are seen. Safe at module level in THIS direction --
@@ -147,6 +174,22 @@ class ScoutPromotionMixin:
                 break
         return results
 
+    def _usage_record(self, response, *, kind: str, model, is_local: bool, started: float) -> None:
+        """Count one internal LLM call in the usage ledger (numbers only; never raises)."""
+        try:
+            from opencohost.core.usage import ledger
+
+            model = ledger.call_model_name(
+                model, is_local=is_local, provider_cfg=getattr(self, "_provider_config", None)
+            )
+            ledger.record_response(
+                response, model=model, is_local=is_local, kind=kind,
+                profile_id=getattr(self, "_current_profile_id", None) or "",
+                wall_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception:
+            pass
+
     def scout_digest(self) -> list[dict]:
         """Topic Scout: idle-time adjacent-topic suggester.
 
@@ -196,17 +239,24 @@ class ScoutPromotionMixin:
             if self._ollama_scout_client is None:
                 self._ollama_scout_client = self._create_ollama_scout_client(self.ollama)
             prompt = _eng.i18n_active.scout_prompt().format(digest_block=input_block)
+            _usage_t0 = time.monotonic()
             response = self._ollama_chat_with_watchdog(
                 timeout=_eng.LLM_SCOUT_TIMEOUT + 2,
                 chat_callable=self._ollama_scout_chat,
                 model=self._loaded_model,
                 messages=[{"role": "user", "content": prompt}],
-                options={
-                    "num_predict": _eng.LLM_SCOUT_NUM_PREDICT,
-                    "temperature": _eng.LLM_SCOUT_TEMPERATURE,
-                },
+                options=self._with_num_ctx(
+                    {
+                        "num_predict": _eng.LLM_SCOUT_NUM_PREDICT,
+                        "temperature": _eng.LLM_SCOUT_TEMPERATURE,
+                    },
+                    # Same num_ctx as chat: a default-ctx scout reloads the model.
+                    self._resolve_local_num_ctx(self._loaded_model),
+                ),
                 keep_alive=_eng.LLM_KEEP_ALIVE,
             )
+            self._usage_record(response, kind="topic_scout", model=self._loaded_model,
+                               is_local=bool(self._is_local), started=_usage_t0)
             text = self._scout_extract_text(response)
             return self._scout_parse_titles(text, input_block)
         except Exception:
@@ -230,121 +280,6 @@ class ScoutPromotionMixin:
         """Return the injected non-negative UTC epoch second."""
         clock = getattr(self, "_promotion_wall_clock", None) or time.time
         return max(0, int(clock()))
-
-    def _promotion_diagnostic(
-        self,
-        event: str,
-        profile_id: str | None = None,
-        model: str | None = None,
-        drafts_count: int = -1,
-        input_chars: int = -1,
-        *,
-        reasoning_mode: str = "none",
-        duration_ms: int = -1,
-        decided_count: int = 0,
-        kept_count: int = 0,
-        rejected_count: int = 0,
-        charged_count: int = 0,
-        deferred_count: int = 0,
-        stale_count: int = 0,
-        remaining_count: int = -1,
-        reason: str = "none",
-        failure_class: str = "none",
-        dedupe: bool = False,
-        gate_dedupe: bool = False,
-        clear_noop: bool = False,
-        start_ns: int | None = None,
-        counts: dict | None = None,
-    ) -> int | None:
-        """Emit one bounded metadata-only lifecycle line when opted in."""
-        if not _eng.MEMORY_PROMOTION_DIAGNOSTICS:
-            return None
-        try:
-            def identity_hash(domain: str, value: str | None) -> str:
-                if not isinstance(value, str) or not value:
-                    return "none"
-                prefix = (
-                    f"opencohost.memory_promotion.{domain}.v1\0".encode()
-                )
-                return hashlib.sha256(
-                    prefix + value.encode("utf-8")
-                ).hexdigest()[:16]
-
-            def bounded(value: int, upper: int | None = None) -> int:
-                value = int(value)
-                if value < -1:
-                    return -1
-                if upper is not None:
-                    return min(value, upper)
-                return value
-
-            if event not in _PROMOTION_DIAGNOSTIC_EVENTS:
-                return None
-            if clear_noop:
-                self._promotion_diagnostic_last_noop = None
-            profile_hash = identity_hash("profile", profile_id)
-            model_hash = identity_hash("model", model)
-            if reasoning_mode == "request":
-                normalized = (model or "").lower().replace("_", "-")
-                reasoning_mode = (
-                    "low" if "gpt-oss" in normalized else "disabled"
-                )
-            if reasoning_mode not in {"disabled", "low", "none"}:
-                reasoning_mode = "none"
-            if reason not in _PROMOTION_DIAGNOSTIC_REASONS:
-                reason = "unexpected_failure"
-            if failure_class not in _PROMOTION_DIAGNOSTIC_FAILURES:
-                failure_class = "unexpected_precommit"
-            if counts is not None:
-                decided_count = counts["decided"]
-                kept_count = counts["kept"]
-                rejected_count = counts["rejected"]
-                stale_count = counts["stale"]
-            if start_ns is not None:
-                try:
-                    duration_ms = max(
-                        0, (time.monotonic_ns() - start_ns) // 1_000_000,
-                    )
-                except Exception:
-                    duration_ms = -1
-            remaining_count = bounded(remaining_count)
-            if gate_dedupe:
-                signature = (profile_hash, reason)
-                if self._promotion_diagnostic_last_gate == signature:
-                    return None
-                self._promotion_diagnostic_last_gate = signature
-            if dedupe:
-                signature = (profile_hash, reason, remaining_count)
-                if self._promotion_diagnostic_last_noop == signature:
-                    return None
-                self._promotion_diagnostic_last_noop = signature
-            _eng.logger.info(
-                _PROMOTION_DIAGNOSTIC_LOG,
-                event,
-                profile_hash,
-                model_hash,
-                bounded(drafts_count, _eng._PROMOTION_DRAFT_BATCH),
-                bounded(input_chars, _eng._PROMOTION_DRAFT_CHARS),
-                reasoning_mode,
-                _eng._PROMOTION_NUM_PREDICT,
-                bounded(duration_ms),
-                max(0, int(decided_count)),
-                max(0, int(kept_count)),
-                max(0, int(rejected_count)),
-                max(0, int(charged_count)),
-                max(0, int(deferred_count)),
-                max(0, int(stale_count)),
-                remaining_count,
-                reason,
-                failure_class,
-            )
-            if event == "started":
-                try:
-                    return time.monotonic_ns()
-                except Exception:
-                    return None
-        except Exception:
-            return None
 
     def _record_promotion_profile_failure(
         self, profile_id: str, failure_class: str, now_s: int,
@@ -462,7 +397,7 @@ class ScoutPromotionMixin:
         return max(_eng._JUDGE_BUDGET_FLOOR_SECONDS, min(_eng._JUDGE_BUDGET_CEILING_SECONDS, base))
 
     def _run_promotion_judge(
-        self, batch: list, *, chat_callable=None,
+        self, batch: list, *, chat_callable=None, related=None,
     ) -> "_eng._PromotionParseDiagnostics":
         """ONE chat completion over *batch*, parsed. Raises on transport failure.
 
@@ -474,15 +409,34 @@ class ScoutPromotionMixin:
         draft_block = "\n".join(
             f"{i}. {row['content']}" for i, row in enumerate(batch, start=1)
         )
+        existing_block = ""
+        if related is not None and related.existing_map:
+            # F2: the related EXISTING facts ride in the SAME judge call.
+            draft_block = related.draft_block
+            existing_block = _eng._PROMOTION_EXISTING_BLOCK.replace(
+                "{existing_facts}", "\0X\0",
+            )
         # str.replace, not str.format: the prompt's JSON example is full of
         # literal braces and doubling every one of them is a corruption trap.
-        prompt = _eng._PROMOTION_JUDGE_PROMPT.replace("{draft_block}", draft_block)
+        # Sentinels keep memory text that happens to contain a placeholder
+        # from being substituted a second time.
+        prompt = (
+            _eng._PROMOTION_JUDGE_PROMPT
+            .replace("{existing_block}", "\0E\0")
+            .replace("{draft_block}", "\0D\0")
+            .replace("\0E\0", existing_block)
+            .replace("\0D\0", draft_block)
+        )
+        if existing_block:
+            prompt = prompt.replace("\0X\0", related.existing_block)
         budget = self._judge_timeout_seconds()
         options = {
             "temperature": 0,
             "num_predict": _eng._PROMOTION_NUM_PREDICT,
         }
         judge_model = self._judge_model()
+        # Resolved for the judge model itself (it may differ from chat's).
+        self._with_num_ctx(options, self._resolve_local_num_ctx(judge_model))
         normalized_model = judge_model.lower().replace("_", "-")
         think = "low" if "gpt-oss" in normalized_model else False
         if chat_callable is None:
@@ -498,6 +452,7 @@ class ScoutPromotionMixin:
         from opencohost.core.memory.models import MemoryJudgeResult
         json_schema = MemoryJudgeResult.model_json_schema()
 
+        _usage_t0 = time.monotonic()
         response = self._ollama_chat_with_watchdog(
             timeout=budget + 2,  # the socket abort must fire first (scout precedent)
             chat_callable=call,
@@ -508,6 +463,8 @@ class ScoutPromotionMixin:
             options=options,
             keep_alive=_eng.LLM_KEEP_ALIVE,
         )
+        self._usage_record(response, kind="memoria_judge", model=judge_model,
+                           is_local=True, started=_usage_t0)
         text = self._scout_extract_text(response)
         return _eng._parse_promotion_diagnostics(text, len(batch))
 
@@ -541,6 +498,236 @@ class ScoutPromotionMixin:
             return "model_not_resident"
         return ""
 
+    def _build_dedup_semantic_fn(self, profile_id: str, decisions):
+        """F1 (memory-paraphrase-contradiction-20260928): a precomputed-score
+        closure for THIS sweep, or None to leave dedup on the lexical
+        fallback.
+
+        Design choice (precomputed-scores over a widened constructor hook,
+        per the F1 task): the store's ``semantic_similarity_fn`` constructor
+        parameter is a PERSISTENT instance attribute on a long-lived
+        ``MemoriaStore``, but a sweep's embeddings are only valid for THIS
+        batch, THIS profile, right now -- storing them there would either go
+        stale the moment the sweep moves to another profile/batch, or need
+        the store to know when to invalidate them, which drags worker/IPC
+        awareness into a module the docstring is explicit must stay free of
+        it. ``apply_promotion_batch``'s new ``semantic_similarity_fn``
+        keyword is a per-call override instead: this method builds one fresh
+        closure, the caller passes it in, and it is thrown away after.
+
+        Only the up to ``_PROMOTION_DRAFT_BATCH`` (4) KEEP judged_texts in
+        *decisions* are embedded (ONE ``embed_batch`` call, bounded by
+        ``_DEDUP_EMBED_BATCH_TIMEOUT_S``) -- existing durable rows are never
+        embedded here; they reuse the SAME cached ``fact_embeddings`` vectors
+        (and the SAME revision/content-hash/model freshness contract) the
+        retrieval hot path already validates in ``FactSemanticIndex``, via
+        ``MemoriaStore.list_durable_rows_for_dedup``. A row with no cached or
+        stale vector is simply absent from the returned closure's map, so
+        THAT one pair alone falls back to lexical.
+
+        Fully fail-open (F1 constraint 4): any settings gate, missing
+        ``_memory``/``fact_index``, dead/absent worker, an embedding timeout,
+        or a malformed batch result all return None here, never raise --
+        ``_is_near_duplicate`` already treats a None fn as "use the lexical
+        path", so an unavailable embedder never blocks promotion. Never logs
+        memory text (RC-8); the one log line here is a reason CODE only.
+        """
+        try:
+            if not (_settings.MEMORY_SEMANTIC_ENABLED and _settings.MEMORY_FACTS_ENABLED):
+                return None
+
+            # Lazy (OFF-zero contract, memoria injection's own precedent):
+            # importing the v5 package must cost nothing when v5 is OFF.
+            from opencohost.core.memory_v5_shadow.fact_index import FactSemanticIndex
+
+            mem = getattr(self, "_memory", None)
+            fact_index = getattr(mem, "fact_index", None) if mem is not None else None
+            if not isinstance(fact_index, FactSemanticIndex):
+                return None
+
+            keeper_texts: list[str] = []
+            seen: set[str] = set()
+            for _, judged_text, uncertain, _reason in decisions:
+                if judged_text is None or uncertain or judged_text in seen:
+                    continue
+                seen.add(judged_text)
+                keeper_texts.append(judged_text)
+            if not keeper_texts:
+                return None
+
+            vectors = fact_index.worker.embed_batch(
+                keeper_texts, timeout_s=_DEDUP_EMBED_BATCH_TIMEOUT_S,
+            )
+            if not vectors or len(vectors) != len(keeper_texts):
+                _eng.logger.info(
+                    "memoria dedup semantic embedding unavailable (fail-open): "
+                    "reason=embed_batch_empty_or_mismatched"
+                )
+                return None
+
+            vector_by_text: dict[str, list] = dict(zip(keeper_texts, vectors))
+
+            durable_rows = self._get_memoria_store().list_durable_rows_for_dedup(
+                profile_id,
+            )
+            if durable_rows:
+                cached = {
+                    rec.fact_id: rec
+                    for rec in fact_index.cache_store.get_fact_embeddings_by_profile(
+                        profile_id,
+                    )
+                }
+                for row in durable_rows:
+                    content = row["content"]
+                    if content in vector_by_text:
+                        continue  # a fresh keeper vector always wins
+                    vector = _cached_vector_if_fresh(
+                        cached.get(row["id"]), row, fact_index,
+                    )
+                    if vector is None:
+                        continue  # missing/stale cache entry -> lexical for this row
+                    vector_by_text[content] = vector
+
+            def _similarity(text_a: str, text_b: str):
+                return _cosine_similarity(
+                    vector_by_text.get(text_a), vector_by_text.get(text_b),
+                )
+
+            return _similarity
+        except Exception as exc:
+            _eng.logger.info(
+                "memoria dedup semantic embedding unavailable (fail-open): "
+                "reason=exception exc=%s",
+                type(exc).__name__,
+            )
+            return None
+
+    def _retrieve_related_facts(self, profile_id: str, store, batch: list) -> dict:
+        """F2: ``{draft index (1-based): [ExistingFact, ...]}`` -- up to 2
+        existing durable facts of THIS profile related to each draft, for the
+        judge's EXISTING FACTS section. Runs BEFORE the judge call.
+
+        Durable = promoted/imported/curated, active, non-private, non-blank
+        (``MemoriaStore.list_supersede_candidates``). Related = MiniLM cosine
+        in [RELATED_BAND_LOW, RELATED_BAND_HIGH) using ONE ``embed_batch`` of
+        the draft texts plus the cached ``fact_embeddings`` vectors (same
+        freshness contract as F1); a row with no fresh vector -- or every row
+        when the worker is absent/dead/timed out -- uses the conservative
+        lexical fallback in ``promotion_related.rank_related``. Fully
+        fail-open: any error returns {} (the sweep then runs exactly as
+        before F2). Counts-only logging (RC-8).
+        """
+        try:
+            from opencohost.core.memory.promotion_related import (
+                ExistingFact,
+                rank_related,
+            )
+
+            rows = store.list_supersede_candidates(profile_id)
+            if not rows:
+                return {}
+            facts = [
+                ExistingFact(
+                    id=r["id"], profile_id=r["profile_id"], status=r["status"],
+                    revision=int(r["revision"]), content=r["content"],
+                )
+                for r in rows
+            ]
+            draft_vectors = None
+            fact_vectors: dict = {}
+            fact_index = None
+            if _settings.MEMORY_SEMANTIC_ENABLED and _settings.MEMORY_FACTS_ENABLED:
+                try:
+                    from opencohost.core.memory_v5_shadow.fact_index import (
+                        FactSemanticIndex,
+                    )
+
+                    mem = getattr(self, "_memory", None)
+                    candidate = getattr(mem, "fact_index", None) if mem is not None else None
+                    if isinstance(candidate, FactSemanticIndex):
+                        fact_index = candidate
+                except Exception:
+                    fact_index = None
+            if fact_index is not None:
+                try:
+                    texts = [row["content"] for row in batch]
+                    vectors = fact_index.worker.embed_batch(
+                        texts, timeout_s=_DEDUP_EMBED_BATCH_TIMEOUT_S,
+                    )
+                    if vectors and len(vectors) == len(texts):
+                        draft_vectors = vectors
+                        cached = {
+                            rec.fact_id: rec
+                            for rec in fact_index.cache_store.get_fact_embeddings_by_profile(
+                                profile_id,
+                            )
+                        }
+                        for row in rows:
+                            vec = _cached_vector_if_fresh(
+                                cached.get(row["id"]), row, fact_index,
+                            )
+                            if vec is not None:
+                                fact_vectors[row["id"]] = vec
+                except Exception as exc:
+                    draft_vectors = None
+                    _eng.logger.info(
+                        "memoria related-fact embedding unavailable (fail-open): "
+                        "reason=exception exc=%s", type(exc).__name__,
+                    )
+            related: dict = {}
+            semantic_drafts = 0
+            for index, row in enumerate(batch, start=1):
+                scores = None
+                if draft_vectors is not None:
+                    scores = {}
+                    for fid, vec in fact_vectors.items():
+                        score = _cosine_similarity(draft_vectors[index - 1], vec)
+                        if score is not None:
+                            scores[fid] = score
+                    semantic_drafts += 1
+                picked = rank_related(row["content"], facts, scores)
+                if picked:
+                    related[index] = picked
+            _eng.logger.info(
+                "memoria related facts: drafts=%d with_related=%d semantic=%d "
+                "candidates=%d", len(batch), len(related), semantic_drafts, len(facts),
+            )
+            return related
+        except Exception as exc:
+            _eng.logger.info(
+                "memoria related-fact retrieval failed (fail-open): %s",
+                type(exc).__name__,
+            )
+            return {}
+
+    def _schedule_fact_reconcile_after_promotion(self, profile_id: str) -> None:
+        """F1 -- after a sweep KEEPS at least one row, schedule (never block
+        on) a background re-embed so the newly-promoted row(s) get a fact
+        vector for both future dedup checks and retrieval ranking (ADR-060).
+
+        Mirrors ``_fact_semantic_scores``'s own ``schedule_reconcile`` call:
+        same lazy v5 import, same "full eligible row set, not just this
+        batch" contract (``FactSemanticIndex.reconcile`` treats any id absent
+        from the passed rows as GONE and deletes its cached vector, so
+        passing only the just-promoted rows would wrongly evict every OTHER
+        row's cache). Fail-open and silent -- a reconcile is a background
+        nicety, never a sweep-blocking step.
+        """
+        try:
+            from opencohost.core.memory_v5_shadow.fact_index import FactSemanticIndex
+
+            mem = getattr(self, "_memory", None)
+            fact_index = getattr(mem, "fact_index", None) if mem is not None else None
+            if not isinstance(fact_index, FactSemanticIndex):
+                return
+            rows = self._get_memoria_store().list_injection_candidates(profile_id)
+            fact_index.schedule_reconcile(profile_id, rows)
+        except Exception as exc:
+            _eng.logger.info(
+                "memoria post-promotion reconcile schedule failed (fail-open): %s",
+                type(exc).__name__,
+            )
+
     def promote_pending_drafts(self, *, chat_callable=None) -> dict:
         """ONE LLM call: judge, rewrite and promote this profile's oldest
         unjudged drafts (memory_promotion_20260725).
@@ -568,9 +755,6 @@ class ScoutPromotionMixin:
         }
         profile_id = None
         now_s = None
-        attempt_started = False
-        attempt_terminal = False
-        attempt_start_ns = None
         batch = []
         draft_chars = 0
         charged_count = 0
@@ -593,13 +777,6 @@ class ScoutPromotionMixin:
                         else _eng.logger.info
                     )
                     level("memoria promotion sweep gated: %s", gate)
-                self._promotion_diagnostic(
-                    "deferred",
-                    self._current_profile_id,
-                    self._loaded_model,
-                    reason=gate,
-                    gate_dedupe=True,
-                )
                 return counts
             profile_id = self._current_profile_id
             now_s = self._promotion_now_s()
@@ -611,13 +788,6 @@ class ScoutPromotionMixin:
                     _eng.logger.info(
                         "memoria promotion sweep gated: profile_backoff"
                     )
-                self._promotion_diagnostic(
-                    "deferred",
-                    profile_id,
-                    self._loaded_model,
-                    reason="profile_backoff",
-                    gate_dedupe=True,
-                )
                 return counts
 
             resident, residency_failure = self._judge_model_residency()
@@ -632,14 +802,6 @@ class ScoutPromotionMixin:
                     _eng.logger.warning(
                         "memoria promotion sweep gated: model_not_resident"
                     )
-                self._promotion_diagnostic(
-                    "deferred",
-                    profile_id,
-                    self._loaded_model,
-                    reason="model_not_resident",
-                    failure_class=residency_failure or "none",
-                    gate_dedupe=True,
-                )
                 return counts
             self._promotion_last_gate = ""
 
@@ -655,13 +817,6 @@ class ScoutPromotionMixin:
                 self._record_promotion_profile_failure(
                     profile_id, "sqlite_read", now_s,
                 )
-                self._promotion_diagnostic(
-                    "deferred",
-                    profile_id,
-                    self._loaded_model,
-                    reason="store_read_failed",
-                    failure_class="sqlite_read",
-                )
                 return counts
             if not drafts:
                 try:
@@ -674,33 +829,12 @@ class ScoutPromotionMixin:
                     self._record_promotion_profile_failure(
                         profile_id, "sqlite_read", now_s,
                     )
-                    self._promotion_diagnostic(
-                        "deferred",
-                        profile_id,
-                        self._loaded_model,
-                        reason="store_read_failed",
-                        failure_class="sqlite_read",
-                    )
                     return counts
                 # Includes the cooling/deferred no-call case. A stale, already
                 # due profile failure no longer has work to protect, while the
                 # draft's own deadline remains authoritative in memorias.db.
                 reset_ok = backoff_store.reset(profile_id, now_s=now_s)
                 remaining = counts["unjudged_remaining"]
-                self._promotion_diagnostic(
-                    "completed",
-                    profile_id,
-                    self._loaded_model,
-                    0,
-                    0,
-                    duration_ms=0,
-                    remaining_count=remaining,
-                    reason="no_drafts" if remaining == 0 else "no_due",
-                    failure_class=(
-                        "none" if reset_ok else "backoff_reset_failed"
-                    ),
-                    dedupe=True,
-                )
                 return counts  # the common no-op: zero tokens, no call at all
 
             # No dedup step, deliberately: the design's "drop any draft whose
@@ -720,39 +854,31 @@ class ScoutPromotionMixin:
             counts["considered"] = len(batch)
 
             if not batch:
-                self._promotion_diagnostic(
-                    "completed",
-                    profile_id,
-                    self._loaded_model,
-                    0,
-                    0,
-                    duration_ms=0,
-                    remaining_count=-1,
-                    reason="input_cap",
-                    dedupe=True,
-                )
                 return counts
 
             # The model call is intentionally outside every SQLite transaction.
-            diagnostic = (
-                profile_id, self._loaded_model, len(batch), draft_chars,
-            )
-            self._promotion_diagnostic(
-                "eligible",
-                *diagnostic,
-                reasoning_mode="request",
-                clear_noop=True,
-            )
-            attempt_started = True
-            attempt_start_ns = self._promotion_diagnostic(
-                "started",
-                *diagnostic,
-                reasoning_mode="request",
-            )
-            try:
-                diagnostics = self._run_promotion_judge(
-                    batch, chat_callable=chat_callable,
+            # F2: related EXISTING facts (fail-open; {} means "as before").
+            related_ctx = None
+            related_by_draft = self._retrieve_related_facts(profile_id, store, batch)
+            if related_by_draft:
+                from opencohost.core.memory.promotion_related import (
+                    build_related_context,
                 )
+
+                related_ctx = build_related_context(
+                    batch,
+                    related_by_draft,
+                    budget_chars=_eng._PROMOTION_DRAFT_CHARS,
+                )
+            try:
+                if related_ctx is not None and related_ctx.existing_map:
+                    diagnostics = self._run_promotion_judge(
+                        batch, chat_callable=chat_callable, related=related_ctx,
+                    )
+                else:
+                    diagnostics = self._run_promotion_judge(
+                        batch, chat_callable=chat_callable,
+                    )
             except Exception as exc:
                 failure_class = self._promotion_exception_class(exc)
                 self._record_promotion_profile_failure(
@@ -760,70 +886,69 @@ class ScoutPromotionMixin:
                     failure_class,
                     now_s,
                 )
-                self._promotion_diagnostic(
-                    "deferred",
-                    *diagnostic,
-                    start_ns=attempt_start_ns,
-                    reasoning_mode="request",
-                    reason="judge_failed",
-                    failure_class=failure_class,
-                )
-                attempt_terminal = True
                 return counts
 
             if not diagnostics.top_level_valid:
                 self._record_promotion_profile_failure(
                     profile_id, "protocol_malformed", now_s,
                 )
-                self._promotion_diagnostic(
-                    "deferred",
-                    *diagnostic,
-                    start_ns=attempt_start_ns,
-                    reasoning_mode="request",
-                    reason="protocol_malformed",
-                    failure_class="protocol_malformed",
-                )
-                attempt_terminal = True
                 return counts
 
             counts["decided"] = len(diagnostics.decisions)
+            # F1: built AFTER the judge call (only CONFIRMED keeper texts are
+            # worth a worker round trip) and BEFORE the write transaction
+            # opens (the closure itself does read-only I/O only).
+            dedup_semantic_fn = self._build_dedup_semantic_fn(
+                profile_id, diagnostics.decisions,
+            )
+            # F2: deterministic validator between the judge's action/target and
+            # the store. Degrades to "new" on ANY failed check; counts only.
+            applied_decisions = diagnostics.decisions
+            updates: dict = {}
+            if related_ctx is not None and related_ctx.existing_map:
+                from opencohost.core.memory.promotion_related import (
+                    resolve_judge_actions,
+                )
+
+                resolved = resolve_judge_actions(
+                    diagnostics.decisions,
+                    diagnostics.actions,
+                    diagnostics.origins,
+                    related_ctx.existing_map,
+                    profile_id,
+                )
+                applied_decisions, updates = resolved.decisions, resolved.updates
+                _eng.logger.info(
+                    "memoria judge actions: new=%d duplicate=%d update=%d "
+                    "degraded=%d reasons=%s",
+                    resolved.stats["new"], resolved.stats["duplicate"],
+                    resolved.stats["update"], resolved.stats["degraded"],
+                    {
+                        k[len("degraded_"):]: v
+                        for k, v in resolved.stats.items()
+                        if k.startswith("degraded_")
+                    },
+                )
             try:
                 committed = store.apply_promotion_batch(
                     profile_id,
                     batch,
-                    decisions=diagnostics.decisions,
+                    decisions=applied_decisions,
                     unresolved=diagnostics.unresolved,
                     now_s=now_s,
+                    origins=diagnostics.origins,
+                    semantic_similarity_fn=dedup_semantic_fn,
+                    updates=updates,
                 )
             except sqlite3.Error:
                 self._record_promotion_profile_failure(
                     profile_id, "sqlite_write", now_s,
                 )
-                self._promotion_diagnostic(
-                    "deferred",
-                    *diagnostic,
-                    start_ns=attempt_start_ns,
-                    reasoning_mode="request",
-                    counts=counts,
-                    reason="store_write_failed",
-                    failure_class="sqlite_write",
-                )
-                attempt_terminal = True
                 return counts
             except Exception:
                 self._record_promotion_profile_failure(
                     profile_id, "unexpected_precommit", now_s,
                 )
-                self._promotion_diagnostic(
-                    "deferred",
-                    *diagnostic,
-                    start_ns=attempt_start_ns,
-                    reasoning_mode="request",
-                    counts=counts,
-                    reason="store_write_failed",
-                    failure_class="unexpected_precommit",
-                )
-                attempt_terminal = True
                 return counts
 
             counts["kept"] = committed.kept
@@ -832,6 +957,11 @@ class ScoutPromotionMixin:
             charged_count = committed.charged
             deferred_count = committed.deferred
             reasons.update(committed.reasons)
+
+            # F1: at least one new durable row exists now -- schedule (never
+            # block on) a background re-embed so it gets a fact vector.
+            if committed.kept:
+                self._schedule_fact_reconcile_after_promotion(profile_id)
 
             # A reset is truthful only after the transaction committed. If the
             # sidecar reset fails it keeps conservative state internally.
@@ -852,21 +982,6 @@ class ScoutPromotionMixin:
                     profile_id, "sqlite_read", now_s,
                 )
                 terminal_failure = "sqlite_read"
-            self._promotion_diagnostic(
-                "completed",
-                *diagnostic,
-                start_ns=attempt_start_ns,
-                reasoning_mode="request",
-                counts=counts,
-                charged_count=charged_count,
-                deferred_count=deferred_count,
-                remaining_count=remaining_count,
-                reason=(
-                    "semantic_partial" if diagnostics.unresolved else "success"
-                ),
-                failure_class=terminal_failure,
-            )
-            attempt_terminal = True
             _eng.logger.info(
                 "memoria promotion sweep: considered=%d decided=%d kept=%d rejected=%d "
                 "stale=%d remaining=%d reasons=%s",
@@ -914,26 +1029,6 @@ class ScoutPromotionMixin:
                     )
                 except Exception:
                     pass
-            if attempt_started and not attempt_terminal and profile_id:
-                self._promotion_diagnostic(
-                    "deferred",
-                    *diagnostic,
-                    start_ns=attempt_start_ns,
-                    reasoning_mode="request",
-                    counts=counts,
-                    charged_count=charged_count,
-                    deferred_count=deferred_count,
-                    reason="unexpected_failure",
-                    failure_class="unexpected_precommit",
-                )
-            elif not attempt_started:
-                self._promotion_diagnostic(
-                    "deferred",
-                    profile_id,
-                    self._loaded_model,
-                    reason="unexpected_failure",
-                    failure_class="unexpected_precommit",
-                )
             _eng.logger.warning(
                 "memoria promotion sweep failed (fail-open): %s",
                 type(exc).__name__,

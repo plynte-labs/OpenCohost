@@ -165,6 +165,7 @@ def test_history_max_turns_is_adr043_lever_a_stopgap_value():
 # Slice 2 — Eviction capture in _commit_history
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("legacy_prompt_layout")  # B-W4: one-pair legacy deque (turns * 2)
 class TestEvictionCapture:
     """_commit_history must capture the about-to-be-evicted turn into the digest."""
 
@@ -609,32 +610,6 @@ class TestDigestSurvival:
         ):
             motor._dispatch_command("switch_model", "other-model")
         assert len(motor._memory_digest.lines) == 3
-
-    def test_digest_survives_download_model_path(self):
-        """D2: the digest must survive the download_model path.
-        _download_model_worker no longer clears historial either (seamless
-        continuity, D2) — both must survive the implicit model change."""
-        motor, _, _ = _make_motor()
-        self._populate_digest(motor)
-        motor._commit_history("probemos el nuevo modelo", "dale, vamos", source="direct")
-        historial_before = list(motor.historial)
-
-        # Simulate the download_model_worker succeeding without real ollama I/O
-        fake_progress = MagicMock()
-        fake_progress.status = "success"
-        fake_progress.total = None
-        fake_progress.completed = None
-        motor.ollama.pull.return_value = iter([fake_progress])
-
-        with patch("opencohost.core.llm_engine.save_last_model"):
-            motor._download_model_worker("new-model:latest")
-
-        # historial preserved by download path (D2)
-        assert list(motor.historial) == historial_before
-        # digest must survive
-        assert len(motor._memory_digest.lines) == 3, (
-            f"Digest was cleared by download_model path: {motor._memory_digest.lines}"
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -86,8 +86,10 @@ def _enable_personalization(monkeypatch, tmp_path, **fields):
     return file_path
 
 
-def _label_marker():
-    return f"[{i18n_active.user_message_label()}]:"
+def _label_marker(nickname: str | None = None):
+    from opencohost.core.context.injection_markers import sanitize_user_label
+    display = sanitize_user_label(nickname, fallback=i18n_active.user_message_label())
+    return f"[{display}]:"
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +105,10 @@ def test_block_in_system_message_when_use_system_role_true(monkeypatch, tmp_path
     messages = _capture_messages(motor, "hablemos de musica", source="direct")
 
     assert messages[0]["role"] == "system"
-    assert "perfil_streamer" in messages[0]["content"]
+    assert "perfil_usuario" in messages[0]["content"]
     assert "nickname: Ash" in messages[0]["content"]
     # The block must NOT ride along in the user turn anymore.
-    assert "perfil_streamer" not in messages[-1]["content"]
+    assert "perfil_usuario" not in messages[-1]["content"]
 
 
 def test_block_appended_after_system_prompt_when_use_system_role_true(monkeypatch, tmp_path):
@@ -119,7 +121,7 @@ def test_block_appended_after_system_prompt_when_use_system_role_true(monkeypatc
     system_content = messages[0]["content"]
 
     # system_prompt stays first, block is appended after it (design: system_prompt + block).
-    assert system_content.index("PERSONA_MARKER") < system_content.index("perfil_streamer")
+    assert system_content.index("PERSONA_MARKER") < system_content.index("perfil_usuario")
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +137,9 @@ def test_block_before_user_label_when_use_system_role_false(monkeypatch, tmp_pat
     messages = _capture_messages(motor, "hablemos de musica", source="direct")
     content = messages[-1]["content"]
 
-    assert "perfil_streamer" in content
+    assert "perfil_usuario" in content
     # System-position injection: block precedes the user-message label.
-    assert content.index("perfil_streamer") < content.index(_label_marker())
+    assert content.index("perfil_usuario") < content.index(_label_marker("Ash"))
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +154,7 @@ def test_block_absent_from_committed_historial(monkeypatch, tmp_path):
     _capture_messages(motor, "hablemos de musica", source="direct", commit_history=True)
 
     joined = " ".join(entry.get("content", "") for entry in motor.historial)
-    assert "perfil_streamer" not in joined
+    assert "perfil_usuario" not in joined
     assert "nickname: Ash" not in joined
 
 
@@ -169,7 +171,7 @@ def test_absent_for_non_qualifying_sources(monkeypatch, tmp_path, source):
     messages = _capture_messages(motor, "hablemos de musica", source=source)
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "perfil_streamer" not in all_content
+    assert "perfil_usuario" not in all_content
 
 
 def test_absent_when_kill_switch_off(monkeypatch, tmp_path):
@@ -182,4 +184,4 @@ def test_absent_when_kill_switch_off(monkeypatch, tmp_path):
     messages = _capture_messages(motor, "hablemos de musica", source="direct")
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "perfil_streamer" not in all_content
+    assert "perfil_usuario" not in all_content

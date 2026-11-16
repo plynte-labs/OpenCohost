@@ -11,11 +11,29 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from opencohost.config.storage import (
     StoragePaths,
     apply_storage_environment,
     resolve_storage_paths,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_storage_environment(tmp_path):
+    # Legacy-default cases explicitly test absence of a selected data root.
+    # Restore the entire environment after apply_storage_environment, including
+    # TMP/cache variables, so no case inherits the owner's external model path.
+    with patch.dict(os.environ, {
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
+        "APPDATA": str(tmp_path / "roaming"),
+        "LOCALAPPDATA": str(tmp_path / "local"),
+    }):
+        os.environ.pop("OPENCOHOST_DATA_ROOT", None)
+        os.environ.pop("OLLAMA_MODELS", None)
+        yield
 
 
 def test_explicit_data_root_controls_owned_paths_and_supports_unicode(tmp_path):
@@ -29,6 +47,32 @@ def test_explicit_data_root_controls_owned_paths_and_supports_unicode(tmp_path):
     assert paths.hf_hub_cache == data_root / "cache" / "hub"
     assert paths.torch_home == data_root / "cache" / "torch"
     assert paths.ollama_models != data_root / "cache" / "ollama_models"
+
+
+def test_packaged_settings_defaults_keep_profiles_memory_and_config_external(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    root = tmp_path / "external data"
+    env = {
+        name: value for name, value in os.environ.items()
+        if name in {"SYSTEMROOT", "WINDIR", "PATH"}
+    }
+    env.update(OPENCOHOST_DATA_ROOT=str(root), PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+               USERPROFILE=str(tmp_path / "home"), HOME=str(tmp_path / "home"),
+               LOCALAPPDATA=str(tmp_path / "local"), APPDATA=str(tmp_path / "roaming"),
+               HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    result = subprocess.run([
+        sys.executable, "-c",
+        "import json; from opencohost.config import settings as s; "
+        "print(json.dumps([s.PROFILES_FILE, s.COHOST_PROFILES_FILE, s.MEMORIAS_DB, s.MEMORY_V5_SHADOW_DB, s.CONFIG_DIR, s.API_TOKENS_FILE]))",
+    ], env=env, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for path in json.loads(result.stdout):
+        assert Path(path).is_relative_to(root)
+    assert not list(root.rglob("*.db")), "resolving defaults must not create or copy owner databases"
 
 
 def test_explicit_data_root_does_not_take_ownership_of_ollama_models(tmp_path):

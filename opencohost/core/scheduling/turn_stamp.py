@@ -35,3 +35,6 @@ class TurnStamp:
 
     submitted_at: float
     submitted_under_provider: Optional[str] = None
+    # runtime-fixes-20261110 T2: the door the turn came through ("desktop" /
+    # "remote", core/turn_origin.py). None = unknown = not desktop.
+    origin: Optional[str] = None

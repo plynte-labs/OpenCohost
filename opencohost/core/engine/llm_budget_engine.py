@@ -13,6 +13,11 @@ from typing import Optional, Any
 SAFETY_RESERVE_TOKENS: int = 128
 DEFAULT_FALLBACK_BUDGET: int = 768
 MIN_EFFECTIVE_BUDGET: int = 32
+# session-2107-fixes F3: reasoning allowance added on top of the answer budget when
+# thinking is on and no per-model budget_tokens is configured (Auto). Hidden
+# thinking tokens are spent from num_predict, so without it a thinking turn is
+# cut off (done=length) before the answer starts.
+DEFAULT_REASONING_BUDGET: int = 1024
 
 
 class InferenceIntent(str, enum.Enum):
@@ -26,6 +31,7 @@ class BudgetVerdict(str, enum.Enum):
     ALLOWED = "allowed"
     CLAMPED_LATENCY = "clamped_latency"
     CLAMPED_CONTEXT = "clamped_context"
+    CLAMPED_MANUAL_CAP = "clamped_manual_cap"
     BUDGET_INFEASIBLE = "budget_infeasible"
 
 
@@ -164,9 +170,12 @@ def resolve_generation_budget(
         if safe_tps > 0:
             base_budget = int(safe_tps * target_lat)
         else:
-            if requested_budget is not None and requested_budget > 0:
-                base_budget = int(requested_budget)
-            elif intent == InferenceIntent.DRAFTING:
+            # T2 (controls-cleanup-adaptive-reasoning-20260928): a manual
+            # value is no longer substituted in directly here -- it is
+            # applied uniformly as an upper-bound CAP below, alongside the
+            # calibrated path, so a cap higher than the safe intent fallback
+            # never lifts the budget above that fallback (min, not override).
+            if intent == InferenceIntent.DRAFTING:
                 base_budget = 2048
             elif intent == InferenceIntent.REASONING:
                 base_budget = 1024
@@ -178,6 +187,38 @@ def resolve_generation_budget(
             scale = max(0.25, min(1.0, float(residency_ratio)))
             base_budget = int(base_budget * scale)
             clamp_reason = "RESIDENCY_SPILL_CLAMP"
+
+        # T2 (controls-cleanup-adaptive-reasoning-20260928): the actual bug
+        # fix. A manual `requested_budget` is now a REAL cap on the
+        # adaptive/fallback estimate above, calibrated or not -- previously
+        # it only ever won pre-calibration (and even then it replaced the
+        # estimate rather than bounding it) and was silently ignored once
+        # TPS calibrated (this whole branch only runs when preset !=
+        # "custom", which is exactly the reported bug's condition). Auto
+        # mode passes requested_budget=None and never reaches this branch.
+        #
+        # L2 (live-session-fixes-20261005): with thinking ON the per-model
+        # budget is the REASONING allowance, spent on hidden tokens before the
+        # answer starts. Capping the total with it let ~400 thinking tokens
+        # starve a 512-token reply mid-sentence, so it is added to the answer
+        # estimate instead. The context ceiling below still bounds the sum.
+        #
+        # F3 (session-2107-fixes): under Auto (no configured budget) the same
+        # rule applies with DEFAULT_REASONING_BUDGET; before, the total was only
+        # the latency-derived answer estimate (242 tokens live) and thinking
+        # consumed all of it.
+        if think_param and requested_budget is not None and requested_budget > 0:
+            base_budget = base_budget + int(requested_budget)
+        elif think_param:
+            base_budget = base_budget + DEFAULT_REASONING_BUDGET
+        elif (
+            requested_budget is not None
+            and requested_budget > 0
+            and base_budget > requested_budget
+        ):
+            base_budget = int(requested_budget)
+            clamp_reason = "MANUAL_CAP_CLAMP"
+            verdict = BudgetVerdict.CLAMPED_MANUAL_CAP
 
     # 2. Check context ceiling clamping
     if base_budget > remaining_context:

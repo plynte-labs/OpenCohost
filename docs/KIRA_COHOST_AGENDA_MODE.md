@@ -295,6 +295,89 @@ Kira está desarrollando: “Minecraft en la industria gaming”
 Esperando reacción del chat o PTT...
 ```
 
+## Topic progression (default ON, operator toggle)
+
+Progression is **ON by default** (owner decision 2026-11-16): a fresh install
+runs the `auto` mode below. The Agenda panel has a switch ("Topic progression")
+that turns it off; the choice persists across restarts and applies to the running
+engine without a restart. No extra LLM call is involved.
+
+Resolution precedence (highest first):
+
+1. `OPENCOHOST_AGENDA_PROGRESSION`, when set to a non-blank value, always wins
+   (restart required). The panel switch is still saved but is shown as overridden
+   by the environment (`env_override: true`) and does not change the effective mode.
+2. The stored operator choice in `config/agenda_settings.json`
+   (`progression_enabled`, global, not per-locale like the other agenda session
+   settings; written by `PUT /api/agenda/progression`). `false` disables
+   progression. A missing, corrupt or non-boolean value fails open to ON.
+3. The shipped default: ON, variant `auto`.
+
+API: `GET /api/agenda/progression` returns `{enabled, variant, env_override}`
+(`variant` is the effective variant, `""` when off); `PUT` takes `{"enabled": bool}`
+and returns the same shape (503 `agenda_settings_write_failed` if the file cannot
+be written). Turning it off also drops any turn prefetched under the old variant.
+
+Env values (`OPENCOHOST_AGENDA_PROGRESSION`, restart required):
+
+- `0`, `false`, `off`, or unrecognized: progression disabled; the
+  assembled prompt is byte-identical to the legacy baseline.
+- `1`, `true`, `auto`, or `rotate`: enables **`auto` (dynamic rotation mode)** —
+  automatically runs the full 56-card / 8-family move deck, per-topic rotated
+  6-facet progression (`pick_auto_progression_facet`), Ledger v2 + anti-self-copy
+  validator, continuation length budget (~3 short sentences / ~110 tokens), and
+  agenda-only 9B sampling controls (`repeat_penalty=1.18`, local `num_predict<=110`).
+- `v1`–`v5`: selects an explicit fixed benchmark variant below (`v1` is the
+  14-move baseline).
+- unset or blank: the stored operator choice / default above applies.
+
+Every active variant preserves these invariants:
+
+- Opening, closing, N=1 topics, chat, and PTT turns carry no move, no facet,
+  and no continuation budget override.
+- Move and facet selection are deterministic pure functions of
+  `(topic_id, turn_index)` (and `max_turns` for `v5` facets), so `prefetch`
+  and `live` always pick the exact same move and facet.
+- Ledgers are built in memory only from Kira's own accepted outputs in the
+  current topic, reset on topic change, and never include raw viewer chat or
+  persist to logs/metrics.
+
+### Progression variants (`v1`–`v5`)
+
+| Variant | Hypothesis / Focus | Move Deck | Ledger | Length & Sampling Controls |
+|---|---|---|---|---|
+| `v1` | Baseline anti-looping via turn moves and recurring-word avoidance | 14 base moves (`llm.agenda.progression.moves`), no reuse in last `min(4, size // 2)` positions | Spent ledger v1 (~200-char tail + 5+ char words recurring 2+ times, excluding topic words) | Default length rule & sampling |
+| `v2` | Long turns (~146 words) cause small local 9B models to self-copy mid-output | 14 base moves | Spent ledger v1 | Continuation turns cap to max 3 short sentences / ~110 tokens (`length_budget` + `length_budget_rule`), agenda-only `repeat_penalty=1.18` (`AGENDA_REPEAT_PENALTY`), and local `num_predict` capped at `AGENDA_V2_MAX_TOKENS` (`110`) |
+| `v3` | Larger, family-structured move space prevents predictable skeletons across turns | 56 moves across 8 families × 7 cards (`historical_analogy`, `moral_dilemma`, `counterintuitive_fact`, `chat_question`, `inversion`, `concrete_case`, `future_projection`, `systemic_mechanism`); cross-family shuffle never repeats a family back-to-back and never forces fixed opening phrases | Spent ledger v1 | Default length rule & sampling |
+| `v4` | Blocking single-use content keywords and prior opening stems/sentences stops subtle paraphrased self-copying | 56 family moves (`v3`) | Ledger v2: tracks 1+ occurrence content words, up to 5 compact normalized opening stems (`spent_openings_line`), and rejects candidate outputs in `_validate_output` that reuse a prior opening stem or ≥22-char sentence (`ledger_v2_self_copy`) | Default length rule & sampling |
+| `v5` | Ordered topic facets + all 9B controls stop small local models from circling the same metaphor on longer topics | 56 family moves (`v3`) | Ledger v2 (`v4`) + anti-self-copy validator | Walks 6 ordered facets (`llm.agenda.progression.facets`: mechanism → human tension → honest counter-angle → social ripple → extreme implication → open synthesis) across N turns (`continue_v5` / `preview_continue_v5`) + `v2` length cap (`length_budget_rule`) & agenda-only `repeat_penalty=1.18` / `num_predict<=110` |
+| `auto` (`1` / `rotate`) | Default live streaming mode combining all 9B protections while avoiding cross-topic template repetition | 56 family moves (`v3`) | Ledger v2 (`v4`) + anti-self-copy validator | Rotates the 6-facet order deterministically per `topic_id` (`pick_auto_progression_facet`) so every topic opens and progresses along a different arc, while keeping `v2` length cap & `repeat_penalty=1.18` / `num_predict<=110` (`prefetch == live`) |
+
+### Shared mechanics
+
+- **Move deck (`v1`/`v2` vs `v3`–`v5`/`auto`)**: `pick_progression_move` (14 moves) and
+  `pick_family_progression_move` (56 moves across 8 families) are pure
+  deterministic functions of `(topic_id, turn_index)`. After a cycle finishes it
+  reshuffles while keeping the last `min(4, size // 2)` moves out of the opening
+  boundary; `v3`–`v5` and `auto` also enforce no adjacent same-family draw across the cycle
+  and across cycle boundaries.
+- **Spent ledger (`v1`–`v3` vs `v4`/`v5`/`auto`)**: replaces the raw "last lines"
+  block with a ~200-character tail of the previous accepted output plus spent
+  content words (5+ chars, excluding stopwords and the topic's title/angle).
+  `v4`, `v5`, and `auto` upgrade to Ledger v2 (`spent_words_v2` on 1+ occurrence words,
+  `spent_openings`, and `repeats_topic_stem_or_sentence` guard in
+  `_validate_output`).
+- **Agenda-only LLM options (`v2`/`v5`/`auto`)**: `agenda_llm_options()` in
+  `opencohost/core/context/prompt_assembler.py` (re-exported by
+  `opencohost/core/engine/llm_engine_agenda.py`) applies `repeat_penalty=1.18`
+  and caps local `num_predict` at `110` only when `source` starts with
+  `"kira-agenda"` and `v2`, `v5`, or `auto` is active; `chat`, `direct`, and other
+  sources are untouched.
+- **Known limitation (accepted by design)**: progression turns use a fixed
+  110-token answer cap with `repeat_penalty=1.18` and no extra reasoning budget,
+  so thinking or heavily quantized models may return short or empty agenda
+  lines. Users can turn progression off in the Agenda panel.
+
 ## Implementation boundaries
 
 Recommended modules:

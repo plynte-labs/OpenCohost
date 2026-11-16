@@ -10,8 +10,8 @@ class ShadowPrivacyController:
     def __init__(self, runtime: MemoryRuntime) -> None:
         self._rt = runtime
 
-    def purge_profile(self, profile_id: str) -> dict:
-        return self._rt._dispatch_barrier("purge", profile_id, timeout=2.0)
+    def purge_profile(self, profile_id: str, timeout: float = 2.0) -> dict:
+        return self._rt._dispatch_barrier("purge", profile_id, timeout=timeout)
 
-    def forget_all(self) -> dict:
-        return self._rt._dispatch_barrier("forget_all", None, timeout=2.0)
+    def forget_all(self, timeout: float = 2.0) -> dict:
+        return self._rt._dispatch_barrier("forget_all", None, timeout=timeout)

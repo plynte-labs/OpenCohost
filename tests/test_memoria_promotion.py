@@ -384,7 +384,7 @@ def test_qwen3_uses_boolean_think_false_on_the_resolved_local_model(monkeypatch,
     assert len(stub.calls) == 1
     assert stub.calls[0]["model"] == "qwen3:8b"
     assert stub.calls[0].get("think") is False
-    assert stub.calls[0]["options"]["num_predict"] == 512
+    assert stub.calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
 
 
 def test_memorias_disabled_skips_the_call(monkeypatch, tmp_path):
@@ -478,7 +478,10 @@ def test_reject_hides_and_stamps_without_disturbing_prune_order(monkeypatch, tmp
     assert row["judged_at"] != ""
     # The prune-order guard: rejecting must not push the row into the keep-window.
     assert row["updated_at"] == before["updated_at"]
-    assert row["content"] == before["content"]  # never rewritten, never deleted
+    # ADR-062 (T6 a) supersedes "never rewritten": a reject is SCRUBBED (the raw
+    # exchange is blanked) but the row is never deleted.
+    assert row["content"] == "" and row["title"] == "" and row["signature"] == ""
+    assert row["id"] == before["id"] and row["revision"] == before["revision"]
     assert counts["rejected"] == 1
     assert counts["reasons"]["vague"] == 1
 
@@ -504,6 +507,9 @@ def test_a_second_sweep_never_re_judges_what_the_first_one_judged(monkeypatch, t
 
 
 def test_reason_counter_reports_exactly_what_the_judge_answered(monkeypatch, tmp_path):
+    # Five reasons need five drafts in ONE batch; widen the batch for this
+    # counter-only contract (the production batch size is pinned elsewhere).
+    monkeypatch.setattr(llm_engine, "_PROMOTION_DRAFT_BATCH", 8)
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
     for i, reason in enumerate(("vague", "speculative", "trivial", "transient", "not_attributable")):
@@ -553,7 +559,7 @@ def test_promoted_rows_are_never_re_sent_to_the_judge(monkeypatch, tmp_path):
     assert "sintetizadores modulares vintage" not in second.prompt
 
 
-def test_batch_is_capped_at_eight_oldest_first(monkeypatch, tmp_path):
+def test_batch_is_capped_at_four_oldest_first(monkeypatch, tmp_path):
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
     for i in range(12):
@@ -562,18 +568,41 @@ def test_batch_is_capped_at_eight_oldest_first(monkeypatch, tmp_path):
 
     counts = motor.promote_pending_drafts(chat_callable=stub)
 
-    assert counts["considered"] == llm_engine._PROMOTION_DRAFT_BATCH == 8
+    assert counts["considered"] == llm_engine._PROMOTION_DRAFT_BATCH == 4
     prompt = stub.prompt
-    # Oldest first: 000..007 are in the prompt, 008+ are not.
+    # Oldest first: 000..003 are in the prompt, 004+ are not.
     assert "contenido numerado 000" in prompt
-    assert "contenido numerado 007" in prompt
-    assert "contenido numerado 008" not in prompt
+    assert "contenido numerado 003" in prompt
+    assert "contenido numerado 004" not in prompt
     assert "contenido numerado 011" not in prompt
+
+
+# Worst-case output tokens for ONE judge decision: index, verdict, a rewritten
+# text up to _PROMOTION_TEXT_MAX_CHARS (~220 chars) and the ADR-062 `origin`
+# field, plus JSON punctuation. Live sweeps measured ~70-90 tokens per KEEP.
+_WORST_CASE_TOKENS_PER_DECISION = 120
+
+
+def test_judge_batch_worst_case_output_fits_num_predict():
+    """Every draft in a batch must be able to receive its decision.
+
+    Live evidence (gemma4:e2b): batch=8 under num_predict=512 produced
+    `considered=8 decided=1 reasons={'missing_decision': 7}` because the
+    decision array was truncated by the output cap.
+    """
+    assert llm_engine._PROMOTION_DRAFT_BATCH == 4
+    assert llm_engine._PROMOTION_NUM_PREDICT == 1024
+    assert (
+        llm_engine._PROMOTION_DRAFT_BATCH * _WORST_CASE_TOKENS_PER_DECISION
+        <= llm_engine._PROMOTION_NUM_PREDICT
+    )
 
 
 def test_batch_stops_before_exceeding_five_thousand_draft_characters(
     monkeypatch, tmp_path,
 ):
+    # Widen the count cap so the character cap is the one that binds.
+    monkeypatch.setattr(llm_engine, "_PROMOTION_DRAFT_BATCH", 8)
     motor = _make_motor(monkeypatch, tmp_path)
     store = _store(tmp_path)
     contents = [f"DRAFT_{i:02d} " + ("x" * 980) for i in range(6)]
@@ -1255,7 +1284,13 @@ def test_maintenance_request_uses_schema_and_deterministic_bounded_options(
     motor.promote_pending_drafts(chat_callable=stub)
 
     assert stub.calls[0].get("think") is False
-    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
+    judged = stub.calls[0]["model"]
+    # num_ctx matches the chat path for the judged model (no reload between calls).
+    assert stub.calls[0]["options"] == {
+        "temperature": 0,
+        "num_predict": llm_engine._PROMOTION_NUM_PREDICT,
+        "num_ctx": motor._resolve_effective_ctx_limit(judged, motor._discover_model_ctx(judged)),
+    }
     assert isinstance(stub.calls[0].get("format"), dict)
     assert stub.calls[0]["format"].get("title") == "MemoryJudgeResult"
 
@@ -1271,7 +1306,13 @@ def test_gpt_oss_uses_low_thinking_level_with_the_same_hard_limits(
     motor.promote_pending_drafts(chat_callable=stub)
 
     assert stub.calls[0].get("think") == "low"
-    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
+    judged = stub.calls[0]["model"]
+    # num_ctx matches the chat path for the judged model (no reload between calls).
+    assert stub.calls[0]["options"] == {
+        "temperature": 0,
+        "num_predict": llm_engine._PROMOTION_NUM_PREDICT,
+        "num_ctx": motor._resolve_effective_ctx_limit(judged, motor._discover_model_ctx(judged)),
+    }
 
 
 def test_plain_model_keeps_the_num_predict_cap(monkeypatch, tmp_path):
@@ -1282,7 +1323,13 @@ def test_plain_model_keeps_the_num_predict_cap(monkeypatch, tmp_path):
     motor.promote_pending_drafts(chat_callable=stub)
 
     assert stub.calls[0].get("think") is False
-    assert stub.calls[0]["options"] == {"temperature": 0, "num_predict": 512}
+    judged = stub.calls[0]["model"]
+    # num_ctx matches the chat path for the judged model (no reload between calls).
+    assert stub.calls[0]["options"] == {
+        "temperature": 0,
+        "num_predict": llm_engine._PROMOTION_NUM_PREDICT,
+        "num_ctx": motor._resolve_effective_ctx_limit(judged, motor._discover_model_ctx(judged)),
+    }
 
 
 def test_parse_promotion_decisions_rejects_out_of_bounds_index():
@@ -1351,7 +1398,7 @@ def test_empty_content_fails_open_without_retrying_uncapped(monkeypatch, tmp_pat
 
     assert len(calls) == 1
     assert calls[0]["model"] == "m"
-    assert calls[0]["options"]["num_predict"] == 512
+    assert calls[0]["options"]["num_predict"] == llm_engine._PROMOTION_NUM_PREDICT
     assert calls[0]["think"] is False
     assert counts["kept"] == 0
     row = _row(tmp_path, row_id)

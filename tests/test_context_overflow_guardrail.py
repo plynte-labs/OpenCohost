@@ -357,9 +357,17 @@ class TestRegressionGuards:
         return captured
 
     def test_num_ctx_in_opciones_uses_effective_ctx_cap(self, monkeypatch):
-        # Under ADR-056 WU2, context is decoupled from tier caps; preserves native context
+        # Under ADR-056 WU2, context is decoupled from tier caps (never a
+        # fixed tier-specific number like the old 4096). T1
+        # (model_context_auto_config_20260928) additionally caps an
+        # UNCONFIGURED model's cold-start default at Auto = min(native,
+        # 16384) -- so a native-32768 model with no residency snapshot and
+        # no explicit override now gets 16384, not the full uncapped native.
+        # `ctx_seed` here is `_model_ctx_limit` (native, cached), not the
+        # resolved effective ctx.
+        from opencohost.config.model_parameters import AUTO_CONTEXT_TOKENS
         captured = self._run_dialogo(monkeypatch, model="qwen3:4b", ctx_seed=32768)
-        assert captured[0]["num_ctx"] == 32768
+        assert captured[0]["num_ctx"] == AUTO_CONTEXT_TOKENS
 
     def test_gemma_preserves_num_ctx_aligned_with_effective_ctx(self, monkeypatch):
         captured = self._run_dialogo(monkeypatch, model="gemma4:e4b", ctx_seed=8192)
@@ -404,7 +412,9 @@ class TestRegressionGuards:
         assert result == "the answer"
         assert "num_predict" in captured[0]
         assert "num_predict" in captured[1]  # ADR-056: bounded escalation, never uncapped
-        assert captured[1]["num_predict"] > captured[0]["num_predict"]
+        # session-2107 F3: exhaustion retries once with thinking off at the
+        # answer budget instead of doubling, so the retry is never larger.
+        assert captured[1]["num_predict"] <= captured[0]["num_predict"]
 
     def test_discover_ctx_populated_for_name_heuristic_models(self, monkeypatch):
         """Layer-1 fix: _generar_dialogo discovers ctx even when the name heuristic

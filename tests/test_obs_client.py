@@ -149,6 +149,20 @@ class TestOBSClientImageResolution:
 
         assert client._get_image_path_for_state("speaking") == idle
 
+    def test_configured_but_missing_image_logs_and_falls_back(self, tmp_path):
+        idle = tmp_path / "idle.png"
+        idle.write_bytes(b"fake png")
+        logs: list[str] = []
+        client = OBSClient(
+            config=OBSConfig(),
+            assets_folder=tmp_path,
+            state_images={"speaking": tmp_path / "moved-away.png", "idle": idle},
+            on_log=logs.append,
+        )
+
+        assert client._get_image_path_for_state("speaking") == idle
+        assert any("speaking" in msg and "missing" in msg for msg in logs)
+
     def test_update_preserves_file_and_local_file_keys(self, tmp_path):
         image = tmp_path / "speaking.webp"
         image.write_bytes(b"fake webp")
@@ -175,3 +189,30 @@ class TestOBSClientDisconnect:
         # Should not raise
         client.disconnect()
         assert client.is_connected is False
+
+
+class TestOBSMissingDependencyMessage:
+    """obsws-python ships only as the opt-in ``obs`` extra, never in the installer."""
+
+    @staticmethod
+    def _client(logs):
+        cfg = OBSConfig(enabled=True, host="localhost", port=4455)
+        return OBSClient(config=cfg, assets_folder=Path("/tmp"), on_log=logs.append)
+
+    def test_connect_message_does_not_tell_installed_users_to_pip_install(self):
+        logs = []
+        with patch.dict("sys.modules", {"obsws_python": None}):
+            assert self._client(logs).connect() is False
+
+        text = " ".join(logs)
+        assert "pip install" not in text
+        assert "not included in the installer build yet" in text
+        assert "obs" in text and "extra" in text
+
+    def test_test_connection_message_matches(self):
+        with patch.dict("sys.modules", {"obsws_python": None}):
+            ok, message = self._client([]).test_connection()
+
+        assert ok is False
+        assert "pip install" not in message
+        assert "not included in the installer build yet" in message

@@ -23,14 +23,39 @@ PromotionRejectReason = Literal[
     "trivial",
     "transient",
     "not_attributable",
+    # memory-noise-amplification-20260928 T1: the judge itself may emit these.
+    "assistant_sourced",
+    "general_knowledge",
+    # T2: applied by the store's post-judge dedup check, never by the judge.
+    "duplicate",
     "",
 ]
+
+# ADR-062 (T6 a): whose fact a keeper is. Kept in sync with
+# memoria_store.MEMORIA_ORIGINS (the DB CHECK constraint).
+MemoryOrigin = Literal["self_stated", "shared_content"]
+_MEMORY_ORIGINS = frozenset({"self_stated", "shared_content"})
+
+# F2 (memory-paraphrase-contradiction-20260928): what a keeper does to the
+# EXISTING facts shown to the judge. "new" is the backward-compatible default.
+MemoryAction = Literal["new", "duplicate", "update"]
+_MEMORY_ACTIONS = frozenset({"new", "duplicate", "update"})
+
+
+def _require_origin_in_schema(schema: dict) -> None:
+    """Constrained decoding (Ollama ``format=``) must always emit ``origin``;
+    the parser still tolerates its absence (see MemoryDecision.origin)."""
+    required = schema.setdefault("required", [])
+    if "origin" not in required:
+        required.append("origin")
 
 
 class MemoryDecision(BaseModel):
     """One strictly validated decision from the memory judge."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(
+        extra="forbid", strict=True, json_schema_extra=_require_origin_in_schema,
+    )
 
     i: StrictInt = Field(
         description="1-based candidate index matching the candidate list",
@@ -62,6 +87,50 @@ class MemoryDecision(BaseModel):
         default="",
         description="Bounded rejection reason, used only when keep is false",
     )
+    origin: MemoryOrigin | None = Field(
+        default=None,
+        description=(
+            "self_stated when the operator said it about themselves; "
+            "shared_content when they relayed someone or something else"
+        ),
+    )
+
+    action: MemoryAction = Field(
+        default="new",
+        description=(
+            "new (default), duplicate (same fact as target, adds nothing) or "
+            "update (same subject, changed or contradicting value of target)"
+        ),
+    )
+    target: StrictStr | None = Field(
+        default=None,
+        description="EXISTING fact label such as E1; required for duplicate/update",
+    )
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _tolerate_unknown_action(cls, value: object) -> object:
+        """A missing or invalid action never drops the decision: it becomes
+        "new" (F2 backward-compatible default)."""
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return value if value in _MEMORY_ACTIONS else "new"
+        return "new"
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def _tolerate_bad_target(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else None
+
+    @field_validator("origin", mode="before")
+    @classmethod
+    def _tolerate_unknown_origin(cls, value: object) -> object:
+        """A missing or invalid origin never drops the decision: it becomes
+        None, and the store applies its fail-safe default (ADR-062)."""
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return value if value in _MEMORY_ORIGINS else None
+        return None
 
     @field_validator("text", mode="before")
     @classmethod

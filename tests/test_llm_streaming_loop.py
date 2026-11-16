@@ -13,6 +13,7 @@ requeue-AND-emit contract for a bundle that dies after its first submit.
 """
 
 import logging
+import re
 import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -147,7 +148,11 @@ def test_ineligible_turn_takes_buffered_path_byte_identically(
     assert motor._fake_router.appends == []
 
 
-def test_cloud_turn_is_not_stream_eligible(motor):
+def test_cloud_turn_is_not_stream_eligible_when_cloud_streaming_flag_off(motor, monkeypatch):
+    """live_session_fixes_20260925 T8: cloud streaming is default ON, but its
+    OWN gate (CLOUD_STREAMING_ENABLED) must still be able to force the
+    byte-identical buffered path, independent of LLM_STREAMING_ENABLED."""
+    monkeypatch.setattr(llm_engine, "CLOUD_STREAMING_ENABLED", False)
     motor._provider_config = {
         "active_provider": "openai",
         "fallback_mode": "manual",
@@ -158,8 +163,8 @@ def test_cloud_turn_is_not_stream_eligible(motor):
     motor._ollama_chat_with_watchdog = MagicMock(
         return_value={"message": {"content": "Respuesta desde la nube."}}
     )
-    motor._ollama_chat_streaming = MagicMock(
-        side_effect=AssertionError("cloud transport must never stream in phase 1")
+    motor._llm_chat_streaming = MagicMock(
+        side_effect=AssertionError("cloud transport must not stream when the flag is off")
     )
 
     dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
@@ -641,7 +646,9 @@ def test_partial_exit_emits_the_spoken_prefix_and_never_says_turn_dropped(motor)
     motor._ejecutar_inferencia("hola", source="direct")
 
     assert "turn_dropped" not in seen
-    motor._emit_dialogue.assert_called_once_with("Primera frase limpia.", "direct")
+    motor._emit_dialogue.assert_called_once_with(
+        "Primera frase limpia.", "direct", web_searched=False
+    )
     # Committed exactly once, by the partial exit itself -- not twice.
     assert motor.historial[-1]["content"] == "Primera frase limpia."
 
@@ -783,7 +790,7 @@ def test_streamed_bundle_death_requeues_every_follower_and_emits_the_prefix(
     assert any("[BUNDLE_FAILED]" in r.getMessage() for r in caplog.records)
     # and the head that DID air is emitted and committed, not reported dropped
     motor._emit_dialogue.assert_called_once_with(
-        "Primera frase limpia.", OWNER_BUNDLE_SOURCE
+        "Primera frase limpia.", OWNER_BUNDLE_SOURCE, web_searched=False
     )
     assert motor.historial[-1]["content"] == "Primera frase limpia."
     assert "turn_dropped" not in seen
@@ -828,3 +835,441 @@ def test_non_streamed_bundle_requeues_exactly_as_before(motor, monkeypatch):
     assert motor._fake_router.jobs == []
     assert motor._priority_queue == followers
     motor._emit_dialogue.assert_not_called()
+
+
+# ------------------------------------------- tts-first-chunk-boost-20261015
+
+
+def _ttfa_message(caplog):
+    lines = [r.getMessage() for r in caplog.records if "[STREAM_TTFA]" in r.getMessage()]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def test_first_chunk_boost_submits_at_comma_and_logs_soft_boundary(motor, monkeypatch, caplog):
+    from opencohost.core.engine import generation_orchestrator as go
+
+    monkeypatch.setattr(go, "TTS_FIRST_CHUNK_BOOST", True)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Bueno amigos de la audiencia, "),
+            FakeChunk("hoy toca hablar de cosas tranquilas, "),
+            FakeChunk("con calma. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    appends = [chunks for _job, chunks in motor._fake_router.appends]
+    assert appends[0] == ["Bueno amigos de la audiencia,"]
+    assert appends[1] == ["hoy toca hablar de cosas tranquilas, con calma."]
+    msg = _ttfa_message(caplog)
+    assert "first_chunk_boundary=soft" in msg
+    assert "Bueno" not in msg
+
+
+def test_first_chunk_boost_off_is_sentence_only(motor, monkeypatch, caplog):
+    from opencohost.core.engine import generation_orchestrator as go
+
+    monkeypatch.setattr(go, "TTS_FIRST_CHUNK_BOOST", False)
+    _arm_stream(
+        motor,
+        [FakeChunk("Bueno amigos de la audiencia, hoy toca hablar. "), FakeChunk("", done=True)],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    appends = [chunks for _job, chunks in motor._fake_router.appends]
+    assert appends == [["Bueno amigos de la audiencia, hoy toca hablar."]]
+    assert "first_chunk_boundary=sentence" in _ttfa_message(caplog)
+
+
+def test_soft_first_chunk_still_goes_through_the_per_sentence_guard(motor, monkeypatch):
+    from opencohost.core.engine import generation_orchestrator as go
+
+    monkeypatch.setattr(go, "TTS_FIRST_CHUNK_BOOST", True)
+    _arm_stream(
+        motor,
+        [FakeChunk("Como *IA* que soy yo, no puedo opinar. "), FakeChunk("", done=True)],
+    )
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+    # the soft chunk "Como *IA* que soy yo," is guarded like any sentence:
+    # nothing violating reached the router
+    assert motor._fake_router.appends == []
+
+
+# ------------------ tts-first-chunk-boost-20261015: correction round (judge)
+
+
+def _arm_boost(monkeypatch):
+    from opencohost.core.engine import generation_orchestrator as go
+
+    monkeypatch.setattr(go, "TTS_FIRST_CHUNK_BOOST", True)
+    return go
+
+
+def _appended(motor):
+    return [chunks for _job, chunks in motor._fake_router.appends]
+
+
+@pytest.mark.parametrize(
+    "text, soft_chunk",
+    [
+        # (a) R3: certainty marker in the soft chunk, outcome object in the rest
+        (
+            "Te aseguro una cosa muy clara: vas a ganar el sorteo. ",
+            "Te aseguro una cosa muy clara:",
+        ),
+        # (b) R4: 'listo, ya lo hice' straddles the comma
+        ("Bueno chat, pues listo, ya lo hice. ", "Bueno chat, pues listo,"),
+        # (c) K8: the 'en el sentido biologico' tail is in the continuation
+        (
+            "No tengo deseos ni sentimientos, en el sentido biologico. ",
+            "No tengo deseos ni sentimientos,",
+        ),
+    ],
+    ids=["R3_cooccurrence", "R4_listo_ya_lo_hice", "K8_sentido_biologico"],
+)
+def test_violation_spanning_a_soft_boundary_is_blocked_before_tts(
+    motor, monkeypatch, request, text, soft_chunk
+):
+    from opencohost.config import warmth as warmth_state
+
+    # K8 only runs at the feeling warmth levels; the others are level-agnostic
+    warmth_state.set_active_warmth("in_character")
+    request.addfinalizer(lambda: warmth_state.set_active_warmth("cold"))
+    _arm_boost(monkeypatch)
+    _arm_stream(motor, [FakeChunk(text), FakeChunk("", done=True)])
+
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    # the lead-in is already on air; the completing chunk must never be spoken
+    assert _appended(motor) == [[soft_chunk]]
+    assert motor._fake_router.jobs[0][0].sealed is True
+
+
+def test_continuation_starting_with_confirmado_is_not_a_sentence_initial_false_positive(
+    motor, monkeypatch
+):
+    _arm_boost(monkeypatch)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Bueno chat esto es lo que pasa, confirmado, el evento sigue en pie. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert _appended(motor) == [
+        ["Bueno chat esto es lo que pasa,"],
+        ["confirmado, el evento sigue en pie."],
+    ]
+
+
+def test_genuine_sentence_initial_confirmado_still_blocks(motor, monkeypatch):
+    _arm_boost(monkeypatch)
+    _arm_stream(
+        motor,
+        [FakeChunk("Confirmado, chat gracias por todo amigos. "), FakeChunk("", done=True)],
+    )
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+    assert _appended(motor) == []
+
+
+def test_stream_cut_by_length_after_a_soft_chunk_still_seals_the_job(motor, monkeypatch):
+    """C2: soft chunk spoken, then done_reason=length with no terminator. The
+    trimmed text is empty, so the verdict code never ran: the job stayed open
+    and the router starved forever. The empty branch must seal it and commit
+    the spoken prefix."""
+    _arm_boost(monkeypatch)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Bueno amigos de la audiencia, "),
+            FakeChunk("hoy toca hablar de cosas"),
+            FakeChunk("", done=True, done_reason="length"),
+        ],
+    )
+
+    result = motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert not result
+    job = motor._fake_router.jobs[0][0]
+    assert job.sealed is True
+    assert _appended(motor) == [["Bueno amigos de la audiencia,"]]
+    assert motor._streamed_turn_prefix == "Bueno amigos de la audiencia,"
+
+
+def test_first_sentence_violation_after_a_soft_chunk_truncates_not_retries(
+    motor, monkeypatch
+):
+    """W1 (accepted cost, pinned): once the soft lead-in is on air the turn can
+    only truncate; the guard retry nudge / canned fallback is no longer
+    reachable for that sentence."""
+    _arm_boost(monkeypatch)
+    motor._retry_after_guard_block = MagicMock(
+        side_effect=AssertionError("retry path must not run after audio is out")
+    )
+    _arm_stream(
+        motor,
+        [
+            FakeChunk(
+                "Bueno, dejame pensarlo un momento, como inteligencia artificial no puedo opinar. "
+            ),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert _appended(motor) == [["Bueno, dejame pensarlo un momento,"]]
+    assert motor._fake_router.jobs[0][0].sealed is True
+
+
+@pytest.mark.parametrize(
+    "think, boost_flag, expected",
+    [
+        (True, True, False),
+        (False, True, True),
+        (None, True, True),
+        (False, False, False),
+        (None, False, False),
+    ],
+)
+def test_boost_gate_truth_table(monkeypatch, think, boost_flag, expected):
+    """W2 (owner decision 2026-10-15, activate-then-measure): the boost is on for
+    think=None and think=False, off only when think is truthy."""
+    from types import SimpleNamespace
+
+    from opencohost.core.engine import generation_orchestrator as go
+
+    monkeypatch.setattr(go, "TTS_FIRST_CHUNK_BOOST", boost_flag)
+    assert go._first_chunk_boost_enabled(SimpleNamespace(think=think)) is expected
+
+
+def test_boost_is_off_when_the_turn_may_think(motor, monkeypatch, caplog):
+    """W2: a turn with think truthy can emit reasoning in content; the sentence
+    splitter must then hold the whole first sentence."""
+    _arm_boost(monkeypatch)
+    motor.current_model = "qwen3:8b"
+    monkeypatch.setattr(
+        go_mod(), "_first_chunk_boost_enabled", lambda setup: False
+    )
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Let me think about this, the user wants a joke</think>"),
+            FakeChunk("Hola amigos de la casa, que tal todo. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert _appended(motor) == [["Hola amigos de la casa, que tal todo."]]
+    assert "first_chunk_boundary=sentence" in _ttfa_message(caplog)
+
+
+def go_mod():
+    from opencohost.core.engine import generation_orchestrator as go
+
+    return go
+
+
+def _rescue_lines(caplog):
+    return [r for r in caplog.records if "[THINK_RESCUE]" in r.getMessage()]
+
+
+def test_think_rescue_logs_spoken_before_no(motor, monkeypatch, caplog):
+    _arm_boost(monkeypatch)
+    monkeypatch.setattr(go_mod(), "_first_chunk_boost_enabled", lambda setup: False)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("SECRETREASONING the user wants a joke</think>"),
+            FakeChunk("Hola amigos de la casa, que tal todo. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    lines = _rescue_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].levelno == logging.INFO
+    msg = lines[0].getMessage()
+    assert "source=direct" in msg
+    assert "boost=off" in msg
+    assert "spoken_before=no" in msg
+    assert re.search(r"held_chars=\d+", msg)
+    assert "SECRETREASONING" not in msg and "joke" not in msg
+
+
+def test_think_rescue_logs_spoken_before_yes(motor, monkeypatch, caplog):
+    _arm_boost(monkeypatch)
+    monkeypatch.setattr(go_mod(), "_first_chunk_boost_enabled", lambda setup: True)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Bueno amigos de la audiencia, "),
+            FakeChunk("SECRETREASONING pensando</think>"),
+            FakeChunk("Hola amigos de la casa, que tal todo. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    lines = _rescue_lines(caplog)
+    assert len(lines) == 1
+    msg = lines[0].getMessage()
+    assert "spoken_before=yes" in msg
+    assert "boost=on" in msg
+    assert "SECRETREASONING" not in msg and "audiencia" not in msg
+
+
+def test_no_think_rescue_line_without_orphan_close(motor, monkeypatch, caplog):
+    _arm_boost(monkeypatch)
+    _arm_stream(
+        motor,
+        [FakeChunk("Hola amigos de la casa, que tal todo. "), FakeChunk("", done=True)],
+    )
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+    assert _rescue_lines(caplog) == []
+
+
+def test_tail_chunks_keep_their_real_boundary_kind(motor, monkeypatch, caplog):
+    """S2: a soft chunk released from the think-splitter tail must not be
+    reported as a sentence boundary."""
+    go = _arm_boost(monkeypatch)
+
+    class _TailSplitter:
+        def __init__(self, **kwargs):
+            pass
+
+        def feed(self, delta):
+            return delta, ""
+
+        def flush(self):
+            return " hoy toca hablar de cosas tranquilas, y mas. ", ""
+
+        orphan_close_seen = False
+
+    monkeypatch.setattr(go, "ThinkTagStreamSplitter", _TailSplitter)
+    _arm_stream(
+        motor,
+        [FakeChunk("Bueno amigos de la audiencia,"), FakeChunk("", done=True)],
+    )
+
+    with caplog.at_level(logging.INFO, logger="OpenCohost"):
+        motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    assert _appended(motor)[0] == ["Bueno amigos de la audiencia,"]
+    assert "first_chunk_boundary=soft" in _ttfa_message(caplog)
+
+
+# ------------------ tts-first-chunk-boost-20261015: round 3 (newline at the soft join)
+
+
+def test_newline_after_soft_mark_does_not_hide_a_sentence_initial_violation(motor, monkeypatch):
+    """C3: a newline after a soft mark must keep R4's sentence-initial
+    'confirmado' visible; the soft join used to flatten it into a space."""
+    _arm_boost(monkeypatch)
+    _arm_stream(
+        motor,
+        [
+            FakeChunk("Esto es lo que hay:\nConfirmado, el sorteo es manana. "),
+            FakeChunk("", done=True),
+        ],
+    )
+
+    motor._generar_dialogo("hola", source="direct", commit_history=True)
+
+    spoken = " ".join(" ".join(c) for c in _appended(motor))
+    assert "sorteo" not in spoken
+
+
+def test_soft_head_is_cleared_when_the_completing_chunk_sanitizes_to_empty(motor, monkeypatch):
+    """S1: a leftover soft_head must not prefix the NEXT sentence's guard text."""
+    from opencohost.core.engine.generation_orchestrator import StreamAttemptState
+
+    state = StreamAttemptState(source="direct")
+    state.soft_head = "Esto es lo que hay"
+    monkeypatch.setattr(motor, "_sanitize_for_tts", lambda s: [])
+    action = motor._handle_stream_sentence("***", state, type("S", (), {})())
+    assert action == "continue"
+    assert state.soft_head == ""
+
+
+
+# ----------------------------------------------- no_code_output (T1, 20261109)
+
+
+def test_fenced_block_split_across_sentences_never_reaches_tts(motor):
+    """Sentence 1 is clean and goes on air; the opening fence trips the guard,
+    and every later sentence of the block is skipped, harmless-looking or not."""
+    record = _arm_stream(
+        motor,
+        [
+            FakeChunk("Te lo explico con calma. "),
+            FakeChunk("```python\nx = 1\n"),
+            FakeChunk("Esto parece inocente. "),
+            FakeChunk("Esto tambien. "),
+            FakeChunk("```\n"),
+            FakeChunk("", done=True),
+        ],
+    )
+    motor._retry_after_guard_block = MagicMock()
+    motor._guardrail_fallback_line = MagicMock()
+
+    dialogo = motor._generar_dialogo("dame codigo", source="direct", commit_history=True)
+
+    router = motor._fake_router
+    job = router.jobs[0][0]
+    assert router.appends == [(job, ["Te lo explico con calma."])]
+    assert dialogo == "Te lo explico con calma."
+    motor._retry_after_guard_block.assert_not_called()
+    assert record["closed"] is True
+
+
+def test_code_before_the_first_submit_reverts_to_the_buffered_retry(motor):
+    _arm_stream(
+        motor,
+        [FakeChunk("```python\nprint(1)\n"), FakeChunk("Frase inocente. "), FakeChunk("", done=True)],
+    )
+    motor._retry_after_guard_block = MagicMock(return_value="Te lo explico hablando.")
+
+    dialogo = motor._generar_dialogo("dame codigo", source="direct", commit_history=True)
+
+    assert motor._fake_router.jobs == []
+    assert motor._fake_router.appends == []
+    motor._retry_after_guard_block.assert_called_once()
+    assert "no_code_output" in motor._retry_after_guard_block.call_args.kwargs["guard_reason"]
+    assert dialogo == "Te lo explico hablando."
+
+
+def test_open_fence_state_blocks_a_harmless_looking_sentence(motor):
+    """Fence state: once an opening fence was seen, a sentence that alone looks
+    harmless is still a hit (unit-level, independent of the guard regexes)."""
+    from opencohost.core.engine.generation_orchestrator import StreamAttemptState
+
+    state = StreamAttemptState(source="direct")
+    state.in_fence = True
+    state.job = object()  # audio already started
+
+    action = motor._generation_orchestrator.handle_stream_sentence(
+        "Esto parece inocente.", state, SimpleNamespace(web_searched=False)
+    )
+
+    assert action == "truncate"
+    assert state.trip is not None and state.trip[0] == "no_code_output"

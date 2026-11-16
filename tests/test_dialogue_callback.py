@@ -68,10 +68,11 @@ def test_spoken_guardrail_fallback_updates_last_reply(monkeypatch):
     spy.assert_called_once_with(fallback, "chat")
 
 
-def test_guardrail_blocked_turn_commits_user_and_fallback_to_history(monkeypatch):
-    """D4 (memoria_quality_20260717): a guardrail-blocked turn must ENTER history
-    — the user turn PLUS the spoken fallback line — instead of vanishing (F4).
-    Before D4 the block returned before _commit_history, dropping the exchange."""
+def test_guardrail_blocked_turn_never_commits_fallback_to_history(monkeypatch):
+    """Session 21:07 (F2): the canned fallback is spoken and shown but is NOT
+    conversation. Stored as an assistant turn it was replayed into later prompts
+    (and the already-said block), so the model parroted it. The blocked exchange
+    stays out of history entirely (pairs only, never an orphan user turn)."""
     motor = _chat_motor()
     motor._hablar = MagicMock()
     motor._ollama_chat = MagicMock(return_value=_resp("respuesta bloqueada por el guardrail"))
@@ -80,9 +81,8 @@ def test_guardrail_blocked_turn_commits_user_and_fallback_to_history(monkeypatch
     assert len(motor.historial) == 0
     motor._ejecutar_inferencia("pregunta honesta del usuario", source="chat")
 
-    fallback = i18n_active.guardrail_fallback_lines()[0]
-    assert motor.historial[-2]["content"] == "pregunta honesta del usuario"
-    assert motor.historial[-1]["content"] == fallback
+    assert len(motor.historial) == 0
+    motor._hablar.assert_called_once()
 
 
 def test_spoken_normal_turn_emits_exactly_once():
@@ -165,3 +165,29 @@ def test_default_none_never_calls_anything():
 
     assert out == "Todo tranqui por acá."
     assert motor.dialogue_callback is None
+
+
+def test_commit_history_refuses_every_locale_fallback_line():
+    """F2: whatever path hands a canned fallback line to _commit_history, it is
+    not stored (active bundle plus the legacy es tuple)."""
+    from opencohost.i18n import active as i18n_active
+
+    motor = _chat_motor()
+    lines = set(i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES) | set(
+        i18n_active.guardrail_fallback_lines()
+    )
+    for line in lines:
+        motor._commit_history("hola", line, source="direct")
+    assert len(motor.historial) == 0
+    motor._commit_history("hola", "Una respuesta real.", source="direct")
+    assert [m["role"] for m in motor.historial] == ["user", "assistant"]
+
+
+def test_fallback_lines_are_neutral_spanish_with_accents():
+    from opencohost.i18n import active as i18n_active
+
+    lines = i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
+    assert "Soy una IA, no una persona; dicho eso, aquí estoy contigo." in lines
+    joined = " ".join(lines).lower()
+    for bad in ("preguntame", "repetilo", "podés", "decime", "mirá", "contame"):
+        assert bad not in joined

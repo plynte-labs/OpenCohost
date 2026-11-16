@@ -13,6 +13,14 @@ from typing import Optional
 # resolves only for names bound above the mixin-import line. Annotations want a
 # direct import; runtime values want `_eng`. See llm_engine_memorias.py.
 from opencohost.core import llm_engine as _eng
+from opencohost.core.engine.llm_engine_vision import VISION_TURN_SOURCES
+from opencohost.core.web import link_read
+
+def _feed_kwargs(feed_turn_id: Optional[int]) -> dict:
+    """`feed_turn_id` kwarg for `_speak_or_submit`, only when a feed turn was
+    recorded (keeps spy-pinned call shapes byte-identical otherwise)."""
+    return {} if feed_turn_id is None else {"feed_turn_id": feed_turn_id}
+
 
 class PregenCacheMixin:
     def _head_snapshot_locked(self):
@@ -183,6 +191,15 @@ class PregenCacheMixin:
             priority = _eng.turn_priority.agenda_priority()
         return self.pregenerate(payload, priority, source)
 
+    def _log_pregen_cloud_refusal(self, source: str, head) -> None:
+        """pregen-retrigger P3/P4: a cloud-gate policy refusal used to look
+        exactly like a miss in the log. One INFO line per head, reason and
+        source only (no payload text; the dedup key keeps only a hash)."""
+        refusal_key = (source, hash(head))
+        if head and self._pregen_refusal_logged_key != refusal_key:
+            self._pregen_refusal_logged_key = refusal_key
+            _eng.logger.info("Pregen refused: reason=cloud_pregen_disabled source=%s", source)
+
     def pregenerate(
         self,
         payload: str,
@@ -220,8 +237,14 @@ class PregenCacheMixin:
         # short-circuits (`_is_local` True), so all existing behavior is
         # byte-identical; only an explicit PUT {"pregen_enabled": true} opts in.
         if not self._is_local and not self._provider_config.get("pregen_enabled", False):
+            self._log_pregen_cloud_refusal(source, payload)
             return False
         if not payload:
+            return False
+        # runtime-fixes-20261110 T2: a turn that carries a link is never drafted
+        # ahead. Its origin is only known at the pop, and a draft built without
+        # the page (or with it, for the wrong door) must not stand in for the turn.
+        if source in ("direct", "ptt") and link_read.has_link(payload):
             return False
         is_agenda = source.startswith("kira-agenda")
         displaced_source: Optional[str] = None
@@ -305,10 +328,30 @@ class PregenCacheMixin:
             try:
                 while True:
                     gen_start = time.monotonic()
+                    # vision-on-demand V1.13: interactive owner turns (PTT/direct
+                    # queued while Kira speaks) look at the screen like their
+                    # foreground twin; agenda prefetch and chat pregen never do.
                     dialogo = self._generar_dialogo(
-                        payload, source=source, commit_history=False, log_prefix=log_prefix
+                        payload,
+                        source=source,
+                        commit_history=False,
+                        log_prefix=log_prefix,
+                        allow_vision=source in VISION_TURN_SOURCES,
                     )
                     if not dialogo:
+                        failure_reason = getattr(dialogo, "failure_reason", None)
+                        if failure_reason == "reasoning_budget_exhausted" and not is_agenda:
+                            with self._prefetch_lock:
+                                if self._prefetch_epoch == epoch:
+                                    self._prefetched_agenda = {
+                                        "payload": payload,
+                                        "dialogo": "",
+                                        "priority": priority,
+                                        "source": source,
+                                        "history_text": history_text,
+                                        "gen_ms": int((time.monotonic() - gen_start) * 1000),
+                                        "failure_reason": failure_reason,
+                                    }
                         return
                     if is_agenda and not self._preview_accept_agenda_output(dialogo):
                         self._log(f"Agenda: prefetch rechazado ({self._format_agenda_rejection()}).", level="warning")
@@ -422,7 +465,11 @@ class PregenCacheMixin:
             # F5 [v4]: this is the CTK legacy agenda consume path — report ready
             # ONLY for an agenda-source draft. An interactive (chat/ptt) occupant
             # is invisible here; it pops through the worker's own queue path.
-            return cached is not None and str(cached.get("source", "")).startswith("kira-agenda")
+            return (
+                cached is not None
+                and str(cached.get("source", "")).startswith("kira-agenda")
+                and not cached.get("failure_reason")
+            )
 
     def prefetch_pending(self) -> bool:
         """True while a prefetch worker is still generating (no draft yet).
@@ -489,7 +536,7 @@ class PregenCacheMixin:
             # F5 [v4]: pop ONLY agenda-source drafts. An interactive occupant is
             # left intact (never spoken as an agenda turn) for its own worker-path
             # pop — return False without popping.
-            if not item or not str(item.get("source", "")).startswith("kira-agenda"):
+            if not item or not str(item.get("source", "")).startswith("kira-agenda") or item.get("failure_reason"):
                 return False
             self._prefetched_agenda = None
             self._prefetch_done.clear()
@@ -501,8 +548,12 @@ class PregenCacheMixin:
             self._record_accepted_agenda_output(dialogo)
             self._log("Agenda: usando respuesta prefabricada durante el audio anterior.")
             self.log_queue.put(f"\n🧠 [Kira]: {dialogo}\n")
-            self._emit_dialogue(dialogo, item.get("source", "kira-agenda"))
-            self._speak_or_submit(dialogo, source=item.get("source", "kira-agenda"))
+            feed_turn_id = self._emit_dialogue(
+                dialogo, item.get("source", "kira-agenda"), web_searched=False
+            )
+            self._speak_or_submit(
+                dialogo, source=item.get("source", "kira-agenda"), **_feed_kwargs(feed_turn_id)
+            )
 
         if self._speech_router_enabled:
             # Step 2: the detached speaker thread existed only so playback
@@ -530,6 +581,8 @@ class PregenCacheMixin:
             if cached.get("payload") == payload and cached.get("source") == source:
                 self._prefetched_agenda = None
                 self._prefetch_done.clear()
+                # V1.13: the draft already carries its look; never reuse it.
+                self._drop_vision_pregen_look()
                 return cached
             return None
 
@@ -652,7 +705,7 @@ class PregenCacheMixin:
         # a foreground one are the same turn to every consumer, so if one of these
         # two sites ever relabels and the other does not, a cache hit and a cache
         # miss start reporting different origins for identical work.
-        self._emit_dialogue(dialogo, source)
+        feed_turn_id = self._emit_dialogue(dialogo, source, web_searched=False)
         if not already_reported_boundary:
             # WU4 4a boundary telemetry: an immediate pop-time cache hit is a
             # "used" draft. gap_ms = ms since the PREVIOUS turn's speaking_end;
@@ -674,7 +727,7 @@ class PregenCacheMixin:
         # path (design §11 B1/B5) — it must fire only when the job actually
         # FINISHED with speech delivered, which a non-blocking submit can no
         # longer tell from here.
-        self._speak_or_submit(dialogo, source=source)
+        self._speak_or_submit(dialogo, source=source, **_feed_kwargs(feed_turn_id))
 
     def _pregen_in_flight_for(self, payload: str, source: str) -> bool:
         """True when a pregen worker is currently generating THIS exact

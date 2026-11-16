@@ -146,12 +146,12 @@ class TestSSLErrorTriggersPiper:
 
 
 # ---------------------------------------------------------------------------
-# asyncio.TimeoutError does NOT trigger fallback
+# asyncio.TimeoutError falls back to Piper but is not session-permanent
 # ---------------------------------------------------------------------------
 
-class TestTimeoutErrorDoesNotTrigger:
+class TestTimeoutErrorFallsBackTransiently:
     def test_timeout_does_not_set_flag(self):
-        """asyncio.TimeoutError is not a connection error -> no Piper fallback, flag stays False."""
+        """asyncio.TimeoutError is transient -> Piper speaks the line, flag stays False."""
         motor, *_ = _make_motor()
         motor.tts_local_only = False
         motor._edge_tts_offline = False
@@ -163,8 +163,8 @@ class TestTimeoutErrorDoesNotTrigger:
 
         assert motor._edge_tts_offline is False, "_edge_tts_offline must stay False on TimeoutError"
         assert communicate.called, "Edge-TTS WAS attempted (it just timed out, not offline)"
-        piper.synthesize.assert_not_called()
-        assert all(not p.endswith(".wav") for p in loaded)
+        assert piper.synthesize.called, "transient failure must still be spoken by Piper"
+        assert loaded and loaded[-1].endswith(".wav")
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +391,11 @@ class TestStartupTtsPrewarm:
 
             def qsize(self):
                 return 0
+
+            def empty(self):
+                # run()'s idle tick asks _promotion_idle_step, which checks
+                # command_queue.empty() so a queued command always wins.
+                return True
 
         started = threading.Event()
         release = threading.Event()

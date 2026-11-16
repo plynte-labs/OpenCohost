@@ -33,6 +33,11 @@ from opencohost.config.settings import HISTORY_MAX_TURNS
 from opencohost.core.memory.memoria_store import MemoriaStore
 from opencohost.i18n import active as i18n_active
 
+# B-W4: the eviction-capture gate chain is pinned against the one-pair legacy deque
+# (capacity turns * 2). Under v2 the deque holds turns + K - 1 pairs and drops K at
+# once; that path is covered in tests/test_prompt_layout_v2.py (F1).
+pytestmark = pytest.mark.usefixtures("legacy_prompt_layout")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -301,14 +306,15 @@ def test_eligible_pair_meeting_token_minimum_creates_draft_with_nonempty_title_c
     assert row["title"] != ""
     assert row["content"] != ""
     assert "contexto:" in row["content"]
-    assert "→ Kira:" in row["content"]
+    assert "→ Kira:" not in row["content"]  # owner-only-drafts: user side only
     assert len(row["content"]) <= 300
 
 
-def test_eviction_capture_stores_full_pair_signature(monkeypatch, tmp_path):
+def test_eviction_capture_stores_user_side_signature(monkeypatch, tmp_path):
     """Candidate 2 (memoria_rag_followups_20260716): the captured draft row
-    persists a retrieval signature built from the FULL user+assistant pair
-    via build_signature — the scorer's input, wider than the 3-token title."""
+    persists a retrieval signature via build_signature — the scorer's input,
+    wider than the 3-token title. owner-only-drafts (2026-10-18): built from
+    the user side alone; Kira's reply never enters it."""
     from opencohost.core.memory.memoria_store import build_signature
 
     motor, _, _ = _make_motor()
@@ -321,7 +327,7 @@ def test_eviction_capture_stores_full_pair_signature(monkeypatch, tmp_path):
 
     rows = _store(tmp_path).list_for_profile("profile-1")
     assert len(rows) == 1
-    expected = build_signature(f"{_ELIGIBLE_USER} {_ELIGIBLE_ASST}")
+    expected = build_signature(f"{_ELIGIBLE_USER} ")
     assert expected != ""
     assert rows[0]["signature"] == expected
 
@@ -526,7 +532,7 @@ def test_memory_flavored_guardrail_fallback_never_becomes_a_memoria(monkeypatch,
     motor, _, _ = _make_motor()
     _enable_memorias(monkeypatch, motor, tmp_path)
 
-    memory_fallback = "Se me mezclan los recuerdos, preguntame en un rato."
+    memory_fallback = "Soy una IA, no una persona; dicho eso, aquí estoy contigo."
     assert memory_fallback in i18n_active.guardrail_fallback_lines()  # the new 5th line
 
     _fill_history_to_max(motor)

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<title>Kira</title>
+<style>
+:root { --bg: #f5f5f7; --fg: #1c1c1e; --card: #ffffff; --accent: #5b5bd6; --muted: #6b6b73; --err: #c62828;
+  --scrim: rgba(245, 245, 247, 0.88); --glass: rgba(255, 255, 255, 0.72); }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111114; --fg: #f2f2f5; --card: #1c1c21; --accent: #8b8bf0; --muted: #9a9aa5; --err: #ef6b6b;
+    --scrim: rgba(17, 17, 20, 0.88); --glass: rgba(28, 28, 33, 0.72); }
+}
+* { box-sizing: border-box; }
+html, body { height: 100vh; height: 100dvh; margin: 0; overflow: hidden; overscroll-behavior: none; }
+body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, sans-serif;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+input, button { font: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+
+#topbar { position: fixed; z-index: 3; top: env(safe-area-inset-top); left: env(safe-area-inset-left); right: env(safe-area-inset-right);
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: linear-gradient(to bottom, var(--scrim), transparent); }
+#topbar h1 { margin: 0; font-size: 18px; flex: 1; }
+#status { font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: var(--glass); color: var(--fg); }
+#status[data-state="idle"] { display: none; }
+#status.error { color: var(--err); }
+.iconbtn { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--glass); color: var(--fg);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 18px; padding: 0; }
+.iconbtn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#avatarToggle[data-off="1"] { opacity: 0.55; }
+body[data-view="pairing"] #avatarToggle, body[data-view="pairing"] #unlink { display: none; }
+
+#pairing { position: fixed; z-index: 2; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 64px 16px 16px; }
+#pairing label { color: var(--muted); }
+input[type=text] { width: 100%; min-height: 48px; padding: 8px 14px; border-radius: 999px;
+  border: 1px solid var(--muted); background: var(--card); color: var(--fg); }
+#pairBtn { min-height: 48px; padding: 8px 16px; border-radius: 999px; border: 0; background: var(--accent); color: #fff; }
+
+#main { position: fixed; z-index: 1; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; pointer-events: none; }
+#avatarWrap { position: fixed; z-index: 0; inset: 0; pointer-events: auto; }
+#kira-avatar { display: block; width: 100%; height: 100%; touch-action: none; }
+#kira-avatar[hidden] { display: none; }
+#kira-avatar-loading { position: absolute; left: 0; right: 0; top: 50%; text-align: center; color: var(--muted); }
+
+#controls { position: relative; z-index: 2; pointer-events: auto; display: flex; flex-direction: column; gap: 8px;
+  padding: 24px 12px 12px; background: linear-gradient(to top, var(--scrim) 60%, transparent); }
+#captions { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+#heard, #reply { white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 4.2em; line-height: 1.4; }
+#heard { color: var(--muted); }
+#heard:empty, #reply:empty { display: none; }
+#callrow { display: flex; align-items: center; gap: 8px; }
+#inputPill { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding-right: 4px;
+  border-radius: 999px; border: 1px solid var(--muted); background: var(--card); }
+#inputPill input[type=text] { border: 0; background: transparent; min-height: 44px; flex: 1; min-width: 0; }
+#inputPill input[type=text]:focus { outline: none; }
+#inputPill:focus-within { border-color: var(--accent); }
+#sendBtn { width: 38px; height: 38px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; }
+#sendBtn svg, #talk svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#talk { width: 60px; height: 60px; flex: none; border: 0; border-radius: 50%; background: var(--accent); color: #fff; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; touch-action: none; user-select: none; -webkit-user-select: none; }
+#talk.active { filter: brightness(1.25); box-shadow: 0 0 0 6px var(--glass); }
+#stop { flex: none; }
+</style>
+</head>
+<body data-view="pairing">
+<div id="topbar">
+  <h1>Kira</h1>
+  <div id="status" role="status" aria-live="polite" data-state="idle"></div>
+  <button id="avatarToggle" class="iconbtn" type="button"></button>
+  <button id="unlink" class="iconbtn" type="button"></button>
+</div>
+
+<div id="pairing" hidden>
+  <label id="codeLabel" for="codeInput"></label>
+  <input id="codeInput" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false">
+  <button id="pairBtn" type="button"></button>
+</div>
+
+<div id="main" hidden>
+  <div id="avatarWrap">
+    <canvas id="kira-avatar" data-avatar-status="idle" aria-hidden="true"></canvas>
+    <div id="kira-avatar-loading" hidden></div>
+  </div>
+  <div id="controls">
+    <div id="captions">
+      <div id="heard" aria-live="polite"></div>
+      <div id="reply" aria-live="polite"></div>
+    </div>
+    <div id="callrow">
+      <div id="inputPill">
+        <input id="textInput" type="text" autocomplete="off" maxlength="2000" enterkeyhint="send">
+        <button id="sendBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></button>
+      </div>
+      <button id="stop" class="iconbtn" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+      <button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
+    </div>
+  </div>
+</div>
+<script src="/phone.js"></script>
+<script type="module" src="/avatar.js"></script>
+</body>
+</html>

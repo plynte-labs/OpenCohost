@@ -36,9 +36,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from opencohost.api.auth import auth_middleware, ensure_tokens
+from opencohost.config.guardrail_policy import load_guardrails
+from opencohost.config.locale_upgrade import ensure_upgrade_locale_and_en_files
+from opencohost.config.reply_length import load_reply_length
+from opencohost.config.decisions import load_decisions
+from opencohost.config.web_fetch import load_web_fetch
+from opencohost.config.update_setting import load_update_check
+from opencohost.core.decision import runtime as decision_runtime
+from opencohost.core.speech.pronunciation import load_pronunciation
 from opencohost.api.dispatch import Dispatcher
 from opencohost.api.engine_host import EngineHost, EventLogSink
+from opencohost.api.host_guard import HostGuardMiddleware
 from opencohost.api.observability import audit_middleware, setup_api_logging
+from opencohost.api.owner_speech_dispatch import OwnerSpeechFilterDispatcher
 from opencohost.api.ptt_session import PttController, probe_stt_ws
 # `opencohost.api.routers.avatar`/`.obs` own VALID_STATES/AvatarConfigUnreadableError/
 # load_avatar_config/save_avatar_config directly now (refactor_core_api_20260802 B4)
@@ -77,18 +87,25 @@ from opencohost.config.settings import (
     # load_ptt_ws_uri: used directly below by lifespan() (never
     # monkeypatched); routers/ptt.py imports it separately from settings.
     load_ptt_ws_uri,
+    load_ptt_companion_dictation,
+    load_ptt_dictation_mode,
     load_tts_local_only,
+    load_motor_tts,
+    save_motor_tts,
     # save_ptt_ws_uri is ALSO monkeypatched on `main` (test_api_ptt.py's
     # write-failure case) -- deps.save_ptt_ws_uri() reads it off THIS module
     # at call time for routers/ptt.py.
     save_ptt_ws_uri,
     load_tts_speed,
+    load_discard_speech_residue,
+    save_discard_speech_residue,
 )
 # `build_signature`/`build_title`/`derive_import_key`/`is_capturable` moved
 # with POST /api/memoria/import to `opencohost.api.routers.memoria`, which
 # imports them directly (never monkeypatched). `MemoriaStore` stays: it is
 # constructed by `_get_memoria_store()` below.
 from opencohost.core.memory.memoria_store import MemoriaStore
+from opencohost.core.model_downloads import manager as model_downloads_mod
 # `clear_personalization`/`save_personalization`/`cargar_perfiles` stay
 # imported here (never called by this file's own code anymore) because all
 # three ARE monkeypatched directly on `main` -- opencohost.api.deps'
@@ -97,7 +114,6 @@ from opencohost.core.memory.memoria_store import MemoriaStore
 # `_legacy_profile_key` (refactor_core_api_20260802 B6).
 from opencohost.core.profiles.personalization import clear_personalization, save_personalization
 from opencohost.core.profiles.profiles import cargar_perfiles
-from opencohost.stt.discovery import is_loopback_uri
 from opencohost.stt.supervisor import LiveAudioSupervisor
 # `logger`, the cross-family write locks, `_PROFILE_ID_RE`, `_count_sql`,
 # `_editorial_cards_by_status`, `_MEMORIA_TITLE_MAX_LENGTH`/
@@ -303,7 +319,30 @@ def _ptt_controller_hooks(host) -> dict:
     }
 
 
-def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_factory=None) -> FastAPI:
+def _build_download_manager(host):
+    """Default in-app model download manager (ADR-063).
+
+    The record path and the pull stream are resolved from
+    ``model_downloads_mod`` at call time (tests/conftest.py isolates both).
+    Completion refreshes discovery through this module's own bounded
+    ``_discover_ollama_models`` (bare-name call, so a monkeypatch on ``main``
+    is honoured), and download lifecycle reaches GET /api/events through the
+    host's whitelisted motor-event recorder -- never a second event path.
+    """
+    recorder = getattr(host, "_record_motor_event", None)
+    return model_downloads_mod.ModelDownloadManager(
+        model_downloads_mod.MODEL_DOWNLOADS_FILE,
+        discover_fn=lambda: _discover_ollama_models(),
+        on_event=recorder if callable(recorder) else None,
+    )
+
+
+def create_app(
+    host_factory=EngineHost,
+    cors_origins=None,
+    liveaudio_supervisor_factory=None,
+    download_manager_factory=None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _host_active
@@ -316,6 +355,22 @@ def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_
         # Phase 1). Best-effort: a failed mint degrades to 503s on protected
         # surfaces (auth.py), never blocks engine startup.
         ensure_tokens()
+        # Preserve/infer locale and perform one-time *_en.json subdivision
+        # before pronunciation loading or EngineHost creation.
+        ensure_upgrade_locale_and_en_files()
+        # Owner pronunciation dictionary: fail-open to empty, logs counts only.
+        load_pronunciation()
+        # Owner guardrail toggles: fail-closed (all rules on), logs ids only.
+        load_guardrails()
+        # Owner reply length: missing/corrupt -> auto, logs the mode only.
+        load_reply_length()
+        # Decision layer (laya-decision-layer-20261009): owner settings over the
+        # env defaults; logs modes only.
+        load_decisions()
+        # Web lookups (web-fetch-laya-20261009): missing/corrupt -> off.
+        load_web_fetch()
+        # Update check switch (update-notification-20261111): missing/corrupt -> on.
+        load_update_check()
         if _host_active:
             raise RuntimeError("An OpenCohost API engine host is already active in this process")
         _host_active = True
@@ -336,10 +391,14 @@ def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_
             # getattr fallback mirrors the obs_runtime resiliency in get_status:
             # a real EngineHost always has event_log, but minimal host doubles
             # (health/status test fakes) may not -- never break app startup.
+            # vision-and-prompt-leaks T4: Whisper silence hallucinations are
+            # stripped from the owner's PTT words before the engine sees them.
             app.state.ptt_controller = PttController(
                 load_ptt_ws_uri(),
-                app.state.dispatcher,
+                OwnerSpeechFilterDispatcher(app.state.dispatcher),
                 getattr(host, "event_log", None) or EventLogSink(),
+                dictation_mode=load_ptt_dictation_mode(),
+                companion_dictation=load_ptt_companion_dictation(),
                 **_ptt_controller_hooks(host),
             )
             # Local LiveAudio supervisor (liveaudio-service-client track):
@@ -350,22 +409,73 @@ def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_
             # teardown. Injectable for tests via liveaudio_supervisor_factory.
             factory = liveaudio_supervisor_factory or LiveAudioSupervisor
             try:
-                supervisor = factory()
-                app.state.liveaudio_supervisor = supervisor
-                if (
-                    supervisor is not None
-                    and os.environ.get("OPENCOHOST_PREWARM_LIVEAUDIO") == "1"
-                    and is_loopback_uri(load_ptt_ws_uri())
-                ):
-                    threading.Thread(
-                        target=supervisor.ensure_started,
-                        name="liveaudio-prewarm",
-                        daemon=True,
-                    ).start()
+                app.state.liveaudio_supervisor = factory()
             except Exception:
                 app.state.liveaudio_supervisor = None
+            # Model download manager (ADR-063): its own thread, never the
+            # engine command queue. Loading only reads the job record; a job
+            # left active by a crash comes back as a paused, resumable job.
+            # A construction failure degrades /api/models/downloads to 503.
+            try:
+                app.state.download_manager = (download_manager_factory or _build_download_manager)(host)
+            except Exception as exc:
+                logger.warning("Model download manager unavailable: %s", type(exc).__name__)
+                app.state.download_manager = None
+            # Laya decision worker (laya-decision-layer-20261009): spawned and
+            # preloaded on a background thread, never blocking startup; until it
+            # reports ready (or when no ONNX export / torch env is set up) every turn
+            # takes the rule path. Stopped in the finally below.
+            decision_runtime.start()
+            # Remote voice gateway (remote-voice-gateway-20261020): off unless
+            # the flag is set, in which case nothing below is even imported. A
+            # failure here (port in use, ...) never blocks the main API.
+            from opencohost.config import settings as _gw_settings
+
+            if _gw_settings.REMOTE_GATEWAY_ENABLED:
+                gateway_port = _gw_settings.REMOTE_GATEWAY_PORT
+                try:
+                    from opencohost.gateway.app import create_gateway_app
+                    from opencohost.gateway.devices import DeviceRegistry
+                    from opencohost.gateway.server import GatewayServer
+
+                    # ONE registry per process, shared by the operator
+                    # endpoints (routers/remote.py) and the gateway's /pair
+                    # and device-token gate.
+                    app.state.remote_devices = DeviceRegistry()
+                    # In-memory phone-message feed (remote-vrm-avatar T9):
+                    # written by the gateway, read by the operator endpoint.
+                    from opencohost.gateway.feed import RemoteTurnFeed
+
+                    app.state.remote_feed = RemoteTurnFeed()
+                    gateway = GatewayServer(
+                        create_gateway_app(
+                            host, app.state.dispatcher, app.state.remote_devices, feed=app.state.remote_feed
+                        ),
+                        gateway_port,
+                    )
+                    app.state.remote_gateway = gateway
+                    gateway.start()
+                except Exception as exc:
+                    logger.warning(
+                        "Remote gateway unavailable: %s on port %s",
+                        type(exc).__name__,
+                        gateway_port,
+                    )
             yield
         finally:
+            gateway = getattr(app.state, "remote_gateway", None)
+            if gateway is not None:
+                try:
+                    gateway.stop()
+                except Exception:
+                    pass
+            decision_runtime.stop()
+            download_manager = getattr(app.state, "download_manager", None)
+            if download_manager is not None:
+                try:
+                    download_manager.shutdown()
+                except Exception:
+                    pass
             supervisor = getattr(app.state, "liveaudio_supervisor", None)
             shutdown = getattr(supervisor, "shutdown", None)
             if callable(shutdown):
@@ -392,6 +502,10 @@ def create_app(host_factory=EngineHost, cors_origins=None, liveaudio_supervisor_
         allow_headers=["Content-Type", "Idempotency-Key", "Authorization"],
         allow_credentials=False,
     )
+    # Host guard (release-050 D1, DNS rebinding): added LAST, so it is the
+    # outermost layer and refuses a non-loopback Host before CORS, audit or
+    # auth run. The remote gateway is a separate app and never gets it.
+    app.add_middleware(HostGuardMiddleware)
 
     # B4-B6 (refactor_core_api_20260802): every resource family -- all
     # routers in ALL_ROUTERS (opencohost/api/routers/__init__.py) -- mounts

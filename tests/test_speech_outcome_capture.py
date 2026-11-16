@@ -100,6 +100,10 @@ def _make_motor(*, mixer_music=None, synthesize=None):
     motor.motor_tts = "ligero"
     motor.tts_local_only = False
     motor._edge_tts_offline = True  # fast-path straight to Piper, no network
+    # Hermetic: the constructor reads the owner's tts_settings.json from disk.
+    # Pin the shipped default (suspend, not discard); tests that exercise the
+    # discard mode set it explicitly.
+    motor._discard_speech_residue = False
     fake_piper = MagicMock()
     fake_piper.is_available.return_value = True
     fake_piper.synthesize.side_effect = synthesize or (lambda text, out_path: _write_wav(out_path))
@@ -377,3 +381,33 @@ def test_pre_dequeue_cut_logs_speech_stack_line(monkeypatch, caplog):
         r"\[SPEECH_STACK\] cut source=kira-agenda:t9 cursor=0 at=pre_dequeue", cut_lines[0]
     )
     assert "Fragmento" not in cut_lines[0], "PRIVACY: no fragment text in the telemetry line"
+
+
+def test_stop_during_prepare_audio_marks_interrupted_with_unstarted_cursor(monkeypatch, caplog):
+    """A stop landing while `prepare_audio` runs (pre-load window) must report
+    the turn as interrupted with the never-started fragment as cursor, so the
+    router keeps the owed fragments instead of marking the slice as spoken."""
+    from opencohost.core.engine import llm_engine_speech
+
+    caplog.set_level(logging.INFO, logger="OpenCohost")
+    motor, _, _ = _make_motor(mixer_music=_ScriptedMixerMusic())
+    # audio must be enabled for the pre-load guard to run
+    motor.pygame.mixer.get_init.return_value = True
+    seen: list[str] = []
+
+    def _prepare(path):
+        seen.append(path)
+        motor.interrupt_speaking()  # stop lands while the first fragment is being prepared
+        return None
+
+    monkeypatch.setattr(llm_engine_speech, "prepare_audio", _prepare)
+
+    outcome = motor._hablar_impl(" ".join(_sentences(3)), source="direct")
+
+    assert seen, "prepare_audio never ran"
+    assert outcome.interrupted is True
+    assert outcome.cursor == 0, "the fragment never started"
+    assert outcome.spoken == []
+    assert motor.pygame.mixer.music.load_count == 0
+    cut_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[SPEECH_STACK] cut")]
+    assert any("at=pre_load" in m for m in cut_lines), cut_lines

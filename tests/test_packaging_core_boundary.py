@@ -13,7 +13,10 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (flux_env): tomllib arrived in 3.11
+    import tomli as tomllib
 import zipfile
 from pathlib import Path
 
@@ -138,6 +141,21 @@ def test_engine_payload_is_allowlisted_and_hash_manifested(tmp_path):
             assert item["sha256"] == hashlib.sha256(data).hexdigest()
 
 
+def test_engine_payload_excludes_the_agenda_benchmark_tool(tmp_path):
+    """Owner decision D7 (2026-11-16): the offline agenda benchmark is dev tooling."""
+    builder = _load_payload_builder()
+    archive = tmp_path / "engine-payload.zip"
+    builder.build_payload(ROOT, archive)
+
+    with zipfile.ZipFile(archive) as payload:
+        names = payload.namelist()
+        manifest = json.loads(payload.read("payload-manifest.json"))
+    assert not any("agenda_benchmark" in name for name in names)
+    assert not any("agenda_benchmark" in item["path"] for item in manifest["files"])
+    # The runtime package that held it stays importable.
+    assert "opencohost/api/main.py" in names
+
+
 def test_engine_payload_build_is_byte_deterministic(tmp_path):
     builder = _load_payload_builder()
     first = tmp_path / "first.zip"
@@ -162,3 +180,30 @@ def test_ci_sync_extras_are_declared_and_select_modern_suite():
     assert "legacy-ui" not in used_extras
     assert "legacy-ui" not in declared_extras
     assert used_extras <= declared_extras
+
+
+def _requirement_name(requirement: str) -> str:
+    return re.split(r"[<>=!~;\[ ]", requirement, maxsplit=1)[0].strip().lower()
+
+
+def test_gpl3_only_obs_client_is_opt_in_and_never_staged_into_the_installer():
+    # obsws-python is GPL-3.0-only; shipping it would make the whole installer
+    # GPL-3.0-only. Owner decision 2026-11-16: keep it out of the installer and
+    # expose it as the opt-in `obs` extra until an MIT client replaces it.
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    extras = project.get("optional-dependencies", {})
+    assert {_requirement_name(r) for r in extras.get("obs", [])} == {"obsws-python"}
+
+    spec = importlib.util.spec_from_file_location(
+        "_stage_installer_resources_boundary", ROOT / "packaging" / "stage_installer_resources.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "obs" not in module.SUPPORTED_EXTRAS
+    staged = {
+        _requirement_name(requirement)
+        for extra in module.SUPPORTED_EXTRAS
+        for requirement in extras.get(extra, [])
+    }
+    assert "obsws-python" not in staged
+    assert "nvidia-ml-py" in staged

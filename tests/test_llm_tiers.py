@@ -51,10 +51,10 @@ def test_resolve_llm_tiers_uses_operator_config_file(tmp_path, monkeypatch):
     }
 
 
-def test_models_catalog_includes_gemma4_12b():
-    model = settings.MODELS_CATALOG["gemma4:12b"]
+def test_models_catalog_includes_gemma4_e4b():
+    model = settings.MODELS_CATALOG["gemma4:e4b"]
 
-    assert model["display"].startswith("Gemma 4 (12B)")
+    assert model["display"].startswith("Gemma 4 (E4B)")
     assert model["family"] == "gemma"
     assert model["size_gb"] > 0
 
@@ -191,13 +191,32 @@ def test_resolve_startup_model_breaks_size_ties_deterministically(
     """Two installed catalog models of equal size resolve to the alphabetically
     first tag, stably across repeated calls (no hash-order nondeterminism)."""
     monkeypatch.setattr(settings, "LAST_MODEL_FILE", str(tmp_path / "nope.json"))
-    installed = {"phi4-mini", "gemma4:e4b"}  # both 2.5 GB; nothing smaller installed
+    # Both 5.8 GB, neither is DEFAULT_MODEL (gemma4:e4b), and nothing smaller
+    # is installed, so resolution reaches the alphabetical tie-break.
+    tie_a = "hf.co/unsloth/gemma-4-E4B-it-GGUF:IQ4_NL"
+    tie_b = "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M"
+    assert settings.MODELS_CATALOG[tie_a]["size_gb"] == settings.MODELS_CATALOG[tie_b]["size_gb"]
+    assert settings.DEFAULT_MODEL not in (tie_a, tie_b)
+    installed = {tie_a, tie_b}
 
     first = settings.resolve_startup_model(installed_model_tags=installed)
     second = settings.resolve_startup_model(installed_model_tags=installed)
 
-    assert first == ("gemma4:e4b", "installed_fallback")
+    assert first == (min(tie_a, tie_b), "installed_fallback")
     assert first == second
+
+
+def test_resolve_startup_model_prefers_installed_default_over_smaller_models(
+    tmp_path, monkeypatch
+):
+    """An installed DEFAULT_MODEL wins even when equal-or-smaller models exist."""
+    monkeypatch.setattr(settings, "LAST_MODEL_FILE", str(tmp_path / "nope.json"))
+    installed = {"qwen3:1.7b", settings.DEFAULT_MODEL}
+
+    assert settings.resolve_startup_model(installed_model_tags=installed) == (
+        settings.DEFAULT_MODEL,
+        "default",
+    )
 
 
 def test_resolve_llm_tiers_accepts_installed_non_curated_override(

@@ -252,12 +252,15 @@ class TestProviderModelSwitchReconciliation:
         assert motor._desired_model == "gemma4:e4b"
         assert ui_events.count("model_switch_applied") >= 1
 
-    def test_switch_model_during_speech_defers_and_applies_at_boundary(self, tmp_path):
-        """9. switch_model while _speech_active=True defers and applies once speech clears."""
+    def test_switch_model_during_generation_defers_and_applies_at_boundary(self, tmp_path):
+        """9. switch_model while a generation is in flight (_processing) defers and
+        applies once the motor is free. (K2: speaking ALONE no longer defers --
+        see tests/test_model_switch_while_speaking.py.)"""
         motor, _, ui_events = _make_motor(tmp_path, provider_config=_local_config())
         motor.is_ready = True
         motor.current_model = "gemma4:e2b"
         motor._desired_model = "gemma4:e2b"
+        motor._processing = True
         motor._speaking = True
         assert motor._speech_active is True
 
@@ -267,13 +270,14 @@ class TestProviderModelSwitchReconciliation:
         ):
             motor._dispatch_command("switch_model", "gemma4:e4b")
 
-            # Deferred during speech
+            # Deferred while generating
             assert motor.current_model == "gemma4:e2b"
             assert motor._pending_model_switch == "gemma4:e4b"
             assert "model_switch_pending" in ui_events
             assert "model_switch_applied" not in ui_events
 
-            # Speech ends -> check pending switch
+            # Generation and speech end -> check pending switch
+            motor._processing = False
             motor._speaking = False
             assert motor._speech_active is False
             motor._check_pending_model_switch()

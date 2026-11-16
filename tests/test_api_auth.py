@@ -1,11 +1,12 @@
-"""Strict-TDD tests for the warn-only bearer-token auth core (Phase 1 of
+"""Strict-TDD tests for the bearer-token auth core (Phase 1 of
 track agent_context_gateway_20260705, design.md 'Auth design' ADR-3/ADR-4).
 
-Owner decision D2 binds this suite: auth ships WARN-ONLY — the enforcement
-flag (`settings.API_AUTH_ENFORCED`, env OPENCOHOST_API_AUTH) defaults OFF, and
-a missing/invalid token on existing mutating routes logs a warning while the
-request still succeeds, so the shipped Tauri app (which sends no token today)
-keeps working unchanged.
+Owner decision 2026-11-08 binds this suite (it supersedes the warn-only D2):
+the enforcement flag (`settings.API_AUTH_ENFORCED`, env OPENCOHOST_API_AUTH)
+defaults ON. The kill switch is OPENCOHOST_API_AUTH=0, which restores the old
+warn-only behavior: a missing/invalid token logs a warning while the request
+still succeeds. Most tests below pin the flag explicitly; `TestDefaultEnforcement`
+exercises the real default resolution.
 
 Covers:
 - ensure_tokens(): mints ``{"version": 1, "operator": ..., "agent": ...}``
@@ -52,7 +53,7 @@ def _reset_host_active():
 
 @pytest.fixture(autouse=True)
 def _auth_flag_off(monkeypatch):
-    """D2 default: enforcement flag OFF unless a test flips it explicitly."""
+    """Kill-switch state (flag OFF) unless a test flips it explicitly."""
     monkeypatch.setattr(settings, "API_AUTH_ENFORCED", False)
 
 
@@ -232,7 +233,7 @@ class TestAgentSurfaceAlwaysEnforced:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-class TestWarnOnlyMode:
+class TestKillSwitchMode:
     def test_post_without_token_succeeds_and_logs_one_warning(self, caplog):
         app = _app(_host_with_agenda())
         with TestClient(app) as client:
@@ -267,6 +268,41 @@ class TestWarnOnlyMode:
                     json={"title": "Warn only operator topic"},
                     headers=_bearer(tokens["operator"]),
                 )
+            assert resp.status_code == 200
+            assert _auth_warnings(caplog) == []
+
+    def test_get_sensitive_route_without_token_succeeds_and_warns(self, caplog):
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            with caplog.at_level(logging.WARNING, logger="opencohost.api.auth"):
+                resp = client.get("/api/memoria/stats")
+            assert resp.status_code == 200
+            assert len(_auth_warnings(caplog)) == 1
+
+    def test_get_sensitive_route_with_operator_token_succeeds_without_warning(self, caplog):
+        auth.ensure_tokens()
+        tokens = auth.load_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            with caplog.at_level(logging.WARNING, logger="opencohost.api.auth"):
+                resp = client.get("/api/memoria/stats", headers=_bearer(tokens["operator"]))
+            assert resp.status_code == 200
+            assert _auth_warnings(caplog) == []
+
+    def test_get_non_sensitive_route_with_invalid_token_warns(self, caplog):
+        auth.ensure_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            with caplog.at_level(logging.WARNING, logger="opencohost.api.auth"):
+                resp = client.get("/api/health", headers=_bearer("wrong-token"))
+            assert resp.status_code == 200
+            assert len(_auth_warnings(caplog)) == 1
+
+    def test_get_non_sensitive_route_without_token_does_not_warn(self, caplog):
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            with caplog.at_level(logging.WARNING, logger="opencohost.api.auth"):
+                resp = client.get("/api/health")
             assert resp.status_code == 200
             assert _auth_warnings(caplog) == []
 
@@ -341,3 +377,128 @@ class TestEnforcedMode:
         with TestClient(app) as client:
             resp = client.get("/api/health")
             assert resp.status_code == 200
+
+    def test_get_sensitive_route_without_token_is_401(self):
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/stats")
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "missing bearer token"}
+
+    def test_get_sensitive_route_with_invalid_token_is_401(self):
+        auth.ensure_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/stats", headers=_bearer("wrong-token"))
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "invalid token"}
+
+    def test_get_sensitive_route_with_agent_token_is_403(self):
+        auth.ensure_tokens()
+        tokens = auth.load_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/stats", headers=_bearer(tokens["agent"]))
+            assert resp.status_code == 403
+            assert resp.json() == {"detail": "operator token required"}
+
+    def test_get_sensitive_route_with_operator_token_is_200(self):
+        auth.ensure_tokens()
+        tokens = auth.load_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/stats", headers=_bearer(tokens["operator"]))
+            assert resp.status_code == 200
+
+    def test_get_sensitive_route_corrupt_token_file_is_503(self):
+        _tokens_path().parent.mkdir(parents=True, exist_ok=True)
+        _tokens_path().write_text("garbage-not-json", encoding="utf-8")
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/memoria/stats", headers=_bearer("anything"))
+            assert resp.status_code == 503
+
+    def test_stream_admin_prefix_is_not_a_sensitive_route(self):
+        # /api/stream-admin matches no route (dead prefix, removed 2026-11-08).
+        assert not auth._is_sensitive_path("/api/stream-admin/status")
+        assert not any("stream-admin" in p for p in auth._SENSITIVE_PREFIXES)
+
+    def test_get_non_sensitive_route_with_invalid_token_is_401(self):
+        auth.ensure_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/health", headers=_bearer("wrong-token"))
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "invalid token"}
+
+    def test_get_non_sensitive_route_with_valid_token_is_200(self):
+        auth.ensure_tokens()
+        tokens = auth.load_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            resp = client.get("/api/health", headers=_bearer(tokens["agent"]))
+            assert resp.status_code == 200
+            resp = client.get("/api/health", headers=_bearer(tokens["operator"]))
+            assert resp.status_code == 200
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Default-ON enforcement (owner decision 2026-11-08) and the kill switch
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestDefaultEnforcement:
+    def test_resolver_defaults_on_without_env(self, monkeypatch):
+        monkeypatch.delenv("OPENCOHOST_API_AUTH", raising=False)
+        assert settings._resolve_api_auth_enforced() is True
+
+    @pytest.mark.parametrize("value", ["1", "true", "", "yes"])
+    def test_resolver_stays_on_for_non_zero_values(self, monkeypatch, value):
+        monkeypatch.setenv("OPENCOHOST_API_AUTH", value)
+        assert settings._resolve_api_auth_enforced() is True
+
+    def test_resolver_kill_switch_zero_turns_it_off(self, monkeypatch):
+        monkeypatch.setenv("OPENCOHOST_API_AUTH", "0")
+        assert settings._resolve_api_auth_enforced() is False
+
+    def test_default_config_memoria_get_without_token_is_401_and_with_token_200(self, monkeypatch):
+        monkeypatch.delenv("OPENCOHOST_API_AUTH", raising=False)
+        monkeypatch.setattr(settings, "API_AUTH_ENFORCED", settings._resolve_api_auth_enforced())
+        auth.ensure_tokens()
+        tokens = auth.load_tokens()
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            assert client.get("/api/memoria/stats").status_code == 401
+            ok = client.get("/api/memoria/stats", headers=_bearer(tokens["operator"]))
+            assert ok.status_code == 200
+
+    def test_kill_switch_memoria_get_without_token_passes(self, monkeypatch):
+        monkeypatch.setenv("OPENCOHOST_API_AUTH", "0")
+        monkeypatch.setattr(settings, "API_AUTH_ENFORCED", settings._resolve_api_auth_enforced())
+        app = _app(_host_with_agenda())
+        with TestClient(app) as client:
+            assert client.get("/api/memoria/stats").status_code == 200
+
+
+class TestTokenFileAcl:
+    def test_ensure_tokens_restricts_the_token_file(self, monkeypatch):
+        calls = []
+        import opencohost.stream_admin.oauth_store as store
+
+        monkeypatch.setattr(store, "restrict_file_permissions", lambda p: calls.append(str(p)) or True)
+        auth.ensure_tokens()
+        assert calls == [str(_tokens_path())]
+
+    def test_ensure_tokens_logs_when_restriction_fails_without_leaking_tokens(self, monkeypatch, caplog):
+        import opencohost.stream_admin.oauth_store as store
+
+        monkeypatch.setattr(store, "restrict_file_permissions", lambda p: False)
+        with caplog.at_level(logging.WARNING, logger="opencohost.api.auth"):
+            auth.ensure_tokens()
+        warnings = _auth_warnings(caplog)
+        assert len(warnings) == 1
+        tokens = json.loads(_tokens_path().read_text(encoding="utf-8"))
+        text = warnings[0].getMessage()
+        assert tokens["operator"] not in text and tokens["agent"] not in text
+        # The token file is still usable despite the failed ACL restriction.
+        assert auth.load_tokens()["operator"] == tokens["operator"]

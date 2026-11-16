@@ -42,7 +42,52 @@ NO_FALLBACK_DOMAINS = ("guardrails",)
 # other ~40 scaffolding slots — broadening NO_FALLBACK_DOMAINS to cover "llm"
 # would fail those closed too for any future partial community-tier locale.
 # Slot-exact governance, checked alongside the domain list in `resolve()`.
-NO_FALLBACK_SLOTS = frozenset({"llm.provider_fallback_notice"})
+NO_FALLBACK_SLOTS = frozenset({
+    "llm.provider_fallback_notice",
+    # T4 (live_session_fixes_20260925): the brief transitional phrase spoken
+    # before a regenerated reply when the owner setting
+    # `discard_stale_speech_on_regenerated_reply` is on. Same governance as
+    # its sibling above -- a new-era slot with no legacy cross-locale
+    # default, so a locale that omits it must fail closed, never silently
+    # borrow the other locale's line.
+    "llm.provider_fallback_transition_notice",
+    # S1 (guardrails-vulnerable-users): the deterministic reply spoken when the
+    # owner's own words signal self-harm. A locale that omits it must not
+    # borrow another locale's text; i18n/active.py::crisis_reply degrades to a
+    # built-in English line (never silence) instead.
+    "llm.crisis_reply",
+    # K4 (warmth-guardrails-runtime-20261006): the guardrail retry nudges.
+    # A locale that omits them must not borrow another locale's correction
+    # (the old hard-coded es text leaked Spanish into en retries);
+    # i18n/active.py::guardrail_retry_nudge degrades to a built-in English
+    # note instead.
+    "llm.guardrail_retry_nudges",
+    # K5 (warmth-guardrails-runtime-20261006): the per-profile warmth blocks.
+    # A locale that omits them must not borrow another locale's text;
+    # i18n/active.py::warmth_block degrades to a built-in English block.
+    "llm.warmth_blocks",
+    # K8: the one-line warmth reminder that closes a warm system prompt.
+    # Same governance as the blocks; i18n/active.py::warmth_recency_line
+    # degrades to a built-in English line.
+    "llm.warmth_recency",
+    # kira-personal-tone-20261007 P2/P3: the profile/memory relevance rule
+    # (warm owner turns) and the vision answer rules. Same governance;
+    # i18n/active.py degrades each to a built-in English line.
+    "llm.facts_relevance_rule",
+    # kira-natural-replies-20261111 A2: per-message role labels (owner / chat)
+    # and the one stable line mapping the owner role to the nickname. Same
+    # governance; i18n/active.py degrades each to a built-in English value.
+    "llm.owner_role_label",
+    "llm.chat_role_label",
+    "llm.owner_nickname_line",
+    "llm.vision_answer_rules",
+    # kira-personal-tone-20261007 P5: how to address the owner grammatically.
+    # Same governance; i18n/active.py::owner_gender_line degrades to English.
+    "llm.owner_gender_lines",
+    # kira-identity-core-rules-20261007 C1: the core rules appended for custom
+    # personas. Same governance; i18n/active.py::core_rules degrades to English.
+    "llm.core_rules",
+})
 
 
 class SlotNotFound(KeyError):

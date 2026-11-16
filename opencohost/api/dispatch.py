@@ -55,6 +55,7 @@ class Dispatcher:
         source: Optional[str] = None,
         submitted_at: Optional[float] = None,
         submitted_under_provider: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> DispatchResult:
         with self._lock:
             now = time.time()
@@ -94,7 +95,15 @@ class Dispatcher:
             # the moment this item was submitted, so the engine can disclose a
             # fallback/return that happened while the item sat queued. Omitted ->
             # tuple shape unchanged. Never part of the idempotency identity.
-            if submitted_at is not None:
+            # runtime-fixes-20261110 T2: origin (desktop / remote, set by the
+            # receiving route, see core/turn_origin.py) rides as an OPTIONAL
+            # 7th element. Present -> the full 7-tuple (the provider slot may
+            # be None); omitted -> every shape above is unchanged.
+            if origin is not None:
+                self._queue.put_nowait(
+                    (command, payload, history_text, source, submitted_at, submitted_under_provider, origin)
+                )
+            elif submitted_at is not None:
                 if submitted_under_provider is not None:
                     self._queue.put_nowait(
                         (command, payload, history_text, source, submitted_at, submitted_under_provider)

@@ -171,32 +171,108 @@ def test_reconcile_unindexed_episodes(tmp_path: Path):
     cache_store.close()
 
 
-def test_indexer_reconciles_real_corpus_smoke(tmp_path: Path):
-    trial_db = Path("E:/VoiceAI/.artifacts/memory_v5_shadow/manual/francisco-trial.db")
-    if not trial_db.exists():
-        pytest.skip("francisco-trial.db not present")
+def test_indexer_reconciles_multi_profile_corpus_smoke(tmp_path: Path):
+    """Reconcile a synthetic multi-profile corpus (hermetic).
 
-    conn = sqlite3.connect(f"file:{trial_db}?mode=ro", uri=True)
-    cache_db = tmp_path / "trial_cache.db"
-    cache_store = SemanticCacheStore(cache_db)
+    Formerly read the owner's local ``francisco-trial.db`` under ``.artifacts``,
+    which drifts and holds several profiles, so the per-profile count never
+    matched the corpus-wide CLOSED count. This builds an equivalent corpus:
+    two profiles, several CLOSED episodes with multiple exchanges each, and one
+    OPEN episode that must stay unindexed.
+    """
+    conn = sqlite3.connect(tmp_path / "shadow.db")
+    conn.executescript("""
+        CREATE TABLE evidence_journal (
+            event_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            stream_sequence INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            source TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            content TEXT NOT NULL,
+            is_private INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE episodes (
+            episode_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            formation_policy_id TEXT NOT NULL,
+            formation_policy_version TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            opened_reason TEXT NOT NULL,
+            closure_reason TEXT,
+            event_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE episode_membership (
+            episode_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            sequence_index INTEGER NOT NULL,
+            PRIMARY KEY (episode_id, event_id)
+        );
+    """)
+
+    profile_id = "prof_main"
+    other_profile = "prof_other"
+    # (episode_id, profile, state): 3 closed + 1 open for the main profile,
+    # 2 closed for another profile.
+    episodes = [
+        ("ep_a1", profile_id, "CLOSED"),
+        ("ep_a2", profile_id, "CLOSED"),
+        ("ep_a3", profile_id, "CLOSED"),
+        ("ep_a4", profile_id, "OPEN"),
+        ("ep_b1", other_profile, "CLOSED"),
+        ("ep_b2", other_profile, "CLOSED"),
+    ]
+    seq = 0
+    for ep_id, prof, state in episodes:
+        for exchange in range(3):
+            for role, text in (("user", f"pregunta {ep_id} {exchange}"),
+                               ("assistant", f"respuesta {ep_id} {exchange}")):
+                seq += 1
+                event_id = f"ev{seq}"
+                stamp = f"2026-09-02T10:{seq // 60:02d}:{seq % 60:02d}Z"
+                conn.execute(
+                    "INSERT INTO evidence_journal VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (event_id, prof, "run1", seq, role, "PTT", stamp, text, stamp),
+                )
+                conn.execute(
+                    "INSERT INTO episode_membership VALUES (?, ?, ?)",
+                    (ep_id, event_id, seq),
+                )
+        conn.execute(
+            "INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ep_id, prof, f"sess_{ep_id}", state, "policy_v1", "v1",
+             "2026-09-02T10:00:00Z", None if state == "OPEN" else "2026-09-02T10:59:00Z",
+             "SESSION_START", None if state == "OPEN" else "SESSION_CLOSED", 6),
+        )
+    conn.commit()
+
+    cache_store = SemanticCacheStore(tmp_path / "trial_cache.db")
     cache_store.initialize()
-
     worker = SemanticWorkerService(use_dummy=True)
     worker.start()
 
-    indexer = IncrementalSemanticIndexer(shadow_conn=conn, cache_store=cache_store, worker=worker)
-    count = indexer.reconcile_unindexed_episodes()
-    expected_closed = conn.execute("SELECT count(1) FROM episodes WHERE state='CLOSED'").fetchone()[0]
-    assert count == expected_closed
+    try:
+        indexer = IncrementalSemanticIndexer(shadow_conn=conn, cache_store=cache_store, worker=worker)
+        count = indexer.reconcile_unindexed_episodes()
+        expected_closed = conn.execute("SELECT count(1) FROM episodes WHERE state='CLOSED'").fetchone()[0]
+        assert expected_closed == 5
+        assert count == expected_closed
 
-    # Check profile records in cache
-    profile_id = "30ea444e-99c7-4369-95bc-ff9215314aa3"
-    exs = cache_store.get_exchange_embeddings_by_profile(profile_id)
-    eps = cache_store.get_episode_embeddings_by_profile(profile_id)
-    assert len(eps) == expected_closed
-    assert len(exs) > 0
+        main_eps = cache_store.get_episode_embeddings_by_profile(profile_id)
+        main_exs = cache_store.get_exchange_embeddings_by_profile(profile_id)
+        other_eps = cache_store.get_episode_embeddings_by_profile(other_profile)
+        assert {r.episode_id for r in main_eps} == {"ep_a1", "ep_a2", "ep_a3"}
+        assert len(other_eps) == 2
+        assert len(main_exs) == 9  # 3 closed episodes x 3 exchanges; the OPEN one is skipped
 
-    worker.shutdown()
-    conn.close()
-    cache_store.close()
-
+        # Idempotent: a second pass finds nothing left to index.
+        assert indexer.reconcile_unindexed_episodes() == 0
+    finally:
+        worker.shutdown()
+        conn.close()
+        cache_store.close()

@@ -1,13 +1,14 @@
 # OpenCohost UI Architecture — LEGACY (CustomTkinter)
 
+> **Historical: describes the retired CustomTkinter shell (removed in 1eecab7). Current architecture: [docs/architecture.md](architecture.md).**
+
 > **DEPRECATED as of 2026-08-13.** This document describes the FROZEN legacy
 > CustomTkinter shell, not the product UI.
 >
 > The product UI is **Tauri + React** (`OpenCohost_UI/src/features/`) over the
 > FastAPI host (`opencohost/api/`). The migration is complete — every module
-> diagrammed below has an API router behind it. See the "Surfaces" section of
-> `CLAUDE.md` for the maintenance policy: no new features, no refactors, no
-> restyling in `opencohost/ui/`.
+> diagrammed below has an API router behind it. Maintenance policy for `opencohost/ui/`:
+> no new features, no refactors, no restyling.
 
 ## Overview
 

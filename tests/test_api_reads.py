@@ -37,8 +37,18 @@ def _app():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_models_shape_and_real_catalog():
+def test_models_shape_and_real_catalog(tmp_path, monkeypatch):
     from opencohost.config.settings import MODELS_CATALOG
+
+    # T2 (model_context_auto_config_20260928): isolate model_parameters.json
+    # so `context_config`'s asserted values do not depend on this repo's own
+    # ambient dev config/model_parameters.json (a real file with the
+    # developer's own overrides, e.g. context.policy="requested" -- see
+    # test_update_model_reasoning_endpoint for the same isolation idiom;
+    # reasoning_config below happened to match defaults by coincidence, this
+    # keeps context_config from depending on that same luck).
+    import opencohost.config.model_parameters as mp
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", str(tmp_path / "model_params.json"))
 
     app = _app()
     with TestClient(app) as client:
@@ -54,15 +64,34 @@ def test_models_shape_and_real_catalog():
             "is_reasoning_active",
             "reasoning_config",
             "runtime_state",
+            "context_config",
         }
         assert body["is_reasoning_active"] is True
-        assert body["reasoning_config"] == {"enabled": False, "budget_tokens": 512}
+        # T2 (controls-cleanup-adaptive-reasoning-20260928): a fresh/isolated
+        # config is Auto by default (budget_tokens=None), not the historical
+        # literal 512 -- the adaptive engine decides at generation time.
+        assert body["reasoning_config"] == {"enabled": False, "budget_tokens": None}
+        # "effective_budget" is best-effort and read-only: under Auto there is
+        # no cheaply-available last-known value to report, so it is null
+        # rather than a fabricated number (T2 "don't invent data you don't have").
+        assert body["runtime_state"]["effective_budget"] is None
         # real curated catalog, not a hand-rolled stub
         assert set(body["catalog"].keys()) == set(MODELS_CATALOG.keys())
         assert body["current_model"] == "qwen3:8b"
         assert body["active_tier"] == "balanced"
         assert isinstance(body["tiers"], dict) and body["tiers"]
         assert isinstance(body["discovered"], list)
+        # T2 (model_context_auto_config_20260928): FakeMotor has no
+        # _model_ctx_limit/_resolve_effective_ctx_limit, so native/effective
+        # degrade to None -- unconfigured (Auto) with the default cap.
+        assert body["context_config"] == {
+            "model": "qwen3:8b",
+            "context_tokens": None,
+            "auto_context_tokens": 16384,
+            "native_context": None,
+            "effective_context": None,
+            "policy": "runtime_truth",
+        }
 
 
 def test_models_discovery_timeout_degrades_to_catalog_only(monkeypatch):
@@ -441,6 +470,9 @@ def test_tts_config_shape_from_accessors(monkeypatch):
     monkeypatch.setattr(main_mod, "load_tts_local_only", lambda: True)
     monkeypatch.setattr(main_mod, "load_tts_speed", lambda: 1.25)
     monkeypatch.setattr(main_mod, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True)
+    from opencohost.api.routers import i18n_tts as i18n_tts_mod
+
+    monkeypatch.setattr(i18n_tts_mod, "_piper_unavailable_reason", lambda voice_key: None)
 
     app = _app()
     with TestClient(app) as client:
@@ -455,8 +487,55 @@ def test_tts_config_shape_from_accessors(monkeypatch):
             "engine": "pesado",
             "heavy_available": True,
             "piper_available": False,
+            "piper_unavailable_reason": None,
             "edge_tts_offline": False,
+            "edge_tts_degraded": False,
+            "edge_tts_last_error": None,
+            # Default is ON since 98c22c7 (feat(speech): enable discard residue by default).
+            "discard_speech_residue": True,
         }
+
+
+@pytest.mark.parametrize(
+    "package_ok, file_present, expected",
+    [(False, True, "package_missing"), (False, False, "package_missing"),
+     (True, False, "voice_file_missing"), (True, True, None)],
+)
+def test_piper_unavailable_reason_distinguishes_package_from_voice_file(
+    monkeypatch, tmp_path, package_ok, file_present, expected
+):
+    from opencohost.api.routers import i18n_tts as i18n_tts_mod
+    from opencohost.core.speech.backends import tts_piper
+
+    voice = tmp_path / "voice.onnx"
+    if file_present:
+        voice.write_bytes(b"x")
+    monkeypatch.setattr(tts_piper, "_PIPER_AVAILABLE", package_ok)
+    monkeypatch.setattr(i18n_tts_mod, "piper_voice_path", lambda key: str(voice))
+    assert i18n_tts_mod._piper_unavailable_reason("english") == expected
+
+
+def test_tts_config_reports_voice_file_missing_when_piper_unavailable(monkeypatch):
+    from opencohost.api.routers import i18n_tts as i18n_tts_mod
+
+    monkeypatch.setattr(i18n_tts_mod, "_piper_unavailable_reason", lambda key: "voice_file_missing")
+    app = _app()
+    with TestClient(app) as client:
+        class _StubPiper:
+            def is_available(self):
+                return False
+
+        app.state.host.motor._piper = _StubPiper()
+        body = client.get("/api/tts/config").json()
+        assert body["piper_available"] is False
+        assert body["piper_unavailable_reason"] == "voice_file_missing"
+
+        class _OkPiper:
+            def is_available(self):
+                return True
+
+        app.state.host.motor._piper = _OkPiper()
+        assert client.get("/api/tts/config").json()["piper_unavailable_reason"] is None
 
 
 def test_tts_config_surfaces_piper_and_edge_tts_status():
@@ -474,6 +553,52 @@ def test_tts_config_surfaces_piper_and_edge_tts_status():
         body = resp.json()
         assert body["piper_available"] is True
         assert body["edge_tts_offline"] is True
+
+
+def test_tts_config_surfaces_edge_breaker_degraded_state():
+    from opencohost.core.speech.speech_rate import EdgeBreaker
+
+    app = _app()
+    with TestClient(app) as client:
+        breaker = EdgeBreaker(3, 120, 900)
+        app.state.host.motor._edge_breaker = breaker
+        body = client.get("/api/tts/config").json()
+        assert body["edge_tts_degraded"] is False
+        assert body["edge_tts_last_error"] is None
+
+        for _ in range(3):
+            breaker.record_failure("http_403")
+        body = client.get("/api/tts/config").json()
+        assert body["edge_tts_degraded"] is True
+        assert body["edge_tts_last_error"] == "http_403"
+
+        breaker.record_success()
+        body = client.get("/api/tts/config").json()
+        assert body["edge_tts_degraded"] is False
+        assert body["edge_tts_last_error"] is None
+
+
+def test_tts_config_offline_reports_fixed_error_code():
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._edge_tts_offline = True
+        body = client.get("/api/tts/config").json()
+        assert body["edge_tts_offline"] is True
+        assert body["edge_tts_last_error"] == "offline"
+
+
+def test_tts_config_prefers_offline_over_stale_breaker_error():
+    from opencohost.core.speech.speech_rate import EdgeBreaker
+
+    app = _app()
+    with TestClient(app) as client:
+        breaker = EdgeBreaker(3, 120, 900)
+        for _ in range(3):
+            breaker.record_failure("http_403")
+        app.state.host.motor._edge_breaker = breaker
+        app.state.host.motor._edge_tts_offline = True
+        body = client.get("/api/tts/config").json()
+        assert body["edge_tts_last_error"] == "offline"
 
 
 def test_tts_config_does_not_touch_command_queue():
@@ -737,3 +862,132 @@ def test_update_model_reasoning_endpoint(tmp_path, monkeypatch):
         data = models_resp.json()
         assert data["is_reasoning_active"] is True
         assert data["reasoning_config"] == {"enabled": True, "budget_tokens": 1024}
+
+
+def test_update_model_reasoning_endpoint_null_budget_clears_to_auto(tmp_path, monkeypatch):
+    """T2 (controls-cleanup-adaptive-reasoning-20260928): PUT with
+    ``budget_tokens: null`` explicitly (present in the JSON body, not just
+    omitted) clears a previously-set manual cap back to Auto -- mirrors
+    PUT /api/models/context's own null-clears-to-Auto convention."""
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        client.put(
+            "/api/models/reasoning",
+            json={"enabled": True, "budget_tokens": 1024, "model": "qwen3:8b"},
+        )
+        resp = client.put(
+            "/api/models/reasoning",
+            json={"budget_tokens": None, "model": "qwen3:8b"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"enabled": True, "budget_tokens": None}
+
+        models_resp = client.get("/api/models")
+        assert models_resp.json()["reasoning_config"] == {"enabled": True, "budget_tokens": None}
+
+
+def test_update_model_reasoning_endpoint_omitted_budget_leaves_it_unchanged(tmp_path, monkeypatch):
+    """Omitting `budget_tokens` from the PUT body entirely (never present in
+    the JSON, distinct from an explicit null) must NOT clear it -- only
+    `enabled` is being toggled here, mirroring the pre-existing partial-update
+    convention for `update_model_reasoning_settings`."""
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        client.put(
+            "/api/models/reasoning",
+            json={"enabled": True, "budget_tokens": 1024, "model": "qwen3:8b"},
+        )
+        resp = client.put(
+            "/api/models/reasoning",
+            json={"enabled": False, "model": "qwen3:8b"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"enabled": False, "budget_tokens": 1024}
+
+
+def test_update_model_context_endpoint(tmp_path, monkeypatch):
+    """T2 (model_context_auto_config_20260928): PUT persists an explicit
+    override (auto-flips policy to "requested") and GET /api/models reflects
+    it immediately."""
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/models/context",
+            json={"model": "qwen3:8b", "context_tokens": 32768},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["model"] == "qwen3:8b"
+        assert body["context_tokens"] == 32768
+        assert body["policy"] == "requested"
+        assert body["auto_context_tokens"] == 16384
+
+        models_resp = client.get("/api/models")
+        assert models_resp.status_code == 200
+        ctx_cfg = models_resp.json()["context_config"]
+        assert ctx_cfg["context_tokens"] == 32768
+        assert ctx_cfg["policy"] == "requested"
+
+
+def test_update_model_context_none_clears_to_auto(tmp_path, monkeypatch):
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        client.put("/api/models/context", json={"model": "qwen3:8b", "context_tokens": 32768})
+        resp = client.put("/api/models/context", json={"model": "qwen3:8b", "context_tokens": None})
+        assert resp.status_code == 200
+        assert resp.json()["context_tokens"] is None
+
+
+def test_update_model_context_out_of_range_clamps_not_422(tmp_path, monkeypatch):
+    """Convention follows PUT /api/models/reasoning: silent clamp, no 422."""
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/models/context",
+            json={"model": "qwen3:8b", "context_tokens": 999_999_999},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["context_tokens"] == 131072  # MAX_CONTEXT_TOKENS
+
+
+def test_update_model_context_reload_glitch_never_500s(tmp_path, monkeypatch):
+    """FakeMotor has no `request_model_context_reload`: the PUT still
+    persists and returns 200, it just cannot force a live reload."""
+    import opencohost.config.model_parameters as mp
+
+    cfg_file = str(tmp_path / "model_params.json")
+    monkeypatch.setattr(mp, "MODEL_PARAMETERS_CONFIG_FILE", cfg_file)
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/models/context",
+            json={"model": "qwen3:8b", "context_tokens": 8192},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["context_tokens"] == 8192

@@ -12,7 +12,7 @@ number, a decimal) gets shredded even though nothing follows it on the
 same line yet.
 """
 
-from opencohost.core.speech.sentence_splitter import SentenceSplitter
+from opencohost.core.speech.sentence_splitter import SentenceSplitter, trim_to_last_sentence
 
 
 def test_streaming_splitter_buffers_abbreviations_and_spanish_questions():
@@ -164,3 +164,127 @@ def test_flush_on_empty_buffer_returns_nothing():
     splitter = SentenceSplitter()
 
     assert splitter.flush() == []
+
+
+# ── tts-first-chunk-boost-20261015 ──────────────────────────────────────────
+
+
+def _boost():
+    return SentenceSplitter(first_chunk_boost=True)
+
+
+def test_boost_off_by_default_keeps_soft_punctuation_inside_the_sentence():
+    splitter = SentenceSplitter()
+
+    assert splitter.feed("Bueno amigos de la audiencia, hoy toca hablar. ") == [
+        "Bueno amigos de la audiencia, hoy toca hablar."
+    ]
+
+
+def test_boost_first_chunk_ends_at_comma_with_four_words():
+    splitter = _boost()
+
+    assert splitter.feed("Bueno amigos de la audiencia, hoy toca hablar. ") == [
+        "Bueno amigos de la audiencia,",
+        "hoy toca hablar.",
+    ]
+    assert splitter.last_boundaries == ["soft", "sentence"]
+
+
+def test_boost_only_applies_to_the_first_chunk():
+    splitter = _boost()
+
+    out = splitter.feed("Uno dos tres cuatro, cinco seis siete ocho, nueve. ")
+    assert out == ["Uno dos tres cuatro,", "cinco seis siete ocho, nueve."]
+
+
+def test_boost_works_char_by_char_and_needs_whitespace_after_the_mark():
+    splitter = _boost()
+    out: list[str] = []
+    for ch in "Uno dos tres cuatro, cinco.":
+        out.extend(splitter.feed(ch))
+    assert out == ["Uno dos tres cuatro,"]
+    assert splitter.flush() == ["cinco."]
+
+
+def test_boost_requires_four_words_before_the_mark():
+    splitter = _boost()
+
+    assert splitter.feed("Hola amigos, hoy toca hablar. ") == ["Hola amigos, hoy toca hablar."]
+    assert splitter.last_boundaries == ["sentence"]
+
+
+def test_boost_never_splits_a_decimal_comma():
+    splitter = _boost()
+
+    assert splitter.feed("Mide uno coma 1,5 metros de alto. ") == [
+        "Mide uno coma 1,5 metros de alto."
+    ]
+
+
+def test_boost_handles_semicolon_colon_and_dash():
+    for mark in (";", ":", "—"):
+        splitter = _boost()
+        assert splitter.feed(f"Uno dos tres cuatro{mark} cinco seis. ") == [
+            f"Uno dos tres cuatro{mark}",
+            "cinco seis.",
+        ], mark
+
+
+def test_boost_respects_abbreviations_before_the_mark():
+    splitter = _boost()
+
+    assert splitter.feed("Uno dos tres con el Dr., cinco seis. ") == [
+        "Uno dos tres con el Dr., cinco seis."
+    ]
+
+
+def test_boost_sentence_terminator_first_marks_sentence_and_disarms():
+    splitter = _boost()
+
+    out = splitter.feed("Hola. Uno dos tres cuatro, cinco. ")
+    assert out == ["Hola.", "Uno dos tres cuatro, cinco."]
+    assert splitter.last_boundaries == ["sentence", "sentence"]
+
+
+def test_boost_flush_and_discard_unchanged():
+    splitter = _boost()
+    assert splitter.feed("Uno dos tres, cuatro") == []
+    assert splitter.flush() == ["Uno dos tres, cuatro"]
+    assert splitter.last_boundaries == ["sentence"]
+
+
+def test_trim_to_last_sentence_ignores_soft_boundaries():
+    assert trim_to_last_sentence("Uno dos tres cuatro, cinco seis") == ""
+    assert trim_to_last_sentence("Hola. Uno dos tres cuatro, cinco") == "Hola."
+
+
+def test_boost_does_not_split_after_a_year_before_the_comma():
+    # S1: "1,5" never reached the digit branch (no whitespace after the comma);
+    # this one does: >= 4 words, a digit right before ', '.
+    splitter = SentenceSplitter(first_chunk_boost=True)
+    assert splitter.feed("hasta el año 2024, cuatro veces. ") == [
+        "hasta el año 2024, cuatro veces."
+    ]
+    assert splitter.last_boundaries == ["sentence"]
+
+
+def test_soft_mark_followed_by_a_newline_is_not_a_soft_boundary():
+    splitter = SentenceSplitter(first_chunk_boost=True)
+    assert splitter.feed("Esto es lo que hay:\nConfirmado, el sorteo es manana. ") == [
+        "Esto es lo que hay:\nConfirmado, el sorteo es manana."
+    ]
+    assert splitter.last_boundaries == ["sentence"]
+
+
+def test_soft_mark_followed_by_space_then_newline_is_not_a_soft_boundary():
+    splitter = SentenceSplitter(first_chunk_boost=True)
+    assert splitter.feed("Esto es lo que hay: \nvamos con ello") == []
+
+
+def test_flush_after_soft_chunk_reports_its_own_boundary():
+    splitter = SentenceSplitter(first_chunk_boost=True)
+    assert splitter.feed("uno dos tres cuatro, cinco") == ["uno dos tres cuatro,"]
+    assert splitter.last_boundaries == ["soft"]
+    assert splitter.flush() == ["cinco"]
+    assert splitter.last_boundaries == ["sentence"]

@@ -6,22 +6,30 @@ by grep across tests/), so every import here binds directly at module load
 time -- no `deps` accessor is needed. `_COMMAND_WHITELIST`,
 `_engine_command_payload`, `_validate_command_value`, `_CHAT_TEXT_MAX_LENGTH`,
 and `_validate_chat_text` are used ONLY by this family, so they relocate here
-wholesale. `i18n_active` (opencohost.i18n) is used only by
-POST /api/chat/turn's history-wrapper call and moves with it.
+wholesale. The POST /api/chat/turn submission itself lives in
+`opencohost.api.direct_turn`, shared with the remote gateway.
 
 No parameterized (`{...}`) path exists in this family -- no CAUTION block
 needed (contrast routers/music.py, routers/perfiles.py, routers/agent.py,
 routers/memoria.py).
 """
 
-import time
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from opencohost.api.models import ChatLastReplyResponse, ChatTurnRequest, CommandRequest
+from opencohost.api.models import (
+    ChatLastReplyResponse,
+    ChatSpeechProgressResponse,
+    ChatTurnRequest,
+    CommandRequest,
+)
+from opencohost.api import chat_image
+from opencohost.api.direct_turn import submit_direct_turn
+from opencohost.core import turn_origin
+from opencohost.core.vision import direct_cloud
 from opencohost.api.shared import logger
-from opencohost.i18n import active as i18n_active
 
 router = APIRouter()
 
@@ -37,6 +45,7 @@ _COMMAND_WHITELIST = frozenset(
         "set_motor_tts",
         "switch_model",
         "switch_llm_tier",
+        "set_discard_speech_residue",
     }
 )
 
@@ -86,12 +95,19 @@ def _validate_command_value(command: str, value) -> "str | None":
         if not isinstance(value, bool):
             return "set_tts_local_only requires a boolean value"
         return None
+    if command == "set_discard_speech_residue":
+        if not isinstance(value, bool):
+            return "set_discard_speech_residue requires a boolean value"
+        return None
     return None
 
 
-def _validate_chat_text(text: str) -> "str | None":
-    """Returns None when `text` is acceptable, or a rejection reason string."""
-    if not text.strip():
+def _validate_chat_text(text: str, *, allow_empty: bool = False) -> "str | None":
+    """Returns None when `text` is acceptable, or a rejection reason string.
+
+    `allow_empty` is for an image-only turn: the pasted image supplies the
+    content. The cap applies to the operator's text only."""
+    if not text.strip() and not allow_empty:
         return "text must not be empty or whitespace-only"
     if len(text) > _CHAT_TEXT_MAX_LENGTH:
         return f"text exceeds max length of {_CHAT_TEXT_MAX_LENGTH} characters"
@@ -121,109 +137,123 @@ def post_command(request: Request, body: CommandRequest):
     return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
 
 
+def _engine_unavailable(host):
+    """409 ENGINE_UNAVAILABLE response when the engine cannot chat, else None.
+    Checked before a pasted image is described, so no vision time is wasted."""
+    from opencohost.core.engine import llm_readiness as llm_readiness_mod
+
+    readiness = llm_readiness_mod.resolve_llm_readiness(host)
+    if readiness.can_chat:
+        return None
+    return JSONResponse(
+        status_code=409,
+        content={
+            "accepted": False,
+            "detail": {
+                "error": "ENGINE_UNAVAILABLE",
+                "state": readiness.state,
+                "message": "LLM engine is not ready for inference.",
+            },
+        },
+    )
+
+
 @router.post("/api/chat/turn")
 @router.post("/api/chat/message")
 def post_chat_turn(request: Request, body: ChatTurnRequest):
     # R8-CRITICAL: this handler must never return `body.text` (or any
     # derived dialogue) in the response, and must never log it. The ack
     # below carries only accepted/command_id/status/state_version.
-    rejection = _validate_chat_text(body.text)
+    try:
+        items = chat_image.request_images(body.image, body.images)
+    except chat_image.ChatImageError as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.body())
+    rejection = _validate_chat_text(body.text, allow_empty=bool(items))
     if rejection is not None:
         return JSONResponse(status_code=422, content={"detail": rejection})
 
-    host = getattr(getattr(request, "app", None), "state", None)
-    host = getattr(host, "host", None)
-    if host is not None:
-        from opencohost.core.engine import llm_readiness as llm_readiness_mod
-
-        readiness = llm_readiness_mod.resolve_llm_readiness(host)
-        if not readiness.can_chat:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "accepted": False,
-                    "detail": {
-                        "error": "ENGINE_UNAVAILABLE",
-                        "state": readiness.state,
-                        "message": "LLM engine is not ready for inference.",
-                    },
-                },
-            )
-
     key = request.headers.get("Idempotency-Key") or body.idempotency_key
     dispatcher = request.app.state.dispatcher
-    host = request.app.state.host
-    # B1 (turn provenance): a typed turn used to commit to historial BARE, so
-    # the model could not tell WHO spoke and guessed (it referred to "the
-    # viewer before" with no chat platform connected at all). history_text
-    # gives it the same speaker frame PTT already had; the prompt payload
-    # stays the raw text, so generation behavior is unchanged.
-    # Unit 4.1 (runtime_findings_batch_20260731, F5): stamp submitted_at HERE
-    # -- the earliest backend receipt of a typed direct question -- so
-    # queue_wait_ms can later report the FULL wait (queue time was
-    # invisible to TURN_LATENCY before this unit). source="direct" made
-    # explicit alongside it (was previously left to _consume_command's
-    # default).
-    # Unit 4.2 (F12 closure): tag the item with the provider posture in
-    # effect AT SUBMIT time (unit 1.3's provider_runtime_state -- the same
-    # live truth /api/status reports), so a fallback/return that happens
-    # while this item sits queued can be disclosed on the reply instead of
-    # silently answering under a different provider with no note.
-    result = dispatcher.dispatch(
-        "process_context",
-        body.text,
-        key,
-        history_text=i18n_active.typed_history_wrapper().format(text=body.text),
-        source="direct",
-        submitted_at=time.monotonic(),
-        submitted_under_provider=host.motor.provider_runtime_state()["provider"],
-    )
-    if result.state in ("accepted", "replay"):
-        # Step 1 (direct_turn_preemption_20260803, OQ-6): while the engine is
-        # busy it only reads command_queue between dispatches, so this turn
-        # would sit there invisible until the next speech boundary -- and the
-        # interactive-pregen trigger, which works off the priority-queue HEAD,
-        # would never see it (the measured "Pregen boundary: draft=none
-        # source=direct"). Move it into the priority queue NOW, on this HTTP
-        # thread, using the engine's own existing boundary drain: it re-checks
-        # the front of command_queue under its mutex, pops only a leading
-        # explicitly-tagged source="direct" process_context, and re-enqueues it
-        # at priority 1 with its stamps. Nothing here interrupts anything --
-        # the queue is non-preemptive; the win is that the reply can now
-        # pregenerate under cover of the agenda's remaining speech.
-        #
-        # The engine-boundary call stays as the backstop for the cases this one
-        # cannot cover (a non-direct command ahead of it in FIFO, or this
-        # busy-check racing the engine going idle -- run()'s 1s idle tick picks
-        # the item up either way).
-        #
-        # Best-effort by construction: the dispatch already succeeded and the
-        # ack below is the receipt, so a motor that predates this seam
-        # (getattr) or a drain that raises must never turn a queued turn into a
-        # 500 the client would retry. Same getattr-and-call idiom the driver
-        # uses for every optional engine seam (api/agenda_driver.py).
-        motor = host.motor
-        if motor is not None and (motor.is_processing or motor.is_speaking):
-            drain = getattr(motor, "_drain_pending_direct_into_priority_queue", None)
-            if callable(drain):
-                try:
-                    drain()
-                except Exception:
-                    logger.exception("arrival-time direct drain failed; the boundary drain still covers it")
+    host = getattr(getattr(request, "app", None), "state", None)
+    host = getattr(host, "host", None)
+    if host is None:
+        host = request.app.state.host  # preserved: raises like the pre-extraction handler
+    text = body.text
+    if items:
+        # Route A. This is a sync route, so FastAPI runs it in the worker
+        # threadpool: the describe call (seconds) never blocks the event loop.
+        try:
+            decoded = chat_image.decode_images(items)
+            direct = chat_image.direct_route(host)
+            if not direct:
+                chat_image.check_vision_ready(host)
+            unavailable = _engine_unavailable(host)
+            if unavailable is not None:
+                return unavailable
+            if not direct:
+                # Per-image size and mime are logged inside describe_images, nothing else.
+                descriptions = chat_image.describe_images(host, decoded, body.text)
+        except chat_image.ChatImageError as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.body())
+        if direct:
+            # P2: the cloud chat model sees the images itself, in the same call.
+            text = chat_image.compose_direct_turn_text(body.text, len(decoded))
+            host.vision_stash_images(
+                text, [direct_cloud.shrink_for_cloud(data, mime) for data, mime in decoded]
+            )
+        else:
+            text = chat_image.compose_turn_text_multi(body.text, descriptions)
+    # runtime-fixes-20261110 T2: this route IS the desktop door; the origin is
+    # fixed here and never taken from the request.
+    outcome = submit_direct_turn(host, dispatcher, text, key, origin=turn_origin.DESKTOP)
+    if outcome.kind == "unavailable":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "accepted": False,
+                "detail": {
+                    "error": "ENGINE_UNAVAILABLE",
+                    "state": outcome.state,
+                    "message": "LLM engine is not ready for inference.",
+                },
+            },
+        )
+    if outcome.kind == "accepted":
         return {
             "accepted": True,
-            "command_id": result.command_id,
+            "command_id": outcome.result.command_id,
             "status": "queued",
             "state_version": dispatcher.state_version,
         }
-    if result.state == "conflict":
+    if outcome.kind == "conflict":
         return JSONResponse(status_code=409, content={"accepted": False, "reason": "conflict"})
     return JSONResponse(status_code=429, content={"accepted": False, "reason": "queue_full"})
 
 
 @router.get("/api/chat/last-reply", response_model=ChatLastReplyResponse)
-def get_chat_last_reply(request: Request) -> ChatLastReplyResponse:
+def get_chat_last_reply(request: Request, turn_id: Optional[int] = None):
     # R8-safe: surfaces Kira's OWN generated reply text only -- see
     # ChatReplySink docstring (engine_host.py). Never the viewer/operator
     # text that triggered it.
-    return ChatLastReplyResponse(**request.app.state.host.chat_sink.last())
+    sink = request.app.state.host.chat_sink
+    if turn_id is None:
+        return ChatLastReplyResponse(**sink.last())
+    # `?turn_id=N`: an older recent turn (follow-reading of a queued reply).
+    # 404 once it aged out of the sink window.
+    reply = sink.get(turn_id)
+    if reply is None:
+        return JSONResponse(status_code=404, content={"detail": "turn_not_found"})
+    return ChatLastReplyResponse(**reply)
+
+
+@router.get("/api/chat/speech-progress", response_model=ChatSpeechProgressResponse)
+def get_chat_speech_progress(request: Request) -> ChatSpeechProgressResponse:
+    """Real-time, in-memory speech playback progress for UI sentence tracking."""
+    host = getattr(getattr(request, "app", None), "state", None)
+    host = getattr(host, "host", None)
+    motor = getattr(host, "motor", None)
+    getter = getattr(motor, "speech_progress", None)
+    progress = getter() if callable(getter) else None
+    if not progress:
+        return ChatSpeechProgressResponse(speaking=False, turn_id=None, current_idx=None, played=0, total=0)
+    return ChatSpeechProgressResponse(**progress)

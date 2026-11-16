@@ -17,6 +17,7 @@ from opencohost.core.providers.cloud.cloud_llm_client import (
     CloudLLMResponseError,
     map_options_to_openai,
     send_chat_completion,
+    stream_chat_completion,
 )
 
 
@@ -105,6 +106,48 @@ def test_map_options_omits_max_tokens_when_num_predict_absent():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# map_options_to_openai — reasoning kwargs (nim-cloud-reasoning-off, T1)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_map_options_disables_reasoning_by_default():
+    body = map_options_to_openai("nemotron-3.5-lightning", [{"role": "user", "content": "hi"}], {})
+    assert body["chat_template_kwargs"] == {"enable_thinking": False, "thinking": False}
+
+
+def test_map_options_think_true_enables_reasoning():
+    body = map_options_to_openai(
+        "nemotron-3.5-lightning", [{"role": "user", "content": "hi"}], {"think": True}
+    )
+    assert body["chat_template_kwargs"] == {"enable_thinking": True, "thinking": True}
+
+
+def test_map_options_think_true_wins_over_disable_reasoning_off():
+    body = map_options_to_openai(
+        "nemotron-3.5-lightning",
+        [{"role": "user", "content": "hi"}],
+        {"think": True},
+        disable_reasoning=False,
+    )
+    assert body["chat_template_kwargs"] == {"enable_thinking": True, "thinking": True}
+
+
+def test_map_options_omits_kwargs_when_disable_reasoning_off_and_think_not_true():
+    body = map_options_to_openai(
+        "nemotron-3.5-lightning", [{"role": "user", "content": "hi"}], {}, disable_reasoning=False
+    )
+    assert "chat_template_kwargs" not in body
+
+
+@pytest.mark.parametrize("think_value", [True, False, None])
+def test_map_options_never_sends_think_as_top_level_key(think_value):
+    body = map_options_to_openai(
+        "nemotron-3.5-lightning", [{"role": "user", "content": "hi"}], {"think": think_value}
+    )
+    assert "think" not in body
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # send_chat_completion — request shape + response adapter
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -136,6 +179,49 @@ def test_send_posts_to_chat_completions_with_bearer_auth_and_timeout(monkeypatch
     assert captured["headers"]["Authorization"] == f"Bearer {_SENTINEL_KEY}"
     assert captured["timeout"] == 42
     assert captured["json"]["max_tokens"] == 100
+
+
+def test_send_default_disable_reasoning_sends_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(json_data={"choices": [{"message": {"content": "hi"}}], "usage": {}})
+
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
+
+    send_chat_completion(
+        base_url="https://api.example.com/v1",
+        api_key=_SENTINEL_KEY,
+        model="nemotron-3.5-lightning",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        timeout=30,
+    )
+
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False, "thinking": False}
+
+
+def test_send_disable_reasoning_false_omits_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(json_data={"choices": [{"message": {"content": "hi"}}], "usage": {}})
+
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
+
+    send_chat_completion(
+        base_url="https://api.example.com/v1",
+        api_key=_SENTINEL_KEY,
+        model="nemotron-3.5-lightning",
+        messages=[{"role": "user", "content": "hi"}],
+        options={},
+        timeout=30,
+        disable_reasoning=False,
+    )
+
+    assert "chat_template_kwargs" not in captured["json"]
 
 
 def test_send_normalizes_trailing_slash_on_base_url(monkeypatch):
@@ -196,6 +282,78 @@ def test_response_adapter_maps_content_thinking_and_usage(
     assert result["message"]["content"] == expected_content
     assert result["message"]["thinking"] == expected_thinking
     assert result["usage"] == expected_usage
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _adapt_response — inline <think> stripping (nim-cloud-reasoning-off, T3)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "message_body, expected_content, expected_thinking",
+    [
+        (
+            {"content": "<think>let me reason</think>the answer is 42"},
+            "the answer is 42",
+            "let me reason",
+        ),
+        (
+            {
+                "content": "<think>step one</think>final answer",
+                "reasoning_content": "prior reasoning",
+            },
+            "final answer",
+            "prior reasoning\nstep one",
+        ),
+        (
+            # Truncated stream: opening tag never closes -- whole content is reasoning.
+            {"content": "<think>never closes, still going"},
+            "",
+            "never closes, still going",
+        ),
+        (
+            {"content": "plain answer, no tags"},
+            "plain answer, no tags",
+            "",
+        ),
+        (
+            {"content": "<THINK>upper case tag</THINK>done"},
+            "done",
+            "upper case tag",
+        ),
+        (
+            {"content": "  <think> padded </think>  padded answer  "},
+            "padded answer",
+            "padded",
+        ),
+        (
+            # Template-injected opening tag (DeepSeek-R1 style): only the
+            # closing tag reaches content -- everything before it is reasoning.
+            {"content": "the user asks, as an AI I should</think>the answer is 42"},
+            "the answer is 42",
+            "the user asks, as an AI I should",
+        ),
+    ],
+)
+def test_response_adapter_strips_inline_think_blocks(
+    monkeypatch, message_body, expected_content, expected_thinking
+):
+    def fake_post(url, json=None, headers=None, timeout=None):
+        return _FakeResponse(json_data={"choices": [{"message": message_body}], "usage": {}})
+
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
+
+    result = send_chat_completion(
+        base_url="https://api.example.com/v1",
+        api_key=_SENTINEL_KEY,
+        model="nemotron-3.5-lightning",
+        messages=[{"role": "user", "content": "what is 6*7"}],
+        options={},
+        timeout=30,
+    )
+
+    assert result["message"]["content"] == expected_content
+    assert result["message"]["thinking"] == expected_thinking
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -322,3 +480,361 @@ def test_response_adapter_defaults_usage_when_key_absent_entirely(monkeypatch):
         timeout=30,
     )
     assert result["usage"] == {}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# stream_chat_completion — SSE streaming (live_session_fixes_20260925 T8)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeStreamResponse:
+    """Minimal ``requests.Response`` stand-in for ``stream=True`` -- iterable
+    SSE lines plus the same status/headers/close surface the streaming client
+    uses."""
+
+    def __init__(self, *, status_code=200, lines=None, text="", headers=None, request_headers=None):
+        self.status_code = status_code
+        self._lines = list(lines or [])
+        self.text = text
+        self.reason = text or "Error"
+        self.headers = headers or {}
+        self.request = _FakeRequest(request_headers or {})
+        self.closed = False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+
+    def iter_lines(self, decode_unicode=True):
+        for line in self._lines:
+            yield line
+
+    def close(self):
+        self.closed = True
+
+
+def _sse(*objs):
+    """One ``data: <json>`` line per object, terminated by ``data: [DONE]``."""
+    import json as _json
+
+    lines = [f"data: {_json.dumps(obj)}" for obj in objs]
+    lines.append("data: [DONE]")
+    return lines
+
+
+def test_stream_yields_content_deltas_then_final_usage_chunk(monkeypatch):
+    fake = _FakeStreamResponse(
+        lines=_sse(
+            {"choices": [{"delta": {"content": "Hola "}}]},
+            {"choices": [{"delta": {"content": "mundo"}}]},
+            {"choices": [{"delta": {}}], "usage": {"completion_tokens": 5, "total_tokens": 20}},
+        )
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None, stream=None):
+        captured.update(url=url, json=json, headers=headers, timeout=timeout, stream=stream)
+        return fake
+
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "hi"}],
+            options={},
+            timeout=30,
+        )
+    )
+
+    assert captured["stream"] is True
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["stream_options"] == {"include_usage": True}
+    assert captured["headers"]["Authorization"] == f"Bearer {_SENTINEL_KEY}"
+
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    assert content == "Hola mundo"
+    assert chunks[-1] == {"done": True, "usage": {"completion_tokens": 5, "total_tokens": 20}}
+    assert fake.closed is True
+
+
+def test_stream_skips_blank_and_comment_lines(monkeypatch):
+    fake = _FakeStreamResponse(
+        lines=[
+            "",
+            ": keepalive",
+            *_sse({"choices": [{"delta": {"content": "hola"}}]}),
+        ]
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="gpt-4o-mini",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    assert content == "hola"
+
+
+def test_stream_routes_reasoning_content_into_thinking(monkeypatch):
+    fake = _FakeStreamResponse(
+        lines=_sse(
+            {"choices": [{"delta": {"reasoning_content": "let me think"}}]},
+            {"choices": [{"delta": {"content": "42"}}]},
+        )
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="nemotron-3.5-lightning",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    thinking = "".join(c["message"]["thinking"] for c in chunks if not c.get("done"))
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    assert thinking == "let me think"
+    assert content == "42"
+
+
+@pytest.mark.parametrize(
+    "deltas, expected_content, expected_thinking",
+    [
+        # <think> open tag split across two deltas, close tag whole.
+        (["<thi", "nk>reasoning here</think>content after"], "content after", "reasoning here"),
+        # Close tag split across deltas too.
+        (["<think>reasoning", " here</thi", "nk>content after"], "content after", "reasoning here"),
+        # Orphan </think> at stream start (template-injected opening, no <think> ever sent).
+        (["the model reasoned</thi", "nk>final answer"], "final answer", "the model reasoned"),
+        # No tags at all -- passes through as content untouched.
+        (["plain ", "content ", "only"], "plain content only", ""),
+    ],
+)
+def test_stream_think_tag_state_machine_across_chunk_boundaries(
+    monkeypatch, deltas, expected_content, expected_thinking
+):
+    fake = _FakeStreamResponse(
+        lines=_sse(*[{"choices": [{"delta": {"content": d}}]} for d in deltas])
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="nemotron-3.5-lightning",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    thinking = "".join(c["message"]["thinking"] for c in chunks if not c.get("done"))
+    assert content == expected_content
+    assert thinking == expected_thinking
+
+
+def test_stream_non_2xx_raises_sanitized_error_before_any_chunk(monkeypatch):
+    """Same F2 security posture as send_chat_completion: the key must be
+    unreachable from the raised exception's object graph, and the error
+    surfaces on the FIRST iteration, before any content chunk is produced."""
+    fake = _FakeStreamResponse(
+        status_code=401,
+        text="Unauthorized",
+        request_headers={"Authorization": f"Bearer {_SENTINEL_KEY}"},
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    gen = stream_chat_completion(
+        base_url="https://api.example.com/v1",
+        api_key=_SENTINEL_KEY,
+        model="gpt-4o-mini",
+        messages=[],
+        options={},
+        timeout=30,
+    )
+    with pytest.raises(CloudLLMResponseError) as excinfo:
+        next(gen)
+    exc = excinfo.value
+    assert _SENTINEL_KEY not in str(exc)
+    assert _SENTINEL_KEY not in repr(exc)
+    assert getattr(exc, "response", None) is None
+    assert getattr(exc, "request", None) is None
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    assert fake.closed is True
+
+
+def test_stream_closes_response_on_early_generator_close(monkeypatch):
+    """An aborted turn (guard trip, cancel token) closes the generator early
+    -- the underlying HTTP response/socket must close too, freeing the
+    connection the same way the local streaming seam frees the Ollama
+    runner."""
+    # Long enough to clear the pre-first-tag holdback (_PRE_FIRST_TAG_HOLDBACK)
+    # so the first line streams out immediately, exercising a real mid-stream
+    # abort rather than "nothing was ever yielded yet".
+    first_delta = "uno dos tres " * 6  # 78 chars, no '<' anywhere: zero tag risk
+    fake = _FakeStreamResponse(
+        lines=_sse(
+            {"choices": [{"delta": {"content": first_delta}}]},
+            {"choices": [{"delta": {"content": "cuatro"}}]},
+            {"choices": [{"delta": {"content": "cinco"}}]},
+        )
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    gen = stream_chat_completion(
+        base_url="https://api.example.com/v1",
+        api_key=_SENTINEL_KEY,
+        model="gpt-4o-mini",
+        messages=[],
+        options={},
+        timeout=30,
+    )
+    first = next(gen)
+    # Some non-empty prefix streams immediately (the pre-first-tag holdback
+    # keeps a bounded trailing slice in reserve -- see
+    # _ThinkTagStreamSplitter -- so this need not be the WHOLE first delta).
+    assert first["message"]["content"]
+    assert first_delta.startswith(first["message"]["content"])
+    assert fake.closed is False
+    gen.close()
+    assert fake.closed is True
+
+
+def test_stream_closes_response_on_normal_exhaustion(monkeypatch):
+    fake = _FakeStreamResponse(lines=_sse({"choices": [{"delta": {"content": "hola"}}]}))
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="gpt-4o-mini",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    assert fake.closed is True
+
+
+def test_stream_ignores_unparseable_data_lines(monkeypatch):
+    """A malformed JSON payload on one SSE line must not kill the whole
+    stream -- skip it and keep consuming."""
+    fake = _FakeStreamResponse(
+        lines=[
+            "data: {not valid json",
+            *_sse({"choices": [{"delta": {"content": "hola"}}]}),
+        ]
+    )
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **kw: fake,
+    )
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="gpt-4o-mini",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    assert content == "hola"
+
+
+def test_stream_sends_disable_reasoning_kwargs_by_default(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None, stream=None):
+        captured["json"] = json
+        return _FakeStreamResponse(lines=_sse())
+
+    monkeypatch.setattr("opencohost.core.providers.cloud.cloud_llm_client.requests.post", fake_post)
+
+    list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="nemotron-3.5-lightning",
+            messages=[],
+            options={},
+            timeout=30,
+        )
+    )
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False, "thinking": False}
+
+
+class _Latin1DefaultStreamResponse(_FakeStreamResponse):
+    """Mirrors real ``requests`` for ``text/event-stream`` with no charset:
+    the body arrives as UTF-8 bytes, but ``decode_unicode=True`` decodes with
+    the ISO-8859-1 default -- the mojibake seen live on 2026-09-25."""
+
+    encoding = "ISO-8859-1"
+
+    def iter_lines(self, decode_unicode=False):
+        for line in self._lines:
+            raw = line.encode("utf-8")
+            yield raw.decode(self.encoding) if decode_unicode else raw
+
+
+def test_stream_decodes_utf8_even_when_server_omits_charset(monkeypatch):
+    import json as _json
+
+    lines = [
+        "data: " + _json.dumps({"choices": [{"delta": {"content": "¿Qué tal? configuración"}}]}, ensure_ascii=False),
+        "data: [DONE]",
+    ]
+    fake = _Latin1DefaultStreamResponse(lines=lines)
+    monkeypatch.setattr(
+        "opencohost.core.providers.cloud.cloud_llm_client.requests.post",
+        lambda *a, **k: fake,
+    )
+
+    chunks = list(
+        stream_chat_completion(
+            base_url="https://api.example.com/v1",
+            api_key=_SENTINEL_KEY,
+            model="z-ai/glm-5.3-flash",
+            messages=[{"role": "user", "content": "hola"}],
+            options={},
+            timeout=30,
+        )
+    )
+
+    content = "".join(c["message"]["content"] for c in chunks if not c.get("done"))
+    assert content == "¿Qué tal? configuración"

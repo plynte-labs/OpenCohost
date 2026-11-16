@@ -7,10 +7,11 @@ Single authoritative state resolver evaluating whether the active LLM engine
 from __future__ import annotations
 
 import logging
-import os
-import shutil
+import json
+import re
+import urllib.request
 from dataclasses import asdict, dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from opencohost.config.settings import _canonical_model_tag
 
@@ -71,24 +72,27 @@ def _detect_gpu_hardware() -> tuple[Optional[str], int]:
 
 def get_hardware_guideline() -> dict[str, Any]:
     """Return hardware-aware model recommendations based on total VRAM.
-    
+
     Recommendations guide the user toward fast, reliable startup without
     prohibiting manual overrides:
-      < 5000 MB: gemma4:e2b
-      5000 - 11000 MB: gemma4:e4b (ideal for 6GB-8GB GPUs like RTX 5060/4060)
-      >= 11000 MB: gemma4:12b
+      no GPU detected (VRAM 0 / detection failure): qwen3:1.7b, cpu_only=True
+      < 5000 MB: qwen3:1.7b
+      5000 - 7499 MB: hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_M (6 GB cards)
+      >= 7500 MB: hf.co/unsloth/gemma-4-E4B-it-GGUF:IQ4_NL
     """
     gpu_name, total_vram_mb = _detect_gpu_hardware()
+    cpu_only = total_vram_mb <= 0
     if total_vram_mb < 5000:
-        recommended_tag = "gemma4:e2b"
-    elif total_vram_mb < 11000:
-        recommended_tag = "gemma4:e4b"
+        recommended_tag = "qwen3:1.7b"
+    elif total_vram_mb < 7500:
+        recommended_tag = "hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_M"
     else:
-        recommended_tag = "gemma4:12b"
+        recommended_tag = "hf.co/unsloth/gemma-4-E4B-it-GGUF:IQ4_NL"
 
     return {
         "gpu_name": gpu_name,
         "total_vram_mb": total_vram_mb,
+        "cpu_only": cpu_only,
         "recommended_tag": recommended_tag,
         "recommended_command": f"ollama run {recommended_tag}",
     }
@@ -99,35 +103,70 @@ def get_hardware_guideline() -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────────
 
 def _detect_ollama_binary() -> tuple[Optional[str], bool]:
-    """Check if ollama executable is present in PATH or standard installation directory.
+    """Check if ollama executable is present in PATH or a standard install dir.
+
+    Delegates to the shared finder (also used by the eager wake), so the two
+    can never disagree about whether Ollama is installed.
 
     Returns:
         (binary_path, in_path): path string and whether it was found directly in PATH.
     """
-    which_path = shutil.which("ollama")
-    if which_path:
-        return (which_path, True)
+    from opencohost.core import ollama_locator
 
-    # Check default Windows installation directory
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        default_win_path = os.path.join(local_app_data, "Programs", "Ollama", "ollama.exe")
-        if os.path.isfile(default_win_path):
-            return (default_win_path, False)
+    return ollama_locator.locate_ollama_binary()
 
-    # Check common UNIX fallbacks
-    for fallback in ("/usr/local/bin/ollama", "/usr/bin/ollama"):
-        if os.path.isfile(fallback):
-            return (fallback, False)
 
-    return (None, False)
+# Minimum Ollama build we expect for the default ``gemma4`` family. Below it the
+# model may fail to load or answer; readiness only WARNS (never blocks), because
+# the floor is a best estimate and the owner may run a patched build.
+# ASSUMPTION (unverified against Ollama release notes): 0.20.0. The only builds
+# this repo has been measured on are 0.30.11 (owner) and python client 0.6.2.
+MIN_OLLAMA_VERSION: tuple[int, ...] = (0, 20, 0)
+
+_VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
+_old_version_warned = False
+
+
+def parse_ollama_version(raw: Any) -> Optional[tuple[int, ...]]:
+    """"0.30.11" / "v0.9.0-rc2" -> (0, 30, 11) / (0, 9, 0); anything else -> None."""
+    if not isinstance(raw, str):
+        return None
+    match = _VERSION_RE.match(raw.strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def ollama_version_supported(raw: Any) -> Optional[bool]:
+    """True/False against MIN_OLLAMA_VERSION, None when the version is unknown."""
+    parsed = parse_ollama_version(raw)
+    if parsed is None:
+        return None
+    width = max(len(parsed), len(MIN_OLLAMA_VERSION))
+    pad = lambda t: tuple(t) + (0,) * (width - len(t))  # noqa: E731
+    return pad(parsed) >= pad(MIN_OLLAMA_VERSION)
+
+
+def _fetch_ollama_version(timeout: float = 1.5) -> Optional[str]:
+    """GET /api/version on the main daemon; None on any failure."""
+    try:
+        from opencohost.core.vision.model_inventory import main_ollama_base_url
+
+        url = main_ollama_base_url().rstrip("/") + "/api/version"
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        version = data.get("version") if isinstance(data, dict) else None
+        return str(version) if version else None
+    except Exception:
+        return None
 
 
 def _ping_ollama(timeout: float = 1.5) -> tuple[bool, Optional[str], list[str]]:
     """Probe local Ollama daemon for reachability and installed model tags.
-    
+
     Returns:
-        (reachable, version, installed_models)
+        (reachable, version, installed_models). ``version`` is the real build
+        from GET /api/version, or None when the daemon did not report one.
     """
     try:
         import ollama
@@ -148,8 +187,7 @@ def _ping_ollama(timeout: float = 1.5) -> tuple[bool, Optional[str], list[str]]:
             if tag:
                 tags.add(tag)
 
-        version = getattr(response, "version", None) or "available"
-        return (True, str(version), sorted(tags))
+        return (True, _fetch_ollama_version(timeout), sorted(tags))
     except Exception:
         return (False, None, [])
 
@@ -170,6 +208,7 @@ def _check_cloud_key_configured(profile_id: str = "cloud") -> bool:
 
 
 def _probe_cloud_status(
+    profile_id: Union[str, dict[str, Any]] = "cloud",
     cloud_profile: Optional[dict[str, Any]] = None,
     timeout: float = 3.0,
 ) -> tuple[bool, Optional[str]]:
@@ -179,8 +218,12 @@ def _probe_cloud_status(
         from opencohost.api import deps
         from opencohost.stream_admin.oauth_store import OAuthStore
 
+        if isinstance(profile_id, dict):
+            cloud_profile = profile_id
+            profile_id = "cloud"
+
         store = OAuthStore(deps.llm_keys_file())
-        token = store.load("cloud")
+        token = store.load(profile_id)
         api_key = token.get("api_key") if isinstance(token, dict) else ""
         if not api_key:
             return (False, "invalid_credentials")
@@ -239,6 +282,17 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
 
         binary_path, in_path = _detect_ollama_binary()
 
+        version_supported = ollama_version_supported(version) if reachable else None
+        global _old_version_warned
+        if version_supported is False and not _old_version_warned:
+            _old_version_warned = True
+            logger.warning(
+                "Ollama %s is older than the minimum %s expected for gemma4; "
+                "update Ollama if the model fails to load.",
+                version,
+                ".".join(str(n) for n in MIN_OLLAMA_VERSION),
+            )
+
         if not reachable:
             state = STATE_LOCAL_OLLAMA_OFFLINE if binary_path else STATE_LOCAL_OLLAMA_MISSING
             can_chat = False
@@ -267,6 +321,8 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
                 "binary_found": bool(binary_path),
                 "binary_path": binary_path,
                 "in_path": in_path,
+                "min_version": ".".join(str(n) for n in MIN_OLLAMA_VERSION),
+                "version_supported": version_supported,
             },
             cloud={
                 "configured": False,
@@ -278,11 +334,11 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
 
     # 2. Cloud Provider
     cloud_profiles = provider_cfg.get("profiles", {})
-    cloud_profile = cloud_profiles.get("cloud") or cloud_profiles.get(active_provider) or {}
-    provider_id = cloud_profile.get("provider_id", "nvidia")
+    cloud_profile = cloud_profiles.get(active_provider) or {}
+    provider_id = cloud_profile.get("provider_id") or cloud_profile.get("preset") or active_provider
     selected_model = cloud_profile.get("model") or "meta/llama-3.1-70b-instruct"
 
-    key_configured = _check_cloud_key_configured("cloud")
+    key_configured = _check_cloud_key_configured(active_provider)
     if not key_configured:
         return LlmReadinessResult(
             state=STATE_CLOUD_UNCONFIGURED,
@@ -298,7 +354,7 @@ def resolve_llm_readiness(host: Any) -> LlmReadinessResult:
             hardware=hardware,
         )
 
-    success, err_reason = _probe_cloud_status(cloud_profile)
+    success, err_reason = _probe_cloud_status(active_provider, cloud_profile)
     if success:
         state = STATE_CLOUD_READY
         can_chat = True

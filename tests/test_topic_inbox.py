@@ -132,6 +132,20 @@ def test_propose_code_in_angle(tmp_path: Path) -> None:
         store.propose(title="Valid title", angle="function() => {}", tags=[], source="")
 
 
+# K4 (G4b): the inbox shares the controller's structural code detection, so
+# plain English topics with "from"/"update"/"class"/"select" are accepted.
+@pytest.mark.parametrize("title,angle", [
+    ("Games from the 90s", "Which ones still hold up today."),
+    ("Patch update thoughts", "What the update changed for the meta."),
+    ("The class system", "Is the new class system any good?"),
+    ("Main picks", "Is it worth it to select a main?"),
+])
+def test_propose_plain_english_topic_is_not_code(tmp_path: Path, title: str, angle: str) -> None:
+    store, _ = make_store(tmp_path)
+    row = store.propose(title=title, angle=angle, tags=[], source="")
+    assert row["title"] == title
+
+
 # ---------------------------------------------------------------------------
 # 9. Dedupe: same slug updates instead of duplicating
 # ---------------------------------------------------------------------------

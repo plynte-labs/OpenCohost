@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: MIT
-"""Generate packaging/_release_meta.py for release launcher builds.
+"""Generate packaging/_release_meta.py (VERSION, SRC_ZIP_URL, SRC_ZIP_SHA256).
 
-The launcher (packaging/launcher.py) imports an optional ``_release_meta``
-module providing VERSION, SRC_ZIP_URL and SRC_ZIP_SHA256. CI generates that
-module right before running PyInstaller so the frozen launcher knows which
-source zip to download and how to verify it.
+The legacy PyInstaller launcher that consumed this module was removed on
+2026-11-12; the script is kept as a standalone release-metadata generator.
 
 Usage:
     python packaging/build_release_meta.py \

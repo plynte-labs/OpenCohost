@@ -196,11 +196,14 @@ class TestQwenDegradationWhenNoPython:
         with patch.dict(os.environ, {"XTTS_PYTHON": "/fake/python"}, clear=False):
             with patch("opencohost.config.storage.STORAGE_CONFIG_FILE", yaml_cfg):
                 mgr = QwenProcessManager()
-                with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
-                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
-                        with patch.object(mgr, "_check_health", return_value=True):
-                            mock_popen.return_value.poll.return_value = None
-                            result = mgr.start()
+                # RETIRED 2026-09-21: server_qwen.py lives in a separate legacy repository;
+                # cover the manual-restore spawn path with the script present.
+                with patch("opencohost.core.observability.health_monitor.os.path.isfile", return_value=True):
+                    with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                        with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+                            with patch.object(mgr, "_check_health", return_value=True):
+                                mock_popen.return_value.poll.return_value = None
+                                result = mgr.start()
 
         assert result is True
         call_args = mock_popen.call_args

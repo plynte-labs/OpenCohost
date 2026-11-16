@@ -111,6 +111,7 @@ class TestAgentCardsList:
             "expires_at",
             "updated_at",
             "single_use",
+            "active",
         }
         assert cards[0]["topic"] == "Projection shape topic"
         assert cards[0]["status"] == "draft"

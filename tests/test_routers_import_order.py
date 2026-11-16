@@ -22,11 +22,13 @@ import pytest
 
 # One router per wave (B4 obs, B5 agent, B6 memoria) -- all go through the
 # same `opencohost.api.shared`/`deps` seam now. The package-level test below
-# covers ALL 15 regardless; these direct cases just localize a failure.
+# covers ALL registered routers regardless; these direct cases just localize a failure.
 _ROUTER_MODULES = [
     "opencohost.api.routers.obs",
     "opencohost.api.routers.agent",
     "opencohost.api.routers.memoria",
+    "opencohost.api.routers.model_downloads",
+    "opencohost.api.routers.remote",
 ]
 
 
@@ -42,9 +44,11 @@ def test_router_importable_first_on_fresh_interpreter(module):
 
 def test_routers_package_importable_first_on_fresh_interpreter():
     """The package `__init__.py` itself (ALL_ROUTERS) must also survive
-    being the first thing imported, not just an individual submodule."""
+    being the first thing imported, not just an individual submodule.
+
+    30 routers since d3439bd added ``update`` (GitHub release notice)."""
     result = subprocess.run(
-        [sys.executable, "-c", "from opencohost.api.routers import ALL_ROUTERS; assert len(ALL_ROUTERS) == 15"],
+        [sys.executable, "-c", "from opencohost.api.routers import ALL_ROUTERS; assert len(ALL_ROUTERS) == 30"],
         capture_output=True,
         text=True,
     )

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -34,6 +34,24 @@ KEEP an item only if ALL SIX hold:
 5. DURABLE — still true next month. Reject anything about the current moment.
 6. ATTRIBUTABLE — it is clear whose fact it is.
 
+ALSO REJECT, even when the six above look satisfied:
+- NOT ABOUT THE ASSISTANT — the item is about Kira/the assistant itself: its
+  identity, its role, who created it, or its own opinions and recommendations.
+  Reject it, even when it sounds specific. Anything supported ONLY by the
+  "Kira:" side of an exchange (never confirmed by the operator) is not
+  attributable to the operator either — reject that the same way.
+- GENERAL KNOWLEDGE — the item is a definition, an aphorism, a motivational
+  line or a general truth anyone could already know, with nothing operator-
+  specific in it. Reject it.
+
+ORIGIN: for every item say whose fact it is.
+  "self_stated"    — the operator said it about themselves or their own
+                     life, plans, tastes or setup.
+  "shared_content" — the operator relayed someone or something else: chat,
+                     a video, an article, a friend, a rumour. Write the
+                     sentence about that source ("A video the operator
+                     shared says ..."), never as a fact about the operator.
+
 NAMES: never invent, normalise, translate or "correct" a proper noun. Game
 titles, model names, tools and people usually appear only ONCE — that is
 normal and is NOT a reason to reject. Copy the operator's own spelling
@@ -42,13 +60,13 @@ KEEP the item and set "uncertain": true.
 
 Write each rewrite in the SAME LANGUAGE the operator used, in at most 30 words.
 
-CANDIDATES:
+{existing_block}CANDIDATES:
 {draft_block}
 
 Reply with JSON only, no prose, no markdown fence:
-{"decisions":[{"i":1,"keep":true,"text":"<standalone sentence>"},
-              {"i":2,"keep":true,"text":"<sentence>","uncertain":true},
-              {"i":3,"keep":false,"reason":"vague"}]}
+{"decisions":[{"i":1,"keep":true,"text":"<standalone sentence>","origin":"self_stated"},
+              {"i":2,"keep":true,"text":"<sentence>","uncertain":true,"origin":"shared_content"},
+              {"i":3,"keep":false,"reason":"vague","origin":"self_stated"}]}
 
 Field contract:
   i          int, 1..N, exactly one object per candidate number
@@ -56,11 +74,89 @@ Field contract:
   text       string, required when keep is true, <=220 characters
   uncertain  bool, optional, only meaningful when keep is true
   reason     string, only when keep is false; one of:
-             vague, speculative, trivial, transient, not_attributable
+             vague, speculative, trivial, transient, not_attributable,
+             assistant_sourced, general_knowledge
+  origin     string, required; one of: self_stated, shared_content
 
 If unsure whether to keep an item, use keep:false."""
 
+# F2: prepended before CANDIDATES only when related EXISTING facts were found
+# (str.replace target "{existing_facts}"). Same-call Mem0-style actions.
+_PROMOTION_EXISTING_BLOCK = """EXISTING FACTS already remembered about this operator (text only):
+{existing_facts}
+
+Candidates tagged [related: E#] may relate to those facts. For every candidate
+you KEEP, also set "action":
+  "new"       — a fact not covered by any existing fact. This is the default.
+  "duplicate" — the SAME fact as one existing fact, adding nothing. Set
+                "target" to that label, for example "E1".
+  "update"    — same subject as one existing fact but a changed or newer value,
+                or it contradicts that fact. Set "target" to that label.
+Only the labels listed above are valid targets. If unsure between update and
+new, use "new". If unsure between duplicate and new, use "new".
+
+"""
+
 _PROMOTION_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# T1 (memory-noise-amplification-20260928): deterministic post-parse guard —
+# defense in depth, since small local judge models follow the "NOT ABOUT THE
+# ASSISTANT" prompt rule above only loosely.
+# ---------------------------------------------------------------------------
+
+# The assistant's persona name is hardcoded here as "Kira" plus generic
+# English/Spanish assistant/co-host terms, rather than read from a
+# configurable persona-name setting: OpenCohost ships exactly one persona
+# today and no settings key names it (checked 2026-09-28).
+# Revisit this constant if a configurable persona name is ever added.
+#
+# Every Kira-specific alternative requires a reporting/copular VERB right
+# after "Kira" so the guard fires only when Kira is the clause's grammatical
+# SUBJECT. A sentence that only mentions Kira as an OBJECT — "El operador
+# creó a Kira para su stream" — never matches: "Kira" there is followed by
+# "para", not a verb, so the rewrite stays a keeper.
+#
+# NOTE (parent review 2026-09-28): this also catches "El operador dijo que
+# Kira es graciosa" (an OPERATOR opinion ABOUT Kira, not Kira's own words) --
+# accepted on purpose. An operator's passing opinion about the co-host is low
+# value, and un-catching it would mean relaxing "Kira es" itself, which is
+# exactly the pattern that must fire on Kira's own self-description. Not
+# widening or narrowing the regex for this case.
+_ASSISTANT_SUBJECT_PATTERNS: tuple[str, ...] = (
+    r"\bsoy\s+kira\b",
+    r"\bi\s*['’]?m\s+kira\b",
+    r"\bi\s+am\s+kira\b",
+    r"\bkira\s+(?:is|was|says?|said|states?|stated|recommends?|recommended|"
+    r"thinks?|thought|believes?|believed|opines?|dijo|afirm[oó]|recomienda|"
+    r"recomend[oó]|piensa|pens[oó]|cree|crey[oó]|opina|opin[oó]|es|fue|era)\b",
+    r"\bthe\s+assistant\b",
+    r"\bla\s+asistente\b",
+    r"\bel\s+asistente\b",
+    r"\bsoy\s+(?:la\s+|el\s+)?(?:co-?host|copresentador[ea]?|asistente)\b",
+    r"\bi\s+am\s+(?:the\s+)?(?:co-?host|assistant)\b",
+)
+_ASSISTANT_SUBJECT_RE = re.compile(
+    "|".join(_ASSISTANT_SUBJECT_PATTERNS), re.IGNORECASE,
+)
+
+
+def _apply_assistant_subject_guard(
+    decisions: list[tuple[int, str | None, bool, str]],
+) -> list[tuple[int, str | None, bool, str]]:
+    """Downgrade a KEEP to a REJECT (``assistant_sourced``) when the judge's
+    own rewritten TEXT has Kira/the assistant as its grammatical subject.
+
+    Pure, deterministic, and applied AFTER schema validation — a reject entry
+    is passed through untouched (there is no text to check). Never raises."""
+    guarded: list[tuple[int, str | None, bool, str]] = []
+    for index, text, uncertain, reason in decisions:
+        if text is not None and _ASSISTANT_SUBJECT_RE.search(text):
+            guarded.append((index, None, False, "assistant_sourced"))
+        else:
+            guarded.append((index, text, uncertain, reason))
+    return guarded
 
 
 @dataclass(frozen=True)
@@ -68,6 +164,13 @@ class PromotionParseDiagnostics:
     decisions: list[tuple[int, str | None, bool, str]]
     top_level_valid: bool
     unresolved: dict[int, str]
+    # ADR-062: index -> judge origin (None when missing/invalid) for KEEP
+    # decisions only. A side channel so the 4-tuple contract stays intact.
+    origins: dict[int, str | None] = field(default_factory=dict)
+    # F2: index -> (action, "E#") for KEEP decisions whose judge action is
+    # duplicate/update with a well-formed target. Everything else is "new" and
+    # absent here (backward-compatible default).
+    actions: dict[int, tuple[str, str]] = field(default_factory=dict)
 
 
 class _PromotionState(Enum):
@@ -119,7 +222,7 @@ def _parse_promotion_decisions(text: str, batch_len: int) -> list[tuple[int, str
             results.append((index, decision.text or "", bool(decision.uncertain), ""))
         else:
             results.append((index, None, False, decision.reason or "unspecified"))
-    return results
+    return _apply_assistant_subject_guard(results)
 
 
 def _parse_promotion_diagnostics(text: str, batch_len: int) -> PromotionParseDiagnostics:
@@ -139,6 +242,9 @@ def _parse_promotion_diagnostics(text: str, batch_len: int) -> PromotionParseDia
 
     decisions = _parse_promotion_decisions(text, batch_len)
     decision_indices = {d[0] for d in decisions}
+    origins = _parse_promotion_origins(
+        stripped, {d[0] for d in decisions if d[1] is not None},
+    )
 
     raw_counts: dict[int, int] = {}
     present_indices: set[int] = set()
@@ -164,4 +270,48 @@ def _parse_promotion_diagnostics(text: str, batch_len: int) -> PromotionParseDia
         decisions=decisions,
         top_level_valid=True,
         unresolved=unresolved,
+        origins=origins,
+        actions=_parse_promotion_actions(
+            stripped, {d[0] for d in decisions if d[1] is not None},
+        ),
     )
+
+
+def _parse_promotion_origins(stripped: str, kept: set[int]) -> dict[int, str | None]:
+    """Origins of the applied KEEP decisions (*kept* indices), re-read through
+    the same strict model so an invalid value maps to None. Never raises."""
+    try:
+        from opencohost.core.memory.models import MemoryJudgeResult
+        parsed = MemoryJudgeResult.model_validate_json(stripped)
+    except Exception:
+        return {}
+    origins: dict[int, str | None] = {}
+    for decision in parsed.decisions:
+        if decision.i in kept and decision.i not in origins:
+            origins[decision.i] = decision.origin
+    return origins
+
+
+_TARGET_LABEL_RE = re.compile(r"^E([1-9][0-9]?)$")
+
+
+def _parse_promotion_actions(stripped: str, kept: set[int]) -> dict[int, tuple[str, str]]:
+    """F2: (action, target) of the applied KEEP decisions. A missing/invalid
+    action, or a duplicate/update without a well-formed ``E#`` target,
+    degrades to "new" (omitted). Whether the label exists is the validator's
+    job (``promotion_related.resolve_judge_actions``). Never raises."""
+    try:
+        from opencohost.core.memory.models import MemoryJudgeResult
+        parsed = MemoryJudgeResult.model_validate_json(stripped)
+    except Exception:
+        return {}
+    actions: dict[int, tuple[str, str]] = {}
+    for decision in parsed.decisions:
+        if decision.i not in kept or decision.i in actions:
+            continue
+        if decision.action not in ("duplicate", "update") or not decision.target:
+            continue
+        label = decision.target.upper()
+        if _TARGET_LABEL_RE.match(label):
+            actions[decision.i] = (decision.action, label)
+    return actions

@@ -30,6 +30,19 @@ from opencohost.i18n import active as i18n_active
 
 
 @pytest.fixture(autouse=True)
+def _pin_medium_reply_length():
+    """reply-length-selector-20261009: the default ``auto`` mode would size the
+    short test turn as ``short`` and swap the persona's 2-4 line. These tests
+    pin personalization byte-identity, so they run at ``medium``, the level
+    that is byte-identical to the pre-selector prompt."""
+    from opencohost.config import reply_length
+
+    reply_length.set_reply_length_mode("medium")
+    yield
+    reply_length.reset_reply_length()
+
+
+@pytest.fixture(autouse=True)
 def _pin_es_locale():
     """Pin the active locale to es (matches tests/test_memorias_retrieval.py)
     so the delimiter block and user-message label render deterministically."""
@@ -106,12 +119,12 @@ def test_injection_present_for_direct_and_ptt(monkeypatch, tmp_path, source):
     messages = _capture_messages(motor, "hablemos de musica", source=source)
     final_content = messages[-1]["content"]
 
-    assert "perfil_streamer" in final_content
+    assert "perfil_usuario" in final_content
     assert "nickname: Ash" in final_content
     # W1: block sits at the system position — before the user-message label,
     # not prepended into the user turn.
-    label = f"[{i18n_active.user_message_label()}]:"
-    assert final_content.index("perfil_streamer") < final_content.index(label)
+    label = "[Ash]:"
+    assert final_content.index("perfil_usuario") < final_content.index(label)
 
 
 def test_injection_first_before_memorias_block(monkeypatch, tmp_path):
@@ -122,21 +135,21 @@ def test_injection_first_before_memorias_block(monkeypatch, tmp_path):
     monkeypatch.setattr(
         motor,
         "_build_memorias_injection_block",
-        lambda profile_id, contexto: "<memorias_guardadas>fake memoria</memorias_guardadas>",
+        lambda profile_id, contexto, lang=None: "<memorias_guardadas>fake memoria</memorias_guardadas>",
     )
 
     messages = _capture_messages(motor, "hablemos de musica synthwave", source="direct")
     final_content = messages[-1]["content"]
 
-    assert "perfil_streamer" in final_content
+    assert "perfil_usuario" in final_content
     # D1 put the bare <memorias_guardadas> tag in the system prompt; assert on
     # the injection-only close tag so the ordering compares the real blocks.
     assert "</memorias_guardadas>" in final_content
     # W1: personalization is at the system position (before [label]:); memorias
     # rides in the user context after it — so perfil still precedes memorias.
-    label = f"[{i18n_active.user_message_label()}]:"
-    assert final_content.index("perfil_streamer") < final_content.index(label)
-    assert final_content.index("perfil_streamer") < final_content.index("</memorias_guardadas>")
+    label = "[Ash]:"
+    assert final_content.index("perfil_usuario") < final_content.index(label)
+    assert final_content.index("perfil_usuario") < final_content.index("</memorias_guardadas>")
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +167,7 @@ def test_injection_absent_for_non_qualifying_sources(monkeypatch, tmp_path, sour
     messages = _capture_messages(motor, "hablemos de musica", source=source)
     all_content = " ".join(m.get("content", "") for m in messages)
 
-    assert "perfil_streamer" not in all_content
+    assert "perfil_usuario" not in all_content
 
 
 # ---------------------------------------------------------------------------
@@ -170,9 +183,18 @@ def _expected_prompt_without_personalization(motor) -> str:
     grounding_rules section in grounding_authority_temporal_humility: the engine
     appends it at the SYSTEM position on every turn, so it belongs in the
     expected value — it is not personalization output.
+
+    qwen-runtime-fixes-20260928 T3 (owner decision 2026-09-28): owner sources
+    (direct/ptt) also always carry the active-model line now (Kira may name
+    the model she runs on) -- it belongs in the expected value for the same
+    reason grounding_rules does: it is not personalization output either.
     """
+    from opencohost.core.context.prompt_assembler import OWNER_RESPONSE_POLICY
+    model_label = i18n_active.active_model_label().format(model=motor.current_model)
     return (
         f"{motor.system_prompt}\n\n{i18n_active.grounding_rules()}"
+        f"\n\n{OWNER_RESPONSE_POLICY}"
+        f"\n\n{model_label}"
         f"\n\n[{i18n_active.user_message_label()}]: hablemos de musica"
     )
 
@@ -220,4 +242,4 @@ def test_build_injection_block_raising_fails_open_turn_still_succeeds(monkeypatc
     messages = _capture_messages(motor, "hablemos de musica", source="direct")
 
     assert messages
-    assert "perfil_streamer" not in messages[-1]["content"]
+    assert "perfil_usuario" not in messages[-1]["content"]
