@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -126,6 +127,91 @@ class TestStartupModelResolution:
         assert motor._model_source == "invalid_saved_fallback"
 
 
+def _deny_network_connections(monkeypatch):
+    def deny(*_args, **_kwargs):
+        raise AssertionError("T9 model identity tests must use fake transports only")
+
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+
+
+def test_cloud_prompt_identity_matches_active_profile_not_local_alias(tmp_path, monkeypatch):
+    """Owner model identity must match the cloud model sent in this turn."""
+    _deny_network_connections(monkeypatch)
+    motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
+    local_model = "gemma4:e4b"
+    cloud_model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    fake_api_key = "FAKE_T9_API_KEY_MUST_NOT_ENTER_PROMPT"
+    motor.current_model = local_model
+    motor._provider_config = {
+        "active_provider": "nvidia_nim",
+        "fallback_mode": "auto",
+        "pregen_enabled": False,
+        "profiles": {
+            "nvidia_nim": {
+                "base_url": "https://example.test/v1",
+                "model": cloud_model,
+            }
+        },
+    }
+    from opencohost.core.self_knowledge.providers import ModelProvider
+    from opencohost.core.self_knowledge.service import SelfKnowledgeService
+
+    motor.self_knowledge_service = SelfKnowledgeService(
+        providers=[ModelProvider()],
+        settings_reader=lambda: SimpleNamespace(enabled=True, viewers=False),
+        lang_reader=lambda: "en",
+    )
+    motor._inference_service._api_key_resolver = lambda _profile_id: fake_api_key
+    captured = []
+
+    def capture_cloud_request(**kwargs):
+        captured.append(kwargs)
+        return {"message": {"content": "cloud reply", "thinking": ""}, "usage": {}}
+
+    with patch(
+        "opencohost.core.llm_engine.cloud_llm_client.send_chat_completion",
+        side_effect=capture_cloud_request,
+    ):
+        result = motor._generar_dialogo(
+            "what model are you", source="direct", commit_history=False
+        )
+        # Provider/profile changes are read from the next turn's config
+        # snapshot; identity is not cached from a previous cloud request.
+        next_cloud_model = "openai-compatible/test-model-v2"
+        motor._provider_config = {
+            "active_provider": "custom_cloud",
+            "fallback_mode": "auto",
+            "profiles": {
+                "custom_cloud": {
+                    "base_url": "https://example.test/v1",
+                    "model": next_cloud_model,
+                }
+            },
+        }
+        next_result = motor._generar_dialogo(
+            "what model are you", source="direct", commit_history=False
+        )
+
+    assert result == "cloud reply"
+    assert captured[0]["model"] == cloud_model
+    prompt = "\n".join(
+        str(message.get("content", "")) for message in captured[0]["messages"]
+    )
+    assert cloud_model in prompt
+    assert local_model not in prompt
+    assert fake_api_key not in prompt
+    assert next_result == "cloud reply"
+    assert captured[1]["model"] == next_cloud_model
+    next_prompt = "\n".join(
+        str(message.get("content", "")) for message in captured[1]["messages"]
+    )
+    assert next_cloud_model in next_prompt
+    assert local_model not in next_prompt
+    assert fake_api_key not in next_prompt
+
+
 # ---------------------------------------------------------------------------
 # 2. Model switch behavior
 # ---------------------------------------------------------------------------
@@ -156,10 +242,14 @@ class TestModelSwitch:
             settings.LAST_MODEL_FILE = original
 
     def test_switch_while_speaking_is_pending(self, tmp_path):
-        """Switch while _speaking=True -> pending state, model NOT changed yet."""
+        """Switch while a generation is in flight -> pending state, model NOT changed yet.
+
+        Speech-only is no longer pending: 1b6ebec cuts the playback and applies
+        the switch at once (covered by the K2 tests); only `_processing` defers.
+        """
         motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
         original_model = motor.current_model
-        motor._speaking = True
+        motor._processing = True
 
         # Exercise the real dispatch handler
         motor._dispatch_command("switch_model", "qwen3:4b")
@@ -204,7 +294,7 @@ class TestRetryExhaustion:
         motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
 
-        motor._pending_model_switch = "gemma4:e4b"
+        motor._pending_model_switch = "llama3"
         motor._pending_switch_next_at = 0
         motor._processing = False
         motor._speaking = False
@@ -212,17 +302,17 @@ class TestRetryExhaustion:
 
         # Retry 1
         motor._check_pending_model_switch()
-        assert motor._pending_model_switch == "gemma4:e4b"
+        assert motor._pending_model_switch == "llama3"
 
         # Retry 2
         motor._pending_switch_next_at = 0
         motor._check_pending_model_switch()
-        assert motor._pending_model_switch == "gemma4:e4b"
+        assert motor._pending_model_switch == "llama3"
 
         # Retry 3 — still pending; user intent must survive slow Ollama startup
         motor._pending_switch_next_at = 0
         motor._check_pending_model_switch()
-        assert motor._pending_model_switch == "gemma4:e4b"
+        assert motor._pending_model_switch == "llama3"
         assert "model_switch_failed" not in ui_events
         assert motor._last_switch_failure is None
 
@@ -240,8 +330,8 @@ class TestRetryExhaustion:
             motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
             motor.is_ready = False
             motor.current_model = "qwen3:1.7b"
-            motor._desired_model = "gemma4:e4b"
-            motor._pending_model_switch = "gemma4:e4b"
+            motor._desired_model = "llama3"
+            motor._pending_model_switch = "llama3"
             motor._pending_switch_next_at = 0
             motor.ollama.list = MagicMock(side_effect=[
                 RuntimeError("down"),
@@ -255,17 +345,17 @@ class TestRetryExhaustion:
             for _ in range(3):
                 motor._pending_switch_next_at = 0
                 motor._check_pending_model_switch()
-                assert motor._pending_model_switch == "gemma4:e4b"
+                assert motor._pending_model_switch == "llama3"
 
             assert motor._check_ollama_service() is True
 
-            assert motor.current_model == "gemma4:e4b"
+            assert motor.current_model == "llama3"
             assert motor._pending_model_switch is None
             assert "model_switch_applied" in ui_events
             assert os.path.exists(settings.LAST_MODEL_FILE)
             with open(settings.LAST_MODEL_FILE) as f:
                 data = json.load(f)
-            assert data["model"] == "gemma4:e4b"
+            assert data["model"] == "llama3"
         finally:
             settings.LAST_MODEL_FILE = original
 
@@ -279,8 +369,8 @@ class TestRetryExhaustion:
             motor, log_q, ui_events = _make_motor(tmp_dir=str(tmp_path))
             motor.is_ready = False
             motor.current_model = "qwen3:1.7b"
-            motor._desired_model = "gemma4:e4b"
-            motor._pending_model_switch = "gemma4:e4b"
+            motor._desired_model = "llama3"
+            motor._pending_model_switch = "llama3"
             motor._pending_switch_next_at = 0
             motor._processing = False
             motor._speaking = False
@@ -292,13 +382,13 @@ class TestRetryExhaustion:
             motor._check_pending_model_switch()
 
             assert motor.ollama.list.call_count == 2
-            assert motor.current_model == "gemma4:e4b"
+            assert motor.current_model == "llama3"
             assert motor._pending_model_switch is None
             assert "model_switch_applied" in ui_events
 
             pending_logs = [
                 msg for msg in _drain_log(log_q)
-                if "Switch a gemma4:e4b sigue pendiente: Ollama no está listo." in msg
+                if "Switch a llama3 sigue pendiente: Ollama no está listo." in msg
             ]
             assert len(pending_logs) == 1
         finally:
@@ -337,7 +427,7 @@ class TestRetryExhaustion:
             assert _wait_until(lambda: fake_ollama.list.call_count == 1)
             assert motor.is_ready is False
 
-            motor.command_queue.put(("switch_model", "gemma4:e4b"))
+            motor.command_queue.put(("switch_model", "llama3"))
             assert _wait_until(lambda: "model_switch_failed" in ui_events)
             assert motor.current_model == "qwen3:1.7b"
             assert motor._pending_model_switch is None
@@ -355,8 +445,8 @@ class TestRetryExhaustion:
         motor, log_q, ui_events = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
         motor.current_model = "qwen3:1.7b"
-        motor._desired_model = "gemma4:e4b"
-        motor._pending_model_switch = "gemma4:e4b"
+        motor._desired_model = "llama3"
+        motor._pending_model_switch = "llama3"
         motor._pending_switch_next_at = 0
         motor._processing = False
         motor._speaking = False
@@ -372,7 +462,7 @@ class TestRetryExhaustion:
         assert not any("Ollama no esta disponible" in msg for msg in logs)
         pending_logs = [
             msg for msg in logs
-            if "Switch a gemma4:e4b sigue pendiente: Ollama no está listo." in msg
+            if "Switch a llama3 sigue pendiente: Ollama no está listo." in msg
         ]
         assert len(pending_logs) == 1
 
@@ -390,8 +480,8 @@ class TestRetryExhaustion:
             motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
             motor.is_ready = False
             motor.current_model = "qwen3:1.7b"
-            motor._desired_model = "gemma4:e4b"
-            motor._pending_model_switch = "gemma4:e4b"
+            motor._desired_model = "llama3"
+            motor._pending_model_switch = "llama3"
             motor.ollama.list = MagicMock(return_value=[])
             motor.ollama.generate = MagicMock()
 
@@ -402,7 +492,7 @@ class TestRetryExhaustion:
                 for call in motor.ollama.generate.call_args_list
                 if call.kwargs.get("prompt") == "Responde solo: ok"
             ]
-            assert warmed_models == ["gemma4:e4b"]
+            assert warmed_models == ["llama3"]
         finally:
             settings.LAST_MODEL_FILE = original
 
@@ -410,15 +500,15 @@ class TestRetryExhaustion:
         """A pending intent equal to the active model should not linger forever."""
         motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
-        motor.current_model = "gemma4:e4b"
-        motor._desired_model = "gemma4:e4b"
-        motor._pending_model_switch = "gemma4:e4b"
+        motor.current_model = "llama3"
+        motor._desired_model = "llama3"
+        motor._pending_model_switch = "llama3"
         motor.ollama.list = MagicMock(return_value=[])
         motor.ollama.generate = MagicMock()
 
         assert motor._check_ollama_service() is True
 
-        assert motor.current_model == "gemma4:e4b"
+        assert motor.current_model == "llama3"
         assert motor._pending_model_switch is None
         assert "model_switch_failed" not in ui_events
 
@@ -432,12 +522,12 @@ class TestRetryExhaustion:
             motor, _, ui_events = _make_motor(tmp_dir=str(tmp_path))
             motor.is_ready = False
             motor.current_model = "qwen3:1.7b"
-            motor._desired_model = "gemma4:e4b"
-            motor._pending_model_switch = "gemma4:e4b"
+            motor._desired_model = "llama3"
+            motor._pending_model_switch = "llama3"
             motor.ollama.list = MagicMock(return_value=[])
 
             def fake_generate(*, model, prompt, **kwargs):
-                if model == "gemma4:e4b" and prompt == "Responde solo: ok":
+                if model == "llama3" and prompt == "Responde solo: ok":
                     raise RuntimeError("model unavailable")
                 return {"response": "ok"}
 
@@ -524,8 +614,9 @@ class TestModelTrace:
         suppression must NOT swallow a genuine local mismatch."""
         motor, log_q, _ = self._setup_motor_for_generation(tmp_path)
 
-        # Simulate: UI requested gemma4:e4b but motor still on default
-        motor._desired_model = "gemma4:e4b"
+        # Simulate: UI requested llama3 but motor still on the default
+        # (DEFAULT_MODEL is gemma4:e4b since 9dad677).
+        motor._desired_model = "llama3"
         # current_model stays as default (whatever _make_motor resolved)
 
         motor._generar_dialogo("test mismatch", source="direct", commit_history=False)
@@ -533,7 +624,7 @@ class TestModelTrace:
         logs = _drain_log(log_q)
         mismatch_logs = [l for l in logs if "MODEL_MISMATCH_WARNING" in l]
         assert len(mismatch_logs) >= 1, f"No MODEL_MISMATCH_WARNING found in: {logs}"
-        assert "desired=gemma4:e4b" in mismatch_logs[0]
+        assert "desired=llama3" in mismatch_logs[0]
         assert "transport=local" in mismatch_logs[0]
 
     def test_model_mismatch_warning_silenced_for_cloud_by_design(self, tmp_path):
@@ -717,7 +808,7 @@ class TestNonBlockingRetry:
         """Verify that _pending_switch_next_at uses time.monotonic."""
         motor, _, _ = _make_motor(tmp_dir=str(tmp_path))
         motor.is_ready = False
-        motor._pending_model_switch = "gemma4:e4b"
+        motor._pending_model_switch = "llama3"
         motor._pending_switch_next_at = 0
 
         before = time.monotonic()

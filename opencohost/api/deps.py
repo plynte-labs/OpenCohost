@@ -103,6 +103,21 @@ def load_tts_local_only():
     return _main.load_tts_local_only()
 
 
+def load_motor_tts(*args, **kwargs) -> str:
+    """Load the persisted TTS motor ('ligero' | 'pesado') through the CURRENT main binding."""
+    import inspect
+    from opencohost.api import main as _main
+
+    fn = _main.load_motor_tts
+    try:
+        params = inspect.signature(fn).parameters
+        accepts_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        filtered = {k: v for k, v in kwargs.items() if accepts_kw or k in params}
+        return fn(*args, **filtered)
+    except (TypeError, ValueError):
+        return fn()
+
+
 def load_tts_speed():
     """test_tts_config_shape_from_accessors (tests/test_api_reads.py) replaces
     ``main.load_tts_speed`` wholesale for GET /api/tts/config, alongside
@@ -123,6 +138,20 @@ def experimental_heavy_tts_enabled() -> bool:
     return _main.EXPERIMENTAL_HEAVY_TTS_ENABLED
 
 
+def load_discard_speech_residue() -> bool:
+    """Load discard_speech_residue, resolved through the CURRENT main binding."""
+    from opencohost.api import main as _main
+
+    return _main.load_discard_speech_residue()
+
+
+def save_discard_speech_residue(enabled: bool) -> None:
+    """Save discard_speech_residue, resolved through the CURRENT main binding."""
+    from opencohost.api import main as _main
+
+    return _main.save_discard_speech_residue(enabled)
+
+
 def cargar_perfiles():
     """Current profiles dict. Patched directly on ``main`` by
     tests/test_api_phase1.py's perfiles + POST /api/perfiles/switch tests
@@ -137,22 +166,30 @@ def cargar_perfiles():
     return _main.cargar_perfiles()
 
 
-def save_personalization(data: dict) -> bool:
+def save_personalization(data: dict, locale: Optional[str] = None) -> bool:
     """test_api_personalization.py replaces ``main.save_personalization``
     wholesale (``lambda data: False``) to exercise PUT /api/personalization's
     503 write-failure path."""
+    import inspect
     from opencohost.api import main as _main
 
-    return _main.save_personalization(data)
+    fn = _main.save_personalization
+    if "locale" in inspect.signature(fn).parameters:
+        return fn(data, locale=locale)
+    return fn(data)
 
 
-def clear_personalization() -> bool:
+def clear_personalization(locale: Optional[str] = None) -> bool:
     """test_api_personalization.py replaces ``main.clear_personalization``
     wholesale (``lambda: False``) to exercise DELETE /api/personalization's
     503 write-failure path."""
+    import inspect
     from opencohost.api import main as _main
 
-    return _main.clear_personalization()
+    fn = _main.clear_personalization
+    if "locale" in inspect.signature(fn).parameters:
+        return fn(locale=locale)
+    return fn()
 
 
 def music_import_max_bytes() -> int:

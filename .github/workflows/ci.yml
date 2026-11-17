@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Called by release.yml so that a release cannot build unless these pass.
+  workflow_call:
 
 permissions:
   contents: read
@@ -36,7 +38,44 @@ jobs:
       - name: Sync dependencies (dev + integrations + youtube-chat + local-tts + cloud-tts)
         # FastAPI/uvicorn are core dependencies for the Tauri backend.
         # youtube-chat provides pytchat; local-tts/cloud-tts provide piper-tts/edge-tts.
-        run: uv sync --locked --extra dev --extra integrations --extra youtube-chat --extra local-tts --extra cloud-tts
+        run: uv sync --locked --extra dev --extra integrations --extra obs --extra youtube-chat --extra local-tts --extra cloud-tts
 
       - name: Tests
-        run: uv run pytest tests/ -q
+        run: |
+          uv run python -c "import pathlib; [compile(p.read_bytes(), str(p), 'exec') for p in [*pathlib.Path('opencohost').rglob('*.py'), *pathlib.Path('packaging').glob('*.py')]]"
+          uv run pytest tests/test_release_ci_contract.py tests/test_release_semver_mapping.py tests/test_release_workflow_staging.py tests/test_packaging_core_boundary.py tests/test_packaging_asset_absence.py tests/test_packaging_edge_tts_optional.py tests/test_packaging_experimental_tts_flag.py tests/test_packaging_user_data_paths.py tests/test_installer_composition_contract.py tests/test_installer_staging.py tests/test_nsis_large_payload_contract.py tests/test_storage_packaging.py tests/test_edge_tts_version_floor.py tests/test_runtime_smoke_harness.py -q
+
+  ui:
+    name: ui (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - name: Install UI dependencies
+        working-directory: OpenCohost_UI
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate API types
+        # src/api/types.gen.ts is gitignored; tsc and vitest need it on a clean checkout.
+        working-directory: OpenCohost_UI
+        run: pnpm run gen:api:offline
+
+      - name: Typecheck
+        working-directory: OpenCohost_UI
+        run: pnpm exec tsc --noEmit -p .
+
+      - name: UI tests
+        working-directory: OpenCohost_UI
+        run: pnpm vitest run

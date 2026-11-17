@@ -436,17 +436,23 @@ class RTFTracker:
 # ──────────────────────────────────────────────
 
 class QwenProcessManager:
-    """Manages the Qwen TTS server subprocess lifecycle.
+    """Manages the Qwen TTS server subprocess lifecycle (RETIRED).
+
+    Qwen3-TTS was retired to a separate legacy repository (server_qwen.py) on 2026-09-21
+    and is no longer packaged. This manager is kept as a shim so saved state
+    and the /api/status wire shape (qwen_status/qwen_lifecycle) stay backward
+    compatible: start() reports unavailable when the script is absent, health
+    reads "unavailable" unless a manual server answers on :5000.
 
     Can start, stop, and attach to existing server processes.
     Detects manually-started servers and avoids killing them.
     """
 
+    # RETIRED 2026-09-21: server_qwen.py moved to a separate legacy repository.
     # Three levels up from this file is the opencohost package root, where
-    # server_qwen.py lives. Adding a directory level to this module's path
-    # silently repoints this at a file that does not exist -- every start()
-    # test mocks Popen, so only test_qwen_server_script_resolves_to_an_existing_file
-    # catches it.
+    # server_qwen.py used to live. The path is kept so attach_existing() can
+    # still detect a manually-started server, but start() fails fast when the
+    # script is absent instead of spawning a doomed subprocess.
     SERVER_SCRIPT = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "server_qwen.py",
@@ -483,6 +489,11 @@ class QwenProcessManager:
     def start(self) -> bool:
         """Launch server_qwen.py via subprocess. Returns True if healthy.
 
+        RETIRED 2026-09-21: the script lives in a separate legacy repository and is no
+        longer packaged. When the script is absent, logs once and returns
+        False without raising — mirrors the PiperEngine.load() never-raise
+        contract.
+
         When XTTS_PYTHON cannot be resolved (env var unset, storage.yaml "auto"),
         logs an actionable warning and returns False without raising — mirrors the
         PiperEngine.load() never-raise contract.
@@ -498,6 +509,14 @@ class QwenProcessManager:
                 "QwenProcessManager: XTTS_PYTHON interpreter not configured — "
                 "set the XTTS_PYTHON environment variable or set "
                 "tools.xtts_python in config/storage.yaml. Qwen TTS unavailable."
+            )
+            self._lifecycle_state = LIFECYCLE_FAILED
+            return False
+
+        if not os.path.isfile(self.SERVER_SCRIPT):
+            logger.warning(
+                "QwenProcessManager: server_qwen.py is retired and not packaged — "
+                "Qwen TTS unavailable (Edge-TTS/Piper remain the supported engines)."
             )
             self._lifecycle_state = LIFECYCLE_FAILED
             return False

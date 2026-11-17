@@ -14,6 +14,8 @@ and `clear_personalization` ARE monkeypatched directly on
 write-failure paths), so they go through `deps`.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -45,14 +47,18 @@ def _personalization_response(data: dict) -> PersonalizationResponse:
 
 
 @router.get("/api/personalization", response_model=PersonalizationResponse)
-def get_personalization() -> PersonalizationResponse:
+def get_personalization(locale: Optional[str] = None) -> PersonalizationResponse:
     # Lock-free like list_perfiles/get_perfil — GET never mutates and
     # load_personalization() already fails open to defaults.
-    return _personalization_response(load_personalization())
+    return _personalization_response(load_personalization(locale=locale))
 
 
 @router.put("/api/personalization", response_model=PersonalizationResponse)
-def update_personalization(body: PersonalizationUpdateRequest):
+def update_personalization(
+    body: PersonalizationUpdateRequest,
+    locale: Optional[str] = None,
+):
+    target_locale = locale if locale is not None else body.locale
     if body.nickname is not None and len(body.nickname) > PERSONALIZATION_NICKNAME_MAX:
         return JSONResponse(status_code=422, content={"detail": "nickname exceeds max length"})
     if body.occupation is not None and len(body.occupation) > PERSONALIZATION_OCCUPATION_MAX:
@@ -69,7 +75,7 @@ def update_personalization(body: PersonalizationUpdateRequest):
             status_code=422, content={"detail": "custom_instructions exceeds max length"}
         )
     with _personalization_lock:
-        data = load_personalization()
+        data = load_personalization(locale=target_locale)
         if body.enabled is not None:
             data["enabled"] = body.enabled
         if body.nickname is not None:
@@ -80,21 +86,21 @@ def update_personalization(body: PersonalizationUpdateRequest):
             data["interests"] = body.interests
         if body.custom_instructions is not None:
             data["custom_instructions"] = body.custom_instructions
-        if not deps.save_personalization(data):
+        if not deps.save_personalization(data, locale=target_locale):
             return JSONResponse(
                 status_code=503, content={"detail": "personalization_write_failed"}
             )
         # Re-read: save_personalization stamps its own `updated_at` and
         # re-clamps, so the response must reflect the persisted values,
         # not the pre-save `data` dict.
-        data = load_personalization()
+        data = load_personalization(locale=target_locale)
     return _personalization_response(data)
 
 
 @router.delete("/api/personalization")
-def delete_personalization():
+def delete_personalization(locale: Optional[str] = None):
     with _personalization_lock:
-        if not deps.clear_personalization():
+        if not deps.clear_personalization(locale=locale):
             return JSONResponse(
                 status_code=503, content={"detail": "personalization_write_failed"}
             )

@@ -1,4 +1,4 @@
-"""/api/ptt/* -- start, keepalive, stop, state, config, test
+"""/api/ptt/* -- start, keepalive, stop, state, config, test, focus
 (moved verbatim from main.py, refactor_core_api_20260802 B6).
 
 Push-to-Talk (liveaudio_ptt_tauri_20260710). PRIVACY (hard rule 2): NO
@@ -73,8 +73,11 @@ from opencohost.api import deps
 from opencohost.api.models import (
     PttConfigRequest,
     PttConfigResponse,
+    PttFocusRequest,
+    PttFocusResponse,
     PttKeepaliveRequest,
     PttKeepaliveResponse,
+    PttStartRequest,
     PttStartResponse,
     PttStateResponse,
     PttStopRequest,
@@ -83,7 +86,18 @@ from opencohost.api.models import (
     PttTestResponse,
 )
 from opencohost.api.ptt_session import PttUnreachable, SessionActive
-from opencohost.config.settings import is_valid_stt_ws_uri, load_ptt_ws_uri
+from opencohost.config.settings import (
+    PTT_DICTATION_MODES,
+    PTT_HOTKEY_LIST,
+    is_valid_stt_ws_uri,
+    load_ptt_companion_dictation,
+    load_ptt_dictation_mode,
+    load_ptt_hotkey,
+    load_ptt_ws_uri,
+    save_ptt_companion_dictation,
+    save_ptt_dictation_mode,
+    save_ptt_hotkey,
+)
 from opencohost.stt.discovery import ensure_local_service, is_loopback_host, is_loopback_uri
 
 router = APIRouter()
@@ -178,6 +192,45 @@ def _service_summary(request: Request, stt_ws_url) -> Optional[dict]:
     return summary
 
 
+def _effective_dictation_mode(request: Request) -> str:
+    """The mode the live controller will apply, else the persisted one."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    mode = getattr(controller, "dictation_mode", None)
+    return mode if isinstance(mode, str) and mode in PTT_DICTATION_MODES else load_ptt_dictation_mode()
+
+
+def _effective_companion_dictation(request: Request) -> bool:
+    """The switch the live controller will apply, else the persisted one."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    value = getattr(controller, "companion_dictation", None)
+    return value if isinstance(value, bool) else load_ptt_companion_dictation()
+
+
+def _apply_ptt_companion_dictation(request: Request, value: bool) -> None:
+    """Live-apply the saved switch; best effort, like the dictation mode."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    setter = getattr(controller, "set_companion_dictation", None)
+    if setter is None:
+        return
+    try:
+        setter(value)
+    except Exception:
+        pass
+
+
+def _apply_ptt_dictation_mode(request: Request, mode: str) -> None:
+    """Live-apply the saved dictation mode; best effort, same contract as
+    `_apply_ptt_ws_uri` below."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    setter = getattr(controller, "set_dictation_mode", None)
+    if setter is None:
+        return
+    try:
+        setter(mode)
+    except Exception:
+        pass
+
+
 def _apply_ptt_ws_uri(request: Request, uri: str) -> None:
     """Push the just-saved WhisperLive URL to the live PttController.
 
@@ -201,8 +254,21 @@ def _apply_ptt_ws_uri(request: Request, uri: str) -> None:
         pass
 
 
+def _started(controller, session_id: str, body: Optional[PttStartRequest]) -> PttStartResponse:
+    """Success response; a companion hold is flagged background first, so the
+    flag is in place before the client can know the id to stop it."""
+    if body is not None and body.origin == "companion":
+        marker = getattr(controller, "mark_hold_background", None)
+        if marker is not None:
+            try:
+                marker(session_id)
+            except Exception:
+                pass
+    return PttStartResponse(session_id=session_id, state="listening")
+
+
 @router.post("/api/ptt/start")
-def post_ptt_start(request: Request):
+def post_ptt_start(request: Request, body: Optional[PttStartRequest] = None):
     controller = request.app.state.ptt_controller
     state = controller.state() if hasattr(controller, "state") else {}
     uri = state.get("stt_ws_url") if isinstance(state, dict) else None
@@ -220,7 +286,7 @@ def post_ptt_start(request: Request):
     except PttUnreachable:
         pass
     else:
-        return PttStartResponse(session_id=session_id, state="listening")
+        return _started(controller, session_id, body)
     # Connect failed against the effective URI. For loopback URIs, run ONE
     # ensure cycle (spawn-or-scan, runtime-only repoint) and retry the start
     # exactly once; remote URIs and missing supervisors fall straight through
@@ -241,7 +307,7 @@ def post_ptt_start(request: Request):
             except PttUnreachable:
                 pass
             else:
-                return PttStartResponse(session_id=session_id, state="listening")
+                return _started(controller, session_id, body)
         elif outcome is not None and outcome.loading:
             return JSONResponse(status_code=503, content={"detail": "stt_loading"})
     return JSONResponse(status_code=503, content={"detail": "stt_unreachable"})
@@ -276,7 +342,28 @@ def get_ptt_state(request: Request) -> PttStateResponse:
     # dedicated GET /api/ptt/config exists, deliberately.
     payload = dict(request.app.state.ptt_controller.state())
     payload["stt_service"] = _service_summary(request, payload.get("stt_ws_url"))
+    payload["hotkey"] = load_ptt_hotkey()
+    payload["dictation_mode"] = _effective_dictation_mode(request)
+    payload["companion_dictation"] = _effective_companion_dictation(request)
     return PttStateResponse(**payload)
+
+
+@router.post("/api/ptt/focus", response_model=PttFocusResponse)
+def post_ptt_focus(request: Request, body: PttFocusRequest) -> PttFocusResponse:
+    # ptt-dictation-20261111: the MAIN webview reports whether its window has
+    # focus, so a release in `foreground` mode can dictate instead of sending.
+    # A boolean only, memory only, time-stamped by the controller; a stale or
+    # missing report means "background" (the turn is sent). Operator-token
+    # tier like every POST here, and not rate-limited.
+    controller = getattr(request.app.state, "ptt_controller", None)
+    reporter = getattr(controller, "report_focus", None)
+    if reporter is None:
+        return PttFocusResponse(ok=False)
+    try:
+        reporter(bool(body.focused))
+    except Exception:
+        return PttFocusResponse(ok=False)
+    return PttFocusResponse(ok=True)
 
 
 @router.put("/api/ptt/config", response_model=PttConfigResponse)
@@ -285,6 +372,8 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
     # WITHOUT restarting the backend: the operator regularly launches
     # OpenCohost before LiveAudio, and killing the process to recover is
     # the pain this closes (liveaudio_ws_uri_config_20260724).
+    #
+    # Also allows updating the global PTT hotkey, persisted to ptt_settings.json.
     #
     # SECURITY: WhisperLive is recv-only and its text flows straight into
     # `process_context` -- the SAME path as a real operator turn (privacy
@@ -297,16 +386,43 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
     # deliberately NOT applied (owner decision): LiveAudio on a second
     # capture PC is a legitimate dual-PC setup, exactly like OBS accepting
     # any host.
-    if body.stt_ws_uri is None:
-        return PttConfigResponse(stt_ws_uri=load_ptt_ws_uri())
-    if not is_valid_stt_ws_uri(body.stt_ws_uri):
+    if (
+        body.stt_ws_uri is None
+        and body.hotkey is None
+        and body.dictation_mode is None
+        and body.companion_dictation is None
+    ):
+        return PttConfigResponse(
+            stt_ws_uri=load_ptt_ws_uri(),
+            hotkey=load_ptt_hotkey(),
+            dictation_mode=_effective_dictation_mode(request),
+            companion_dictation=_effective_companion_dictation(request),
+        )
+    if body.stt_ws_uri is not None and not is_valid_stt_ws_uri(body.stt_ws_uri):
         return JSONResponse(
             status_code=422,
             content={"detail": "stt_ws_uri must start with ws:// or wss://"},
         )
+    if body.hotkey is not None and body.hotkey not in PTT_HOTKEY_LIST:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"hotkey must be one of {PTT_HOTKEY_LIST}"},
+        )
+    if body.dictation_mode is not None and body.dictation_mode not in PTT_DICTATION_MODES:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"dictation_mode must be one of {list(PTT_DICTATION_MODES)}"},
+        )
     with _ptt_config_lock:
         try:
-            deps.save_ptt_ws_uri(body.stt_ws_uri)
+            if body.stt_ws_uri is not None:
+                deps.save_ptt_ws_uri(body.stt_ws_uri)
+            if body.hotkey is not None:
+                save_ptt_hotkey(body.hotkey)
+            if body.dictation_mode is not None:
+                save_ptt_dictation_mode(body.dictation_mode)
+            if body.companion_dictation is not None:
+                save_ptt_companion_dictation(body.companion_dictation)
         except (OSError, RuntimeError, ValueError):
             return JSONResponse(
                 status_code=503, content={"detail": "config_write_failed"}
@@ -314,8 +430,18 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
     # Live-apply AFTER a successful save and OUTSIDE the write lock (same
     # ordering as _apply_avatar_runtime on PUT /api/obs/config), so a URL
     # is never applied to the runtime unless it also survives a restart.
-    _apply_ptt_ws_uri(request, body.stt_ws_uri)
-    return PttConfigResponse(stt_ws_uri=body.stt_ws_uri)
+    if body.stt_ws_uri is not None:
+        _apply_ptt_ws_uri(request, body.stt_ws_uri)
+    if body.dictation_mode is not None:
+        _apply_ptt_dictation_mode(request, body.dictation_mode)
+    if body.companion_dictation is not None:
+        _apply_ptt_companion_dictation(request, body.companion_dictation)
+    return PttConfigResponse(
+        stt_ws_uri=load_ptt_ws_uri(),
+        hotkey=load_ptt_hotkey(),
+        dictation_mode=_effective_dictation_mode(request),
+        companion_dictation=_effective_companion_dictation(request),
+    )
 
 
 @router.post("/api/ptt/test", response_model=PttTestResponse)

@@ -71,6 +71,24 @@ class EpisodeEmbeddingRecord:
         }
 
 
+@dataclass(frozen=True)
+class FactEmbeddingRecord:
+    """Derived vector for one `memorias` fact row (ADR-060).
+
+    Keyed by the row id; valid only while (revision, content_hash, model)
+    still match the live row. Holds no text: the hash is a sha256 prefix.
+    """
+
+    fact_id: str
+    profile_id: str
+    revision: int
+    content_hash: str
+    model_id: str
+    model_version: str
+    vector: list[float]
+    created_at: str
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS exchange_embeddings (
     exchange_key TEXT PRIMARY KEY,
@@ -100,6 +118,19 @@ CREATE TABLE IF NOT EXISTS episode_embeddings (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ep_profile ON episode_embeddings(profile_id);
+
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector_blob BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fact_profile ON fact_embeddings(profile_id);
 
 CREATE TABLE IF NOT EXISTS profile_privacy_fences (
     profile_id TEXT PRIMARY KEY,
@@ -259,6 +290,19 @@ class SemanticCacheStore:
                 )
             return records
 
+    def get_exchange_lexical_tokens_by_profile(self, profile_id: str) -> list[str]:
+        """Lexical token strings of the profile's exchange rows, no vectors.
+
+        The recall preflight only needs tokens; decoding every vector blob
+        (``get_exchange_embeddings_by_profile``) costs ~100 ms per 3000 rows."""
+        with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute(
+                "SELECT lexical_tokens FROM exchange_embeddings WHERE profile_id = ?",
+                (profile_id,),
+            )
+            return [row["lexical_tokens"] or "" for row in cur.fetchall()]
+
     def get_episode_embeddings_by_profile(
         self, profile_id: str
     ) -> list[EpisodeEmbeddingRecord]:
@@ -304,6 +348,73 @@ class SemanticCacheStore:
                 created_at=row["created_at"],
             )
 
+    def upsert_fact_embedding(self, rec: FactEmbeddingRecord) -> bool:
+        with self._lock:
+            conn = self._ensure_conn()
+            if self._is_fenced_out(conn, rec.profile_id, rec.created_at):
+                return False
+            blob = np.array(rec.vector, dtype=np.float32).tobytes()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO fact_embeddings (
+                    fact_id, profile_id, revision, content_hash, model_id,
+                    model_version, dimensions, vector_blob, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rec.fact_id,
+                    rec.profile_id,
+                    int(rec.revision),
+                    rec.content_hash,
+                    rec.model_id,
+                    rec.model_version,
+                    len(rec.vector),
+                    blob,
+                    rec.created_at,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def get_fact_embeddings_by_profile(self, profile_id: str) -> list[FactEmbeddingRecord]:
+        with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute("SELECT * FROM fact_embeddings WHERE profile_id = ?", (profile_id,))
+            return [
+                FactEmbeddingRecord(
+                    fact_id=row["fact_id"],
+                    profile_id=row["profile_id"],
+                    revision=int(row["revision"]),
+                    content_hash=row["content_hash"],
+                    model_id=row["model_id"],
+                    model_version=row["model_version"],
+                    vector=np.frombuffer(row["vector_blob"], dtype=np.float32).tolist(),
+                    created_at=row["created_at"],
+                )
+                for row in cur.fetchall()
+            ]
+
+    def count_fact_embeddings(self, profile_id: str) -> int:
+        with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM fact_embeddings WHERE profile_id = ?", (profile_id,)
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+    def delete_fact_embeddings(self, fact_ids) -> int:
+        ids = list(fact_ids)
+        if not ids:
+            return 0
+        with self._lock:
+            conn = self._ensure_conn()
+            deleted = 0
+            for fid in ids:
+                cur = conn.execute("DELETE FROM fact_embeddings WHERE fact_id = ?", (fid,))
+                deleted += int(cur.rowcount or 0)
+            conn.commit()
+            return deleted
+
     def delete_episode_cache(self, episode_id: str) -> None:
         with self._lock:
             conn = self._ensure_conn()
@@ -317,6 +428,7 @@ class SemanticCacheStore:
             now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             conn.execute("DELETE FROM exchange_embeddings WHERE profile_id = ?", (profile_id,))
             conn.execute("DELETE FROM episode_embeddings WHERE profile_id = ?", (profile_id,))
+            conn.execute("DELETE FROM fact_embeddings WHERE profile_id = ?", (profile_id,))
             conn.execute(
                 "INSERT OR REPLACE INTO profile_privacy_fences (profile_id, purged_at) VALUES (?, ?)",
                 (profile_id, now_iso),
@@ -329,6 +441,7 @@ class SemanticCacheStore:
             now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             conn.execute("DELETE FROM exchange_embeddings;")
             conn.execute("DELETE FROM episode_embeddings;")
+            conn.execute("DELETE FROM fact_embeddings;")
             conn.execute(
                 "INSERT OR REPLACE INTO global_privacy_fence (id, forgotten_at) VALUES (1, ?)",
                 (now_iso,),

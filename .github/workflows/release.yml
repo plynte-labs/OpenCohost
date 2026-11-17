@@ -14,10 +14,19 @@ defaults:
 
 env:
   UV_VERSION: "0.11.6"
+  # Laya export pins (see THIRD-PARTY-NOTICES.md): the Hugging Face checkpoint revision
+  # and the versions the committed manifest was produced with.
+  LAYA_REVISION: "7b928d828b7b0e022f929d9bd2e44165aa270148"
+  LAYA_EXPORT_DEPS: "laya==0.4.1 onnx==1.23.2 onnxscript==0.7.2 transformers==5.19.0 huggingface_hub"
 
 jobs:
+  test:
+    name: Tests (CI workflow)
+    uses: ./.github/workflows/ci.yml
+
   build-engine-payload:
     name: Build engine payload
+    needs: test
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -41,15 +50,18 @@ jobs:
           import re
           import sys
 
+          _SEMVER_TAGS = {"alpha": "a", "beta": "b", "rc": "rc"}
+          _PEP440_TAGS = {"a": "alpha", "b": "beta", "rc": "rc"}
+
           def normalize_pep440(v):
-              """Normalize semver prerelease to PEP 440: 0.2.0-alpha.1 -> 0.2.0a1"""
-              m = re.match(r'^(\d+\.\d+\.\d+)-alpha\.(\d+)$', v)
-              return f"{m.group(1)}a{m.group(2)}" if m else v
+              """Normalize semver prerelease to PEP 440: 0.2.0-beta.1 -> 0.2.0b1"""
+              m = re.match(r'^(\d+\.\d+\.\d+)-(alpha|beta|rc)\.(\d+)$', v)
+              return f"{m.group(1)}{_SEMVER_TAGS[m.group(2)]}{m.group(3)}" if m else v
 
           def pep440_to_semver(v):
-              """Expand PEP 440 prerelease to semver: 0.2.0a1 -> 0.2.0-alpha.1"""
-              m = re.match(r'^(\d+\.\d+\.\d+)a(\d+)$', v)
-              return f"{m.group(1)}-alpha.{m.group(2)}" if m else v
+              """Expand PEP 440 prerelease to semver: 0.2.0rc1 -> 0.2.0-rc.1"""
+              m = re.match(r'^(\d+\.\d+\.\d+)(a|b|rc)(\d+)$', v)
+              return f"{m.group(1)}-{_PEP440_TAGS[m.group(2)]}.{m.group(3)}" if m else v
 
           tag = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
           text = open("opencohost/__init__.py", encoding="utf-8").read()
@@ -118,10 +130,62 @@ jobs:
           name: engine-payload
           path: build_artifacts/payloads
 
+      - name: Prepare standalone Python runtime
+        run: |
+          uv python install 3.12.4 --install-dir packaging/embedded_runtime/python
+          mkdir -p packaging/standalone_python
+          cp -r packaging/embedded_runtime/python/cpython-3.12.4-windows-x86_64-none/* packaging/standalone_python/
+          rm -f packaging/standalone_python/Lib/EXTERNALLY-MANAGED
+          uv pip install --break-system-packages ".[local-tts,cloud-tts]" --python packaging/standalone_python/python.exe
+
+      - name: Locate the Visual Studio MSVC runtime
+        id: crt
+        run: |
+          # The ten x64 CRT DLLs come from the runner's Visual Studio redistributable tree,
+          # unmodified (Microsoft: VC\Redist, not debug_nonredist). The staging script
+          # (--msvc-crt-policy signed) then checks signature and version and records hashes.
+          VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VS_ROOT="$("$VSWHERE" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | tr -d '\r')"
+          if [ -z "$VS_ROOT" ]; then
+            echo "::error::No Visual Studio installation with the C++ tools was found on this runner"
+            exit 1
+          fi
+          CRT_DIR="$(ls -d "$(cygpath -u "$VS_ROOT")"/VC/Redist/MSVC/*/x64/Microsoft.VC14*.CRT 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$CRT_DIR" ] || [ ! -d "$CRT_DIR" ]; then
+            echo "::error::No VC/Redist/MSVC/<ver>/x64/Microsoft.VC14*.CRT folder under $VS_ROOT"
+            exit 1
+          fi
+          echo "Using MSVC runtime: $CRT_DIR"
+          echo "crt_dir=$(cygpath -m "$CRT_DIR")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Laya ONNX export
+        id: laya-cache
+        uses: actions/cache@v4
+        with:
+          path: build_artifacts/laya-onnx
+          key: laya-onnx-${{ env.LAYA_REVISION }}-exporter-1adc59f7-${{ hashFiles('scripts/export_laya_onnx.py') }}
+
+      - name: Export the Laya ONNX model
+        if: steps.laya-cache.outputs.cache-hit != 'true'
+        run: |
+          # Heavy dependencies (torch, laya, onnx) live only in this throwaway environment.
+          # The checkpoint is convaiinnovations/laya (Apache-2.0) at the pinned revision;
+          # scripts/export_laya_onnx.py wraps upstream NandhaKishorM/laya scripts/export_onnx.py
+          # at commit 1adc59f7. The export writes manifest.json with the source revision.
+          uv venv build_artifacts/laya-env --python 3.11
+          LAYA_PY="build_artifacts/laya-env/Scripts/python.exe"
+          uv pip install --python "$LAYA_PY" --extra-index-url https://download.pytorch.org/whl/cpu torch==2.14.1 $LAYA_EXPORT_DEPS
+          SNAPSHOT="$("$LAYA_PY" -c "import sys; from huggingface_hub import snapshot_download; print(snapshot_download('convaiinnovations/laya', revision=sys.argv[1], allow_patterns=['multilingual/*'], cache_dir='build_artifacts/laya-hf'))" "$LAYA_REVISION" | tail -n 1)"
+          "$LAYA_PY" scripts/export_laya_onnx.py --checkpoint "$SNAPSHOT/multilingual" --out build_artifacts/laya-onnx
+          test -f build_artifacts/laya-onnx/manifest.json
+
       - name: Stage bundled installer resources
         run: |
           VERSION="${{ needs.build-engine-payload.outputs.version }}"
-          uv run python packaging/stage_installer_resources.py --version "$VERSION" --engine-payload "build_artifacts/payloads/engine-${VERSION}.zip"
+          uv run python packaging/stage_installer_resources.py --version "$VERSION" \
+            --engine-payload "build_artifacts/payloads/engine-${VERSION}.zip" \
+            --msvc-runtime-dir "${{ steps.crt.outputs.crt_dir }}" --msvc-crt-policy signed \
+            --laya-onnx-dir build_artifacts/laya-onnx
 
       - name: Install UI dependencies
         working-directory: OpenCohost_UI
@@ -168,12 +232,20 @@ jobs:
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build-engine-payload.outputs.version }}
         run: |
-          TAG="${GITHUB_REF_NAME:-v${{ needs.build-engine-payload.outputs.version }}}"
+          # The tag comes from the verified version, never from the ref name (a manual run is on a branch).
+          TAG="v${VERSION}"
+          PRERELEASE_ARGS=()
+          case "$VERSION" in
+            *-alpha*|*-beta*|*-rc*)
+              PRERELEASE_ARGS=(--prerelease)
+              ;;
+          esac
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
-            --prerelease \
             --title "OpenCohost $TAG" \
             --generate-notes \
+            "${PRERELEASE_ARGS[@]}" \
             release_assets/*

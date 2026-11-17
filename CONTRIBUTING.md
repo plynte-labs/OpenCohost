@@ -124,8 +124,7 @@ uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 legacy** — superseded 2026-08-13, retained but not maintained. Do not add
 features to `opencohost/ui/`. Note that host flags armed by `EngineHost` (the
 speech router, and therefore LLM output streaming) never engage under it, so it
-is not a valid surface for runtime validation. See the "Surfaces" section of
-`CLAUDE.md`.
+is not a valid surface for runtime validation.
 
 Running from source — the normal case for every contributor — logs are written to `<repo>/logs/`: outside a frozen build, `USER_DATA_DIR` resolves to the repo root (`opencohost/config/storage.py`). Only a frozen/packaged build writes to `%APPDATA%\OpenCohost\logs\` on Windows or `~/.config/OpenCohost/logs/` on Linux/macOS.
 

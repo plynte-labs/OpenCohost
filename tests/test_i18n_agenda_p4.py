@@ -68,9 +68,9 @@ LEGACY_TOPIC_TEMPLATES = {
 }
 
 # The old SCOUT_PROMPT_TEMPLATE constant, llm_engine.py:106-121 (pre-P4).
-LEGACY_SCOUT_PROMPT_TEMPLATE = """Sos un asistente que sugiere próximos temas para un stream en vivo.
-A partir de estas notas de la conversación reciente, proponé 2 o 3 temas
-NUEVOS y ADYACENTES para seguir la charla: no repitas lo ya dicho, pensá
+LEGACY_SCOUT_PROMPT_TEMPLATE = """Eres un asistente que sugiere próximos temas para un stream en vivo.
+A partir de estas notas de la conversación reciente, propón 2 o 3 temas
+NUEVOS y ADYACENTES para seguir la charla: no repitas lo ya dicho, piensa
 hacia dónde podría derivar de forma natural lo que se vino hablando.
 
 Notas:
@@ -274,7 +274,7 @@ def test_scout_prompt_wiring_uses_active_locale_bundle(monkeypatch, official):
 
     assert calls, "scout chat was never invoked"
     prompt = calls[0]["messages"][0]["content"]
-    assert "Sos un asistente" not in prompt
+    assert "Eres un asistente" not in prompt
     assert "You are an assistant that suggests upcoming topics" in prompt
 
 

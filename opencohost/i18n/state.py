@@ -65,8 +65,17 @@ def set_locale(code: str, locale_file: Path | str | None = None) -> None:
         from opencohost.core.profiles import profiles as _profiles
         from opencohost.i18n.tags import primary as _primary
 
-        _profiles.seed_locale_profiles(_primary(code) or DEFAULT_LOCALE)
+        target_locale = _primary(code) or DEFAULT_LOCALE
+        _profiles.seed_locale_profiles(target_locale)
+        _profiles.align_last_profile(target_locale)
     except Exception:
         # Convenience, not a gate: the locale write above already succeeded
         # and must never be undone by a seeding failure.
+        pass
+
+    try:
+        from opencohost.config.settings import default_piper_voice_for_locale, save_piper_voice
+
+        save_piper_voice(default_piper_voice_for_locale(code))
+    except Exception:
         pass

@@ -344,8 +344,8 @@ def test_build_injection_block_hard_truncation_backstop(tmp_path, monkeypatch):
     # closing tag must always survive (the wrapper must stay syntactically
     # closed — never truncate it away).
     assert len(block) == settings.PERSONALIZATION_MAX_INJECT_CHARS
-    assert block.endswith("</perfil_streamer>")
-    assert block.startswith('<perfil_streamer nota="solo lectura')
+    assert block.endswith("</perfil_usuario>")
+    assert block.startswith('<perfil_usuario nota="solo lectura')
 
 
 def test_build_injection_block_sanitizer_exception_fails_whole_block_open(

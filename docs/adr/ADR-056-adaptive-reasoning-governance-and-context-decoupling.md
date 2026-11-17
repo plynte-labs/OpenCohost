@@ -180,3 +180,57 @@ Every completed generation returns metadata for runtime audit without logging us
 [x] Zero storage of prompt, thinking, or response text in logs or telemetry structures.
 [x] All existing unit, integration, and regression suites pass GREEN.
 ```
+
+---
+
+## Amendment (2026-09-28) — Auto upgrades a smaller resident allocation
+
+**Track:** `odd/tasks/model-context-auto-config-20260928.md` (T1, T1b).
+
+T1 introduced Auto (`min(native_context_max, 16384)`, VRAM-clamped through the
+same ceiling/spill-ratchet/NVML-advisory machinery this ADR already describes
+for an explicit `requested_context`) as the safe cold-start default for an
+unconfigured model, replacing the old flat `CTX_FALLBACK_DEFAULT` (4096)
+fallback. At cold start this fully closed the reported gap: a 128K/262K-native
+model with no explicit override no longer silently allocated 4096.
+
+T1 left one case open by design (documented at the time as a known,
+out-of-scope limitation): a model already **resident** — for example kept
+loaded by Ollama's own `keep_alive` from an earlier session, or previously
+loaded at the pre-T1 4096 fallback — was trusted unconditionally (ADR-056 P0,
+§1 above) over Auto, with no upper bound. Auto only ever ran at a true cold
+start (nothing resident yet). In practice this meant an unconfigured model
+already resident at a small allocation never got upgraded: every turn
+re-resolved to the same small resident value, requested it again, and it
+stuck for the lifetime of that residency — defeating the Qwen3.8-9B
+acceptance case T1 itself was meant to fix (native 262144, observed stuck at
+4096 from an earlier keep_alive load).
+
+**T1b (owner-approved 2026-09-28) closes this gap:** for an unconfigured
+model, Auto now behaves like an explicit `requested_context` whenever the
+live resident allocation is **smaller** than Auto's own VRAM-bounded target —
+it requests the upgrade, and the next Ollama call reloads at the new
+`num_ctx` exactly as an explicit override already does. The upgrade runs
+through the identical VRAM-clamp/spill-ratchet plan an explicit override
+uses (never a parallel mechanism): it is bounded by the 16384 Auto cap, and
+by any ceiling a prior spill has already ratcheted down for that model — it
+never bounces back above a ratcheted ceiling, and settles (no further
+reload) once the resident allocation reaches that ceiling.
+
+Resident allocation still wins unconditionally, unchanged from T1/ADR-056 P0,
+in three cases:
+- It is already **>=** Auto's own target (a possibly stale/wrong discovered
+  `native_context_max` must never shrink a bigger live allocation).
+- The native context ceiling itself is **unknown or invalid** — Auto never
+  guesses an upgrade target from an unreliable ceiling.
+- The per-model configuration read fails — fail open to runtime truth,
+  exactly like the pre-existing cold-start fail-open path.
+
+An **explicit** per-model `context_tokens` override is unaffected by this
+amendment: it already won unconditionally over resident truth before T1b
+(§ "Priority", `_resolve_effective_ctx_limit`'s own docstring).
+
+See `opencohost/core/engine/llm_engine_models.py::_resolve_effective_ctx_limit`
+(step 1) and `_apply_vram_ctx_plan` for the implementation, and
+`tests/test_vram_ctx_plan.py` / `tests/test_context_decoupling.py` for the
+resident-larger-wins vs. resident-smaller-gets-upgraded coverage.

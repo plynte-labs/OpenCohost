@@ -17,6 +17,7 @@ from typing import Optional
 
 import ollama
 
+from opencohost.config import vision_settings as _vision_settings
 from opencohost.config.settings import (
     EDITORIAL_CARDS_DB,
     LOG_DIR,
@@ -32,6 +33,14 @@ from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.profiles.profiles import cargar_perfiles
 from opencohost.core.music.music_library import MusicLibrary
 from opencohost.core.providers.local.ollama_startup import OllamaStartupManager
+from opencohost.core.providers.local.vision_daemon import DEFAULT_VISION_HOST, VisionDaemon
+from opencohost.core.vision.capture import MssCapture
+from opencohost.core.vision.controller import VisionController, _spawn_thread as _vision_spawn
+from opencohost.core.vision.cloud_describer import make_describer, resolve_cloud_key
+from opencohost.core.vision.describer import VisionDescribeError
+from opencohost.core.vision.foreground import default_foreground_probe
+from opencohost.core.vision.catalog import SUGGESTED_VISION_MODELS, VISION_BENCHMARKS
+from opencohost.core.vision.model_inventory import VisionModelInventory, main_ollama_base_url
 from opencohost.avatar.obs_runtime import ObsRuntime
 from opencohost.api.agenda_driver import (
     AgendaDriver,
@@ -106,6 +115,9 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         "model_switch_failed",
         "llm_tier_switch_applied",
         "llm_tier_switch_failed",
+        # Emitted by the in-app ModelDownloadManager (ADR-063) through
+        # _record_motor_event (create_app wires it); no detail payload --
+        # progress numbers are polled from GET /api/models/downloads.
         "download_start",
         "download_done",
         "download_error",
@@ -152,6 +164,9 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         # retry -- surfaced so the owner sees it instead of inferring the
         # loss from silence. Detail stays None (same privacy gate).
         "turn_dropped",
+        # ADR-056: Bounded reasoning recovery terminal exhaustion notification
+        # for owner-visible turns (direct, ptt, owner_bundle). Detail stays None.
+        "reasoning_budget_exhausted",
     }
 )
 
@@ -193,33 +208,40 @@ def _noop_event(*_args, **_kwargs):
 
 
 def _find_ollama_executable():
-    """Locate the Ollama executable.
+    """Locate the Ollama executable (PATH, per-user and machine-wide installs).
 
-    ponytail: duplicated (not imported) from
-    `opencohost/ui/model_panel.py:_find_ollama_executable` — that file is
-    forbidden for this slice, and importing `opencohost.ui` here would
-    violate this package's "never imports opencohost.ui" contract (see
-    main.py module docstring). Accept the ~15-line duplication instead.
-    Keep both copies in sync if the discovery order ever changes.
+    Thin wrapper over the one shared finder so the readiness probe and the eager
+    wake can never disagree; kept under this name because tests patch it here.
     """
-    ollama_exe = shutil.which("ollama")
-    if ollama_exe:
-        return ollama_exe
+    from opencohost.core import ollama_locator
 
-    candidates = []
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        candidates.append(os.path.join(local_appdata, "Programs", "Ollama", "ollama.exe"))
+    return ollama_locator.find_ollama_executable()
 
-    program_files = os.environ.get("ProgramFiles")
-    if program_files:
-        candidates.append(os.path.join(program_files, "Ollama", "ollama.exe"))
 
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
+def _vision_default_language() -> str:
+    """Bridge-line language when the question itself is ambiguous: the
+    active locale's base code, "es" when it is neither es nor en."""
+    try:
+        from opencohost.i18n import active as _i18n_active
 
-    return None
+        code = str(_i18n_active.get_active_bundle().code or "")[:2].lower()
+    except Exception:
+        return "es"
+    return code if code in ("es", "en") else "es"
+
+
+def _clean_web_sources(raw) -> list:
+    """The ``[{"host", "url"}]`` entries that are plain ``https://`` sources, rebuilt
+    from their URL (so a host can never disagree with it), at most 3."""
+    from opencohost.core.web import sources as web_sources
+
+    items = []
+    for entry in raw if isinstance(raw, (list, tuple)) else ():
+        url = entry.get("url") if isinstance(entry, dict) else None
+        source = web_sources.make_source(url)
+        if source is not None:
+            items.append(source)
+    return web_sources.as_dicts(web_sources.merge(items))
 
 
 class ChatReplySink:
@@ -232,10 +254,52 @@ class ChatReplySink:
     (one process, one sink) — ponytail: one global lock, not per-source.
     """
 
-    def __init__(self, maxlen: int = 16):
+    def __init__(self, maxlen: int = 20):
         self._replies = collections.deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self._turn_id = 0
+
+    def record_stream_chunk(
+        self,
+        stream_id: str,
+        text: str,
+        fragments: list[str],
+        source: str,
+        web_searched: Optional[bool] = None,
+    ) -> int:
+        """Stream-aware incremental update for active LLM generation."""
+        display_source = source if source.startswith("kira-agenda") else "kira"
+        origin = source if source and source != "kira" else None
+        with self._lock:
+            if self._replies and self._replies[-1].get("stream_id") == stream_id:
+                tail = self._replies[-1]
+                tail["text"] = text
+                tail["fragments"] = list(fragments)
+                tail["ts"] = time.time()
+                if web_searched is not None:
+                    tail["web_searched"] = web_searched
+                return int(tail["turn_id"])
+
+            self._turn_id += 1
+            self._replies.append(
+                {
+                    "text": text,
+                    "source": display_source,
+                    "origin": origin,
+                    "turn_id": self._turn_id,
+                    "stream_id": stream_id,
+                    "ts": time.time(),
+                    "queue_wait_ms": None,
+                    "answered_by_provider": None,
+                    "answered_by_transport": None,
+                    "submitted_under_provider": None,
+                    "provider_changed_while_queued": None,
+                    "fragments": list(fragments),
+                    "is_streaming": True,
+                    "web_searched": web_searched,
+                }
+            )
+            return self._turn_id
 
     def record(
         self,
@@ -246,7 +310,9 @@ class ChatReplySink:
         answered_by_transport: Optional[str] = None,
         submitted_under_provider: Optional[str] = None,
         provider_changed_while_queued: Optional[bool] = None,
-    ) -> None:
+        web_searched: Optional[bool] = None,
+        web_sources: Optional[list] = None,
+    ) -> int:
         # `source` arrives as the TRUE generating source ("chat", "direct",
         # "ptt", "accumulated", "kira-agenda", "kira-agenda-stop"). The uniform
         # "kira" attribution the published `source` field has always carried is
@@ -263,7 +329,28 @@ class ChatReplySink:
         # the placeholder into a fake origin.
         display_source = source if source.startswith("kira-agenda") else "kira"
         origin = source if source and source != "kira" else None
+        try:
+            fragments = MotorVocalIA._split_for_tts(text) if text else []
+        except Exception:
+            fragments = []
         with self._lock:
+            if self._replies and self._replies[-1].get("is_streaming"):
+                tail = self._replies[-1]
+                tail["text"] = text
+                tail["is_streaming"] = False
+                tail["queue_wait_ms"] = queue_wait_ms
+                tail["answered_by_provider"] = answered_by_provider
+                tail["answered_by_transport"] = answered_by_transport
+                tail["submitted_under_provider"] = submitted_under_provider
+                tail["provider_changed_while_queued"] = provider_changed_while_queued
+                if web_searched is not None:
+                    tail["web_searched"] = web_searched
+                if web_sources is not None:
+                    tail["web_sources"] = _clean_web_sources(web_sources)
+                if not tail.get("fragments"):
+                    tail["fragments"] = fragments
+                return int(tail["turn_id"])
+
             self._turn_id += 1
             self._replies.append(
                 {
@@ -288,14 +375,37 @@ class ChatReplySink:
                     "answered_by_transport": answered_by_transport,
                     "submitted_under_provider": submitted_under_provider,
                     "provider_changed_while_queued": provider_changed_while_queued,
+                    "fragments": fragments,
+                    "is_streaming": False,
+                    "web_searched": web_searched,
+                    # runtime-fixes-20261110 T5: real sources of a web answer. Held in
+                    # this in-memory sink only, for the desktop API; the gateway reads
+                    # `text` and `turn_id` alone and never this field.
+                    "web_sources": _clean_web_sources(web_sources) if web_sources is not None else None,
                 }
             )
+            return self._turn_id
 
     def last(self) -> dict:
         with self._lock:
             if not self._replies:
                 return {"text": None, "source": None, "turn_id": 0, "ts": None}
             return dict(self._replies[-1])
+
+    def since(self, turn_id: int) -> list:
+        """Copies of the recent items with a turn_id above ``turn_id``, oldest
+        first. Read-only seam for the remote gateway's reply poll."""
+        with self._lock:
+            return [dict(r) for r in self._replies if int(r.get("turn_id") or 0) > turn_id]
+
+    def get(self, turn_id: int) -> Optional[dict]:
+        """One recent turn (with its fragments) by id, or None once it has
+        aged out of the window (or never existed)."""
+        with self._lock:
+            for reply in self._replies:
+                if reply.get("turn_id") == turn_id:
+                    return dict(reply)
+        return None
 
 
 class EventLogSink:
@@ -326,7 +436,7 @@ class EventLogSink:
         self._seq = 0
         self.boot = time.time()
 
-    def record(self, source: str, action: str, detail: "str | None" = None) -> None:
+    def record(self, source: str, action: str, detail: "str | dict | None" = None) -> None:
         with self._lock:
             self._seq += 1
             self._events.append(
@@ -524,6 +634,12 @@ class EngineHost:
         # process, one wake attempt (mirrors aggregator_lock/agenda_lock).
         self.ollama_wake_lock = threading.Lock()
         self.ollama_warming = False
+        # vision-on-demand V1.5: None until start() wires it; stays None if
+        # wiring fails (resilient, like the editorial bridge). The controller
+        # builds nothing while vision is disabled.
+        self.vision = None
+        # V1.17: installed-model listing + per-tag vision capability cache.
+        self._vision_inventory = VisionModelInventory()
 
     def _wake_ollama_eager(self) -> None:
         """S4 (P2): eager, non-blocking Ollama server wake.
@@ -547,6 +663,8 @@ class EngineHost:
         ollama_exe = _find_ollama_executable()
         if ollama_exe is None:
             self.ollama_wake_lock.release()
+            # Content-free (no paths, no user data): why Ollama will not start.
+            _logger.info("Ollama executable not found; eager wake skipped")
             return
 
         self.ollama_warming = True
@@ -568,7 +686,8 @@ class EngineHost:
                     stdout_log_path=os.path.join(LOG_DIR, "ollama_startup_stdout.log"),
                     stderr_log_path=os.path.join(LOG_DIR, "ollama_startup_stderr.log"),
                 )
-                manager.start_and_wait(ollama_exe, OLLAMA_MODELS_DIR)
+                result = manager.start_and_wait(ollama_exe, OLLAMA_MODELS_DIR)
+                self._nudge_engine_after_wake(result)
             except Exception:
                 _logger.exception("Eager Ollama wake failed")
                 # FIX-BE: release only on failure so a later retry can
@@ -583,6 +702,25 @@ class EngineHost:
                 self.ollama_warming = False
 
         threading.Thread(target=_worker, daemon=True, name="ollama-wake").start()
+
+    def _nudge_engine_after_wake(self, result) -> None:
+        """R1: tell an engine that missed the daemon's boot window to re-check.
+
+        The engine's own startup check is bounded (5 s) and can lose the race
+        against a cold `ollama serve`. When our wake finishes with Ollama up, ask
+        the engine thread for the full `check_ollama` path (model re-resolution
+        and preparation included). No-op when the engine is absent or already
+        ready; the idle re-probe is the safety net for every other case.
+        """
+        if getattr(result, "status", None) not in ("ready", "already_running"):
+            return
+        motor = self.motor
+        if motor is None or getattr(motor, "is_ready", True):
+            return
+        try:
+            motor.command_queue.put(("check_ollama", None))
+        except Exception:
+            _logger.exception("Could not queue the post-wake Ollama re-check")
 
     def _record_motor_event(self, status) -> None:
         """Item B: record engine-thread motor lifecycle into `event_log`.
@@ -772,6 +910,238 @@ class EngineHost:
         # engine fires it once after a successful direct generation.
         self.motor.direct_editorial_usage_recorder = bridge.commit_direct_injection
         self.editorial_bridge = bridge
+        # active cards: host-only (CTk never arms it). Store-only like the
+        # direct provider; empty when no card is active.
+        from opencohost.core.editorial.active_cards import ActiveCardService
+        from opencohost.i18n import active as i18n_active
+
+        # The MiniLM worker belongs to the memory subsystem, which starts later
+        # and may be absent: resolve it lazily on every use.
+        from opencohost.core.editorial import card_embeddings
+
+        card_embeddings.set_embedder_provider(
+            lambda: card_embeddings.MemoryWorkerEmbedder.from_memory(
+                getattr(self.motor, "_memory", None)
+            )
+        )
+        self.motor.active_card_service = ActiveCardService(
+            store, lang_reader=lambda: i18n_active.get_active_bundle().code
+        )
+
+    @staticmethod
+    def _apply_persisted_memory_layers() -> None:
+        """Arm the user's per-layer memory controls (memory-semantic-recall
+        T4) from MEMORY_LAYERS_FILE. Host-only, like the speech-router flags:
+        CTk never calls this and keeps the all-on code defaults. The loader
+        fails open to all layers on; one INFO line, flags only, on the
+        OpenCohost logger (the one routed to logs/opencohost_*.log)."""
+        from opencohost.config import settings as _settings
+
+        layers = _settings.load_memory_layers()
+        _settings.apply_memory_layers(layers)
+        logging.getLogger("OpenCohost").info(
+            "memory_layers: facts=%s episodes=%s semantic=%s",
+            layers["facts"], layers["episodes"], layers["semantic"],
+        )
+
+    # -- vision on demand (V1.5) ------------------------------------------------
+
+    def _wire_self_knowledge(self) -> None:
+        """Arm the self-knowledge service on the motor (read live per turn from
+        ``self_knowledge.json``; master OFF makes it a no-op)."""
+        from opencohost.core.self_knowledge.wiring import build_default_service
+
+        motor = self.motor
+        motor.self_knowledge_service = build_default_service(
+            vision_enabled=motor._vision_enabled,
+            tts_label=lambda: str(getattr(motor, "motor_tts", "") or ""),
+        )
+
+    def _wire_vision(self) -> None:
+        """Apply the persisted VISION_* settings and build the controller.
+
+        Host-only, like the speech router flags: CTk never calls this, so the
+        frozen shell never looks at the screen. Nothing heavy is built unless
+        the owner enabled vision."""
+        values = _vision_settings.load()
+        _vision_settings.apply(values)
+        self.vision = VisionController(
+            daemon_factory=self._make_vision_daemon,
+            # P3: by vision_source (local Ollama, cloud vision model, or none).
+            describer_factory=lambda v, base_url: make_describer(
+                v, base_url, self._vision_cloud_key
+            ),
+            capture_factory=lambda: MssCapture() if MssCapture.available() else None,
+            speak_bridge=self.motor._vision_speak_bridge,
+            # V1.28: "Sigo leyendo..." every 5 s while a describe runs long.
+            speak_progress=self.motor._vision_speak_progress,
+            on_looking=self._on_vision_looking,
+            on_result=self._on_vision_result,
+            default_language=_vision_default_language(),
+            spawn=_vision_spawn,
+            # V1.11: skip burst frames taken while OpenCohost itself is in front.
+            foreground_probe=default_foreground_probe(),
+            # V1.13: the "processing the frames" phase, between capture and describe.
+            on_describing=self._on_vision_describing,
+            # P2: a look goes straight to a vision-capable cloud chat model when allowed.
+            direct_check=self.motor._vision_direct_eligible,
+        )
+        self.motor._vision = self.vision
+        self.vision.apply(values)
+
+    @staticmethod
+    def _vision_cloud_key():
+        """P3: the cloud describer's API key, read per call so a key change
+        applies at once. Never logged; ``None`` when none is stored."""
+        from opencohost.api import deps
+        from opencohost.stream_admin.oauth_store import OAuthStore
+
+        return resolve_cloud_key(
+            _vision_settings.current(), deps.load_provider_config(), OAuthStore(deps.llm_keys_file())
+        )
+
+    @staticmethod
+    def _make_vision_daemon(values) -> VisionDaemon:
+        """Same ollama exe and model store as the main daemon, own port and
+        own log files (stdout/stderr must be redirected or the pipe stalls)."""
+        return VisionDaemon(
+            ollama_exe=_find_ollama_executable(),
+            models_dir=OLLAMA_MODELS_DIR,
+            port=values.port,
+            stdout_log_path=os.path.join(LOG_DIR, "ollama_vision_stdout.log"),
+            stderr_log_path=os.path.join(LOG_DIR, "ollama_vision_stderr.log"),
+        )
+
+    def _on_vision_looking(self, looking: bool) -> None:
+        """Push the "Kira is looking" indicator to GET /api/events.
+
+        Host-originated, so it bypasses the motor-status whitelist on purpose;
+        the detail is a code-built boolean, never text."""
+        self.event_log.record("vision", "vision_looking", {"looking": bool(looking)})
+
+    def _on_vision_describing(self) -> None:
+        """Push the "processing the frames" phase (V1.13), fired after capture
+        and right before the describe request. Same shape as `vision_looking`:
+        a code-built boolean, never text."""
+        self.event_log.record("vision", "vision_describing", {"describing": True})
+
+    def _on_vision_off_request(self) -> None:
+        """The owner asked to look while vision is off (vision-off-quick-enable).
+
+        Wired as `motor.on_vision_off_request`; the engine fires it at most once
+        per owner request. The UI shows a one-click "Activar visión" row on it.
+        Closed detail, never the utterance."""
+        self.event_log.record("vision", "vision_off_request", {"reason": "look_requested"})
+
+    _VISION_RESULT_KEYS = ("outcome", "id", "describe_ms", "frames_sent", "mode")
+
+    def _on_vision_result(self, result: dict) -> None:
+        """Per-look `vision_result` event (V1.8): `{outcome, id, describe_ms,
+        frames_sent, mode}`, emitted only when the gate decided to look. The
+        keys are a closed list copied from the controller's result, so no text,
+        description or image can ride along."""
+        detail = {key: result.get(key) for key in self._VISION_RESULT_KEYS}
+        self.event_log.record("vision", "vision_result", detail)
+
+    def vision_status(self) -> dict:
+        """Enabled flag, controller state (V1.8), daemon state, model/capture
+        availability, armed and looking-now flags and the last look's result.
+        Safe before start() and after a wiring failure."""
+        vision = self.vision
+        if vision is not None:
+            return vision.status()
+        values = _vision_settings.current()
+        return {
+            "enabled": False,
+            "state": "off",
+            "last_error": None,
+            "daemon_state": "stopped",
+            "model_installed": None,
+            "model_loaded": None,
+            "capture_available": False,
+            "armed": False,
+            "looking": False,
+            "model": values.model,
+            "port": values.port,
+            "last_result": None,
+        }
+
+    def vision_models(self) -> dict:
+        """V1.17: installed models with their vision capability, plus the
+        suggested catalog. Asks the vision daemon when it runs, then the main
+        daemon (shared model store). Bounded and fail-open: an unreachable
+        Ollama, or any inventory error, yields no models and
+        ``ollama_reachable`` False."""
+        values = _vision_settings.current()
+        status = self.vision_status()
+        base_urls = []
+        if status.get("daemon_state") in ("running", "external"):
+            port = status.get("port") or values.port
+            base_urls.append(f"http://{DEFAULT_VISION_HOST}:{port}")
+        base_urls.append(main_ollama_base_url())
+        try:
+            snapshot = self._vision_inventory.snapshot(base_urls)
+            reachable, installed = bool(snapshot.reachable), list(snapshot.installed)
+        except Exception:
+            _logger.warning("[VISION_MODELS] reason=inventory_failed")
+            reachable, installed = False, []
+        return {
+            "current": values.model,
+            "installed": installed,
+            "suggested": [dict(model) for model in SUGGESTED_VISION_MODELS],
+            "ollama_reachable": reachable,
+            "benchmarks": {tag: dict(entry) for tag, entry in VISION_BENCHMARKS.items()},
+        }
+
+    def vision_thumbnails(self, look_id: str):
+        """V1.11: the look's in-memory thumbnails as JPEG data URLs, or None
+        (unknown/expired look, thumbnails off, or vision not wired)."""
+        vision = self.vision
+        return vision.thumbnails(look_id) if vision is not None else None
+
+    def vision_description(self, look_id: str):
+        """The look's in-memory description text (expires with its frames), or
+        None. Owner surface only; the router gates it on the operator token."""
+        vision = self.vision
+        return vision.description(look_id) if vision is not None else None
+
+    def vision_describe_image(self, image: bytes, question: str) -> str:
+        """Describe one pasted image with the configured vision describer
+        (blocking; raises ``VisionDescribeError``). Bytes are never kept."""
+        vision = self.vision
+        if vision is None:
+            raise VisionDescribeError("unavailable", "vision_not_wired")
+        return vision.describe_image(image, question)
+
+    def vision_direct_eligible(self) -> bool:
+        """P2: True when pasted images should go straight to the cloud chat model
+        (cloud provider, model sees images, owner opted in, vision on)."""
+        check = getattr(self.motor, "_vision_direct_eligible", None)
+        return bool(check()) if callable(check) else False
+
+    def vision_stash_images(self, text: str, images) -> None:
+        """P2: hold the pasted images for the engine turn carrying *text*."""
+        self.motor.stash_turn_images(text, images)
+
+    def vision_arm_look(self, mode=None) -> bool:
+        """Arm the one-shot "look at this" flag for the next owner turn.
+        ``mode`` is an optional look mode (``clip``/``text``, V1.26/V1.27)."""
+        vision = self.vision
+        return vision.arm_look(mode) if vision is not None else False
+
+    def vision_apply_settings(self, updates: dict, *, persist: bool = True):
+        """Validate *updates* over the current values, persist, then apply.
+
+        Returns the effective VisionSettings, or None when the write failed:
+        nothing is applied then, so the runtime never drifts from what a
+        restart would load (mirrors POST /api/memoria/settings)."""
+        new = _vision_settings.with_updates(_vision_settings.current(), updates or {})
+        if persist and not _vision_settings.save(new):
+            return None
+        _vision_settings.apply(new)
+        if self.vision is not None:
+            self.vision.apply(new)
+        return new
 
     def _seed_startup_profile(self) -> None:
         """FIX-A: dispatch a set_profile for the startup profile at boot.
@@ -837,6 +1207,15 @@ class EngineHost:
         """
         agenda = self.agenda
         if agenda is None:
+            return
+        # Read-aloud (owner-selected text) rides the router and emits the
+        # boundary pair, but the agenda controller routes by its OWN state, not
+        # by source: a read-aloud boundary during a GENERATING beat would
+        # accept the generation and then complete a beat that never spoke.
+        # The motor keeps the boundary's source past its end for exactly this.
+        if status in ("speaking_start", "speaking_end") and (
+            getattr(self.motor, "_speech_boundary_source", None) == "readaloud"
+        ):
             return
         driver = self._agenda_driver
         nudge = driver.nudge if driver is not None else None
@@ -1000,7 +1379,14 @@ class EngineHost:
         if self.motor is not None and hasattr(self.motor, "drop_pending_sources"):
             self.motor.drop_pending_sources(("chat",))
 
+    # Idempotent-stop state (clean_shutdown_unload_20261007): class-level
+    # defaults so a partially-constructed host still has them.
+    _stopped = False
+    _stop_lock = threading.Lock()
+    last_unloaded_model: Optional[str] = None
+
     def start(self) -> None:
+        self._stopped = False
         self._acquire_lock()
         try:
             self._wake_ollama_eager()
@@ -1035,13 +1421,31 @@ class EngineHost:
             # memoria concern, unrelated to agenda construction. Carries the
             # kept COUNT, which cannot ride the shared ui_callback.
             self.motor.on_memoria_promoted = self._on_memoria_promoted
+            # vision-off-quick-enable-20261009: wired before (and independent
+            # of) _wire_vision, so a vision wiring failure still surfaces the
+            # "vision is off" request to the UI.
+            self.motor.on_vision_off_request = self._on_vision_off_request
+            self._apply_persisted_memory_layers()
+            # vision-on-demand V1.5: resilient -- a failure leaves vision off,
+            # never bricks the host. Daemon start runs on its own thread.
+            try:
+                self._wire_vision()
+            except Exception:
+                self.vision = None
+                _logger.exception("Vision wiring failed; vision on demand disabled")
+            # self-knowledge: host-only like vision (CTk never arms it). A
+            # failure leaves the motor without the service, i.e. prompts as
+            # before.
+            try:
+                self._wire_self_knowledge()
+            except Exception:
+                _logger.exception("Self-knowledge wiring failed; feature disabled")
             self.monitor = HealthMonitor()
             self.motor.health_monitor = self.monitor  # mirrors app_shell.py:196-197
             self.motor.start()
-            try:
-                self.monitor.qwen_manager.attach_existing()
-            except Exception:
-                pass
+            # Qwen3-TTS retired to a separate legacy repository (2026-09-21):
+            # the API host no longer attaches to a manual Qwen server on :5000.
+            # HealthMonitor reports qwen_status="unavailable" by default.
             self.monitor.start()
             # RF3 stream chat-live control-plane: resilient by design — a
             # missing config or optional chat-source dependency must not
@@ -1141,7 +1545,7 @@ class EngineHost:
             self.stop()
             raise
 
-    def stop(self) -> None:
+    def stop(self, unload_models: bool = True) -> None:
         """Best-effort teardown — each step swallows exceptions.
 
         Eager-wake orphan (WU5/D10, intentional): _wake_ollama_eager may have
@@ -1149,7 +1553,19 @@ class EngineHost:
         NOT kill it here — the owner's model keeps Ollama warm across API
         restarts, and the wake thread is a daemon with log-file-redirected pipes
         (no undrained-pipe stall). Killing it at shutdown would be an anti-feature.
+
+        Idempotent: the Tauri shell calls POST /api/system/shutdown before it
+        kills the process, and the lifespan finally calls this again on a
+        clean exit -- the second call is a no-op.
+
+        ``unload_models=False`` (owner toggle "Unload models when closing" OFF)
+        skips only the Ollama ``keep_alive=0`` step; every other teardown step
+        still runs. The default keeps the unload.
         """
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
         # FIX-C: stop the agenda driver first so its tick thread cannot enqueue
         # onto a motor that is about to be torn down. getattr-guarded: stop() is
         # best-effort and may run on a partially-constructed host.
@@ -1157,6 +1573,15 @@ class EngineHost:
         if agenda_driver is not None:
             try:
                 agenda_driver.stop()
+            except Exception:
+                pass
+        # vision-on-demand V1.5: stop the vision daemon this host spawned (an
+        # external one on the port is never touched). Unlike the main Ollama
+        # wake above, nothing else uses it, so it must not outlive the host.
+        vision = getattr(self, "vision", None)
+        if vision is not None:
+            try:
+                vision.shutdown()
             except Exception:
                 pass
         # ponytail: KiraAgendaController and MusicLibrary are both pure state
@@ -1218,12 +1643,13 @@ class EngineHost:
                 pass
         try:
             model = getattr(self.motor, "current_model", None)
-            if model:
+            if model and unload_models:
                 # WU5/D10: bound the unload. The module-level ollama.generate()
                 # uses the default client with NO timeout — a hung Ollama would
                 # stall API shutdown indefinitely. A dedicated Client(timeout=2.0)
                 # caps this teardown step at ~2s.
                 ollama.Client(timeout=2.0).generate(model=model, prompt="", keep_alive=0)
+                self.last_unloaded_model = model
         except Exception:
             pass
         self._release_lock()

@@ -2,6 +2,7 @@ import queue
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from opencohost.core.context.prompt_profile import COMPACT_GROUNDING, COMPACT_OWNER_POLICY
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.core.providers.llm_tiers import LLMTierConfig
 from opencohost.i18n import active as i18n_active
@@ -116,11 +117,17 @@ def test_tier_switch_preserves_profile_prompt_and_conversation_memory():
     messages = motor.ollama.chat.call_args.kwargs["messages"]
     assert dialogo == "nueva respuesta"
     # The profile prompt survives the tier switch verbatim and stays FIRST in the
-    # system message. grounding_authority_temporal_humility appends the engine's
-    # always-present grounding rules after it (llm_engine._generar_dialogo), so
-    # the expected system content is composed rather than a bare literal — still
-    # an exact equality, no substring softening.
-    expected_system = f"Prompt de Kira\n\n{i18n_active.grounding_rules()}"
+    # system message. The fast tier is qwen3:1.7b, a small local model, so the
+    # compact prompt profile applies (c805ca9, compact-prompt-profile-20261009):
+    # PromptContextAssembler swaps the long grounding rules, the owner policy and
+    # the model-label line for COMPACT_GROUNDING + COMPACT_OWNER_POLICY, followed
+    # by the reply-length line (the "hola" turn is a brief input -> "short").
+    # Still an exact equality, no substring softening.
+    expected_system = (
+        "Prompt de Kira\n\n"
+        f"{COMPACT_GROUNDING}\n\n{COMPACT_OWNER_POLICY}\n\n"
+        f"{i18n_active.reply_length_line('short')}"
+    )
     assert messages[:3] == [
         {"role": "system", "content": expected_system},
         {"role": "user", "content": "recuerdo previo"},
@@ -186,9 +193,19 @@ def test_fast_qwen_preserves_decoupled_native_ctx_under_tier_switch():
         assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "respuesta rapida"
 
     assert motor._model_ctx_limit["qwen3:1.7b"] == 40960
-    # Decoupled from tier caps under ADR-056 WU2: preserves native/allocated ctx
-    assert captured_budget["ctx_limit"] == 40960
-    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == 40960
+    # Pre-T1 (model_context_auto_config_20260928), an unconfigured model with
+    # no /api/ps snapshot got its FULL native ctx uncapped at cold start
+    # (decoupled from tier caps under ADR-056 WU2). T1 replaces that
+    # cold-start default with Auto = min(native, 16384) VRAM-clamped for
+    # EVERY unconfigured model, not just the very-large-native ones the bug
+    # report named -- so this native-40960 model is now also capped to Auto,
+    # same machinery as a configured override. Still fully decoupled from
+    # tier caps (nothing here is 4096 or a tier-specific number); it is
+    # simply Auto's own cap now, and it still matches num_ctx (no mismatch
+    # reload).
+    from opencohost.config.model_parameters import AUTO_CONTEXT_TOKENS
+    assert captured_budget["ctx_limit"] == AUTO_CONTEXT_TOKENS
+    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == AUTO_CONTEXT_TOKENS
 
 
 def test_gemma_quality_preserves_num_ctx_aligned_with_effective_ctx():
@@ -203,7 +220,10 @@ def test_gemma_quality_preserves_num_ctx_aligned_with_effective_ctx():
 
     assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "respuesta quality"
 
-    # ADR-056 P0: Gemma preserves num_ctx, but native 131072 on cold start without /api/ps
-    # MUST NOT allocate 128K into Ollama VRAM. It safely defaults to requested context (4096).
-    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == 4096
+    # ADR-056 P0 + T1 (model_context_auto_config_20260928): Gemma preserves
+    # num_ctx, but native 131072 on cold start without /api/ps MUST NOT
+    # allocate 128K into Ollama VRAM. It safely defaults to Auto
+    # (min(native, 16384), VRAM-clamped) -- no longer the old flat 4096.
+    from opencohost.config.model_parameters import AUTO_CONTEXT_TOKENS
+    assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] == AUTO_CONTEXT_TOKENS
     assert motor.ollama.chat.call_args.kwargs["options"]["num_ctx"] != 131072

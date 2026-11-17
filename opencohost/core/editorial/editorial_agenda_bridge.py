@@ -99,6 +99,10 @@ class EditorialAgendaBridge:
         card = self.store.get(card_id)
         if card is None or card.status is not EditorialCardStatus.ACTIVE or card.is_expired():
             return None
+        if card.active:
+            # An active card is retrieved by the active-card seam; rendering
+            # it here too would duplicate it.
+            return None
         return _render_block(card)
 
     def auto_attach(self, topic: "AgendaTopic") -> bool:
@@ -113,7 +117,7 @@ class EditorialAgendaBridge:
             cards = self.store.list_armed()
             eligible = [
                 c for c in cards
-                if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
+                if not c.active and not c.is_expired() and not c.in_cooldown(now, cooldown_s)
             ]
             from opencohost.core.editorial.editorial_matching import match_score, select_card
             text = (topic.title or "") + (" " + topic.angle if topic.angle else "")
@@ -160,9 +164,11 @@ class EditorialAgendaBridge:
             now = datetime.now(timezone.utc)
             cooldown_s = settings.EDITORIAL_REUSE_COOLDOWN_SECONDS
             cards = self.store.list_armed()
+            # An active card is retrieved by the active-card seam; matching it
+            # here as well would duplicate its block.
             eligible = [
                 c for c in cards
-                if not c.is_expired() and not c.in_cooldown(now, cooldown_s)
+                if not c.active and not c.is_expired() and not c.in_cooldown(now, cooldown_s)
             ]
             from opencohost.core.editorial.editorial_matching import select_card
             card = select_card(query_text, eligible)

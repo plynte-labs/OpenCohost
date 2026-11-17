@@ -190,3 +190,28 @@ class TestProfileUseCases:
         assert "cohost" in prompt or "streamer" in prompt, (
             "Calmado must address cohost/streamer-away scenarios"
         )
+
+
+# K5 (warmth-guardrails-runtime-20261006): every es seed narrates in neutral
+# tú. Quoted spans document banned words, so they are excluded from the scan.
+_VOSEO_NARRATION = re.compile(
+    r"\b(sos|vos|tenés|querés|hacés|podés|sabés|decís|inventás|suponés|leés|"
+    r"destacás|celebrás|bromeás|explicás|acompañás|hablás|necesitás|sostenés|tirás|"
+    r"quejés|proponé|hacé|ignorá|seguí|mantené|ayudá|distinguí|tirá|pasá|mirá|"
+    r"acordate|reaccioná|usás|transformalo|leé)\b",
+    re.IGNORECASE,
+)
+
+
+def _es_seeds() -> dict:
+    with open(DEFAULT_PROFILES_FILE, "r", encoding="utf-8") as f:
+        profiles = json.load(f)
+    return {n: p for n, p in profiles.items() if p.get("locale") == "es"}
+
+
+@pytest.mark.parametrize("name", sorted(_es_seeds()))
+def test_es_seed_narration_has_no_voseo(name):
+    prompt = _es_seeds()[name]["prompt"]
+    narration = re.sub(r'"[^"]*"', "", prompt)
+    match = _VOSEO_NARRATION.search(narration)
+    assert not match, f"{name} seed still uses voseo: {match.group()!r}"

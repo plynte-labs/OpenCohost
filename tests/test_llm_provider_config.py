@@ -75,6 +75,7 @@ def test_get_absent_config_defaults_local():
             "active_provider": "local",
             "fallback_mode": "auto",
             "pregen_enabled": False,
+            "discard_stale_speech_on_regenerated_reply": False,
             "profiles": {},
         }
 
@@ -106,6 +107,7 @@ def test_put_creates_profile_with_key_and_get_round_trips():
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-4o-mini",
             "preset": None,
+            "model_vision": False,
             "api_key_set": True,
         }
         assert '"api_key":' not in resp.text
@@ -258,6 +260,37 @@ def test_pregen_enabled_defaults_false_and_enable_via_put():
         assert client.get("/api/llm/provider").json()["pregen_enabled"] is True
 
 
+def test_discard_stale_speech_on_regenerated_reply_defaults_false_and_enable_via_put():
+    """T4 (live_session_fixes_20260925): "discard stale speech when a
+    regenerated reply arrives" -- default OFF, round-trips through the same
+    global-posture PUT as fallback_mode/pregen_enabled."""
+    app = _app()
+    with TestClient(app) as client:
+        assert (
+            client.get("/api/llm/provider").json()["discard_stale_speech_on_regenerated_reply"]
+            is False
+        )
+
+        resp = client.put(
+            "/api/llm/provider",
+            json={"discard_stale_speech_on_regenerated_reply": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["discard_stale_speech_on_regenerated_reply"] is True
+        assert (
+            client.get("/api/llm/provider").json()["discard_stale_speech_on_regenerated_reply"]
+            is True
+        )
+
+        # And back OFF -- an explicit False must persist, never be treated as
+        # "omitted" (mirrors how every other Optional[bool] global field works).
+        resp = client.put(
+            "/api/llm/provider",
+            json={"discard_stale_speech_on_regenerated_reply": False},
+        )
+        assert resp.json()["discard_stale_speech_on_regenerated_reply"] is False
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Write-failure paths -> 503, never 500 (mirrors test_api_write_failures.py)
 # ──────────────────────────────────────────────────────────────────────────
@@ -382,6 +415,7 @@ def test_put_api_key_only_for_fresh_profile_id_creates_visible_draft():
             "base_url": "",
             "model": "",
             "preset": None,
+            "model_vision": False,
             "api_key_set": True,
         }
 
@@ -567,3 +601,62 @@ def test_delete_profile_key_store_failure_returns_503_config_unchanged(monkeypat
         body = client.get("/api/llm/provider").json()
         assert body["profiles"]["nvidia_nim"]["base_url"] == "https://a"
         assert body["profiles"]["nvidia_nim"]["api_key_set"] is True
+
+
+def test_put_preset_none_clears_existing_preset():
+    app = _app()
+    with TestClient(app) as client:
+        client.put(
+            "/api/llm/provider",
+            json={
+                "profile_id": "nvidia_nim",
+                "preset": "nvidia_nim",
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "model": "meta/llama-3.1-8b-instruct",
+            },
+        )
+
+        resp = client.put(
+            "/api/llm/provider",
+            json={"profile_id": "nvidia_nim", "preset": None},
+        )
+        assert resp.status_code == 200
+        profile = resp.json()["profiles"]["nvidia_nim"]
+        assert profile["preset"] is None
+        assert profile["base_url"] == "https://integrate.api.nvidia.com/v1"
+        assert profile["model"] == "meta/llama-3.1-8b-instruct"
+
+        persisted = client.get("/api/llm/provider").json()["profiles"]["nvidia_nim"]
+        assert persisted["preset"] is None
+
+
+def test_put_omitting_preset_preserves_existing_preset():
+    app = _app()
+    with TestClient(app) as client:
+        client.put(
+            "/api/llm/provider",
+            json={
+                "profile_id": "nvidia_nim",
+                "preset": "nvidia_nim",
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "model": "meta/llama-3.1-8b-instruct",
+            },
+        )
+
+        resp = client.put(
+            "/api/llm/provider",
+            json={"profile_id": "nvidia_nim", "model": "meta/llama-3.3-70b-instruct"},
+        )
+        assert resp.status_code == 200
+        profile = resp.json()["profiles"]["nvidia_nim"]
+        assert profile["preset"] == "nvidia_nim"
+        assert profile["model"] == "meta/llama-3.3-70b-instruct"
+
+
+def test_put_preset_none_without_profile_id_422():
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/llm/provider", json={"preset": None})
+        assert resp.status_code == 422
+        assert resp.json() == {"detail": "profile_id required"}
+

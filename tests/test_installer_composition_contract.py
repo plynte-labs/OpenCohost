@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (flux_env): tomllib arrived in 3.11
+    import tomli as tomllib
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).parent.parent.absolute()
 TAURI_DIR = ROOT / "OpenCohost_UI" / "src-tauri"
 TAURI_CONF = TAURI_DIR / "tauri.conf.json"
 PYPROJECT = ROOT / "pyproject.toml"
@@ -31,10 +34,11 @@ def _pyproject_version() -> str:
 
 
 def _normalize_to_semver(pep440: str) -> str:
-    """Convert PEP 440 prerelease (e.g. '0.2.0a1') to semver (e.g. '0.2.0-alpha.1')."""
-    m = re.match(r'^(\d+\.\d+\.\d+)(?:a(\d+))?$', pep440)
-    if m and m.group(2):
-        return f"{m.group(1)}-alpha.{m.group(2)}"
+    """Convert PEP 440 prerelease (e.g. '0.2.0rc1') to semver (e.g. '0.2.0-rc.1')."""
+    m = re.match(r'^(\d+\.\d+\.\d+)(a|b|rc)(\d+)$', pep440)
+    if m:
+        label = {"a": "alpha", "b": "beta", "rc": "rc"}[m.group(2)]
+        return f"{m.group(1)}-{label}.{m.group(3)}"
     return pep440
 
 
@@ -83,11 +87,39 @@ def test_forbidden_artifacts_are_not_in_resources_or_bundle_config():
             continue
         rel = path.relative_to(RESOURCES_DIR).as_posix().lower()
         
-        # NSIS must NOT package backend.config.json or raw developer code
-        assert rel != "backend.config.json", "backend.config.json must never be bundled into resources"
-        assert not rel.endswith(".py"), f"Raw python file '{rel}' must not be bundled in resources"
+        # NSIS must NOT package backend.config.json or active developer venvs
+        assert "backend.config.json" not in rel, "backend.config.json must never be bundled into resources"
         assert ".venv" not in rel, f"Virtual environment '{rel}' must not be in resources"
-        assert "__pycache__" not in rel, f"Python cache '{rel}' must not be in resources"
+        parts = rel.split("/")
+        assert not ({"laya_env", "staging-backups"} & set(parts)), f"Developer tree '{rel}' must not be bundled"
+        if "site-packages" in parts:
+            distribution = parts[parts.index("site-packages") + 1]
+            assert distribution not in {"torch", "transformers"}, f"Training distribution '{rel}' must not be bundled"
+            assert not distribution.startswith(("torch-", "transformers-")), f"Training metadata '{rel}' must not be bundled"
+        assert path.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".jsonl"}, f"Owner-state blob '{rel}' must not be bundled"
+        assert path.name.lower() not in {"api_tokens.json", "perfiles.json", ".env"}, f"Owner configuration '{rel}' must not be bundled"
+
+        # Files outside runtime/ must not be loose python scripts or caches
+        if not rel.startswith("runtime/"):
+            assert not rel.endswith(".py"), f"Raw python file '{rel}' must not be bundled outside runtime"
+            assert "__pycache__" not in rel, f"Python cache '{rel}' must not be outside runtime in resources"
+
+
+def test_extracted_runtime_structure_when_staged():
+    runtime_dir = RESOURCES_DIR / "runtime"
+    if not runtime_dir.is_dir():
+        pytest.skip("runtime directory not yet staged in resources")
+
+    assert (runtime_dir / "opencohost").is_dir(), "runtime/opencohost directory must exist"
+    assert (runtime_dir / "opencohost" / "__init__.py").is_file(), "runtime/opencohost/__init__.py must exist"
+    assert (runtime_dir / "config").is_dir(), "runtime/config directory must exist"
+    assert (runtime_dir / "data" / "editorial_cards").is_dir(), "runtime/data/editorial_cards must exist"
+    assert (runtime_dir / "data" / "memorias").is_dir(), "runtime/data/memorias must exist"
+    assert (runtime_dir / "logs").is_dir(), "runtime/logs directory must exist"
+
+    python_exe = runtime_dir / "python" / "python.exe"
+    if python_exe.is_file():
+        assert (runtime_dir / "python" / "Lib").is_dir(), "runtime/python/Lib must exist"
 
 
 def test_built_nsis_bundle_excludes_forbidden_blobs_and_respects_size_envelope():
@@ -95,10 +127,20 @@ def test_built_nsis_bundle_excludes_forbidden_blobs_and_respects_size_envelope()
     if not nsis_dir.is_dir():
         pytest.skip("NSIS bundle not yet built in target/release/bundle/nsis")
     
-    installer = next(nsis_dir.glob("OpenCohost_*_x64-setup.exe"), None)
-    assert installer is not None, "OpenCohost_*_x64-setup.exe must exist in bundle/nsis"
+    version = _normalize_to_semver(_pyproject_version())
+    installer = nsis_dir / f"OpenCohost_{version}_x64-setup.exe"
+    if not installer.is_file():
+        installers = sorted(nsis_dir.glob("OpenCohost_*_x64-setup.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
+        installer = installers[0] if installers else None
+    assert installer is not None and installer.is_file(), f"OpenCohost_{version}_x64-setup.exe must exist in bundle/nsis"
     
     size_mb = installer.stat().st_size / (1024 * 1024)
-    # The installer contains the Tauri binary, frontend assets, runtime bootstrap, Piper offline voice models, and ONNX embedding models (<600MB)
-    assert 5 < size_mb < 600, f"Installer size {size_mb:.2f}MB is outside expected envelope (5MB - 600MB)"
+    # Six measured ONNX export files total 1,324,617,323 bytes (LP1 inventory).
+    # Retain the historical 600 MiB base plus the uncompressed model and 256
+    # MiB dependency/headroom allowance. Compression is not assumed as proof.
+    maximum_bytes = 600 * 1024 * 1024 + 1_324_617_323 + 256 * 1024 * 1024
+    assert 5 * 1024 * 1024 < installer.stat().st_size < maximum_bytes, (
+        f"Installer size {size_mb:.2f}MiB is outside measured model-inclusive envelope "
+        f"(5MiB - {maximum_bytes / (1024 * 1024):.2f}MiB)"
+    )
 

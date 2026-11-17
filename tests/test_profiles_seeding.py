@@ -25,6 +25,8 @@ EXPECTED_PROFILE_NAMES = {
     "Calmado",
     "Técnico",
     "Show",
+    # K5 (warmth-guardrails-runtime-20261006): warm seed, warmth in_character.
+    "Kira cálida",
 }
 
 # English counterparts shipped alongside the es set in the real
@@ -38,6 +40,7 @@ EXPECTED_PROFILE_NAMES_EN = {
     "Calm",
     "Technical",
     "Showtime",
+    "Warm Kira",
 }
 
 VALID_DEFAULTS = {
@@ -47,6 +50,7 @@ VALID_DEFAULTS = {
     "Calmado": {"prompt": "Eres Kira, calmada.", "use_system": True},
     "Técnico": {"prompt": "Eres Kira, técnica.", "use_system": True},
     "Show": {"prompt": "Eres Kira, show.", "use_system": True},
+    "Kira cálida": {"prompt": "Eres Kira, cálida.", "use_system": True, "warmth": "in_character"},
 }
 
 
@@ -343,3 +347,24 @@ def test_corrupt_profiles_file_quarantined_not_overwritten(tmp_path):
     assert set(result.keys()) == EXPECTED_PROFILE_NAMES
     on_disk = json.loads(profiles_file.read_text(encoding="utf-8"))
     assert set(on_disk.keys()) == EXPECTED_PROFILE_NAMES
+
+
+# ---------------------------------------------------------------------------
+# K5 (warmth-guardrails-runtime-20261006): the warm seeds carry warmth
+# in_character; every other seed omits the field (reads as cold).
+# ---------------------------------------------------------------------------
+
+
+def test_real_defaults_warm_seeds_are_in_character():
+    real_defaults = Path(__file__).resolve().parent.parent / "opencohost" / "config" / "default_profiles.json"
+    data = json.loads(real_defaults.read_text(encoding="utf-8"))
+    from opencohost.config.warmth import normalize_warmth
+
+    assert data["Kira cálida"]["warmth"] == "in_character"
+    assert data["Kira cálida"]["locale"] == "es"
+    assert data["Warm Kira"]["warmth"] == "in_character"
+    assert data["Warm Kira"]["locale"] == "en"
+    for name, profile in data.items():
+        if name not in ("Kira cálida", "Warm Kira"):
+            assert normalize_warmth(profile.get("warmth")) == "cold", name
+        assert len(profile["prompt"]) > 50, name

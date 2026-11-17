@@ -36,6 +36,7 @@ from opencohost.core.memory.memoria_store import (
     _SESSION_SUMMARY_MARKER,
     build_recency_lines,
     build_title,
+    build_signature,
     derive_import_key,
     derive_stable_key,
     is_capturable,
@@ -108,7 +109,7 @@ def test_memorias_db_uses_user_data_dir_and_schema_v4(tmp_path) -> None:
     MemoriaStore(db_path)
     assert db_path.exists()
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert cols == {
         "id", "profile_id", "stable_key", "revision", "title", "content",
@@ -116,6 +117,14 @@ def test_memorias_db_uses_user_data_dir_and_schema_v4(tmp_path) -> None:
         "signature",
         # memory_promotion_20260725 (v3): the judge's per-row stamp.
         "judged_at",
+        # ADR-062 (v5): the judge's origin of a kept fact.
+        "origin",
+        # F2 (v6): id of the row that superseded this one.
+        "superseded_by",
+        # owner-reflection-memory (v7): opaque owner-turn ids of a distilled draft.
+        "provenance",
+        # v8: language classification tag ('es', 'en', 'unknown')
+        "lang",
     }
 
 
@@ -181,7 +190,7 @@ def test_legacy_v1_db_migrates_signature_column_and_backfills(tmp_path) -> None:
 
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
         assert "signature" in cols
         row = conn.execute("SELECT * FROM memorias WHERE id = 'mem_legacy_1'").fetchone()
@@ -208,7 +217,7 @@ def test_migration_is_idempotent_on_second_construction(tmp_path) -> None:
     MemoriaStore(db_path)  # must not raise (no duplicate-column error)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     assert sig == "marker-must-survive"  # backfill did not rerun
 
@@ -234,7 +243,7 @@ def test_interrupted_migration_column_present_version_stale_self_heals(tmp_path)
     MemoriaStore(db_path)  # must NOT raise duplicate-column
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         sig = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_legacy_1'").fetchone()[0]
     expected = build_signature("musica synthwave calma contexto: streamer prefiere musica synthwave calma nocturna")
     assert sig == expected  # backfill still ran on the resumed migration
@@ -266,7 +275,7 @@ def test_interrupted_mid_backfill_resume_fills_only_empty_signatures(tmp_path) -
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         done = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_done'").fetchone()[0]
         pending = conn.execute("SELECT signature FROM memorias WHERE id = 'mem_pending'").fetchone()[0]
     assert done == "already-backfilled-marker"  # resume never rewrites filled rows
@@ -281,7 +290,7 @@ def test_fresh_db_has_v4_signature_column(tmp_path) -> None:
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert "signature" in cols  # no user ever sees a version-1 schema
 
@@ -415,7 +424,10 @@ def test_curated_row_upsert_immune_when_signature_kwarg_passed(tmp_path) -> None
     row = store.get(row_id)
     assert row["title"] == "titulo curado"
     assert row["content"] == "contenido curado aqui"
-    assert row["signature"] == "alpha beta gamma"  # signature immune too
+    # Operator edit recomputed the signature from the new words; the later
+    # upsert must not have overwritten it (signature immune too).
+    assert row["signature"] == build_signature("titulo curado contenido curado aqui")
+    assert row["signature"] != "delta epsilon zeta"
     assert row["status"] == "curated"
 
 
@@ -1480,8 +1492,10 @@ def test_recency_imported_third_partition_one_slot_after_summaries(tmp_path) -> 
               stable_key=f"p{_IMPORT_MARKER}aaa-bbb-old", updated_at=base + timedelta(hours=3))
     _seed_row(db_path, "p", "imp-new", content="dato importado nuevo", status="imported",
               stable_key=f"p{_IMPORT_MARKER}ccc-ddd-new", updated_at=base + timedelta(hours=4))
+    # ADR-062: unjudged drafts are no longer injection candidates, so the
+    # "regular" partition is seeded with judged (promoted) rows.
     for i in range(4):
-        _seed_row(db_path, "p", f"reg-{i}", content=f"regular fresco {i}",
+        _seed_row(db_path, "p", f"reg-{i}", content=f"regular fresco {i}", status="promoted",
                   stable_key=f"p|reg-{i}", updated_at=base + timedelta(days=1, hours=i))
 
     rows = MemoriaStore(db_path).list_injection_candidates("p")
@@ -1548,7 +1562,7 @@ def test_fresh_db_has_v4_judged_at_column(tmp_path) -> None:
     db_path = tmp_path / "memorias.db"
     MemoriaStore(db_path)
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(memorias)").fetchall()}
     assert "judged_at" in cols
 
@@ -1558,7 +1572,7 @@ def test_v4_migration_is_idempotent_across_two_constructions(tmp_path) -> None:
     MemoriaStore(db_path)
     MemoriaStore(db_path)  # must not raise
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
 
 
 def test_v3_migration_tolerates_preadded_column_after_interrupted_run(tmp_path) -> None:
@@ -1569,7 +1583,7 @@ def test_v3_migration_tolerates_preadded_column_after_interrupted_run(tmp_path) 
         conn.execute("PRAGMA user_version = 2")
     MemoriaStore(db_path)  # column already present, version behind -> must not raise
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
 
 
 def test_v2_db_with_rows_migrates_with_every_row_unjudged(tmp_path) -> None:
@@ -1676,7 +1690,9 @@ def test_update_row_without_new_kwargs_keeps_the_legacy_curated_contract(tmp_pat
     assert MemoriaStore(db_path).update_row("d1", title="t", content="c") is True
     row = _row(db_path, "d1")
     assert row["status"] == "curated"
-    assert row["signature"] == "firma original"
+    # An operator edit without an explicit signature recomputes it (no stale index).
+    assert row["signature"] == build_signature("t c")
+    assert row["signature"] != "firma original"
 
 
 def test_judged_draft_reupserted_with_new_content_is_unjudged_and_unhidden(tmp_path) -> None:
@@ -2029,7 +2045,7 @@ def test_v0_through_v3_migrate_to_v4_without_losing_base_rows(
     MemoriaStore(db_path)
 
     with sqlite3.connect(str(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8  # v8 adds lang (locale isolation)
         row = conn.execute(
             "SELECT id, content FROM memorias WHERE id = 'legacy'"
         ).fetchone()
@@ -2354,9 +2370,11 @@ def test_deferred_rows_remain_ordinary_drafts_for_existing_reads(
     assert [row["id"] for row in store.list_for_profile("p")] == [
         "deferred"
     ]
+    # ADR-062: a deferred draft was never judged, so it still holds the raw
+    # exchange and is no longer an injection candidate (it stays listed).
     assert [
         row["id"] for row in store.list_injection_candidates("p")
-    ] == ["deferred"]
+    ] == []
     assert store.list_unjudged_drafts("p", limit=10, now_s=10_000) == []
     deferred = store.list_deferred_drafts("p", limit=10)
     assert [row["id"] for row in deferred] == ["deferred"]
@@ -2488,3 +2506,150 @@ def test_growth_prune_cascades_attempt_metadata(monkeypatch, tmp_path) -> None:
             "SELECT COUNT(*) FROM memoria_promotion_attempts"
         ).fetchone()[0]
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Schema v8 tests (locale isolation: lang 'es' / 'en' / 'unknown')
+# ---------------------------------------------------------------------------
+
+def test_schema_v8_migration_adds_lang_column_and_index(tmp_path) -> None:
+    db_path = tmp_path / "v7_to_v8.db"
+    # Seed a v7 database
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE memorias (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                stable_key TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                private INTEGER NOT NULL DEFAULT 0,
+                inactive INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                signature TEXT NOT NULL DEFAULT '',
+                judged_at TEXT NOT NULL DEFAULT '',
+                origin TEXT,
+                superseded_by TEXT,
+                provenance TEXT,
+                UNIQUE(profile_id, stable_key)
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 7")
+        conn.execute(
+            "INSERT INTO memorias (id, profile_id, stable_key, title, content, created_at, updated_at) "
+            "VALUES ('legacy_v7', 'p1', 'p1|k', 'title', 'content', '2026-01-01', '2026-01-01')"
+        )
+
+    store = MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        row = conn.execute("SELECT lang FROM memorias WHERE id = 'legacy_v7'").fetchone()
+        assert row[0] == "unknown"  # default backfilled
+
+        indexes = {
+            r[1] for r in conn.execute("SELECT * FROM sqlite_master WHERE type = 'index'").fetchall()
+        }
+        assert "idx_memorias_profile_lang" in indexes
+
+
+def test_schema_v8_lang_check_constraint(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        # Valid values: "en", "es", "ja", "pt", "en-US", "unknown"
+        for val in ("en", "es", "ja", "pt", "en-US", "unknown"):
+            conn.execute(
+                "INSERT INTO memorias (id, profile_id, stable_key, title, content, created_at, updated_at, lang) "
+                f"VALUES ('id_{val}', 'p1', 'p1|{val}', 't', 'c', 'now', 'now', '{val}')"
+            )
+        # Invalid values fail check constraint
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO memorias (id, profile_id, stable_key, title, content, created_at, updated_at, lang) "
+                "VALUES ('id_too_short', 'p1', 'p1|too_short', 't', 'c', 'now', 'now', 'e')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO memorias (id, profile_id, stable_key, title, content, created_at, updated_at, lang) "
+                "VALUES ('id_too_long', 'p1', 'p1|too_long', 't', 'c', 'now', 'now', 'toolonglanguage')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO memorias (id, profile_id, stable_key, title, content, created_at, updated_at, lang) "
+                "VALUES ('id_invalid_char', 'p1', 'p1|invalid_char', 't', 'c', 'now', 'now', 'en;drop')"
+            )
+
+
+def test_list_injection_candidates_filters_by_lang(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    id_es = store.insert_curated("p1", "Espanol", "Contenido en espanol", lang="es")
+    id_en = store.insert_curated("p1", "English", "Content in english", lang="en")
+    id_unk = store.insert_curated("p1", "Unknown", "Content in unknown", lang="unknown")
+
+    # None returns all candidates
+    all_candidates = store.list_injection_candidates("p1", lang=None)
+    all_ids = {r["id"] for r in all_candidates}
+    assert all_ids == {id_es, id_en, id_unk}
+
+    # lang='es' returns 'es' and 'unknown', never 'en'
+    es_candidates = store.list_injection_candidates("p1", lang="es")
+    es_ids = {r["id"] for r in es_candidates}
+    assert es_ids == {id_es, id_unk}
+    assert id_en not in es_ids
+
+    # lang='en' returns 'en' and 'unknown', never 'es'
+    en_candidates = store.list_injection_candidates("p1", lang="en")
+    en_ids = {r["id"] for r in en_candidates}
+    assert en_ids == {id_en, id_unk}
+    assert id_es not in en_ids
+
+
+def test_upsert_draft_and_insert_methods_support_lang(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    # upsert_draft with lang="en"
+    d_id = store.upsert_draft("p1", "p1|draft", "Draft Title", "Draft content", lang="en")
+    assert store.get(d_id)["lang"] == "en"
+
+    # upsert_draft refresh updates lang
+    store.upsert_draft("p1", "p1|draft", "Draft Title 2", "Draft content 2", lang="es")
+    assert store.get(d_id)["lang"] == "es"
+
+    # insert_summary with lang="en"
+    s_id = store.insert_summary("p1", "Summary", "Summary text", lang="en")
+    assert store.get(s_id)["lang"] == "en"
+
+    # insert_curated with default lang ("unknown")
+    c_id = store.insert_curated("p1", "Curated", "Curated text")
+    assert store.get(c_id)["lang"] == "unknown"
+
+
+def test_apply_promotion_batch_preserves_lang(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    d_id = store.upsert_draft("p1", "p1|k1", "Original draft", "Original draft content", lang="en")
+    draft_row = store.get(d_id)
+    assert draft_row["lang"] == "en"
+
+    result = store.apply_promotion_batch(
+        "p1",
+        [draft_row],
+        decisions=[(1, "Judged keeper content", False, "")],
+        unresolved={},
+        now_s=1000,
+    )
+    assert result.kept == 1
+    promoted_row = store.get(d_id)
+    assert promoted_row["status"] == "promoted"
+    assert promoted_row["lang"] == "en"  # preserved!
+

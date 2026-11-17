@@ -167,6 +167,37 @@ def test_bw_13_use_system_role_false_evicts_index_0():
     assert retained[0]["content"] == "Current turn prompt"
 
 
+def test_bw_15_pure_preserves_second_to_last_system_message():
+    """BW-15: When messages[-2] is a context system message, it is protected from eviction."""
+    messages = [
+        {"role": "system", "content": "Primary System Prompt " + "S" * 400},
+        {"role": "user", "content": "Turn 1 User " + "A" * 1000},
+        {"role": "assistant", "content": "Turn 1 Asst " + "B" * 1000},
+        {"role": "system", "content": "<context>Injected memory</context> " + "M" * 400},
+        {"role": "user", "content": "Current turn prompt " + "C" * 100},
+    ]
+    # Budget: (800 - 200) * 0.95 = 570 chars.
+    # Total retained [sys0, ctx_sys, u2] = ~420 + ~430 + ~120 = ~970 > 570.
+    # Without tail=2 protection, ctx_sys would be evicted as an odd front message.
+    # With protection, eviction stops after dropping Turn 1 pair, leaving 3 messages.
+    retained, evicted_pairs, n_evicted = cb.apply_char_budget_pure(
+        messages,
+        ctx_limit=800,
+        max_output_tokens=200,
+        safety_factor=0.95,
+    )
+    assert n_evicted == 1
+    assert len(evicted_pairs) == 1
+    assert "Turn 1 User" in evicted_pairs[0][0]["content"]
+    assert len(retained) == 3
+    assert "Primary System Prompt" in retained[0]["content"]
+    assert retained[1]["role"] == "system"
+    assert "<context>Injected memory</context>" in retained[1]["content"]
+    assert retained[2]["role"] == "user"
+    assert "Current turn prompt" in retained[2]["content"]
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Engine Integration & Invariant Tests (BW-02, BW-07, BW-08, BW-09, BW-10, BW-11, BW-14)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +208,7 @@ def motor_instance():
     log_q = queue.Queue()
     motor = MotorVocalIA(log_q, lambda event: None)
     motor._current_profile_id = "test-profile"
+    motor.current_model = "llama3"
     return motor
 
 

@@ -28,10 +28,13 @@ _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
 @pytest.fixture(autouse=True)
 def _reset_host_active():
     import opencohost.api.main as main_mod
+    from opencohost.i18n import active
 
+    active.reset_active_bundle()
     main_mod._host_active = False
     yield
     main_mod._host_active = False
+    active.reset_active_bundle()
 
 
 @pytest.fixture
@@ -199,3 +202,163 @@ def test_select_writes_no_file(cohost_profiles_file):
         resp = client.post("/api/agenda/cohost-profiles/select", json={"name": "Natural"})
         assert resp.status_code == 200
     assert not cohost_profiles_file.exists()
+
+
+def test_get_cohost_profiles_en_returns_english_defaults(cohost_profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/agenda/cohost-profiles?locale=en")
+        assert resp.status_code == 200
+        names = {p["name"] for p in resp.json()["profiles"]}
+        assert names == {"Natural", "Spicy with nuance", "Entertaining teacher"}
+
+
+def test_save_and_select_cohost_profile_en_isolated_from_es(cohost_profiles_file):
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+
+    controller = KiraAgendaController()
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        # Save a custom English profile
+        save_resp = client.post(
+            "/api/agenda/cohost-profiles",
+            json={
+                "name": "Dry Sarcasm",
+                "style": "Dry, sarcastic, but friendly.",
+                "locale": "en",
+            },
+        )
+        assert save_resp.status_code == 200
+        en_names = {p["name"] for p in save_resp.json()["profiles"]}
+        assert "Dry Sarcasm" in en_names
+
+        # Verify it appears in EN query
+        get_en = client.get("/api/agenda/cohost-profiles?locale=en")
+        assert "Dry Sarcasm" in {p["name"] for p in get_en.json()["profiles"]}
+
+        # Verify it DOES NOT leak into ES query
+        get_es = client.get("/api/agenda/cohost-profiles?locale=es")
+        assert "Dry Sarcasm" not in {p["name"] for p in get_es.json()["profiles"]}
+
+        # Select the EN profile
+        select_resp = client.post(
+            "/api/agenda/cohost-profiles/select",
+            json={"name": "Dry Sarcasm", "locale": "en"},
+        )
+        assert select_resp.status_code == 200
+        assert controller.profile["style"] == "Dry, sarcastic, but friendly."
+
+
+def test_post_cohost_profile_preserves_existing_priority_and_length_when_omitted(cohost_profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Custom", "style": "Initial style", "priority": "alta", "length": "expandida"},
+        )
+        assert first.status_code == 200
+
+        # Omitting priority and length on update must preserve existing metadata
+        second = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Custom", "style": "Updated style"},
+        )
+        assert second.status_code == 200
+        data = _read_disk(cohost_profiles_file)
+        assert data["Custom"] == {
+            "style": "Updated style",
+            "default_priority": "alta",
+            "default_response_length": "expandida",
+        }
+
+
+def test_post_cohost_profile_blank_style_preserves_existing_style_but_defaults_new_profile(cohost_profiles_file):
+    from opencohost.core.profiles.cohost_profiles import DEFAULT_COHOST_PROFILES
+
+    app = _app()
+    with TestClient(app) as client:
+        # Updating an existing preset with blank optional estilo preserves its style and length
+        upd = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Picante con matiz", "style": "   "},
+        )
+        assert upd.status_code == 200
+        data = _read_disk(cohost_profiles_file)
+        assert data["Picante con matiz"] == DEFAULT_COHOST_PROFILES["Picante con matiz"]
+
+        # Creating a brand new profile with blank style still gets the Natural fallback style
+        created = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Brand New", "style": ""},
+        )
+        assert created.status_code == 200
+        data = _read_disk(cohost_profiles_file)
+        assert data["Brand New"] == {
+            "style": DEFAULT_COHOST_PROFILES["Natural"]["style"],
+            "default_priority": "normal",
+            "default_response_length": "normal",
+        }
+
+
+def test_cohost_profiles_omitted_locale_follows_active_en_bundle(cohost_profiles_file):
+    from opencohost.i18n import active
+    from opencohost.i18n.registry import discover_bundles, official_locales_dir
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    official = discover_bundles(official_locales_dir(), "official")
+    active.set_active_bundle(resolve_active_bundle(locale="en", registry=official))
+    en_path = cohost_profiles_file.with_name("cohost_profiles_en.json")
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/agenda/cohost-profiles")
+        assert resp.status_code == 200
+        assert {p["name"] for p in resp.json()["profiles"]} == {"Natural", "Spicy with nuance", "Entertaining teacher"}
+
+        save_resp = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Runtime EN", "style": "Concise English"},
+        )
+        assert save_resp.status_code == 200
+        assert en_path.exists()
+        assert not cohost_profiles_file.exists()
+        assert "Runtime EN" in _read_disk(en_path)
+
+
+def test_cohost_profiles_bcp47_locale_normalizes_primary_subtag(cohost_profiles_file):
+    en_path = cohost_profiles_file.with_name("cohost_profiles_en.json")
+    app = _app()
+    with TestClient(app) as client:
+        save_resp = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": "Regional EN", "style": "Calm", "locale": "en-US"},
+        )
+        assert save_resp.status_code == 200
+        assert en_path.exists()
+        assert not cohost_profiles_file.exists()
+
+        get_resp = client.get("/api/agenda/cohost-profiles?locale=en_GB")
+        assert get_resp.status_code == 200
+        assert "Regional EN" in {p["name"] for p in get_resp.json()["profiles"]}
+
+
+def test_select_cohost_profile_matches_sanitized_truncated_name(cohost_profiles_file):
+    from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaController
+
+    controller = KiraAgendaController()
+    long_name = "  " + ("L" * 45) + "  "
+    app = _app(_host_with_agenda(controller))
+    with TestClient(app) as client:
+        save_resp = client.post(
+            "/api/agenda/cohost-profiles",
+            json={"name": long_name, "style": "Long name style", "locale": "es"},
+        )
+        assert save_resp.status_code == 200
+        select_resp = client.post(
+            "/api/agenda/cohost-profiles/select",
+            json={"name": long_name, "locale": "es"},
+        )
+        assert select_resp.status_code == 200
+        assert select_resp.json() == {"selected": "L" * 40}
+        assert controller.profile["style"] == "Long name style"
+

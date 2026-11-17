@@ -51,8 +51,9 @@ The pair a cautious reader should check first.
 | [`architecture.md`](architecture.md) | Which entry point is the product (Tauri + FastAPI) and which is frozen legacy, plus the system map and module ownership boundaries. |
 | [`api-reference.md`](api-reference.md) | The backend HTTP surface and the conventions behind it: the error contract, the no-raw-exposure rule, locking, and verb whitelists. Covers 46 of the 72 method+path pairs the app actually serves, and says which are still missing — `GET /openapi.json` on a running backend is the authoritative list. |
 | [`modules/runtime-speech.md`](modules/runtime-speech.md) | How direct speech, agenda speech, TTS generation, and priority arbitration share a single speech owner inside the runtime motor. |
-| [`modules/ui-shell.md`](modules/ui-shell.md) | How the legacy CustomTkinter composition root wires panels, motor, and shutdown — historical: marked deprecated 2026-08-13, kept as an accurate record of the frozen shell. |
-| [`UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) | The module diagram of the legacy CustomTkinter UI after its God-class breakup — historical: marked deprecated 2026-08-13; the product UI is Tauri + React. |
+| [`modules/turn-state.md`](modules/turn-state.md) | The explicit state of one foreground turn: state x event table, terminal states, where each `[TURN_STATE]` event is emitted. |
+| [`modules/ui-shell.md`](modules/ui-shell.md) | How the legacy CustomTkinter composition root wires panels, motor, and shutdown — historical: marked deprecated 2026-08-13, kept as an accurate record of the frozen shell (removed in `1eecab7`; current architecture is [`architecture.md`](architecture.md)). |
+| [`UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) | The module diagram of the legacy CustomTkinter UI after its God-class breakup — historical: marked deprecated 2026-08-13; the product UI is Tauri + React (removed in `1eecab7`; see [`architecture.md`](architecture.md)). |
 
 ## Working on it
 

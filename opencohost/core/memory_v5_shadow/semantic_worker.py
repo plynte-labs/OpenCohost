@@ -13,6 +13,7 @@ import math
 import multiprocessing as mp
 import queue
 import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -105,6 +106,33 @@ class SemanticWorkerService:
         self._resp_queue: Optional[mp.Queue] = None
         self._ready_event: Optional[Any] = None
         self._req_counter = 0
+        # One call in flight at a time: calls share one response queue and
+        # discard foreign req_ids, so two threads (a turn's query embedding
+        # and a background fact reconcile) would otherwise eat each other's
+        # replies. A caller that cannot get the lock within its own timeout
+        # fails open exactly like an IPC timeout.
+        self._call_lock = threading.Lock()
+        # Per-thread timing of the last call (memory-grounding T1): the turn
+        # thread reads its own embed timing; a background reconcile never
+        # overwrites it. Numbers only.
+        self._tls = threading.local()
+
+    @property
+    def device(self) -> str:
+        """Fixed code for where embeddings run. The MiniLM backend is pinned to
+        CPUExecutionProvider (semantic.py); the dummy backend is not a model."""
+        return "dummy" if self.use_dummy else "cpu"
+
+    def last_call_stats(self) -> Optional[dict]:
+        """``{method, wait_ms, call_ms}`` of this thread's last call, or None."""
+        return getattr(self._tls, "last", None)
+
+    def _record_call(self, method: str, wait_ms: float, call_ms: float) -> None:
+        self._tls.last = {
+            "method": method,
+            "wait_ms": int(max(0.0, wait_ms)),
+            "call_ms": int(max(0.0, call_ms)),
+        }
 
     def start(self, timeout: float = 5.0) -> None:
         if self._process is not None and self._process.is_alive():
@@ -130,7 +158,34 @@ class SemanticWorkerService:
     def is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
-    def _call(self, method: str, args: tuple, timeout_s: float) -> Any:
+    def _call(self, method: str, args: tuple, timeout_s: float, block: bool = True) -> Any:
+        started = time.monotonic()
+        # Never let a skipped/timed-out call read the previous call's stats.
+        self._tls.last = None
+        if not block:
+            # Opt-in try-acquire (session-topic-folder-20261016): a background
+            # caller must never queue in front of a turn's own embed. Busy means
+            # skip, immediately, with no warning.
+            if not self._call_lock.acquire(blocking=False):
+                logger.debug("Semantic worker busy; non-blocking call '%s' skipped.", method)
+                self._record_call(method, (time.monotonic() - started) * 1000.0, 0.0)
+                return None
+        elif not self._call_lock.acquire(timeout=max(0.0, timeout_s)):
+            logger.warning("Semantic worker busy (limit=%0.3fs); failing open.", timeout_s)
+            self._record_call(method, (time.monotonic() - started) * 1000.0, 0.0)
+            return None
+        try:
+            acquired = time.monotonic()
+            remaining = max(0.0, timeout_s - (acquired - started))
+            result = self._call_locked(method, args, remaining)
+            self._record_call(
+                method, (acquired - started) * 1000.0, (time.monotonic() - acquired) * 1000.0
+            )
+            return result
+        finally:
+            self._call_lock.release()
+
+    def _call_locked(self, method: str, args: tuple, timeout_s: float) -> Any:
         if not self.is_alive():
             logger.warning("SemanticWorkerService is not alive; failing open.")
             return None
@@ -164,8 +219,11 @@ class SemanticWorkerService:
         logger.warning("Semantic worker call '%s' timed out (limit=%0.3fs); failing open.", method, timeout_s)
         return None
 
-    def embed_query(self, text: str, timeout_s: float = 0.5) -> Optional[list[float]]:
-        return self._call("embed_query", (text,), timeout_s)
+    def embed_query(
+        self, text: str, timeout_s: float = 0.5, *, block: bool = True
+    ) -> Optional[list[float]]:
+        """``block=False`` skips (returns None at once) when another call holds the worker."""
+        return self._call("embed_query", (text,), timeout_s, block=block)
 
     def embed_batch(self, texts: list[str], timeout_s: float = 10.0) -> Optional[list[list[float]]]:
         return self._call("embed_batch", (texts,), timeout_s)
@@ -186,3 +244,9 @@ class SemanticWorkerService:
 
         self._req_queue = None
         self._resp_queue = None
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception:
+            pass

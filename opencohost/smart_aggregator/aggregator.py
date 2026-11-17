@@ -1,8 +1,9 @@
 import logging
 import os
 import yaml
+import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Optional, Callable
 
 from .session_history import SessionHistory
@@ -10,6 +11,13 @@ from .message_filter import MessageFilter
 from .chat_source import YouTubeChatSource, TwitchChatSource
 from .vibe_thermometer import VibeThermometer
 from .activity_trigger import ActivityTrigger
+from .highlight_scoring import (
+    LAYA_FILTERED,
+    HighlightConfig,
+    combined_score,
+    heuristic_score,
+    new_counters,
+)
 from .intent_aggregator import IntentAggregator
 from .filter_policy import get_preset, list_presets
 from .diagnostics import FilterDiagnostics
@@ -19,6 +27,14 @@ from .chat_input_contract import (
     ChatEventDetector,
 )
 from opencohost.config.validation import runtime_screen
+from opencohost.core.safety.contextual import (
+    ContextualCrisisArbiter,
+    SafetySeverity,
+    StreamContextMetadata,
+    ViewerCrisisTracker,
+)
+from opencohost.config import storage
+from opencohost.core.decision import runtime as decision_runtime
 
 logger = logging.getLogger("OpenCohost")
 
@@ -27,6 +43,8 @@ logger = logging.getLogger("OpenCohost")
 # Whichever threshold hits first triggers the rollup.
 _CHAT_INGEST_ROLLUP_EVERY_N = 50
 _CHAT_INGEST_ROLLUP_EVERY_SECONDS = 30.0
+# Per-message Laya verdicts kept for the highlight (memory only).
+_LAYA_CACHE_MAX = 256
 
 
 class Aggregator:
@@ -44,9 +62,9 @@ class Aggregator:
         retention = hist_cfg.get("retention_hours", 168)
         
         if not os.path.isabs(db_path):
-            db_path = os.path.join(base_dir, db_path)
+            db_path = os.path.join(str(storage.USER_DATA_DIR), db_path)
         if not os.path.isabs(jl_path):
-            jl_path = os.path.join(base_dir, jl_path)
+            jl_path = os.path.join(str(storage.USER_DATA_DIR), jl_path)
         
         self.history = SessionHistory(db_path, jl_path, retention)
         try:
@@ -110,6 +128,25 @@ class Aggregator:
         self._chat_ingest_msg_count = 0
         self._chat_ingest_last_rollup_ts = time.monotonic()
 
+        # chat-highlight-laya-scoring-20261111: highlight floor, Laya verdict
+        # cache (memory only, bounded, keyed by a hash of user+text, never
+        # logged or persisted) and the counts-only [CHAT_HIGHLIGHT] telemetry.
+        self._highlight_cfg = HighlightConfig.from_dict(self.config.get("chat_highlight"))
+        self._highlight_counters = new_counters()
+        # S1 (guardrails-vulnerable-users + contextual arbiter): viewer crisis
+        # and troll-bait messages are tracked via ephemeral HMAC-SHA256 digests
+        # (never raw text or usernames) and counted here before any consumer.
+        self.crisis_screened_count = 0
+        self.troll_bait_screened_count = 0
+        self.gaming_hyperbole_allowed_count = 0
+        self._safety_arbiter = ContextualCrisisArbiter()
+        self._viewer_crisis_tracker = ViewerCrisisTracker()
+        self._stream_safety_context = StreamContextMetadata()
+        self._laya_cache: "OrderedDict[int, tuple]" = OrderedDict()
+        self._laya_lock = threading.Lock()
+        self._low_traffic_lock = threading.Lock()
+        self._last_low_traffic_ts: Optional[float] = None
+
         self._load_spam_config()
         self._load_live_safety_config()
     
@@ -130,6 +167,32 @@ class Aggregator:
             self._spam_max_messages = max(1, int(max_messages_per_user))
         if user_window_seconds is not None:
             self._spam_user_window = max(1.0, float(user_window_seconds))
+
+    def set_stream_safety_context(
+        self,
+        context: Optional[StreamContextMetadata] = None,
+        *,
+        active_game: Optional[str] = None,
+        game_genres: tuple[str, ...] = (),
+        active_topic_title: Optional[str] = None,
+        active_card_tags: tuple[str, ...] = (),
+        chat_activity_mood: str = "neutral",
+    ) -> None:
+        """Update non-PII stream context used by the contextual safety arbiter."""
+        if context is not None:
+            self._stream_safety_context = context
+            return
+        self._stream_safety_context = StreamContextMetadata(
+            active_game=active_game,
+            game_genres=tuple(game_genres or ()),
+            active_topic_title=active_topic_title,
+            active_card_tags=tuple(active_card_tags or ()),
+            chat_activity_mood=chat_activity_mood,
+        )
+
+    def reset_safety_tracker(self) -> None:
+        """Rotate ephemeral HMAC key and clear viewer safety buckets."""
+        self._viewer_crisis_tracker.reset_ephemeral_key()
 
     def set_activity_limits(self, threshold_per_second: Optional[float] = None, cooldown_seconds: Optional[float] = None,
                              reset: bool = False, *, suppress_adaptive_auto_off: bool = False):
@@ -393,6 +456,10 @@ class Aggregator:
                 self.on_source_changed()
             except Exception:
                 pass
+        try:
+            self.reset_safety_tracker()
+        except Exception:
+            pass
 
         self._source.connect(source_id)
 
@@ -478,6 +545,13 @@ class Aggregator:
             self.activity.trigger_count,
             "on" if self.activity.adaptive_enabled else "off",
         )
+        c = self._highlight_counters
+        logger.info(
+            "[CHAT_HIGHLIGHT] laya_used=%d laya_missing=%d laya_filtered=%d "
+            "floor_rejected=%d low_traffic_fired=%d",
+            c["laya_used"], c["laya_missing"], c["laya_filtered"],
+            c["floor_rejected"], c["low_traffic_fired"],
+        )
 
     def process_message(self, message: dict):
         now = self._message_timestamp(message)
@@ -533,6 +607,49 @@ class Aggregator:
             # stay consistent instead of reporting a blocked raid as accepted.
             self._diagnostics.reclassify_accepted_as_rejected(f"safety_floor:{blocked_rule}")
 
+        # S1 + contextual safety: evaluate accepted viewer chat through the
+        # privacy-preserving HMAC tracker (distinguishes benign gaming/hyperbole
+        # from escalating viewer distress and troll/coercion bait). Count only;
+        # logs never carry user IDs or raw chat text.
+        if accepted:
+            viewer_id = str(
+                filtered.get("user")
+                or filtered.get("author")
+                or filtered.get("username")
+                or "anon"
+            )
+            safety_verdict = self._viewer_crisis_tracker.evaluate_chat_message(
+                viewer_id,
+                str(filtered.get("text", "")),
+                arbiter=self._safety_arbiter,
+                stream_ctx=self._stream_safety_context,
+                now=now,
+            )
+            if safety_verdict.should_withhold_chat_msg:
+                accepted = False
+                filtered = None
+                if safety_verdict.severity == SafetySeverity.TROLL_ABUSE_BAIT:
+                    self.troll_bait_screened_count += 1
+                    self._diagnostics.reclassify_accepted_as_rejected("troll_bait_screened")
+                    logger.warning(
+                        "[CHAT_TROLL_BAIT] a chat message classified as abuse/coercion "
+                        "bait was withheld from Kira's chat reactions; count=%d (text not logged)",
+                        self.troll_bait_screened_count,
+                    )
+                else:
+                    self.crisis_screened_count += 1
+                    self._diagnostics.reclassify_accepted_as_rejected("crisis_screened")
+                    logger.warning(
+                        "[CHAT_CRISIS] a chat message that may signal a person in crisis was "
+                        "withheld from Kira's chat reactions; count=%d (text not logged)",
+                        self.crisis_screened_count,
+                    )
+            elif safety_verdict.severity in {
+                SafetySeverity.BENIGN_HYPERBOLE,
+                SafetySeverity.GAMING_FICTION,
+            }:
+                self.gaming_hyperbole_allowed_count += 1
+
         # Diagnostics are fully settled for this message at this point
         # (including a possible safety-floor reclassify above) -- the right
         # moment to check whether a periodic [CHAT_INGEST] rollup is due.
@@ -570,8 +687,98 @@ class Aggregator:
                     except Exception:
                         pass
                 self.thermometer.reset()
+            fired_before = self.activity.trigger_count
             self.activity.on_message(filtered)
-        
+            self._shadow_respond(filtered, self.activity.trigger_count > fired_before, now)
+
+    @staticmethod
+    def _laya_key(user, text) -> int:
+        return hash((user, text))
+
+    def _cache_laya(self, key: int, label: str, confidence: float) -> None:
+        with self._laya_lock:
+            self._laya_cache[key] = (label, confidence)
+            self._laya_cache.move_to_end(key)
+            while len(self._laya_cache) > _LAYA_CACHE_MAX:
+                self._laya_cache.popitem(last=False)
+
+    def _laya_lookup(self, key: int) -> Optional[tuple]:
+        with self._laya_lock:
+            return self._laya_cache.get(key)
+
+    def _shadow_respond(self, filtered: dict, fired: bool, now: float) -> None:
+        """laya-decision-layer-20261009: ``respond`` decision for one accepted
+        viewer message. The rule value is whether this message fired the
+        activity trigger. Fire-and-forget: returns at once, drops while one is
+        in flight, no-op without a decision backend, never raises. The verdict
+        is cached for the highlight (chat-highlight-laya-scoring-20261111) and,
+        when this message is a low-traffic candidate, decides the low-traffic
+        reaction once it arrives; without a verdict the heuristic decides."""
+        text = filtered.get("text", "")
+        key = self._laya_key(filtered.get("user", ""), text)
+        candidate = self._low_traffic_candidate(text, fired)
+
+        def on_result(label, confidence):
+            if label is not None:
+                self._cache_laya(key, label, confidence)
+            if candidate:
+                self._maybe_low_traffic(filtered, key, now)
+
+        submitted = False
+        try:
+            submitted = bool(decision_runtime.shadow_respond(text, "respond" if fired else "ignore", on_result))
+        except Exception:
+            pass
+        if candidate and not submitted:
+            self._maybe_low_traffic(filtered, key, now)
+
+    def _low_traffic_candidate(self, text: str, fired: bool) -> bool:
+        """Cheap pre-check: could this message fire a low-traffic reaction?"""
+        cfg = self._highlight_cfg
+        if not cfg.low_traffic_enabled or fired:
+            return False
+        if self.activity.get_current_rate() >= self.activity.threshold_per_second:
+            return False
+        base = heuristic_score(text)
+        return base >= 0 and base + cfg.laya_respond_bonus >= cfg.low_traffic_min_score
+
+    def _maybe_low_traffic(self, filtered: dict, key: int, now: float) -> None:
+        """Fire one reaction for a single strong message on a quiet channel.
+
+        Never more often than ``low_traffic_cooldown_s`` and never inside the
+        normal activity cooldown. Takes the same path as a normal trigger, so
+        agenda routing, turn priority and expiry apply unchanged. Never raises.
+        """
+        try:
+            cfg = self._highlight_cfg
+            with self._low_traffic_lock:
+                last = self._last_low_traffic_ts
+                if last is not None and (now - last) < cfg.low_traffic_cooldown_s:
+                    return
+                normal = self.activity._last_trigger_time
+                if normal is not None and (now - normal) < self.activity.cooldown_seconds:
+                    return
+                if self.activity.get_current_rate() >= self.activity.threshold_per_second:
+                    return
+                score, state = combined_score(filtered.get("text", ""), self._laya_lookup(key), cfg)
+                if state == LAYA_FILTERED:
+                    self._highlight_counters["laya_filtered"] += 1
+                    return
+                if score < cfg.low_traffic_min_score:
+                    return
+                self._last_low_traffic_ts = now
+                self._highlight_counters["low_traffic_fired"] += 1
+                rate = self.activity.get_current_rate()
+            self._on_activity_trigger({
+                "rate": rate,
+                "threshold": self.activity.threshold_per_second,
+                "window_seconds": self.activity.window_seconds,
+                "actions": {},
+                "low_traffic": True,
+            })
+        except Exception:
+            pass
+
     def _on_activity_trigger(self, data: dict):
         if self.on_activity_trigger:
             try:
@@ -582,6 +789,10 @@ class Aggregator:
         if self._session_id is not None:
             try:
                 context = self.intent_aggregator.recent_messages(max_messages=20)
+                for item in context:
+                    verdict = self._laya_lookup(self._laya_key(item.get("user", ""), item.get("text", "")))
+                    if verdict is not None:
+                        item["laya"] = verdict
                 intent_summary = self.intent_aggregator.summarize()
                 prompt = intent_summary.get("prompt", "")
                 if prompt and prompt != "No hay un tema dominante claro en el chat filtrado.":
@@ -615,6 +826,8 @@ class Aggregator:
                         "trigger": data,
                         "context": context,
                         "intent_summary": intent_summary,
+                        "highlight_cfg": self._highlight_cfg,
+                        "highlight_counters": self._highlight_counters,
                     })
 
                 # ── should_call telemetry (metadata-only; replaces the removed

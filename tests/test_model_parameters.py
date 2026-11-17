@@ -4,10 +4,14 @@ import json
 from pathlib import Path
 
 from opencohost.config.model_parameters import (
+    AUTO_CONTEXT_TOKENS,
     DEFAULT_MODEL_PARAMETERS,
+    get_model_context_settings,
     get_model_reasoning_settings,
     load_model_parameters,
+    resolve_auto_context_tokens,
     save_model_parameters,
+    update_model_context_settings,
     update_model_reasoning_settings,
 )
 
@@ -16,7 +20,14 @@ def test_load_defaults_when_file_missing(tmp_path: Path):
     cfg_file = str(tmp_path / "non_existent.json")
     cfg = load_model_parameters(cfg_file)
     assert cfg["reasoning_enabled"] is False
-    assert cfg["reasoning_budget_tokens"] == 512
+    # T2 (controls-cleanup-adaptive-reasoning-20260928): a fresh/unconfigured
+    # install is Auto by default (None), not the historical literal 512 --
+    # the adaptive budget engine decides at generation time. An EXISTING
+    # config file with an explicit numeric value still preserves it (see
+    # test_get_reasoning_settings_root_and_override below), now interpreted
+    # as a manual cap rather than "the" budget.
+    assert cfg["reasoning_budget_tokens"] is None
+    assert cfg["reasoning"]["budget_tokens"] is None
     assert cfg["models"] == {}
 
 
@@ -113,6 +124,47 @@ def test_update_reasoning_settings_model_override(tmp_path: Path):
     assert q == {"enabled": True, "budget_tokens": 256}
 
 
+def test_get_model_reasoning_settings_defaults_to_auto_when_unconfigured(tmp_path: Path):
+    """T2 (controls-cleanup-adaptive-reasoning-20260928): a truly fresh config
+    (no file on disk) reports budget_tokens=None (Auto) both globally and for
+    any model with no per-model override -- the adaptive engine decides at
+    generation time; there is no more hardcoded 512 default."""
+    cfg_file = str(tmp_path / "non_existent.json")
+    assert get_model_reasoning_settings(None, config_file=cfg_file) == {
+        "enabled": False,
+        "budget_tokens": None,
+    }
+    assert get_model_reasoning_settings("gemma4:e4b", config_file=cfg_file) == {
+        "enabled": False,
+        "budget_tokens": None,
+    }
+
+
+def test_update_reasoning_settings_root_clear_budget_returns_to_auto(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    update_model_reasoning_settings(enabled=True, budget_tokens=2048, config_file=cfg_file)
+    res = update_model_reasoning_settings(clear_budget=True, config_file=cfg_file)
+    assert res == {"enabled": True, "budget_tokens": None}
+
+    loaded = load_model_parameters(config_file=cfg_file)
+    assert loaded["reasoning_budget_tokens"] is None
+    assert loaded["reasoning"]["budget_tokens"] is None
+    # enabled, set separately, survives the budget clear untouched
+    assert loaded["reasoning_enabled"] is True
+
+
+def test_update_reasoning_settings_model_clear_budget_returns_to_auto(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    update_model_reasoning_settings(budget_tokens=1024, model="gemma4:e4b", config_file=cfg_file)
+    res = update_model_reasoning_settings(clear_budget=True, model="gemma4:e4b", config_file=cfg_file)
+    assert res == {"enabled": False, "budget_tokens": None}
+
+    q = get_model_reasoning_settings("gemma4:e4b", config_file=cfg_file)
+    assert q == {"enabled": False, "budget_tokens": None}
+
+
 def test_schema_v1_to_v2_migration(tmp_path: Path):
     """ADR-056 WU4: Legacy v1 files automatically migrate to Schema v2 on load."""
     cfg_file = tmp_path / "legacy_v1.json"
@@ -165,3 +217,133 @@ def test_semantic_validation_clamping(tmp_path: Path):
     assert loaded["models"]["m1"]["budget_tokens"] == 512
     assert loaded["models"]["m1"]["enabled"] is True
 
+
+
+def test_context_tokens_survive_load_and_clamp(tmp_path: Path):
+    cfg_file = tmp_path / "model_params.json"
+    cfg_file.write_text(json.dumps({
+        "version": 2,
+        "context": {"policy": "requested"},
+        "models": {
+            "gemma4:e4b": {"enabled": True, "budget_tokens": 2048, "context_tokens": 16384},
+            "tiny": {"context_tokens": 100},
+            "huge": {"context_tokens": 10_000_000},
+            "junk": {"context_tokens": "abc"},
+        },
+    }), encoding="utf-8")
+    cfg = load_model_parameters(str(cfg_file))
+    assert cfg["context"]["policy"] == "requested"
+    assert cfg["models"]["gemma4:e4b"]["context_tokens"] == 16384
+    assert cfg["models"]["tiny"]["context_tokens"] == 2048
+    assert cfg["models"]["huge"]["context_tokens"] == 131072
+    assert "context_tokens" not in cfg["models"]["junk"]
+
+
+def test_context_policy_invalid_falls_back_to_runtime_truth(tmp_path: Path):
+    cfg_file = tmp_path / "model_params.json"
+    cfg_file.write_text(json.dumps({"context": {"policy": "whatever"}}), encoding="utf-8")
+    cfg = load_model_parameters(str(cfg_file))
+    assert cfg["context"]["policy"] == "runtime_truth"
+
+
+def test_context_tokens_roundtrip_through_save(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+    cfg = load_model_parameters(cfg_file)
+    cfg["context"]["policy"] = "requested"
+    cfg["models"]["gemma4:e4b"] = {"enabled": False, "budget_tokens": 512, "context_tokens": 16384}
+    save_model_parameters(cfg, cfg_file)
+    again = load_model_parameters(cfg_file)
+    assert again["models"]["gemma4:e4b"]["context_tokens"] == 16384
+
+
+def test_get_model_context_settings(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+    # Unset config: runtime truth, nothing requested.
+    assert get_model_context_settings("gemma4:e4b", cfg_file) == {
+        "policy": "runtime_truth", "requested_tokens": None,
+    }
+    cfg = load_model_parameters(cfg_file)
+    cfg["models"]["gemma4:e4b"] = {"enabled": False, "budget_tokens": 512, "context_tokens": 16384}
+    save_model_parameters(cfg, cfg_file)
+    # context_tokens is only honored under policy "requested".
+    assert get_model_context_settings("gemma4:e4b", cfg_file)["requested_tokens"] is None
+    cfg["context"]["policy"] = "requested"
+    save_model_parameters(cfg, cfg_file)
+    assert get_model_context_settings("gemma4:e4b", cfg_file) == {
+        "policy": "requested", "requested_tokens": 16384,
+    }
+    assert get_model_context_settings("other", cfg_file)["requested_tokens"] is None
+    assert get_model_context_settings(None, cfg_file)["requested_tokens"] is None
+
+
+# ---------------------------------------------------------------------------
+# T1/T2 (model_context_auto_config_20260928): Auto default + context writer.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_auto_context_tokens_caps_large_native():
+    assert resolve_auto_context_tokens(262144) == AUTO_CONTEXT_TOKENS
+    assert AUTO_CONTEXT_TOKENS == 16384
+
+
+def test_resolve_auto_context_tokens_keeps_small_native():
+    assert resolve_auto_context_tokens(8192) == 8192
+
+
+def test_resolve_auto_context_tokens_unknown_native_falls_back_to_cap():
+    assert resolve_auto_context_tokens(None) == AUTO_CONTEXT_TOKENS
+    assert resolve_auto_context_tokens("garbage") == AUTO_CONTEXT_TOKENS
+    assert resolve_auto_context_tokens(0) == AUTO_CONTEXT_TOKENS
+    assert resolve_auto_context_tokens(-1) == AUTO_CONTEXT_TOKENS
+
+
+def test_update_model_context_settings_roundtrip(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    res = update_model_context_settings("gemma4:e4b", 32768, config_file=cfg_file)
+    assert res == {"model": "gemma4:e4b", "context_tokens": 32768, "policy": "requested"}
+
+    loaded = load_model_parameters(cfg_file)
+    assert loaded["models"]["gemma4:e4b"]["context_tokens"] == 32768
+    assert loaded["context"]["policy"] == "requested"
+
+    # get_model_context_settings reflects the write immediately.
+    assert get_model_context_settings("gemma4:e4b", cfg_file) == {
+        "policy": "requested", "requested_tokens": 32768,
+    }
+
+
+def test_update_model_context_settings_clamps_out_of_range(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    res = update_model_context_settings("tiny", 1, config_file=cfg_file)
+    assert res["context_tokens"] == 2048  # MIN_CONTEXT_TOKENS
+
+    res = update_model_context_settings("huge", 10_000_000, config_file=cfg_file)
+    assert res["context_tokens"] == 131072  # MAX_CONTEXT_TOKENS
+
+
+def test_update_model_context_settings_none_clears_back_to_auto(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    update_model_context_settings("gemma4:e4b", 32768, config_file=cfg_file)
+    res = update_model_context_settings("gemma4:e4b", None, config_file=cfg_file)
+    assert res == {"model": "gemma4:e4b", "context_tokens": None, "policy": "requested"}
+
+    loaded = load_model_parameters(cfg_file)
+    assert "context_tokens" not in loaded["models"]["gemma4:e4b"]
+
+    # No explicit override left: get_model_context_settings reports nothing
+    # requested even though policy stayed "requested" from the earlier set.
+    assert get_model_context_settings("gemma4:e4b", cfg_file)["requested_tokens"] is None
+
+
+def test_update_model_context_settings_does_not_disturb_other_models(tmp_path: Path):
+    cfg_file = str(tmp_path / "model_params.json")
+
+    update_model_context_settings("gemma4:e4b", 32768, config_file=cfg_file)
+    update_model_context_settings("llama3", 8192, config_file=cfg_file)
+
+    loaded = load_model_parameters(cfg_file)
+    assert loaded["models"]["gemma4:e4b"]["context_tokens"] == 32768
+    assert loaded["models"]["llama3"]["context_tokens"] == 8192

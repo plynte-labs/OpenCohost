@@ -13,27 +13,41 @@ routers<->main module-level import cycle), so they are imported directly.
 """
 
 import dataclasses
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
 from opencohost.api import deps
-from opencohost.api.shared import _ctx_telemetry_out, _derive_session_mode, _display_model
+from opencohost.api.shared import (
+    _ctx_telemetry_out,
+    _derive_session_mode,
+    _display_model,
+    engine_startup_state,
+)
 from opencohost.api.models import (
     HealthResponse,
     HealthState,
     InferenceRuntimeState,
+    ModelContextConfig,
     ModelReasoningConfig,
     ModelsResponse,
     StatusResponse,
+    UpdateModelContextRequest,
     UpdateModelReasoningRequest,
 )
 from opencohost.config.model_parameters import (
+    get_model_context_settings,
     get_model_reasoning_settings,
+    resolve_auto_context_tokens,
+    update_model_context_settings,
     update_model_reasoning_settings,
 )
 from opencohost.config.settings import MODELS_CATALOG, resolve_llm_tiers
+from opencohost.core import install_identity
 from opencohost.smart_aggregator.kira_agenda_controller import AgendaState
+
+logger = logging.getLogger("OpenCohost")
 
 router = APIRouter()
 
@@ -45,7 +59,13 @@ def get_health(request: Request) -> HealthResponse:
     motor = getattr(request.app.state.host, "motor", None)
     is_alive = getattr(motor, "is_alive", None)
     engine_alive = bool(is_alive()) if callable(is_alive) else False
-    return HealthResponse(status="ok", engine_alive=engine_alive)
+    return HealthResponse(
+        status="ok",
+        engine_alive=engine_alive,
+        engine_state=engine_startup_state(request.app.state.host),
+        build_version=install_identity.build_version(),
+        install_id=install_identity.install_id(),
+    )
 
 
 @router.get("/api/status", response_model=StatusResponse)
@@ -159,7 +179,12 @@ def _extract_inference_runtime_state(host, active_model: Optional[str]) -> Optio
         spill = max(0, snap.size_bytes - snap.size_vram_bytes)
 
     r_settings = get_model_reasoning_settings(model_name)
-    effective_budget = r_settings.get("budget_tokens", 512)
+    # T2 (controls-cleanup-adaptive-reasoning-20260928): None under Auto --
+    # this is a static config read, not a live read of what the adaptive
+    # engine actually picked for the last turn, so there is nothing honest
+    # to report as "effective" when there is no manual cap. See
+    # ModelReasoningConfig / InferenceRuntimeState docstrings (api/models.py).
+    effective_budget = r_settings.get("budget_tokens")
 
     return InferenceRuntimeState(
         effective_budget=effective_budget,
@@ -169,6 +194,44 @@ def _extract_inference_runtime_state(host, active_model: Optional[str]) -> Optio
         residency_ratio=res_ratio,
         spill_bytes=spill,
         clamp_reason=None,
+    )
+
+
+def _model_context_config_out(host: Any, model: Optional[str]) -> ModelContextConfig:
+    """Build ``ModelContextConfig`` for ``model`` (T2, model_context_auto_config_20260928).
+
+    Read-only, no side effects: ``native_context`` comes only from the
+    engine's already-cached ``_model_ctx_limit`` (never a fresh
+    ``ollama.show`` call from a GET handler), so it is ``None`` until some
+    other path (warm-up, chat, discovery) has populated the cache. Same for
+    ``effective_context`` -- computed only when a cached native ctx exists,
+    via the engine's own ``_resolve_effective_ctx_limit`` (pure/read-only:
+    it consults health-monitor/NVML state but never calls Ollama itself).
+    """
+    if not model:
+        return ModelContextConfig(model="")
+    try:
+        settings = get_model_context_settings(model)
+    except Exception:
+        settings = {"policy": "runtime_truth", "requested_tokens": None}
+    native_context: Optional[int] = None
+    effective_context: Optional[int] = None
+    motor = getattr(host, "motor", None) if host is not None else None
+    if motor is not None:
+        native_context = getattr(motor, "_model_ctx_limit", {}).get(model)
+        resolver = getattr(motor, "_resolve_effective_ctx_limit", None)
+        if native_context and callable(resolver):
+            try:
+                effective_context = resolver(model, native_context)
+            except Exception:
+                effective_context = None
+    return ModelContextConfig(
+        model=model,
+        context_tokens=settings.get("requested_tokens") if isinstance(settings, dict) else None,
+        auto_context_tokens=resolve_auto_context_tokens(native_context),
+        native_context=native_context,
+        effective_context=effective_context,
+        policy=settings.get("policy", "runtime_truth") if isinstance(settings, dict) else "runtime_truth",
     )
 
 
@@ -201,6 +264,9 @@ def get_models(request: Request) -> ModelsResponse:
             is_reasoning_active=is_reasoning,
             reasoning_config=ModelReasoningConfig(**r_settings),
             runtime_state=_extract_inference_runtime_state(host, active_model),
+            # T1 says nothing about cloud providers (CLOUD_CTX_BUDGET path,
+            # unchanged); Auto/context config is a local-Ollama-only concept.
+            context_config=ModelContextConfig(model=active_model or ""),
         )
     try:
         discovered = deps.discover_ollama_models()
@@ -225,6 +291,7 @@ def get_models(request: Request) -> ModelsResponse:
         is_reasoning_active=is_reasoning,
         reasoning_config=ModelReasoningConfig(**r_settings),
         runtime_state=_extract_inference_runtime_state(host, current_model),
+        context_config=_model_context_config_out(host, current_model),
     )
 
 
@@ -232,10 +299,52 @@ def get_models(request: Request) -> ModelsResponse:
 def update_model_reasoning(
     request: Request, body: UpdateModelReasoningRequest
 ) -> ModelReasoningConfig:
+    """T2 (controls-cleanup-adaptive-reasoning-20260928): ``budget_tokens``
+    now carries three distinct states through one Optional Pydantic field,
+    resolved via ``body.model_fields_set`` (the JSON keys actually present
+    in the request, not merely non-None):
+      - key ABSENT from the body -> leave the current value untouched (the
+        pre-existing partial-update convention for this endpoint).
+      - key present, value ``null`` -> explicit "clear to Auto"
+        (``clear_budget=True``; mirrors PUT /api/models/context's own
+        null-clears-to-Auto convention).
+      - key present, a number -> the new manual cap.
+    """
+    budget_provided = "budget_tokens" in body.model_fields_set
+    clear_budget = budget_provided and body.budget_tokens is None
     updated = update_model_reasoning_settings(
         enabled=body.enabled,
-        budget_tokens=body.budget_tokens,
+        budget_tokens=body.budget_tokens if (budget_provided and not clear_budget) else None,
         preset=body.preset,
         model=body.model,
+        clear_budget=clear_budget,
     )
     return ModelReasoningConfig(**updated)
+
+
+@router.put("/api/models/context", response_model=ModelContextConfig)
+def update_model_context(
+    request: Request, body: UpdateModelContextRequest
+) -> ModelContextConfig:
+    """T2 (model_context_auto_config_20260928). ``context_tokens=None``
+    clears back to Auto. Validation follows the reasoning endpoint's own
+    convention: an out-of-range value is silently CLAMPED
+    (``_sanitize_context_tokens``), never a 422 -- only a wrong JSON type
+    (e.g. a string) 422s, via ordinary Pydantic validation.
+
+    Applying to the ACTIVE model (forcing a live Ollama reload) is
+    best-effort: a motor that predates ``request_model_context_reload``
+    (or any glitch while forcing it) never fails this write -- the config is
+    already durably persisted by this point, and the new value still
+    applies the next time that model loads.
+    """
+    update_model_context_settings(model=body.model, context_tokens=body.context_tokens)
+    host = request.app.state.host
+    motor = getattr(host, "motor", None)
+    reload_fn = getattr(motor, "request_model_context_reload", None) if motor is not None else None
+    if callable(reload_fn):
+        try:
+            reload_fn(body.model)
+        except Exception as exc:
+            logger.warning("Context reload glitch for %s (config already saved): %s", body.model, exc)
+    return _model_context_config_out(host, body.model)

@@ -123,7 +123,7 @@ def test_prompt_block_is_bounded_structured_and_has_no_raw_fields() -> None:
     assert block.startswith("<editorial_context>")
     assert block.endswith("</editorial_context>")
     assert "Polémica de monetización" in block
-    assert "priorizá claridad" in block
+    assert "prioriza claridad" in block
     assert "raw_chat" not in block
     assert "raw_page" not in block
     assert len(block) <= 900
@@ -157,7 +157,7 @@ def test_prompt_block_frames_card_as_authoritative_over_recollection() -> None:
     assert "fechas" in block
     assert "versiones" in block
     # The pre-existing one-turn/clarity instruction is preserved, not replaced.
-    assert "priorizá claridad" in block
+    assert "prioriza claridad" in block
 
 
 def test_prompt_block_instruction_is_locale_injectable() -> None:
@@ -774,3 +774,127 @@ def test_in_cooldown_true_within_window_false_outside_and_when_never_injected() 
 
     card.last_injected_at = now - timedelta(seconds=600)
     assert card.in_cooldown(now, 300) is False
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["counterpoints", "discussion_hooks", "triggers", "must_say", "forbidden_claims"],
+)
+def test_list_fields_over_max_items_raise_validation_error(field_name: str) -> None:
+    too_many = [f"item {i}" for i in range(EditorialCard.MAX_ITEMS + 1)]
+    with pytest.raises(EditorialCardValidationError, match=f"{field_name} exceeds {EditorialCard.MAX_ITEMS} items"):
+        EditorialCard(
+            topic="Limit Check",
+            summary="Summary.",
+            streamer_take="Take.",
+            **{field_name: too_many},
+        )
+
+    # Blank lines are filtered before checking MAX_ITEMS; exactly MAX_ITEMS succeeds.
+    padded_valid = [f"item {i}" for i in range(EditorialCard.MAX_ITEMS)] + ["", "   "]
+    card = EditorialCard(
+        topic="Limit Check",
+        summary="Summary.",
+        streamer_take="Take.",
+        **{field_name: padded_valid},
+    )
+    assert len(getattr(card, field_name)) == EditorialCard.MAX_ITEMS
+
+
+def test_store_from_row_tolerates_legacy_overlong_lists(tmp_path) -> None:
+    import json
+    import sqlite3
+
+    db_path = tmp_path / "cards.db"
+    store = EditorialCardStore(db_path)
+    seeded = store.upsert(
+        EditorialCard(topic="Legacy Card", summary="Summary.", streamer_take="Take.")
+    )
+
+    overlong = json.dumps([f"legacy {i}" for i in range(EditorialCard.MAX_ITEMS + 3)])
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE editorial_cards
+            SET counterpoints_json = ?,
+                discussion_hooks_json = ?,
+                triggers_json = ?,
+                must_say_json = ?,
+                forbidden_claims_json = ?
+            WHERE id = ?
+            """,
+            (overlong, overlong, overlong, overlong, overlong, seeded.id),
+        )
+        conn.commit()
+
+    loaded = store.get(seeded.id)
+    assert loaded is not None
+    assert len(loaded.counterpoints) == EditorialCard.MAX_ITEMS
+    assert len(loaded.must_say) == EditorialCard.MAX_ITEMS
+    assert len(store.list_all()) == 1
+
+
+def test_api_routes_reject_over_max_items_with_422(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    import opencohost.api.auth as auth
+    import opencohost.api.main as main_mod
+    from tests.test_api_phase1 import FakeHost
+
+    monkeypatch.setattr(main_mod, "EDITORIAL_CARDS_DB", str(tmp_path / "api_cards.db"))
+    monkeypatch.setattr(main_mod, "_host_active", False)
+    monkeypatch.setattr(auth, "_rate_limiter", auth.RateLimiter())
+    auth.ensure_tokens()
+    tokens = auth.load_tokens()
+    agent_headers = {"Authorization": f"Bearer {tokens['agent']}"}
+    operator_headers = {"Authorization": f"Bearer {tokens['operator']}"}
+    overlong = [f"entry {i}" for i in range(EditorialCard.MAX_ITEMS + 1)]
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=["http://localhost:5173"])
+    with TestClient(app) as client:
+        agent_resp = client.post(
+            "/api/agent/cards",
+            json={
+                "agent": "claude-code",
+                "topic": "Too Many",
+                "summary": "Summary.",
+                "streamer_take": "Take.",
+                "counterpoints": overlong,
+            },
+            headers=agent_headers,
+        )
+        assert agent_resp.status_code == 422
+        assert f"counterpoints exceeds {EditorialCard.MAX_ITEMS} items" in agent_resp.json()["detail"]
+
+        create_resp = client.post(
+            "/api/editorial/cards",
+            json={
+                "topic": "Sponsor Too Many",
+                "summary": "Summary.",
+                "streamer_take": "Take.",
+                "must_say": overlong,
+            },
+            headers=operator_headers,
+        )
+        assert create_resp.status_code == 422
+        assert f"must_say exceeds {EditorialCard.MAX_ITEMS} items" in create_resp.json()["detail"]
+
+        valid_resp = client.post(
+            "/api/editorial/cards",
+            json={
+                "topic": "Sponsor Valid",
+                "summary": "Summary.",
+                "streamer_take": "Take.",
+            },
+            headers=operator_headers,
+        )
+        assert valid_resp.status_code == 200
+        card_id = valid_resp.json()["id"]
+
+        put_resp = client.put(
+            f"/api/editorial/cards/{card_id}/fields",
+            json={"forbidden_claims": overlong},
+            headers=operator_headers,
+        )
+        assert put_resp.status_code == 422
+        assert f"forbidden_claims exceeds {EditorialCard.MAX_ITEMS} items" in put_resp.json()["detail"]
+

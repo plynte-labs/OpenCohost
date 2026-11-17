@@ -90,6 +90,9 @@ debug_*.py
 debug_obs.py
 mudanza.py
 
+# ── Scratch workbench (ad-hoc probes, pasted test logs; never commit) ──
+scratch/
+
 # ── Local tooling dirs ──
 .opencode/
 .agents/
@@ -100,6 +103,7 @@ VoiceAItemp*/
 
 # ── User assets ──
 assets/music/
+assets/avatar/user/
 opencohost/config/music_library.json
 Documents/
 WhatIs.md
@@ -134,7 +138,7 @@ OpenCohost_TAURI/
 /config/
 .pnpm-store/
 
-# ── Internal development records (owner ruling 2026-08-02) ──
+# ── Internal development records (owner/ maybe obsolete ruling 2026-08-02) ──
 AGENT_HANDOFF.md
 docs/sesiondanger/
 docs/audit_snapshots/
@@ -171,3 +175,60 @@ docs/*technical_session*.md
 *.db
 *.db-shm
 *.db-wal
+
+# Local backup copies and runtime lock
+* original copy.py
+state/
+
+# Internal agent notes and local build output: kept on disk, never published.
+# Anchored to the repo root, like `/config/` above.
+/odd/
+/AGENTS.md
+/CLAUDE.md
+/build_artifacts/
+# Internal verbatim pre-trim copies (owner decision 2026-11-16: never published).
+/docs/archive/
+# Local release builds (installer, engine zip, checksums); published only by CI.
+/release_assets/
+
+
+# agregados
+./artifacts/
+./uv-cache/
+
+# Internal dev material, never published (owner decision 2026-11-16).
+/docs/superpowers/
+/docs/specs/
+/.mcp.json
+/tools/diag_cloud_nim.py
+/tools/diag_cloud_nim_standalone.py
+/tools/nim_snippet_probe.py
+/docs/packaging/CLEAN_VM_CHECKLIST.md
+/opencohost/mcp_local/*
+!/opencohost/mcp_local/__init__.py
+!/opencohost/mcp_local/runner_log.py
+# Imported by tracked tests (prompt layout, turn latency, recall observability).
+!/opencohost/mcp_local/logparse.py
+!/opencohost/mcp_local/prompt_debug.py
+/tests/test_mcp_diag_tid.py
+/tests/test_mcp_local_config.py
+/tests/test_mcp_local_diagnostics.py
+/tests/test_mcp_local_prompt_debug.py
+/tests/test_mcp_local_runner_log.py
+
+# Internal category paths: files already on origin/master stay tracked (ignore does not
+# affect tracked files); anything new in these paths is never added (owner decision 2026-11-16).
+/scripts/delegate.*
+/tools/safe_stage_check.py
+/docs/SDD_SKILLS_USAGE.md
+/docs/sdd_tracks/
+/docs/RF3_*
+/docs/RF4_*
+/docs/SESSION_ANALYTICS_EXPORTER_SPEC.md
+/docs/runtime-validation-*
+/docs/closeout-*
+/docs/deferred-*
+/docs/audit/
+/docs/memory_v5/
+/docs/test_suite_audit_full.md
+/tools/memory_v5_*

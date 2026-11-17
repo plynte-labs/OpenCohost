@@ -36,6 +36,15 @@ class MemoryDigest:
     def __init__(self, max_chars: int = DEFAULT_MAX_CHARS) -> None:
         self._max_chars = max_chars
         self._lines: List[str] = []
+        # session-topic-folder-20261016: optional identity key per line (parallel
+        # to ``_lines``; None for callers that pass none), so the in-session topic
+        # index can tell which of its fragments the ledger already represents.
+        self._keys: List[Optional[str]] = []
+
+    @property
+    def keys(self) -> frozenset:
+        """Keys of the lines still alive in the FIFO (keyless lines excluded)."""
+        return frozenset(k for k in self._keys[-len(self._lines):] if k is not None) if self._lines else frozenset()
 
     @property
     def lines(self) -> List[str]:
@@ -50,21 +59,25 @@ class MemoryDigest:
     def __iter__(self):
         return iter(self._lines)
 
-    def append(self, line: str) -> None:
+    def append(self, line: str, key: Optional[str] = None) -> None:
         """Add a ledger line, evicting the oldest entries to stay within cap."""
         # Truncate the incoming line itself if it alone exceeds the cap
         if len(line) > self._max_chars:
             line = line[: self._max_chars]
 
         self._lines.append(line)
+        self._keys.append(key)
 
         # FIFO eviction: drop oldest lines until total fits within cap
         while self._lines and len("\n".join(self._lines)) > self._max_chars:
             self._lines.pop(0)
+            if self._keys:
+                self._keys.pop(0)
 
     def clear(self) -> None:
         """Reset the digest (profile change, clear_history)."""
         self._lines = []
+        self._keys = []
 
     # Defaults are the original Spanish literals (es-preserving). The engine
     # passes the active locale's values; a bundle with a broken format string

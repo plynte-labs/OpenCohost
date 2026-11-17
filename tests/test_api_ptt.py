@@ -27,6 +27,11 @@ from tests.test_ptt_session import _FakeConnect, _FakeWS, _patch_connect
 
 _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
 
+# The PTT config and state responses also carry the hotkey and the dictation
+# settings (PttConfigResponse / PttStateResponse, ptt-dictation-20261111). These
+# are the defaults for the isolated test config file (release-050 D16).
+_PTT_DEFAULTS = {"hotkey": "F10", "dictation_mode": "send", "companion_dictation": False}
+
 
 @pytest.fixture(autouse=True)
 def _reset_host_active():
@@ -225,7 +230,10 @@ def test_get_state_shape_counts_never_text():
         resp = client.get("/api/ptt/state")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"state", "session_id", "buffered_chars", "last_error", "stt_ws_url", "stt_service"}
+        assert set(body.keys()) == {
+            "state", "session_id", "buffered_chars", "last_error", "stt_ws_url", "stt_service",
+            "hotkey", "dictation_mode", "companion_dictation",
+        }
         assert isinstance(body["buffered_chars"], int)
         assert body["state"] == "flushing"
         # Additive supervisor summary (liveaudio-service-client track): the
@@ -566,7 +574,7 @@ def test_put_ptt_config_persists_and_returns_the_effective_config():
     try:
         resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
         assert resp.status_code == 200
-        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765"}
+        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765", **_PTT_DEFAULTS}
         # Persisted, not just held in memory.
         assert settings.load_ptt_ws_uri() == "ws://10.0.0.5:8765"
     finally:
@@ -612,7 +620,7 @@ def test_put_ptt_config_with_no_field_returns_current_and_writes_nothing():
     try:
         resp = client.put("/api/ptt/config", json={})
         assert resp.status_code == 200
-        assert resp.json() == {"stt_ws_uri": settings.WS_URI}
+        assert resp.json() == {"stt_ws_uri": settings.WS_URI, **_PTT_DEFAULTS}
         assert not os.path.exists(settings.PTT_CONFIG_FILE)
     finally:
         client.__exit__(None, None, None)
@@ -646,7 +654,7 @@ def test_put_ptt_config_live_apply_failure_never_fails_the_write():
     try:
         resp = client.put("/api/ptt/config", json={"stt_ws_uri": "ws://10.0.0.5:8765"})
         assert resp.status_code == 200
-        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765"}
+        assert resp.json() == {"stt_ws_uri": "ws://10.0.0.5:8765", **_PTT_DEFAULTS}
         assert settings.load_ptt_ws_uri() == "ws://10.0.0.5:8765"
     finally:
         client.__exit__(None, None, None)
@@ -935,3 +943,62 @@ def test_stt_unreachable_returns_503_and_frees_slot(monkeypatch):
         assert st["last_error"] == "stt_unreachable"
     finally:
         client.__exit__(None, None, None)
+
+
+def test_load_save_ptt_hotkey_round_trip(tmp_path):
+    path = str(tmp_path / "ptt_settings.json")
+    assert settings.load_ptt_hotkey(path) == "F10"
+
+    settings.save_ptt_hotkey("F8", path)
+    assert settings.load_ptt_hotkey(path) == "F8"
+
+    # Merge check: does not clobber stt_ws_uri
+    settings.save_ptt_ws_uri("ws://127.0.0.1:9999", path)
+    assert settings.load_ptt_hotkey(path) == "F8"
+    assert settings.load_ptt_ws_uri(path) == "ws://127.0.0.1:9999"
+
+
+def test_save_ptt_hotkey_rejects_invalid_key(tmp_path):
+    path = str(tmp_path / "ptt_settings.json")
+    import pytest
+
+    with pytest.raises(ValueError, match="Invalid hotkey"):
+        settings.save_ptt_hotkey("InvalidKey123", path)
+
+
+def test_hotkey_to_vk_mapping():
+    assert settings.hotkey_to_vk("F10") == 0x79
+    assert settings.hotkey_to_vk("F8") == 0x77
+    assert settings.hotkey_to_vk("Insert") == 0x2D
+    assert settings.hotkey_to_vk("ScrollLock") == 0x91
+    assert settings.hotkey_to_vk("Pause") == 0x13
+    assert settings.hotkey_to_vk("Mouse4") == 0x06
+    assert settings.hotkey_to_vk("Mouse5") == 0x05
+    assert settings.hotkey_to_vk("Unknown") == 0x79  # safe default
+
+
+def test_put_ptt_config_updates_hotkey(monkeypatch, tmp_path):
+    path = str(tmp_path / "ptt_settings.json")
+    monkeypatch.setattr(settings, "PTT_CONFIG_FILE", path)
+
+    app = _app()
+    client = TestClient(app)
+    with client:
+        # Initial state includes default hotkey
+        res = client.get("/api/ptt/state")
+        assert res.status_code == 200
+        assert res.json()["hotkey"] == "F10"
+
+        # Update hotkey
+        res = client.put("/api/ptt/config", json={"hotkey": "F8"})
+        assert res.status_code == 200
+        assert res.json()["hotkey"] == "F8"
+
+        # GET reflects new hotkey
+        res = client.get("/api/ptt/state")
+        assert res.json()["hotkey"] == "F8"
+
+        # Reject invalid hotkey with 422
+        res = client.put("/api/ptt/config", json={"hotkey": "Ctrl+Alt+Del"})
+        assert res.status_code == 422
+

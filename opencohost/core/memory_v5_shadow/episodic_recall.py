@@ -8,9 +8,11 @@ Supports OFF, SHADOW (prompt unchanged), and ACTIVE (injected into prompt) modes
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -41,14 +43,39 @@ from opencohost.core.memory_v5_shadow.semantic_worker import SemanticWorkerServi
 logger = logging.getLogger(__name__)
 
 
+try:
+    from opencohost.core.editorial.editorial_matching import _strip_accents
+except Exception:  # fail-open: unfolded comparison still works
+    _strip_accents = None
+
+
 def _fold_token(token: str) -> str:
     """Accent-fold + lowercase a single token (matches analyzer anchors)."""
-    try:
-        from opencohost.core.editorial.editorial_matching import _strip_accents
-    except Exception:  # fail-open: unfolded comparison still works
-        return (token or "").lower()
+    token = token or ""
+    if token.isascii():
+        # NFD of ASCII is the identity and ASCII has no combining marks, so
+        # `_strip_accents` cannot change it: only the lowercase remains.
+        return token.lower()
+    if _strip_accents is None:
+        return token.lower()
+    return _strip_accents(token).lower()
 
-    return _strip_accents(token or "").lower()
+
+def _fold_token_set(text: str) -> set[str]:
+    """Folded, non-empty whitespace tokens of *text*.
+
+    Equal to ``{_fold_token(t) for t in text.split()} - {""}``, but a pure-ASCII
+    text (what the indexer stores: `normalize_tokens` already emits lowercase
+    [a-z0-9]) is folded in one C-level pass instead of once per token. Any
+    non-ASCII text takes the exact per-token path, so older or foreign rows
+    keep their previous behaviour.
+    """
+    text = text or ""
+    if text.isascii():
+        return set(text.lower().split())
+    out = {_fold_token(t) for t in text.split()}
+    out.discard("")
+    return out
 
 
 class RecallMode(str, Enum):
@@ -64,6 +91,9 @@ class RetrievedEpisodeContext:
     started_at: str
     composite_score: float
     exchanges: list[ConversationalExchange]
+    # "<user_event_id>:<assistant_event_id>" of the exchange that matched;
+    # lets compact consumers pick it out of the ±1 window.
+    best_exchange_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +107,27 @@ class EpisodicRecallPacket:
     reason_code: str
     scope: RecallScope = RecallScope.EPISODIC_TOPIC
     candidate_count: int = 0
+    # Highest query-to-exchange cosine seen among candidates (telemetry only);
+    # None when no embedding was computed (preflight miss, worker timeout).
+    top_score: Optional[float] = None
+    # Stage telemetry (memory-grounding T1): milliseconds and a fixed device
+    # code, never text. None = that stage did not run / was not measured.
+    embed_ms: Optional[int] = None
+    worker_wait_ms: Optional[int] = None
+    retrieval_ms: Optional[int] = None
+    device: Optional[str] = None
+    # The turn's query embedding, so later stages (fact ranking, session
+    # topics) reuse it instead of embedding the same text again (T2). Never
+    # logged.
+    query_vec: Optional[tuple] = field(default=None, repr=False)
+    # Decision telemetry (recall-observability T4): enum / family codes and
+    # counts only, never text. None = not measured (e.g. recall OFF).
+    intent: Optional[str] = None
+    trigger: Optional[str] = None
+    anchors: Optional[int] = None
+    accepted_n: Optional[int] = None
+    # Gate outcome of the BEST-cosine candidate; None when nothing was scored.
+    best_reason: Optional[str] = None
 
 
 _EPISODIC_PREAMBLE = (
@@ -107,7 +158,8 @@ def _format_episodic_block(
         )
         turns = []
         for ex in ep.exchanges:
-            turns.append(f"User: {ex.user_text}\nKira: {ex.assistant_text}")
+            # User side only (S2): Kira's generated text is not memory.
+            turns.append(f"User: {ex.user_text}")
         body_parts.append(ep_header + "\n" + "\n\n".join(turns))
 
     if scope == RecallScope.PROFILE_SYNTHESIS:
@@ -158,17 +210,12 @@ class EpisodicRecallCoordinator:
         if not anchors:
             return False
         try:
-            records = self.cache_store.get_exchange_embeddings_by_profile(
+            token_rows = self.cache_store.get_exchange_lexical_tokens_by_profile(
                 query.profile_id
             )
         except Exception:
             return False
-        cached: set[str] = set()
-        for rec in records:
-            for tok in (rec.lexical_tokens or "").split():
-                folded = _fold_token(tok)
-                if folded:
-                    cached.add(folded)
+        cached = _fold_token_set(" ".join(row or "" for row in token_rows))
         return bool(anchors & cached)
 
     def _previous_closed_session_id(self, profile_id: str) -> Optional[str]:
@@ -209,6 +256,7 @@ class EpisodicRecallCoordinator:
         query: EpisodicQuery,
         reason_code: str,
         candidate_count: int = 0,
+        top_score: Optional[float] = None,
     ) -> EpisodicRecallPacket:
         return EpisodicRecallPacket(
             query_hash=q_hash,
@@ -220,6 +268,7 @@ class EpisodicRecallCoordinator:
             reason_code=reason_code,
             scope=query.scope,
             candidate_count=candidate_count,
+            top_score=top_score,
         )
 
     def process_query(
@@ -227,6 +276,46 @@ class EpisodicRecallCoordinator:
         query_text: str,
         profile_id: str,
         reference_time: Optional[datetime] = None,
+        embed_timeout_s: Optional[float] = None,
+    ) -> Optional[EpisodicRecallPacket]:
+        trace: dict[str, Any] = {}
+        packet = self._process_query(
+            query_text, profile_id, reference_time, embed_timeout_s, trace
+        )
+        if packet is None:
+            return None
+        done = trace.pop("_embed_done", None)
+        if done is not None:
+            trace["retrieval_ms"] = int(max(0.0, (time.monotonic() - done) * 1000.0))
+        return dataclasses.replace(packet, **trace)
+
+    def _embed_traced(self, text: str, timeout_s: Optional[float], trace: dict) -> Any:
+        """Embed *text* on the worker and record stage timing in *trace*
+        (numbers and a fixed device code only)."""
+        if timeout_s is None:
+            vec = self.worker.embed_query(text)
+        else:
+            vec = self.worker.embed_query(text, timeout_s=timeout_s)
+        trace["_embed_done"] = time.monotonic()
+        if vec is not None:
+            trace["query_vec"] = tuple(float(x) for x in vec)
+        stats_fn = getattr(self.worker, "last_call_stats", None)
+        stats = stats_fn() if callable(stats_fn) else None
+        if isinstance(stats, dict):
+            trace["embed_ms"] = int(stats.get("call_ms", 0))
+            trace["worker_wait_ms"] = int(stats.get("wait_ms", 0))
+        device = getattr(self.worker, "device", None)
+        if isinstance(device, str):
+            trace["device"] = device
+        return vec
+
+    def _process_query(
+        self,
+        query_text: str,
+        profile_id: str,
+        reference_time: Optional[datetime],
+        embed_timeout_s: Optional[float],
+        trace: dict,
     ) -> Optional[EpisodicRecallPacket]:
         if self.mode == RecallMode.OFF:
             return None
@@ -235,6 +324,10 @@ class EpisodicRecallCoordinator:
 
         # 1. Query understanding (deterministic intent + scope + temporal)
         query = self.query_analyzer.analyze(query_text, profile_id=profile_id, reference_time=reference_time)
+        trace["intent"] = query.recall_intent.value
+        trace["trigger"] = query.trigger
+        trace["anchors"] = len(query.lexical_anchors)
+        trace["accepted_n"] = 0
         # NONE is a very strict opportunistic policy, not a hard gate: a
         # cheap deterministic preflight decides whether any historical anchor
         # overlaps before any embedding work happens.
@@ -245,7 +338,9 @@ class EpisodicRecallCoordinator:
                 )
 
         # 2. Query embedding via isolated worker
-        query_vec = self.worker.embed_query(query.normalized_query)
+        # embed_timeout_s bounds the IPC wait on the worker (the caller's
+        # latency budget); None keeps the worker's own default.
+        query_vec = self._embed_traced(query.normalized_query, embed_timeout_s, trace)
         if query_vec is None:
             logger.warning("Worker embedding failed or timed out; fail-open to NO_RECALL.")
             return self._empty_packet(q_hash, profile_id, query, "WORKER_UNAVAILABLE")
@@ -308,9 +403,17 @@ class EpisodicRecallCoordinator:
         if ref_dt.tzinfo is None:
             ref_dt = ref_dt.replace(tzinfo=timezone.utc)
 
+        top_cos: Optional[float] = None
+        accepted_n = 0
+        # Gate outcome of the best-cosine candidate (ties: the first), so the
+        # reported rejection is the one that mattered, not the last scored.
+        best_reason: Optional[str] = None
         for cand in cand_exchanges:
             v_arr = np.array(cand.vector, dtype=np.float32)
             ex_cos = float(np.dot(q_arr, v_arr) / (q_norm * np.linalg.norm(v_arr) + 1e-9))
+            is_best = top_cos is None or ex_cos > top_cos
+            if is_best:
+                top_cos = ex_cos
 
             ep_rec = ep_records.get(cand.episode_id)
             ep_cos = _cosine(query_vec, ep_rec.vector) if ep_rec else ex_cos
@@ -320,10 +423,7 @@ class EpisodicRecallCoordinator:
             # `audifonos` matches cached `audífonos`).
             lex_score = 0.0
             if q_tokens and cand.lexical_tokens:
-                cand_tokens = {
-                    _fold_token(t) for t in cand.lexical_tokens.split()
-                }
-                cand_tokens.discard("")
+                cand_tokens = _fold_token_set(cand.lexical_tokens)
                 shared = q_tokens & cand_tokens
                 lex_score = round(len(shared) / max(1, len(q_tokens)), 4)
 
@@ -349,17 +449,22 @@ class EpisodicRecallCoordinator:
                 has_lexical_anchors=bool(query.lexical_anchors),
             )
 
+            if is_best:
+                best_reason = score_res.reason_code
             if score_res.accepted:
+                accepted_n += 1
                 curr = ep_to_best.get(cand.episode_id)
                 if curr is None or score_res.score > curr[0]:
                     ep_to_best[cand.episode_id] = (score_res.score, cand.exchange_key, score_res, lex_score)
-            else:
-                last_rejected_reason = score_res.reason_code
+
+        trace["accepted_n"] = accepted_n
+        trace["best_reason"] = best_reason
 
         if not ep_to_best:
             return self._empty_packet(
-                q_hash, profile_id, query, last_rejected_reason,
+                q_hash, profile_id, query, best_reason or "NO_CANDIDATES",
                 candidate_count=len(cand_exchanges),
+                top_score=top_cos,
             )
 
         # 5. Build RankedCandidateEpisode list with actual best lexical score
@@ -440,6 +545,7 @@ class EpisodicRecallCoordinator:
                     started_at=started_at,
                     composite_score=sel.composite_score,
                     exchanges=window_exs,
+                    best_exchange_key=sel.best_exchange_key,
                 )
             )
 
@@ -456,11 +562,8 @@ class EpisodicRecallCoordinator:
         if tokens > self.max_token_budget and len(retrieved_contexts) == 1:
             single_ep = retrieved_contexts[0]
             while tokens > self.max_token_budget and len(single_ep.exchanges) > 1:
-                single_ep = RetrievedEpisodeContext(
-                    episode_id=single_ep.episode_id,
-                    session_id=single_ep.session_id,
-                    started_at=single_ep.started_at,
-                    composite_score=single_ep.composite_score,
+                single_ep = dataclasses.replace(
+                    single_ep,
                     exchanges=single_ep.exchanges[: len(single_ep.exchanges) - 1],
                 )
                 retrieved_contexts = [single_ep]
@@ -476,22 +579,17 @@ class EpisodicRecallCoordinator:
                     formatted = ""
                     tokens = 0
                 else:
+                    # dataclasses.replace keeps every other field: the old
+                    # hand-built constructor passed a non-existent field
+                    # (stream_sequence) and raised AttributeError, so any
+                    # single oversize exchange failed recall open.
                     ex0 = single_ep.exchanges[0]
-                    trimmed_ex = ConversationalExchange(
-                        user_event_id=ex0.user_event_id,
-                        assistant_event_id=ex0.assistant_event_id,
+                    trimmed_ex = dataclasses.replace(
+                        ex0,
                         user_text=ex0.user_text[: avail // 2],
                         assistant_text=ex0.assistant_text[: avail // 2] + "...",
-                        stream_sequence=ex0.stream_sequence,
-                        occurred_at=ex0.occurred_at,
                     )
-                    single_ep = RetrievedEpisodeContext(
-                        episode_id=single_ep.episode_id,
-                        session_id=single_ep.session_id,
-                        started_at=single_ep.started_at,
-                        composite_score=single_ep.composite_score,
-                        exchanges=[trimmed_ex],
-                    )
+                    single_ep = dataclasses.replace(single_ep, exchanges=[trimmed_ex])
                     retrieved_contexts = [single_ep]
                     formatted = _format_episodic_block(retrieved_contexts, query.scope)
                     tokens = len(formatted) // 4
@@ -511,4 +609,5 @@ class EpisodicRecallCoordinator:
             reason_code=final_reason,
             scope=query.scope,
             candidate_count=len(cand_exchanges),
+            top_score=top_cos,
         )

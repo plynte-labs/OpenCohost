@@ -297,9 +297,22 @@ class CloudFallbackMixin:
                 # Letting it inherit the owner band (priority 0) would make a
                 # system notice preemptive at step 3 under owner decision D3
                 # (uniform priority-0 preemption). It is chat-band work.
-                self._speak_or_submit(
+                #
+                # T4 (live_session_fixes_20260925): capture the returned job
+                # (None under the legacy non-router path) so a same-turn
+                # `cloud_fallback_retry` reply can later `discard_job()` it
+                # instead of letting a D3 preempt merely SUSPEND it -- see
+                # `_maybe_discard_stale_fallback_notice`'s docstring for the
+                # full root-cause writeup. Tracked unconditionally (cheap, and
+                # a no-op downstream when the owner setting is OFF); only ONE
+                # notice is ever pending at a time since `_cloud_fallback_active`
+                # already prevents an overlapping second fallback.
+                job = self._speak_or_submit(
                     _eng.i18n_active.provider_fallback_notice(), source=source, priority=1
                 )
+                if job is not None:
+                    with self._lock:
+                        self._pending_fallback_notice_job = job
             except Exception:
                 _eng.logger.exception("Cloud fallback: could not speak provider_fallback_notice")
 

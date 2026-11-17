@@ -51,6 +51,7 @@ from enum import Enum
 from typing import Optional
 
 from opencohost.config.settings import OWNER_BUNDLE_SOURCE
+from opencohost.core.engine import turn_state
 
 logger = logging.getLogger("OpenCohost")
 
@@ -120,6 +121,42 @@ class SpeechJob:
     # the chunk list is final. Defaulting True keeps every job built
     # anywhere else byte-identical in behavior.
     sealed: bool = True
+    turn_id: Optional[int] = None
+    # ChatReplySink turn id of the reply this job speaks, for the UI's
+    # follow-reading highlight. Deliberately NOT `turn_id`, which doubles as the
+    # vision-read shield token. None for readings, status lines and notices.
+    feed_turn_id: Optional[int] = None
+    # vision-on-demand V1.32: True means a LATER owner-band submit queues behind
+    # this job instead of preempting it while it is ACTIVE (the transcription
+    # read aloud must finish before the reaction to it plays). Cancel, PTT hold
+    # and discard paths do not read this flag, so they stop it like any job.
+    protected: bool = False
+    # turn-state-machine-20261112 T3: the tid of the foreground turn that
+    # submitted this job (``turn_state.current_tid()`` on the submitting
+    # thread), immutable after submit. None for agenda, pregen background and
+    # notices from other threads: those log no ``[TURN_SPEECH]`` line.
+    # Deliberately NOT ``turn_id`` (the vision-read / feed token).
+    turn_uid: Optional[str] = None
+    # True once the job's ``[TURN_SPEECH] state=started`` line was logged, so
+    # a retry or a resume never logs a second ``started``.
+    turn_start_logged: bool = False
+
+
+def _turn_log(job, state: str, reason: str) -> None:
+    """One ``[TURN_SPEECH]`` line for a job stamped with a turn. Codes only.
+
+    Call it OUTSIDE ``_sched_lock``. A no-op without ``turn_uid``; never
+    raises (a logging failure must not break playback)."""
+    try:
+        turn_state.log_speech(getattr(job, "turn_uid", None), job.job_id, state, reason)
+    except Exception:
+        pass
+
+
+# Pause reasons `_reconcile` treats as SUSPEND-worthy (resumable). Anything
+# else on a bare interruption -- "discard" included -- is the DISCARDED
+# default. "user_pause" is the owner's Pause control (readaloud-speech T1).
+_SUSPEND_REASONS = ("ptt", "preempt", "user_pause")
 
 
 def priority_for_source(source: str) -> int:
@@ -160,6 +197,12 @@ class SpeechRouter:
         # `held_ms` (2026-08-09). None when no hold was armed through
         # `hold_and_pause` -- the release then reports -1 rather than a lie.
         self._ptt_hold_started_monotonic: Optional[float] = None
+        # Owner-controlled pause (readaloud-speech T1). A hold INDEPENDENT of
+        # `_ptt_held`: a PTT release never clears it and a user release never
+        # clears a live PTT hold. Same discipline otherwise: read/written
+        # under `_sched_lock` only; `_pick()` refuses while either is set.
+        self._user_paused: bool = False
+        self._user_pause_started_monotonic: Optional[float] = None
         # D4: the depth-0 job. Only this job ever emits
         # speaking_start/speaking_end; a preempting (inner) job never claims.
         self._boundary_owner: Optional[SpeechJob] = None
@@ -185,6 +228,12 @@ class SpeechRouter:
             getattr(motor, "_speech_interrupt_enabled", False)
             and getattr(motor, "_speech_router_enabled", False)
         )
+
+    @property
+    def discard_speech_residue(self) -> bool:
+        """Owner-configurable toggle to discard residual speech from non-agenda
+        turns, read LIVE from the motor."""
+        return bool(getattr(self._motor, "_discard_speech_residue", False))
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -213,10 +262,30 @@ class SpeechRouter:
         if thread is not None:
             thread.join(timeout)
 
+    def _shields(self, victim: Optional[SpeechJob], turn_id: Optional[int]) -> bool:
+        """True when `victim` (the ACTIVE job) must not be preempted by a submit
+        from `turn_id`. A protected job (the vision reading) shields itself from
+        every owner submit while the owner's discard_speech_residue toggle is
+        off (read LIVE here, at submit time). With the toggle on it shields only
+        against its OWN turn (same non-None `turn_id`): the reaction must never
+        cut its reading, but a new owner reply does. Call under `_sched_lock`."""
+        if victim is None or not victim.protected:
+            return False
+        if not self.discard_speech_residue:
+            return True
+        return victim.turn_id is not None and victim.turn_id == turn_id
+
     # ── public surface ───────────────────────────────────────────────────
 
-    def submit(self, text: str, source: str, priority: int) -> SpeechJob:
-        """Non-blocking. Returns immediately with the job QUEUED — which is
+    def submit(
+        self, text: str, source: str, priority: int, turn_id: Optional[int] = None,
+        protected: bool = False, feed_turn_id: Optional[int] = None,
+    ) -> SpeechJob:
+        """Enqueue a speech request and wake the router loop. Non-blocking.
+        Returns the created SpeechJob.
+
+        The active job reservation runs inside `_sched_lock`. The incoming
+        list append and wake event run under the leaf lock — `_incoming` is
         already enough for `has_work()`, closing the submit->pick window the
         §11 B2 audit found.
 
@@ -233,10 +302,18 @@ class SpeechRouter:
             contextlib.nullcontext,
         )
         # The reservation holds no Motor lock while `_sched_lock` is held (I10).
+        turn_uid = turn_state.current_tid()
         with publication(), self._sched_lock:
             self._next_job_id += 1
             job = SpeechJob(
-                job_id=self._next_job_id, text=text, source=source, priority=priority
+                job_id=self._next_job_id,
+                text=text,
+                source=source,
+                priority=priority,
+                turn_id=turn_id,
+                protected=protected,
+                feed_turn_id=feed_turn_id,
+                turn_uid=turn_uid,
             )
             self._incoming.append(job)
             victim = self._active
@@ -244,19 +321,33 @@ class SpeechRouter:
                 self.interrupt_enabled
                 and priority == PRIORITY_OWNER
                 and victim is not None
+                and not self._shields(victim, turn_id)
             )
         self._wake.set()
         if priority == PRIORITY_OWNER:
             self.sweep_sources(("ptt", "direct", "owner"))
+        if self.discard_speech_residue and not str(source).startswith("kira-agenda"):
+            self._sweep_non_agenda_stack()
         if preempt:
             # Closure M3: pass the job this submit OBSERVED. If it already
             # left ACTIVE by the time pause_speech runs, the pause aborts —
             # cutting "whatever is active now" would typically cut the
             # preemptor's own answer (audible stutter + spurious suspension).
-            self.pause_speech("preempt", target=victim)
+            if self.discard_speech_residue and not str(victim.source).startswith("kira-agenda"):
+                self.pause_speech("discard", target=victim)
+            else:
+                self.pause_speech("preempt", target=victim)
         return job
 
-    def submit_streaming(self, source: str, priority: int) -> SpeechJob:
+    def active_job(self) -> Optional[SpeechJob]:
+        """The job currently ACTIVE, or None. Lock-free attribute read: the
+        caller only compares `job_id` and reads `feed_turn_id` for a UI poll."""
+        return self._active
+
+    def submit_streaming(
+        self, source: str, priority: int, turn_id: Optional[int] = None,
+        protected: bool = False, feed_turn_id: Optional[int] = None,
+    ) -> SpeechJob:
         """Streaming entry (llm_output_streaming_20260813 design §2): one
         growing job for the whole turn. Mirrors `submit` — including the
         single D3 priority-0 preempt — but the job is born UNSEALED with
@@ -270,11 +361,20 @@ class SpeechRouter:
             "_memoria_promotion_publication",
             contextlib.nullcontext,
         )
+        turn_uid = turn_state.current_tid()
         with publication(), self._sched_lock:
             self._next_job_id += 1
             job = SpeechJob(
-                job_id=self._next_job_id, text="", source=source,
-                priority=priority, chunks=[], sealed=False,
+                job_id=self._next_job_id,
+                text="",
+                source=source,
+                priority=priority,
+                chunks=[],
+                sealed=False,
+                turn_id=turn_id,
+                protected=protected,
+                feed_turn_id=feed_turn_id,
+                turn_uid=turn_uid,
             )
             self._incoming.append(job)
             victim = self._active
@@ -282,12 +382,18 @@ class SpeechRouter:
                 self.interrupt_enabled
                 and priority == PRIORITY_OWNER
                 and victim is not None
+                and not self._shields(victim, turn_id)
             )
         self._wake.set()
         if priority == PRIORITY_OWNER:
             self.sweep_sources(("ptt", "direct", "owner"))
+        if self.discard_speech_residue and not str(source).startswith("kira-agenda"):
+            self._sweep_non_agenda_stack()
         if preempt:
-            self.pause_speech("preempt", target=victim)
+            if self.discard_speech_residue and not str(victim.source).startswith("kira-agenda"):
+                self.pause_speech("discard", target=victim)
+            else:
+                self.pause_speech("preempt", target=victim)
         return job
 
     def append_chunks(self, job: SpeechJob, chunks: list) -> bool:
@@ -369,6 +475,92 @@ class SpeechRouter:
         if victim is not None:
             self._motor.interrupt_speaking()
 
+    @property
+    def user_paused(self) -> bool:
+        """True while the owner's pause hold is engaged (read accessor)."""
+        with self._sched_lock:
+            return self._user_paused
+
+    def engage_user_pause(self) -> None:
+        """Owner pause (readaloud-speech T1): arm the user hold AND stamp the
+        active job's `user_pause` request in ONE `_sched_lock` acquisition --
+        the exact request-before-cut discipline of `hold_and_pause` (a cut
+        landing between a separate hold and request would reach reconcile with
+        no request and DISCARD the job instead of suspending it). The
+        interrupt fires OUTSIDE the lock (I10). Idempotent: a second engage is
+        silent and does not re-cut. The log names the victim SOURCE only,
+        never any text."""
+        with self._sched_lock:
+            if self._user_paused:
+                return
+            self._user_paused = True
+            self._user_pause_started_monotonic = time.monotonic()
+            victim = self._active
+            if victim is not None:
+                victim.pause_requested = "user_pause"
+            victim_log = victim.source if victim is not None else "none"
+        logger.info("[SPEECH_STACK] user_pause engaged victim=%s", victim_log)
+        self._wake.set()
+        if victim is not None:
+            self._motor.interrupt_speaking()
+
+    def release_user_pause(self) -> None:
+        """Release the owner pause and wake the loop: `_pick()` pops the
+        suspended job and replays it from its cursor (unless a PTT hold is
+        still live, which keeps refusing independently). Idempotent: a
+        release with no hold is silent."""
+        with self._sched_lock:
+            released = self._user_paused
+            started = self._user_pause_started_monotonic
+            self._user_paused = False
+            self._user_pause_started_monotonic = None
+        if released:
+            held_ms = int((time.monotonic() - started) * 1000) if started is not None else -1
+            logger.info("[SPEECH_STACK] user_pause released held_ms=%d", held_ms)
+        self._wake.set()
+
+    def discard_source(self, source: str) -> int:
+        """Discard EVERY job whose source tag equals `source` exactly, wherever
+        it lives (ACTIVE, INCOMING or STACK). Returns how many were targeted.
+
+        Exact match, not a prefix (contrast `sweep_sources`): the read-aloud
+        Stop must never touch `chat`/`direct`/agenda jobs. Matching jobs are
+        collected under the leaf lock and then discarded BY IDENTITY through
+        `discard_job`, which owns the cut-vs-remove bookkeeping and takes the
+        lock itself (never nested). Logs ride on `discard_job`'s
+        `[SPEECH_DISCARD]` line (ids and counts only)."""
+        with self._sched_lock:
+            targets = [j for j in self._incoming if j.source == source]
+            targets += [j for j in self._stack if j.source == source]
+            if self._active is not None and self._active.source == source:
+                targets.append(self._active)
+        for job in targets:
+            self.discard_job(job)
+        return len(targets)
+
+    def discard_all(self) -> int:
+        """Discard EVERY job -- ACTIVE, INCOMING and STACK -- through
+        `discard_job` (K2: a model switch requested while Kira is only
+        speaking must not wait for the speech to finish). Returns how many
+        jobs were targeted. Same cut-vs-remove bookkeeping as `discard_source`;
+        ids and counts only are logged (by `discard_job`)."""
+        with self._sched_lock:
+            targets = list(self._incoming) + list(self._stack)
+            if self._active is not None:
+                targets.append(self._active)
+        for job in targets:
+            self.discard_job(job)
+        return len(targets)
+
+    def source_counts(self, source: str) -> tuple:
+        """`(active, pending)` for jobs with this exact source: 1/0 for the
+        ACTIVE job, and the INCOMING + STACK (suspended) count. Read-only."""
+        with self._sched_lock:
+            active = 1 if self._active is not None and self._active.source == source else 0
+            pending = sum(1 for j in self._incoming if j.source == source)
+            pending += sum(1 for j in self._stack if j.source == source)
+        return active, pending
+
     def pause_speech(self, reason: str, target: Optional[SpeechJob] = None) -> None:
         """D3-preempt cut (design §2/§3) — the PTT press goes through
         `hold_and_pause` above instead. REQUEST-BEFORE-CUT is
@@ -405,7 +597,7 @@ class SpeechRouter:
         lock `pause_speech` publishes under) is what un-stomps it."""
         with self._sched_lock:
             active = self._active
-            return self._ptt_held or (
+            return self._ptt_held or self._user_paused or (
                 active is not None and active.pause_requested is not None
             )
 
@@ -471,8 +663,114 @@ class SpeechRouter:
                 "[SPEECH_DISCARD] job=%d source=%s from_idx=%d lost=%d reason=cancelled",
                 job.job_id, job.source, job.cursor, pending,
             )
+            _turn_log(job, "discarded", "cancelled")
         if owner_removed:
             self._wake.set()
+
+    def _sweep_non_agenda_stack(self) -> None:
+        """Discard every STACK entry whose source does NOT start with 'kira-agenda'.
+        Preserves agenda jobs on the stack."""
+        with self._sched_lock:
+            kept = []
+            removed = []
+            for job in self._stack:
+                if not str(job.source).startswith("kira-agenda"):
+                    removed.append(job)
+                else:
+                    kept.append(job)
+            if not removed:
+                return
+            self._stack = kept
+            owner_removed = False
+            for job in removed:
+                job.state = SpeechJobState.DISCARDED
+                if self._boundary_owner is job:
+                    owner_removed = True
+            if owner_removed:
+                self._boundary_owner = None
+                self._owed_end = True
+        for job in removed:
+            pending = max(0, len(job.chunks) - job.cursor) if job.chunks else 0
+            logger.info(
+                "[SPEECH_DISCARD] job=%d source=%s from_idx=%d lost=%d reason=discard_residue",
+                job.job_id, job.source, job.cursor, pending,
+            )
+            _turn_log(job, "discarded", "discard_residue")
+        if owner_removed:
+            self._wake.set()
+
+    def discard_job(self, job: SpeechJob) -> None:
+        """Discard ONE job BY IDENTITY, wherever it currently lives --
+        INCOMING, the STACK, or ACTIVE -- regardless of its state (T4,
+        live_session_fixes_20260925: the owner-configurable "discard stale
+        speech on a regenerated reply" setting).
+
+        Unlike `sweep_sources` (matches a SOURCE PREFIX, scoped to the STACK
+        only, and deliberately never touches ACTIVE), this targets one exact
+        job object the caller already holds a reference to. It exists
+        because the cloud-fallback notice and the reply that follows it
+        share the SAME source tag (the notice inherits the failed turn's
+        source) -- a prefix sweep could never tell them apart, but an
+        identity check always can. Lookups compare BY IDENTITY (`is`), never
+        `==` -- `SpeechJob` is a plain dataclass and would otherwise fall
+        back to a full-field equality neither caller nor this method wants.
+
+        An ACTIVE job is CUT, never suspended: `pause_requested` is set to
+        `"discard"`, a reason OUTSIDE `("ptt", "preempt")` -- the only two
+        values `_reconcile` treats as SUSPEND-worthy -- so the bare-
+        interruption DISCARDED default applies instead, the exact opposite
+        of `pause_speech`'s "preempt" contract. `_finish` (reached via that
+        default) already clears `_boundary_owner` and emits the owed
+        `speaking_end` for an ACTIVE target, so this method only has to
+        do that bookkeeping itself for the INCOMING/STACK cases, where the
+        job is removed OUTSIDE the normal `_reconcile`/`_finish` flow
+        (mirrors `sweep_sources`).
+
+        Residual (stated, not closed): the microscopic pick->`_hablar` window
+        `_run_job` already documents (a pause landing between `_pick()`
+        popping the job and the `_hablar` call) suspends UNCONDITIONALLY on
+        any non-None `pause_requested`, without inspecting the reason --
+        same pre-existing residual `pause_speech`/PTT already carry, not
+        something this method introduces or can close without touching that
+        shared window check.
+
+        A job found in neither place and not ACTIVE (already FINISHED/
+        DISCARDED, or a stale/foreign reference) is a silent, safe no-op.
+        """
+        removed_from = None
+        with self._sched_lock:
+            for i, candidate in enumerate(self._incoming):
+                if candidate is job:
+                    del self._incoming[i]
+                    job.state = SpeechJobState.DISCARDED
+                    removed_from = "incoming"
+                    break
+            if removed_from is None:
+                for i, candidate in enumerate(self._stack):
+                    if candidate is job:
+                        del self._stack[i]
+                        job.state = SpeechJobState.DISCARDED
+                        removed_from = "stack"
+                        break
+            owner_removed = False
+            if removed_from is not None and self._boundary_owner is job:
+                self._boundary_owner = None
+                owner_removed = True
+                self._owed_end = True
+            active_target = self._active is job
+            if active_target:
+                job.pause_requested = "discard"
+        if removed_from is not None:
+            pending = max(0, len(job.chunks) - job.cursor) if job.chunks else 0
+            logger.info(
+                "[SPEECH_DISCARD] job=%d source=%s from_idx=%d lost=%d reason=discard_stale",
+                job.job_id, job.source, job.cursor, pending,
+            )
+            _turn_log(job, "discarded", "discard_stale")
+        if owner_removed:
+            self._wake.set()
+        if active_target:
+            self._motor.interrupt_speaking()
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -521,7 +819,7 @@ class SpeechRouter:
     def _pick(self) -> Optional[SpeechJob]:
         resume_log = None
         with self._sched_lock:
-            if self._ptt_held:
+            if self._ptt_held or self._user_paused:
                 # Contract point 3: while the mic is live, nothing reaches
                 # the mixer -- blocks INCOMING as well as STACK. Level-
                 # triggered: re-checked every iteration.
@@ -559,6 +857,7 @@ class SpeechRouter:
             logger.info(
                 "[SPEECH_STACK] resume source=%s cursor=%d depth=%d", *resume_log,
             )
+            _turn_log(job, "resumed", "resume")
         return job
 
     def _run_job(self, job: SpeechJob) -> None:
@@ -569,6 +868,9 @@ class SpeechRouter:
         if motor._speech_cancelled(job.source):
             self._finish(job, SpeechJobState.DISCARDED, reason="cancelled")
             return
+        if not job.turn_start_logged:
+            job.turn_start_logged = True
+            _turn_log(job, "started", "activated")
 
         # D4 (design §10): outermost-only, terminal-only. Only the job that
         # holds the boundary when the tower is empty ever emits a pair; a
@@ -623,16 +925,30 @@ class SpeechRouter:
         # `pause_pending_for_active` inside `_hablar_impl` (closure B1).
         depth_log = 0
         push_log = None
+        susp_reason = None
+        discard_requested = False
         with self._sched_lock:
-            pending_pause = self._ptt_held or job.pause_requested is not None
-            if pending_pause:
-                depth_log = self._push_suspended(job)
-                push_log = (job.source, job.cursor, len(self._stack))
+            if job.pause_requested == "discard":
+                discard_requested = True
+            else:
+                pending_pause = (
+                    self._ptt_held
+                    or self._user_paused
+                    or job.pause_requested is not None
+                )
+                if pending_pause:
+                    susp_reason = self._suspend_reason(job)
+                    depth_log = self._push_suspended(job)
+                    push_log = (job.source, job.cursor, len(self._stack))
+        if discard_requested:
+            self._finish(job, SpeechJobState.DISCARDED, reason="interrupted")
+            return
         if pending_pause:
             if push_log:
                 logger.info(
                     "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
                 )
+                _turn_log(job, "suspended", susp_reason or "pause")
             if depth_log:
                 logger.warning("[SPEECH_STACK] depth=%d", depth_log)
             return
@@ -654,6 +970,8 @@ class SpeechRouter:
                     # whole turn.
                     pre_split=job.chunks[job.cursor:] if job.chunks is not None else None,
                     cursor_base=job.cursor if job.chunks is not None else 0,
+                    turn_id=getattr(job, "turn_id", None),
+                    job_id=job.job_id,
                 )
             except Exception as e:  # noqa: BLE001 — reconcile decides, never the caller
                 exc = e
@@ -699,10 +1017,14 @@ class SpeechRouter:
             cancelled = motor._speech_cancelled(job.source)
             depth_log = 0
             push_log = None
+            susp_reason = None
             with self._sched_lock:
                 if cancelled:
                     return SpeechJobState.DISCARDED, "cancelled"
-                if self._ptt_held or job.pause_requested is not None:
+                if job.pause_requested == "discard":
+                    return SpeechJobState.DISCARDED, "interrupted"
+                if self._ptt_held or self._user_paused or job.pause_requested is not None:
+                    susp_reason = self._suspend_reason(job)
                     depth_log = self._push_suspended(job)
                     push_log = (job.source, job.cursor, len(self._stack))
                 elif job.cursor < len(job.chunks):
@@ -713,6 +1035,7 @@ class SpeechRouter:
                 logger.info(
                     "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
                 )
+                _turn_log(job, "suspended", susp_reason or "pause")
                 if depth_log:
                     logger.warning("[SPEECH_STACK] depth=%d", depth_log)
                 return SpeechJobState.SUSPENDED, None
@@ -722,6 +1045,13 @@ class SpeechRouter:
                 # `stop()` must not hang behind a producer that never seals:
                 # unlike playback, starvation has no natural end.
                 return SpeechJobState.DISCARDED, "stopped"
+
+    def _suspend_reason(self, job: SpeechJob) -> str:
+        """The code a suspension is logged with. Caller HOLDS `_sched_lock`
+        and calls it BEFORE `_push_suspended` (which clears the request)."""
+        if job.pause_requested is not None:
+            return str(job.pause_requested)
+        return "ptt" if self._ptt_held else "user_pause"
 
     def _push_suspended(self, job: SpeechJob) -> int:
         """Push-back on pause (design §4): unconditional, same object,
@@ -757,6 +1087,7 @@ class SpeechRouter:
         cancelled = self._motor._speech_cancelled(job.source)
         depth_log = 0
         push_log = None
+        susp_reason = None
         try:
             with self._sched_lock:
                 # Closure M4: the pause request is JOB-LOCAL. Read+clear is
@@ -771,7 +1102,8 @@ class SpeechRouter:
                     # outranks the raise — the cut was REQUESTED, so the job
                     # is owed a resume even though the unwind raised. An
                     # emergency cancel still wins.
-                    if pause_reason in ("ptt", "preempt") and not cancelled:
+                    if pause_reason in _SUSPEND_REASONS and not cancelled:
+                        susp_reason = pause_reason
                         depth_log = self._push_suspended(job)
                         push_log = (job.source, job.cursor, len(self._stack))
                         return SpeechJobState.SUSPENDED, None
@@ -855,7 +1187,8 @@ class SpeechRouter:
                     return SpeechJobState.ACTIVE, None
                 if cancelled:
                     return SpeechJobState.DISCARDED, "cancelled"
-                if pause_reason in ("ptt", "preempt"):
+                if pause_reason in _SUSPEND_REASONS:
+                    susp_reason = pause_reason
                     # Step 3 (design §2/§4): unfinished, not cancelled, and a
                     # pause was requested before the cut landed — push back
                     # onto the stack with its identity and its cursor (never
@@ -872,6 +1205,7 @@ class SpeechRouter:
                 logger.info(
                     "[SPEECH_STACK] push source=%s cursor=%d depth=%d", *push_log,
                 )
+                _turn_log(job, "suspended", susp_reason or "pause")
             if depth_log:
                 logger.warning("[SPEECH_STACK] depth=%d", depth_log)
 
@@ -888,6 +1222,11 @@ class SpeechRouter:
                 self._active = None
             if self._boundary_owner is job:
                 self._boundary_owner = None
+        _turn_log(
+            job,
+            "finished" if state is SpeechJobState.FINISHED else "discarded",
+            "unwind",
+        )
         if job.started:
             try:
                 self._motor._speech_boundary_end()
@@ -919,6 +1258,12 @@ class SpeechRouter:
                     "[SPEECH_DISCARD] job=%d source=%s from_idx=%d lost=%d reason=%s",
                     job.job_id, job.source, from_idx, pending, reason or "interrupted",
                 )
+            if reason == "error":
+                _turn_log(job, "lost", "error")
+            else:
+                _turn_log(job, "discarded", reason or "interrupted")
+        else:
+            _turn_log(job, "finished" if state is SpeechJobState.FINISHED else "discarded", "complete")
 
         # NOTHING below runs under `_sched_lock` (§11 B6): every consumer here
         # may re-enter submit() on this very thread.

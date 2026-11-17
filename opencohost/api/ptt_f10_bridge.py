@@ -11,9 +11,16 @@ import urllib.error
 import urllib.request
 
 
+try:
+    from opencohost.config.settings import hotkey_to_vk, load_ptt_hotkey
+except Exception:  # pragma: no cover - standalone execution fallback
+    hotkey_to_vk = None
+    load_ptt_hotkey = None
+
 VK = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0x79  # VK_F10
 POLL_S = 0.03
 KEEPALIVE_S = 1.0
+CONFIG_CHECK_S = 1.0
 try:
     GetAsyncKeyState = ctypes.windll.user32.GetAsyncKeyState
 except AttributeError:  # pragma: no cover - Windows-only bridge
@@ -66,19 +73,46 @@ def main():
     if GetAsyncKeyState is None:
         raise RuntimeError("The OpenCohost PTT bridge requires Windows")
     base = find_api()
-    print(f"PTT bridge on {base} — hold VK 0x{VK:X} to talk (Ctrl+C to quit)")
+    explicit_cli_vk = int(sys.argv[1], 0) if len(sys.argv) > 1 else None
+
+    current_hotkey = load_ptt_hotkey() if load_ptt_hotkey is not None else "F10"
+    current_vk = (
+        explicit_cli_vk
+        if explicit_cli_vk is not None
+        else (hotkey_to_vk(current_hotkey) if hotkey_to_vk is not None else VK)
+    )
+
+    print(f"PTT bridge on {base} — hold {current_hotkey} (VK 0x{current_vk:X}) to talk (Ctrl+C to quit)")
     session_id = None
     last_keepalive = 0.0
+    last_config_check = 0.0
     try:
         while True:
-            held = bool(GetAsyncKeyState(VK) & 0x8000)
             now = time.monotonic()
+
+            # Dynamically re-sync hotkey if not overridden via CLI and idle
+            if (
+                explicit_cli_vk is None
+                and session_id is None
+                and (now - last_config_check >= CONFIG_CHECK_S)
+            ):
+                last_config_check = now
+                if load_ptt_hotkey is not None and hotkey_to_vk is not None:
+                    new_hotkey = load_ptt_hotkey()
+                    if new_hotkey != current_hotkey:
+                        current_hotkey = new_hotkey
+                        current_vk = hotkey_to_vk(new_hotkey)
+                        print(
+                            f"PTT bridge hotkey updated: {current_hotkey} (VK 0x{current_vk:X})"
+                        )
+
+            held = bool(GetAsyncKeyState(current_vk) & 0x8000)
             if held and session_id is None:
                 status, body = _post(base, "/api/ptt/start", {})
                 if status == 200:
                     session_id = body["session_id"]
                     last_keepalive = now
-                    print("listening...")
+                    print(f"listening ({current_hotkey})...")
                 elif status == 503:
                     print("STT (LiveAudio) not available — is it running on 8765?")
                 elif status == 409:
@@ -86,7 +120,7 @@ def main():
                 else:
                     print(f"start failed: {status} {body}")
                 if status != 200:
-                    while GetAsyncKeyState(VK) & 0x8000:
+                    while GetAsyncKeyState(current_vk) & 0x8000:
                         time.sleep(POLL_S)
             elif held and session_id and now - last_keepalive >= KEEPALIVE_S:
                 status, _ = _post(base, "/api/ptt/keepalive", {"session_id": session_id})

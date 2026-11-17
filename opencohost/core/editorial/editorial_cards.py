@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from array import array
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -92,10 +93,24 @@ class EditorialCard:
     # cards written through /api/agent/cards; '' means operator (CLI/UI
     # flows never set it — behavior unchanged).
     origin: str = ""
+    # Active-card fields: verified facts, forbidden phrases, optional extras
+    # (code, link) and the ``active`` flag that marks the card as verified
+    # streamer data for the current stream. Empty/False keeps a card an
+    # ordinary editorial card. ``active`` is store-managed (activate /
+    # deactivate; upsert never writes it) and is NOT the agenda-gate status
+    # ``EditorialCardStatus.ACTIVE``. The DB column keeps its historical name
+    # ``pinned``; the legacy ``product`` column stays in the schema, unused.
+    must_say: list[str] = field(default_factory=list)
+    forbidden_claims: list[str] = field(default_factory=list)
+    discount_code: str = ""
+    link: str = ""
+    active: bool = False
     raw_chat: str | None = field(default=None, repr=False)
     raw_page: str | None = field(default=None, repr=False)
 
     SUMMARY_MAX_CHARS = 1200
+    DISCOUNT_CODE_MAX_CHARS = 60
+    LINK_MAX_CHARS = 240
     STREAMER_TAKE_MAX_CHARS = 800
     TOPIC_MAX_CHARS = 120
     ITEM_MAX_CHARS = 240
@@ -113,7 +128,7 @@ class EditorialCard:
     DEFAULT_PROMPT_INSTRUCTION = (
         "Datos verificados por el streamer: MANDAN sobre cualquier recuerdo "
         "propio; no agregar fechas, versiones, nombres ni números que no estén "
-        "en este bloque. Usá este contexto una sola vez; priorizá claridad "
+        "en este bloque. Usa este contexto una sola vez; prioriza claridad "
         "sobre chistes y no anuncies la estructura."
     )
 
@@ -135,6 +150,13 @@ class EditorialCard:
             raise EditorialCardValidationError("topic_slug is required")
         if not isinstance(self.status, EditorialCardStatus):
             self.status = EditorialCardStatus(str(self.status))
+        self.discount_code = self._clean_optional(
+            self.discount_code, "discount_code", self.DISCOUNT_CODE_MAX_CHARS
+        )
+        self.link = self._clean_optional(self.link, "link", self.LINK_MAX_CHARS)
+        self.must_say = self._clean_list(self.must_say, "must_say")
+        self.forbidden_claims = self._clean_list(self.forbidden_claims, "forbidden_claims")
+        self.active = bool(self.active)
         # origin is optional ('' = operator) but bounded: it is rendered in
         # operator-facing labels, same cap as topic_inbox.SOURCE_MAX.
         self.origin = " ".join((self.origin or "").split())
@@ -153,6 +175,13 @@ class EditorialCard:
         return text
 
     @classmethod
+    def _clean_optional(cls, value: str, field_name: str, max_chars: int) -> str:
+        text = " ".join((value or "").split())
+        if len(text) > max_chars:
+            raise EditorialCardValidationError(f"{field_name} exceeds {max_chars} characters")
+        return text
+
+    @classmethod
     def _clean_list(cls, values: Iterable[str], field_name: str) -> list[str]:
         cleaned: list[str] = []
         for value in values or []:
@@ -162,7 +191,9 @@ class EditorialCard:
             if len(text) > cls.ITEM_MAX_CHARS:
                 raise EditorialCardValidationError(f"{field_name} item exceeds {cls.ITEM_MAX_CHARS} characters")
             cleaned.append(text)
-        return cleaned[: cls.MAX_ITEMS]
+        if len(cleaned) > cls.MAX_ITEMS:
+            raise EditorialCardValidationError(f"{field_name} exceeds {cls.MAX_ITEMS} items")
+        return cleaned
 
     def is_expired(self, now: datetime | None = None) -> bool:
         """Return True when this card has passed its optional expiration."""
@@ -223,6 +254,32 @@ class EditorialCard:
         return block[:max_chars]
 
 
+_CARD_COLUMNS = (
+    # ``product`` is a legacy column: kept so old and new DBs share one schema,
+    # never read or written any more.
+    ("product", "TEXT NOT NULL DEFAULT ''"),
+    ("must_say_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("forbidden_claims_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("discount_code", "TEXT NOT NULL DEFAULT ''"),
+    ("link", "TEXT NOT NULL DEFAULT ''"),
+    ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+    # MiniLM embedding of topic + summary + must_say, stored with the model id
+    # and a hash of the embedded text so an edit or a model change is detected.
+    ("embedding", "BLOB"),
+    ("embedding_model", "TEXT NOT NULL DEFAULT ''"),
+    ("embedding_hash", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
+@dataclass(frozen=True)
+class CardEmbedding:
+    """A stored card vector plus what it was computed from."""
+
+    vector: tuple[float, ...]
+    model_id: str
+    text_hash: str
+
+
 class EditorialCardStore:
     """SQLite-backed store for deterministic Editorial Cue Card lookup."""
 
@@ -246,6 +303,7 @@ class EditorialCardStore:
             # preserved across upserts. single_use is content-like (the writer
             # redeclares intent) so it is taken from the incoming card.
             card.last_injected_at = existing.last_injected_at
+            card.active = existing.active
         card.updated_at = now
         with self._connect() as conn:
             conn.execute(
@@ -254,8 +312,10 @@ class EditorialCardStore:
                     id, topic_slug, status, topic, summary, streamer_take,
                     counterpoints_json, discussion_hooks_json, triggers_json,
                     created_at, updated_at, expires_at, last_used_at, use_count,
-                    origin, single_use, last_injected_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    origin, single_use, last_injected_at,
+                    must_say_json, forbidden_claims_json,
+                    discount_code, link
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic_slug) DO UPDATE SET
                     status=excluded.status,
                     topic=excluded.topic,
@@ -270,7 +330,11 @@ class EditorialCardStore:
                     use_count=excluded.use_count,
                     origin=excluded.origin,
                     single_use=excluded.single_use,
-                    last_injected_at=excluded.last_injected_at
+                    last_injected_at=excluded.last_injected_at,
+                    must_say_json=excluded.must_say_json,
+                    forbidden_claims_json=excluded.forbidden_claims_json,
+                    discount_code=excluded.discount_code,
+                    link=excluded.link
                 """,
                 self._to_row(card),
             )
@@ -528,6 +592,78 @@ class EditorialCardStore:
         self._set_status(card.id, EditorialCardStatus.DRAFT)
         return True
 
+    def list_active(self) -> list[EditorialCard]:
+        """Return every active card (any number may be active), oldest first."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM editorial_cards WHERE pinned = 1 ORDER BY updated_at ASC, id ASC"
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def activate(self, card_id: str) -> bool:
+        """Mark a card active for the stream; other active cards are untouched.
+
+        Activating never changes status, use_count or last_used/injected: the
+        card is not consumed. Refuses unknown, EXPIRED or past-expiry cards.
+        """
+        card = self.get(card_id)
+        if card is None or card.status is EditorialCardStatus.EXPIRED or card.is_expired():
+            return False
+        now = _dt_to_text(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE editorial_cards SET pinned = 1, updated_at = ? WHERE id = ?",
+                (now, card_id),
+            )
+        return True
+
+    def deactivate(self, card_id: str) -> bool:
+        """Release the active flag; False when the card is missing or not active."""
+
+        now = _dt_to_text(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE editorial_cards SET pinned = 0, updated_at = ? WHERE id = ? AND pinned = 1",
+                (now, card_id),
+            )
+        return cur.rowcount > 0
+
+    def get_embedding(self, card_id: str) -> CardEmbedding | None:
+        """Return the stored embedding of a card, or None when it has none."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT embedding, embedding_model, embedding_hash FROM editorial_cards WHERE id = ?",
+                (card_id,),
+            ).fetchone()
+        if row is None or not row["embedding"]:
+            return None
+        vector = array("f")
+        vector.frombytes(row["embedding"])
+        return CardEmbedding(tuple(vector), row["embedding_model"] or "", row["embedding_hash"] or "")
+
+    def set_embedding(self, card_id: str, vector: Iterable[float], model_id: str, text_hash: str) -> None:
+        """Store a card's vector (float32) with its model id and source-text hash.
+
+        Deliberately does not touch ``updated_at``: an embedding is derived
+        data and must not reorder the operator's card list.
+        """
+
+        blob = array("f", [float(x) for x in vector]).tobytes()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE editorial_cards SET embedding = ?, embedding_model = ?, embedding_hash = ? WHERE id = ?",
+                (blob, model_id, text_hash, card_id),
+            )
+
+    def clear_embedding(self, card_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE editorial_cards SET embedding = NULL, embedding_model = '', embedding_hash = '' WHERE id = ?",
+                (card_id,),
+            )
+
     def disable(self, card_id: str) -> bool:
         """Move any non-USED card to EXPIRED. Idempotent when already EXPIRED.
 
@@ -539,6 +675,7 @@ class EditorialCardStore:
             return False
         if card.status is EditorialCardStatus.USED:
             return False
+        self.deactivate(card.id)  # a disabled card must stop being retrieved
         if card.status is EditorialCardStatus.EXPIRED:
             return True  # Already expired — idempotent
         self._set_status(card.id, EditorialCardStatus.EXPIRED)
@@ -578,7 +715,16 @@ class EditorialCardStore:
                     use_count INTEGER NOT NULL DEFAULT 0,
                     origin TEXT NOT NULL DEFAULT '',
                     single_use INTEGER NOT NULL DEFAULT 0,
-                    last_injected_at TEXT
+                    last_injected_at TEXT,
+                    product TEXT NOT NULL DEFAULT '',
+                    must_say_json TEXT NOT NULL DEFAULT '[]',
+                    forbidden_claims_json TEXT NOT NULL DEFAULT '[]',
+                    discount_code TEXT NOT NULL DEFAULT '',
+                    link TEXT NOT NULL DEFAULT '',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    embedding BLOB,
+                    embedding_model TEXT NOT NULL DEFAULT '',
+                    embedding_hash TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -602,6 +748,15 @@ class EditorialCardStore:
                 conn.execute(
                     "ALTER TABLE editorial_cards ADD COLUMN last_injected_at TEXT"
                 )
+            # Active-card columns: same PRAGMA-guarded pattern.
+            # Existing rows land as ordinary, inactive cards via the defaults.
+            for name, ddl in _CARD_COLUMNS:
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE editorial_cards ADD COLUMN {name} {ddl}")
+            # Several cards may be active now: drop the "at most one pinned"
+            # index the earlier build created. Existing flags carry over as
+            # the active flag.
+            conn.execute("DROP INDEX IF EXISTS idx_editorial_cards_one_pinned")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS editorial_card_ratings (
@@ -648,7 +803,15 @@ class EditorialCardStore:
             card.origin,
             int(card.single_use),
             _dt_to_text(card.last_injected_at),
+            json.dumps(card.must_say, ensure_ascii=False),
+            json.dumps(card.forbidden_claims, ensure_ascii=False),
+            card.discount_code,
+            card.link,
         )
+
+    @staticmethod
+    def _bounded_legacy_list(raw: str | None) -> list[str]:
+        return list(json.loads(raw or "[]"))[: EditorialCard.MAX_ITEMS]
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> EditorialCard:
@@ -659,9 +822,9 @@ class EditorialCardStore:
             topic=row["topic"],
             summary=row["summary"],
             streamer_take=row["streamer_take"],
-            counterpoints=json.loads(row["counterpoints_json"] or "[]"),
-            discussion_hooks=json.loads(row["discussion_hooks_json"] or "[]"),
-            triggers=json.loads(row["triggers_json"] or "[]"),
+            counterpoints=EditorialCardStore._bounded_legacy_list(row["counterpoints_json"]),
+            discussion_hooks=EditorialCardStore._bounded_legacy_list(row["discussion_hooks_json"]),
+            triggers=EditorialCardStore._bounded_legacy_list(row["triggers_json"]),
             created_at=_dt_from_text(row["created_at"]),
             updated_at=_dt_from_text(row["updated_at"]),
             expires_at=_dt_from_text(row["expires_at"]),
@@ -670,6 +833,11 @@ class EditorialCardStore:
             use_count=int(row["use_count"] or 0),
             origin=row["origin"] or "",
             single_use=bool(row["single_use"]),
+            must_say=EditorialCardStore._bounded_legacy_list(row["must_say_json"]),
+            forbidden_claims=EditorialCardStore._bounded_legacy_list(row["forbidden_claims_json"]),
+            discount_code=row["discount_code"] or "",
+            link=row["link"] or "",
+            active=bool(row["pinned"]),
         )
 
     @staticmethod

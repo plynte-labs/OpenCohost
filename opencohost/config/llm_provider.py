@@ -27,6 +27,10 @@ def _default_config() -> dict:
         "active_provider": "local",
         "fallback_mode": DEFAULT_FALLBACK_MODE,
         "pregen_enabled": False,
+        # T4 (live_session_fixes_20260925): "discard stale speech when a
+        # regenerated reply arrives" -- default OFF, today's behavior
+        # byte-identical. See MotorVocalIA._maybe_discard_stale_fallback_notice.
+        "discard_stale_speech_on_regenerated_reply": False,
         "profiles": {},
     }
 
@@ -50,6 +54,9 @@ def load_provider_config(config_file: Optional[str] = None) -> dict:
     cfg["active_provider"] = str(data.get("active_provider") or "local")
     cfg["fallback_mode"] = data.get("fallback_mode") or DEFAULT_FALLBACK_MODE
     cfg["pregen_enabled"] = bool(data.get("pregen_enabled", False))
+    cfg["discard_stale_speech_on_regenerated_reply"] = bool(
+        data.get("discard_stale_speech_on_regenerated_reply", False)
+    )
     profiles = data.get("profiles")
     if isinstance(profiles, dict):
         # Drop non-dict entries so a hand-corrupted file degrades instead of 500ing.

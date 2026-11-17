@@ -9,19 +9,298 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
+import random
 import re
 import time as _time_module
+import unicodedata
 from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
+from opencohost.config import guardrail_policy
+from opencohost.config import settings as _settings
 from opencohost.config.logger import get_logger
 from opencohost.core.context.repetition_guard import detect_repetition
 # Module import, not from-import: stream/agenda tiers are resolved LIVE from
 # the streamer's STREAM_OVER_AGENDA setting at mint time (see turn_priority).
 from opencohost.core import turn_priority
+from opencohost.core.agenda.topic_inbox import _looks_like_code
+from opencohost.core.safety.contextual import (
+    ContextualCrisisArbiter,
+    CrisisAssessment,
+    OwnerSafetyTrajectory,
+    SafetySeverity,
+    StreamContextMetadata,
+    TopicSafetyTier,
+    care_recency_line,
+    care_style_fallback,
+    classify_topic_safety,
+    detect_nihilistic_drift,
+    filter_safe_deck_moves,
+    filter_safe_family_moves,
+    grounding_line_for_profile,
+    max_safety_severity,
+    parse_safety_severity,
+    strip_sarcasm_directives,
+)
+from opencohost.core.safety.turn import active_safety_severity
 from opencohost.i18n import active as i18n_active
 
 logger = get_logger()
+
+
+# -- Opt-in topic progression (OPENCOHOST_AGENDA_PROGRESSION) ---------------
+# Pure helpers: the move for (topic id, turn index) is a deterministic function
+# so a prefetched preview and the live prompt for the same turn agree without
+# any shared mutable state.
+_MOVE_REUSE_WINDOW = 4
+_SPENT_WORDS_CAP = 20
+_SPENT_MIN_WORD_LEN = 5
+_SPENT_OPENINGS_CAP = 5
+_SPENT_OPENING_STEM_WORDS = 4
+_MIN_SENTENCE_DEDUPE_CHARS = 22
+_LEDGER_TAIL_CHARS = 200
+_LEDGER_MAX_OUTPUTS = 20
+# Letters only (any script), optionally joined by apostrophes; tokens with an
+# apostrophe are contractions ("doesn't") and are discarded, never split.
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?\n]+")
+# Function words of 5+ letters in es/en; the ledger targets content words.
+_LEDGER_STOPWORDS = frozenset(
+    """
+    aquel aquella aquellos aquellas aunque ahora antes algo algunos algunas alguien cada
+    cuando cuanto donde entre estas estos están estar hacia hasta mismo misma mismos
+    mismas mucho mucha muchos muchas nadie ningún ninguna nuestro nuestra otros otras otro otra
+    pero porque pues quien quienes sobre tiene tienen tener todo toda todos todas
+    también tampoco entonces siempre nunca algún alguna ellos ellas desde puede pueden poder
+    hacer hace hacen había habría sería serán somos fueron sigue como cómo cual cuál
+    nosotros ustedes aquí allí así bien
+    además mientras tienes tengo puedes puedo quiero estoy estaba estamos quizás incluso tanto claro
+    todavía luego cosas otra sobre hasta tienes
+    really something anything everything people think things maybe still about their there these
+    those would could should which being other every because actually pretty rather where while
+    about after again also because been before being between both could doing during each
+    every from have having here into just like more most much other over same should since some such
+    than that their them then there these they this those through under until very what when where
+    which while will with would your
+    """.split()
+)
+
+
+def _seeded_order(topic_id: str, cycle: int, size: int) -> list[int]:
+    digest = hashlib.sha256(f"{topic_id}:{cycle}".encode("utf-8")).digest()
+    order = list(range(size))
+    random.Random(int.from_bytes(digest[:8], "big")).shuffle(order)
+    return order
+
+
+def _deck_order(topic_id: str, cycle: int, size: int) -> list[int]:
+    """Per-topic deterministic shuffle; a reshuffle pushes the previous cycle's
+    last ``window`` moves to the end, where ``window = min(_MOVE_REUSE_WINDOW,
+    size // 2)`` (small decks cannot honor 4), so none returns within that window.
+
+    The window counts deck positions, not aired moves: chat, PTT and rejected
+    turns consume a position, so an aired move can recur with fewer than 4
+    other aired moves in between at the cycle boundary (only when N >= 16).
+    """
+    order = _seeded_order(topic_id, cycle, size)
+    window = min(_MOVE_REUSE_WINDOW, size // 2)
+    if cycle > 0 and window > 0:
+        recent = set(_deck_order(topic_id, cycle - 1, size)[-window:])
+        order = [i for i in order if i not in recent] + [i for i in order if i in recent]
+    return order
+
+
+def pick_progression_move(topic_id: str, turn_index: int, moves: tuple[str, ...]) -> str:
+    """Pure function of (topic id, 1-based continuation turn index, deck)."""
+    if not moves:
+        return ""
+    j = max(1, turn_index) - 1
+    cycle, pos = divmod(j, len(moves))
+    return moves[_deck_order(topic_id, cycle, len(moves))[pos]]
+
+
+def _is_safe_family_state(rem: dict[str, int], rem_total: int, chosen_fam: str) -> bool:
+    """True when picking ``chosen_fam`` keeps a valid alternating suffix reachable."""
+    if rem_total <= 0:
+        return True
+    if rem.get(chosen_fam, 0) > rem_total // 2:
+        return False
+    half_ceil = (rem_total + 1) // 2
+    return all(cnt <= half_ceil for fam, cnt in rem.items() if fam != chosen_fam)
+
+
+def _family_deck_order(
+    topic_id: str,
+    cycle: int,
+    family_moves: dict[str, tuple[str, ...]],
+) -> list[tuple[str, str]]:
+    """Deterministic full-cycle permutation across families without back-to-back family repeats.
+
+    Also preserves the cross-cycle ``_MOVE_REUSE_WINDOW`` spacing guard so neither
+    a family nor a specific move recurs immediately across a cycle boundary.
+    """
+    families = sorted(fam for fam, cards in family_moves.items() if cards)
+    all_cards = [(fam, mv) for fam in families for mv in family_moves[fam]]
+    size = len(all_cards)
+    if size == 0:
+        return []
+    window = min(_MOVE_REUSE_WINDOW, size // 2)
+    prev_order: list[tuple[str, str]] = []
+    cur_order: list[tuple[str, str]] = []
+    for c in range(max(0, cycle) + 1):
+        digest = hashlib.sha256(f"{topic_id}:v3:{c}".encode("utf-8")).digest()
+        rng = random.Random(int.from_bytes(digest[:8], "big"))
+        pool = list(all_cards)
+        rng.shuffle(pool)
+        rem: dict[str, int] = {fam: len(family_moves[fam]) for fam in families}
+        rem_total = size
+        prev_fam = prev_order[-1][0] if prev_order else ""
+        recent_moves = {mv for _, mv in prev_order[-window:]} if (prev_order and window > 0) else set()
+        cur_order = []
+        for pos in range(size):
+            respect_window = pos < window and bool(recent_moves)
+            eligible = [
+                idx for idx, (fam, mv) in enumerate(pool)
+                if fam != prev_fam and (not respect_window or mv not in recent_moves)
+            ]
+            if not eligible:
+                eligible = [idx for idx, (fam, _) in enumerate(pool) if fam != prev_fam] or list(range(len(pool)))
+            safe: list[int] = []
+            for idx in eligible:
+                fam = pool[idx][0]
+                rem[fam] -= 1
+                if _is_safe_family_state(rem, rem_total - 1, fam):
+                    safe.append(idx)
+                rem[fam] += 1
+            pick_idx = safe[0] if safe else max(eligible, key=lambda idx: rem[pool[idx][0]])
+            fam, mv = pool.pop(pick_idx)
+            rem[fam] -= 1
+            rem_total -= 1
+            prev_fam = fam
+            cur_order.append((fam, mv))
+        prev_order = cur_order
+    return cur_order
+
+
+def pick_family_progression_move(
+    topic_id: str,
+    turn_index: int,
+    family_moves: dict[str, tuple[str, ...]],
+) -> tuple[str, str]:
+    """Pure function returning ``(family, move)`` for (topic id, turn index, family deck)."""
+    size = sum(len(cards) for cards in family_moves.values())
+    if size == 0:
+        return ("", "")
+    j = max(1, turn_index) - 1
+    cycle, pos = divmod(j, size)
+    return _family_deck_order(topic_id, cycle, family_moves)[pos]
+
+
+def pick_progression_facet(turn_index: int, max_turns: int, facets: tuple[str, ...]) -> str:
+    """Pure monotonic facet index across a topic's continuation turns (``v5``)."""
+    if not facets:
+        return ""
+    total_cont = max(1, max_turns - 1)
+    idx = (max(0, turn_index - 1) * len(facets)) // total_cont
+    return facets[min(len(facets) - 1, idx)]
+
+
+def pick_auto_progression_facet(
+    topic_id: str,
+    turn_index: int,
+    max_turns: int,
+    facets: tuple[str, ...],
+) -> str:
+    """Pure deterministic topic-rotated facet plan for ``auto`` / ``rotate`` mode.
+
+    Unlike fixed ``v5`` (which always opens on facet 0), each ``topic_id`` gets
+    its own deterministic permutation of the facet deck so consecutive topics on
+    a stream never follow the same rigid arc, while ``prefetch`` and ``live``
+    still select the exact same facet for any ``(topic_id, turn_index, max_turns)``.
+    """
+    if not facets:
+        return ""
+    digest = hashlib.sha256(f"{topic_id}:auto-facets".encode("utf-8")).digest()
+    rotated = list(facets)
+    random.Random(int.from_bytes(digest[:8], "big")).shuffle(rotated)
+    total_cont = max(1, max_turns - 1)
+    idx = (max(0, turn_index - 1) * len(rotated)) // total_cont
+    return rotated[min(len(rotated) - 1, idx)]
+
+
+def _normalize_for_dedupe(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", (text or "").lower())
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return " ".join(re.sub(r"[^\w\s]+", " ", stripped).split())
+
+
+def _opening_stem(text: str, *, num_words: int = _SPENT_OPENING_STEM_WORDS, strip_accents: bool = False) -> str:
+    source = _normalize_for_dedupe(text) if strip_accents else (text or "").lower()
+    words = [w for w in _WORD_RE.findall(source) if "'" not in w and "’" not in w]
+    if len(words) < num_words:
+        return ""
+    return " ".join(words[:num_words])
+
+
+def spent_words(outputs: list[str], exclude: Iterable[str] = ()) -> list[str]:
+    """Content words (5+ chars) present in 2+ of the given outputs, most frequent first.
+
+    ``exclude`` holds lowercase words (e.g. the topic's own title/angle) never listed."""
+    skip = set(exclude)
+    doc_freq: dict[str, int] = {}
+    for text in outputs:
+        for word in set(_WORD_RE.findall((text or "").lower())):
+            if "'" in word or "’" in word:
+                continue
+            if len(word) >= _SPENT_MIN_WORD_LEN and word not in _LEDGER_STOPWORDS and word not in skip:
+                doc_freq[word] = doc_freq.get(word, 0) + 1
+    repeated = [(w, n) for w, n in doc_freq.items() if n >= 2]
+    repeated.sort(key=lambda item: (-item[1], item[0]))
+    return [w for w, _ in repeated[:_SPENT_WORDS_CAP]]
+
+
+def spent_words_v2(outputs: list[str], exclude: Iterable[str] = ()) -> list[str]:
+    """Content words (5+ chars) from 1+ outputs in the current topic (Ledger v2)."""
+    skip = set(exclude)
+    doc_freq: dict[str, int] = {}
+    last_seen: dict[str, int] = {}
+    for idx, text in enumerate(outputs):
+        for word in set(_WORD_RE.findall((text or "").lower())):
+            if "'" in word or "’" in word:
+                continue
+            if len(word) >= _SPENT_MIN_WORD_LEN and word not in _LEDGER_STOPWORDS and word not in skip:
+                doc_freq[word] = doc_freq.get(word, 0) + 1
+                last_seen[word] = idx
+    ranked = sorted(doc_freq.items(), key=lambda item: (-item[1], -last_seen[item[0]], item[0]))
+    return [w for w, _ in ranked[:_SPENT_WORDS_CAP]]
+
+
+def spent_openings(outputs: list[str]) -> list[str]:
+    """Compact unique opening stems from Kira's prior outputs in the current topic."""
+    stems: list[str] = []
+    seen_norm: set[str] = set()
+    for text in outputs[-_LEDGER_MAX_OUTPUTS:]:
+        stem = _opening_stem(text, strip_accents=False)
+        norm = _normalize_for_dedupe(stem)
+        if stem and norm and norm not in seen_norm:
+            seen_norm.add(norm)
+            stems.append(stem)
+    return stems[-_SPENT_OPENINGS_CAP:]
+
+
+def active_progression_variant() -> str:
+    """Resolve the active progression variant (``, v1..v5``) via settings."""
+    getter = getattr(_settings, "get_agenda_progression_variant", None)
+    if callable(getter):
+        val = str(getter() or "")
+        if val:
+            return val
+    return "v1" if bool(getattr(_settings, "AGENDA_PROGRESSION_ENABLED", False)) else ""
+
+
+def _progression_enabled() -> bool:
+    return bool(active_progression_variant())
 
 
 # ── Untrusted viewer-chat containment (prompt-injection defense) ──────────
@@ -368,9 +647,9 @@ class KiraAgendaController:
         "prueba": "test",
     }
     RESPONSE_LENGTH_RULES = {
-        "corta": "intervención breve pero útil: apuntá a ~450 caracteres, una idea clara con remate natural, sin desarrollar de más.",
-        "normal": "mini monólogo natural y rico: apuntá a ~1500 caracteres; desarrollá una postura con ejemplos o contraste, ritmo de stream y sin sonar a cierre de sección.",
-        "expandida": "monólogo largo expandido para test: desarrollá con profundidad si el modelo local puede sostenerlo; hard cap 6000 caracteres; conectá varias ideas sin repetir ni cerrar en círculo.",
+        "corta": "intervención breve pero útil: apunta a ~450 caracteres, una idea clara con remate natural, sin desarrollar de más.",
+        "normal": "mini monólogo natural y rico: apunta a ~1500 caracteres; desarrolla una postura con ejemplos o contraste, ritmo de stream y sin sonar a cierre de sección.",
+        "expandida": "monólogo largo expandido para test: desarrolla con profundidad si el modelo local puede sostenerlo; hard cap 6000 caracteres; conecta varias ideas sin repetir ni cerrar en círculo.",
     }
     RESPONSE_LENGTH_ALIASES = {
         "extensa": "expandida",
@@ -395,14 +674,6 @@ class KiraAgendaController:
     RHYTHM_ALIASES = {
         "dinámico": "dinamico",
     }
-    CODE_PATTERNS = (
-        r"```",
-        r"<\/?[a-z][^>]*>",
-        r"\b(function|class|import|from|select|insert|update|delete|drop|script|console\.log)\b",
-        r"[{};]{3,}",
-        r"=>",
-    )
-
     CHARACTER_CONTRACT_ENABLED: bool = True
 
     # ── Character Contract Validator: precompiled regex patterns ──
@@ -423,9 +694,9 @@ class KiraAgendaController:
     )
 
     _ASSISTANT_IDENTITY_RE = re.compile(
-        r"\b(soy|yo\s+soy)\s+(una|un)\s+(ia|inteligencia\s+artificial|asistente|asistente\s+virtual|modelo\s+de\s+lenguaje|llm|chatbot)"
+        r"\b(soy|yo\s+soy)\s+(una|un)\s+(ia|inteligencia\s+artificial|asistente|asistente\s+virtual|modelo\s+de\s+lenguaje|llm|chatbot)\b"
         r"|"
-        r"\b(como|en\s+mi\s+calidad\s+de)\s+(ia|asistente|modelo)",
+        r"\b(como|en\s+mi\s+calidad\s+de)\s+(ia|asistente|modelo(?=\s*[,.;:!?]|\s+de\s+lenguaje))\b",
         re.IGNORECASE,
     )
 
@@ -444,7 +715,11 @@ class KiraAgendaController:
     # NOTE: the five regexes above are frozen HISTORICAL anchors — P1a's
     # characterization test (tests/test_i18n_agenda_guardrails.py) binds the
     # es manifest's guardrails.agenda.character_contract lists to these
-    # `.pattern` strings byte-for-byte, so they must not change or disappear.
+    # `.pattern` strings byte-for-byte, so they must not disappear, and any
+    # change must land in the es manifest in the same commit. K4
+    # (warmth-guardrails-runtime-20261006) did exactly that: word boundaries on
+    # the identity nouns, and bare "modelo" only before punctuation or
+    # "de lenguaje" ("como modelo de referencia" is not a character break).
     # Runtime validation no longer reads them directly: `breaks_character` and
     # `enable()`'s fail-closed gate both resolve patterns fresh from the
     # ACTIVE locale bundle via `_compile_character_patterns()` (design D2/D4)
@@ -499,10 +774,16 @@ class KiraAgendaController:
         rhythm: str = "normal",
         safety_mode: str = "live_safe",
         chat_cadence_blocks: int = 2,
+        progression_variant: Optional[str] = None,
     ) -> None:
         self.state = AgendaState.OFF
         self.stop_requested = False
         self.recovery = RecoveryPolicy()
+        self._progression_variant_override: Optional[str] = (
+            _settings._resolve_agenda_progression_variant(progression_variant)
+            if progression_variant is not None
+            else None
+        )
         # Compiled character-contract patterns for the ACTIVE locale, read
         # once here (locale is process-immutable). None means the active
         # bundle ships no guardrails.agenda — enable() fail-closes on it.
@@ -524,6 +805,11 @@ class KiraAgendaController:
         self.topics: list[AgendaTopic] = []
         self.active_topic: Optional[AgendaTopic] = None
         self.last_outputs: list[str] = []
+        # Spent-word ledger source (progression flag): Kira's own accepted
+        # outputs for the CURRENT topic only. In memory, never persisted, never
+        # exposed in metrics or logs; reset whenever the topic id changes.
+        self._ledger_topic_id: Optional[str] = None
+        self._ledger_outputs: list[str] = []
         # ── Metrics / audit (Phase 0: zero behaviour change) ────────
         self.rejection_log: list[dict[str, object]] = []
         self._last_similarity_overlap: float = 0.0
@@ -543,12 +829,62 @@ class KiraAgendaController:
         self._rejected_phrases: list[str] = []
         self._regen_active: bool = False
         self._regen_retry_count: int = 0
+        # ── Contextual safety state (no raw user text persisted) ─────────
+        self._owner_safety_severity: SafetySeverity = SafetySeverity.NONE
+        self._safety_arbiter: ContextualCrisisArbiter = ContextualCrisisArbiter()
+        self._owner_safety_trajectory: OwnerSafetyTrajectory = OwnerSafetyTrajectory()
+        self._stream_safety_context: StreamContextMetadata = StreamContextMetadata()
         # TODO(next-slice): inject a short spoken filler line to cover regen latency
         #   when _regen_active=True so listeners don't hear silence during retry.
 
     def set_profile(self, profile: dict[str, str]) -> None:
         style = self.sanitize_topic_text((profile or {}).get("style", ""), field="profile_style", required=False)
         self.profile = {"style": style or self.profile.get("style", "")}
+
+    def set_owner_safety_severity(self, severity: object) -> None:
+        """Set owner safety severity level (used to strip sarcasm on SENSITIVE_CARE)."""
+        self._owner_safety_severity = parse_safety_severity(severity)
+
+    def set_stream_safety_context(
+        self,
+        context: StreamContextMetadata | None = None,
+        *,
+        active_game: str | None = None,
+        game_genres: tuple[str, ...] = (),
+        active_topic_title: str | None = None,
+        active_card_tags: tuple[str, ...] = (),
+        chat_activity_mood: str = "neutral",
+    ) -> None:
+        if context is not None:
+            self._stream_safety_context = context
+            return
+        self._stream_safety_context = StreamContextMetadata(
+            active_game=active_game,
+            game_genres=tuple(game_genres or ()),
+            active_topic_title=active_topic_title,
+            active_card_tags=tuple(active_card_tags or ()),
+            chat_activity_mood=chat_activity_mood,
+        )
+
+    def assess_owner_safety(self, text: str, *, source: str = "ptt") -> CrisisAssessment:
+        """Evaluate owner utterance with trajectory history and update controller state."""
+        traj_delta, hyp_delta = self._owner_safety_trajectory.pending_deltas()
+        assessment = self._safety_arbiter.assess(
+            text,
+            source=source,
+            stream_ctx=self._stream_safety_context,
+            trajectory_delta=traj_delta,
+            hyperbole_repeat_delta=hyp_delta,
+        )
+        self._owner_safety_trajectory.record(assessment)
+        self._owner_safety_severity = assessment.severity
+        return assessment
+
+    def _effective_safety_severity(self) -> SafetySeverity:
+        return max_safety_severity(
+            self._owner_safety_severity,
+            parse_safety_severity(active_safety_severity()),
+        )
 
     def set_editorial_context_provider(self, provider: Callable[[str], str | None] | None) -> None:
         """Set the callback used to resolve one-turn Editorial Cue Card context."""
@@ -646,7 +982,9 @@ class KiraAgendaController:
 
     @classmethod
     def looks_like_code(cls, text: str) -> bool:
-        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in cls.CODE_PATTERNS)
+        # K4 (G4b): structural detection shared with the topic inbox
+        # (core/agenda/topic_inbox.py), so both entry points agree.
+        return _looks_like_code(text)
 
     @classmethod
     def normalize_priority(cls, priority: str) -> str:
@@ -830,8 +1168,10 @@ class KiraAgendaController:
         self.active_topic = None
         self.recovery.record_success()
         self.failure_count = 0
-        # Clear regeneration ladder state so it does not survive across sessions
+        # Clear regeneration ladder and contextual safety state on emergency stop
         self._reset_ladder_state()
+        self._owner_safety_severity = SafetySeverity.NONE
+        self._owner_safety_trajectory.clear()
 
     def can_auto_resume(self) -> bool:
         """Return True when the recovery policy permits an automatic retry."""
@@ -916,7 +1256,14 @@ class KiraAgendaController:
             if self._topic_complete():
                 return self._closing_action()
             self.state = AgendaState.CONTINUE_TOPIC
-            return self._topic_action(i18n_active.agenda_instructions()["topic_continue"])
+            return self._topic_action(
+                self._continue_instruction(
+                    legacy_key="topic_continue",
+                    progression_key="continue",
+                    turn_index=self.active_topic.turns_spoken if self.active_topic else 0,
+                ),
+                is_continuation=True,
+            )
 
         return AgendaAction.none()
 
@@ -946,10 +1293,84 @@ class KiraAgendaController:
                 turns=1,
             )
         return self._preview_topic_action(
-            i18n_active.agenda_instructions()["preview_continue"],
+            self._continue_instruction(
+                legacy_key="preview_continue",
+                progression_key="preview_continue",
+                # The current turn is not debited yet: the previewed turn is the next one.
+                turn_index=projected_turns,
+            ),
             source="kira-agenda",
             turns=1,
+            is_continuation=True,
         )
+
+    def active_progression_variant(self) -> str:
+        """Return the effective progression variant ('', 'v1'..'v5') for this controller."""
+        if self._progression_variant_override is not None:
+            return self._progression_variant_override
+        return active_progression_variant()
+
+    def _continue_instruction(self, *, legacy_key: str, progression_key: str, turn_index: int) -> str:
+        """Continuation instruction; with the progression flag on, it carries the turn's move/facet."""
+        legacy = i18n_active.agenda_instructions()[legacy_key]
+        variant = self.active_progression_variant()
+        if not variant or self.active_topic is None:
+            return legacy
+        prog = i18n_active.agenda_progression()
+        topic_profile = classify_topic_safety(
+            self.active_topic.title,
+            last_owner_severity=self._effective_safety_severity(),
+        )
+        if variant in ("v3", "v4", "v5", "auto"):
+            family_moves = filter_safe_family_moves(
+                i18n_active.agenda_progression_family_moves(),
+                topic_profile=topic_profile,
+            )
+            _, move = pick_family_progression_move(self.active_topic.id, turn_index, family_moves)
+            if not move:
+                safe_flat = filter_safe_deck_moves(
+                    i18n_active.agenda_progression_moves(),
+                    topic_profile=topic_profile,
+                )
+                move = pick_progression_move(self.active_topic.id, turn_index, safe_flat)
+        else:
+            safe_flat = filter_safe_deck_moves(
+                i18n_active.agenda_progression_moves(),
+                topic_profile=topic_profile,
+            )
+            move = pick_progression_move(self.active_topic.id, turn_index, safe_flat)
+        if not move:
+            return legacy
+        if variant in ("v5", "auto"):
+            facets = i18n_active.agenda_progression_facets()
+            facet = (
+                pick_auto_progression_facet(
+                    self.active_topic.id,
+                    turn_index,
+                    self.max_turns_per_topic,
+                    facets,
+                )
+                if variant == "auto"
+                else pick_progression_facet(turn_index, self.max_turns_per_topic, facets)
+            )
+            template_v5 = prog.get(f"{progression_key}_v5")
+            if template_v5 and facet:
+                try:
+                    return str(template_v5).format(facet=facet, move=move)
+                except (KeyError, ValueError, IndexError):
+                    pass
+        template = prog.get(progression_key)
+        if not template:
+            return legacy
+        try:
+            rendered = str(template).format(move=move)
+        except (KeyError, ValueError, IndexError):
+            return legacy
+        if variant == "v2":
+            budget = prog.get("length_budget")
+            if budget:
+                rendered = f"{rendered} {budget}"
+        return rendered
 
     def start_prefetched_action(self, action: AgendaAction) -> bool:
         """Adopt a previously previewed agenda action right before cached TTS.
@@ -1097,6 +1518,12 @@ class KiraAgendaController:
             return
         self.last_outputs.append(clean.lower())
         self.last_outputs = self.last_outputs[-5:]
+        topic_id = self.active_topic.id if self.active_topic else None
+        if topic_id != self._ledger_topic_id:
+            self._ledger_topic_id = topic_id
+            self._ledger_outputs = []
+        self._ledger_outputs.append(clean.lower())
+        self._ledger_outputs = self._ledger_outputs[-_LEDGER_MAX_OUTPUTS:]
 
     def _validate_output(self, output: str, *, mutate: bool) -> bool:
         clean = " ".join((output or "").strip().split())
@@ -1178,10 +1605,25 @@ class KiraAgendaController:
             error, reason, guardrail = ErrorCode.GUARDRAIL_SIMILAR, "Repitió el mismo esqueleto con sinónimos", "skeleton_repetition"
             if skeleton_match.detail:
                 self._last_matched_phrase = skeleton_match.detail
+        elif self.active_progression_variant() in ("v4", "v5", "auto") and (
+            ledger_copy := self.repeats_topic_stem_or_sentence(clean)
+        ):
+            error, reason, guardrail = (
+                ErrorCode.GUARDRAIL_SIMILAR,
+                "Reutilizó apertura o frase previa del tema",
+                "ledger_v2_self_copy",
+            )
+            self._last_matched_phrase = ledger_copy
         elif self.reuses_looping_opening(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LOOPING, "Reutilizó apertura tipo 'Y eso...'", "reused_opening"
         elif self.claims_inner_life(clean):
             error, reason, guardrail = ErrorCode.GUARDRAIL_LEAK, "Afirmó tener conciencia o estar viva", "claims_inner_life"
+        elif not (drift_verdict := detect_nihilistic_drift(clean))[0]:
+            error, reason, guardrail = (
+                ErrorCode.GUARDRAIL_BREAKS_CHARACTER,
+                "Desviación nihilista o fatalista detectada en salida de agenda",
+                drift_verdict[1],
+            )
         elif self.CHARACTER_CONTRACT_ENABLED:
             result = self.breaks_character(clean)
             if result is not None:
@@ -1249,7 +1691,34 @@ class KiraAgendaController:
             "active_topic": self.active_topic.title if self.active_topic else None,
             "topics_queued": len([t for t in self.topics if t.status == TopicStatus.QUEUED]),
             "last_outputs_count": len(self.last_outputs),
+            "progression_variant": self.active_progression_variant() or "off",
         }
+
+    def repeats_topic_stem_or_sentence(self, text: str) -> str:
+        """Ledger v2 guard (v4/v5): returns matched stem/sentence if ``text`` copies a prior
+        opening stem or full sentence from Kira's accepted outputs in the current topic."""
+        topic = self.active_topic
+        if not topic or topic.id != self._ledger_topic_id or not self._ledger_outputs:
+            return ""
+        cand_stem = _opening_stem(text, strip_accents=True)
+        cand_sentences = [
+            _normalize_for_dedupe(seg)
+            for seg in _SENTENCE_SPLIT_RE.split(text or "")
+        ]
+        cand_sentences = [s for s in cand_sentences if len(s) >= _MIN_SENTENCE_DEDUPE_CHARS]
+        for prev in self._ledger_outputs:
+            if cand_stem and cand_stem == _opening_stem(prev, strip_accents=True):
+                return cand_stem[:60]
+            if cand_sentences:
+                prev_norm = _normalize_for_dedupe(prev)
+                prev_sents = {
+                    s for s in (_normalize_for_dedupe(seg) for seg in _SENTENCE_SPLIT_RE.split(prev or ""))
+                    if len(s) >= _MIN_SENTENCE_DEDUPE_CHARS
+                }
+                for sent in cand_sentences:
+                    if sent in prev_sents or sent in prev_norm:
+                        return sent[:60]
+        return ""
 
     def enforce_live_safety_cap(self, output: str) -> str:
         """Trim agenda output to the configured live-safety cap on sentence boundaries.
@@ -1398,7 +1867,13 @@ class KiraAgendaController:
         if not patterns:
             return None
         lowered = text.lower()
+        # The owner's R9 toggle also covers the agenda identity class
+        # (owner decision 2026-10-01). The pattern set itself stays complete,
+        # so the fail-closed locale gate above is unaffected.
+        skip_identity = not guardrail_policy.is_rule_enabled("no_ai_self_identification")
         for category, pattern in patterns:
+            if skip_identity and category == "assistant_identity":
+                continue
             m = pattern.search(lowered)
             if m:
                 return CharacterContractResult(
@@ -1409,21 +1884,22 @@ class KiraAgendaController:
                 )
         return None
 
-    def _topic_action(self, instruction: str) -> AgendaAction:
+    def _topic_action(self, instruction: str, *, is_continuation: bool = False) -> AgendaAction:
         self._pending_turns_spoken = 1
         self._pending_action_source = "kira-agenda"
         prompt = self._build_prompt(
             instruction=instruction,
             editorial_context=self._consume_editorial_context_block(),
+            is_continuation=is_continuation,
         )
         self.state = AgendaState.GENERATING
         return AgendaAction(kind="enqueue", prompt=prompt, source="kira-agenda", priority=turn_priority.agenda_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=self._pending_turns_spoken)
 
-    def _preview_topic_action(self, instruction: str, *, source: str, turns: int) -> AgendaAction:
+    def _preview_topic_action(self, instruction: str, *, source: str, turns: int, is_continuation: bool = False) -> AgendaAction:
         previous_turns = self._pending_turns_spoken
         try:
             self._pending_turns_spoken = max(1, turns)
-            prompt = self._build_prompt(instruction=instruction)
+            prompt = self._build_prompt(instruction=instruction, is_continuation=is_continuation)
         finally:
             self._pending_turns_spoken = previous_turns
         return AgendaAction(kind="enqueue", prompt=prompt, source=source, priority=turn_priority.agenda_priority(), topic_id=self.active_topic.id if self.active_topic else None, turns=max(1, turns))
@@ -1446,6 +1922,7 @@ class KiraAgendaController:
     def _streamer_action(self, ptt_text: str) -> AgendaAction:
         self._pending_turns_spoken = 1
         self._pending_action_source = "ptt"
+        self.assess_owner_safety(ptt_text, source="ptt")
         prompt = self._build_prompt(
             instruction=i18n_active.agenda_instructions()["ptt"],
             ptt_text=ptt_text,
@@ -1483,7 +1960,7 @@ class KiraAgendaController:
         """Wrap viewer chat in read-only data delimiters. See wrap_untrusted_chat()."""
         return wrap_untrusted_chat(compact_chat, empty_fallback="- sin chat compacto fresco")
 
-    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "", editorial_context: str = "") -> str:
+    def _build_prompt(self, *, instruction: str, compact_chat: str = "", ptt_text: str = "", editorial_context: str = "", is_continuation: bool = False) -> str:
         # ── Assembled from i18n bundle slots (kira_bilingual_e2e P3b) ──
         # Engine keeps: ladder state (repair/dup_block triggers below),
         # _wrap_untrusted_chat (untouched — out of scope for this migration),
@@ -1507,11 +1984,36 @@ class KiraAgendaController:
         rules_rhythm = i18n_active.agenda_rules_rhythm()
         rules_safety = i18n_active.agenda_rules_safety()
         response_rule = rules_length.get(self.response_length, rules_length["normal"])
+        variant = self.active_progression_variant()
+        if topic and is_continuation and variant in ("v2", "v5", "auto"):
+            budget_rule = i18n_active.agenda_progression().get("length_budget_rule")
+            if budget_rule:
+                response_rule = str(budget_rule)
         rhythm_rule = rules_rhythm.get(self.rhythm, rules_rhythm["normal"])
         safety_rule = rules_safety.get(self.safety_mode, rules_safety["live_safe"])
         block_size = self._pending_turns_spoken if topic else 1
         last_lines = "\n".join(f"- {line}" for line in self.last_outputs[-3:]) or defaults["last_lines"]
+        if topic and variant:
+            last_lines = self._spent_ledger_block(variant=variant) or defaults["last_lines"]
         style = self.profile.get("style") or defaults["style_fallback"]
+        eff_severity = self._effective_safety_severity()
+        is_care_mode = eff_severity in {
+            SafetySeverity.SENSITIVE_CARE,
+            SafetySeverity.CRISIS_INTERVENTION,
+        }
+        topic_profile = classify_topic_safety(
+            topic.title if topic else "",
+            last_owner_severity=eff_severity,
+        )
+        try:
+            locale_code = i18n_active.get_active_bundle().code
+        except Exception:
+            locale_code = "es"
+        if is_care_mode:
+            style = strip_sarcasm_directives(style) or care_style_fallback(locale_code)
+            repair_prefix = strip_sarcasm_directives(repair_prefix)
+            if repair_prefix:
+                repair_prefix += "\n\n"
         parts = dict(
             short_target=self.SHORT_RESPONSE_TARGET_CHARS,
             normal_target=self.NORMAL_RESPONSE_TARGET_CHARS,
@@ -1535,7 +2037,50 @@ class KiraAgendaController:
             editorial_block=editorial_context or defaults["editorial_block"],
             last_lines=last_lines,
         )
-        return repair_prefix + dup_block + i18n_active.agenda_task_template().format(**parts)
+        rendered = repair_prefix + dup_block + i18n_active.agenda_task_template().format(**parts)
+        if not is_care_mode and topic_profile.tier == TopicSafetyTier.STANDARD:
+            return rendered
+        extra_blocks: list[str] = []
+        if is_care_mode:
+            rendered = strip_sarcasm_directives(rendered)
+            extra_blocks.append(care_recency_line(locale_code))
+        anchor_line = grounding_line_for_profile(topic_profile, locale_code)
+        if anchor_line:
+            extra_blocks.append(anchor_line)
+        return rendered + ("\n\n" + "\n".join(extra_blocks) if extra_blocks else "")
+
+    def _spent_ledger_block(self, *, variant: str = "") -> str:
+        """Tail of the previous accepted output plus recurring content words (and opening stems in v4/v5)."""
+        topic = self.active_topic
+        if not topic or topic.id != self._ledger_topic_id or not self._ledger_outputs:
+            return ""
+        if not variant:
+            variant = self.active_progression_variant()
+        last = self._ledger_outputs[-1]
+        if len(last) > _LEDGER_TAIL_CHARS:
+            tail = last[-_LEDGER_TAIL_CHARS:]
+            if " " in tail and last[-_LEDGER_TAIL_CHARS - 1] != " ":
+                tail = tail.split(" ", 1)[1]
+            tail = "..." + tail
+        else:
+            tail = last
+        block = f"- {tail}"
+        own = set(_WORD_RE.findall(f"{topic.title} {topic.angle}".lower()))
+        prog = i18n_active.agenda_progression()
+        words = (
+            spent_words_v2(self._ledger_outputs, exclude=own)
+            if variant in ("v4", "v5", "auto")
+            else spent_words(self._ledger_outputs, exclude=own)
+        )
+        line = prog.get("spent_line")
+        if words and line:
+            block += "\n" + str(line).format(words=", ".join(words))
+        if variant in ("v4", "v5", "auto"):
+            openings = spent_openings(self._ledger_outputs)
+            openings_line = prog.get("spent_openings_line")
+            if openings and openings_line:
+                block += "\n" + str(openings_line).format(openings="; ".join(openings))
+        return block
 
     def _consume_editorial_context_block(self) -> str:
         topic = self.active_topic

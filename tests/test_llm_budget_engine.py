@@ -26,6 +26,10 @@ from opencohost.core.engine.llm_budget_engine import (
 )
 from opencohost.core.context.prompt_assembler import PromptContextAssembler
 
+# B-W4: this module pins the legacy prompt layout (system-message placement, one-pair
+# history deque, legacy goldens). The v2 placement is tested in tests/test_prompt_layout_v2.py.
+pytestmark = pytest.mark.usefixtures("legacy_prompt_layout")
+
 
 def test_budget_infeasible_when_remaining_context_exhausted():
     """ADR-056 Block 1: Never fabricate capacity. Return BUDGET_INFEASIBLE with effective_budget=0."""
@@ -184,8 +188,17 @@ def test_motor_vocal_ia_bypasses_tts_on_drafting():
 # ===========================================================================
 
 def test_gemma_native_128k_no_snapshot_does_not_imply_128k_allocation():
-    """[BLOCKER] Gemma native=131072 + no /api/ps snapshot MUST NOT imply num_ctx=131072."""
+    """[BLOCKER] Gemma native=131072 + no /api/ps snapshot MUST NOT imply num_ctx=131072.
+
+    T1 (model_context_auto_config_20260928): the OLD safe default here was a
+    flat 4096 (the very bug the task fixes -- it also starved history/turns).
+    The new safe default is Auto = min(native, AUTO_CONTEXT_TOKENS) run through
+    the SAME VRAM-clamp machinery as an explicit override; with no residency
+    or NVML evidence in this test, the clamp reason is "vram_unknown" and
+    nothing shrinks it. Still MUST NOT imply the full native 128K.
+    """
     from opencohost.core.engine.llm_engine_models import ModelManagementMixin
+    from opencohost.config.model_parameters import AUTO_CONTEXT_TOKENS
 
     class DummyEngine(ModelManagementMixin):
         def __init__(self):
@@ -193,7 +206,7 @@ def test_gemma_native_128k_no_snapshot_does_not_imply_128k_allocation():
 
     engine = DummyEngine()
     resolved = engine._resolve_effective_ctx_limit("gemma4:e4b", native_ctx=131072)
-    assert resolved == 4096
+    assert resolved == AUTO_CONTEXT_TOKENS
     assert resolved != 131072
 
 
@@ -226,7 +239,9 @@ def test_telemetry_calibration_lifecycle_gates_budget_adaptation():
     def _assemble_test(tracker):
         return assembler.assemble(
             "hola",
-            "direct",
+            # A non-owner source keeps the budget engine isolated from the
+            # short-reply owner cap (C4), which only applies to owner turns.
+            "livevoice",
             system_prompt="Eres Kira.",
             use_system_role=True,
             is_local=True,
@@ -538,6 +553,86 @@ def test_streaming_attempt_aborts_on_budget_infeasible_without_calling_ollama():
     assert respuesta is None
     assert stream_state.abort_reason == "budget_infeasible"
     assert fake_host._ollama_chat_streaming.call_count == 0
+
+
+# ===========================================================================
+# T2 (controls-cleanup-adaptive-reasoning-20260928): manual budget is a REAL
+# cap on the adaptive/fallback estimate, calibrated or not -- the reported
+# bug was that `requested_budget` only ever won pre-calibration (and even
+# then it substituted in directly rather than acting as a min-cap) and was
+# silently ignored once TPS calibrated (preset != "custom"). Auto mode
+# passes requested_budget=None and is characterized by the untouched tests
+# above (e.g. test_chat_at_50_tps_presets_order_strictly never sets it).
+# ===========================================================================
+
+
+def test_manual_budget_caps_calibrated_estimate():
+    """A manual cap below the calibrated adaptive estimate MUST win."""
+    # 50 tok/s * 4.0s (balanced/CHAT) -> 200 tokens adaptively; cap at 100.
+    res = resolve_generation_budget(
+        intent=InferenceIntent.CHAT,
+        allocated_context=8192,
+        tps_ewma=50.0,
+        requested_budget=100,
+    )
+    assert res.effective_budget == 100
+    assert res.clamp_reason == "MANUAL_CAP_CLAMP"
+    assert res.verdict == BudgetVerdict.CLAMPED_MANUAL_CAP
+
+
+def test_manual_budget_above_calibrated_estimate_does_not_raise_it():
+    """A manual cap higher than the adaptive estimate is a ceiling, not a floor."""
+    # 50 tok/s * 2.0s (fast/CHAT) -> 100 tokens adaptively; cap at 500 must not lift it.
+    res = resolve_generation_budget(
+        intent=InferenceIntent.CHAT,
+        allocated_context=8192,
+        tps_ewma=50.0,
+        preset="fast",
+        requested_budget=500,
+    )
+    assert res.effective_budget == 100
+    assert res.clamp_reason != "MANUAL_CAP_CLAMP"
+
+
+def test_manual_budget_caps_precalibration_fallback():
+    """Pre-calibration (tps=0), a manual cap below the intent fallback still wins."""
+    res = resolve_generation_budget(
+        intent=InferenceIntent.CHAT,
+        allocated_context=8192,
+        tps_ewma=0.0,
+        requested_budget=300,
+    )
+    assert res.effective_budget == 300
+    assert res.clamp_reason == "MANUAL_CAP_CLAMP"
+
+
+def test_manual_budget_above_precalibration_fallback_does_not_raise_it():
+    """Pre-calibration, a manual cap higher than the intent fallback (768 for CHAT)
+    must not override the safer fallback estimate upward -- min(), not override."""
+    from opencohost.core.engine.llm_budget_engine import DEFAULT_FALLBACK_BUDGET
+
+    res = resolve_generation_budget(
+        intent=InferenceIntent.CHAT,
+        allocated_context=8192,
+        tps_ewma=0.0,
+        requested_budget=2000,
+    )
+    assert res.effective_budget == DEFAULT_FALLBACK_BUDGET
+    assert res.clamp_reason != "MANUAL_CAP_CLAMP"
+
+
+def test_manual_budget_still_bounded_by_context_ceiling():
+    """Context pressure remains the tightest, final constraint over a manual cap."""
+    res = resolve_generation_budget(
+        intent=InferenceIntent.CHAT,
+        allocated_context=1500,
+        prompt_tokens=1072,  # remaining = 300
+        tps_ewma=200.0,  # 200 tok/s * 4.0s (balanced/CHAT) -> 800 adaptively
+        requested_budget=500,  # cap fires first (800 -> 500) ...
+    )
+    assert res.effective_budget == 300  # ... but remaining_context (300) still wins
+    assert res.verdict == BudgetVerdict.CLAMPED_CONTEXT
+    assert res.clamp_reason == "CONTEXT_PRESSURE_CLAMP"
 
 
 def test_reactive_trimming_loop_rescues_budget_infeasible():

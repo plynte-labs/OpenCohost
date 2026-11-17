@@ -1,5 +1,7 @@
 # UI Shell Module — LEGACY (CustomTkinter)
 
+> **Historical: describes the retired CustomTkinter shell (removed in 1eecab7). Current architecture: [docs/architecture.md](../architecture.md).**
+
 > **DEPRECATED as of 2026-08-13. This document describes the FROZEN legacy
 > surface.**
 >
@@ -13,8 +15,7 @@
 > Note especially that host flags armed by `EngineHost` — the speech router, and
 > therefore LLM output streaming — are permanently inert under this shell.
 >
-> See the "Surfaces" section of `CLAUDE.md` for the full policy. Everything
-> below is retained as an accurate description of the legacy shell, not as
+> Everything below is retained as an accurate description of the legacy shell, not as
 > guidance for new work.
 
 This module document explains the legacy UI shell boundary for OpenCohost. It

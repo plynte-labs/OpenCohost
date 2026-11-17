@@ -266,6 +266,11 @@ class FakeMotor:
     def is_speaking(self):
         return self._is_speaking
 
+    def speech_progress(self):
+        if not self._is_speaking:
+            return None
+        return {"speaking": True, "current_idx": 0, "played": 0, "total": 1}
+
     @property
     def is_processing(self):
         return self._is_processing
@@ -569,7 +574,7 @@ def test_health_shape_and_engine_alive_true():
         resp = client.get("/api/health")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"status", "engine_alive"}
+        assert set(body.keys()) == {"status", "engine_alive", "engine_state", "build_version", "install_id"}
         assert body["status"] == "ok"
         assert body["engine_alive"] is True
 
@@ -582,6 +587,69 @@ def test_health_engine_alive_false_when_worker_dead():
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["engine_alive"] is False
+
+
+def _health_state(host_setup):
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=FakeHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        host_setup(app.state.host)
+        return client.get("/api/health").json()["engine_state"]
+
+
+def test_health_engine_state_legacy_motor_without_flags_is_ready():
+    assert _health_state(lambda h: None) == "ready"
+
+
+def test_health_engine_state_starting_before_first_check():
+    def setup(h):
+        h.motor.startup_check_done = False
+        h.motor.is_ready = False
+
+    assert _health_state(setup) == "starting"
+
+
+def test_health_engine_state_starting_while_ollama_warming():
+    def setup(h):
+        h.ollama_warming = True
+        h.motor.startup_check_done = True
+        h.motor.is_ready = False
+
+    assert _health_state(setup) == "starting"
+
+
+def test_health_engine_state_loading_model_when_ollama_answered():
+    def setup(h):
+        h.motor.startup_check_done = False
+        h.motor.is_ready = True
+        h.motor._is_local = True
+
+    assert _health_state(setup) == "loading_model"
+
+
+def test_health_engine_state_ready_after_check_passes():
+    def setup(h):
+        h.motor.startup_check_done = True
+        h.motor.is_ready = True
+
+    assert _health_state(setup) == "ready"
+
+
+def test_health_engine_state_unavailable_when_check_failed():
+    def setup(h):
+        h.motor.startup_check_done = True
+        h.motor.is_ready = False
+
+    assert _health_state(setup) == "unavailable"
+
+
+def test_health_engine_state_unavailable_when_worker_dead():
+    import opencohost.api.main as main_mod
+
+    app = main_mod.create_app(host_factory=DeadEngineHost, cors_origins=_DEFAULT_TEST_ORIGINS)
+    with TestClient(app) as client:
+        assert client.get("/api/health").json()["engine_state"] == "unavailable"
 
 
 def test_health_does_not_touch_command_queue():

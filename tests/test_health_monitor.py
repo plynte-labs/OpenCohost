@@ -332,11 +332,43 @@ class TestRTFTracker:
 class TestQwenProcessManager:
     """Tests for QwenProcessManager — subprocess lifecycle."""
 
-    def test_qwen_server_script_resolves_to_an_existing_file(self):
-        """SERVER_SCRIPT is derived from __file__, so moving this module between
-        directories repoints it. Every other start() test mocks Popen and never
-        resolves the argv against disk, so nothing else would notice."""
-        assert os.path.isfile(QwenProcessManager.SERVER_SCRIPT), QwenProcessManager.SERVER_SCRIPT
+    def test_qwen_server_script_retired_to_legacy(self):
+        """SERVER_SCRIPT no longer ships: server_qwen.py was retired to
+        a separate legacy repository on 2026-09-21. start() must fail fast (False,
+        LIFECYCLE_FAILED) without ever calling Popen."""
+        from opencohost.core.observability.health_monitor import LIFECYCLE_FAILED
+
+        assert not os.path.isfile(QwenProcessManager.SERVER_SCRIPT), QwenProcessManager.SERVER_SCRIPT
+        mgr = QwenProcessManager()
+        with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+            assert mgr.start() is False
+        mock_popen.assert_not_called()
+        assert mgr.lifecycle_state == LIFECYCLE_FAILED
+
+    def test_qwen_missing_script_warning_has_no_developer_path(self, caplog):
+        """Missing SERVER_SCRIPT must log a neutral retired message without developer paths."""
+        from pathlib import Path
+        from opencohost.core.observability.health_monitor import LIFECYCLE_FAILED
+
+        mgr = QwenProcessManager()
+        with caplog.at_level("WARNING", logger="HealthMonitor"):
+            with patch(
+                "opencohost.core.observability.health_monitor.resolve_xtts_python",
+                return_value=Path("/fake/python"),
+            ):
+                with patch("opencohost.core.observability.health_monitor.os.path.isfile", return_value=False):
+                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+                        assert mgr.start() is False
+
+        mock_popen.assert_not_called()
+        assert mgr.lifecycle_state == LIFECYCLE_FAILED
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings, "expected a WARNING log when SERVER_SCRIPT is missing"
+        joined = "\n".join(warnings)
+        assert "VoiceAI-legacy" not in joined
+        assert "E:\\" not in joined
+        assert "retired" in joined.lower()
+        assert "not packaged" in joined.lower()
 
     def test_is_running_false_initially(self):
         """Not running before start()."""
@@ -365,12 +397,15 @@ class TestQwenProcessManager:
         mgr = QwenProcessManager()
 
         with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.observability.health_monitor.sys.platform", "win32"):
-                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
-                    with patch.object(mgr, "_check_health", return_value=True):
-                        mock_popen.return_value.poll.return_value = None
+            # RETIRED 2026-09-21: server_qwen.py lives in a separate legacy repository;
+            # cover the manual-restore spawn path with the script present.
+            with patch("opencohost.core.observability.health_monitor.os.path.isfile", return_value=True):
+                with patch("opencohost.core.observability.health_monitor.sys.platform", "win32"):
+                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+                        with patch.object(mgr, "_check_health", return_value=True):
+                            mock_popen.return_value.poll.return_value = None
 
-                        assert mgr.start() is True
+                            assert mgr.start() is True
 
         flags = mock_popen.call_args.kwargs["creationflags"]
         c_new_grp = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -383,14 +418,16 @@ class TestQwenProcessManager:
         mgr = QwenProcessManager()
 
         with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
-                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
-                    with patch.object(mgr, "_check_health", return_value=True):
-                        mock_popen.return_value.poll.return_value = None
+            # RETIRED 2026-09-21: cover the manual-restore spawn path.
+            with patch("opencohost.core.observability.health_monitor.os.path.isfile", return_value=True):
+                with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+                        with patch.object(mgr, "_check_health", return_value=True):
+                            mock_popen.return_value.poll.return_value = None
 
-                        assert mgr.start() is True
+                            assert mgr.start() is True
 
-        kwargs = mock_popen.call_args.kwargs
+            kwargs = mock_popen.call_args.kwargs
         assert kwargs["stdout"] is not subprocess.DEVNULL
         assert kwargs["stderr"] is not subprocess.DEVNULL
         assert kwargs["stdout"].name == str(tmp_path / "server_qwen_stdout.log")
@@ -409,12 +446,14 @@ class TestQwenProcessManager:
         mgr._stderr_log = stale_stderr
 
         with patch("opencohost.core.observability.health_monitor.resolve_xtts_python", return_value=Path("/fake/python")):
-            with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
-                with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
-                    with patch.object(mgr, "_check_health", return_value=True):
-                        mock_popen.return_value.poll.return_value = None
+            # RETIRED 2026-09-21: cover the manual-restore spawn path.
+            with patch("opencohost.core.observability.health_monitor.os.path.isfile", return_value=True):
+                with patch("opencohost.core.observability.health_monitor.LOG_DIR", str(tmp_path)):
+                    with patch("opencohost.core.observability.health_monitor.subprocess.Popen") as mock_popen:
+                        with patch.object(mgr, "_check_health", return_value=True):
+                            mock_popen.return_value.poll.return_value = None
 
-                        assert mgr.start() is True
+                            assert mgr.start() is True
 
         stale_stdout.close.assert_called_once()
         stale_stderr.close.assert_called_once()

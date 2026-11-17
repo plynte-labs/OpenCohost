@@ -7,6 +7,9 @@ from typing import Optional
 # resolves only for names bound above the mixin-import line. Annotations want a
 # direct import; runtime values want `_eng`. See llm_engine_memorias.py.
 from opencohost.core import llm_engine as _eng
+from opencohost.core.context.prompt_assembler import agenda_llm_options
+
+__all__ = ["AgendaStashMixin", "agenda_llm_options"]
 
 class AgendaStashMixin:
     
@@ -167,6 +170,11 @@ class AgendaStashMixin:
         # tokens); local short-circuits so all existing behavior is byte-identical.
         # Same two-condition idiom as the pregenerate gate.
         if not self._is_local and not self._provider_config.get("pregen_enabled", False):
+            # pregen-retrigger P4: same reason line and dedup as pregenerate()'s
+            # gate. The head is the pregen epoch (no payload exists here).
+            self._log_pregen_cloud_refusal(
+                "kira-agenda-connector", f"epoch{self._prefetch_epoch}"
+            )
             return
         # R3 spawn gate: the upgrade is cosmetic (the pool floor is a complete
         # connector). Only spawn when the remaining-playback estimate comfortably
@@ -252,7 +260,7 @@ class AgendaStashMixin:
             generation_started = False
             try:
                 prompt = (
-                    "Generá UNA sola línea muy corta de transición para retomar "
+                    "Genera UNA sola línea muy corta de transición para retomar "
                     "lo que venías diciendo antes de que te interrumpieran. Natural, "
                     "sin anunciar estructura, sin saludar, sin cerrar."
                 )

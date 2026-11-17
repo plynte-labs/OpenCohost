@@ -20,17 +20,17 @@ logger = get_logger()
 
 DEFAULT_COHOST_PROFILES: dict[str, dict[str, Any]] = {
     "Natural": {
-        "style": "Soná como co-host natural de stream: cercana, con humor seco. Acompañá sin robar protagonismo. Nunca te quejes del chat ni digas que está aburrido. Si no hay nada que decir, hacé una pausa natural.",
+        "style": "Suena como co-host natural de stream: cercana, con humor seco. Acompaña sin robar protagonismo. Nunca te quejes del chat ni digas que está aburrido. Si no hay nada que decir, haz una pausa natural.",
         "default_priority": "normal",
         "default_response_length": "normal",
     },
     "Picante con matiz": {
-        "style": "Podés tomar postura y ser picante, pero siempre con matiz y sin desprecio. No conviertas una opinión polémica en verdad absoluta. NUNCA insultes al chat ni digas que es básico o que deberían leer un manual.",
+        "style": "Puedes tomar postura y ser picante, pero siempre con matiz y sin desprecio. No conviertas una opinión polémica en verdad absoluta. NUNCA insultes al chat ni digas que es básico o que deberían leer un manual.",
         "default_priority": "normal",
         "default_response_length": "expandida",
     },
     "Docente entretenida": {
-        "style": "Explicá con claridad y ejemplos cotidianos, sin sonar académica ni leer definiciones. NUNCA menosprecies a quien pregunta algo básico. Si no sabés algo, decilo con honestidad.",
+        "style": "Explica con claridad y ejemplos cotidianos, sin sonar académica ni leer definiciones. NUNCA menosprecies a quien pregunta algo básico. Si no sabes algo, dilo con honestidad.",
         "default_priority": "normal",
         "default_response_length": "normal",
     },
@@ -59,57 +59,78 @@ DEFAULT_COHOST_PROFILES_EN: dict[str, dict[str, Any]] = {
 }
 
 
-def _default_cohost_profiles() -> dict[str, dict[str, Any]]:
-    """Pick the default Co-host preset set matching the active locale.
-
-    Reads the process-wide active i18n bundle (resolved once at startup, same
-    source every other locale-scoped engine default uses) rather than the
-    persisted next-boot locale — this is "what language is THIS running
-    session speaking", not "what was last requested". Any locale other than
-    "en", or any resolution failure, keeps DEFAULT_COHOST_PROFILES (es) —
-    existing behavior under es is unchanged.
-    """
+def _active_locale() -> str:
     try:
         code = i18n_active.get_active_bundle().code
     except Exception:
-        return DEFAULT_COHOST_PROFILES
-    return DEFAULT_COHOST_PROFILES_EN if i18n_primary(code) == "en" else DEFAULT_COHOST_PROFILES
+        return "es"
+    return "en" if i18n_primary(code) == "en" else "es"
 
 
-def load_cohost_profiles() -> dict[str, dict[str, Any]]:
-    if os.path.exists(COHOST_PROFILES_FILE):
+def _resolve_locale(locale: str | None = None) -> str:
+    """Resolve explicit BCP-47 locale ('en'/'es'), falling back to active runtime locale."""
+    p = i18n_primary(locale)
+    if p:
+        return "en" if p == "en" else "es"
+    return _active_locale()
+
+
+def _cohost_profiles_path(locale: str | None = None) -> Path:
+    loc = _resolve_locale(locale)
+    base = Path(COHOST_PROFILES_FILE)
+    if loc == "en":
+        return base.with_name(f"{base.stem}_en{base.suffix}")
+    return base
+
+
+def _default_cohost_profiles(locale: str | None = None) -> dict[str, dict[str, Any]]:
+    """Pick the default Co-host preset set matching the requested or active locale."""
+    loc = _resolve_locale(locale)
+    return DEFAULT_COHOST_PROFILES_EN if loc == "en" else DEFAULT_COHOST_PROFILES
+
+
+def load_cohost_profiles(locale: str | None = None) -> dict[str, dict[str, Any]]:
+    loc = _resolve_locale(locale)
+    path = _cohost_profiles_path(loc)
+    if os.path.exists(path):
         try:
-            with open(COHOST_PROFILES_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except json.JSONDecodeError:
             # Corrupt file: quarantine instead of silently returning defaults,
             # so a crash-truncated file is preserved and not overwritten blind.
-            corrupt = str(COHOST_PROFILES_FILE) + ".corrupt"
+            corrupt = str(path) + ".corrupt"
             try:
-                os.replace(COHOST_PROFILES_FILE, corrupt)
+                os.replace(str(path), corrupt)
             except OSError:
                 pass
             logger.warning("cohost profiles corrupt — quarantined to %s", corrupt)
-            return deepcopy(_default_cohost_profiles())
+            return deepcopy(_default_cohost_profiles(loc))
         except Exception as e:
             logger.error(f"Error cargando perfiles Co-host: {e}")
-            return deepcopy(_default_cohost_profiles())
+            return deepcopy(_default_cohost_profiles(loc))
         if isinstance(data, dict) and data:
-            return {name: normalize_cohost_profile(profile) for name, profile in data.items()}
-    return deepcopy(_default_cohost_profiles())
+            return {name: normalize_cohost_profile(profile, locale=loc) for name, profile in data.items()}
+    return deepcopy(_default_cohost_profiles(loc))
 
 
-def save_cohost_profiles(profiles: dict[str, dict[str, Any]]) -> bool:
+def save_cohost_profiles(profiles: dict[str, dict[str, Any]], locale: str | None = None) -> bool:
     """Persist co-host profiles atomically. Never raises (fail-open + log).
 
     Returns True when the write landed, False when it failed — the API
     handler checks the bool and surfaces a 503 instead of a false 200.
     """
-    safe = {sanitize_profile_name(name): normalize_cohost_profile(profile) for name, profile in profiles.items() if sanitize_profile_name(name)}
+    loc = _resolve_locale(locale)
+    safe = {
+        sanitize_profile_name(name): normalize_cohost_profile(profile, locale=loc)
+        for name, profile in profiles.items()
+        if sanitize_profile_name(name)
+    }
+    path = _cohost_profiles_path(loc)
     try:
         atomic_write_text(
-            Path(COHOST_PROFILES_FILE),
-            json.dumps(safe or deepcopy(_default_cohost_profiles()), indent=4, ensure_ascii=False),
+            path,
+            json.dumps(safe or deepcopy(_default_cohost_profiles(loc)), indent=4, ensure_ascii=False),
         )
         return True
     except Exception as e:
@@ -124,12 +145,14 @@ def sanitize_profile_name(name: str) -> str:
     return clean
 
 
-def normalize_cohost_profile(profile: dict[str, Any]) -> dict[str, Any]:
+def normalize_cohost_profile(profile: dict[str, Any], locale: str | None = None) -> dict[str, Any]:
+    loc = _resolve_locale(locale)
     style = " ".join(str((profile or {}).get("style", "")).replace("\n", " ").split())
     if len(style) > 600:
         style = style[:600].strip()
+    defaults = _default_cohost_profiles(loc)
     return {
-        "style": style or _default_cohost_profiles()["Natural"]["style"],
+        "style": style or defaults["Natural"]["style"],
         "default_priority": str((profile or {}).get("default_priority", "normal")).lower(),
         "default_response_length": str((profile or {}).get("default_response_length", "normal")).lower(),
     }

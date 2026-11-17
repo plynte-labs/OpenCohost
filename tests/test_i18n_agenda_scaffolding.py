@@ -38,17 +38,19 @@ from opencohost.smart_aggregator.kira_agenda_controller import KiraAgendaControl
 
 # _build_prompt's repair-retry prefix, kira_agenda_controller.py ~:1317-1323.
 LEGACY_REPAIR_PREFIX = (
-    "REESCRIBE: hablá como Kira, la co-host. "
+    "REESCRIBE: habla como Kira, la co-host. "
     "No menciones contexto, sesión, reflexión, procesamiento. "
     "No preguntes qué hacer ni ofrezcas ayuda. "
-    "No digas que sos una IA. "
-    "Solo hablá natural como co-host de stream.\n\n"
+    # T3 (qwen-runtime-fixes-20260928, owner decision 2026-09-28): Kira may
+    # say she's an AI while staying in character now.
+    "No uses descargos genéricos de asistente de IA. "
+    "Solo habla natural como co-host de stream.\n\n"
 )
 
 # _build_prompt's forced anti-repetition block, ~:1328-1331.
 LEGACY_ANTI_REPETITION_TEMPLATE = (
     "ANTI-REPETICIÓN FORZADA: no repitas estas frases/aperturas exactas ni algo muy similar, "
-    "decí algo distinto: {phrases}\n\n"
+    "di algo distinto: {phrases}\n\n"
 )
 
 # _build_prompt's filler defaults for an absent active topic, ~:1333-1340.
@@ -67,10 +69,10 @@ LEGACY_DEFAULTS = {
     "ptt_block": "- sin PTT",
     "editorial_block": "- sin cue card editorial activo",
     "style": (
-        "Soná como co-host natural de stream: cercana, con humor seco, "
+        "Suena como co-host natural de stream: cercana, con humor seco, "
         "sin anunciar estructura ni despedirte entre ideas."
     ),
-    "style_fallback": "Soná natural, como co-host de stream.",
+    "style_fallback": "Suena natural, como co-host de stream.",
 }
 
 # Topic-beat instruction literals. chat/ptt/closing come from _chat_action,
@@ -80,12 +82,12 @@ LEGACY_DEFAULTS = {
 # _preview_topic_action(...) call reuses the SAME literal as `closing`
 # (verified identical pre-migration text — one slot, two call sites).
 LEGACY_INSTRUCTIONS = {
-    "chat": "Integrá el contexto compacto si suma, sin decir que viene del chat. Si no suma, seguí natural con la idea actual.",
-    "ptt": "Respondé o ajustá el rumbo según esta indicación del streamer. No inventes que dijo otra cosa.",
-    "closing": "Hacé una transición natural a otra idea sin despedirte, sin decir 'tema', 'episodio', 'eso es todo' ni anunciar estructura.",
-    "topic_open": "Entrá al tema como comentario orgánico de stream. No anuncies que estás abriendo un tema.",
-    "topic_continue": "Seguí desarrollando la postura como si fuera una conversación viva. No digas que vas al siguiente tema ni que estás cerrando.",
-    "preview_continue": "Seguí desarrollando la postura como bloque fluido de stream. Sumá un ángulo nuevo, no repitas ni cierres en círculo.",
+    "chat": "Integra el contexto compacto si suma, sin decir que viene del chat. Si no suma, sigue natural con la idea actual.",
+    "ptt": "Responde o ajusta el rumbo según esta indicación del streamer. No inventes que dijo otra cosa.",
+    "closing": "Haz una transición natural a otra idea sin despedirte, sin decir 'tema', 'episodio', 'eso es todo' ni anunciar estructura.",
+    "topic_open": "Entra al tema como comentario orgánico de stream. No anuncies que estás abriendo un tema.",
+    "topic_continue": "Sigue desarrollando la postura como si fuera una conversación viva. No digas que vas al siguiente tema ni que estás cerrando.",
+    "preview_continue": "Sigue desarrollando la postura como bloque fluido de stream. Suma un ángulo nuevo, no repitas ni cierres en círculo.",
 }
 
 
@@ -96,7 +98,12 @@ def official():
 
 
 @pytest.fixture(autouse=True)
-def _reset_active():
+def _reset_active(monkeypatch):
+    # These goldens characterize the legacy (no-progression) prompt. Progression
+    # is ON by default (owner decision 2026-11-16), so pin it OFF here.
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "AGENDA_PROGRESSION_ENABLED", False, raising=False)
     active.reset_active_bundle()
     yield
     active.reset_active_bundle()
@@ -179,11 +186,11 @@ def _build_parts(controller, *, instruction, compact_chat="", ptt_text="", edito
     safety_rule = controller.LIVE_SAFETY_MODE_RULES.get(controller.safety_mode, controller.LIVE_SAFETY_MODE_RULES["live_safe"])
     block_size = controller._pending_turns_spoken if topic else 1
     last_lines = "\n".join(f"- {line}" for line in controller.last_outputs[-3:]) or defaults["last_lines"]
-    style = controller.profile.get("style") or "Soná natural, como co-host de stream."
+    style = controller.profile.get("style") or "Suena natural, como co-host de stream."
     interruption_rule = (
         "si entra PTT/chat, no continúes este bloque largo en el próximo turno."
         if safety_rule["interruptible"]
-        else "modo de prueba; aun así respetá stop/emergencia del operador."
+        else "modo de prueba; aun así respeta stop/emergencia del operador."
     )
     return dict(
         short_target=controller.SHORT_RESPONSE_TARGET_CHARS,
@@ -347,6 +354,6 @@ def test_official_bundles_chain_and_expose_agenda_scaffolding():
         agenda = bundle.data["llm"]["agenda"]
         assert set(agenda) == {
             "task_template", "repair_prefix", "anti_repetition_template",
-            "defaults", "instructions", "rules",
+            "defaults", "instructions", "rules", "progression",
         }
         assert set(agenda["rules"]) == {"length", "rhythm", "safety"}

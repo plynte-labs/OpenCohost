@@ -19,7 +19,7 @@ from opencohost.config.settings import (
     CLAUSE_SANITIZER_SOURCES,
     CTX_PRESSURE_HIGH_THRESHOLD,
 )
-from opencohost.core.context import context_budget
+from opencohost.core.context import context_budget, prompt_echo, search_claim
 from opencohost.core.context.prompt_assembler import GenerationSetup
 from opencohost.core.context.repetition_guard import (
     DEFAULT_CONFIG as REPETITION_CONFIG,
@@ -247,6 +247,9 @@ class GenerationEvaluator:
                 profile_cfg.get("model") if isinstance(profile_cfg, dict) else None
             ) or "unknown"
             trace_msg += f" cloud_model={cloud_model}"
+        # K1: the computed generation budget, a count only.
+        _num_predict = (setup.opciones_llm or {}).get("num_predict")
+        trace_msg += f" num_predict={_num_predict if isinstance(_num_predict, int) else '-'}"
 
         cloud_by_design = trace_transport == "cloud" and not trace_fallback_active
         is_mismatch = (
@@ -293,6 +296,27 @@ class GenerationEvaluator:
             guard_allowed, guard_reason = output_guard_with_tts_check(
                 dialogo, source=source, output_guard_fn=self._output_guard_fn
             )
+            # L1 (live-session-fixes-20261005): the stateless output guard never
+            # sees the prompt; a reply that repeats this turn's instructions is
+            # blocked like any other guard hit (retry, then the neutral line).
+            if guard_allowed and prompt_echo.detector_for(setup).text_has_echo(dialogo):
+                prompt_echo.log_prompt_echo(stage="buffered", source=source, chars=len(dialogo))
+                guard_allowed, guard_reason = False, prompt_echo.PROMPT_ECHO_REASON
+            # T3 (vision-and-prompt-leaks): internal markers and the third-person owner.
+            if guard_allowed:
+                leak = prompt_echo.leak_kind(dialogo, source)
+                if leak is not None:
+                    prompt_echo.log_prompt_leak(
+                        stage="buffered", source=source, kind=leak, chars=len(dialogo)
+                    )
+                    guard_allowed, guard_reason = False, prompt_echo.PROMPT_LEAK_REASON
+            # T2: the stateless output guard cannot know whether a search ran;
+            # a reply that claims one on a no-search turn takes the same path.
+            if guard_allowed:
+                claim_rule = search_claim.violated_rule(dialogo, setup)
+                if claim_rule is not None:
+                    search_claim.log_claim(claim_rule, stage="buffered", source=source, chars=len(dialogo))
+                    guard_allowed, guard_reason = False, search_claim.reason_for(claim_rule)
 
         # 7. Chat repetition check
         repetition_verdict: Optional[RepetitionVerdict] = None

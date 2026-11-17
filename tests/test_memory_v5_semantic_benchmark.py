@@ -606,7 +606,11 @@ class TestPublicationOwnership:
         assert after_close_ptr == before_ptr_bytes
         assert after_close_diag == before_diag_bytes
         assert json.loads(after_close_diag.decode("utf-8"))["run_id"] != temp_run_id
-        assert json.loads(after_close_ptr.decode("utf-8"))["current_run_id"] == before_ptr_json["current_run_id"]
+        # The committed repo pointer is a historical artifact with its own shape
+        # (a1b0af5: "latest_valid_run_id", no "current_run_id"). Its bytes are
+        # already pinned equal above; here it must never name the temp run.
+        assert json.loads(after_close_ptr.decode("utf-8")) == before_ptr_json
+        assert temp_run_id not in after_close_ptr.decode("utf-8")
         gens_after = set((REPO_ROOT / "docs" / "memory_v5" / "generations").iterdir())
         assert gens_before == gens_after, "repo generations mutated"
 

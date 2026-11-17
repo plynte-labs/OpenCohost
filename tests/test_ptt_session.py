@@ -16,6 +16,7 @@ import collections
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from unittest.mock import MagicMock
@@ -282,6 +283,115 @@ def test_antiloop_regex_collapses_repeats_before_dispatch(monkeypatch):
     assert rec.flushes == ["hola mundo"]
 
 
+def _flush_after_frames(monkeypatch, frames):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec)
+    session.start()
+    for frame in frames:
+        ws.inbox.append(json.dumps(frame))
+    time.sleep(0.1)
+    session.stop()
+    _wait_state(session, "idle")
+    return rec.flushes
+
+
+def test_replay_frame_is_ignored(monkeypatch):
+    # LiveAudio's late-joiner replay burst tags old cues is_replay=true.
+    flushes = _flush_after_frames(
+        monkeypatch,
+        [{"text": "old utterance", "is_replay": True}, {"text": "fresh words", "is_replay": False}],
+    )
+    assert flushes == ["fresh words"]
+
+
+def test_dropped_replays_are_counted_on_the_outcome_line(monkeypatch, caplog):
+    # A silent is_replay drop made empty holds undiagnosable: the outcome line
+    # must say how many frames were dropped and their worst total_delay.
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec)
+        session.start()
+        ws.inbox.append(json.dumps({"text": "late one", "is_replay": True, "total_delay": 1.25}))
+        ws.inbox.append(json.dumps({"text": "late two", "is_replay": True, "total_delay": 3.5}))
+        time.sleep(0.1)
+        session.stop()
+        _wait_state(session, "idle")
+
+    assert rec.flushes == []
+    empty = [m for m in _session_log_messages(caplog) if m.startswith("[PTT] empty")][0]
+    assert "replays_dropped=2" in empty
+    assert "replay_max_delay_ms=3500" in empty
+    assert "late one" not in empty and "late two" not in empty
+
+
+def _flush_with_frames_built_after_connect(monkeypatch, caplog, build_frames):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec)
+        session.start()
+        for frame in build_frames():
+            ws.inbox.append(json.dumps(frame))
+        time.sleep(0.1)
+        session.stop()
+        _wait_state(session, "idle")
+    lines = _session_log_messages(caplog)
+    outcome = [m for m in lines if m.startswith("[PTT] flushed") or m.startswith("[PTT] empty")][0]
+    return rec.flushes, outcome
+
+
+def test_delayed_live_cue_flagged_replay_is_kept(monkeypatch, caplog):
+    # LiveAudio flags a live cue older than 1 s as is_replay. One created after
+    # this hold's socket connected is the owner's own speech, not a replay.
+    flushes, outcome = _flush_with_frames_built_after_connect(
+        monkeypatch, caplog,
+        lambda: [{"text": "slow asr words", "is_replay": True, "created_at": time.time(), "total_delay": 2.0}],
+    )
+    assert flushes == ["slow asr words"]
+    assert "replays_dropped=0" in outcome and "replays_live_kept=1" in outcome
+
+
+def test_replay_created_before_connect_is_dropped(monkeypatch, caplog):
+    flushes, outcome = _flush_with_frames_built_after_connect(
+        monkeypatch, caplog,
+        lambda: [
+            {"text": "previous hold words", "is_replay": True, "created_at": time.time() - 60.0},
+            {"text": "fresh live words", "is_replay": False, "created_at": time.time()},
+        ],
+    )
+    assert flushes == ["fresh live words"]
+    assert "replays_dropped=1" in outcome and "replays_live_kept=0" in outcome
+
+
+def test_outcome_line_reports_zero_replays_when_none_dropped(monkeypatch, caplog):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec)
+        session.start()
+        ws.inbox.append(json.dumps({"text": "live words here", "is_replay": False}))
+        time.sleep(0.1)
+        session.stop()
+        _wait_state(session, "idle")
+
+    flushed = [m for m in _session_log_messages(caplog) if m.startswith("[PTT] flushed")][0]
+    assert "replays_dropped=0 replay_max_delay_ms=0" in flushed
+
+
+def test_live_frame_with_is_replay_false_is_kept(monkeypatch):
+    assert _flush_after_frames(monkeypatch, [{"text": "live words", "is_replay": False}]) == ["live words"]
+
+
+def test_frame_without_is_replay_is_kept(monkeypatch):
+    assert _flush_after_frames(monkeypatch, [{"text": "legacy words"}]) == ["legacy words"]
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # stop -> grace -> flush -> dispatch
 # ──────────────────────────────────────────────────────────────────────────
@@ -479,6 +589,16 @@ def test_dispatch_sends_ptt_wrapper_prompt_and_ptt_history_wrapper_history_text(
     assert call["payload"] == "El streamer acaba de decir (PTT): hola mundo esto es una prueba"
     assert call["history_text"] == "El streamer dijo (PTT): hola mundo esto es una prueba"
     assert call["key"] is None
+
+
+def test_dispatch_drops_empty_and_whitespace_transcript():
+    disp = _RecordingDispatcher()
+    controller = PttController("ws://test/whisperlive", disp, MagicMock())
+
+    controller._dispatch("")
+    controller._dispatch("   \t\n  ")
+
+    assert len(disp.calls) == 0, "empty or whitespace-only speech must be dropped without dispatch"
 
 
 def test_dispatch_stamps_submitted_at_monotonic():
@@ -859,10 +979,10 @@ def test_deadman_timer_eventually_releases_hold_on_client_abandonment(monkeypatc
     router.stop(timeout=5.0)
 
 
-def test_controller_keepalive_starvation_preserves_hold_until_explicit_stop(monkeypatch):
-    """End-to-end controller physical hold contract: when a session dies from
-    keepalive starvation, PttController must NOT immediately clear the hold.
-    The SpeechRouter remains held until the operator's explicit stop() arrives."""
+def test_controller_keepalive_starvation_releases_hold_at_close(monkeypatch):
+    """End-to-end: when a session dies from keepalive starvation, the closed
+    session can no longer hear the mic, so PttController releases the hold at
+    close (ptt-stall G1) rather than waiting for the deadman."""
     motor = _armed_motor()
     ws = _FakeWS()
     _patch_connect(monkeypatch, ws=ws)
@@ -884,13 +1004,71 @@ def test_controller_keepalive_starvation_preserves_hold_until_explicit_stop(monk
         time.sleep(0.02)
     assert controller._session is None
 
-    # Invariant: Hold MUST still be active via deadman fail-safe!
-    assert router._ptt_held is True
+    # ptt-stall G1: the session is closed, so the hold is already released at
+    # close (no 15 s deadman wait); the later explicit stop is a safe no-op.
+    assert router._ptt_held is False
 
-    # Explicit physical stop arrives -> clears the hold immediately
     controller.stop(session_id)
     assert router._ptt_held is False
     router.stop(timeout=5.0)
+
+
+def test_starvation_close_releases_hold_without_waiting_for_deadman(monkeypatch):
+    """ptt-stall G1: after keepalive starvation the STT session is closed (no
+    live mic), so the speech hold must release at close, not 15 s later."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    armed = []
+    monkeypatch.setattr(controller, "_arm_deadman", lambda *a, **k: armed.append((a, k)))
+    try:
+        controller.start()
+        router = motor._speech_router
+        assert router._ptt_held is True
+
+        created[0]._on_close("keepalive_starvation")
+
+        assert router._ptt_held is False
+        assert armed == [], "starvation close must not rely on the deadman"
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_starvation_close_of_old_session_does_not_release_newer_press(monkeypatch):
+    """ptt-stall G1 epoch guard: a stale session's late starvation close must
+    never release the hold of a newer press."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    try:
+        controller.start()
+        router = motor._speech_router
+        old_close = created[0]._on_close
+        created[0].state = "idle"
+        controller._session = None  # old session left the slot; press 2 wins it
+        controller.start()
+        assert len(created) == 2
+        assert router._ptt_held is True
+
+        old_close("keepalive_starvation")
+
+        assert router._ptt_held is True, "stale close released the newer press"
+    finally:
+        motor._speech_router.stop(timeout=5.0)
+
+
+def test_other_error_close_still_arms_deadman_instead_of_releasing(monkeypatch):
+    """Only keepalive starvation is released at close; a WS drop keeps the
+    deadman fail-safe (unchanged behavior)."""
+    motor = _armed_motor()
+    controller, created = _slot_controller(motor)
+    armed = []
+    monkeypatch.setattr(controller, "_arm_deadman", lambda *a, **k: armed.append(a))
+    try:
+        controller.start()
+        created[0]._on_close("stt_lost")
+        assert motor._speech_router._ptt_held is True
+        assert len(armed) == 1
+    finally:
+        motor._speech_router.stop(timeout=5.0)
 
 
 def test_controller_stale_session_stop_cannot_clear_newer_session_hold(monkeypatch):
@@ -1157,4 +1335,217 @@ def test_default_grace_is_1_point_2_seconds():
     assert session._grace == 1.2
 
     controller = PttController("ws://dummy", MagicMock(), MagicMock())
-    assert controller._session_kwargs.get("grace") == 1.2
+    # Adaptive grace (ptt-adaptive-grace-20261013): the controller no longer
+    # pins a constant; it resolves per press (see test_ptt_adaptive_grace.py).
+    assert "grace" not in controller._session_kwargs
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# K2 (warmth-guardrails-runtime-20261006): session-log outcome lines + the
+# late final STT segment race.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _session_log_messages(caplog):
+    # The session log file handler lives on the "OpenCohost" logger tree.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "OpenCohost" or r.name.startswith("OpenCohost.")
+    ]
+
+
+def test_flush_and_empty_holds_reach_the_session_log_with_counts_only(monkeypatch, caplog):
+    sentinel = "secret banana phrase alpha bravo charlie"
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+
+    with caplog.at_level(logging.DEBUG):
+        session = _fast_session(rec)
+        session.start()
+        ws.feed_text(sentinel)
+        time.sleep(0.1)
+        session.stop()
+        _wait_state(session, "idle")
+
+        ws2 = _FakeWS()
+        _patch_connect(monkeypatch, ws=ws2)
+        session2 = _fast_session(rec)
+        session2.start()
+        ws2.feed_text("hola")  # below the 2-word floor
+        time.sleep(0.05)
+        session2.stop()
+        _wait_state(session2, "idle")
+
+    lines = _session_log_messages(caplog)
+    joined = "\n".join(lines)
+    assert any("[PTT] started" in m for m in lines)
+    assert any(m.startswith("[PTT] stopped") and "hold_ms=" in m for m in lines)
+    assert any(m.startswith("[PTT] flushed") and "words=6" in m for m in lines)
+    assert any(
+        m.startswith("[PTT] empty") and "words=1" in m and "reason=below_min_words" in m
+        for m in lines
+    )
+    assert sentinel not in joined and "hola" not in joined.replace("hold", "")
+
+
+def test_empty_hold_without_any_transcript_logs_reason_no_transcript(monkeypatch, caplog):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec)
+        session.start()
+        session.stop()
+        _wait_state(session, "idle")
+
+    lines = _session_log_messages(caplog)
+    assert any(
+        m.startswith("[PTT] empty") and "words=0" in m and "reason=no_transcript" in m
+        for m in lines
+    )
+
+
+def test_ws_drop_error_reaches_the_session_log(monkeypatch, caplog):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec)
+        session.start()
+        ws.closed = True
+        _wait_state(session, "idle")
+
+    assert any(
+        m.startswith("[PTT] error") and "stt_lost" in m for m in _session_log_messages(caplog)
+    )
+
+
+def test_final_segment_arriving_shortly_after_grace_is_still_flushed(monkeypatch):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, grace=0.15)
+    session.start()
+    ws.feed_text("primera parte")
+    time.sleep(0.05)
+    session.stop()
+    # Lands 0.3 s AFTER the 0.15 s grace window has expired.
+    threading.Timer(0.15 + 0.3, lambda: ws.feed_text("segmento final")).start()
+    _wait_state(session, "idle", timeout=5.0)
+
+    assert rec.flushes == ["primera parte segmento final"]
+
+
+def test_late_drain_is_bounded_and_does_not_hang_on_silence(monkeypatch):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, grace=0.1)
+    session.start()
+    ws.feed_text("hola amigos")
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    session.stop()
+    _wait_state(session, "idle", timeout=5.0)
+    elapsed = time.monotonic() - t0
+
+    assert rec.flushes == ["hola amigos"]
+    assert elapsed < 0.1 + 0.5 + 0.35  # grace + <=500 ms drain + scheduling slack
+    assert session._late_drain <= 0.5
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ptt-grace-latency-20261013: tail extension + numbers-only timing fields.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _timing(line):
+    return {k: int(v) for k, v in re.findall(r"(since_stop_ms|grace_ms|extensions|late_segments)=(\d+)", line)}
+
+
+def test_flushed_and_empty_lines_carry_numbers_only_timing(monkeypatch, caplog):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    with caplog.at_level(logging.INFO):
+        session = _fast_session(rec, grace=0.3)
+        session.start()
+        ws.feed_text("one two three four")
+        time.sleep(0.05)
+        session.stop()
+        time.sleep(0.1)
+        ws.feed_text("five six")  # during grace -> one extension
+        _wait_state(session, "idle")
+
+        ws2 = _FakeWS()
+        _patch_connect(monkeypatch, ws=ws2)
+        s2 = _fast_session(rec, grace=0.1)
+        s2.start()
+        s2.stop()
+        _wait_state(s2, "idle")
+
+    lines = _session_log_messages(caplog)
+    flushed = [m for m in lines if m.startswith("[PTT] flushed")][0]
+    t = _timing(flushed)
+    assert t["grace_ms"] == 300 and t["extensions"] == 1 and t["late_segments"] == 0
+    assert t["since_stop_ms"] >= 300
+    empty = [m for m in lines if m.startswith("[PTT] empty")][0]
+    te = _timing(empty)
+    assert te["grace_ms"] == 100 and te["extensions"] == 0 and te["since_stop_ms"] >= 100
+    assert "five six" not in "\n".join(lines)
+
+
+def test_segment_during_grace_extends_by_tail_not_full_grace(monkeypatch):
+    rec = _Recorder()
+    ws = _FakeWS()
+    _patch_connect(monkeypatch, ws=ws)
+    session = _fast_session(rec, grace=1.0, tail_extension=0.2, late_drain=0.0)
+    session.start()
+    session.stop()
+    time.sleep(0.5)
+    t0 = time.monotonic()
+    ws.feed_text("late words here")
+    _wait_state(session, "idle", timeout=3.0)
+    # Deadline was stop+1.0 (~0.5s left); a 0.2s tail must not push it out.
+    assert time.monotonic() - t0 < 0.9
+    assert rec.flushes == ["late words here"]
+
+
+def test_quick_tap_during_connecting_triggers_stopped_early(monkeypatch):
+    rec = _Recorder()
+    connect_started = threading.Event()
+    can_connect = threading.Event()
+
+    class _PausingConnect:
+        async def __aenter__(self):
+            connect_started.set()
+            can_connect.wait(timeout=2.0)
+            return _FakeWS()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        ptt_session_mod.websockets,
+        "connect",
+        lambda uri, **kw: _PausingConnect(),
+    )
+    session = _fast_session(rec)
+    t = threading.Thread(target=session.start)
+    t.start()
+    try:
+        assert connect_started.wait(timeout=2.0)
+        assert session.state == "connecting"
+        session.stop()
+        can_connect.set()
+        t.join(timeout=3.0)
+        _wait_state(session, "idle", timeout=3.0)
+        assert "started" in rec.events
+        assert "stopped_early" in rec.events
+        assert len(rec.closes) == 1
+    finally:
+        can_connect.set()
+        t.join(timeout=1.0)
+

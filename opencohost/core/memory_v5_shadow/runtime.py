@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from opencohost.core.memory_v5_shadow.episodes import EpisodeSegmentationEngine
 from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
@@ -64,6 +64,11 @@ class MemoryRuntime:
         self._session_reducer = SessionFormationReducer()
         self._episode_engine = EpisodeSegmentationEngine()
         self._semantic_cache = semantic_cache
+        # Called on the worker thread after SHUTDOWN segmentation closes
+        # episodes (wired by MemorySubsystem to the semantic indexer).
+        self._episodes_closed_listener: Optional[Callable[[], Any]] = None
+        # Owner-visible drop warnings are emitted once per reason code.
+        self._warned_drop_reasons: set[str] = set()
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._store.start_run(self.run_id, started_at)
         self._store.recover_unclean_runs(
@@ -80,6 +85,21 @@ class MemoryRuntime:
     @property
     def store(self) -> ShadowStore:
         return self._store
+
+    def set_episodes_closed_listener(self, listener: Optional[Callable[[], Any]]) -> None:
+        self._episodes_closed_listener = listener
+
+    def _warn_drop_once(self, reason: str, exc_type: Optional[str] = None) -> None:
+        """WARNING (codes only, never content), once per reason per run."""
+        key = f"{reason}:{exc_type or ''}"
+        with self._lock:
+            if key in self._warned_drop_reasons:
+                return
+            self._warned_drop_reasons.add(key)
+        if exc_type:
+            logger.warning("memory_v5: drop reason=%s exc=%s", reason, exc_type)
+        else:
+            logger.warning("memory_v5: drop reason=%s", reason)
 
     def allocate_sequences(self, count: int = 1) -> tuple[int, ...]:
         with self._adm_lock:
@@ -134,11 +154,15 @@ class MemoryRuntime:
                 if self._admission_closed or not self._capture_enabled:
                     with self._lock:
                         self._dropped += 2
+                    self._warn_drop_once(
+                        "admission_closed" if self._admission_closed else "capture_disabled"
+                    )
                     return None
                 cap = max(1, self._maxsize - self._reserved)
                 if self._queue.qsize() >= cap:
                     with self._lock:
                         self._dropped += 2
+                    self._warn_drop_once("queue_full")
                     return None
                 if (
                     not user_snap.stream_sequence
@@ -180,9 +204,10 @@ class MemoryRuntime:
         except queue.Full:
             with self._lock:
                 self._dropped += 2
+            self._warn_drop_once("queue_full")
             return None
-        except Exception:
-            logger.debug("shadow record_turn_exchange fail-open", exc_info=True)
+        except Exception as exc:
+            self._warn_drop_once("enqueue_exception", type(exc).__name__)
             return None
 
     def record_drop(self, count: int = 1, reason: str = "") -> None:
@@ -505,10 +530,28 @@ class MemoryRuntime:
                                 self._episode_engine.segment_all_from_db(
                                     self.db_path, persist=True
                                 )
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            except Exception as exc:
+                                logger.warning(
+                                    "memory_v5: shutdown_segmentation failed exc=%s",
+                                    type(exc).__name__,
+                                )
+                        listener = self._episodes_closed_listener
+                        if listener is not None:
+                            try:
+                                indexed = listener()
+                                logger.info(
+                                    "memory_v5: closure_index indexed=%s",
+                                    indexed if isinstance(indexed, int) else "?",
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "memory_v5: closure_index failed exc=%s",
+                                    type(exc).__name__,
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            "memory_v5: shutdown_event failed exc=%s", type(exc).__name__
+                        )
                     finally:
                         self._queue.task_done()
                     continue
@@ -565,16 +608,20 @@ class MemoryRuntime:
                                     self._degraded = True
                                     self._capture_enabled = False
                                     self._control_failures += 1
+                                self._warn_drop_once("integrity_collision_capture_disabled")
                             elif out.outcome == "STORE_FAILURE":
                                 with self._lock:
                                     self._degraded = True
                                     self._capture_enabled = False
                                     self._dropped += 1
-                except Exception:
+                                self._warn_drop_once(
+                                    f"store_failure_capture_disabled code={out.reason_code}"
+                                )
+                except Exception as exc:
                     with self._lock:
                         self._dropped += 1
                         self._degraded = True
-                    logger.debug("shadow worker insert fail-open", exc_info=True)
+                    self._warn_drop_once("worker_insert_exception", type(exc).__name__)
                 finally:
                     self._queue.task_done()
         finally:

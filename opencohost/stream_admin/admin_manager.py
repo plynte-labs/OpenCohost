@@ -6,7 +6,7 @@ import yaml
 
 from .analytics import AnalyticsTracker
 from .moderation import ModerationEngine
-from .oauth_store import OAuthStore, redact_token_text
+from .oauth_store import OAuthStore, redact_token_text, restrict_file_permissions
 from .providers import ProviderAuthError, ProviderError, ProviderUnsupportedError, StreamMetadata
 from .twitch_provider import TwitchProvider
 from .youtube_provider import YouTubeProvider
@@ -72,6 +72,14 @@ class AdminManager:
             "client_config_path": self.oauth_client_path,
         }
 
+    def _restrict_permissions(self, path: Optional[str] = None) -> bool:
+        """Cross-platform helper to restrict permissions on sensitive files."""
+        target = path or self.oauth_client_path
+        restricted = restrict_file_permissions(target)
+        if not restricted:
+            self._log("No se pudieron restringir los permisos de un archivo sensible")
+        return restricted
+
     def save_oauth_client_config(self, client_id: str, client_secret: str):
         client_id = (client_id or "").strip()
         client_secret = (client_secret or "").strip()
@@ -80,10 +88,7 @@ class AdminManager:
         os.makedirs(os.path.dirname(self.oauth_client_path), exist_ok=True)
         with open(self.oauth_client_path, "w", encoding="utf-8") as f:
             json.dump({"client_id": client_id, "client_secret": client_secret}, f, indent=2)
-        try:
-            os.chmod(self.oauth_client_path, 0o600)
-        except Exception:
-            pass
+        self._restrict_permissions(self.oauth_client_path)
         self.config.setdefault("youtube", {})["client_id"] = client_id
         self.config.setdefault("youtube", {})["client_secret"] = client_secret
         youtube = self.providers.get("youtube")

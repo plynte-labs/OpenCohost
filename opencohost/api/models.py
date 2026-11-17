@@ -7,7 +7,10 @@ shortened `ready`/`speaking`/`processing` forms.
 
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StringConstraints
+
+from opencohost.config.setup_checkpoint import SetupCheckpoint
+from opencohost.config.setup_checkpoint import SetupCheckpointBody as SetupCheckpointRequest
 
 # Agent provenance name — REQUIRED non-blank in every agent write (design
 # 'Provenance'). Blank/whitespace would be stored as '' — which
@@ -23,10 +26,18 @@ class ModelCatalogEntry(BaseModel):
     desc: str
     size_gb: float
     family: str
+    # Minimum recommended VRAM in GB; 0 = runs acceptably on CPU only.
+    min_vram_gb: float = 0.0
 
 
 class HealthState(BaseModel):
-    """Mirrors `opencohost.core.observability.health_monitor.MonitorState`."""
+    """Mirrors `opencohost.core.observability.health_monitor.MonitorState`.
+
+    RETIRED 2026-09-21: `qwen_status`/`qwen_lifecycle` are kept for
+    backward wire compatibility with the Tauri UI (StatusRail) and always
+    report "unavailable"/"stopped" — Qwen3-TTS lives in a separate legacy repository
+    and is no longer packaged. Do not add new consumers.
+    """
 
     vram_status: str
     rtf_status: str
@@ -140,6 +151,14 @@ class SwitchProfileRequest(BaseModel):
     idempotency_key: Optional[str] = None
 
 
+# K5 (warmth-guardrails-runtime-20261006): per-profile emotional warmth. Mirrors
+# opencohost.config.warmth.WARMTH_LEVELS (a test pins the two together).
+WarmthLevel = Literal["cold", "empathetic", "in_character", "free", "sentimental"]
+# kira-personal-tone-20261007 P5: optional grammatical gender for addressing the
+# owner; "" = unknown. Mirrors opencohost.config.owner_gender.OWNER_GENDERS.
+OwnerGender = Literal["", "masculine", "feminine", "neutral"]
+
+
 class ProfileDetailResponse(BaseModel):
     """GET /api/perfiles/{name} response (R8/D5).
 
@@ -159,6 +178,15 @@ class ProfileDetailResponse(BaseModel):
     # coherence gate (opencohost/i18n/coherence.py). None means "ungoverned"
     # (today's PROFILE_PERSONA_UNGOVERNED behavior) — profile always wins.
     locale: Optional[str] = None
+    extended_responses: bool = False
+    max_turns: int = 3
+    # vram-aware-context-budget T4: the engine's live history cap, derived
+    # from the active model's effective ctx (10 at 4096 or when unknown). The
+    # editor uses it as its input max; the engine still clamps on apply.
+    max_turns_cap: int = 10
+    # K5: stored value normalized on read (missing/unknown -> "cold").
+    warmth: WarmthLevel = "cold"
+    owner_gender: OwnerGender = ""
 
 
 class ProfileCreateRequest(BaseModel):
@@ -169,6 +197,10 @@ class ProfileCreateRequest(BaseModel):
     prompt: str
     use_system: bool = False
     locale: Optional[str] = None
+    extended_responses: bool = False
+    max_turns: Optional[int] = None
+    warmth: WarmthLevel = "cold"
+    owner_gender: OwnerGender = ""
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -183,6 +215,10 @@ class ProfileUpdateRequest(BaseModel):
     prompt: Optional[str] = None
     use_system: Optional[bool] = None
     locale: Optional[str] = None
+    extended_responses: Optional[bool] = None
+    max_turns: Optional[int] = None
+    warmth: Optional[WarmthLevel] = None
+    owner_gender: Optional[OwnerGender] = None
 
 
 class I18nBundleInfo(BaseModel):
@@ -256,6 +292,7 @@ class PersonalizationUpdateRequest(BaseModel):
     occupation: Optional[str] = None
     interests: Optional[str] = None
     custom_instructions: Optional[str] = None
+    locale: Optional[str] = None
 
 
 class CommandRequest(BaseModel):
@@ -285,8 +322,63 @@ class ChatTurnRequest(BaseModel):
     llm_engine.py). R8: `text` is NEVER echoed back in any response.
     """
 
-    text: str
+    text: str = ""
     idempotency_key: Optional[str] = None
+    # Route A: an optional pasted image. The vision model describes it and the
+    # chat LLM only ever sees that description as text. Never echoed or logged.
+    image: Optional["ChatTurnImage"] = None
+    # runtime-fixes-20261110 T7: up to chat_image.MAX_IMAGES images in one message,
+    # each described in its own vision call. Send ``image`` OR ``images``, not both.
+    images: Optional[list["ChatTurnImage"]] = None
+
+
+class ChatTurnImage(BaseModel):
+    """One pasted image: base64 (or a data URL) plus its mime type."""
+
+    data: str
+    mime_type: Optional[str] = None
+
+
+ChatTurnRequest.model_rebuild()
+
+
+class SpeechSayRequest(BaseModel):
+    """Wire shape for POST /api/speech/say (readaloud-speech T2).
+
+    `text` is owner-selected text to be spoken verbatim. R8: it is NEVER
+    echoed back in any response and never logged.
+    """
+
+    text: str
+    mode: Literal["queue", "now"] = "queue"
+
+
+class SpeechSayResponse(BaseModel):
+    job_id: int
+
+
+class SpeechDiscardResponse(BaseModel):
+    discarded: int
+
+
+class SpeechPauseResponse(BaseModel):
+    paused: bool
+
+
+class SpeechStateResponse(BaseModel):
+    """GET /api/speech/state: drives the Tauri playback bar."""
+
+    paused: bool
+    readaloud_active: bool
+    readaloud_pending: int
+
+
+class WebSourceOut(BaseModel):
+    """One source of a web answer (runtime-fixes-20261110 T5): a bare host and the
+    ``https://`` URL it came from. Built by code from what went into the prompt."""
+
+    host: str
+    url: str
 
 
 class ChatLastReplyResponse(BaseModel):
@@ -328,6 +420,30 @@ class ChatLastReplyResponse(BaseModel):
     answered_by_transport: Optional[str] = None
     submitted_under_provider: Optional[str] = None
     provider_changed_while_queued: Optional[bool] = None
+    fragments: Optional[list[str]] = None
+    is_streaming: Optional[bool] = None
+    web_searched: Optional[bool] = None
+    # Real sources of a web answer, at most 3, https only; null when there are none.
+    web_sources: Optional[list[WebSourceOut]] = None
+
+
+class ChatSpeechProgressResponse(BaseModel):
+    """GET /api/chat/speech-progress.
+    Real-time, in-memory speech playback progress for UI sentence tracking.
+    """
+
+    speaking: bool
+    turn_id: Optional[int] = None
+    current_idx: Optional[int] = None
+    played: int = 0
+    total: int = 0
+    # Follow-reading (additive): the ChatReplySink turn being spoken (null for
+    # read-aloud, vision readings, status lines), a per-job monotonic id, the
+    # speech source tag, and the exact TTS fragment playing now.
+    feed_turn_id: Optional[int] = None
+    job_id: Optional[int] = None
+    source: Optional[str] = None
+    fragment: Optional[str] = None
 
 
 class EventOut(BaseModel):
@@ -348,7 +464,12 @@ class EventOut(BaseModel):
     ts: float
     source: str
     action: str
-    detail: str | dict[str, int | float] | None = None
+    # vision-on-demand V1.5: `vision_looking` carries {"looking": bool}.
+    # V1.8: `vision_result` carries the outcome code string (e.g. "ok"); since
+    # live-session-fixes L7 it carries {outcome, id, describe_ms, frames_sent,
+    # mode} (codes, ids and counts only), so the dict also admits str/None.
+    # V1.13: `vision_describing` carries {"describing": True}.
+    detail: str | dict[str, bool | int | float | str | None] | None = None
 
 
 class EventLogResponse(BaseModel):
@@ -376,15 +497,33 @@ class HealthResponse(BaseModel):
 
     status: str
     engine_alive: bool
+    # starting | loading_model | ready | unavailable. Optional for older clients.
+    engine_state: Optional[Literal["starting", "loading_model", "ready", "unavailable"]] = None
+    # Additive identity fields (S6) for the desktop supervisor's reuse check.
+    # Exact names are a contract with the Rust side. None = unknown.
+    build_version: Optional[str] = None
+    install_id: Optional[str] = None
 
 
 class ModelReasoningConfig(BaseModel):
+    """T2 (controls-cleanup-adaptive-reasoning-20260928): ``budget_tokens``
+    is Optional now -- ``None`` means Auto (the adaptive budget engine
+    decides the generation budget at request time); a number is a REAL
+    manual cap on that adaptive estimate, not "the" budget. See
+    ``resolve_generation_budget`` in
+    ``opencohost/core/engine/llm_budget_engine.py``.
+    """
+
     enabled: bool = False
-    budget_tokens: int = 512
+    budget_tokens: Optional[int] = None
 
 
 class InferenceRuntimeState(BaseModel):
-    effective_budget: int = 512
+    # T2: best-effort and read-only -- under Auto there is no cheaply
+    # available "last known effective budget" to report from a GET handler
+    # (the adaptive engine resolves it live, per turn), so this is null
+    # rather than fabricated. Under a manual cap it mirrors that cap.
+    effective_budget: Optional[int] = None
     allocated_context: int = 4096
     calibration_state: str = "COLD"
     ewma_tps: float = 0.0
@@ -398,6 +537,40 @@ class UpdateModelReasoningRequest(BaseModel):
     budget_tokens: Optional[int] = None
     preset: Optional[str] = None
     model: Optional[str] = None
+
+
+class ModelContextConfig(BaseModel):
+    """GET/PUT /api/models/context (T2, model_context_auto_config_20260928).
+
+    Describes ONE model's context configuration -- the CURRENT/active model
+    on a GET /api/models read, or the model just written by the PUT. Mirrors
+    ``reasoning_config``'s existing single-model shape on ``ModelsResponse``
+    (that field also only ever describes the current model, never every
+    installed one) rather than introducing a new per-model dict structure.
+
+    ``context_tokens``: the EXPLICIT per-model override, or None = Auto.
+    ``auto_context_tokens``: what Auto (min(native, 16384), VRAM-clamped)
+    resolves to for this model's native ctx -- what the UI shows by default.
+    ``native_context``: the model's discovered capability ceiling, or None
+    when not yet discovered/cached.
+    ``effective_context``: the CURRENT runtime allocation
+    (``_resolve_effective_ctx_limit``'s result) -- None when it cannot be
+    computed without side effects (native ctx not yet cached).
+    ``policy``: "runtime_truth" or "requested" (whether an explicit override,
+    if any, is honored -- see ``VALID_CONTEXT_POLICIES``'s docstring).
+    """
+
+    model: str
+    context_tokens: Optional[int] = None
+    auto_context_tokens: int = 16384
+    native_context: Optional[int] = None
+    effective_context: Optional[int] = None
+    policy: str = "runtime_truth"
+
+
+class UpdateModelContextRequest(BaseModel):
+    model: str
+    context_tokens: Optional[int] = None
 
 
 class ModelsResponse(BaseModel):
@@ -415,6 +588,9 @@ class ModelsResponse(BaseModel):
     is_reasoning_active: bool = False
     reasoning_config: ModelReasoningConfig = Field(default_factory=ModelReasoningConfig)
     runtime_state: Optional[InferenceRuntimeState] = None
+    context_config: ModelContextConfig = Field(
+        default_factory=lambda: ModelContextConfig(model="")
+    )
 
 
 class MusicTrackOut(BaseModel):
@@ -522,7 +698,16 @@ class TTSConfigResponse(BaseModel):
     engine: str
     heavy_available: bool
     piper_available: bool = True
+    # Why Piper is unavailable: "package_missing" (piper-tts not importable) or
+    # "voice_file_missing" (the persisted voice's model file is not on disk).
+    # null when Piper is available or the cause is neither. A fixed code, never a path.
+    piper_unavailable_reason: Literal["package_missing", "voice_file_missing"] | None = None
     edge_tts_offline: bool = False
+    # Additive: the transient-failure breaker is open; last_error is a fixed code
+    # (offline | http_<status> | timeout | error), never free text.
+    edge_tts_degraded: bool = False
+    edge_tts_last_error: str | None = None
+    discard_speech_residue: bool = True
 
 
 class StreamChatLiveResponse(BaseModel):
@@ -671,10 +856,14 @@ class ObsTestResponse(BaseModel):
 class LlmProviderProfileOut(BaseModel):
     """One entry of `LlmProviderResponse.profiles` — never carries a key."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     base_url: str
     model: str
     preset: Optional[str] = None
     api_key_set: bool
+    # P2: the owner ticked "this model sees images" (custom models only).
+    model_vision: bool = False
 
 
 class LlmProviderResponse(BaseModel):
@@ -687,6 +876,10 @@ class LlmProviderResponse(BaseModel):
     active_provider: str
     fallback_mode: str
     pregen_enabled: bool
+    # T4 (live_session_fixes_20260925): "discard stale speech on a
+    # regenerated reply" -- default False, byte-identical to today's
+    # behavior. See MotorVocalIA._maybe_discard_stale_fallback_notice.
+    discard_stale_speech_on_regenerated_reply: bool
     profiles: dict[str, LlmProviderProfileOut]
 
 
@@ -718,15 +911,73 @@ class LlmProviderRequest(BaseModel):
     `active_provider`) MAY combine with it in one call (switch-then-delete).
     """
 
+    model_config = ConfigDict(protected_namespaces=())
+
     active_provider: Optional[str] = None
     fallback_mode: Optional[Literal["auto", "manual"]] = None
     pregen_enabled: Optional[bool] = None
+    discard_stale_speech_on_regenerated_reply: Optional[bool] = None
     profile_id: Optional[str] = None
     base_url: Optional[str] = None
     model: Optional[str] = None
     preset: Optional[str] = None
     api_key: Optional[str] = None
     delete_profile: Optional[str] = None
+    # P2: the "this model sees images" checkbox for a custom model (strict bool).
+    model_vision: Optional[StrictBool] = None
+
+
+class LlmProviderTestRequest(BaseModel):
+    """POST /api/llm/provider/test body. ``api_key`` is optional: when omitted
+    the key stored for ``profile_id`` is used. Write-only, never echoed."""
+
+    preset: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    profile_id: Optional[str] = None
+    # S11: also send ONE tiny chat completion to ``model`` (spends a few tokens).
+    # Off by default so callers that only want the key check stay free.
+    check_chat: bool = False
+    model: Optional[str] = None
+
+
+class LlmProviderTestResponse(BaseModel):
+    """POST /api/llm/provider/test response. ``error_code`` is one of the
+    fixed literals invalid_key | unreachable | rate_limited | unexpected
+    (stage 1, ``GET /models``; ``ok`` == ``models_ok``). Stage 2 (the chat
+    check) reports ``chat_ok`` (None when not run) and ``chat_error_code``
+    (cloud_auth | cloud_rate_limit | cloud_bad_request | timeout | cloud_error),
+    plus ``http_status`` and a sanitized ``provider_message`` of the failing
+    stage."""
+
+    ok: bool
+    error_code: Optional[str] = None
+    models_ok: bool = False
+    chat_ok: Optional[bool] = None
+    chat_error_code: Optional[str] = None
+    http_status: Optional[int] = None
+    provider_message: Optional[str] = None
+    models: list[str] = []
+    recommended: list[str] = []
+
+
+class LlmProviderPresetModelOut(BaseModel):
+    id: str
+    vision: bool
+
+
+class LlmProviderPresetOut(BaseModel):
+    """UI-facing view of one provider preset (no headers/params internals)."""
+
+    label: str
+    base_url: str
+    key_url: str
+    default_model: str
+    models: list[LlmProviderPresetModelOut]
+
+
+class LlmProviderPresetsResponse(BaseModel):
+    presets: dict[str, LlmProviderPresetOut]
 
 
 class AvatarConfigResponse(BaseModel):
@@ -742,13 +993,28 @@ class AvatarConfigRequest(BaseModel):
     """PUT /api/avatar/config body — a partial update.
 
     `state_images` keys are validated against `VALID_STATES` server-side
-    (unknown state -> 422) before anything is applied. Image UPLOAD is
-    deferred (owner decision) — values are paths only, never multipart.
+    (unknown state -> 422) before anything is applied. Values are paths only.
+    For real uploads (bytes copied server-side into user-data) use
+    POST /api/avatar/upload (`AvatarUploadRequest`).
     """
 
     enabled: Optional[bool] = None
     mode: Optional[str] = None
     state_images: Optional[dict[str, str]] = None
+
+
+class AvatarUploadRequest(BaseModel):
+    """POST /api/avatar/upload body — Tauri avatar upload (bytes, not paths).
+
+    `content_b64` is the raw image file bytes (base64). The server validates
+    state/extension/size/magic and copies into the user avatar dir as
+    `<state><ext>`, so the original file can be moved or deleted afterwards.
+    Cap: 10MB (`MAX_UPLOAD_BYTES`).
+    """
+
+    state: str
+    filename: str
+    content_b64: str
 
 
 class AgendaTopicOut(BaseModel):
@@ -874,10 +1140,28 @@ class AgendaSessionRequest(BaseModel):
     """
 
     profile: Optional[AgendaProfileRequest] = None
-    max_turns_per_topic: Optional[int] = None
+    max_turns_per_topic: Optional[int] = Field(default=None, ge=1, le=20)
     rhythm: Optional[str] = None
     response_length: Optional[str] = None
     safety_mode: Optional[str] = None
+
+
+class AgendaProgressionRequest(BaseModel):
+    """PUT /api/agenda/progression body (strict bool: no truthy-string coercion)."""
+
+    enabled: StrictBool
+
+
+class AgendaProgressionResponse(BaseModel):
+    """Agenda progression deck toggle state.
+
+    `variant` is the effective variant ('' when off); `env_override` is true
+    when OPENCOHOST_AGENDA_PROGRESSION is set and therefore wins over `enabled`.
+    """
+
+    enabled: bool
+    variant: str
+    env_override: bool
 
 
 class MemoriaStatsResponse(BaseModel):
@@ -942,6 +1226,10 @@ class MemoriaListItem(BaseModel):
     # imported=False, i.e. indistinguishable from an operator edit on every
     # surface. Metadata-only, mirrors `imported`'s derivation shape exactly.
     promoted: bool
+    # F3 (memory-paraphrase-contradiction-20260928): id of the newer row that
+    # replaced this one (the row is then also inactive=True), or None. Lets the
+    # UI show a "replaced by a newer memory" badge and offer a restore.
+    superseded_by: str | None = None
 
 
 class MemoriaListResponse(BaseModel):
@@ -974,6 +1262,8 @@ class MemoriaRowResponse(BaseModel):
     draft: bool
     # memory_promotion_20260725: mirrors MemoriaListItem.promoted.
     promoted: bool
+    # F3: mirrors MemoriaListItem.superseded_by.
+    superseded_by: str | None = None
 
 
 class MemoriaFlagsRequest(BaseModel):
@@ -1092,6 +1382,31 @@ class MemoriaNoticeRequest(BaseModel):
     dismissed: bool
 
 
+class MemoriaSettingsResponse(BaseModel):
+    """GET/POST /api/memoria/settings response — per-layer memory controls
+    (memory-semantic-recall T4), the effective runtime flags.
+
+    `memorias_enabled` is the read-only master switch; when False no layer
+    reaches the prompt. `facts` = fact-notebook rows; `episodes` = v5
+    episodic recall lines; `semantic` = MiniLM ranking/recall — off means
+    lexical-only facts and no episodes (episodic recall is embedding-only).
+    """
+
+    memorias_enabled: bool
+    facts: bool
+    episodes: bool
+    semantic: bool
+
+
+class MemoriaSettingsRequest(BaseModel):
+    """POST /api/memoria/settings body — partial update. An omitted layer is
+    left unchanged; a body with every layer omitted is a 422 no-op."""
+
+    facts: Optional[bool] = None
+    episodes: Optional[bool] = None
+    semantic: Optional[bool] = None
+
+
 class CohostProfileOut(BaseModel):
     """One cohost profile as returned by GET/POST /api/agenda/cohost-profiles."""
 
@@ -1120,12 +1435,14 @@ class CohostProfileSaveRequest(BaseModel):
     style: str
     priority: Optional[str] = None
     length: Optional[str] = None
+    locale: Optional[str] = None
 
 
 class CohostProfileSelectRequest(BaseModel):
     """POST /api/agenda/cohost-profiles/select body."""
 
     name: str
+    locale: Optional[str] = None
 
 
 class CohostProfileSelectResponse(BaseModel):
@@ -1144,6 +1461,9 @@ class MemoriaPurgeResponse(BaseModel):
     """POST /api/memoria/purge response body."""
 
     deleted: int
+    # Additive: whether the Memory v5 evidence/episodes/cache of the profile were
+    # purged too (True), the attempt failed (False), or there is no v5 (None).
+    v5_purged: Optional[bool] = None
 
 
 class AgentTopicRequest(BaseModel):
@@ -1214,6 +1534,12 @@ class AgentCardRequest(BaseModel):
     expires_at: str | None = None
     # Reusable by default (D1/D6); True opts the card into retire-on-first-use.
     single_use: bool = False
+    # Active-card fields: an agent may DRAFT them; activating is operator-only
+    # (POST /api/editorial/cards/{id}/activate).
+    must_say: list[str] = []
+    forbidden_claims: list[str] = []
+    discount_code: str = ""
+    link: str = ""
 
 
 class AgentCardResponse(BaseModel):
@@ -1229,6 +1555,9 @@ class AgentCardResponse(BaseModel):
     topic_slug: str
     status: str
     demoted: bool
+    # True when the rewrite deactivated the card (unreviewed agent content
+    # must never keep speaking as verified streamer data).
+    deactivated: bool = False
 
 
 class AgentCardListItem(BaseModel):
@@ -1243,6 +1572,7 @@ class AgentCardListItem(BaseModel):
     expires_at: str | None
     updated_at: str
     single_use: bool
+    active: bool = False
 
 
 class AgentCardsListResponse(BaseModel):
@@ -1324,6 +1654,15 @@ class PttStopRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class PttStartRequest(BaseModel):
+    """Optional POST /api/ptt/start body (ptt-dictation-20261111). ``origin``
+    ``companion`` marks a hold made from the desktop companion window, which
+    counts as background for the dictation decision. Any other value, or no
+    body at all, keeps today's behavior."""
+
+    origin: Optional[str] = None
+
+
 class PttStartResponse(BaseModel):
     session_id: str
     state: str
@@ -1391,20 +1730,44 @@ class PttStateResponse(BaseModel):
     last_error: Optional[str] = None
     stt_ws_url: Optional[str] = None
     stt_service: Optional[SttServiceStatus] = None
+    hotkey: str = "F10"
+    # ptt-dictation-20261111: send | foreground | always (a literal, never text).
+    dictation_mode: str = "send"
+    # P8: a companion hold dictates (in `always` mode) instead of always sending.
+    companion_dictation: bool = False
 
 
 class PttConfigRequest(BaseModel):
-    """PUT /api/ptt/config body. ``stt_ws_uri`` is optional — an omitted field
-    means "no change", so the PUT doubles as a read of the effective config
-    (there is no dedicated GET; the UI reads GET /api/ptt/state)."""
+    """PUT /api/ptt/config body. ``stt_ws_uri`` and ``hotkey`` are optional —
+    an omitted field means "no change", so the PUT doubles as a read of the
+    effective config (there is no dedicated GET; the UI reads GET /api/ptt/state)."""
 
     stt_ws_uri: Optional[str] = None
+    hotkey: Optional[str] = None
+    dictation_mode: Optional[str] = None
+    companion_dictation: Optional[StrictBool] = None
 
 
 class PttConfigResponse(BaseModel):
-    """The EFFECTIVE LiveAudio/WhisperLive URL after the write."""
+    """The EFFECTIVE LiveAudio/WhisperLive URL, hotkey and dictation mode after the write."""
 
     stt_ws_uri: str
+    hotkey: str = "F10"
+    dictation_mode: str = "send"
+    companion_dictation: bool = False
+
+
+class PttFocusRequest(BaseModel):
+    """POST /api/ptt/focus body (ptt-dictation-20261111): the MAIN window's
+    focus state. A boolean only; held in memory with a staleness bound."""
+
+    focused: bool
+
+
+class PttFocusResponse(BaseModel):
+    """``ok`` is False when the live controller cannot take focus reports."""
+
+    ok: bool
 
 
 class PttTestRequest(BaseModel):
@@ -1437,3 +1800,408 @@ class LlmReadinessResponse(BaseModel):
     cloud: dict
     hardware: dict
 
+
+
+# ── Model downloads (model-download-manager T3, ADR-063) ──────────────────
+
+ModelDownloadState = Literal[
+    "queued", "downloading", "paused", "retrying", "completed", "failed", "cancelled"
+]
+
+
+class ModelDownloadRequest(BaseModel):
+    """POST /api/models/downloads body. ``tag`` is validated by the router
+    (Ollama ``[namespace/]name[:tag]`` or ``hf.co/<owner>/<repo>[:<quant>]``)
+    so a bad tag answers ``422 {"detail": "invalid_tag"}``."""
+
+    tag: str
+
+
+class ModelDownloadJob(BaseModel):
+    """One download job. Progress numbers come from Ollama's pull stream;
+    after a resume they restart from Ollama's own checkpoint (never the
+    pre-pause value). ``error_category``/``error_type`` carry a fixed
+    category and an exception class name only -- never upstream text."""
+
+    id: str
+    tag: str
+    state: ModelDownloadState
+    phase: Optional[str] = None
+    total_bytes: Optional[int] = None
+    completed_bytes: Optional[int] = None
+    percent: Optional[float] = None
+    speed_bps: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    attempt: int = 0
+    retries_used: int = 0
+    error_category: Optional[str] = None
+    error_type: Optional[str] = None
+    interrupted: bool = False
+    installed: Optional[bool] = None
+    created_at: float
+    updated_at: float
+
+
+class ModelDownloadsResponse(BaseModel):
+    """GET /api/models/downloads -- the progress poll target (newest first)."""
+
+    jobs: list[ModelDownloadJob]
+    active_job_id: Optional[str] = None
+    max_retries: int
+
+
+class HfQuant(BaseModel):
+    quant: str
+    size_bytes: int
+    file_count: int
+    tag: str
+    vram_fit: Literal["fits", "tight", "too_large", "unknown"]
+
+
+class HfQuantsResponse(BaseModel):
+    """GET /api/models/hf/{owner}/{repo}/quants."""
+
+    owner: str
+    repo: str
+    vram_mb: Optional[int] = None
+    quants: list[HfQuant]
+
+
+class VisionInstalledModel(BaseModel):
+    """One installed Ollama tag. ``vision`` is None when its capability is unknown."""
+
+    tag: str
+    vision: Optional[bool] = None
+    size_bytes: Optional[int] = None
+
+
+class VisionSuggestedModel(BaseModel):
+    tag: str
+    display: str
+    size_gb: float
+    desc: str
+
+
+class VisionModelBenchmark(BaseModel):
+    """Static benchmark badge data for one vision tag (V1.19)."""
+
+    verdict: Literal["recommended", "light", "broken"]
+    vram_gib: Optional[float] = None
+    describe_s: Optional[float] = None
+    spanish: Optional[bool] = None
+    note: str
+    measured_on: str
+
+
+class VisionModelsResponse(BaseModel):
+    """GET /api/vision/models (vision-on-demand V1.17)."""
+
+    current: str
+    installed: list[VisionInstalledModel]
+    suggested: list[VisionSuggestedModel]
+    ollama_reachable: bool
+    benchmarks: dict[str, VisionModelBenchmark] = {}
+
+
+class ActiveCardRequest(BaseModel):
+    """POST /api/editorial/cards body (active cards, operator).
+
+    Validation is owned by the ``EditorialCard`` dataclass; its error string
+    becomes the 422 detail, like POST /api/agent/cards. The card lands DRAFT
+    and inactive with operator provenance (origin '').
+    """
+
+    topic: str
+    summary: str
+    streamer_take: str
+    counterpoints: list[str] = []
+    discussion_hooks: list[str] = []
+    triggers: list[str] = []
+    single_use: bool = False
+    must_say: list[str] = []
+    forbidden_claims: list[str] = []
+    discount_code: str = ""
+    link: str = ""
+
+
+class ActiveCardFieldsUpdate(BaseModel):
+    """PUT /api/editorial/cards/{id}/fields body: only the keys sent change."""
+
+    must_say: list[str] | None = None
+    forbidden_claims: list[str] | None = None
+    discount_code: str | None = None
+    link: str | None = None
+
+
+class ActiveCardOut(BaseModel):
+    """Full projection of one card with its active-card fields."""
+
+    id: str
+    topic: str
+    topic_slug: str
+    status: str
+    origin: str
+    summary: str
+    streamer_take: str
+    active: bool
+    single_use: bool
+    must_say: list[str]
+    forbidden_claims: list[str]
+    discount_code: str
+    link: str
+    updated_at: str
+
+
+class ActiveCardListResponse(BaseModel):
+    """GET /api/editorial/cards/active: every active card (possibly none)."""
+
+    cards: list[ActiveCardOut]
+
+
+class ActiveCardStateResponse(BaseModel):
+    id: str
+    active: bool
+
+
+class ActiveCardDisableResponse(BaseModel):
+    id: str
+    status: str
+
+
+class ActiveCardDeleteResponse(BaseModel):
+    id: str
+    deleted: bool
+
+
+class SetupStateRequest(BaseModel):
+    """PUT /api/setup/state."""
+
+    status: Literal["pending", "skipped", "completed"]
+
+
+class SetupStateResponse(BaseModel):
+    status: Literal["pending", "skipped", "completed"]
+    engine_ready: bool
+    engine: Optional[Literal["local", "cloud"]] = None
+    show_on_start: bool
+    # S10: where an interrupted setup resumes (non-secret answers only), and a
+    # one-shot flag when a bad checkpoint file was moved aside on this read.
+    checkpoint: Optional[SetupCheckpoint] = None
+    checkpoint_reset: Optional[Literal["corrupt", "unsupported_version"]] = None
+    # An earlier OpenCohost install was detected (read-only registry check).
+    legacy_install: bool = False
+
+
+class SetupCheckpointResponse(BaseModel):
+    """PUT/DELETE /api/setup/checkpoint."""
+
+    checkpoint: Optional[SetupCheckpoint] = None
+
+
+class SetupInferenceTestRequest(BaseModel):
+    """POST /api/setup/inference-test."""
+
+    runs: int = Field(default=3, ge=1, le=5)
+
+
+class SetupInferenceMetrics(BaseModel):
+    load_ms: Optional[float] = None
+    first_token_ms: Optional[float] = None
+    tokens_per_second: Optional[float] = None
+
+
+class SetupInferenceRun(SetupInferenceMetrics):
+    ok: bool
+
+
+class SetupInferenceTestResponse(BaseModel):
+    status: Literal["passed", "slow", "failed"]
+    provider: Literal["local", "cloud"]
+    model: Optional[str] = None
+    metrics: SetupInferenceMetrics
+    runs: list[SetupInferenceRun]
+    error_code: Optional[
+        Literal[
+            "ollama_unreachable",
+            "model_missing",
+            "timeout",
+            "cloud_auth",
+            "cloud_rate_limit",
+            "cloud_bad_request",
+            "cloud_error",
+            "busy",
+        ]
+    ] = None
+    # Cloud HTTP failures only: the status and a sanitized (no key), bounded
+    # excerpt of the provider's own error message.
+    http_status: Optional[int] = None
+    provider_message: Optional[str] = None
+    # Load time of the cold run (local Ollama only; null for cloud).
+    cold_load_ms: Optional[float] = None
+
+
+# reply-length-selector-20261009: owner reply length for Kira's owner turns.
+# Kept in step with opencohost.config.reply_length.MODES (a test pins it).
+ReplyLengthMode = Literal["auto", "short", "medium", "long", "very_long"]
+
+
+class ReplyLengthRequest(BaseModel):
+    """PUT /api/reply-length."""
+
+    mode: ReplyLengthMode
+
+
+class ReplyLengthResponse(BaseModel):
+    mode: ReplyLengthMode
+
+
+# laya-decision-layer-20261009: per-decision mode/threshold and worker status.
+# Kept in step with opencohost.config.decisions.MODES (a test pins it).
+DecisionModeLiteral = Literal["off", "shadow", "on"]
+
+
+class DecisionSetting(BaseModel):
+    mode: DecisionModeLiteral
+    threshold: float
+
+
+class DecisionSettingUpdate(BaseModel):
+    """One decision in PUT /api/decisions; omitted fields keep their value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Optional[DecisionModeLiteral] = None
+    threshold: Optional[float] = None
+
+
+class DecisionSettingsMap(BaseModel):
+    vision: DecisionSetting
+    memory: DecisionSetting
+    reply_length: DecisionSetting
+    respond: DecisionSetting
+    web: DecisionSetting
+    clock: DecisionSetting
+
+
+class DecisionUpdateMap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    vision: Optional[DecisionSettingUpdate] = None
+    memory: Optional[DecisionSettingUpdate] = None
+    reply_length: Optional[DecisionSettingUpdate] = None
+    respond: Optional[DecisionSettingUpdate] = None
+    web: Optional[DecisionSettingUpdate] = None
+    clock: Optional[DecisionSettingUpdate] = None
+
+
+class DecisionsRequest(BaseModel):
+    """PUT /api/decisions: a partial ``{decisions: {id: {mode?, threshold?}}}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: DecisionUpdateMap
+
+
+class DecisionWorkerStatus(BaseModel):
+    configured: bool
+    state: Literal["off", "starting", "ready", "error", "unavailable"]
+    checkpoint: Optional[str] = None
+    last_error: Optional[str] = None
+    # laya-decision-layer-20261009 T8: which runtime the worker uses.
+    engine: Optional[Literal["onnx", "torch"]] = None
+
+
+class DecisionsResponse(BaseModel):
+    decisions: DecisionSettingsMap
+    worker: DecisionWorkerStatus
+    budget_ms: int
+
+
+# web-fetch-laya-20261009: owner master switch for web lookups.
+class WebFetchRequest(BaseModel):
+    """PUT /api/web-fetch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+
+
+class WebFetchResponse(BaseModel):
+    enabled: bool
+
+
+class UpdateConfigRequest(BaseModel):
+    """PUT /api/update/config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+
+
+class UpdateConfigResponse(BaseModel):
+    enabled: bool
+
+
+class UpdateStatusResponse(BaseModel):
+    """GET /api/update (update-notification-20261111)."""
+
+    enabled: bool
+    current: str
+    latest: Optional[str] = None
+    newer: bool
+    url: Optional[str] = None
+
+
+class TavilyKeyRequest(BaseModel):
+    """Write-only credential. Empty deletes only the stored key; never probes Tavily."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr = Field(max_length=4096)
+
+
+class TavilyKeyResponse(BaseModel):
+    api_key_set: bool
+    stored_key_set: bool
+    source: Literal["none", "keyring", "environment", "environment_disabled"]
+    storage_available: bool
+
+
+# remote-voice-gateway-20261020 T2: operator side of phone pairing. Token
+# hashes never leave the registry, so no model here carries one.
+class RemotePairCodeResponse(BaseModel):
+    """POST /api/remote/pair-code: a one-time code, valid until expires_at (epoch s)."""
+
+    code: str
+    expires_at: float
+    gateway_port: int
+
+
+class RemoteDevice(BaseModel):
+    device_id: str
+    name: str
+    created_at: float
+    last_used_at: Optional[float] = None
+    revoked: bool
+
+
+class RemoteDevicesResponse(BaseModel):
+    devices: list[RemoteDevice]
+
+
+class RemoteMessage(BaseModel):
+    seq: int
+    text: str
+    accepted_at: float
+    device_id: str
+    device_label: str
+
+
+class RemoteMessagesResponse(BaseModel):
+    items: list[RemoteMessage]
+    latest_seq: int
+
+
+class RemoteRevokeResponse(BaseModel):
+    device_id: str
+    revoked: bool

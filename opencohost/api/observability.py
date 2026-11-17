@@ -49,7 +49,7 @@ import time
 
 from opencohost.api.auth import TokenFileError, _bearer_token, _resolve_role
 from opencohost.config import settings
-from opencohost.config.logger import SensitiveDataFilter, log_formatter
+from opencohost.config.logger import SensitiveDataFilter, SensitiveDataFormatter, log_formatter
 
 _API_LOGGER_NAME = "opencohost.api"
 _FILE_HANDLER_NAME = "opencohost-api-file"
@@ -62,7 +62,7 @@ _AUDIT_LOGGER_NAME = "opencohost.api.audit"
 _AUDIT_FILE_HANDLER_NAME = "opencohost-api-audit-file"
 _AUDIT_MAX_BYTES = 5 * 1024 * 1024
 _AUDIT_BACKUP_COUNT = 3
-_audit_json_formatter = logging.Formatter("%(message)s")
+_audit_json_formatter = SensitiveDataFormatter("%(message)s")
 
 _ACCIONES_MAX_LINES = 5000
 # Guards the append+trim pair in log_motor_accion below -- see its docstring.

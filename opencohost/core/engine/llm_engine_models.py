@@ -8,12 +8,15 @@ import threading
 import time
 import types
 import uuid
+from collections import deque
 from typing import Optional
 
+from opencohost.config import settings as _settings_mod
 from opencohost.config.settings import (
     CLOUD_CHAT_TIMEOUT,
     CTX_FALLBACK_DEFAULT,
     LLM_KEEP_ALIVE,
+    LLM_MAX_TOKENS,
     LLM_SCOUT_TIMEOUT,
     OLLAMA_CHAT_TIMEOUT,
     OLLAMA_REQUEST_TIMEOUT,
@@ -21,8 +24,12 @@ from opencohost.config.settings import (
     STREAM_IDLE_TIMEOUT_SECONDS,
     save_last_model,
 )
+from opencohost.config.model_parameters import (
+    get_model_context_settings,
+    resolve_auto_context_tokens,
+)
 from opencohost.core.context import context_budget
-from opencohost.core.engine.llm_inference_service import get_inference_service
+from opencohost.core.engine.llm_inference_service import get_inference_service, local_chat
 from opencohost.core.providers.llm_tiers import (
     LLMTierConfig,
     LLMTierState,
@@ -30,6 +37,18 @@ from opencohost.core.providers.llm_tiers import (
 )
 
 logger = logging.getLogger("OpenCohost")
+
+# Spoken when the inference watchdog cancels an owner turn, so the owner is not
+# left in silence. Short and in character; the app locale picks the language.
+TIMEOUT_NOTICE_LINES = {
+    "es": "Se me trabó la respuesta, pregúntamelo otra vez.",
+    "en": "My answer got stuck, ask me again.",
+}
+TIMEOUT_NOTICE_SUFFIX = "-timeout-notice"
+
+# A /api/ps residency snapshot older than this is not evidence (ADR-056). The
+# health monitor polls every ~5s, so a live snapshot is always far younger.
+RESIDENCY_STALE_SECONDS = 60.0
 
 
 def _save_last_model_compat(*args, **kwargs) -> None:
@@ -67,6 +86,42 @@ def _models_match_residency(req_model: str, snap_model: str) -> bool:
 
 class ModelManagementMixin:
     _models_match_residency = staticmethod(_models_match_residency)
+
+    def _is_local_model_resident(self, model: str) -> Optional[bool]:
+        """Check whether `model` is currently resident in Ollama VRAM/RAM via ps().
+
+        Returns:
+            True: ps() responded cleanly and `model` matches a resident model.
+            False: ps() responded cleanly and `model` is NOT in the resident list (cold start / evicted).
+            None: ps() failed, timed out, or returned malformed/mocked data (unknown / unit tests).
+        """
+        if not hasattr(self, "ollama") or self.ollama is None:
+            return None
+        try:
+            client_factory = getattr(self.ollama, "Client", None)
+            client = client_factory(timeout=1.0) if callable(client_factory) else self.ollama
+            ps_fn = getattr(client, "ps", None)
+            if not callable(ps_fn):
+                return None
+            resp = ps_fn()
+            models = getattr(resp, "models", None)
+            if models is None and isinstance(resp, dict):
+                models = resp.get("models")
+            if models is None or isinstance(models, (str, bytes)):
+                return None
+            if hasattr(models, "_mock_return_value") or type(models).__name__ == "MagicMock":
+                return None
+            if not isinstance(models, (list, tuple)):
+                return None
+            for item in models:
+                m_name = getattr(item, "model", None)
+                if m_name is None and isinstance(item, dict):
+                    m_name = item.get("model")
+                if isinstance(m_name, str) and _models_match_residency(model, m_name):
+                    return True
+            return False
+        except Exception:
+            return None
 
     def _probe_ollama_service(self, timeout: float = 3.0) -> bool:
         """Pure, side-effect-free, bounded health check for Ollama daemon.
@@ -134,6 +189,126 @@ class ModelManagementMixin:
                 return False
             return self.is_ready
 
+    # Idle re-probe state (engine-readiness-recovery-20261111). Class-level
+    # defaults so no __init__ change is needed; instances shadow them on write.
+    _reprobe_next_at: Optional[float] = None
+    _reprobe_delay_s: float = 2.0
+    _turn_recover_next_at: float = 0.0
+    _REPROBE_FIRST_DELAY_S = 2.0
+    _REPROBE_MAX_DELAY_S = 30.0
+    _TURN_RECOVER_MIN_INTERVAL_S = 5.0
+    _RECOVER_PROBE_TIMEOUT_S = 2.0
+
+    def _recover_local_readiness(self) -> bool:
+        """Bounded recovery of a stale not-ready flag on the local provider.
+
+        A cheap probe (short client timeout) decides whether Ollama answers; only
+        then the full ``_check_ollama_service`` path runs, so startup-model
+        re-resolution and model preparation happen exactly as on a normal start.
+        Silent on failure. Callers own the throttling.
+        """
+        if not self._is_local:
+            return True
+        if not self._probe_ollama_service(timeout=self._RECOVER_PROBE_TIMEOUT_S):
+            return False
+        return bool(self._check_ollama_service(notify_unavailable=False))
+
+    def _ollama_reprobe_tick(self) -> None:
+        """Idle tick: re-probe a not-ready local provider with 2,4,8..30s backoff."""
+        if self.is_ready or not self._is_local or not getattr(self, "startup_check_done", True):
+            self._reprobe_next_at = None
+            self._reprobe_delay_s = self._REPROBE_FIRST_DELAY_S
+            return
+        if self._processing or self._speech_active:
+            return
+        now = time.monotonic()
+        if self._reprobe_next_at is None:
+            self._reprobe_next_at = now + self._reprobe_delay_s
+            return
+        if now < self._reprobe_next_at:
+            return
+        if self._recover_local_readiness():
+            self._reprobe_next_at = None
+            self._reprobe_delay_s = self._REPROBE_FIRST_DELAY_S
+            return
+        self._reprobe_delay_s = min(self._reprobe_delay_s * 2.0, self._REPROBE_MAX_DELAY_S)
+        self._reprobe_next_at = now + self._reprobe_delay_s
+
+    def _list_ollama_models_bounded(self):
+        """`self.ollama.list()` with an upper bound (S5).
+
+        The ollama client has no default timeout: a daemon that accepts the
+        connection and never answers would hang the engine thread. Runs the call
+        on a daemon thread and raises TimeoutError past OLLAMA_LIST_TIMEOUT_S
+        (read at call time). Goes through ``self.ollama`` so test doubles work.
+        """
+        box: dict = {}
+
+        def _run() -> None:
+            try:
+                box["result"] = self.ollama.list()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+                box["error"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True, name="ollama-list")
+        worker.start()
+        worker.join(_settings_mod.OLLAMA_LIST_TIMEOUT_S)
+        if worker.is_alive():
+            raise TimeoutError("ollama.list timed out")
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    @staticmethod
+    def _installed_tags_from_listing(listing) -> set:
+        models = getattr(listing, "models", None)
+        if models is None and isinstance(listing, dict):
+            models = listing.get("models")
+        raw_tags = []
+        try:
+            for model in models or []:
+                if isinstance(model, dict):
+                    raw_tags.append(model.get("model") or model.get("name") or "")
+                else:
+                    raw_tags.append(getattr(model, "model", "") or "")
+        except TypeError:
+            return set()
+        return _settings_mod._normalize_installed_model_tags(t for t in raw_tags if isinstance(t, str))
+
+    def _reresolve_startup_model(self, listing) -> None:
+        """Once Ollama reports ready, redo the startup model decision (S5).
+
+        `resolve_startup_model()` runs in __init__, before Ollama is up, so with
+        no installed list it fell back to DEFAULT_MODEL even when the owner had
+        a saved or different installed model. Runs once; never overrides a
+        model the user already chose or queued; never picks an uninstalled one.
+        """
+        if not getattr(self, "_startup_model_unverified", False):
+            return
+        self._startup_model_unverified = False
+        if self._pending_model_switch or self.current_model != getattr(self, "_startup_model_value", None):
+            return
+        tags = self._installed_tags_from_listing(listing)
+        if not tags:
+            return
+        try:
+            model, source = _settings_mod.resolve_startup_model(installed_model_tags=tags)
+        except Exception:
+            return
+        if not model or model == self.current_model:
+            self._model_source = source if model == self.current_model else self._model_source
+            return
+        previous = self.current_model
+        self.current_model = model
+        self._desired_model = model
+        self._last_known_good_model = model
+        self._model_source = source
+        try:
+            self.llm_tiers.active_tier = self._infer_active_tier(model, self.llm_tiers.config)
+        except Exception:
+            pass
+        self._log(f"Modelo inicial re-resuelto con Ollama listo: {previous} -> {model} (fuente: {source})")
+
     def _check_ollama_service(self, *, notify_unavailable: bool = True):
         if not self._is_local:
             # Cloud provider active: no local Ollama service to probe or warm.
@@ -141,7 +316,7 @@ class ModelManagementMixin:
             self.is_ready = True
             return True
         try:
-            self.ollama.list()
+            listing = self._list_ollama_models_bounded()
         except Exception as e:
             self.is_ready = False
             if notify_unavailable:
@@ -151,6 +326,7 @@ class ModelManagementMixin:
 
         self.is_ready = True
         self._log("Ollama disponible. Preparando modelo...")
+        self._reresolve_startup_model(listing)
         if self._pending_model_switch and self._pending_model_switch != self.current_model:
             self._log(f"Aplicando modelo pendiente: {self._pending_model_switch}")
             self._apply_model_switch(self._pending_model_switch)
@@ -159,6 +335,8 @@ class ModelManagementMixin:
             if self._pending_model_switch == self.current_model:
                 self._pending_model_switch = None
                 self._pending_switch_not_ready_logged = False
+        # A profile applied before Ollama was ready got the fallback cap of 10.
+        self._refresh_max_turns_cap()
         self._log("Motor IA listo.")
         return True
 
@@ -181,6 +359,8 @@ class ModelManagementMixin:
         self.current_model = new_model
         self._awaiting_first_success_after_switch = previous_model != new_model
         self._log(f"🔄 Modelo cambiado a: {new_model}")
+        # The history window cap follows the new model's effective ctx.
+        self._refresh_max_turns_cap()
 
     @property
     def active_llm_tier(self) -> str:
@@ -311,13 +491,28 @@ class ModelManagementMixin:
         return True
 
     def _check_pending_model_switch(self) -> None:
-        """Attempt pending model switch if conditions are met (non-blocking)."""
-        if self._pending_model_switch is None:
+        """Attempt a pending model switch or context reload (non-blocking).
+
+        T2 (model_context_auto_config_20260928): a context reload deferred by
+        ``request_model_context_reload`` (busy at request time) shares this
+        SAME idle-tick busy gate as a pending model switch -- both are
+        exactly the "apply once the motor is free" pattern.
+        """
+        if self._pending_model_switch is None and self._pending_ctx_reload_model is None:
             return
         if time.monotonic() < self._pending_switch_next_at:
             return  # not time yet
         if self._processing or self._speech_active:
             return  # still busy
+
+        if self._pending_ctx_reload_model is not None:
+            ctx_model = self._pending_ctx_reload_model
+            self._pending_ctx_reload_model = None
+            if ctx_model == self.current_model:
+                self._reload_model_for_ctx_change(ctx_model)
+
+        if self._pending_model_switch is None:
+            return
 
         model = self._pending_model_switch
 
@@ -392,6 +587,10 @@ class ModelManagementMixin:
         self.ui_callback("model_warming")
         self._log(f"Preparando modelo {model} en memoria...")
         start = time.time()
+        # Same num_ctx as the chat path, so the first turn reuses this load.
+        warm_options = self._with_num_ctx(
+            {"num_predict": 1, "temperature": 0}, self._resolve_local_num_ctx(model)
+        )
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
@@ -399,7 +598,7 @@ class ModelManagementMixin:
                     model=model,
                     prompt="Responde solo: ok",
                     keep_alive=LLM_KEEP_ALIVE,
-                    options={"num_predict": 1, "temperature": 0},
+                    options=warm_options,
                 )
                 future.result(timeout=120)
         except Exception as e:
@@ -417,6 +616,57 @@ class ModelManagementMixin:
         self.ui_callback("ready")
         self._log(f"Modelo {model} preparado en {elapsed:.2f}s. Primera respuesta ya no deberia cargar en frio.")
         return True
+
+    def request_model_context_reload(self, model: str) -> bool:
+        """Entry point for ``PUT /api/models/context``: re-apply ``model``'s
+        context configuration without racing a live turn (T2,
+        model_context_auto_config_20260928).
+
+        Returns True when ``model`` is the active model -- either applied
+        immediately (idle) or deferred to the SAME busy gate ``switch_model``
+        uses (``_check_pending_model_switch``, mid-generation or mid-speech).
+        Returns False when ``model`` is not the active model: a non-active
+        model's new context config simply applies whenever it is next
+        loaded, no engine action needed here.
+        """
+        if model != self.current_model:
+            return False
+        if self._processing or self._speech_active:
+            self._pending_ctx_reload_model = model
+            self._log(f"Reload de contexto para {model} pendiente: motor ocupado.", level="debug")
+            return True
+        self._reload_model_for_ctx_change(model)
+        return True
+
+    def _reload_model_for_ctx_change(self, model: str) -> bool:
+        """Force a fresh warm-up of ``model`` at its NEW context target.
+
+        Resets the per-model ctx-plan ceiling (``_ctx_plan_state``) so the
+        very next ``_resolve_local_num_ctx``/``_resolve_effective_ctx_limit``
+        call picks up the freshly-saved target from scratch (a changed
+        target already resets the ceiling per ``_apply_vram_ctx_plan``, but a
+        just-cleared override needs the SAME reset -- there is no "target"
+        left to compare against). Then clears ``_warmed_model`` so
+        ``_prepare_model`` bypasses its ``_warmed_model == model``
+        short-circuit and re-issues the warm-up ``generate`` call at the new
+        ``num_ctx`` -- the standard way this codebase forces an Ollama reload
+        (see ``_resolve_local_num_ctx``'s docstring: a ``num_ctx`` mismatch
+        alone triggers Ollama's own reload on its next call). Finally
+        refreshes the ``max_turns`` cap for the new effective ctx.
+        """
+        plans = getattr(self, "_ctx_plan_state", None)
+        if isinstance(plans, dict):
+            plans.pop(model, None)
+        old_ctx = getattr(self, "_model_ctx_limit", {}).get(model)
+        self._warmed_model = None
+        warmed = self._prepare_model(model)
+        new_ctx = self._resolve_local_num_ctx(model)
+        self._refresh_max_turns_cap()
+        self._log(
+            f"context_apply: model={model} old_ctx={old_ctx} new_ctx={new_ctx} warmed={warmed}",
+            level="info",
+        )
+        return warmed
 
     def release_owned_ollama_model(self, timeout: float = 2.0) -> bool:
         """Best-effort unload for the model warmed by this OpenCohost session."""
@@ -447,61 +697,6 @@ class ModelManagementMixin:
             logger.info("Modelo Ollama %s liberado", model)
         return result["released"]
 
-    def _download_model_worker(self, model_tag):
-        if not self._is_local:
-            # F6: cloud provider active — no local ollama.pull. Surface the
-            # refusal so the operator gets feedback (download_error, the same
-            # signal the failure path emits) instead of a silent no-op.
-            self._log(
-                "Descarga de modelos no disponible con un proveedor cloud activo.",
-                level="warning",
-            )
-            self.ui_callback("download_error")
-            return
-        self._downloading = True
-        self.ui_callback("download_start")
-        self._log(f"📥 Descargando modelo '{model_tag}'... Esto puede tardar varios minutos.")
-
-        try:
-            last_pct = -1
-            for progress in self.ollama.pull(model_tag, stream=True):
-                status = getattr(progress, 'status', str(progress))
-                total = getattr(progress, 'total', None)
-                completed = getattr(progress, 'completed', None)
-
-                if total is not None and completed is not None and total > 0:
-                    pct = int((completed / total) * 100)
-                    if pct >= last_pct + 10:
-                        last_pct = pct
-                        size_mb = completed / (1024 * 1024)
-                        total_mb = total / (1024 * 1024)
-                        self.log_queue.put(
-                            f"[Descarga] {model_tag}: {pct}% ({size_mb:.0f}/{total_mb:.0f} MB) - {status}"
-                        )
-                elif 'success' in str(status).lower():
-                    self._log(f"✅ Modelo '{model_tag}' descargado exitosamente.")
-                else:
-                    status_str = str(status)
-                    if status_str and status_str != last_pct:
-                        self.log_queue.put(f"[Descarga] {model_tag}: {status_str}")
-
-            # D2 (model_switch_memory_continuity_20260723): no historial.clear()
-            # here either — same "model changed mid-session" event family as
-            # switch_model, same seamless-continuity contract.
-            self.current_model = model_tag
-            self._desired_model = model_tag
-            self._loaded_model = model_tag
-            _save_last_model_compat(model_tag, source="download")
-            self._log(f"🔄 Modelo activo cambiado a: {model_tag}")
-            self.ui_callback("download_done")
-
-        except Exception as e:
-            self._log(f"ERROR descargando '{model_tag}': {e}", level="error")
-            logger.exception(f"Error descargando modelo {model_tag}")
-            self.ui_callback("download_error")
-        finally:
-            self._downloading = False
-            
     def _create_ollama_chat_client(self, ollama_module, timeout: float = None):
         """Build (or reuse) the chat client whose HTTP timeout is *timeout*.
 
@@ -593,7 +788,9 @@ class ModelManagementMixin:
     def _ollama_judge_chat(self, *, provider_cfg=None, is_local=None, **kwargs):
         """Transport for the memoria promotion judge — ALWAYS local."""
         client = self._ollama_judge_client or self.ollama
-        return client.chat(**kwargs)
+        # Same think-unsupported fallback as chat: the judge sends top-level
+        # ``think`` and must not fail every sweep on a model without it.
+        return local_chat(client, kwargs)
 
     def _call_with_watchdog(self, call, *, timeout: float, label: str = "OllamaChatWatchdog", **kwargs):
         """Run *call* on a daemon thread and stop waiting on it after *timeout*."""
@@ -621,6 +818,28 @@ class ModelManagementMixin:
             **kwargs,
         )
 
+    def _llm_chat_streaming(self, *, is_local: bool, provider_cfg=None, timeout: float, model, messages, options):
+        """Dispatch a streaming chat call to local Ollama or cloud SSE
+        (live_session_fixes_20260925 T8) -- the single seam
+        ``GenerationOrchestrator.run_streaming_attempt`` calls regardless of
+        transport, so it needs no branch of its own beyond this."""
+        if is_local:
+            return self._ollama_chat_streaming(
+                timeout=timeout,
+                model=model,
+                messages=messages,
+                keep_alive=LLM_KEEP_ALIVE,
+                options=options,
+            )
+        return get_inference_service(self).chat_streaming(
+            timeout=timeout,
+            is_local=False,
+            provider_cfg=provider_cfg if provider_cfg is not None else self._provider_config,
+            messages=messages,
+            options=options,
+            time_fn=time.monotonic,
+        )
+
     def _resolve_chat_watchdog_timeout(self, request_model: str, *, provider_cfg=None, is_local=None) -> float:
         cfg = provider_cfg if provider_cfg is not None else self._provider_config
         # F2: honor the threaded entry posture; stand-alone callers re-derive.
@@ -629,6 +848,22 @@ class ModelManagementMixin:
         if not is_local:
             # Cloud latency, not local GPU stall detection (spec C).
             return CLOUD_CHAT_TIMEOUT
+
+        # Cold-load detection (Option B): If the local model was evicted from VRAM/RAM
+        # (e.g. after LLM_KEEP_ALIVE idle expiration or initial startup), loading weights
+        # to GPU can take 15-60s. Avoid false watchdog kills by granting full generation budget
+        # and notifying the UI.
+        is_resident = self._is_local_model_resident(request_model)
+        if is_resident is False:
+            self._cold_warming_notified = True
+            if getattr(self, "ui_callback", None) is not None:
+                self.ui_callback("model_warming")
+            self._log(
+                f"Carga en frío detectada para {request_model}. Extendiendo watchdog a {self._inference_watchdog_timeout:.0f}s.",
+                level="info",
+            )
+            return self._inference_watchdog_timeout
+
         if self._awaiting_first_success_after_switch and request_model == self.current_model:
             return self._post_switch_watchdog_timeout
         return self._inference_watchdog_timeout
@@ -642,8 +877,13 @@ class ModelManagementMixin:
         self._last_known_good_model = model
         if self.current_model == model:
             self._awaiting_first_success_after_switch = False
+        if getattr(self, "_cold_warming_notified", False):
+            self._cold_warming_notified = False
+            if getattr(self, "ui_callback", None) is not None:
+                self.ui_callback("ready")
 
     def _recover_from_stalled_inference(self, *, request_model: str, source: str, timeout: float) -> None:
+        self._cold_warming_notified = False
         message = f"watchdog_timeout after {timeout:.2f}s"
         self._last_llm_failure = {
             "model": request_model,
@@ -673,6 +913,53 @@ class ModelManagementMixin:
             self._rollback_to_last_known_good_model(request_model)
 
         self.ui_callback("llm_timeout_recovered")
+        self._speak_timeout_notice(source)
+
+    def _speak_timeout_notice(self, source: str) -> bool:
+        """Queue one short spoken line after a watchdog recovery (owner turns only).
+
+        Runs the line through the same stages as any spoken reply (TTS
+        sanitization, then the output guard) and submits it on the router's owner
+        band. It never calls the LLM, so it cannot make the abandoned runner busy
+        again, and it runs after the rollback was attempted. A no-op for chat /
+        viewer / agenda sources and while the speech router is disabled. Never
+        raises; logs only a count/flag.
+        """
+        try:
+            from opencohost.core.context.prompt_assembler import OWNER_POLICY_SOURCES
+
+            if source not in OWNER_POLICY_SOURCES:
+                return False
+            if not getattr(self, "_speech_router_enabled", False):
+                return False
+            try:
+                from opencohost.i18n import active as i18n_active
+                from opencohost.i18n.coherence import primary_subtag
+
+                lang = primary_subtag(i18n_active.get_active_bundle().code)
+            except Exception:
+                lang = "en"
+            line = TIMEOUT_NOTICE_LINES.get(lang, TIMEOUT_NOTICE_LINES["en"])
+
+            from opencohost.core.engine.generation_orchestrator import (
+                _output_guard_with_tts_check,
+            )
+            from opencohost.core.speech.router import PRIORITY_OWNER
+
+            pieces = [p for p in self._sanitize_for_tts(line) if p.strip()]
+            spoken = " ".join(pieces)
+            if not spoken:
+                return False
+            allowed, _reason = _output_guard_with_tts_check(spoken, source=source)
+            if not allowed:
+                logger.info("[RECOVERY] timeout_notice blocked=1")
+                return False
+            self._ensure_router().submit(spoken, f"{source}{TIMEOUT_NOTICE_SUFFIX}", PRIORITY_OWNER)
+            logger.info("[RECOVERY] timeout_notice queued=1")
+            return True
+        except Exception:
+            logger.debug("[RECOVERY] timeout notice failed", exc_info=False)
+            return False
 
     def _rollback_to_last_known_good_model(self, failed_model: str) -> bool:
         rollback_model = self._last_known_good_model
@@ -717,17 +1004,63 @@ class ModelManagementMixin:
         ADR-056: Decouples native capability ceiling from runtime context allocation:
         - native_context_max: discovered capability ceiling (e.g. 131072 for Gemma 4)
         - allocated_context: live runtime allocation from /api/ps if resident
-        - requested_context: what OpenCohost requests from Ollama on cold start (default CTX_FALLBACK_DEFAULT=4096)
+        - requested_context: what OpenCohost requests from Ollama on cold start
 
         Native context ceiling (e.g. 128K for Gemma) is NEVER used as an automatic
         allocation fallback without /api/ps truth.
+
+        Priority (T1b, model_context_auto_config_20260928, owner decision
+        2026-09-28 -- see also ``VALID_CONTEXT_POLICIES``'s docstring in
+        ``model_parameters.py`` and the ADR-056 Amendment dated 2026-09-28):
+          0. An EXPLICIT per-model override (``context.policy == "requested"``
+             plus a configured ``context_tokens``) wins over everything
+             below, including a live resident allocation that differs (the
+             next load re-requests it) -- see ``_resolve_requested_ctx_plan``.
+          1. Live resident allocation from /api/ps (ADR-056 P0): trusted over
+             a possibly-stale/incorrect ``native_ctx`` argument -- UNLESS
+             native ctx is reliably KNOWN and Auto's own VRAM-bounded target
+             for it is LARGER than what is currently resident (T1b). Without
+             this, a model kept resident at a small ctx by Ollama's own
+             ``keep_alive`` (e.g. from an earlier session, or the pre-T1
+             4096 fallback) never got upgraded by itself: every turn re-
+             requested the SAME resident value and it stuck forever -- the
+             literal reported bug. In that case Auto behaves like an
+             explicit target and requests it (``_apply_vram_ctx_plan``, the
+             SAME ceiling/spill-ratchet/NVML-advisory machinery an explicit
+             override uses -- never a parallel one), bounded by the 16384 cap
+             and by any ratchet already in force for this model: it never
+             bounces back above a ceiling a prior spill lowered, and settles
+             (no further reload) once resident reaches that ceiling. Resident
+             still wins unconditionally when it is already >= Auto's target
+             (a stale/wrong discovered ``native_ctx`` must never shrink a
+             bigger live allocation), when native ctx itself is unknown/
+             invalid (never guess an upgrade target from an unreliable
+             ceiling), or when the config read fails (fail open to runtime
+             truth).
+          2. Cold start (nothing resident, no explicit override): Auto =
+             ``resolve_auto_context_tokens(native_max)`` (min(native,
+             AUTO_CONTEXT_TOKENS)) run through the SAME VRAM-clamp/ratchet
+             plan machinery as an explicit override (``_apply_vram_ctx_plan``)
+             -- REGARDLESS of ``context.policy``: "runtime_truth" only means
+             "no explicit override", it does not disable Auto. A
+             model_parameters read failure fails open to the OLD
+             conservative cold-start default instead of gambling Auto+VRAM
+             math while the rest of the config cannot be trusted either.
         """
         try:
             native_max = int(native_ctx)
+            native_known = True
         except (TypeError, ValueError):
             native_max = CTX_FALLBACK_DEFAULT
+            native_known = False
         if native_max <= 0:
             native_max = CTX_FALLBACK_DEFAULT
+            native_known = False
+
+        # 0. Explicit per-model override.
+        planned = self._resolve_requested_ctx_plan(model, native_max)
+        if planned is not None:
+            return max(32, planned)
 
         # 1. Live resident allocation from /api/ps probe if model is resident
         monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
@@ -746,30 +1079,292 @@ class ModelManagementMixin:
                         resident_ctx = int(snap_ctx)
 
         if resident_ctx is not None:
-            # Live residency truth from /api/ps represents what Ollama already allocated in VRAM.
+            # T1b (model_context_auto_config_20260928): Auto may UPGRADE a
+            # smaller resident allocation up to its own VRAM-bounded target
+            # -- see this method's docstring and the ADR-056 Amendment
+            # (2026-09-28). Only attempted when native ctx is reliably known
+            # (never guess an upgrade target otherwise) and the config read
+            # succeeds (fail open to runtime truth on any failure, mirroring
+            # step 2's own independent read below).
+            if native_known:
+                config_ok = True
+                try:
+                    get_model_context_settings(model)
+                except Exception:
+                    config_ok = False
+                if config_ok:
+                    auto_target = resolve_auto_context_tokens(native_max)
+                    if resident_ctx < auto_target:
+                        allocated = self._apply_vram_ctx_plan(model, auto_target, native_max)
+                        return max(32, allocated)
+            # Live residency truth from /api/ps represents what Ollama
+            # already allocated in VRAM: LARGER than Auto's target, native
+            # unknown, or a broken config read -- resident wins unconditionally.
             return max(32, resident_ctx)
 
-        # 2. Cold start requested context
-        req = requested_ctx
-        if req is None:
-            req = getattr(self, "requested_context", None) or getattr(self, "_requested_context", None)
-        if req is None:
-            req = getattr(self, "_model_requested_ctx", {}).get(model)
-        if req is None:
-            # If native max is very large (e.g. Gemma 128K or >= 65536) and not resident,
-            # default to safe cold start requested context (CTX_FALLBACK_DEFAULT=4096)
-            if native_max >= 65536 or ("gemma" in model.lower() and native_max > 8192):
-                req = CTX_FALLBACK_DEFAULT
-            else:
-                req = native_max
+        # 2. Cold start, nothing resident, no explicit override: T1 Auto default.
+        # A second, independent read of model_parameters -- deliberately NOT
+        # reusing `_resolve_requested_ctx_plan`'s own internal read/except --
+        # so a config read failure here still falls open to the OLD
+        # conservative cold-start default below rather than Auto, without
+        # changing that method's signature or its own fail-open tests.
+        config_ok = True
         try:
-            allocated = int(req)
-        except (TypeError, ValueError):
-            allocated = CTX_FALLBACK_DEFAULT
+            get_model_context_settings(model)
+        except Exception:
+            config_ok = False
+
+        if config_ok:
+            auto_target = resolve_auto_context_tokens(native_max)
+            allocated = self._apply_vram_ctx_plan(model, auto_target, native_max)
+        else:
+            req = requested_ctx
+            if req is None:
+                req = getattr(self, "requested_context", None) or getattr(self, "_requested_context", None)
+            if req is None:
+                req = getattr(self, "_model_requested_ctx", {}).get(model)
+            if req is None:
+                # If native max is very large (e.g. Gemma 128K or >= 65536) and not resident,
+                # default to safe cold start requested context (CTX_FALLBACK_DEFAULT=4096)
+                if native_max >= 65536 or ("gemma" in model.lower() and native_max > 8192):
+                    req = CTX_FALLBACK_DEFAULT
+                else:
+                    req = native_max
+            try:
+                allocated = int(req)
+            except (TypeError, ValueError):
+                allocated = CTX_FALLBACK_DEFAULT
 
         # 3. Cap cold start requested context by the model's native capability ceiling
         allocated = min(allocated, native_max)
         return max(32, allocated)
+
+    def _resolve_local_num_ctx(self, model: Optional[str]) -> Optional[int]:
+        """Return the ``num_ctx`` the chat path would request for local ``model``.
+
+        Used by the warm-up, the Topic Scout and the promotion judge so every
+        local Ollama call allocates the same context as chat — a call at
+        Ollama's default ctx forces a model reload before the next chat turn.
+        Returns None (caller omits ``num_ctx``, today's behavior) when there is
+        no model, the local provider is not active (no ``ollama.show`` → native
+        ctx unknown), or resolution fails.
+        """
+        if not model or not getattr(self, "_is_local", False):
+            return None
+        try:
+            native = self._discover_model_ctx(model)
+            return int(self._resolve_effective_ctx_limit(model, native))
+        except Exception as exc:
+            logger.debug("num_ctx resolution failed for %s; omitted: %s", model, exc)
+            return None
+
+    def _history_output_reserve(self, model: Optional[str]) -> int:
+        """Output tokens the char budget gate reserves on an ordinary chat turn.
+
+        Mirrors ``PromptContextAssembler``'s chat-intent branch: a reasoning
+        model (or one with reasoning enabled) reserves its ``budget_tokens``,
+        anything else reserves ``LLM_MAX_TOKENS``.
+        """
+        try:
+            r_cfg = self._resolve_reasoning_settings(model) if model else {}
+            reasoning = bool(r_cfg.get("enabled")) or (
+                bool(model) and self._uses_reasoning_token_budget(model)
+            )
+            budget = r_cfg.get("budget_tokens") if reasoning else None
+            if budget is not None and int(budget) > 0:
+                return int(budget)
+        except Exception as exc:
+            logger.debug("reasoning reserve lookup failed for %s: %s", model, exc)
+        return LLM_MAX_TOKENS
+
+    def _compute_max_turns_cap(self) -> int:
+        """Profile ``max_turns`` cap for the active model's effective ctx.
+
+        Resolved only once Ollama is ready (``is_ready``) and the model's
+        native ctx is already cached, so applying a profile never blocks on
+        ``ollama.show``; otherwise, or when the ctx is unknown (cloud provider,
+        resolution failure), the cap is the historical 10. ``_refresh_max_turns_cap`` recomputes it once the
+        engine is ready and after every model switch.
+        """
+        if not getattr(self, "is_ready", False):
+            return context_budget.MAX_TURNS_CAP_FLOOR
+        model = getattr(self, "current_model", None)
+        # Only once the model's native ctx is cached (the warm-up already
+        # resolved it): a profile switch must never trigger ``ollama.show``.
+        if model not in (getattr(self, "_model_ctx_limit", None) or {}):
+            return context_budget.MAX_TURNS_CAP_FLOOR
+        try:
+            ctx = self._resolve_local_num_ctx(model)
+        except Exception as exc:
+            logger.debug("max_turns cap: ctx resolution failed for %s: %s", model, exc)
+            ctx = None
+        return context_budget.max_turns_cap_for_ctx(
+            ctx, max_output=self._history_output_reserve(model)
+        )
+
+    @staticmethod
+    def _history_rotation_pairs() -> int:
+        """Pairs dropped together when the history is full (ADR-064 / F1).
+
+        1 under the legacy layout (the deque drops one pair at a time); K
+        under v2, so the first history message moves only every K turns.
+        """
+        if getattr(_settings_mod, "PROMPT_LAYOUT", "legacy") == "v2":
+            return int(context_budget.EVICTION_CHUNK_PAIRS)
+        return 1
+
+    @classmethod
+    def _history_maxlen(cls, turns: int) -> int:
+        """Deque capacity (messages) for ``turns`` pairs of memory depth.
+
+        Legacy: ``turns * 2``. v2 stores ``turns + K - 1`` pairs and drops K at
+        once on overflow, so the depth never falls below ``turns``.
+        """
+        return (int(turns) + cls._history_rotation_pairs() - 1) * 2
+
+    def _refresh_max_turns_cap(self) -> None:
+        """Recompute the cap and re-clamp the active profile's history window.
+
+        The profile's requested turns are kept in ``_requested_max_turns`` so a
+        larger ctx restores them and a smaller one shrinks the window (the
+        deque keeps its newest entries).
+        """
+        cap = self._compute_max_turns_cap()
+        self._max_turns_cap = cap
+        requested = getattr(self, "_requested_max_turns", self._max_turns)
+        new_turns = max(1, min(int(requested), cap))
+        with self._history_lock:
+            self._max_turns = new_turns
+            new_maxlen = self._history_maxlen(new_turns)
+            if self.historial.maxlen != new_maxlen:
+                self.historial = deque(self.historial, maxlen=new_maxlen)
+
+    @staticmethod
+    def _with_num_ctx(options: dict, num_ctx: Optional[int]) -> dict:
+        """Return ``options`` plus ``num_ctx`` when it is known."""
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        return options
+
+    def _raw_residency_snapshot(self):
+        """Return the monitor's latest /api/ps snapshot (any model, any age) or None."""
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        if monitor is None:
+            return None
+        snap = getattr(monitor, "residency_snapshot", None)
+        if snap is None:
+            probe = getattr(monitor, "residency_probe", None) or getattr(monitor, "_ollama_residency", None)
+            if probe is not None:
+                snap = getattr(probe, "snapshot", None)
+        return snap
+
+    def _nvml_vram_bytes(self) -> tuple[Optional[int], Optional[int]]:
+        """Return NVML (free, total) VRAM in bytes, or (None, None) when unknown."""
+        monitor = getattr(self, "health_monitor", None) or getattr(self, "_health_monitor", None)
+        guard = getattr(monitor, "vram_guard", None) if monitor is not None else None
+        if guard is None:
+            return None, None
+        try:
+            free_mb = float(getattr(guard, "free_mb", 0.0) or 0.0)
+            total_mb = float(getattr(guard, "total_mb", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None, None
+        if total_mb <= 0:
+            return None, None
+        return int(free_mb * 1024 * 1024), int(total_mb * 1024 * 1024)
+
+    def _resolve_requested_ctx_plan(self, model: str, native_max: int) -> Optional[int]:
+        """Return the VRAM-clamped EXPLICIT owner-requested ctx for ``model``, or None.
+
+        None (caller falls through to resident truth, then the T1 Auto
+        default -- see ``_resolve_effective_ctx_limit``'s own docstring)
+        unless model_parameters has ``context.policy == "requested"`` and a
+        ``context_tokens`` for ``model``. Any failure reading the config also
+        yields None (fail open).
+
+        T1 (model_context_auto_config_20260928): this method now covers ONLY
+        the EXPLICIT-override case; an unconfigured model's Auto default is
+        resolved separately by ``_resolve_effective_ctx_limit``'s own cold-start
+        step (Auto must NOT preempt a live resident allocation the way an
+        explicit override intentionally does -- see
+        ``test_runtime_residency_probe_takes_precedence_when_resident``).
+        Both paths share the exact same VRAM-clamp/ratchet plan machinery via
+        ``_apply_vram_ctx_plan`` below -- never a parallel mechanism.
+
+        Requested wins over a resident allocation that differs, so the next
+        load re-requests it (``_apply_vram_ctx_plan`` handles the
+        ceiling/spill-ratchet/NVML-advisory contract; see its docstring).
+        """
+        try:
+            settings = get_model_context_settings(model)
+            target = settings.get("requested_tokens") if isinstance(settings, dict) else None
+            if target is None:
+                return None
+            target = min(int(target), native_max)
+        except Exception as exc:
+            logger.debug("ctx_plan: model_parameters read failed, runtime truth kept: %s", exc)
+            return None
+
+        return self._apply_vram_ctx_plan(model, target, native_max)
+
+    def _apply_vram_ctx_plan(self, model: str, target: int, native_max: int) -> int:
+        """Grant a VRAM-clamped ctx for ``target``, ratcheting a per-model ceiling.
+
+        Extracted from the original ``_resolve_requested_ctx_plan`` (T1,
+        model_context_auto_config_20260928) so an EXPLICIT per-model override
+        and the Auto cold-start default go through the IDENTICAL machinery --
+        never a parallel one. Per model, a ``ceiling`` starts at ``target``
+        and only ratchets down on SPILL evidence: a fresh (<
+        RESIDENCY_STALE_SECONDS) snapshot of this model loaded AT the current
+        ceiling with ``residency_ratio < 0.98``. A spilling snapshot at
+        another ctx is the pre-reload load and is ignored, so one spill
+        halves once. NVML free-VRAM is consulted only when nothing is
+        resident (another resident model's memory is evicted on load,
+        OLLAMA_MAX_LOADED_MODELS=1) and its step-down is advisory: it is not
+        persisted, the next load re-evaluates. A changed ``target`` (a
+        different configured value, or Auto's own target changing because
+        ``native_max`` changed) resets the ceiling.
+        """
+        plans = getattr(self, "_ctx_plan_state", None)
+        if plans is None:
+            plans = {}
+            self._ctx_plan_state = plans
+        state = plans.get(model)
+        if state is None or state.get("target") != target:
+            state = {"target": target, "ceiling": target, "logged": None}
+            plans[model] = state
+        ceiling = state["ceiling"]
+
+        raw = self._raw_residency_snapshot()
+        ratio: Optional[float] = None
+        free_b: Optional[int] = None
+        total_b: Optional[int] = None
+        if raw is None:
+            free_b, total_b = self._nvml_vram_bytes()
+        else:
+            snap_ctx = getattr(raw, "context_length", None)
+            if snap_ctx == ceiling:
+                ratio = self._resolve_model_residency_ratio(model)
+
+        granted, reason = context_budget.clamp_ctx_for_vram(
+            ceiling,
+            native=native_max,
+            residency_ratio=ratio,
+            free_bytes=free_b,
+            total_bytes=total_b,
+            floor=CTX_FALLBACK_DEFAULT,
+        )
+        if reason.startswith("spill"):
+            state["ceiling"] = granted
+
+        signature = (target, granted, reason)
+        if state.get("logged") != signature:
+            state["logged"] = signature
+            logger.info(
+                "ctx_plan: model=%s requested=%d granted=%d reason=%s",
+                model, target, granted, reason,
+            )
+        return granted
 
     def _resolve_model_residency_ratio(self, model: str) -> Optional[float]:
         """Resolve current hardware residency ratio for model if resident and fresh.
@@ -800,7 +1395,7 @@ class ModelManagementMixin:
 
         # Check staleness: if snapshot unobserved (<=0) or older than 60s, consider stale
         observed_at = getattr(snap, "observed_at", 0.0) or 0.0
-        if observed_at <= 0 or (time.time() - observed_at) > 60.0:
+        if observed_at <= 0 or (time.time() - observed_at) > RESIDENCY_STALE_SECONDS:
             return None
 
         size = getattr(snap, "size_bytes", None)

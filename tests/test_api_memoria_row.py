@@ -107,6 +107,7 @@ def test_get_memoria_row_happy_path(tmp_path, monkeypatch):
             # memory_promotion_20260725: machine-judged rows are labelled
             # honestly instead of borrowing the operator's `curated`.
             "promoted": False,
+            "superseded_by": None,
         }
 
 

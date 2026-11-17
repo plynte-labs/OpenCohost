@@ -75,15 +75,13 @@ Para utilizar OpenCohost sin requerir Ollama local ni agotar la VRAM de tu lapto
 
 2. Configurar tu API key de Nvidia en `.env`:
    ```env
-   OPENCOHOST_LLM_PROVIDER=cloud
    NVIDIA_API_KEY=nvapi-TU_API_KEY_AQUI
    NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
    NVIDIA_MODEL=meta/llama-3.1-70b-instruct
-   OPENCOHOST_TTS_ENGINE=edge-tts
    EDGE_TTS_VOICE=es-AR-TomasNeural
    ```
 
-3. **Alternativa en runtime (`config/llm_provider.json`)**:
+3. **Selección de proveedor y de motor TTS**: no se eligen por variables de entorno. El proveedor LLM se define en runtime (`config/llm_provider.json`) y el motor TTS desde los ajustes de la app.
    El motor soporta perfiles dinámicos mediante `config/llm_provider.json` y `config/llm_keys.json`, permitiendo alternar entre proveedores cloud y local desde la UI.
 
 4. **Modelos para Síntesis de Voz Offline (Piper TTS)**:

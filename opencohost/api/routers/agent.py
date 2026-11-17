@@ -77,6 +77,8 @@ from opencohost.core.editorial.editorial_cards import (
     EditorialCardStore,
     EditorialCardValidationError,
 )
+from opencohost.core.editorial.active_cards import sync_guard_from_store
+from opencohost.core.editorial.card_embeddings import refresh_embedding
 from opencohost.core.agenda.topic_inbox import (
     TopicInboxCapError,
     TopicInboxStore,
@@ -186,6 +188,10 @@ def post_agent_card(body: AgentCardRequest):
             expires_at=expires,
             origin=body.agent,
             single_use=body.single_use,
+            must_say=body.must_say,
+            forbidden_claims=body.forbidden_claims,
+            discount_code=body.discount_code,
+            link=body.link,
         )
     except EditorialCardValidationError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -198,6 +204,14 @@ def post_agent_card(body: AgentCardRequest):
         # unreviewed content. Force it back to DRAFT — the operator
         # re-arms via CLI/UI. New cards are already DRAFT (no-op).
         demoted = store.demote_to_draft(stored.id)
+        # Same rule for the active flag: an agent may draft card fields, never
+        # keep them live. Unreviewed content must not go on speaking as
+        # verified streamer data, so a rewrite deactivates the card (the
+        # operator re-activates after review) and the guard follows the store.
+        deactivated = store.deactivate(stored.id)
+        refresh_embedding(store, stored)  # embed on save, best effort
+        if deactivated:
+            sync_guard_from_store(store)
     except (sqlite3.Error, OSError):
         return JSONResponse(
             status_code=503, content={"detail": "editorial_cards_unavailable"}
@@ -207,6 +221,7 @@ def post_agent_card(body: AgentCardRequest):
         topic_slug=stored.topic_slug,
         status=EditorialCardStatus.DRAFT.value if demoted else stored.status.value,
         demoted=demoted,
+        deactivated=deactivated,
     )
 
 
@@ -232,6 +247,7 @@ def get_agent_cards():
                 expires_at=card.expires_at.isoformat() if card.expires_at else None,
                 updated_at=card.updated_at.isoformat(),
                 single_use=card.single_use,
+                active=card.active,
             )
             for card in cards
         ]

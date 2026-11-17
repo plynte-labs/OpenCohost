@@ -42,6 +42,7 @@ from opencohost.core.memory.memoria_store import (
     MemoriaStore,
     _SESSION_SUMMARY_MARKER,
     build_recency_lines,
+    is_clarification_turn,
     is_meta_recall_query,
 )
 
@@ -50,6 +51,17 @@ from opencohost.core.memory.memoria_store import (
 # and a temporal/session query. Both MUST detect as meta and route to recency.
 _OWNER_Q_SELF = "¿Qué recordás de mí?"
 _OWNER_Q_SESSION = "la sesión pasada qué se dijo, de qué se habló"
+
+
+@pytest.fixture(autouse=True)
+def _summary_branch_on(monkeypatch):
+    """The summary/meta-recall branch ships OFF (owner decision M1,
+    memory-grounding-and-recall-budget-20261016). These tests exercise that
+    branch itself, so they opt in; tests/test_meta_recall_gate.py covers the
+    default-off and topical-gate behaviour."""
+    from opencohost.config import settings
+
+    monkeypatch.setattr(settings, "MEMORY_SUMMARY_RECALL_ENABLED", True)
 
 
 @pytest.fixture(autouse=True)
@@ -90,13 +102,15 @@ def _enable_memorias(monkeypatch, motor, tmp_path, profile_id="profile-1"):
 
 def _seed(
     db_path, profile_id, row_id, *, content="contenido significativo alpha",
-    title="titulo alpha beta", status="draft", stable_key=None,
+    title="titulo alpha beta", status="promoted", stable_key=None,
     updated_at=_BASE_TS, signature="", pinned=False, private=False, inactive=False,
 ):
     """Insert one row with full control over stable_key / status / updated_at.
 
     Ensures the schema exists first (constructing a MemoriaStore). A summary
     row is seeded by passing a stable_key carrying _SESSION_SUMMARY_MARKER.
+    Default status is 'promoted': since ADR-062 an unjudged draft is never an
+    injection candidate, so routing tests seed judged rows unless they ask.
     """
     MemoriaStore(db_path)
     sk = stable_key if stable_key is not None else f"{profile_id}|{row_id}"
@@ -146,6 +160,15 @@ _META_QUERIES = [
     "¿qué es lo último de tu memoria?",
     "que hay en tu memoria",
     "en base a mi memoria",
+    # K2 (warmth-guardrails-runtime-20261006): phrase-final "do you remember me".
+    "¿me recuerdas?",
+    "me recuerdas",
+    "me recordás?",
+    "Hola Kira, me recuerdas?",
+    "te acuerdas de mí",
+    "¿te acordás de mí?",
+    "do you remember me?",
+    "do you remember me"
 ]
 
 # Full negative set: topical turns that share surface stems with recall verbs
@@ -179,6 +202,11 @@ _TOPICAL_QUERIES = [
     "mi memoria RAM",
     "tu memoria USB se llenó",
     "se llenó mi memoria del teléfono",
+    # K2: resemblance / object after "me recuerdas" is NOT a recall query.
+    "me recuerdas a mi primo",
+    "me recuerdas a alguien",
+    "me recuerdas mucho a mi primo",
+    "do you remember me a coffee",
 ]
 
 
@@ -269,9 +297,9 @@ def test_recency_ranks_judge_kept_rows_above_never_judged_drafts(tmp_path):
     _seed(db_path, "p", "kept", content="el streamer usa Ollama para inferencia local",
           status="promoted", updated_at=_BASE_TS + timedelta(hours=1))
     _seed(db_path, "p", "junk-new", content="charla trivial de esta noche",
-          updated_at=_BASE_TS + timedelta(hours=9))
+          status="draft", updated_at=_BASE_TS + timedelta(hours=9))
     _seed(db_path, "p", "junk-old", content="otra charla trivial de esta noche",
-          updated_at=_BASE_TS + timedelta(hours=8))
+          status="draft", updated_at=_BASE_TS + timedelta(hours=8))
 
     rows = MemoriaStore(db_path).list_injection_candidates("p")
     lines = build_recency_lines(rows)
@@ -279,9 +307,9 @@ def test_recency_ranks_judge_kept_rows_above_never_judged_drafts(tmp_path):
     assert lines[0] == "el streamer usa Ollama para inferencia local", (
         "a judge-kept memory must outrank raw drafts even when they are newer"
     )
-    # Drafts are not excluded — they still appear, and still newest-first.
-    assert lines[1] == "charla trivial de esta noche"
-    assert lines[2] == "otra charla trivial de esta noche"
+    # ADR-062 supersedes "drafts are not excluded": never-judged drafts are
+    # no longer injection candidates at all, so only the kept memory remains.
+    assert lines == ["el streamer usa Ollama para inferencia local"]
 
 
 def test_recency_caps_at_meta_recall_k(tmp_path):
@@ -501,3 +529,146 @@ def test_lexical_success_logs_counts_only_debug_line(monkeypatch, tmp_path, capl
     assert "branch=lexical" in line
     assert "chars=" in line
     assert content not in line
+
+
+def test_topical_query_overlapping_summary_does_not_inject_summary(monkeypatch, tmp_path):
+    """T3 (Fix B): a topical query whose tokens overlap a status='summary' row
+    must NOT inject it in lexical or hybrid mode. A meta-recall query still
+    surfaces it."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path, profile_id="p")
+    summary_content = "resumen de la sesion pasada sobre monetizacion y sponsors"
+    _seed(
+        tmp_path / "memorias.db",
+        "p",
+        "sum1",
+        content=summary_content,
+        title="resumen sesion",
+        signature=summary_content,
+        status="summary",
+        stable_key=_summary_key("p", _BASE_TS + timedelta(hours=1)),
+        updated_at=_BASE_TS + timedelta(hours=1),
+    )
+
+    # 1. Topical query matching words in the summary: MUST NOT inject the summary
+    block = motor._build_memorias_injection_block("p", "quiero hablar de monetizacion y sponsors")
+    assert block == ""
+
+    # 2. Meta-recall query: MUST still surface the summary
+    meta_block = motor._build_memorias_injection_block("p", "¿de qué hablamos la sesión pasada?")
+    assert summary_content in meta_block
+
+
+
+# ---------------------------------------------------------------------------
+# T3 (web-trigger-memory-relevance): correction / clarification turns
+# ---------------------------------------------------------------------------
+
+_CORRECTION_TURNS = [
+    "no, no tiene sentido lo que dijiste",
+    "no tiene sentido",
+    "Eso no tiene sentido.",
+    "no entendí",
+    "no entendiste",
+    "no me entendiste nada",
+    "¿qué dijiste?",
+    "que dijiste",
+    "no es eso",
+    "¿A qué te refieres?",
+    "pues no tiene sentido eso",
+    "that makes no sense",
+    "That doesn't make sense.",
+    "what did you say?",
+    "what did you just say",
+    "that's not what I meant",
+    "what do you mean?",
+    "what do you mean by that",
+]
+
+_NOT_CORRECTION_TURNS = [
+    "",
+    "¿Y por qué no puedes? ¿Qué es lo que te impide?",
+    "no tiene sentido que el telescopio de Marcos cueste tanto dinero este mes",
+    "no entendí el final de la película que vimos ayer con mi hermano",
+    "¿qué dijiste de la película de ayer?",
+    "no es eso lo que pasó en el partido del domingo",
+    "what do you mean the telescope costs that much this month",
+    "a qué te refieres con la nebulosa del cangrejo y su historia",
+    "cuéntame algo sobre el telescopio",
+]
+
+
+@pytest.mark.parametrize("text", _CORRECTION_TURNS)
+def test_clarification_turns_detected(text):
+    assert is_clarification_turn(text) is True
+
+
+@pytest.mark.parametrize("text", _NOT_CORRECTION_TURNS)
+def test_topical_turns_are_not_corrections(text):
+    assert is_clarification_turn(text) is False
+
+
+def test_correction_detector_is_accent_and_case_insensitive():
+    assert is_clarification_turn("NO ENTENDÍ") is True
+    assert is_clarification_turn("A QUE TE REFIERES") is True
+
+
+# ---------------------------------------------------------------------------
+# memory-grounding judge round 1: recall-question predicate + anchors
+# ---------------------------------------------------------------------------
+from opencohost.core.memory import memoria_store as _ms  # noqa: E402
+
+_META_EXTRA = [
+    "do you remember what we talked about today",
+    "no me acuerdo, ¿vos sí?",
+    "¿qué sabés de mí?",
+]
+
+
+# "la vez del jefe final" names a real topic (jefe, final): the one table
+# entry that is topical by content, so it keeps its anchors.
+_META_WITH_TOPIC = {"¿se acuerdan de la vez del jefe final?"}
+
+
+@pytest.mark.parametrize(
+    "text", [t for t in _META_QUERIES + _META_EXTRA if t not in _META_WITH_TOPIC])
+def test_general_meta_query_has_no_topical_anchor(text):
+    assert _ms.is_recall_question(text) is True
+    assert _ms.recall_topic_anchors(text) == ()
+    assert _ms.is_topical_recall_question(text) is False
+
+
+@pytest.mark.parametrize("text", [t for t in _TOPICAL_QUERIES if t])
+def test_topical_table_is_never_a_recall_question(text):
+    assert _ms.is_recall_question(text) is False
+    assert _ms.is_topical_recall_question(text) is False
+
+
+_RECALL_TOPICAL = [
+    ("¿qué te conté del Tesla?", "tesla"),
+    ("¿te hablé del Tesla?", "tesla"),
+    ("did I tell you about my Tesla?", "tesla"),
+    ("¿te acordás del Tesla?", "tesla"),
+    ("do you remember the Tesla we discussed", "tesla"),
+]
+
+
+@pytest.mark.parametrize("text,anchor", _RECALL_TOPICAL)
+def test_topical_recall_keeps_its_anchor(text, anchor):
+    assert _ms.is_recall_question(text) is True
+    assert anchor in _ms.recall_topic_anchors(text)
+    assert _ms.is_topical_recall_question(text) is True
+
+
+_NOT_RECALL = [
+    "me recordás al profe",
+    "me recuerdas a mi primo",
+    "la serie que vimos ayer me encantó",
+    "last time I played chess I lost",
+    "recuerda que mañana juego",
+]
+
+
+@pytest.mark.parametrize("text", _NOT_RECALL)
+def test_resemblance_and_narration_are_not_recall(text):
+    assert _ms.is_recall_question(text) is False

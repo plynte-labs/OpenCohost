@@ -14,13 +14,17 @@ One ASGI-level middleware (``auth_middleware``, registered in
    enforced (new surface, nothing shipped calls it yet). 401 on missing or
    invalid token; 503 if the token file is unusable; mutating calls are
    additionally rate limited per token (``RateLimiter``, 429 on breach).
-2. Other ``/api/*`` POST/PUT/DELETE requests require the operator token, but
-   only when ``settings.API_AUTH_ENFORCED`` is true (env OPENCOHOST_API_AUTH,
-   default OFF). Owner decision D2: while the flag is off, a missing/invalid
-   token logs one warning per call and the request succeeds unchanged, so the
-   shipped Tauri app (which sends no token today) keeps working.
-3. GET (and every non-mutating method) stays open in v1, because the read
-   surface carries state and metadata rather than viewer content.
+1b. Paths under ``/api/remote/`` (remote-voice-gateway phone pairing) require
+   the OPERATOR token, any method, ALWAYS enforced: 401 missing/invalid, 403
+   agent token, 503 unusable token file. Its GET is therefore gated too.
+2. Other ``/api/*`` POST/PUT/DELETE requests, as well as sensitive read routes
+   like ``/api/memoria/*``, require the operator token when
+   ``settings.API_AUTH_ENFORCED`` is true. Owner decision 2026-11-08: it is
+   ON by default; the kill switch OPENCOHOST_API_AUTH=0 turns it off, and while
+   off a missing/invalid token logs one warning per call and the request
+   succeeds unchanged.
+3. Other non-sensitive GET/HEAD/OPTIONS stay open in v1, though presented tokens
+   are validated.
    ONE EXCEPTION, and it must stay the only one: ``GET
    /api/stream/chat-live/messages`` serves raw viewer chat text and usernames,
    so it does not rely on this rule — it gates itself on the operator token
@@ -46,10 +50,21 @@ from opencohost.config.storage import atomic_write_text
 logger = logging.getLogger("opencohost.api.auth")
 
 _AGENT_PREFIX = "/api/agent/"
+_REMOTE_PREFIX = "/api/remote/"
 _MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE"})
+# Sensitive read routes carrying private state (memoria, usage ledger).
+_SENSITIVE_PREFIXES = ("/api/memoria/", "/api/usage/")
 # Order matters for _resolve_role: operator first so logs/semantics prefer
 # the higher-trust label when (never expected) both tokens match.
 _TOKEN_ROLES = ("operator", "agent")
+
+
+def _is_sensitive_path(path: str) -> bool:
+    """Return True if path is a sensitive read route (memoria)."""
+    for prefix in _SENSITIVE_PREFIXES:
+        if path == prefix.rstrip("/") or path.startswith(prefix):
+            return True
+    return False
 
 
 class TokenFileError(Exception):
@@ -81,6 +96,13 @@ def ensure_tokens() -> None:
         atomic_write_text(path, json.dumps(payload, indent=2))
     except OSError:
         logger.warning("Could not mint API token file at %s", path, exc_info=True)
+        return
+    # Imported lazily: the package __init__ pulls in the whole stream-admin
+    # stack, which auth must not load at import time.
+    from opencohost.stream_admin.oauth_store import restrict_file_permissions
+
+    if not restrict_file_permissions(path):
+        logger.warning("Could not restrict permissions on the API token file at %s", path)
 
 
 def load_tokens() -> dict:
@@ -170,7 +192,7 @@ def _resolve_role(token: str) -> str | None:
     """Return "operator"/"agent" for a valid token, None for an invalid one.
 
     Propagates TokenFileError so callers decide between 503 (enforced
-    surfaces) and warn-and-pass (D2 warn-only mode).
+    surfaces) and warn-and-pass (kill-switch mode, OPENCOHOST_API_AUTH=0).
     """
     # ponytail: per-request file read. This is NO LONGER a mutating-only path:
     # the Tauri client polls GET /api/stream/chat-live/messages every 1.5s from
@@ -212,9 +234,33 @@ async def auth_middleware(request, call_next):
             return JSONResponse(status_code=429, content={"detail": "rate_limited"})
         return await call_next(request)
 
-    # Rule 2: other mutating /api/* routes — operator token, warn-only until
-    # API_AUTH_ENFORCED flips on (owner decision D2).
-    if path.startswith("/api/") and request.method in _MUTATING_METHODS:
+    # Rule 1b: remote-device pairing (remote-voice-gateway-20261020 T2) —
+    # operator token ONLY, any method, always enforced. Minting a pairing code
+    # admits a phone to the internet-facing gateway, and the device list is
+    # operator data, so neither the kill switch nor rule 3 applies here.
+    # Tavily credentials are operator-only even with the kill switch on.
+    if (path == "/api/web-fetch/tavily"
+            or path == _REMOTE_PREFIX.rstrip("/") or path.startswith(_REMOTE_PREFIX)):
+        token = _bearer_token(request)
+        if token is None:
+            return JSONResponse(status_code=401, content={"detail": "missing bearer token"})
+        try:
+            role = _resolve_role(token)
+        except TokenFileError:
+            return JSONResponse(status_code=503, content={"detail": "auth_unavailable"})
+        if role is None:
+            return JSONResponse(status_code=401, content={"detail": "invalid token"})
+        if role != "operator":
+            return JSONResponse(status_code=403, content={"detail": "operator token required"})
+        return await call_next(request)
+
+    # Rule 2: other mutating /api/* routes, and sensitive read routes
+    # (such as /api/memoria/*) — operator token, enforced by default; only the
+    # OPENCOHOST_API_AUTH=0 kill switch makes it warn-only.
+    # OPTIONS preflight is allowed unauthenticated for CORS.
+    is_mutating = request.method in _MUTATING_METHODS
+    is_sensitive = _is_sensitive_path(path) and request.method != "OPTIONS"
+    if path.startswith("/api/") and (is_mutating or is_sensitive):
         token = _bearer_token(request)
         if not settings.API_AUTH_ENFORCED:
             role = None
@@ -243,5 +289,32 @@ async def auth_middleware(request, call_next):
             return JSONResponse(status_code=403, content={"detail": "operator token required"})
         return JSONResponse(status_code=401, content={"detail": "invalid token"})
 
-    # Rule 3: GET/HEAD/OPTIONS and non-API paths stay open in v1.
+    # If an authorization token is presented on any other /api/* route,
+    # validate it against configured tokens.
+    if path.startswith("/api/") and request.method != "OPTIONS":
+        token = _bearer_token(request)
+        if token is not None:
+            if not settings.API_AUTH_ENFORCED:
+                role = None
+                try:
+                    role = _resolve_role(token)
+                except TokenFileError:
+                    role = None
+                if role is None:
+                    logger.warning(
+                        "Unauthenticated %s %s accepted (OPENCOHOST_API_AUTH not enforced; "
+                        "this request will require the operator token once the flag flips on)",
+                        request.method,
+                        path,
+                    )
+                return await call_next(request)
+            try:
+                role = _resolve_role(token)
+            except TokenFileError:
+                return JSONResponse(status_code=503, content={"detail": "auth_unavailable"})
+            if role is None:
+                return JSONResponse(status_code=401, content={"detail": "invalid token"})
+            return await call_next(request)
+
+    # Rule 3: non-sensitive GET/HEAD/OPTIONS and non-API paths stay open in v1.
     return await call_next(request)

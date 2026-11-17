@@ -126,6 +126,41 @@ def test_parse_ctx_tries_qwen3_key():
     assert cb.parse_model_ctx(show, fallback=FALLBACK) == 40960
 
 
+def test_parse_ctx_accepts_unknown_arch_key_qwen35():
+    # Qwen3.5 (`hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF`) reports architecture
+    # `qwen35`, which is not (and will never exhaustively be) in
+    # `_ARCH_CTX_KEYS`. Any `<arch>.context_length` key must be accepted.
+    show = {"model_info": {"qwen35.context_length": 262144}}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 262144
+
+
+def test_parse_ctx_known_key_wins_over_unknown_arch_key():
+    show = {"model_info": {
+        "qwen35.context_length": 262144,
+        "llama.context_length": 8192,
+    }}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 8192
+
+
+def test_parse_ctx_unknown_arch_key_prefers_general_architecture():
+    show = {"model_info": {
+        "general.architecture": "qwen35",
+        "qwen35.context_length": 262144,
+        "somethingelse.context_length": 4096,
+    }}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 262144
+
+
+def test_parse_ctx_unknown_arch_key_non_positive_falls_back():
+    show = {"model_info": {"qwen35.context_length": 0}}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == FALLBACK
+
+
+def test_parse_ctx_unknown_arch_key_clamped_to_floor():
+    show = {"model_info": {"qwen35.context_length": 256}}
+    assert cb.parse_model_ctx(show, fallback=FALLBACK) == 512
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # §0.3 — parse_model_ctx parameters-block num_ctx parse (gemma refinement)
 # ──────────────────────────────────────────────────────────────────────────

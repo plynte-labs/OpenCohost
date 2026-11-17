@@ -56,6 +56,9 @@ def _make_motor(tmp_path):
 
     motor.ollama = MagicMock()  # never called: _ollama_chat_with_watchdog is monkeypatched per-test
     motor.pygame = MagicMock()
+    # DEFAULT_MODEL became gemma4:e4b (9dad677); pin the fixture to the model
+    # these tests size their 4096-token window and ratios against.
+    motor.current_model = "llama3"
     motor._model_ctx_limit["llama3"] = 4096  # skip real ollama.show discovery
     return motor
 

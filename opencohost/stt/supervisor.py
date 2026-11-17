@@ -13,8 +13,9 @@ Contract (implemented by LiveAudio unit 1, read-only from here):
   ``hello {app: 'liveaudio', proto: 1, port: <effective>}``.
 
 This module NEVER touches the LiveAudio sources: it only spawns the
-installed ``liveaudio-service`` entry point and speaks the stdout/WS
-contract above. No shell, no remote control, no transcript/audio logging.
+installed ``liveaudio-service`` entry point (or the installed headless
+``liveaudio-cli serve`` fallback) and speaks the stdout/WS contract above.
+No shell, no remote control, no transcript/audio logging.
 """
 
 from __future__ import annotations
@@ -35,11 +36,19 @@ logger = logging.getLogger("opencohost.stt.supervisor")
 
 SERVICE_CMD = "liveaudio-service"
 EXPLICIT_ENV_VAR = "OPENCOHOST_LIVEAUDIO_CMD"
-# Official LiveAudio install-root override (packaging/launcher.py
-# resolve_install_root precedence 1; testing/automation hook there too).
+# Official LiveAudio install-root override (testing/automation hook; takes
+# precedence over the installer metadata lookups below).
 INSTALL_ROOT_ENV_VAR = "LIVEAUDIO_INSTALL_ROOT"
 INSTALL_LOCATION_FILE = "install_location.json"
 INSTALLED_MARKER_FILE = "installed.json"
+
+# Headless CLI fallback: ``liveaudio-cli serve --parent-pid <PID>`` (same stdout
+# JSON Lines contract as ``liveaudio-service``). Only the installed sibling
+# binary is used; there is no desktop-app launch mode.
+CLI_EXE_STEM = "liveaudio-cli"
+CLI_SUBCOMMAND = "serve"
+# Per-user NSIS uninstall key; its ``InstallLocation`` locates the install root.
+DESKTOP_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\LiveAudio"
 
 # ASR readiness as reported by the ``asr_state`` stdout event.
 ASR_READY = "ready"
@@ -179,12 +188,13 @@ def resolve_installed_service_exe(environ=None, platform=None) -> Optional[str]:
 
 
 def resolve_liveaudio_command(explicit: Optional[str] = None, environ=None, platform=None) -> Optional[list]:
-    """Resolve the ``liveaudio-service`` argv (without ``--parent-pid``).
+    """Resolve the LiveAudio argv (without ``--parent-pid``).
 
     Precedence: explicit setting (test/dev only) → ``OPENCOHOST_LIVEAUDIO_CMD``
-    env (test/dev only) → ``liveaudio-service`` on PATH → official installer
-    metadata (``LIVEAUDIO_INSTALL_ROOT`` / ``install_location.json`` /
-    default root with ``installed.json`` marker). Returns None when not
+    env (test/dev only) → ``liveaudio-service`` on PATH → installed legacy
+    ``liveaudio-service`` (``LIVEAUDIO_INSTALL_ROOT`` / ``install_location.json``
+    / default root with ``installed.json`` marker) → installed headless CLI
+    ``[liveaudio-cli, "serve"]`` as the last fallback. Returns None when not
     installed so callers keep manual-LiveAudio compatibility with an actionable
     message instead of crashing. Never uses a shell.
     """
@@ -200,7 +210,73 @@ def resolve_liveaudio_command(explicit: Optional[str] = None, environ=None, plat
     if found:
         return [found]
     exe = resolve_installed_service_exe(environ=environ, platform=platform)
-    return [exe] if exe else None
+    if exe:
+        return [exe]
+    return resolve_liveaudio_cli(environ=environ, platform=platform)
+
+
+def _read_registry_install_location() -> Optional[str]:
+    """``InstallLocation`` of the per-user NSIS uninstall key (Windows only)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, DESKTOP_UNINSTALL_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, "InstallLocation")
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _normalise_install_root(value) -> str:
+    r"""Strip whitespace and ONE pair of surrounding double quotes.
+
+    Tauri's NSIS installer writes ``InstallLocation`` quoted
+    (``"E:\...\LiveAudio"``); an unbalanced quote is left untouched.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return text
+
+
+def resolve_liveaudio_cli(environ=None, platform=None, registry_reader=None) -> Optional[list]:
+    """Locate the installed headless CLI and return ``[exe, "serve"]`` (read-only).
+
+    Install roots are tried in order: ``LIVEAUDIO_INSTALL_ROOT`` env,
+    ``install_location.json`` (launcher metadata), then the HKCU uninstall
+    ``InstallLocation`` (Windows only; *registry_reader* is injectable). Each
+    root contributes one sibling ``liveaudio-cli`` (``.exe`` on Windows) that
+    must be a real file. Fixed depth: no recursion, no execution. Returns None
+    when nothing resolves.
+    """
+    platform = platform or sys.platform
+    environ = os.environ if environ is None else environ
+    exe_name = CLI_EXE_STEM + (".exe" if platform == "win32" else "")
+    roots = []
+    override = _normalise_install_root(environ.get(INSTALL_ROOT_ENV_VAR))
+    if override:
+        roots.append(os.path.abspath(override))
+    recorded = _read_metadata_root(_metadata_location_file(platform, environ))
+    if recorded:
+        roots.append(recorded)
+    if platform == "win32":
+        try:
+            registered = (registry_reader or _read_registry_install_location)()
+        except Exception:
+            registered = None
+        registered = _normalise_install_root(registered)
+        if registered:
+            roots.append(os.path.abspath(registered))
+    for root in roots:
+        candidate = os.path.join(root, exe_name)
+        try:
+            if os.path.isfile(candidate):
+                return [candidate, CLI_SUBCOMMAND]
+        except Exception:
+            continue
+    return None
 
 
 def parse_service_line(line: str) -> Optional[dict]:

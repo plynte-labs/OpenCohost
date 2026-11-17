@@ -65,7 +65,7 @@ def test_ac31_typed_message_pregenerates_during_speech_then_pops_from_cache():
     gen_calls = []
     gen_done = threading.Event()
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen_calls.append((contexto, source, commit_history))
         gen_done.set()
         return "Respuesta interactiva."
@@ -111,7 +111,7 @@ def test_f1_pregen_commits_honest_history_text_not_payload():
     )
     gen_done = threading.Event()
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen_done.set()
         return "Respuesta PTT."
 
@@ -206,7 +206,7 @@ def test_f3_doomed_same_item_waits_until_worker_finishes_then_foregrounds_once()
     motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
     fg = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         fg.append(contexto)
         return "FOREGROUND"
 
@@ -321,7 +321,7 @@ def test_ac35_ptt_behind_chat_pregen_evicts_and_retriggers_for_ptt():
 
     gen = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen.append((contexto, source))
         return "PTT_REPLY"
 
@@ -359,7 +359,7 @@ def test_eviction_interactive_evicts_cached_agenda_occupant():
     epoch0 = motor._prefetch_epoch
     gen = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen.append(source)
         return "CHAT"
 
@@ -390,7 +390,7 @@ def test_f2_pregenerate_refuses_while_an_inflight_worker_is_alive():
     ollama_entered = threading.Event()
 
     # A REAL slow worker: a genuine _generar_dialogo blocked mid-"generation".
-    def _slow_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _slow_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         ollama_entered.set()
         release.wait(2.0)
         return "AGENDA_DRAFT"
@@ -554,7 +554,7 @@ def test_prefetch_agenda_alias_still_pregenerates_agenda():
     motor = _bare_motor()
     motor._preview_accept_agenda_output = lambda d: True
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         return "Texto de agenda."
 
     motor._generar_dialogo = _gen
@@ -734,7 +734,7 @@ def test_4c_retry_once_succeeds_and_stores_the_retried_draft():
 
     gen_calls = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen_calls.append(1)
         return f"draft-{len(gen_calls)}"
 
@@ -894,7 +894,7 @@ def test_retry_epoch_pre_check_abandons_a_stale_spawn_without_a_second_generatio
 
     gen_calls = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         gen_calls.append(1)
         if len(gen_calls) == 1:
             # Simulate an intervening commit/eviction that supersedes this
@@ -928,10 +928,10 @@ def test_finally_marker_ownership_survives_a_successor_takeover_in_the_store_to_
     release = threading.Event()
     successor_marker_seen = {}
 
-    def _old_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _old_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         return "OLD_DRAFT"
 
-    def _successor_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _successor_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         release.wait(2.0)
         return "NEW_DRAFT"
 

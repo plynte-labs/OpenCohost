@@ -22,13 +22,61 @@ import contextlib
 from typing import Any, Callable
 
 from opencohost.config.logger import get_logger
+from opencohost.i18n.active import get_active_bundle
+from opencohost.i18n.contract import resolve
 from opencohost.smart_aggregator.chat_input_contract import ChatContextPacketBuilder
+from opencohost.smart_aggregator.highlight_scoring import (
+    HighlightConfig,
+    heuristic_score,
+    is_unsafe,
+    select_best,
+)
 from opencohost.smart_aggregator.kira_agenda_controller import (
     AgendaState,
     wrap_untrusted_chat,
 )
 
 logger = get_logger()
+
+# Chat-reaction prompt text is locale data: the llm.chat_reaction.* slots in the
+# bundles under opencohost/locales. The literals below are the neutral-Spanish
+# base (the es bundle values), used only when the active bundle does not ship a
+# slot. They are never another locale's text. Viewer-chat fences are not here:
+# wrap_untrusted_chat owns those machine delimiters.
+_CHAT_SLOT_PREFIX = "llm.chat_reaction."
+_TASK_DEFAULT = "\n".join((
+    "TAREA: responde en directo como Kira, la co-host del stream, con actitud.",
+    "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.",
+    "PERSONALIDAD: sarcasmo seco, humor ácido, cero condescendencia. No seas predecible.",
+    "Si el chat repite siempre lo mismo, señálalo con ironía, no con una queja genérica.",
+    "No expliques el resumen, no enumeres datos y no describas tu proceso.",
+    "PROHIBIDO mencionar cantidades de mensajes, autores, ejemplos, 'temas/personas', "
+    "'intención dominante', 'contexto privado', 'resumen', 'mensaje destacado' o 'el chat dice'.",
+    "PROHIBIDO empezar con 'Parece que', 'Bueno, parece', 'Bien, parece', 'Voy a', "
+    "'Tengo que', 'El chat está', 'energía del flujo' o 'mantener la energía'.",
+    "PROHIBIDO usar fórmulas repetitivas como 'es como decir que', 'es como si', "
+    "'eso es como'. NUNCA uses símiles forzados.",
+    "Si el contexto interno es confuso o pobre, haz una reacción general corta sin inventar detalles.",
+    "Responde en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.",
+    "No repitas el mismo tipo de reacción del turno anterior. Varía entre burla, reflexión y dato curioso.",
+))
+_HIGHLIGHT_LINE_DEFAULT = "Referencia opcional privada; NO nombres al autor ni digas que es destacado:"
+_ANTI_REPEAT_HEADER_DEFAULT = "ÚLTIMAS RESPUESTAS DE KIRA (NO repetir estructura ni fraseo):"
+_CONTEXT_HEADER_DEFAULT = "Mensajes recientes del chat:"
+
+
+def _chat_slot(name: str, default: str) -> str:
+    """Resolve one ``llm.chat_reaction.<name>`` string from the active bundle.
+
+    Same degrade rule as ``i18n.active._slot``: a missing, empty or non-string
+    slot yields the neutral-Spanish default, and an i18n failure never silences
+    the chat reaction.
+    """
+    try:
+        value = resolve(get_active_bundle(), _CHAT_SLOT_PREFIX + name, default=default)
+    except Exception:
+        return default
+    return value if isinstance(value, str) and value.strip() else default
 
 
 class ChatReactionCore:
@@ -73,7 +121,7 @@ class ChatReactionCore:
             if not context and not intent_prompt:
                 return
             lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-            chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
+            chat_context = intent_prompt or (_chat_slot("context_header", _CONTEXT_HEADER_DEFAULT) + "\n" + "\n".join(lines))
             last_lines = self._recent_kira_lines(3)
             prompt = self._build_kira_chat_prompt(chat_context, last_kira_lines=last_lines)
             # No explicit priority: enqueue() resolves the STREAM tier from
@@ -88,7 +136,9 @@ class ChatReactionCore:
         if not context and not intent_prompt:
             return
 
-        highlight = self._select_highlight(context)
+        highlight = self._select_highlight(
+            context, data.get("highlight_cfg"), data.get("highlight_counters")
+        )
         if highlight:
             lowered = highlight.lower()
             has_question = "?" in highlight or "¿" in highlight
@@ -99,7 +149,7 @@ class ChatReactionCore:
                 formatted = self._format_joyita_for_obs(highlight)
                 self._on_joyita(formatted)
         lines = [f"- {m.get('user', '')}: {m.get('text', '')}" for m in context]
-        chat_context = intent_prompt or "Mensajes recientes del chat:\n" + "\n".join(lines)
+        chat_context = intent_prompt or (_chat_slot("context_header", _CONTEXT_HEADER_DEFAULT) + "\n" + "\n".join(lines))
         last_lines = self._recent_kira_lines(3)
         prompt = self._build_kira_chat_prompt(chat_context, highlight, last_lines)
         # Same tier resolution as the busy path above: stream tier via source.
@@ -154,11 +204,16 @@ class ChatReactionCore:
 
     @staticmethod
     def _build_kira_chat_prompt(chat_context: str, highlight: str = "", last_kira_lines: str = "") -> str:
-        """Build a chat prompt that prevents internal summaries leaking on air."""
+        """Build a chat prompt that prevents internal summaries leaking on air.
+
+        Instruction text and labels come from the active locale bundle
+        (llm.chat_reaction.*). The viewer-chat fences are machine delimiters and
+        are never localized.
+        """
         highlight_line = ""
         if highlight:
             highlight_line = (
-                "Referencia opcional privada; NO nombres al autor ni digas que es destacado:\n"
+                _chat_slot("highlight_line", _HIGHLIGHT_LINE_DEFAULT) + "\n"
                 # The highlight is raw viewer text too -- _select_highlight returns
                 # "{user}: {text}" verbatim -- and it sits in the instruction region,
                 # above the chat fence. Unfenced it could carry a forged delimiter and
@@ -168,175 +223,49 @@ class ChatReactionCore:
         anti_repeat = ""
         if last_kira_lines:
             anti_repeat = (
-                "ÚLTIMAS RESPUESTAS DE KIRA (NO repetir estructura ni fraseo):\n"
+                _chat_slot("anti_repeat_header", _ANTI_REPEAT_HEADER_DEFAULT) + "\n"
                 f"{last_kira_lines}\n\n"
             )
-        task = (
-            "TAREA: respondé al aire como Kira, co-host del stream con actitud.\n"
-            "SALIDA PERMITIDA: solo la frase final que Kira diría en voz alta.\n"
-            "PERSONALIDAD: sarcasmo seco, humor ácido, cero condescendencia. No seas predecible.\n"
-            "Si el chat repite lo mismo de siempre, señalalo con ironía, no con queja genérica.\n"
-            "No expliques el resumen, no listes datos y no describas tu proceso.\n"
-            "PROHIBIDO mencionar cantidades de mensajes, autores, ejemplos, 'temas/personas', "
-            "'intención dominante', 'contexto privado', 'resumen', 'mensaje destacado' o 'el chat dice'.\n"
-            "PROHIBIDO empezar con 'Parece que', 'Bueno, parece', 'Vale, parece', 'Voy a', "
-            "'Tengo que', 'El chat esta', 'energia del flujo' o 'mantener la energia'.\n"
-            "PROHIBIDO usar fórmulas repetitivas como 'es como decir que', 'es como si', 'eso es como'. NUNCA uses símiles forzados.\n"
-            "Si el contexto interno es confuso o pobre, hacé una reacción general corta sin inventar detalles.\n"
-            "Respondé en 1-2 frases cortas, con personalidad de Kira: broma, crítica o comentario concreto.\n"
-            "NO repitas el mismo tipo de reacción del turno anterior. Variá entre burla, reflexión, dato curioso.\n\n"
-            f"{anti_repeat}"
-            f"{highlight_line}"
-        )
+        task = _chat_slot("task", _TASK_DEFAULT) + "\n\n"
         # Untrusted viewer chat (raw usernames + text, see on_aggregated_context)
         # is wrapped in read-only, forgery-resistant data delimiters shared with
         # the agenda prompt path — see kira_agenda_controller.wrap_untrusted_chat.
-        return task + wrap_untrusted_chat(chat_context)
+        return task + anti_repeat + highlight_line + wrap_untrusted_chat(chat_context)
 
     @staticmethod
-    def _select_highlight(context: list[dict]) -> str:
+    def _select_highlight(
+        context: list[dict],
+        cfg: HighlightConfig | None = None,
+        counters: dict | None = None,
+    ) -> str:
         """Pick the best 'joyita' message to highlight from recent context.
 
-        Scoring prefers: questions, humor/emoji, unusual/out-of-context
-        messages, then falls back to longest valid-length text.
-        Deterministic and cheap — no LLM calls.
+        Heuristic scoring (questions, humor/emoji, unusual messages) plus an
+        optional per-message Laya verdict (``msg["laya"] = (label, conf)``),
+        see ``highlight_scoring``. Returns "" when nothing reaches the floor
+        ``cfg.highlight_min_score``. Deterministic and cheap -- no LLM calls;
+        ``counters`` (counts only) is updated in place when given.
         """
-        if not context:
+        best = select_best(context, cfg or HighlightConfig(), counters)
+        if best is None:
             return ""
-
-        candidates = []
-        for msg in context:
-            text = msg.get("text", "").strip()
-            if not text:
-                continue
-            candidates.append(msg)
-
-        if not candidates:
-            return ""
-
-        def _joyita_score(msg: dict) -> int:
-            text = msg.get("text", "")
-            length = len(text)
-            if length < 10 or length > 180:
-                return -1  # disqualify too short or too long
-
-            lowered = text.lower()
-
-            # ---- Content safety gates: reject immediately ----
-            if ChatReactionCore._is_joyita_unsafe(text, lowered):
-                return -1
-
-            score = 0
-
-            # Questions get highest priority
-            if "?" in text or "¿" in text:
-                score += 100
-
-            # Humor / emoji signals
-            emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
-            score += min(emoji_count * 10, 30)
-            for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "😆", "jajaja"):
-                if marker in lowered:
-                    score += 15
-                    break
-
-            # Unusual / out-of-context: numbers mixed with text, rare chars
-            has_digits = any(c.isdigit() for c in text)
-            has_alpha = any(c.isalpha() for c in text)
-            if has_digits and has_alpha:
-                score += 8
-
-            for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
-                if marker in lowered:
-                    score += 5
-
-            # Small bonus for being in the sweet-spot length range
-            if 30 <= length <= 120:
-                score += 3
-
-            return score
-
-        best = max(candidates, key=_joyita_score)
         return f"{best.get('user', '')}: {best.get('text', '')}"
 
     @staticmethod
     def _is_joyita_unsafe(text: str, lowered: str) -> bool:
-        """Reject messages containing links, @mentions, or advertising.
-
-        These signals indicate the message is promotional, a call-to-action,
-        or otherwise inappropriate for on-stream highlighting.
-        """
-        # URLs / links — any protocol, bare domain, or tld
-        url_patterns = (
-            "http://", "https://", "www.", ".com", ".net", ".org",
-            ".gg/", ".tv/", ".live/", "youtu.be/", "twitch.tv/",
-            "discord.gg/", "tiktok.com/",
-        )
-        if any(p in lowered for p in url_patterns):
-            return True
-
-        # @mentions — directing viewers to another account
-        if "@" in text:
-            words = lowered.split()
-            for w in words:
-                # Only treat as mention if @ is followed by a letter/number
-                if w.startswith("@") and len(w) > 1 and w[1].isalnum():
-                    return True
-
-        # Payment / advertising / hidden promotion
-        ad_patterns = (
-            "paga", "pagá", "pagame", "donación", "donacion", "dona",
-            "subscribe", "suscribete", "suscríbete", "follow",
-            "sígueme", "sigueme", "regalame", "regálame",
-            "compra", "comprá", "vendo", "vendes", "barato",
-            "promo", "sorteo", "giveaway", "sponsor",
-            "bit.ly", "linktr.ee", "onlyfans",
-        )
-        if any(p in lowered for p in ad_patterns):
-            return True
-
-        return False
+        """Reject messages containing links, @mentions, or advertising."""
+        return is_unsafe(text, lowered)
 
     @staticmethod
     def _joyita_score_raw(highlight: str) -> int:
         """Re-compute the joyita score from a formatted highlight string.
 
-        Used by the OBS gateway to enforce the score ≥100 threshold without
+        Used by the OBS gateway to enforce the score >= 100 threshold without
         re-parsing the raw context dicts.
         """
         # highlight format: "user: text"
-        if ":" in highlight:
-            text = highlight.split(":", 1)[1].strip()
-        else:
-            text = highlight
-
-        length = len(text)
-        if length < 10 or length > 180:
-            return -1
-
-        lowered = text.lower()
-        if ChatReactionCore._is_joyita_unsafe(text, lowered):
-            return -1
-
-        score = 0
-        if "?" in text or "¿" in text:
-            score += 100
-        emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
-        score += min(emoji_count * 10, 30)
-        for marker in ("jaja", "jeje", "lol", "xd", "😂", "🤣", "jajaja"):
-            if marker in lowered:
-                score += 15
-                break
-        has_digits = any(c.isdigit() for c in text)
-        has_alpha = any(c.isalpha() for c in text)
-        if has_digits and has_alpha:
-            score += 8
-        for marker in ("por qué", "cómo", "cuándo", "dónde", "quién"):
-            if marker in lowered:
-                score += 5
-        if 30 <= length <= 120:
-            score += 3
-        return score
+        text = highlight.split(":", 1)[1].strip() if ":" in highlight else highlight
+        return heuristic_score(text)
 
     @staticmethod
     def _format_joyita_for_obs(highlight: str) -> str:

@@ -181,7 +181,9 @@ def test_self_heal_escalates_bounded_num_predict_on_empty_content_with_thinking(
     assert result == "Here is the real answer."
     assert "num_predict" in captured[0]          # first attempt was capped
     assert "num_predict" in captured[1]          # ADR-056: never uncapped; escalated boundedly
-    assert captured[1]["num_predict"] > captured[0]["num_predict"]
+    # F3: the retry is think-off with the answer-only budget (no doubling).
+    assert captured[1]["num_predict"] <= captured[0]["num_predict"]
+    assert captured[1].get("think") is False
     assert m._reasoning_model_cache["gemma4:12b"] is True
 
 

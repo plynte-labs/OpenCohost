@@ -60,6 +60,28 @@ activity:
       parameter: "excitement_multiplier"
       value: 1.5
 
+# chat-highlight-laya-scoring-20261111: which chat message Kira reacts to, and
+# whether a quiet channel can wake her. Scores are the highlight_scoring units
+# (question 100, humor 15, emoji up to 30, digits+text 8, interrogative 5, a
+# message with no signal at best 3 for its length).
+chat_highlight:
+  # No highlight below this score. A plain message with no signal scores at
+  # most 3, so 4 means "something must be positive".
+  highlight_min_score: 4
+  # Laya (local, shadow-only `respond` decision) refines the pick. A confident
+  # `respond` adds the bonus; a confident `ignore` drops the candidate as spam.
+  # A missing or late Laya verdict means the heuristic alone decides.
+  laya_respond_bonus: 20
+  laya_respond_min_conf: 0.70
+  laya_spam_min_conf: 0.85
+  # Low-traffic reaction: below activity.threshold_per_second, one strong
+  # message may fire a reaction. Never more often than low_traffic_cooldown_s
+  # and never inside activity.cooldown_seconds. 20 = a question, humor plus an
+  # emoji, or a message Laya confidently wants answered.
+  low_traffic_enabled: true
+  low_traffic_min_score: 20
+  low_traffic_cooldown_s: 90
+
 # Measure-first instrumentation of the chat-activation filter. Metadata-only
 # (no chat text/usernames ever logged). OFF by default — enable to diagnose why
 # Kira is under-fed at high traffic, then read get_diagnostics()["activation_telemetry"].

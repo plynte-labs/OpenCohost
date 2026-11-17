@@ -107,6 +107,93 @@ def test_set_active_en_makes_provider_fallback_notice_accessor_english(official)
 
 
 # ---------------------------------------------------------------------------
+# T4 (live_session_fixes_20260925): llm.provider_fallback_transition_notice
+# present in BOTH official locales, and genuinely translated.
+# ---------------------------------------------------------------------------
+
+
+def test_provider_fallback_transition_notice_present_in_both_locales(official):
+    en_bundle = build_chain("en", official)
+    es_bundle = build_chain("es", official)
+    en_notice = resolve(en_bundle, "llm.provider_fallback_transition_notice")
+    es_notice = resolve(es_bundle, "llm.provider_fallback_transition_notice")
+    assert en_notice
+    assert es_notice
+    assert en_notice != es_notice
+
+
+def test_set_active_en_makes_provider_fallback_transition_notice_accessor_english(official):
+    active.set_active_bundle(resolve_active_bundle(locale="en", registry=official))
+    assert active.provider_fallback_transition_notice() == resolve(
+        build_chain("en", official), "llm.provider_fallback_transition_notice"
+    )
+
+
+# ---------------------------------------------------------------------------
+# K4 (G6): llm.guardrail_retry_nudges ships in BOTH official locales with the
+# same keys, authored per locale.
+# ---------------------------------------------------------------------------
+
+# K5 added no_human_claim (warm profiles only); K8 added no_machine_lecture
+# (in_character / free / sentimental only); P4 added no_echo (echo guard);
+# S4 added no_isolation_pressure.
+_NUDGE_KEYS = {
+    "no_cannot_search_claim",
+    "never_promise",
+    "no_ai_self_identification",
+    "no_human_claim",
+    "no_machine_lecture",
+    "no_echo",
+    "no_code_output",
+    "no_memory_denial",
+    "no_false_capability",
+    "no_isolation_pressure",
+    "no_false_search_claim",
+    "no_false_search_result",
+    "no_false_page_claim",
+    "generic",
+}
+
+
+def test_guardrail_retry_nudges_present_in_both_locales(official):
+    en = resolve(build_chain("en", official), "llm.guardrail_retry_nudges")
+    es = resolve(build_chain("es", official), "llm.guardrail_retry_nudges")
+    assert set(en) == _NUDGE_KEYS
+    assert set(es) == _NUDGE_KEYS
+    for key in _NUDGE_KEYS:
+        assert en[key] and es[key] and en[key] != es[key], key
+
+
+def test_guardrail_retry_nudges_is_a_no_fallback_slot():
+    from opencohost.i18n.contract import NO_FALLBACK_SLOTS
+
+    assert "llm.guardrail_retry_nudges" in NO_FALLBACK_SLOTS
+
+
+@pytest.mark.parametrize("locale", ["en", "es"])
+def test_guardrail_retry_nudge_accessor_follows_active_locale(official, locale):
+    active.set_active_bundle(resolve_active_bundle(locale=locale, registry=official))
+    nudges = resolve(build_chain(locale, official), "llm.guardrail_retry_nudges")
+    for key in _NUDGE_KEYS:
+        assert active.guardrail_retry_nudge(key) == nudges[key]
+    # Unknown rule ids get the generic nudge.
+    assert active.guardrail_retry_nudge("no_doxxing") == nudges["generic"]
+
+
+def test_guardrail_retry_nudge_accessor_degrades_to_english_without_slot():
+    """A community bundle without the slot must not borrow Spanish: the
+    accessor returns the built-in English generic note (model-only text,
+    never spoken)."""
+    from opencohost.i18n.contract import TIER_OFFICIAL, LocaleBundle
+
+    active.set_active_bundle(
+        LocaleBundle(code="xx", tier=TIER_OFFICIAL, data={"meta": {"code": "xx"}})
+    )
+    text = active.guardrail_retry_nudge("never_promise")
+    assert text.startswith("Internal note")
+
+
+# ---------------------------------------------------------------------------
 # grounding_authority_temporal_humility: llm.grounding_rules and
 # llm.editorial_card_instruction must ship in BOTH official locales, authored
 # per-locale (never a copy-paste of the other language).

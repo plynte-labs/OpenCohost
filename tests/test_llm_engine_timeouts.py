@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from opencohost.core import llm_engine
+from opencohost.core.context import prompt_assembler
 from opencohost.core.engine import llm_engine_models
 from opencohost.config import settings
 from opencohost.config.settings import CLOUD_CHAT_TIMEOUT, TTS_HEAVY_TIMEOUT, TTS_LIGHT_TIMEOUT
@@ -292,6 +293,40 @@ def test_watchdog_still_times_out_when_worker_never_returns():
 
 
 def test_non_reasoning_models_use_configured_token_cap():
+    # source=chat is outside OWNER_POLICY_SOURCES, so the owner reply-length cap
+    # does not apply and this test pins the general LLM_MAX_TOKENS cap.
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "llama3"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {"message": {"content": "Respuesta segura."}}
+
+    assert motor._generar_dialogo("hola", source="chat", commit_history=False) == "Respuesta segura."
+
+    options = motor.ollama.chat.call_args.kwargs["options"]
+    assert options["num_predict"] == llm_engine.LLM_MAX_TOKENS
+    assert options["num_predict"] == 768
+
+
+def test_reasoning_models_use_governed_token_budget():
+    # source=chat, for the same reason as the non-reasoning test above: the
+    # governed budget is asserted without the owner reply-length cap.
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
+    motor.current_model = "qwen3:4b"
+    motor.use_system_role = True
+    motor.ollama = MagicMock()
+    motor.ollama.chat.return_value = {"message": {"content": "Respuesta segura."}}
+
+    assert motor._generar_dialogo("hola", source="chat", commit_history=False) == "Respuesta segura."
+
+    options = motor.ollama.chat.call_args.kwargs["options"]
+    assert "num_predict" in options
+    assert options["num_predict"] in (512, 768)
+
+
+def test_owner_brief_greeting_uses_short_reply_cap():
+    """An owner greeting ("hola") resolves to the `short` reply level, so the
+    owner cap for that level bounds num_predict instead of the general cap."""
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor.use_system_role = True
@@ -301,22 +336,7 @@ def test_non_reasoning_models_use_configured_token_cap():
     assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "Respuesta segura."
 
     options = motor.ollama.chat.call_args.kwargs["options"]
-    assert options["num_predict"] == llm_engine.LLM_MAX_TOKENS
-    assert options["num_predict"] == 768
-
-
-def test_reasoning_models_use_governed_token_budget():
-    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
-    motor.current_model = "qwen3:4b"
-    motor.use_system_role = True
-    motor.ollama = MagicMock()
-    motor.ollama.chat.return_value = {"message": {"content": "Respuesta segura."}}
-
-    assert motor._generar_dialogo("hola", source="direct", commit_history=False) == "Respuesta segura."
-
-    options = motor.ollama.chat.call_args.kwargs["options"]
-    assert "num_predict" in options
-    assert options["num_predict"] in (512, 768)
+    assert options["num_predict"] == prompt_assembler.OWNER_REPLY_MAX_TOKENS_BY_LEVEL["short"]
 
 
 def test_replace_pending_keeps_latest_item_for_same_source():
@@ -420,9 +440,11 @@ def test_agenda_prefetch_generates_text_without_speaking_until_consumed():
     assert spoke.wait(1.0) is True
     assert spoken == ["Texto cacheado"]
     motor.agenda_output_recorder.assert_called_once_with("Texto cacheado")
+    # clock-and-compact-polish-20261010 T3: entries carry the committing model.
+    model = motor.current_model
     assert list(motor.historial)[-2:] == [
-        {"role": "user", "content": "[agenda segura: prompt interno omitido]", "source": "kira-agenda", "private": False},
-        {"role": "assistant", "content": "Texto cacheado", "source": "kira-agenda", "private": False},
+        {"role": "user", "content": "[agenda segura: prompt interno omitido]", "source": "kira-agenda", "private": False, "model": model},
+        {"role": "assistant", "content": "Texto cacheado", "source": "kira-agenda", "private": False, "model": model},
     ]
 
 
@@ -460,7 +482,7 @@ def test_agenda_generation_uses_controller_guardrail_before_history_or_speech():
     assert list(motor.historial) == []
 
 
-def test_output_guard_blocked_direct_commits_user_turn_and_fallback():
+def test_output_guard_blocked_direct_keeps_fallback_out_of_history():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor.use_system_role = True
@@ -472,17 +494,14 @@ def test_output_guard_blocked_direct_commits_user_turn_and_fallback():
     dialogo = motor._generar_dialogo("hola", source="direct", commit_history=True)
 
     # R9 (AI self-ID) is global: blocked even for direct source. The spoken
-    # fallback line replaces dead air. D4 (memoria_quality_20260717): the blocked
-    # exchange now ENTERS history as (user turn, spoken fallback) instead of
-    # vanishing (F4) — but the blocked LLM output itself never reaches history.
+    # fallback line replaces dead air. F2 (session-2107-fixes): the canned line is
+    # spoken/shown but is NOT conversation, so neither it nor the blocked exchange
+    # enters history (it was replayed into later prompts and parroted).
     assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
-    assert len(motor.historial) == 2
-    assert motor.historial[-2]["content"] == "hola"
-    assert motor.historial[-1]["content"] == dialogo
-    assert "Como modelo de lenguaje" not in motor.historial[-1]["content"]
+    assert len(motor.historial) == 0
 
 
-def test_output_guard_blocked_chat_commits_user_turn_and_fallback():
+def test_output_guard_blocked_chat_keeps_fallback_out_of_history():
     motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
     motor.current_model = "llama3"
     motor.use_system_role = True
@@ -494,13 +513,9 @@ def test_output_guard_blocked_chat_commits_user_turn_and_fallback():
     dialogo = motor._generar_dialogo("chat compactado", source="chat", commit_history=True)
 
     # R10 still applies to chat sources; the fallback line is spoken instead of
-    # dead air. D4: the blocked exchange enters history (user turn + fallback);
-    # the blocked LLM output ("Tu audiencia...") never does.
+    # dead air. F2: neither the fallback nor the blocked output enters history.
     assert dialogo in i18n_active.LEGACY_GUARDRAIL_FALLBACK_LINES
-    assert len(motor.historial) == 2
-    assert motor.historial[-2]["content"] == "chat compactado"
-    assert motor.historial[-1]["content"] == dialogo
-    assert "Tu audiencia" not in motor.historial[-1]["content"]
+    assert len(motor.historial) == 0
 
 
 def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
@@ -520,7 +535,6 @@ def test_ollama_chat_timeout_is_logged_and_returns_empty(caplog):
         "source": "direct",
         "attempt": 1,
         "reason": "TimeoutError",
-        "message": "chat stalled",
     }
     assert any("ERROR Ollama chat (TimeoutError)" in item for item in list(motor.log_queue.queue))
     assert any("Ollama chat transport failure" in record.message for record in caplog.records)
@@ -574,7 +588,7 @@ def test_ollama_chat_connection_error_is_logged_and_returns_empty(caplog):
     assert dialogo == ""
     assert motor.ollama.chat.call_count == 1
     assert motor._last_llm_failure["reason"] == "ConnectionError"
-    assert motor._last_llm_failure["message"] == "ollama refused"
+    assert "message" not in motor._last_llm_failure  # provider text is never kept
     assert any("ERROR Ollama chat (ConnectionError)" in item for item in list(motor.log_queue.queue))
     assert any("Ollama chat transport failure" in record.message for record in caplog.records)
     assert list(motor.historial) == []
@@ -594,6 +608,7 @@ def test_agenda_output_transformer_caps_before_history_commit():
     motor.agenda_output_transformer.assert_called_once_with("uno dos tres cuatro")
     assert list(motor.historial)[-1] == {
         "role": "assistant", "content": "uno dos", "source": "kira-agenda", "private": False,
+        "model": "llama3",
     }
 
 
@@ -1546,3 +1561,54 @@ def test_streaming_seam_never_logs_response_text(monkeypatch, caplog):
         assert secret.lower() not in record.getMessage().lower()
     for line in list(motor.log_queue.queue):
         assert secret.lower() not in str(line).lower()
+
+
+def test_cold_load_not_resident_extends_watchdog_timeout_and_emits_model_warming():
+    events = []
+    motor = llm_engine.MotorVocalIA(queue.Queue(), events.append)
+    motor.current_model = "gemma4:e2b"
+    motor._awaiting_first_success_after_switch = True
+    motor.is_ready = True
+
+    # Mock ollama client with ps() returning empty models list (evicted/cold)
+    mock_client = MagicMock()
+    mock_client.ps.return_value = SimpleNamespace(models=[])
+    mock_ollama = MagicMock()
+    mock_ollama.Client.return_value = mock_client
+    motor.ollama = mock_ollama
+
+    timeout = motor._resolve_chat_watchdog_timeout("gemma4:e2b")
+
+    # Timeout should be extended to full inference watchdog timeout (180s)
+    assert timeout == motor._inference_watchdog_timeout
+    assert motor._cold_warming_notified is True
+    assert "model_warming" in events
+
+    # On generation success, ready is emitted and flag cleared
+    motor._mark_model_generation_success("gemma4:e2b")
+    assert motor._cold_warming_notified is False
+    assert motor._awaiting_first_success_after_switch is False
+    assert events[-1] == "ready"
+
+
+def test_resident_model_keeps_post_switch_timeout():
+    events = []
+    motor = llm_engine.MotorVocalIA(queue.Queue(), events.append)
+    motor.current_model = "gemma4:e2b"
+    motor._awaiting_first_success_after_switch = True
+    motor.is_ready = True
+
+    # Mock ollama client with ps() returning the resident model
+    mock_client = MagicMock()
+    mock_client.ps.return_value = SimpleNamespace(models=[SimpleNamespace(model="gemma4:e2b")])
+    mock_ollama = MagicMock()
+    mock_ollama.Client.return_value = mock_client
+    motor.ollama = mock_ollama
+
+    timeout = motor._resolve_chat_watchdog_timeout("gemma4:e2b")
+
+    # Resident model keeps the standard post-switch watchdog timeout (45s)
+    assert timeout == motor._post_switch_watchdog_timeout
+    assert motor._cold_warming_notified is False
+    assert "model_warming" not in events
+

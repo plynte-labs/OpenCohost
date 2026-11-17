@@ -44,6 +44,15 @@ def _reset_host_active():
     main_mod._host_active = False
 
 
+@pytest.fixture(autouse=True)
+def _reset_active_bundle():
+    from opencohost.i18n import active as i18n_active
+
+    i18n_active.reset_active_bundle()
+    yield
+    i18n_active.reset_active_bundle()
+
+
 @pytest.fixture
 def profiles_file(tmp_path, monkeypatch):
     """Seed a >=2-profile tmp json and redirect PROFILES_FILE to it."""
@@ -83,13 +92,29 @@ def test_get_perfil_returns_name_id_prompt_and_use_system(profiles_file):
         resp = client.get("/api/perfiles/default")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"name", "id", "prompt", "use_system", "locale"}
+        assert set(body.keys()) == {
+            "name",
+            "id",
+            "prompt",
+            "use_system",
+            "locale",
+            "extended_responses",
+            "max_turns",
+            "max_turns_cap",
+            "warmth",
+            "owner_gender",
+        }
         assert body == {
             "name": "default",
             "id": "id-default",
             "prompt": "Default prompt",
             "use_system": False,
             "locale": None,
+            "extended_responses": False,
+            "max_turns": 3,
+            "max_turns_cap": 10,
+            "warmth": "cold",
+            "owner_gender": "",
         }
 
 
@@ -106,6 +131,36 @@ def test_get_perfil_404_when_missing(profiles_file):
     with TestClient(app) as client:
         resp = client.get("/api/perfiles/nonexistent")
         assert resp.status_code == 404
+
+
+def test_list_perfiles_without_locale_returns_all(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles")
+        assert resp.status_code == 200
+        profiles = resp.json()["profiles"]
+        assert "default" in profiles
+        assert "streamer" in profiles
+
+
+def test_list_perfiles_with_locale_en_filters_correctly(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles?locale=en")
+        assert resp.status_code == 200
+        profiles = resp.json()["profiles"]
+        assert "streamer" in profiles
+        assert "default" not in profiles
+
+
+def test_list_perfiles_with_locale_es_includes_unspecified(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/perfiles?locale=es")
+        assert resp.status_code == 200
+        profiles = resp.json()["profiles"]
+        assert "default" in profiles
+        assert "streamer" not in profiles
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -171,6 +226,131 @@ def test_create_perfil_with_locale_persists_and_returns_it(profiles_file):
 
         get_resp = client.get("/api/perfiles/gringo")
         assert get_resp.json()["locale"] == "en"
+
+
+def test_create_perfil_without_locale_defaults_to_active_en_and_is_listed(profiles_file):
+    from opencohost.i18n import active as i18n_active
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    i18n_active.set_active_bundle(resolve_active_bundle(locale="en"))
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "Tsundere", "prompt": "English anime prompt", "use_system": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+
+        data = _read_profiles(profiles_file)
+        assert data["Tsundere"]["locale"] == "en"
+
+        list_en = client.get("/api/perfiles?locale=en")
+        assert list_en.status_code == 200
+        assert "Tsundere" in list_en.json()["profiles"]
+
+
+def test_create_perfil_with_explicit_null_locale_defaults_to_active_locale(profiles_file):
+    from opencohost.i18n import active as i18n_active
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    i18n_active.set_active_bundle(resolve_active_bundle(locale="en"))
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "Gril", "prompt": "English anime prompt", "locale": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+
+        data = _read_profiles(profiles_file)
+        assert data["Gril"]["locale"] == "en"
+        assert "Gril" in client.get("/api/perfiles?locale=en").json()["profiles"]
+
+
+def test_create_perfil_without_locale_defaults_to_active_es(profiles_file):
+    from opencohost.i18n import active as i18n_active
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    i18n_active.set_active_bundle(resolve_active_bundle(locale="es"))
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "nueva_es", "prompt": "Hola"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "es"
+        assert _read_profiles(profiles_file)["nueva_es"]["locale"] == "es"
+        assert "nueva_es" in client.get("/api/perfiles?locale=es").json()["profiles"]
+        assert "nueva_es" not in client.get("/api/perfiles?locale=en").json()["profiles"]
+
+
+def test_create_and_list_perfiles_normalize_primary_tags_preserving_es_legacy_fallback(profiles_file):
+    profiles = _read_profiles(profiles_file)
+    profiles["regional_stored"] = {
+        "id": "id-regional",
+        "prompt": "British prompt",
+        "use_system": False,
+        "locale": "en-GB",
+    }
+    _write_profiles(profiles_file, profiles)
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "us_created", "prompt": "Hi", "locale": "en-US"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locale"] == "en"
+        assert _read_profiles(profiles_file)["us_created"]["locale"] == "en"
+
+        en_profiles = client.get("/api/perfiles?locale=en").json()["profiles"]
+        en_us_profiles = client.get("/api/perfiles?locale=en_US").json()["profiles"]
+        es_profiles = client.get("/api/perfiles?locale=es").json()["profiles"]
+
+        assert "us_created" in en_profiles
+        assert "regional_stored" in en_profiles
+        assert "regional_stored" in en_us_profiles
+        assert "default" not in en_profiles
+        assert "default" in es_profiles
+        assert "regional_stored" not in es_profiles
+
+
+def test_create_perfil_with_extended_responses_persists_and_returns_it(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "deep_learner", "prompt": "Teach deeply", "extended_responses": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["extended_responses"] is True
+
+        data = _read_profiles(profiles_file)
+        assert data["deep_learner"]["extended_responses"] is True
+
+        get_resp = client.get("/api/perfiles/deep_learner")
+        assert get_resp.json()["extended_responses"] is True
+
+
+def test_create_perfil_with_max_turns_persists_and_returns_it(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/perfiles",
+            json={"name": "long_memory", "prompt": "Remember more", "max_turns": 5},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["max_turns"] == 5
+
+        data = _read_profiles(profiles_file)
+        assert data["long_memory"]["max_turns"] == 5
+
+        get_resp = client.get("/api/perfiles/long_memory")
+        assert get_resp.json()["max_turns"] == 5
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -243,6 +423,64 @@ def test_update_perfil_omitted_locale_leaves_existing_value_unchanged(profiles_f
         assert data["streamer"]["prompt"] == "New streamer prompt"
 
 
+def test_update_perfil_sets_extended_responses(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/perfiles/default", json={"extended_responses": True})
+        assert resp.status_code == 200
+        assert resp.json()["extended_responses"] is True
+
+        data = _read_profiles(profiles_file)
+        assert data["default"]["extended_responses"] is True
+
+        # Toggle back to False
+        resp_off = client.put("/api/perfiles/default", json={"extended_responses": False})
+        assert resp_off.status_code == 200
+        assert resp_off.json()["extended_responses"] is False
+        assert _read_profiles(profiles_file)["default"]["extended_responses"] is False
+
+
+def test_update_perfil_omitted_extended_responses_leaves_existing_value_unchanged(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        # First set it to True
+        client.put("/api/perfiles/default", json={"extended_responses": True})
+        # Update only prompt
+        resp = client.put("/api/perfiles/default", json={"prompt": "Only prompt changed"})
+        assert resp.status_code == 200
+        assert resp.json()["extended_responses"] is True
+        assert _read_profiles(profiles_file)["default"]["extended_responses"] is True
+
+
+def test_update_perfil_sets_max_turns(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/perfiles/default", json={"max_turns": 5})
+        assert resp.status_code == 200
+        assert resp.json()["max_turns"] == 5
+
+        data = _read_profiles(profiles_file)
+        assert data["default"]["max_turns"] == 5
+
+        # Update to another value
+        resp_2 = client.put("/api/perfiles/default", json={"max_turns": 8})
+        assert resp_2.status_code == 200
+        assert resp_2.json()["max_turns"] == 8
+        assert _read_profiles(profiles_file)["default"]["max_turns"] == 8
+
+
+def test_update_perfil_omitted_max_turns_leaves_existing_value_unchanged(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        # First set it to 5
+        client.put("/api/perfiles/default", json={"max_turns": 5})
+        # Update only prompt
+        resp = client.put("/api/perfiles/default", json={"prompt": "Only prompt changed"})
+        assert resp.status_code == 200
+        assert resp.json()["max_turns"] == 5
+        assert _read_profiles(profiles_file)["default"]["max_turns"] == 5
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # DELETE /api/perfiles/{name} (last-profile guard only)
 # ──────────────────────────────────────────────────────────────────────────
@@ -307,6 +545,23 @@ def test_switch_profile_enqueues_payload_with_locale(profiles_file):
         assert payload["locale"] == "en"
 
 
+def test_switch_profile_enqueues_payload_with_max_turns(profiles_file):
+    app = _app()
+    with TestClient(app) as client:
+        # Create a profile with explicit max_turns
+        client.post(
+            "/api/perfiles",
+            json={"name": "custom_window", "prompt": "Window test", "max_turns": 8},
+        )
+        resp = client.post("/api/perfiles/switch", json={"name": "custom_window"})
+        assert resp.status_code == 200
+
+        queued = app.state.host.motor.command_queue.get_nowait()
+        command, payload = queued
+        assert command == "set_profile"
+        assert payload["max_turns"] == 8
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # CORS (D6): allow_methods must include PUT and DELETE
 # ──────────────────────────────────────────────────────────────────────────
@@ -325,3 +580,54 @@ def test_cors_allows_put_and_delete():
             )
             assert resp.status_code == 200, f"{method} preflight rejected"
             assert method in resp.headers.get("access-control-allow-methods", ""), method
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# max_turns_cap (vram-aware-context-budget T4): the live engine cap the
+# ProfileEditor uses as its input max; persisted max_turns is range-checked.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _app_with_cap(cap):
+    import opencohost.api.main as main_mod
+
+    def _factory():
+        host = FakeHost()
+        host.motor._max_turns_cap = cap
+        return host
+
+    return main_mod.create_app(host_factory=_factory, cors_origins=_DEFAULT_TEST_ORIGINS)
+
+
+def test_get_perfil_reports_engine_max_turns_cap(profiles_file):
+    with TestClient(_app_with_cap(40)) as client:
+        assert client.get("/api/perfiles/default").json()["max_turns_cap"] == 40
+
+
+def test_max_turns_cap_falls_back_to_10_when_engine_has_none(profiles_file):
+    with TestClient(_app_with_cap(None)) as client:
+        assert client.get("/api/perfiles/default").json()["max_turns_cap"] == 10
+
+
+def test_update_and_create_report_max_turns_cap(profiles_file):
+    with TestClient(_app_with_cap(25)) as client:
+        put = client.put("/api/perfiles/default", json={"max_turns": 20})
+        assert put.json()["max_turns_cap"] == 25
+        post = client.post("/api/perfiles", json={"name": "n", "prompt": "p", "max_turns": 20})
+        assert post.json()["max_turns_cap"] == 25
+
+
+def test_persisted_max_turns_is_range_checked(profiles_file):
+    with TestClient(_app()) as client:
+        # Stored value keeps the profile's intent up to the absolute ceiling (40);
+        # the engine clamps it further to the live, ctx-derived cap.
+        resp = client.put("/api/perfiles/default", json={"max_turns": 500})
+        assert resp.json()["max_turns"] == 40
+        assert _read_profiles(profiles_file)["default"]["max_turns"] == 40
+
+        resp = client.put("/api/perfiles/default", json={"max_turns": 0})
+        assert resp.json()["max_turns"] == 1
+
+        post = client.post("/api/perfiles", json={"name": "big", "prompt": "p", "max_turns": 99})
+        assert post.json()["max_turns"] == 40
+        assert _read_profiles(profiles_file)["big"]["max_turns"] == 40

@@ -123,3 +123,37 @@ def test_other_llm_slots_still_fall_back():
     )
     en = LocaleBundle(code="en", tier=TIER_OFFICIAL, data={"meta": {"code": "en"}}, fallback=es)
     assert resolve(en, "llm.digest_line_format") == "[hace {n} {unit}]"
+
+
+# ---------------------------------------------------------------------------
+# T4 (live_session_fixes_20260925): llm.provider_fallback_transition_notice
+# is ALSO a NO_FALLBACK slot -- same slot-exact governance as its sibling
+# provider_fallback_notice above.
+# ---------------------------------------------------------------------------
+
+def test_provider_fallback_transition_notice_is_a_no_fallback_slot():
+    assert "llm.provider_fallback_transition_notice" in NO_FALLBACK_SLOTS
+
+
+def test_provider_fallback_transition_notice_never_falls_back():
+    es = LocaleBundle(
+        code="es", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_transition_notice": "transición es"}},
+    )
+    en = LocaleBundle(
+        code="en", tier=TIER_OFFICIAL, data={"meta": {"code": "en"}}, fallback=es,
+    )
+    with pytest.raises(SlotNotFound):
+        resolve(en, "llm.provider_fallback_transition_notice")
+
+
+def test_provider_fallback_transition_notice_resolves_when_present_in_bundle():
+    es = LocaleBundle(
+        code="es", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_transition_notice": "transición es"}},
+    )
+    en = LocaleBundle(
+        code="en", tier=TIER_OFFICIAL,
+        data={"llm": {"provider_fallback_transition_notice": "transition en"}}, fallback=es,
+    )
+    assert resolve(en, "llm.provider_fallback_transition_notice") == "transition en"

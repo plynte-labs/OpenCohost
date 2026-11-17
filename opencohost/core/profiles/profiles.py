@@ -209,6 +209,64 @@ def seed_locale_profiles(locale_code: str) -> None:
         logger.warning(f"Could not seed locale profiles for '{locale_code}': {type(e).__name__}")
 
 
+_DEFAULT_PROFILE_ORDER: dict[str, tuple[str, ...]] = {
+    "en": ("Kira", "Default EN"),
+    "es": ("Akira", "Kira (Default)"),
+}
+
+
+def align_last_profile(locale_code: str) -> str | None:
+    """Align persisted last_profile to a profile matching ``locale_code``.
+
+    Preserves the current profile when it already matches ``locale_code``
+    (treating untagged legacy profiles as Spanish). Otherwise selects the
+    preferred target-locale profile and writes it via ``settings.save_last_profile``.
+    Fail-open: never raises.
+    """
+    try:
+        from opencohost.config import settings
+
+        target = i18n_primary(locale_code) or "es"
+        if not os.path.exists(PROFILES_FILE):
+            return None
+        with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if not isinstance(existing, dict) or not existing:
+            return None
+
+        current_name = settings.load_last_profile()
+        current_data = existing.get(current_name) if current_name else None
+        if isinstance(current_data, dict):
+            raw_loc = current_data.get("locale")
+            current_locale = i18n_primary(raw_loc) if raw_loc else None
+            effective_locale = current_locale if current_locale is not None else "es"
+            if effective_locale == target:
+                return None
+
+        chosen = None
+        for preferred in _DEFAULT_PROFILE_ORDER.get(target, ()):
+            if isinstance(existing.get(preferred), dict):
+                chosen = preferred
+                break
+        if chosen is None:
+            for name, data in existing.items():
+                if not isinstance(data, dict):
+                    continue
+                raw_loc = data.get("locale")
+                if raw_loc and i18n_primary(raw_loc) == target:
+                    chosen = name
+                    break
+        if not chosen or chosen == current_name:
+            return None
+
+        settings.save_last_profile(chosen)
+        logger.info(f"Aligned last_profile to '{chosen}' for locale '{target}'")
+        return chosen
+    except Exception as e:
+        logger.warning(f"Could not align last_profile for '{locale_code}': {type(e).__name__}")
+        return None
+
+
 def guardar_perfiles(perfiles: dict) -> bool:
     """Write profiles to PROFILES_FILE atomically.
 

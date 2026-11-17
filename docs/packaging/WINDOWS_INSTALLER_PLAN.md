@@ -13,6 +13,7 @@ The installed product must launch from a runtime manifest. Users must never inst
 - `OpenCohost_UI/src-tauri/tauri.conf.json` builds the Tauri NSIS shell but bundles only `backend.config.default.json` as `backend.config.json`.
 - `OpenCohost_UI/src-tauri/src/backend.rs` launches `python -m uvicorn` from that configuration. It has development/source-tree fallback logic, but no installed-runtime discovery or provisioning lifecycle.
 - The observed installed shell points at `E:\Miniconda\envs\flux_env\python.exe` and `E:\VoiceAI`; it is therefore not a distributable standalone product.
+- Note: the legacy launcher (`packaging/launcher.py`, `packaging/launcher.spec`) and its env vars were removed 2026-11-12.
 - `packaging/launcher.py` and `packaging/launcher.spec` implement an older `uv`/PyInstaller bootstrap flow, then launch the frozen CustomTkinter entry point. That flow is legacy and is not the v1 composition root.
 - `.github/workflows/release.yml` publishes the legacy launcher/source package, does not compose the Tauri product, and does not explicitly check out the Tauri submodule.
 - `pyproject.toml` mixes core backend, legacy UI, API, and optional TTS dependencies. The old launcher does not install from `uv.lock`.
@@ -334,6 +335,8 @@ Run on supported clean Windows x64 VMs with no developer checkout. Preserve inst
 
 **Recommended default:** ship the core installer independently and keep the Piper component unavailable in public builds until this gate is recorded as accepted. If accepted, pin the exact Piper version and treat its package, notices, source-offer/source location, and hashes as one inseparable component payload. Do not rely on process separation to pretend the GPL question does not exist.
 
+**Update 2026-11-16 (owner decision; the text above is the original recommendation, kept as history):** Piper ships in the public installer. The installer, as a combined work, is offered under GPL-3.0 for `piper-tts` and the espeak-ng it embeds, while OpenCohost's own source stays MIT. The source obligation is met under GPL-3.0 section 6(d): the Corresponding Source is offered from the same place as the installer (see `docs/release-notes-template.md`, section "Corresponding Source (GPL-3.0)", and `THIRD-PARTY-NOTICES.md`). Not legal advice; the owner is expected to have the section reviewed before publishing.
+
 ### Voice licenses and hashes
 
 **Gate:** approve an exact immutable manifest for every model and JSON configuration, including source URL, model card, dataset/model license, attribution text, SHA-256, and redistribution approval.
@@ -345,6 +348,8 @@ Run on supported clean Windows x64 VMs with no developer checkout. Preserve inst
 **Gate:** decide the distribution posture for OBS control before adding the `integrations` extra to any public engine payload. The currently locked `obsws-python` package is GPL-3.0-only and imported in-process.
 
 **Recommended default:** keep `integrations` out of the core payload until OpenCohost either accepts the applicable GPL obligations or replaces the client with a distribution-compatible implementation. Optional installation is still distribution and does not erase the license question.
+
+**Update 2026-11-16 (owner decision; the text above is the original recommendation, kept as history):** `obsws-python` is excluded from the installer. It stays in the separate opt-in `obs` extra, which `SUPPORTED_EXTRAS` deliberately omits, so installer users have no OBS control until an MIT-licensed obs-websocket client replaces it (see `THIRD-PARTY-NOTICES.md`).
 
 ### Kira artwork provenance
 

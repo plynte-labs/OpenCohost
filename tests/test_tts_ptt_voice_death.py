@@ -185,3 +185,20 @@ def test_normal_pipeline_never_touches_mixer_quit_without_flag(tmp_path):
 
     motor.pygame.mixer.quit.assert_not_called()
     motor.pygame.mixer.init.assert_not_called()
+
+
+def test_reinit_log_line_reports_reinit_ms_and_keeps_prefix(tmp_path):
+    """ptt-stall G2: the recovery log line keeps its 'Audio device
+    re-inicializado (recovery)' prefix and now carries the measured
+    reinit_ms so a slow WASAPI re-open is visible in the log."""
+    motor, log_q, ui_events = _make_motor()
+    _wire_fake_piper(motor, tmp_path)
+
+    motor.mark_audio_suspect()
+    motor._hablar("Turno tras cierre de PTT con reinit medido.", source="ptt")
+
+    lines = [l for l in _drain_logs(log_q) if "re-inicializado" in l]
+    assert len(lines) == 1
+    assert "Audio device re-inicializado (recovery)" in lines[0]
+    import re
+    assert re.search(r"reinit_ms=\d+", lines[0]), lines[0]

@@ -93,7 +93,7 @@ def test_pop_time_miss_falls_back_to_generation():
     motor._hablar = lambda texto, source="direct": hablar_calls.append((texto, source))
     gen_calls = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix=None):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix=None, allow_vision=None):
         gen_calls.append((contexto, source))
         return "Respuesta generada en vivo."
 
@@ -116,7 +116,7 @@ def test_pop_time_cache_present_but_wrong_item_still_generates():
     hablar_calls = []
     motor._hablar = lambda texto, source="direct": hablar_calls.append((texto, source))
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix=None):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix=None, allow_vision=None):
         return "Generado para el chat."
 
     motor._generar_dialogo = _gen
@@ -592,7 +592,7 @@ def test_clear_prefetched_agenda_only_discards_late_agenda_store_after_drop():
     motor = _bare_motor()
     release = threading.Event()
 
-    def _slow_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _slow_gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         release.wait(2.0)
         return "LATE_DRAFT"
 
@@ -636,7 +636,7 @@ def test_wait_or_invalidate_pregen_falls_back_on_timeout_even_if_worker_still_al
     motor._hablar = lambda texto, source="direct": spoke.append((texto, source))
     fg = []
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         fg.append(contexto)
         return "FOREGROUND"
 
@@ -956,7 +956,7 @@ def test_pregen_store_records_real_gen_ms_for_the_stored_draft():
     motor = _bare_motor()
     motor._preview_accept_agenda_output = lambda d: True
 
-    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM"):
+    def _gen(contexto, source="direct", commit_history=True, history_text=None, log_prefix="LLM", allow_vision=None):
         time.sleep(0.05)
         return "DRAFT"
 

@@ -63,7 +63,10 @@ _NON_NEGOTIABLES: tuple[NonNegotiableRule, ...] = (
     ),
     NonNegotiableRule(
         id="no_ai_self_identification",
-        description="No self-identification as AI/LLM/chatbot",
+        # T3 (qwen-runtime-fixes-20260928, owner decision 2026-09-28): Kira may
+        # acknowledge being an AI co-host and name her model; only generic
+        # assistant-style disclaimers still break character.
+        description="No generic assistant disclaimers; stay in character",
     ),
     NonNegotiableRule(
         id="no_meta_commentary",

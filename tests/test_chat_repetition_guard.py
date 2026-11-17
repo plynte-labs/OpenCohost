@@ -16,6 +16,7 @@ import inspect
 import queue
 from unittest.mock import MagicMock
 
+from opencohost.config import settings
 from opencohost.core.llm_engine import MotorVocalIA
 from opencohost.i18n import active as i18n_active
 
@@ -56,9 +57,14 @@ def test_chat_passes_repeat_penalty():
 
 # ── B-Isolation — the penalties never leak to other paths (CRITICAL) ─────────
 
-def test_chat_penalties_do_not_apply_to_other_sources():
+def test_chat_penalties_do_not_apply_to_other_sources(monkeypatch):
+    # Legacy agenda prompt: progression OFF (the progression sampling is tested below).
+    monkeypatch.setattr(settings, "AGENDA_PROGRESSION_VARIANT", "")
+    monkeypatch.setattr(settings, "AGENDA_PROGRESSION_ENABLED", False)
     # If this fails, do NOT merge: the fix is bleeding past chat-reactive scope.
-    for src in ("direct", "ptt", "accumulated", "kira-agenda", "kira-agenda-stop"):
+    # direct/ptt carry the separate mild owner brake (asserted below); chat
+    # values never reach them.
+    for src in ("accumulated", "kira-agenda", "kira-agenda-stop"):
         motor = _chat_motor()
         motor._ollama_chat = MagicMock(return_value=_resp("Una linea neutra cualquiera para el test."))
         motor._generar_dialogo("hola", source=src, commit_history=False)
@@ -69,6 +75,29 @@ def test_chat_penalties_do_not_apply_to_other_sources():
         assert "presence_penalty" not in opts, src
         assert "frequency_penalty" not in opts, src
 
+
+def test_agenda_progression_uses_its_own_repeat_penalty_not_chat_values():
+    # Progression ON (default): agenda-only repeat_penalty (AGENDA_REPEAT_PENALTY,
+    # docs/KIRA_COHOST_AGENDA_MODE.md); chat presence/frequency penalties never leak.
+    motor = _chat_motor()
+    motor._ollama_chat = MagicMock(return_value=_resp("Una linea neutra cualquiera para el test."))
+    motor._generar_dialogo("hola", source="kira-agenda", commit_history=False)
+    opts = motor._ollama_chat.call_args.kwargs["options"]
+    assert opts["repeat_penalty"] == settings.AGENDA_REPEAT_PENALTY
+    assert opts["repeat_penalty"] != settings.CHAT_REPEAT_PENALTY
+    assert "presence_penalty" not in opts
+    assert "frequency_penalty" not in opts
+
+
+def test_owner_sources_get_mild_penalties_not_chat_values():
+    for src in ("direct", "ptt"):
+        motor = _chat_motor()
+        motor._ollama_chat = MagicMock(return_value=_resp("Una linea neutra cualquiera para el test."))
+        motor._generar_dialogo("hola", source=src, commit_history=False)
+        opts = motor._ollama_chat.call_args.kwargs["options"]
+        assert opts["repeat_penalty"] == settings.OWNER_REPEAT_PENALTY, src
+        assert opts["presence_penalty"] == settings.OWNER_PRESENCE_PENALTY, src
+        assert "frequency_penalty" not in opts, src
 
 def test_default_enqueue_is_chat_documented():
     # Freeze today's behavior: enqueue without an explicit source falls into

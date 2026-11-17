@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -9,6 +10,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 from opencohost.core.memory_v5_shadow.evidence import CommittedTurnSnapshot
+
+# Owner-visible logger (routed to logs/opencohost_*.log). Codes only.
+_oc_logger = logging.getLogger("OpenCohost")
 
 
 def _ddl_path() -> Path:
@@ -70,8 +74,10 @@ class ShadowStore:
                         (run_id, started_at, 0, 1, 0, 0, started_at),
                     )
                     self._conn.commit()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _oc_logger.warning(
+                        "memory_v5: start_run failed exc=%s", type(exc).__name__
+                    )
 
     def record_run_health(
         self, run_id: str, degraded: bool, control_failures: int, dropped: int
@@ -441,6 +447,136 @@ class ShadowStore:
                     (profile_id,),
                 )
                 self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+    # ------------------------------------------------------------------
+    # Targeted forgetting + retention (S1, release-050-stabilization)
+    # ------------------------------------------------------------------
+    _IN_CHUNK = 400
+
+    def _delete_events_locked(self, event_ids: Sequence[str]) -> list[str]:
+        """Delete *event_ids* (caller holds the lock and the transaction).
+
+        Returns the episode ids that lost a member. Episodes left with no
+        member at all are deleted too (they would be empty shells whose
+        embeddings still describe the removed text).
+        """
+        affected: set[str] = set()
+        ids = list(event_ids)
+        for i in range(0, len(ids), self._IN_CHUNK):
+            chunk = ids[i : i + self._IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for row in self._conn.execute(
+                f"SELECT DISTINCT episode_id FROM episode_membership WHERE event_id IN ({marks})",
+                chunk,
+            ):
+                affected.add(row[0])
+            self._conn.execute(f"DELETE FROM evidence_journal WHERE event_id IN ({marks})", chunk)
+        for eid in list(affected):
+            left = self._conn.execute(
+                "SELECT COUNT(*) FROM episode_membership WHERE episode_id=?", (eid,)
+            ).fetchone()[0]
+            if not left:
+                self._conn.execute("DELETE FROM episodes WHERE episode_id=?", (eid,))
+        return sorted(affected)
+
+    def delete_user_turns_matching(
+        self, profile_id: str, matcher: Callable[[str], bool]
+    ) -> dict[str, Any]:
+        """Delete this profile's user turns whose text satisfies *matcher*,
+        plus the Kira reply committed right after each (stream_sequence + 1 in
+        the same run). Returns ``{"events": n, "episode_ids": [...]}``.
+        """
+        with self._lock:
+            if self._conn is None:
+                return {"events": 0, "episode_ids": []}
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                users = self._conn.execute(
+                    "SELECT event_id, content, run_id, stream_sequence FROM evidence_journal "
+                    "WHERE profile_id=? AND role='user'",
+                    (profile_id,),
+                ).fetchall()
+                doomed: list[str] = []
+                for row in users:
+                    try:
+                        hit = bool(matcher(row["content"]))
+                    except Exception:
+                        hit = False
+                    if not hit:
+                        continue
+                    doomed.append(row["event_id"])
+                    reply = self._conn.execute(
+                        "SELECT event_id FROM evidence_journal "
+                        "WHERE profile_id=? AND run_id=? AND stream_sequence=? AND role='assistant'",
+                        (profile_id, row["run_id"], int(row["stream_sequence"]) + 1),
+                    ).fetchone()
+                    if reply is not None:
+                        doomed.append(reply["event_id"])
+                episode_ids = self._delete_events_locked(doomed) if doomed else []
+                self._conn.commit()
+                return {"events": len(doomed), "episode_ids": episode_ids}
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def purge_older_than(self, cutoff_iso: str, limit: int = 2000) -> dict[str, Any]:
+        """Retention: delete evidence whose turn time is before *cutoff_iso*
+        (at most *limit* rows), then closed sessions/lifecycle markers that
+        ended before it. Records a per-profile watermark in ``retention_state``.
+        Returns ``{"events": n, "episode_ids": [...removed or touched...]}``.
+        """
+        with self._lock:
+            if self._conn is None:
+                return {"events": 0, "episode_ids": []}
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                rows = self._conn.execute(
+                    "SELECT event_id, profile_id FROM evidence_journal "
+                    "WHERE occurred_at < ? ORDER BY occurred_at ASC LIMIT ?",
+                    (cutoff_iso, int(limit)),
+                ).fetchall()
+                per_profile: dict[str, int] = {}
+                for row in rows:
+                    per_profile[row["profile_id"]] = per_profile.get(row["profile_id"], 0) + 1
+                episode_ids = set(
+                    self._delete_events_locked([r["event_id"] for r in rows]) if rows else []
+                )
+                # Closed sessions that ended before the cutoff are fully expired.
+                # Collect their episodes first: deleting the session cascades them.
+                for row in self._conn.execute(
+                    "SELECT e.episode_id FROM episodes e JOIN sessions s ON s.session_id=e.session_id "
+                    "WHERE s.state='CLOSED' AND s.ended_at < ?",
+                    (cutoff_iso,),
+                ).fetchall():
+                    episode_ids.add(row[0])
+                self._conn.execute(
+                    "DELETE FROM sessions WHERE state='CLOSED' AND ended_at < ?", (cutoff_iso,)
+                )
+                self._conn.execute(
+                    "DELETE FROM lifecycle_events WHERE occurred_at < ?", (cutoff_iso,)
+                )
+                now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                for pid, n in per_profile.items():
+                    self._conn.execute(
+                        "INSERT INTO retention_state "
+                        "(profile_id, last_purge_at, last_purge_deleted_evidence, last_purge_reason) "
+                        "VALUES (?,?,?, 'TTL') "
+                        "ON CONFLICT(profile_id) DO UPDATE SET last_purge_at=excluded.last_purge_at, "
+                        "last_purge_deleted_evidence=excluded.last_purge_deleted_evidence, "
+                        "last_purge_reason='TTL'",
+                        (pid, now_iso, n),
+                    )
+                self._conn.commit()
+                return {"events": len(rows), "episode_ids": sorted(episode_ids)}
             except Exception:
                 try:
                     self._conn.rollback()
