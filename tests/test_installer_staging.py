@@ -318,6 +318,8 @@ def test_python_root_replaces_only_the_known_older_vcruntime_pair(tmp_path, monk
 def test_known_previous_python_crt_hashes_match_checked_in_cpython_distribution():
     python_source = ROOT / "packaging/standalone_python"
     assert set(stage.KNOWN_PYTHON_CRT_SHA256) == {"vcruntime140.dll", "vcruntime140_1.dll"}
+    if not python_source.is_dir():
+        pytest.skip("standalone_python not yet staged")
     for name, expected in stage.KNOWN_PYTHON_CRT_SHA256.items():
         assert stage._compute_sha256(python_source / name) == expected
 
