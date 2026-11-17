@@ -1185,7 +1185,13 @@ class SpeechPipelineMixin:
                             )
                             await communicate.save(archivo_chunk)
 
+                        synth_inicio = time.perf_counter()
                         _eng.asyncio.run(_eng.asyncio.wait_for(generar_edge(), timeout=_eng.TTS_LIGHT_TIMEOUT))
+                        synth_ms = int((time.perf_counter() - synth_inicio) * 1000)
+                        # Timing metadata only: index, wall ms, char count. Never the text.
+                        _eng.logger.info(
+                            "[EDGE_TTS_SYNTH] idx=%d ms=%d chars=%d", i, synth_ms, len(oracion)
+                        )
                         if self._edge_breaker.record_success():
                             _eng.logger.info("[EDGE_TTS_BREAKER] state=closed cooldown_s=0")
                         cola_audios.put((archivo_chunk, i, fragmento))
