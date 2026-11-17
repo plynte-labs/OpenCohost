@@ -14,6 +14,8 @@ defaults:
 
 env:
   UV_VERSION: "0.11.6"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
   # Laya export pins (see THIRD-PARTY-NOTICES.md): the Hugging Face checkpoint revision
   # and the versions the committed manifest was produced with.
   LAYA_REVISION: "7b928d828b7b0e022f929d9bd2e44165aa270148"
