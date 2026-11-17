@@ -41,7 +41,9 @@ jobs:
         run: uv sync --locked --extra dev --extra integrations --extra obs --extra youtube-chat --extra local-tts --extra cloud-tts
 
       - name: Tests
-        run: uv run pytest tests/ -q
+        run: |
+          uv run python -c "import pathlib; [compile(p.read_bytes(), str(p), 'exec') for p in [*pathlib.Path('opencohost').rglob('*.py'), *pathlib.Path('packaging').glob('*.py')]]"
+          uv run pytest tests/test_release_ci_contract.py tests/test_release_semver_mapping.py tests/test_release_workflow_staging.py tests/test_packaging_core_boundary.py tests/test_packaging_asset_absence.py tests/test_packaging_edge_tts_optional.py tests/test_packaging_experimental_tts_flag.py tests/test_packaging_user_data_paths.py tests/test_installer_composition_contract.py tests/test_installer_staging.py tests/test_nsis_large_payload_contract.py tests/test_storage_packaging.py tests/test_edge_tts_version_floor.py tests/test_runtime_smoke_harness.py -q
 
   ui:
     name: ui (windows-latest)

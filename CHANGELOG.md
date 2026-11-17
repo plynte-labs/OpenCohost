@@ -12,7 +12,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 This release finishes moving OpenCohost to a single architecture: the Tauri desktop app over a local FastAPI engine, with the last legacy paths (the separate Qwen3-TTS server among them) retired.
 Memory, profiles and settings now use a new storage format and database schema, so 0.5.0 does not import 0.3.0 memories. Profiles, settings, assets and API keys stored in the previous install folder are copied selectively.
 The installer also changed shape: it now bundles the engine, its Python runtime and the offline voices and models, so Kira can run without extra downloads.
-Because upgrading is not a drop-in replacement, this is a breaking release, and the version skips 0.4 to make that clear.
+0.4.0 (screen vision and the 3D VRM avatar) was developed on internal branches but never shipped as an installer; its changes are included in 0.5.0, and because upgrading from 0.3.0 is not a drop-in replacement, this remains a breaking release.
 
 ### Breaking
 
