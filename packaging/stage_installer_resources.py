@@ -67,14 +67,17 @@ def _version_tuple(text: str) -> tuple[int, ...]:
 
 def inspect_windows_file(path: Path) -> dict:
     """Authenticode status, signer subject and file version, read through PowerShell (Windows only)."""
-    script = ("$s = Get-AuthenticodeSignature -LiteralPath $args[0]; "
-              "$v = (Get-Item -LiteralPath $args[0]).VersionInfo; "
+    import os
+    script = ("$p = $env:OPENCOHOST_INSPECT_PATH; "
+              "$s = Get-AuthenticodeSignature -LiteralPath $p; "
+              "$v = (Get-Item -LiteralPath $p).VersionInfo; "
               "[pscustomobject]@{status=[string]$s.Status; "
               "subject=[string]$s.SignerCertificate.Subject; "
               "version=('{0}.{1}.{2}.{3}' -f $v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart)} "
               "| ConvertTo-Json -Compress")
-    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
-                            capture_output=True, text=True, check=True)
+    env = {**os.environ, "OPENCOHOST_INSPECT_PATH": str(path)}
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                            env=env, capture_output=True, text=True, check=True)
     return json.loads(result.stdout)
 
 
