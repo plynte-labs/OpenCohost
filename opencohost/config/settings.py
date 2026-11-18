@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
@@ -584,6 +586,10 @@ LLM_KEYS_FILE = os.path.join(str(USER_DATA_DIR), "config", "llm_keys.json")
 TTS_LOCAL_ONLY_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_local_only.json")
 MOTOR_TTS_FILE = os.path.join(str(USER_DATA_DIR), "config", "motor_tts.json")
 PIPER_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice.json")
+# User-chosen folder scanned for Piper voices (voice-catalog-selection-20261118).
+PIPER_VOICE_DIR_FILE = os.path.join(str(USER_DATA_DIR), "config", "piper_voice_dir.json")
+# Per-locale Edge-TTS voice override: {"by_locale": {"es": "es-MX-DaliaNeural"}}. Never written at startup.
+EDGE_VOICE_FILE = os.path.join(str(USER_DATA_DIR), "config", "edge_voice.json")
 TTS_SPEED_FILE = os.path.join(str(USER_DATA_DIR), "config", "tts_speed.json")
 CONFIG_DIR = os.path.join(str(USER_DATA_DIR), "config")
 TTS_SETTINGS_FILE = os.path.join(CONFIG_DIR, "tts_settings.json")
@@ -2365,46 +2371,199 @@ def piper_voice_path(voice_key: str) -> str:
     return _resolve_piper_voice_file(voice["file"])
 
 
-def load_piper_voice(config_file: Optional[str] = None, default: str = DEFAULT_PIPER_VOICE) -> str:
-    """Load the selected Piper voice key from disk.
+_PIPER_VOICE_ID_MAX = 256
+# Upper bound for a saved speaker id when the model's num_speakers is unknown here.
+PIPER_SPEAKER_ID_MAX = 4096
+# Serializes the per-locale read-modify-write of piper_voice.json (engine thread vs locale change).
+_PIPER_VOICE_LOCK = threading.Lock()
 
-    Returns `default` (DEFAULT_PIPER_VOICE unless overridden) when the file is
-    absent, unreadable, corrupted, or holds an unknown key — i.e. whenever
-    there is no valid user-persisted choice. Engine init passes a
-    locale-aware `default` (see default_piper_voice_for_locale); every other
-    caller keeps the original default (neutral) behavior unchanged.
+
+def _piper_locale_slot(code) -> str:
+    """``"en-US"`` -> ``"en"``; anything unusable -> ``""``."""
+    if not isinstance(code, str):
+        return ""
+    return code.replace("_", "-").split("-", 1)[0].strip().lower()
+
+
+def _clean_piper_voice_entry(raw) -> Optional[dict]:
+    """A saved entry as ``{"voice": str, "speaker_id": int | None}``, or None when unusable."""
+    if not isinstance(raw, dict):
+        return None
+    voice = raw.get("voice")
+    if not isinstance(voice, str) or not _usable_piper_voice_id(voice):
+        return None
+    return {"voice": voice, "speaker_id": _clean_speaker_id(raw.get("speaker_id"))}
+
+
+def _clean_speaker_id(speaker) -> Optional[int]:
+    if isinstance(speaker, bool) or not isinstance(speaker, int):
+        return None
+    return speaker if 0 <= speaker <= PIPER_SPEAKER_ID_MAX else None
+
+
+def _usable_piper_voice_id(voice: str) -> bool:
+    return (
+        bool(voice)
+        and len(voice) <= _PIPER_VOICE_ID_MAX
+        and not any(c in voice for c in "/\\:\x00")
+    )
+
+
+def _read_piper_voices_by_locale(path: str) -> dict:
+    """``{locale: {"voice", "speaker_id"}}`` from the file; never raises.
+
+    Reads the current ``by_locale`` format and migrates the old single-key format
+    (``{"piper_voice": key}``) into the registry language slot of that key.
     """
-    path = config_file if config_file is not None else PIPER_VOICE_FILE
     try:
-        if not os.path.exists(path):
-            return default
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        key = str(data.get("piper_voice", default))
-        return key if key in PIPER_VOICES else default
     except Exception:
-        return default
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    by_locale = data.get("by_locale")
+    if isinstance(by_locale, dict):
+        result = {}
+        for code, raw in by_locale.items():
+            slot = _piper_locale_slot(code)
+            entry = _clean_piper_voice_entry(raw)
+            if slot and entry is not None:
+                result[slot] = entry
+        return result
+    legacy = data.get("piper_voice")
+    if isinstance(legacy, str) and legacy in PIPER_VOICES:
+        slot = _piper_locale_slot(PIPER_VOICES[legacy].get("lang"))
+        if slot:
+            return {slot: {"voice": legacy, "speaker_id": None}}
+    return {}
+
+
+def load_piper_voice_for_locale(locale: str, config_file: Optional[str] = None) -> Optional[dict]:
+    """The saved ``{"voice", "speaker_id"}`` for one locale, or None when there is none."""
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    return _read_piper_voices_by_locale(path).get(_piper_locale_slot(locale))
+
+
+def save_piper_voice_for_locale(
+    locale: str, voice: str, speaker_id: Optional[int] = None, config_file: Optional[str] = None
+) -> bool:
+    """Persist one locale's voice atomically without touching the other locales.
+
+    Returns False (and keeps the previous file) when the input is unusable or the write fails.
+    """
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    slot = _piper_locale_slot(locale)
+    if not slot or not isinstance(voice, str) or not _usable_piper_voice_id(voice):
+        return False
+    speaker_id = _clean_speaker_id(speaker_id)
+    try:
+        with _PIPER_VOICE_LOCK:
+            voices = _read_piper_voices_by_locale(path)
+            voices[slot] = {"voice": voice, "speaker_id": speaker_id}
+            payload = {"by_locale": voices, "saved_at": datetime.now().isoformat()}
+            atomic_write_text(Path(path), json.dumps(payload, indent=2))
+        return True
+    except Exception:
+        return False
+
+
+def fill_piper_voice_for_locale(locale: str, config_file: Optional[str] = None) -> bool:
+    """Save the locale default ONLY when that locale has no saved voice. True when it wrote."""
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    slot = _piper_locale_slot(locale)
+    with _PIPER_VOICE_LOCK:
+        # Locked check-then-write: a concurrent user pick cannot be overwritten by the default.
+        voices = _read_piper_voices_by_locale(path)
+        if not slot or slot in voices:
+            return False
+        voices[slot] = {"voice": default_piper_voice_for_locale(locale), "speaker_id": None}
+        try:
+            payload = {"by_locale": voices, "saved_at": datetime.now().isoformat()}
+            atomic_write_text(Path(path), json.dumps(payload, indent=2))
+            return True
+        except Exception:
+            return False
+
+
+def load_piper_voice(config_file: Optional[str] = None, default: str = DEFAULT_PIPER_VOICE) -> str:
+    """Legacy loader: a saved registry key, preferring the language slot of ``default``.
+
+    Returns `default` (DEFAULT_PIPER_VOICE unless overridden) when no slot holds a
+    registry key (a catalog id is not a registry key). New code should use
+    :func:`load_piper_voice_for_locale`; the engine no longer uses this loader.
+    """
+    path = config_file if config_file is not None else PIPER_VOICE_FILE
+    voices = _read_piper_voices_by_locale(path)
+    preferred = _piper_locale_slot((PIPER_VOICES.get(default) or {}).get("lang"))
+    for slot in [preferred] + sorted(voices):
+        entry = voices.get(slot)
+        if entry is not None and entry["voice"] in PIPER_VOICES:
+            return entry["voice"]
+    return default
 
 
 def save_piper_voice(voice_key: str, config_file: Optional[str] = None) -> None:
-    """Persist the selected Piper voice key using an atomic write.
+    """Legacy writer: persist a registry key into that key's own language slot.
 
     Unknown keys are normalized to the default before writing so a corrupted
-    call can never persist a voice that does not exist.
+    call can never persist a voice that does not exist. Other locales are untouched.
     """
-    path = config_file if config_file is not None else PIPER_VOICE_FILE
     key = voice_key if voice_key in PIPER_VOICES else DEFAULT_PIPER_VOICE
+    save_piper_voice_for_locale(PIPER_VOICES[key].get("lang", ""), key, None, config_file=config_file)
+
+
+# Edge ShortName, e.g. "es-MX-DaliaNeural", "zh-CN-liaoning-XiaobeiNeural". Mirrors the edge_tts
+# package's own `^([a-z]{2,})-([A-Z]{2,})-(.+Neural)$` (data_classes.py) with bounded character classes.
+_EDGE_VOICE_RE = re.compile(r"[a-z]{2,3}-[A-Z]{2,4}-[A-Za-z0-9-]{1,48}Neural")
+_EDGE_VOICE_MAX = 80
+_EDGE_VOICE_LOCK = threading.Lock()
+
+
+def is_valid_edge_voice(voice) -> bool:
+    """True for a well-formed Edge-TTS ShortName (format only; the catalog is not consulted)."""
+    return isinstance(voice, str) and len(voice) <= _EDGE_VOICE_MAX and _EDGE_VOICE_RE.fullmatch(voice) is not None
+
+
+def _read_edge_voices_by_locale(path: str) -> dict:
+    """``{locale_slot: ShortName}`` from the file; never raises, drops unusable entries."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({
-                "piper_voice": key,
-                "saved_at": datetime.now().isoformat(),
-            }, f)
-        os.replace(tmp, path)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception:
-        pass
+        return {}
+    by_locale = data.get("by_locale") if isinstance(data, dict) else None
+    if not isinstance(by_locale, dict):
+        return {}
+    result = {}
+    for code, voice in by_locale.items():
+        slot = _piper_locale_slot(code)
+        if slot and is_valid_edge_voice(voice):
+            result[slot] = voice
+    return result
+
+
+def load_edge_voice_for_locale(locale: str, config_file: Optional[str] = None) -> Optional[str]:
+    """The saved Edge voice override for one locale, or None (the locale bundle's voice applies)."""
+    path = config_file if config_file is not None else EDGE_VOICE_FILE
+    return _read_edge_voices_by_locale(path).get(_piper_locale_slot(locale))
+
+
+def save_edge_voice_for_locale(locale: str, voice: str, config_file: Optional[str] = None) -> bool:
+    """Persist one locale's Edge voice atomically (locked read-modify-write). False on bad input or I/O."""
+    path = config_file if config_file is not None else EDGE_VOICE_FILE
+    slot = _piper_locale_slot(locale)
+    if not slot or not is_valid_edge_voice(voice):
+        return False
+    try:
+        with _EDGE_VOICE_LOCK:
+            voices = _read_edge_voices_by_locale(path)
+            voices[slot] = voice
+            payload = {"by_locale": voices, "saved_at": datetime.now().isoformat()}
+            atomic_write_text(Path(path), json.dumps(payload, indent=2))
+        return True
+    except Exception:
+        return False
 
 
 def load_tts_speed(config_file: Optional[str] = None) -> float:

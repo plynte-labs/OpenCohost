@@ -30,6 +30,7 @@ from opencohost.api.direct_turn import submit_direct_turn
 from opencohost.core import turn_origin
 from opencohost.core.vision import direct_cloud
 from opencohost.api.shared import logger
+from opencohost.config.settings import PIPER_SPEAKER_ID_MAX
 
 router = APIRouter()
 
@@ -42,6 +43,7 @@ _COMMAND_WHITELIST = frozenset(
         "set_tts_local_only",
         "set_tts_speed",
         "set_piper_voice",
+        "set_edge_voice",
         "set_motor_tts",
         "switch_model",
         "switch_llm_tier",
@@ -65,6 +67,10 @@ def _engine_command_payload(command: str, payload: dict):
     """
     if command == "clear_history":
         return None
+    if command == "set_piper_voice" and payload.get("speaker_id") is not None:
+        # Catalog voice + speaker: the engine takes a dict only when a speaker is present, so the
+        # legacy scalar shape (registry key / catalog id alone) is unchanged.
+        return {"value": payload.get("value"), "speaker_id": payload.get("speaker_id")}
     return payload.get("value")
 
 
@@ -86,6 +92,19 @@ def _validate_command_value(command: str, value) -> "str | None":
             float(value)
         except (TypeError, ValueError):
             return "set_tts_speed requires a numeric value"
+        return None
+    if command == "set_piper_voice" and isinstance(value, dict):
+        speaker = value.get("speaker_id")
+        if not isinstance(value.get("value"), str):
+            return "set_piper_voice requires a non-None string value"
+        if isinstance(speaker, bool) or not isinstance(speaker, int) or speaker < 0 or speaker > PIPER_SPEAKER_ID_MAX:
+            return "set_piper_voice speaker_id must be a non-negative integer"
+        return None
+    if command == "set_edge_voice":
+        if not isinstance(value, str):
+            return "set_edge_voice requires a non-None string value"
+        if len(value) > 80:
+            return "set_edge_voice value is too long"
         return None
     if command in ("switch_model", "switch_llm_tier", "set_piper_voice", "set_motor_tts"):
         if not isinstance(value, str):

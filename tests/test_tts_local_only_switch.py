@@ -495,11 +495,13 @@ class TestPiperVoiceCommand:
         motor, *_ = _make_motor()
         motor._piper = MagicMock()
         motor._piper.reload.return_value = True
-        with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+        with patch("opencohost.core.llm_engine.save_piper_voice_for_locale") as mock_save:
             motor._dispatch_command("set_piper_voice", "neutral")
         motor._piper.reload.assert_called_once()
         assert motor._piper.reload.call_args[0][0].endswith("es_MX-claude-high.onnx")
-        mock_save.assert_called_once_with("neutral")
+        # T3: persisted per locale (the active locale's slot), no longer one global key.
+        assert mock_save.call_count == 1
+        assert mock_save.call_args[0][1:] == ("neutral", None)
 
     def test_set_piper_voice_skips_persist_on_reload_failure(self):
         from unittest.mock import patch, MagicMock
@@ -532,19 +534,21 @@ class TestPiperVoiceCommand:
             motor._dispatch_command("set_piper_voice", "neutral")
         assert motor._piper_voice_key == "english"
 
-    def test_set_piper_voice_unknown_key_normalizes_to_default(self):
+    def test_set_piper_voice_unknown_key_is_rejected_and_keeps_the_voice(self):
+        # T3: an id that is neither a registry key nor a catalog voice (no ".onnx") used to be
+        # silently normalized to the default; it is now refused so a typo never changes the voice.
         from unittest.mock import patch, MagicMock
 
         motor, *_ = _make_motor()
         motor._piper_voice_key = "english"
         motor._piper = MagicMock()
         motor._piper.reload.return_value = True
-        with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+        with patch("opencohost.core.llm_engine.save_piper_voice_for_locale") as mock_save:
             motor._dispatch_command("set_piper_voice", "argentina")
-        motor._piper.reload.assert_called_once()
-        assert motor._piper.reload.call_args[0][0].endswith("es_MX-claude-high.onnx")
-        mock_save.assert_called_once_with("neutral")
-        assert motor._piper_voice_key == "neutral"
+        motor._piper.reload.assert_not_called()
+        mock_save.assert_not_called()
+        assert motor._piper_voice_key == "english"
+        assert motor._last_piper_switch_failure["reason"] == "invalid_voice_id"
 
     def test_load_piper_voice_legacy_key_normalizes_to_default_on_startup(self, tmp_path):
         from opencohost.config.settings import load_piper_voice, PIPER_VOICES

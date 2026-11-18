@@ -51,6 +51,8 @@ from opencohost.config.settings import (
     load_motor_tts, save_motor_tts,
     PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
+    load_piper_voice_for_locale, save_piper_voice_for_locale, PIPER_SPEAKER_ID_MAX,
+    load_edge_voice_for_locale, save_edge_voice_for_locale, is_valid_edge_voice,
     MEMORIAS_ENABLED, MEMORIAS_DB,
     MEMORIAS_PROFILE_CAP, MEMORIAS_PROMOTION_REARM_S,
     MEMORIAS_PROMOTION_QUIET_S,
@@ -173,6 +175,7 @@ from opencohost.config.llm_provider import load_provider_config
 from opencohost.stream_admin.oauth_store import OAuthStore
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import coherence as i18n_coherence
+from opencohost.core.speech import edge_voices, piper_catalog
 from opencohost.core.speech.backends.tts_piper import PiperEngine
 from opencohost.core.providers.llm_tiers import LLMTierConfig, LLMTierState, LLM_TIER_LABELS
 from opencohost.core.memory.memory_digest import MemoryDigest
@@ -370,6 +373,7 @@ _DRAIN_SAFE_COMMANDS = frozenset({
     "set_tts_local_only",
     "set_tts_speed",
     "set_piper_voice",
+    "set_edge_voice",
     "set_profile",
     "clear_history",
     "switch_llm_tier",
@@ -691,6 +695,13 @@ class MotorVocalIA(
         with self._lock:
             self._discard_speech_residue: bool = load_discard_speech_residue()
 
+        # Per-locale Edge voice override (edge_voice.json). Read-only here: startup never writes it.
+        # None -> the locale bundle's voice applies. The locale never hot-swaps, so one value suffices.
+        self._edge_voice_override = load_edge_voice_for_locale(
+            i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
+        )
+        self._last_edge_switch_failure = None
+
         # Offline fallback: latches True on first Edge-TTS connection error;
         # subsequent chunks skip Edge-TTS for the rest of the session.
         # Also latched True at startup when the edge_tts package is absent.
@@ -704,21 +715,31 @@ class MotorVocalIA(
         self._edge_breaker = EdgeBreaker(
             EDGE_BREAKER_THRESHOLD, EDGE_BREAKER_COOLDOWN_S, EDGE_BREAKER_MAX_COOLDOWN_S
         )
-        # An explicit user pick (persisted piper_voice.json) wins if its
-        # language is coherent with the active locale; if it belongs to a
-        # different language, fall back to the active locale's default voice.
+        # The active locale's saved voice (piper_voice.json, one entry per locale)
+        # wins. A missing or unresolvable entry falls back to the locale default
+        # for THIS run only: the saved choice is never overwritten here.
         active_lang = i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
         default_voice = default_piper_voice_for_locale(active_lang)
-        persisted_voice = load_piper_voice(default=default_voice)
-        persisted_lang = PIPER_VOICES.get(persisted_voice, {}).get("lang")
-        if persisted_lang and active_lang and persisted_lang != active_lang:
-            self._piper_voice_key = default_voice
-            save_piper_voice(default_voice)
-        else:
-            self._piper_voice_key = persisted_voice
+        self._piper_voice_key = default_voice
+        self._piper_catalog_lang = None
+        self._last_piper_switch_failure = None
+        self._piper_startup_default = None
+        initial_path = piper_voice_path(default_voice)
+        initial_speaker = None
+        saved = load_piper_voice_for_locale(active_lang)
+        if saved is not None:
+            try:
+                saved_path, saved_lang = piper_catalog.resolve_voice(saved["voice"])
+                if os.path.isfile(saved_path):
+                    self._piper_voice_key = saved["voice"]
+                    self._piper_catalog_lang = saved_lang
+                    initial_path, initial_speaker = saved_path, saved["speaker_id"]
+                    self._piper_startup_default = (default_voice, piper_voice_path(default_voice))
+            except piper_catalog.PiperVoiceError:
+                logger.warning("Saved Piper voice for the active locale is unavailable; using the default")
         self._tts_length_scale: float = load_tts_speed()
         self._piper = PiperEngine(
-            piper_voice_path(self._piper_voice_key), length_scale=self._tts_length_scale
+            initial_path, length_scale=self._tts_length_scale, speaker_id=initial_speaker
         )
         # Honest-degrade: one-shot ui_callback notice, latched the first time
         # Piper actually engages as a fallback under a locale/voice mismatch.
@@ -730,7 +751,7 @@ class MotorVocalIA(
         # T4/P5 coherence gate at startup (warn-only; log_coherence never raises).
         i18n_coherence.log_coherence(
             i18n_active.get_active_bundle(),
-            piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
+            piper_voice_lang=self._active_piper_voice_lang(),
         )
 
         self._audio_reinit_needed: bool = False
@@ -1094,7 +1115,8 @@ class MotorVocalIA(
             self._audio_disabled = True
 
         if TTS_LOCAL_MODEL_PATH:
-            self._piper.load()
+            if not self._piper.load():
+                self._piper_startup_fallback()
         try:
             self._check_ollama_service()
         finally:
@@ -1428,26 +1450,10 @@ class MotorVocalIA(
             logger.info("Piper speech rate set to length_scale=%.2f", scale)
 
         elif tipo == "set_piper_voice":
-            raw_key = str(payload)
-            voice_key = raw_key if raw_key in PIPER_VOICES else DEFAULT_PIPER_VOICE
-            path = piper_voice_path(voice_key)
-            try:
-                reload_ok = bool(self._piper.reload(path))
-            except Exception as exc:
-                logger.warning("Piper voice reload failed for %s: %s", voice_key, type(exc).__name__)
-                reload_ok = False
-            if reload_ok:
-                save_piper_voice(voice_key)
-                self._piper_voice_key = voice_key
-                label = PIPER_VOICES.get(voice_key, {}).get("label", voice_key)
-                self._log(f"Voz de Kira cambiada a: {label}")
-                logger.info("Piper voice switched to %s (%s)", voice_key, path)
-            else:
-                logger.warning("Piper voice switch rejected for %s (%s)", voice_key, path)
-                self._log(
-                    f"No se pudo cambiar la voz de Kira a '{voice_key}'",
-                    level="warning",
-                )
+            self._switch_piper_voice(payload)
+
+        elif tipo == "set_edge_voice":
+            self._switch_edge_voice(payload)
 
         elif tipo == "set_profile":
             # A draft generated under the old persona must never be spoken (#344).
@@ -1510,7 +1516,7 @@ class MotorVocalIA(
                 profile_name=profile_name,
                 profile_prompt_active=prompt_override_active,
                 profile_locale=payload.get("locale"),
-                piper_voice_lang=PIPER_VOICES.get(self._piper_voice_key, {}).get("lang"),
+                piper_voice_lang=self._active_piper_voice_lang(),
             )
 
     def enqueue(
@@ -3450,6 +3456,132 @@ class MotorVocalIA(
                     state.job.feed_turn_id = int(recorded_turn_id)
             except Exception:
                 logger.exception("record_stream_chunk failed")
+
+    def _active_piper_voice_lang(self):
+        """Language family of the active Piper voice (registry first, then the catalog's)."""
+        return PIPER_VOICES.get(self._piper_voice_key, {}).get("lang") or getattr(self, "_piper_catalog_lang", None)
+
+    def _piper_startup_fallback(self) -> None:
+        """The saved voice did not load at startup: use the locale default for this run only.
+
+        The saved choice stays on disk untouched, so it comes back once the file is fixed.
+        """
+        fallback = self._piper_startup_default
+        if not fallback:
+            return
+        key, path = fallback
+        self._piper_startup_default = None
+        logger.warning("Saved Piper voice failed to load; using the locale default for this run")
+        try:
+            ok = bool(self._piper.reload(path, speaker_id=None))
+        except Exception as exc:
+            logger.warning("Piper default voice reload failed: %s", type(exc).__name__)
+            ok = False
+        # Success or not, the saved voice is not loaded: report the locale default, never the
+        # unloaded saved voice (config then shows "piper unavailable" for the default's file).
+        self._piper_voice_key = key
+        self._piper_catalog_lang = None
+        if not ok:
+            try:
+                self._piper.set_speaker_id(None)
+            except Exception:
+                pass
+
+    def _piper_switch_failed(self, requested, reason: str) -> None:
+        """Keep the old voice, persist nothing, and tell the UI (event + reason code)."""
+        self._last_piper_switch_failure = {"requested": str(requested)[:256], "reason": reason}
+        logger.warning("Piper voice switch rejected (reason=%s)", reason)
+        self._log("No se pudo cambiar la voz de Kira", level="warning")
+        self.ui_callback("piper_voice_switch_failed")
+
+    def _switch_piper_voice(self, payload) -> None:
+        """``set_piper_voice``: a legacy registry key OR a catalog voice id, plus an optional speaker.
+
+        ``payload`` is the voice string, or ``{"value": voice, "speaker_id": n}``. The path is
+        resolved only through the registry or the confined catalog. On ANY failure the old voice
+        and speaker stay active, nothing is persisted, and ``piper_voice_switch_failed`` is emitted
+        with the reason held in ``_last_piper_switch_failure`` (surfaced by GET /api/tts/config).
+        """
+        speaker_id = None
+        if isinstance(payload, dict):
+            voice = payload.get("value")
+            speaker_id = payload.get("speaker_id")
+        else:
+            voice = payload
+        voice = voice if isinstance(voice, str) else ""
+        if speaker_id is not None and (
+            isinstance(speaker_id, bool) or not isinstance(speaker_id, int)
+            or speaker_id < 0 or speaker_id > PIPER_SPEAKER_ID_MAX
+        ):
+            self._piper_switch_failed(voice, "invalid_speaker_id")
+            return
+        try:
+            path, lang = piper_catalog.resolve_voice(voice)
+        except piper_catalog.PiperVoiceError as exc:
+            self._piper_switch_failed(voice, exc.code)
+            return
+        try:
+            reload_ok = bool(self._piper.reload(path, speaker_id=speaker_id))
+        except Exception as exc:
+            logger.warning("Piper voice reload failed: %s", type(exc).__name__)
+            self._piper_switch_failed(voice, "load_failed")
+            return
+        if not reload_ok:
+            code = getattr(self._piper, "last_error", None)
+            self._piper_switch_failed(voice, code if isinstance(code, str) and code else "load_failed")
+            return
+        active_lang = i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
+        if not save_piper_voice_for_locale(active_lang, voice, speaker_id):
+            logger.warning("Piper voice applied but could not be saved")
+        self._piper_voice_key = voice
+        self._piper_catalog_lang = lang
+        self._piper_locale_mismatch_notified = False
+        self._last_piper_switch_failure = None
+        label = PIPER_VOICES.get(voice, {}).get("label", voice)
+        self._log(f"Voz de Kira cambiada a: {label}")
+        logger.info("Piper voice switched (speaker=%s)", speaker_id)
+        self.ui_callback("piper_voice_switch_applied")
+
+    def effective_edge_voice(self) -> str:
+        """Edge voice for the next sentence: the user's per-locale override, else the bundle voice."""
+        override = getattr(self, "_edge_voice_override", None)
+        return override if override else i18n_active.edge_voice()
+
+    def _edge_switch_failed(self, requested, reason: str) -> None:
+        """Keep the old Edge voice, persist nothing, and tell the UI (event + reason code)."""
+        self._last_edge_switch_failure = {"requested": str(requested)[:80], "reason": reason}
+        logger.warning("Edge voice switch rejected (reason=%s)", reason)
+        self._log("No se pudo cambiar la voz de Edge de Kira", level="warning")
+        self.ui_callback("edge_voice_switch_failed")
+
+    def _switch_edge_voice(self, payload) -> None:
+        """``set_edge_voice``: payload is the Edge ShortName (e.g. ``es-MX-DaliaNeural``).
+
+        Format-checked, then confirmed against the CACHED catalog only (no network on this thread):
+        a voice absent from a live/stale cache is rejected; no cache accepts a well-formed name.
+        Applies to the next sentence and persists for the active locale only. On any failure the
+        old voice stays, nothing is persisted, and ``edge_voice_switch_failed`` is emitted (reason
+        in ``_last_edge_switch_failure``, surfaced as edge_voice_failure_reason by /api/tts/config).
+        """
+        if not is_valid_edge_voice(payload):
+            self._edge_switch_failed(payload if isinstance(payload, str) else "", "invalid_edge_voice")
+            return
+        known = edge_voices.DEFAULT_CATALOG.peek()
+        if known is not None and payload not in known:
+            self._edge_switch_failed(payload, "edge_voice_unknown")
+            return
+        active_lang = i18n_coherence.primary_subtag(i18n_active.get_active_bundle().code)
+        if not save_edge_voice_for_locale(active_lang, payload):
+            self._edge_switch_failed(payload, "config_write_failed")
+            return
+        self._edge_voice_override = payload
+        self._last_edge_switch_failure = None
+        voice_lang = i18n_coherence.primary_subtag(payload)
+        if voice_lang and active_lang and voice_lang != active_lang:
+            logger.warning("Edge voice language '%s' differs from the active locale '%s'", voice_lang, active_lang)
+        self._log(f"Voz Edge de Kira cambiada a: {payload}")
+        logger.info("Edge voice switched")
+        self.ui_callback("edge_voice_switch_applied")
 
     def _log(self, msg, level="info"):
         prefix = "[IA]"

@@ -336,7 +336,7 @@ class SpeechPipelineMixin:
         """
         if self._piper_locale_mismatch_notified:
             return
-        voice_lang = _eng.PIPER_VOICES.get(self._piper_voice_key, {}).get("lang", "")
+        voice_lang = self._active_piper_voice_lang() or ""
         locale_lang = _eng.i18n_coherence.primary_subtag(_eng.i18n_active.get_active_bundle().code)
         if voice_lang and locale_lang and voice_lang != locale_lang:
             self._piper_locale_mismatch_notified = True
@@ -1181,7 +1181,7 @@ class SpeechPipelineMixin:
                     if effective_motor == "ligero":
                         async def generar_edge():
                             communicate = _eng.edge_tts.Communicate(
-                                oracion, _eng.i18n_active.edge_voice(), rate=edge_rate
+                                oracion, self.effective_edge_voice(), rate=edge_rate
                             )
                             await communicate.save(archivo_chunk)
 

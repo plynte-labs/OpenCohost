@@ -471,6 +471,7 @@ def test_tts_config_shape_from_accessors(monkeypatch):
     monkeypatch.setattr(main_mod, "load_tts_speed", lambda: 1.25)
     monkeypatch.setattr(main_mod, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True)
     from opencohost.api.routers import i18n_tts as i18n_tts_mod
+    from opencohost.i18n import active as i18n_active
 
     monkeypatch.setattr(i18n_tts_mod, "_piper_unavailable_reason", lambda voice_key: None)
 
@@ -493,6 +494,12 @@ def test_tts_config_shape_from_accessors(monkeypatch):
             "edge_tts_last_error": None,
             # Default is ON since 98c22c7 (feat(speech): enable discard residue by default).
             "discard_speech_residue": True,
+            # voice-catalog-selection-20261118 T2 (additive). "es_kira" is not a registry key.
+            "piper_voice_id": None,
+            "piper_speaker_id": None,
+            "piper_switch_failure_reason": None,
+            "edge_voice": i18n_active.edge_voice(),
+            "edge_voice_failure_reason": None,
         }
 
 
@@ -991,3 +998,15 @@ def test_update_model_context_reload_glitch_never_500s(tmp_path, monkeypatch):
         )
         assert resp.status_code == 200
         assert resp.json()["context_tokens"] == 8192
+
+
+def test_tts_config_exposes_registry_voice_id(monkeypatch):
+    import opencohost.api.main as main_mod
+    from opencohost.config import settings
+
+    monkeypatch.setattr(main_mod, "load_piper_voice", lambda **kwargs: "english")
+    app = _app()
+    with TestClient(app) as client:
+        body = client.get("/api/tts/config").json()
+    assert body["piper_voice_id"] == settings.PIPER_VOICES["english"]["file"]
+    assert body["piper_speaker_id"] is None

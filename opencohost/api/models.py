@@ -708,6 +708,18 @@ class TTSConfigResponse(BaseModel):
     edge_tts_degraded: bool = False
     edge_tts_last_error: str | None = None
     discard_speech_residue: bool = True
+    # Additive (voice-catalog-selection-20261118): the active Piper voice's catalog id (its
+    # model filename), its speaker (null: single speaker or not set) and the effective Edge voice.
+    piper_voice_id: str | None = None
+    piper_speaker_id: int | None = None
+    # Reason code of the last failed set_piper_voice (voice_not_found, invalid_voice_id,
+    # speaker_out_of_range, invalid_speaker_id, load_failed, piper_unavailable); null after a success.
+    piper_switch_failure_reason: str | None = None
+    # The EFFECTIVE Edge voice for the active locale: the user override when set, else the bundle voice.
+    edge_voice: str | None = None
+    # Reason code of the last failed set_edge_voice (invalid_edge_voice, edge_voice_unknown,
+    # config_write_failed); null after a success.
+    edge_voice_failure_reason: str | None = None
 
 
 class StreamChatLiveResponse(BaseModel):

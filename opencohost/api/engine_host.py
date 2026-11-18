@@ -123,6 +123,15 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         "download_error",
         "ctx_pressure_high",
         "piper_voice_locale_mismatch",
+        # voice-catalog-selection-20261118 T3: outcome of a set_piper_voice command. Detail stays
+        # None (whitelist contract); the failure reason code is read from GET /api/tts/config
+        # (piper_switch_failure_reason), never carried on the event.
+        "piper_voice_switch_applied",
+        "piper_voice_switch_failed",
+        # voice-catalog-selection-20261118 T4: outcome of a set_edge_voice command (same contract:
+        # detail None; the reason code is edge_voice_failure_reason in GET /api/tts/config).
+        "edge_voice_switch_applied",
+        "edge_voice_switch_failed",
         # multi_provider_llm_20260723 F4: cloud LLM failure surfaced to the
         # operator (manual-mode failure, or an auto-fallback whose local warm-up
         # also failed). Server-side whitelist entry so the event persists into

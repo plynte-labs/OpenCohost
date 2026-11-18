@@ -255,8 +255,9 @@ class TestIsAvailable:
 class _FakeSynthesisConfig:
     """Stub so the tests do not depend on the installed piper-tts version."""
 
-    def __init__(self, length_scale=1.0):
+    def __init__(self, length_scale=None, speaker_id=None):
         self.length_scale = length_scale
+        self.speaker_id = speaker_id
 
 
 class TestLengthScale:
@@ -320,6 +321,127 @@ class TestLengthScale:
             motor = llm_engine.MotorVocalIA(queue.Queue(), lambda event: None)
 
         assert motor._piper._length_scale == pytest.approx(1.23)
+
+
+# ---------------------------------------------------------------------------
+# Speaker selection (voice-catalog-selection-20261118 T3)
+# ---------------------------------------------------------------------------
+
+class _SpeakerVoice:
+    """Fake piper voice: records synthesize_wav kwargs, exposes config.num_speakers."""
+
+    def __init__(self, num_speakers=1):
+        self.config = MagicMock()
+        self.config.num_speakers = num_speakers
+        self.calls = []
+
+    def synthesize_wav(self, text, wav_file, **kwargs):
+        self.calls.append(kwargs)
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(22050)
+        wav_file.writeframes(b"\x00" * 44)
+
+
+_P = "opencohost.core.speech.backends.tts_piper"
+
+
+class TestSpeakerId:
+    def _engine(self, voice, **kwargs):
+        from opencohost.core.speech.backends.tts_piper import PiperEngine
+
+        with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv:
+            pv.PiperVoice.load.return_value = voice
+            engine = PiperEngine("/fake/model.onnx", **kwargs)
+            assert engine.load() is True
+        return engine
+
+    def test_speaker_only_builds_syn_config_without_length_scale(self, tmp_path):
+        voice = _SpeakerVoice(num_speakers=4)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice, speaker_id=2)
+            assert engine.synthesize("hola", str(tmp_path / "o.wav")) is True
+        cfg = voice.calls[0]["syn_config"]
+        assert cfg.speaker_id == 2 and cfg.length_scale is None
+
+    def test_speaker_and_length_scale_combine(self, tmp_path):
+        voice = _SpeakerVoice(num_speakers=4)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice, length_scale=1.2, speaker_id=1)
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+        cfg = voice.calls[0]["syn_config"]
+        assert cfg.speaker_id == 1 and cfg.length_scale == pytest.approx(1.2)
+
+    def test_no_speaker_no_scale_keeps_legacy_call(self, tmp_path):
+        voice = _SpeakerVoice()
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice)
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+        assert "syn_config" not in voice.calls[0]
+
+    def test_setter_changes_speaker_and_validates_range(self, tmp_path):
+        voice = _SpeakerVoice(num_speakers=3)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice)
+            assert engine.set_speaker_id(2) is True
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+            assert voice.calls[-1]["syn_config"].speaker_id == 2
+            assert engine.set_speaker_id(3) is False
+            assert engine.set_speaker_id(-1) is False
+            assert engine.speaker_id == 2  # unchanged by the rejected calls
+            assert engine.set_speaker_id(None) is True
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+            assert "syn_config" not in voice.calls[-1]
+
+    def test_unknown_num_speakers_accepts_any_non_negative(self):
+        voice = _SpeakerVoice()
+        voice.config.num_speakers = None
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice)
+            assert engine.set_speaker_id(7) is True
+
+    def test_reload_with_speaker_applies_it_to_the_new_voice(self, tmp_path):
+        old, new = _SpeakerVoice(1), _SpeakerVoice(5)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(old)
+            with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv:
+                pv.PiperVoice.load.return_value = new
+                assert engine.reload("/fake/other.onnx", speaker_id=4) is True
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+        assert new.calls[0]["syn_config"].speaker_id == 4
+        assert engine.speaker_id == 4 and engine.last_error is None
+
+    def test_reload_with_out_of_range_speaker_keeps_old_voice_and_speaker(self, tmp_path):
+        old, new = _SpeakerVoice(3), _SpeakerVoice(2)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(old, speaker_id=1)
+            with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv:
+                pv.PiperVoice.load.return_value = new
+                assert engine.reload("/fake/other.onnx", speaker_id=2) is False
+            engine.synthesize("hola", str(tmp_path / "o.wav"))
+        assert old.calls and not new.calls
+        assert old.calls[0]["syn_config"].speaker_id == 1
+        assert engine.speaker_id == 1 and engine._model_path == "/fake/model.onnx"
+        assert engine.last_error == "speaker_out_of_range"
+
+    def test_reload_load_failure_reports_code_and_keeps_state(self):
+        voice = _SpeakerVoice(3)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice, speaker_id=1)
+            with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv:
+                pv.PiperVoice.load.side_effect = RuntimeError("bad onnx")
+                assert engine.reload("/fake/other.onnx", speaker_id=0) is False
+        assert engine.last_error == "load_failed"
+        assert engine.speaker_id == 1 and engine.is_available()
+
+    def test_reload_without_speaker_resets_speaker_to_none(self):
+        voice = _SpeakerVoice(3)
+        with patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+            engine = self._engine(voice, speaker_id=2)
+            with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv:
+                pv.PiperVoice.load.return_value = _SpeakerVoice(3)
+                assert engine.reload("/fake/other.onnx") is True
+        assert engine.speaker_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -414,3 +536,47 @@ class TestThreadSafety:
         assert errors == [], f"Unexpected exceptions: {errors}"
         assert len(results) == 2
         assert all(r is True for r in results)
+
+
+class _BlockingVoice(_SpeakerVoice):
+    """Voice whose synthesize_wav blocks until released, so a reload can race it."""
+
+    def __init__(self, entered, release):
+        super().__init__(num_speakers=4)
+        self.entered, self.release = entered, release
+
+    def synthesize_wav(self, text, wav_file, **kwargs):
+        self.entered.set()
+        assert self.release.wait(5)
+        super().synthesize_wav(text, wav_file, **kwargs)
+
+
+def test_reload_during_synthesize_never_mixes_voice_and_speaker(tmp_path):
+    from opencohost.core.speech.backends.tts_piper import PiperEngine
+
+    entered, release = threading.Event(), threading.Event()
+    old = _BlockingVoice(entered, release)
+    new = _SpeakerVoice(num_speakers=4)
+    voices = {"/fake/old.onnx": old, "/fake/new.onnx": new}
+    with patch(f"{_P}._PIPER_AVAILABLE", True), patch(f"{_P}._piper_voice") as pv, \
+            patch(f"{_P}._SynthesisConfig", _FakeSynthesisConfig):
+        pv.PiperVoice.load.side_effect = lambda p: voices[p]
+        engine = PiperEngine("/fake/old.onnx", speaker_id=1)
+        assert engine.load() is True
+        t_syn = threading.Thread(target=engine.synthesize, args=("hola", str(tmp_path / "a.wav")))
+        t_syn.start()
+        assert entered.wait(5)
+        result = {}
+        t_rel = threading.Thread(target=lambda: result.update(ok=engine.reload("/fake/new.onnx", speaker_id=3)))
+        t_rel.start()
+        t_rel.join(0.2)
+        assert t_rel.is_alive()  # the reload waits for the in-flight synthesis
+        release.set()
+        t_syn.join(5)
+        t_rel.join(5)
+        assert result["ok"] is True
+        # The in-flight call used the OLD voice with the OLD speaker.
+        assert old.calls[0]["syn_config"].speaker_id == 1
+        engine.synthesize("again", str(tmp_path / "b.wav"))
+    assert new.calls[0]["syn_config"].speaker_id == 3
+    assert engine.speaker_id == 3

@@ -74,8 +74,9 @@ def set_locale(code: str, locale_file: Path | str | None = None) -> None:
         pass
 
     try:
-        from opencohost.config.settings import default_piper_voice_for_locale, save_piper_voice
+        from opencohost.config.settings import fill_piper_voice_for_locale
 
-        save_piper_voice(default_piper_voice_for_locale(code))
+        # Only a missing slot is filled: the user's saved voice for this locale is never replaced.
+        fill_piper_voice_for_locale(code)
     except Exception:
         pass

@@ -106,10 +106,13 @@ def test_piper_reload_exception_keeps_the_loop_alive_and_persists_nothing():
     motor._piper.reload.side_effect = RuntimeError("onnx load failed")
     before = motor._piper_voice_key
 
-    with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save:
+    with patch("opencohost.core.llm_engine.save_piper_voice") as mock_save, patch(
+        "opencohost.core.llm_engine.save_piper_voice_for_locale"
+    ) as mock_save_locale:
         motor._dispatch_command("set_piper_voice", "english")
 
     mock_save.assert_not_called()
+    mock_save_locale.assert_not_called()
     assert motor._piper_voice_key == before
 
 
