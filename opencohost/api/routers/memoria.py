@@ -97,6 +97,7 @@ from opencohost.config.settings import (
 )
 from opencohost.core.memory.memoria_import import parse_import, strip_control_chars
 from opencohost.core.memory.memoria_store import build_signature, build_title, derive_import_key, is_capturable
+from opencohost.core.memory.purge_coordinator import purge_profile_cascade
 
 router = APIRouter()
 
@@ -392,12 +393,20 @@ def get_memoria_row(row_id: str, profile_id: str):
 def post_memoria_purge(request: Request, body: MemoriaPurgeRequest) -> MemoriaPurgeResponse:
     # Forgetting must reach v5 even when the memorias feature is switched off:
     # the evidence journal is written independently of it.
-    v5_purged = _purge_v5_profile(request, body.profile_id)
-    if not deps.memorias_enabled():
-        return MemoriaPurgeResponse(deleted=0, v5_purged=v5_purged)
-    deleted = _purge_memoria(deps.memorias_db(), body.profile_id)
-    _reset_session_topics(request)
-    return MemoriaPurgeResponse(deleted=deleted, v5_purged=v5_purged)
+    legacy_key = _legacy_profile_key(body.profile_id)
+    memorias_enabled = deps.memorias_enabled()
+    result = purge_profile_cascade(
+        profile_id=body.profile_id,
+        legacy_name=legacy_key,
+        memorias_db=deps.memorias_db(),
+        v5_subsystem=_v5_memory(request),
+        memorias_enabled=memorias_enabled,
+        force_memorias_when_disabled=False,
+        drop_v5_privacy_fence=False,
+    )
+    if memorias_enabled:
+        _reset_session_topics(request)
+    return MemoriaPurgeResponse(deleted=result["deleted"], v5_purged=result["v5_purged"])
 
 
 @router.post("/api/memoria/flags", response_model=MemoriaMutationResponse)

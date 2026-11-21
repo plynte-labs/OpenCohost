@@ -255,10 +255,12 @@ class PromotionBackoffStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(
+        conn = sqlite3.connect(
             self.db_path,
             timeout=_SIDECAR_TIMEOUT_SECONDS,
         )
+        conn.execute("PRAGMA secure_delete = ON")
+        return conn
 
     @staticmethod
     def _profile_id(profile_id: str) -> str:

@@ -535,6 +535,36 @@ class MemorySubsystem:
                 success = False
         return success
 
+    def drop_profile_fence(self, profile_id: str) -> None:
+        """Remove a profile's privacy fence entry so deleted IDs leave no tombstone."""
+        cache = self._cache_store or (
+            getattr(self._runtime, "_semantic_cache", None)
+            if self._runtime is not None
+            else None
+        )
+        if cache is not None and hasattr(cache, "drop_profile_fence"):
+            cache.drop_profile_fence(profile_id)
+
+    def list_distinct_profile_ids(self) -> set[str]:
+        """Collect distinct profile IDs present across ShadowStore and SemanticCacheStore."""
+        found: set[str] = set()
+        rt = self._runtime
+        store = getattr(rt, "_store", None) if rt is not None else None
+        if store is not None and hasattr(store, "list_distinct_profile_ids"):
+            try:
+                found.update(store.list_distinct_profile_ids())
+            except Exception:
+                pass
+        cache = self._cache_store or (
+            getattr(rt, "_semantic_cache", None) if rt is not None else None
+        )
+        if cache is not None and hasattr(cache, "list_distinct_profile_ids"):
+            try:
+                found.update(cache.list_distinct_profile_ids())
+            except Exception:
+                pass
+        return found
+
     def shutdown(self, timeout_s: float = 2.0) -> None:
         """Gracefully shut down runtime, workers, and caches. Idempotent.
 

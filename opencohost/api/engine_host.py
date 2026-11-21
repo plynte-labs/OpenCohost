@@ -1152,6 +1152,20 @@ class EngineHost:
             self.vision.apply(new)
         return new
 
+    def _gc_orphan_profiles(self) -> None:
+        """Purge SQLite memory rows whose profile no longer exists in perfiles.json."""
+        from opencohost.core import llm_engine as _llm_engine
+        from opencohost.core.memory.purge_coordinator import gc_orphan_profiles
+
+        perfiles = cargar_perfiles()
+        if not isinstance(perfiles, dict) or not perfiles:
+            return
+        gc_orphan_profiles(
+            active_profiles=perfiles,
+            memorias_db=_llm_engine.MEMORIAS_DB,
+            v5_subsystem=getattr(self.motor, "_memory", None),
+        )
+
     def _seed_startup_profile(self) -> None:
         """FIX-A: dispatch a set_profile for the startup profile at boot.
 
@@ -1547,6 +1561,10 @@ class EngineHost:
             # seed itself is resilient — a failure must not brick the host, it
             # only leaves the profile unset until the operator's first switch.
             try:
+                self._gc_orphan_profiles()
+            except Exception:
+                _logger.exception("Startup orphan profile GC failed")
+            try:
                 self._seed_startup_profile()
             except Exception:
                 _logger.exception("Startup profile seed failed; active profile stays unset until first switch")
@@ -1643,6 +1661,10 @@ class EngineHost:
                 mem = getattr(self.motor, "_memory", None)
                 if mem is not None:
                     mem.shutdown(timeout_s=1.0)
+            except Exception:
+                pass
+            try:
+                self.motor.reset_session_topics()
             except Exception:
                 pass
         if self.monitor is not None:

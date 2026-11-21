@@ -50,6 +50,7 @@ from opencohost.core.context.context_budget import (
     MAX_TURNS_CAP_CEILING,
     MAX_TURNS_CAP_FLOOR,
 )
+from opencohost.core.memory.purge_coordinator import purge_profile_cascade
 from opencohost.core.profiles.profiles import guardar_perfiles
 from opencohost.i18n import active as i18n_active
 from opencohost.i18n import state as i18n_state
@@ -263,9 +264,26 @@ def delete_perfil(request: Request, name: str):
             return JSONResponse(
                 status_code=409, content={"detail": "cannot delete the last profile"}
             )
+        deleted_entry = perfiles.get(name)
+        deleted_id = (
+            str(deleted_entry.get("id") or "").strip()
+            if isinstance(deleted_entry, dict)
+            else ""
+        )
         del perfiles[name]
         if not guardar_perfiles(perfiles):
             return JSONResponse(status_code=503, content={"detail": "profiles_write_failed"})
+    motor = getattr(getattr(getattr(request, "app", None), "state", None), "host", None)
+    motor_obj = getattr(motor, "motor", None)
+    purge_profile_cascade(
+        profile_id=deleted_id or name,
+        legacy_name=name,
+        memorias_db=deps.memorias_db(),
+        v5_subsystem=getattr(motor_obj, "_memory", None),
+        memorias_enabled=deps.memorias_enabled(),
+        force_memorias_when_disabled=True,
+        drop_v5_privacy_fence=True,
+    )
     try:  # session-topic-folder-20261016: the deleted profile's in-session topics go too
         request.app.state.host.motor.reset_session_topics()
     except Exception:

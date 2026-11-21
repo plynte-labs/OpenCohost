@@ -57,6 +57,7 @@ class ShadowStore:
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 self._conn.execute("PRAGMA synchronous=NORMAL")
                 self._conn.execute("PRAGMA foreign_keys=ON")
+                self._conn.execute("PRAGMA secure_delete=ON")
                 self._conn.execute("PRAGMA busy_timeout=5000")
                 self._conn.commit()
 
@@ -435,6 +436,10 @@ class ShadowStore:
                     (profile_id,),
                 )
                 self._conn.execute(
+                    "DELETE FROM episodes WHERE profile_id=?",
+                    (profile_id,),
+                )
+                self._conn.execute(
                     "DELETE FROM sessions WHERE profile_id=?",
                     (profile_id,),
                 )
@@ -446,6 +451,11 @@ class ShadowStore:
                     "DELETE FROM retention_state WHERE profile_id=?",
                     (profile_id,),
                 )
+                self._conn.execute(
+                    "DELETE FROM episode_membership "
+                    "WHERE episode_id NOT IN (SELECT episode_id FROM episodes) "
+                    "OR event_id NOT IN (SELECT event_id FROM evidence_journal)"
+                )
                 self._conn.commit()
             except Exception:
                 try:
@@ -453,6 +463,34 @@ class ShadowStore:
                 except Exception:
                     pass
                 raise
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.execute("VACUUM")
+            except Exception:
+                pass
+
+    def list_distinct_profile_ids(self) -> set[str]:
+        """Return distinct non-empty profile IDs across all v5 store tables."""
+        with self._lock:
+            if self._conn is None:
+                return set()
+            found: set[str] = set()
+            queries = (
+                "SELECT DISTINCT profile_id FROM evidence_journal WHERE profile_id IS NOT NULL",
+                "SELECT DISTINCT profile_id FROM sessions WHERE profile_id IS NOT NULL",
+                "SELECT DISTINCT profile_id FROM episodes WHERE profile_id IS NOT NULL",
+                "SELECT DISTINCT profile_id FROM retention_state WHERE profile_id IS NOT NULL",
+                "SELECT DISTINCT owner_profile_id FROM lifecycle_events WHERE owner_profile_id IS NOT NULL",
+            )
+            for sql in queries:
+                try:
+                    for row in self._conn.execute(sql).fetchall():
+                        val = str(row[0] or "").strip()
+                        if val:
+                            found.add(val)
+                except Exception:
+                    pass
+            return found
 
     # ------------------------------------------------------------------
     # Targeted forgetting + retention (S1, release-050-stabilization)
@@ -609,8 +647,11 @@ class ShadowStore:
                 except Exception:
                     pass
                 raise
-
-    def close(self) -> None:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._conn.execute("VACUUM")
+            except Exception:
+                pass
         with self._lock:
             if self._conn is not None:
                 try:

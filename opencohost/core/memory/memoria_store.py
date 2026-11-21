@@ -2351,12 +2351,18 @@ class MemoriaStore:
         management UI would surface a misleading MEMORIAS_WRITE_FAILED_TEXT
         for an already-deleted row.
         """
+        deleted = 0
         try:
             with closing(self._connect(timeout=WRITE_TIMEOUT_SECONDS)) as conn, conn:
-                conn.execute("DELETE FROM memorias WHERE id = ?", (memoria_id,))
+                cur = conn.execute("DELETE FROM memorias WHERE id = ?", (memoria_id,))
+                deleted = cur.rowcount
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store delete_row failed (fail-open): {type(exc).__name__}")
             return False
+        if deleted > 0:
+            from opencohost.core.memory.purge_coordinator import sanitize_sqlite_db
+
+            sanitize_sqlite_db(self.db_path, timeout=WRITE_TIMEOUT_SECONDS)
         self._clear_warn()
         return True
 
@@ -2369,6 +2375,10 @@ class MemoriaStore:
         except sqlite3.Error as exc:
             self._warn_once(f"memoria store purge failed (fail-open): {type(exc).__name__}")
             return 0
+        if deleted > 0:
+            from opencohost.core.memory.purge_coordinator import sanitize_sqlite_db
+
+            sanitize_sqlite_db(self.db_path, timeout=WRITE_TIMEOUT_SECONDS)
         self._clear_warn()
         return deleted
 
@@ -2964,6 +2974,7 @@ class MemoriaStore:
         conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA secure_delete = ON")
         return conn
 
     @staticmethod

@@ -157,6 +157,7 @@ class SemanticCacheStore:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
+            self._conn.execute("PRAGMA secure_delete=ON;")
             self._conn.executescript(_SCHEMA_SQL)
             # Migration check: add lexical_tokens if missing from existing db
             try:
@@ -434,6 +435,50 @@ class SemanticCacheStore:
                 (profile_id, now_iso),
             )
             conn.commit()
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                conn.execute("VACUUM;")
+            except Exception:
+                pass
+
+    def drop_profile_fence(self, profile_id: str) -> None:
+        """Remove profile_privacy_fences entry so deleted IDs leave no tombstone."""
+        with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute(
+                "DELETE FROM profile_privacy_fences WHERE profile_id = ?",
+                (profile_id,),
+            )
+            conn.commit()
+            if cur.rowcount > 0:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    conn.execute("VACUUM;")
+                except Exception:
+                    pass
+
+    def list_distinct_profile_ids(self) -> set[str]:
+        """Return distinct non-empty profile IDs across cache and fence tables."""
+        with self._lock:
+            conn = self._ensure_conn()
+            found: set[str] = set()
+            for table in (
+                "exchange_embeddings",
+                "episode_embeddings",
+                "fact_embeddings",
+                "profile_privacy_fences",
+            ):
+                try:
+                    rows = conn.execute(
+                        f"SELECT DISTINCT profile_id FROM {table} WHERE profile_id IS NOT NULL"
+                    ).fetchall()
+                    for row in rows:
+                        val = str(row[0] or "").strip()
+                        if val:
+                            found.add(val)
+                except Exception:
+                    pass
+            return found
 
     def forget_all_cache(self) -> None:
         with self._lock:
@@ -447,6 +492,11 @@ class SemanticCacheStore:
                 (now_iso,),
             )
             conn.commit()
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                conn.execute("VACUUM;")
+            except Exception:
+                pass
 
     def close(self) -> None:
         with self._lock:
