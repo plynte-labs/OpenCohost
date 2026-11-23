@@ -160,6 +160,7 @@ LLM_PROVIDER_PRESETS: dict[str, dict] = {
         "models": [
             {"id": "meta/llama-3.1-70b-instruct", "vision": False},
             {"id": "deepseek-ai/deepseek-r1", "vision": False},
+            {"id": "nvidia/nemotron-3.5-super-vl-120b-a12b", "vision": True},
         ],
         "extra_headers": {},
         "reasoning_style": "nim_kwargs",
