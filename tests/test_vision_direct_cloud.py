@@ -94,6 +94,8 @@ def test_preset_model_flag_decides_vision():
     assert dc.profile_model_vision(_cfg("gemini", "gemini-3.5-flash-lite")) is True
     assert dc.profile_model_vision(_cfg("deepseek", "deepseek-v4-pro")) is False
     assert dc.profile_model_vision(_cfg("deepseek", "deepseek-flash")) is True
+    assert dc.profile_model_vision(_cfg("nvidia_nim", "nvidia/nemotron-3.5-super-vl-120b-a12b")) is True
+    assert dc.profile_model_vision(_cfg("nvidia_nim", "meta/llama-3.1-70b-instruct")) is False
 
 
 def test_custom_profile_uses_the_model_vision_checkbox():
