@@ -76,7 +76,7 @@ class RecordingRouter:
         with self._lock:
             self.sealed.append(job["id"])
 
-    def submit(self, text, source, priority):
+    def submit(self, text, source, priority, releases_arrival_hold=True):
         with self._lock:
             self.submits.append((source, priority))
 

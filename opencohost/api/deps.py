@@ -152,6 +152,20 @@ def save_discard_speech_residue(enabled: bool) -> None:
     return _main.save_discard_speech_residue(enabled)
 
 
+def load_interrupt_on_direct() -> bool:
+    """Load interrupt_on_direct, resolved through the CURRENT main binding."""
+    from opencohost.api import main as _main
+
+    return _main.load_interrupt_on_direct()
+
+
+def save_interrupt_on_direct(enabled: bool) -> None:
+    """Save interrupt_on_direct, resolved through the CURRENT main binding."""
+    from opencohost.api import main as _main
+
+    return _main.save_interrupt_on_direct(enabled)
+
+
 def cargar_perfiles():
     """Current profiles dict. Patched directly on ``main`` by
     tests/test_api_phase1.py's perfiles + POST /api/perfiles/switch tests

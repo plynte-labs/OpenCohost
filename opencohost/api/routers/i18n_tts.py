@@ -185,6 +185,7 @@ def get_tts_config(request: Request) -> TTSConfigResponse:
         edge_tts_degraded=edge_tts_degraded,
         edge_tts_last_error=edge_tts_last_error,
         discard_speech_residue=deps.load_discard_speech_residue(),
+        interrupt_on_direct=deps.load_interrupt_on_direct(),
         piper_voice_id=piper_voice_id,
         piper_speaker_id=piper_speaker_id,
         piper_switch_failure_reason=piper_switch_failure_reason,

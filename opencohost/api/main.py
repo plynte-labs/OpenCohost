@@ -99,6 +99,8 @@ from opencohost.config.settings import (
     load_tts_speed,
     load_discard_speech_residue,
     save_discard_speech_residue,
+    load_interrupt_on_direct,
+    save_interrupt_on_direct,
 )
 # `build_signature`/`build_title`/`derive_import_key`/`is_capturable` moved
 # with POST /api/memoria/import to `opencohost.api.routers.memoria`, which

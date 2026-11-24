@@ -52,13 +52,14 @@ def submit_direct_turn(
     # live truth /api/status reports), so a fallback/return that happens
     # while this item sits queued can be disclosed on the reply instead of
     # silently answering under a different provider with no note.
+    arrival_stamp = time.monotonic()
     result = dispatcher.dispatch(
         "process_context",
         text,
         key,
         history_text=i18n_active.typed_history_wrapper().format(text=text),
         source="direct",
-        submitted_at=time.monotonic(),
+        submitted_at=arrival_stamp,
         submitted_under_provider=host.motor.provider_runtime_state()["provider"],
         origin=origin,
     )
@@ -76,6 +77,11 @@ def submit_direct_turn(
         # the queue is non-preemptive; the win is that the reply can now
         # pregenerate under cover of the agenda's remaining speech.
         #
+        # Exception (ADR-069, opt-in, default OFF): with the owner's
+        # "interrupt when a direct message arrives" switch ON, the motor cuts
+        # non-owner speech at arrival (`cut_for_direct_arrival`) and the turn
+        # may pop at once. With the switch OFF the sentence above is exact.
+        #
         # The engine-boundary call stays as the backstop for the cases this one
         # cannot cover (a non-direct command ahead of it in FIFO, or this
         # busy-check racing the engine going idle -- run()'s 1s idle tick picks
@@ -88,6 +94,19 @@ def submit_direct_turn(
         # optional engine seam (api/agenda_driver.py).
         motor = getattr(host, "motor", None)
         if motor is not None and (motor.is_processing or motor.is_speaking):
+            # ADR-069: the decision lives in the motor/router; this is only
+            # the arrival point. It runs BEFORE the drain so this turn's own
+            # interactive pregen cannot start first and veto the cut. The
+            # hold is keyed to this turn's stamp. Best-effort like the drain.
+            # Only a fresh enqueue cuts: a replay enqueued nothing, so no turn
+            # carries this stamp and its hold could never be released (it would
+            # mute every job until ARRIVAL_HOLD_MAX_SECONDS).
+            cut = getattr(motor, "cut_for_direct_arrival", None)
+            if result.state == "accepted" and callable(cut):
+                try:
+                    cut(token=arrival_stamp)
+                except Exception:
+                    logger.exception("arrival-time direct cut failed; the reply still cuts at submit")
             drain = getattr(motor, "_drain_pending_direct_into_priority_queue", None)
             if callable(drain):
                 try:

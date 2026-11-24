@@ -70,6 +70,12 @@ PRIORITY_OWNER = 0
 PRIORITY_CHAT = 1
 PRIORITY_AGENDA = 2
 
+# ADR-069 upper bound for the arrival hold. The hold normally ends at the
+# owner reply's submit; this only bounds a lost release (generation failed or
+# stalled), after which the cut speech resumes. Matches the direct-turn answer
+# wait ceiling's order of magnitude rather than a tight guess.
+ARRIVAL_HOLD_MAX_SECONDS = 180.0
+
 
 class SpeechJobState(Enum):
     """Explicit state (design §2/§8 point 8) — never inferred from position."""
@@ -211,6 +217,16 @@ class SpeechRouter:
         # owed `speech_boundary_end` on the ROUTER thread (never the sweep's
         # caller -- see the module docstring's deadlock note).
         self._owed_end: bool = False
+        # ADR-069 arrival hold: set by `cut_for_direct_arrival`, blocks
+        # `_pick()` like a PTT hold so the cut victim cannot resume under the
+        # generating direct reply. Cleared by the next owner-band submit, an
+        # explicit `release_arrival_hold`, or its own deadline (a stuck hold is
+        # silence, so it can never be open-ended). `_sched_lock` only.
+        self._arrival_hold: bool = False
+        self._arrival_hold_deadline: float = 0.0
+        # Opaque id of the direct turn that caused the hold (its submitted_at
+        # stamp). Only THAT turn's reply, end or expiry releases the hold.
+        self._arrival_token = None
         # Step-3 kill switch: `interrupt_enabled` (a property below) reads
         # the motor's host flags LIVE — no build-time copy to go stale.
 
@@ -280,6 +296,7 @@ class SpeechRouter:
     def submit(
         self, text: str, source: str, priority: int, turn_id: Optional[int] = None,
         protected: bool = False, feed_turn_id: Optional[int] = None,
+        releases_arrival_hold: bool = True,
     ) -> SpeechJob:
         """Enqueue a speech request and wake the router loop. Non-blocking.
         Returns the created SpeechJob.
@@ -316,6 +333,13 @@ class SpeechRouter:
                 turn_uid=turn_uid,
             )
             self._incoming.append(job)
+            if (
+                releases_arrival_hold
+                and priority == PRIORITY_OWNER
+                and self._arrival_hold
+                and self._owns_arrival_hold()
+            ):
+                self._arrival_hold = False  # the causing turn's reply is here (ADR-069)
             victim = self._active
             preempt = (
                 self.interrupt_enabled
@@ -347,6 +371,7 @@ class SpeechRouter:
     def submit_streaming(
         self, source: str, priority: int, turn_id: Optional[int] = None,
         protected: bool = False, feed_turn_id: Optional[int] = None,
+        releases_arrival_hold: bool = True,
     ) -> SpeechJob:
         """Streaming entry (llm_output_streaming_20260813 design §2): one
         growing job for the whole turn. Mirrors `submit` — including the
@@ -377,6 +402,13 @@ class SpeechRouter:
                 turn_uid=turn_uid,
             )
             self._incoming.append(job)
+            if (
+                releases_arrival_hold
+                and priority == PRIORITY_OWNER
+                and self._arrival_hold
+                and self._owns_arrival_hold()
+            ):
+                self._arrival_hold = False  # the causing turn's reply is here (ADR-069)
             victim = self._active
             preempt = (
                 self.interrupt_enabled
@@ -475,6 +507,75 @@ class SpeechRouter:
         if victim is not None:
             self._motor.interrupt_speaking()
 
+    def _owns_arrival_hold(self) -> bool:
+        """True when the turn now submitting is the direct turn that caused the
+        hold: the motor publishes the member stamps of the turn it is
+        processing (`_current_turn_tokens`). Call under `_sched_lock`."""
+        tokens = getattr(self._motor, "_current_turn_tokens", None) or ()
+        return self._arrival_token is not None and self._arrival_token in tokens
+
+    def cut_for_direct_arrival(
+        self, token=None, max_hold_s: float = ARRIVAL_HOLD_MAX_SECONDS
+    ) -> bool:
+        """ADR-069: cut the ACTIVE non-owner job NOW, at direct-message
+        arrival, and hold `_pick()` until the owner reply is submitted.
+
+        Same request-before-cut discipline as `hold_and_pause`: the victim's
+        `pause_requested` and the hold publish in ONE `_sched_lock`
+        acquisition, the interrupt fires OUTSIDE the lock (I10). Reason
+        semantics match a D3-uniform owner submit: "discard" when the owner's
+        discard_speech_residue is on and the victim is not agenda, else
+        "preempt" (suspended, resumed after the reply). Returns False, and
+        changes nothing, when the kill switches are off, nothing is active,
+        the active job is owner speech (never cut by a new direct message) or
+        the shield protects it. Logs source tags only, never text."""
+        with self._sched_lock:
+            victim = self._active
+            if not self.interrupt_enabled or victim is None:
+                return False
+            if victim.priority == PRIORITY_OWNER or self._shields(victim, None):
+                return False
+            reason = (
+                "discard"
+                if self.discard_speech_residue and not str(victim.source).startswith("kira-agenda")
+                else "preempt"
+            )
+            victim.pause_requested = reason
+            self._arrival_hold = True
+            self._arrival_token = token
+            self._arrival_hold_deadline = time.monotonic() + max_hold_s
+            victim_log = victim.source
+        logger.info("[SPEECH_STACK] arrival_cut victim=%s reason=%s", victim_log, reason)
+        self._wake.set()
+        self._motor.interrupt_speaking()
+        return True
+
+    def arrival_hold_active(self) -> bool:
+        """True while an arrival cut holds `_pick()`. An overdue hold clears
+        itself here (and in `_pick`) so a lost release never means silence."""
+        with self._sched_lock:
+            return self._arrival_hold_live_locked()
+
+    def _arrival_hold_live_locked(self) -> bool:
+        """Call under `_sched_lock`."""
+        if self._arrival_hold and time.monotonic() >= self._arrival_hold_deadline:
+            self._arrival_hold = False
+            logger.info("[SPEECH_STACK] arrival_hold expired")
+        return self._arrival_hold
+
+    def release_arrival_hold(self, reason: str = "release", token=None) -> None:
+        """Drop the arrival hold and wake the loop. Idempotent and silent
+        (no wake) when nothing was released. With a `token`, only the hold
+        caused by that direct turn is released; None releases unconditionally
+        (switch turned off, full stop)."""
+        with self._sched_lock:
+            released = self._arrival_hold and (token is None or token == self._arrival_token)
+            if released:
+                self._arrival_hold = False
+        if released:
+            logger.info("[SPEECH_STACK] arrival_hold released reason=%s", reason)
+            self._wake.set()
+
     @property
     def user_paused(self) -> bool:
         """True while the owner's pause hold is engaged (read accessor)."""
@@ -545,6 +646,7 @@ class SpeechRouter:
         jobs were targeted. Same cut-vs-remove bookkeeping as `discard_source`;
         ids and counts only are logged (by `discard_job`)."""
         with self._sched_lock:
+            self._arrival_hold = False  # a full stop ends any ADR-069 hold
             targets = list(self._incoming) + list(self._stack)
             if self._active is not None:
                 targets.append(self._active)
@@ -823,6 +925,12 @@ class SpeechRouter:
                 # Contract point 3: while the mic is live, nothing reaches
                 # the mixer -- blocks INCOMING as well as STACK. Level-
                 # triggered: re-checked every iteration.
+                return None
+            # ADR-069: an arrival hold holds the STACK and non-owner jobs only.
+            # Owner-band speech still plays: a mid-turn bridge/notice of the
+            # causing turn (`releases_arrival_hold=False`) must be audible
+            # without ending the hold, or the cut victim resumes under it.
+            if self._arrival_hold_live_locked() and not any(j.priority == PRIORITY_OWNER for j in self._incoming):
                 return None
             if self._incoming:
                 # Lowest priority number wins; arrival order within a tie.

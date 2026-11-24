@@ -707,6 +707,55 @@ class SpeechPipelineMixin:
             return
         self._ensure_router().hold_and_pause("ptt")
 
+    # ── interrupt on direct (ADR-069) ────────────────────────────────────
+    # Opt-in: a typed direct message that arrives while Kira speaks a
+    # non-owner turn cuts that speech immediately (like a PTT press) and holds
+    # the router until the reply is submitted, so the cut speech cannot
+    # resume under the generating reply. Owner decision 2026-11-21.
+
+    def cut_for_direct_arrival(self, token=None) -> bool:
+        """Cut non-owner speech at direct-message arrival. True when a cut
+        was requested. `token` is the direct turn's submitted_at stamp: the
+        hold is keyed to it (only that turn's reply, end or expiry releases it).
+        Cuts ONLY when the direct turn can start generating at once: no other
+        LLM generation in flight (`_processing` or `_llm_generating`),
+        otherwise the speech would stay silent through that generation plus
+        the direct one; then today's cut-at-reply-submit applies. Inert when the switch is off, when the router and
+        interrupt flags are not both armed (non-EngineHost surfaces; logged
+        once at debug), or when the active speech is owner speech. Never
+        aborts an in-flight generation. Takes no engine lock while the
+        router's leaf lock is held; takes `_lock` only for the log-once flag."""
+        if not getattr(self, "_interrupt_on_direct", False):
+            return False
+        if not (self._speech_interrupt_enabled and self._speech_router_enabled):
+            with self._lock:
+                first = not self._interrupt_on_direct_unarmed_logged
+                self._interrupt_on_direct_unarmed_logged = True
+            if first:
+                _eng.logger.debug("[DIRECT_CUT] skipped reason=flags_unarmed")
+            return False
+        router = self._speech_router
+        if router is None:
+            return False
+        with self._lock:
+            generating = self._processing or self._llm_generating
+        if generating:
+            _eng.logger.debug("[DIRECT_CUT] skipped reason=generation_in_flight")
+            return False
+        return router.cut_for_direct_arrival(token=token)
+
+    def _arrival_cut_holding(self) -> bool:
+        """True while an arrival cut holds the router (widens the pop gate)."""
+        router = self._speech_router
+        return router is not None and router.arrival_hold_active()
+
+    def _release_arrival_cut(self, reason: str, token=None) -> None:
+        """Drop the arrival hold (of `token`'s turn, or any when None), if any.
+        Idempotent; a no-op without a router."""
+        router = self._speech_router
+        if router is not None:
+            router.release_arrival_hold(reason, token=token)
+
     def resume_speech_after_ptt(self) -> None:
         """PTT_UP entrypoint (design §5.1's `on_release` funnel): fail-open,
         a no-op unless BOTH switches are armed (same conjunction as the

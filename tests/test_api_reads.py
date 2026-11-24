@@ -494,6 +494,8 @@ def test_tts_config_shape_from_accessors(monkeypatch):
             "edge_tts_last_error": None,
             # Default is ON since 98c22c7 (feat(speech): enable discard residue by default).
             "discard_speech_residue": True,
+            # ADR-069 (additive): opt-in cut at direct-message arrival, default off.
+            "interrupt_on_direct": False,
             # voice-catalog-selection-20261118 T2 (additive). "es_kira" is not a registry key.
             "piper_voice_id": None,
             "piper_speaker_id": None,

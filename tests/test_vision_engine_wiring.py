@@ -61,7 +61,7 @@ class FakeRouter:
         self.appends = []
         self.discarded = []
 
-    def submit(self, text, source, priority, turn_id=None):
+    def submit(self, text, source, priority, turn_id=None, releases_arrival_hold=True):
         job = FakeJob(len(self.submitted) + 1, text, source, priority)
         self.submitted.append(job)
         return job
@@ -544,9 +544,9 @@ def _record_submits(motor):
     router = motor._fake_router
     original = router.submit
 
-    def _submit(text, source, priority, turn_id=None):
+    def _submit(text, source, priority, turn_id=None, **kw):
         motor._events.append(f"submit:{source}")
-        return original(text, source, priority, turn_id)
+        return original(text, source, priority, turn_id, **kw)
 
     router.submit = _submit
 

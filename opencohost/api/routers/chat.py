@@ -48,6 +48,7 @@ _COMMAND_WHITELIST = frozenset(
         "switch_model",
         "switch_llm_tier",
         "set_discard_speech_residue",
+        "set_interrupt_on_direct",
     }
 )
 
@@ -117,6 +118,10 @@ def _validate_command_value(command: str, value) -> "str | None":
     if command == "set_discard_speech_residue":
         if not isinstance(value, bool):
             return "set_discard_speech_residue requires a boolean value"
+        return None
+    if command == "set_interrupt_on_direct":
+        if not isinstance(value, bool):
+            return "set_interrupt_on_direct requires a boolean value"
         return None
     return None
 

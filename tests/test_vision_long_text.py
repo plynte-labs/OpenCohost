@@ -300,7 +300,7 @@ class _Router:
     def __init__(self):
         self.submitted, self.discarded = [], []
 
-    def submit(self, text, source, priority, turn_id=None):
+    def submit(self, text, source, priority, turn_id=None, releases_arrival_hold=True):
         job = _Job(text, source, priority)
         self.submitted.append(job)
         return job

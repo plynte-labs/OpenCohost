@@ -364,7 +364,9 @@ class VisionTurnMixin:
         from opencohost.core.speech.router import PRIORITY_OWNER
 
         source = f"{self._vision_bridge_source}{VISION_BRIDGE_SUFFIX}"
-        self._vision_bridge_job = self._ensure_router().submit(line, source, PRIORITY_OWNER)
+        self._vision_bridge_job = self._ensure_router().submit(
+            line, source, PRIORITY_OWNER, releases_arrival_hold=False
+        )
 
     def _vision_speak_status(self, line: str) -> None:
         """Speak the post-describe status line on the owner band (router only)."""
@@ -374,7 +376,9 @@ class VisionTurnMixin:
 
         source = f"{self._vision_bridge_source}{VISION_STATUS_SUFFIX}"
         try:
-            self._vision_status_job = self._ensure_router().submit(line, source, PRIORITY_OWNER)
+            self._vision_status_job = self._ensure_router().submit(
+                line, source, PRIORITY_OWNER, releases_arrival_hold=False
+            )
         except Exception:
             logger.debug("[VISION] status line submit failed", exc_info=False)
 
@@ -467,7 +471,9 @@ class VisionTurnMixin:
                 return
         source = f"{self._vision_bridge_source}{VISION_PROGRESS_SUFFIX}"
         try:
-            self._vision_progress_job = self._ensure_router().submit(line, source, PRIORITY_OWNER)
+            self._vision_progress_job = self._ensure_router().submit(
+                line, source, PRIORITY_OWNER, releases_arrival_hold=False
+            )
         except Exception:
             logger.debug("[VISION] progress line submit failed", exc_info=False)
 

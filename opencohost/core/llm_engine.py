@@ -48,6 +48,7 @@ from opencohost.config.settings import (
     load_tts_local_only, save_tts_local_only,
     load_tts_speed, save_tts_speed,
     load_discard_speech_residue, save_discard_speech_residue,
+    load_interrupt_on_direct, save_interrupt_on_direct,
     load_motor_tts, save_motor_tts,
     PIPER_VOICES, DEFAULT_PIPER_VOICE, piper_voice_path, load_piper_voice, save_piper_voice,
     default_piper_voice_for_locale,
@@ -379,6 +380,7 @@ _DRAIN_SAFE_COMMANDS = frozenset({
     "switch_llm_tier",
     "switch_model",
     "set_discard_speech_residue",
+    "set_interrupt_on_direct",
 })
 
 # §11 B4 primary path: verbs `_dispatch_command` parks while speech is
@@ -388,7 +390,11 @@ _DRAIN_SAFE_COMMANDS = frozenset({
 # sequence at the boundary instead of collapsing to the latest.
 # `set_discard_speech_residue` is also excluded: the operator's toggle is
 # immediately effective under `_lock` rather than delayed until speech boundary.
-_SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {"switch_model", "set_discard_speech_residue"}
+# `set_interrupt_on_direct` is excluded for the same reason (ADR-069): the
+# switch must take effect while Kira is mid-speech, which is when it matters.
+_SPEECH_DEFER_COMMANDS = _DRAIN_SAFE_COMMANDS - {
+    "switch_model", "set_discard_speech_residue", "set_interrupt_on_direct",
+}
 
 
 # Carriers for _generar_dialogo's phase split are defined in and imported from
@@ -694,6 +700,14 @@ class MotorVocalIA(
         # turns are discarded on interruption/arrival. Default False.
         with self._lock:
             self._discard_speech_residue: bool = load_discard_speech_residue()
+
+        # Interrupt on direct (ADR-069): opt-in cut of non-owner speech when a
+        # typed direct message ARRIVES. Default False = today's non-preemptive
+        # arrival (the cut happens when the reply is submitted).
+        with self._lock:
+            self._interrupt_on_direct: bool = load_interrupt_on_direct()
+        self._interrupt_on_direct_unarmed_logged: bool = False
+        self._current_turn_tokens: frozenset = frozenset()
 
         # Per-locale Edge voice override (edge_voice.json). Read-only here: startup never writes it.
         # None -> the locale bundle's voice applies. The locale never hot-swaps, so one value suffices.
@@ -1324,6 +1338,9 @@ class MotorVocalIA(
                 )
                 self.ui_callback("ollama_unavailable")
                 _log_turn_outcome(source, TurnEvent.REFUSE)
+                if self._interrupt_on_direct and stamp is not None:
+                    # ADR-069: a refused direct turn never replies; clear ITS hold.
+                    self._release_arrival_cut("refused", token=stamp.submitted_at)
                 return
             if self._processing or self._speech_active:
                 # Motor busy — enqueue to priority queue instead of dropping
@@ -1343,6 +1360,13 @@ class MotorVocalIA(
             with self._lock:
                 self._processing = True
                 self._current_processing_source = source
+                # ADR-069: same token the priority-queue path publishes, so a
+                # direct turn consumed from command_queue owns (and, at turn
+                # end, releases) the hold its arrival set.
+                self._current_turn_tokens = frozenset(
+                    t for t in (stamp.submitted_at if stamp is not None else None,)
+                    if t is not None and source in _OWNER_QUESTION_SOURCES
+                )
             self.ui_callback("processing")
             self._note_detour_turn(source)
             turn_state.open_turn(source)
@@ -1441,6 +1465,15 @@ class MotorVocalIA(
                 self._discard_speech_residue = val
             save_discard_speech_residue(val)
             logger.info("Discard speech residue set to %s", val)
+
+        elif tipo == "set_interrupt_on_direct":
+            val = bool(payload)
+            with self._lock:
+                self._interrupt_on_direct = val
+            save_interrupt_on_direct(val)
+            if not val:
+                self._release_arrival_cut("switch_off")
+            logger.info("Interrupt on direct set to %s", val)
 
         elif tipo == "set_tts_speed":
             scale = float(payload)
@@ -1850,6 +1883,8 @@ class MotorVocalIA(
             for exp in expired_turns:
                 prio, ts, payload, source = exp.item[:4]
                 self._log(f"Item expirado y omitido (TTL {exp.ttl_seconds:.0f}s): {source}")
+                if source == "direct" and self._interrupt_on_direct and len(exp.item) > 5:
+                    self._release_arrival_cut("expired", token=exp.item[5])
                 _log_turn_outcome(source, TurnEvent.EXPIRE)
                 if source == "chat":
                     expired_chat_infos.append({"age_sec": exp.age_seconds, "ttl_sec": exp.ttl_seconds})
@@ -1864,9 +1899,17 @@ class MotorVocalIA(
 
             queue_empty = False
             accumulated = None
+            required_priority = None
+            if widened_pop_armed and speech_busy:
+                # PTT only, plus the direct tier while an ADR-069 arrival cut
+                # holds the router: the cut speech is not coming back until
+                # the reply plays, so the direct turn must start generating.
+                required_priority = (0, 1) if (
+                    self._interrupt_on_direct and self._arrival_cut_holding()
+                ) else 0
             dequeue_res = _get_turn_scheduler(self).dequeue_or_else(
                 on_empty=self._flush_accumulation,
-                required_priority=0 if (widened_pop_armed and speech_busy) else None,
+                required_priority=required_priority,
             )
             if dequeue_res.blocked:
                 self._retrigger_interactive_pregen_for_blocked_head()
@@ -1918,6 +1961,11 @@ class MotorVocalIA(
             with self._lock:
                 self._processing = True
                 self._current_processing_source = source
+                # ADR-069: stamps of the owner turn(s) this cycle answers, so
+                # the router can tell WHOSE reply is submitting.
+                self._current_turn_tokens = frozenset(
+                    t for t in (submitted_at,) if t is not None and source in _OWNER_QUESTION_SOURCES
+                )
             if not self._speech_active:
                 self.ui_callback("processing")
             self._note_detour_turn(source)
@@ -1952,6 +2000,10 @@ class MotorVocalIA(
                         taken = self._take_owner_bundle_prefix(item)
                         if taken:
                             members = [item] + taken
+                            with self._lock:
+                                self._current_turn_tokens = frozenset(
+                                    m[5] for m in members if len(m) > 5 and m[5] is not None
+                                )
                             payload, history_text, stamp = self._compose_owner_bundle(members)
                             source = OWNER_BUNDLE_SOURCE
                             for member in taken:
@@ -1976,6 +2028,15 @@ class MotorVocalIA(
         with self._lock:
             self._processing = False
             self._current_processing_source = None
+            finished_tokens = getattr(self, "_current_turn_tokens", frozenset())
+            self._current_turn_tokens = frozenset()
+        if self._interrupt_on_direct and finished_tokens:
+            # ADR-069 safety net: a direct turn that ended without submitting
+            # speech (error, blocked, empty reply) must not leave ITS arrival
+            # hold engaged. Keyed by the turn's stamp: a PTT turn or an older
+            # direct turn finishing never releases someone else's hold.
+            for token in finished_tokens:
+                self._release_arrival_cut("turn_end", token=token)
         self._owner_reflection_stamp_turn_done()
         self._stamp_command_done()  # opens the promotion quiet window (priority-queue turns too)
         if emit_idle and not self._speech_active:

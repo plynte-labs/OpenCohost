@@ -411,7 +411,8 @@ class WebTurnMixin:
                 bridge_lang = detect_language(clean, default=session_lang)
             line = WEB_BRIDGE_LINES.get(bridge_lang, WEB_BRIDGE_LINES[session_lang])
             self._web_bridge_job = self._ensure_router().submit(
-                line, f"{source}{WEB_BRIDGE_SUFFIX}", PRIORITY_OWNER
+                line, f"{source}{WEB_BRIDGE_SUFFIX}", PRIORITY_OWNER,
+                releases_arrival_hold=False,
             )
         except Exception:
             logger.debug("[WEB] bridge submit failed", exc_info=False)

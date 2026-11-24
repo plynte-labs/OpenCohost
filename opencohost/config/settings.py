@@ -2072,6 +2072,59 @@ def save_discard_speech_residue(enabled: bool, config_file: Optional[str] = None
         pass
 
 
+def load_interrupt_on_direct(config_file: Optional[str] = None) -> bool:
+    """Load the interrupt_on_direct preference from disk (ADR-069).
+
+    Returns False (default) when the file is absent, unreadable or corrupted:
+    the opt-in cut at direct-message arrival is OFF unless the owner enables it.
+
+    Args:
+        config_file: Override path for testing. Uses TTS_SETTINGS_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_SETTINGS_FILE
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return bool(data.get("interrupt_on_direct", False))
+        return False
+    except Exception:
+        return False
+
+
+def save_interrupt_on_direct(enabled: bool, config_file: Optional[str] = None) -> None:
+    """Persist the interrupt_on_direct preference using an atomic write.
+
+    Preserves other keys in tts_settings.json if the file already exists.
+
+    Args:
+        enabled: True to cut non-owner speech when a direct message arrives.
+        config_file: Override path for testing. Uses TTS_SETTINGS_FILE when None.
+    """
+    path = config_file if config_file is not None else TTS_SETTINGS_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                    if isinstance(existing, dict):
+                        data = existing
+            except Exception:
+                data = {}
+        data["interrupt_on_direct"] = bool(enabled)
+        data["saved_at"] = datetime.now().isoformat()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def load_memorias_notice_dismissed(config_file: Optional[str] = None) -> bool:
     """Load the F1 disclosure-banner dismissed state from disk.
 

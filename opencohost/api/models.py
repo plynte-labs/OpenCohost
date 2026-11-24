@@ -708,6 +708,8 @@ class TTSConfigResponse(BaseModel):
     edge_tts_degraded: bool = False
     edge_tts_last_error: str | None = None
     discard_speech_residue: bool = True
+    # Additive (ADR-069): opt-in cut of non-owner speech when a direct message arrives.
+    interrupt_on_direct: bool = False
     # Additive (voice-catalog-selection-20261118): the active Piper voice's catalog id (its
     # model filename), its speaker (null: single speaker or not set) and the effective Edge voice.
     piper_voice_id: str | None = None

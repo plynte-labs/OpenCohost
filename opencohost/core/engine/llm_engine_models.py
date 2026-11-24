@@ -954,7 +954,9 @@ class ModelManagementMixin:
             if not allowed:
                 logger.info("[RECOVERY] timeout_notice blocked=1")
                 return False
-            self._ensure_router().submit(spoken, f"{source}{TIMEOUT_NOTICE_SUFFIX}", PRIORITY_OWNER)
+            self._ensure_router().submit(
+                spoken, f"{source}{TIMEOUT_NOTICE_SUFFIX}", PRIORITY_OWNER, releases_arrival_hold=False
+            )
             logger.info("[RECOVERY] timeout_notice queued=1")
             return True
         except Exception:

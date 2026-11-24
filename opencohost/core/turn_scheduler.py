@@ -207,7 +207,7 @@ class TurnScheduler:
         self,
         *,
         on_empty: Callable[[], Any],
-        required_priority: int | None = None,
+        required_priority: int | tuple[int, ...] | None = None,
     ) -> DequeueResult:
         """Pop atomically or invoke ``on_empty`` while the scheduler lock is held.
 
@@ -216,8 +216,11 @@ class TurnScheduler:
         method calls outward while holding this lock.
         """
         with self._sched_lock:
-            if required_priority is not None and (
-                not self._items or self._items[0][0] != required_priority
+            allowed = (
+                (required_priority,) if isinstance(required_priority, int) else required_priority
+            )
+            if allowed is not None and (
+                not self._items or self._items[0][0] not in allowed
             ):
                 return DequeueResult(blocked=True)
             if not self._items:

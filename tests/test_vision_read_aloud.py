@@ -178,7 +178,7 @@ class _Router:
     def __init__(self, calls):
         self.jobs, self.discarded, self.calls = [], [], calls
 
-    def submit(self, text, source, priority, turn_id=None, protected=False):
+    def submit(self, text, source, priority, turn_id=None, protected=False, releases_arrival_hold=True):
         job = _Job(source, priority, protected)
         job.text = text
         self.jobs.append(job)
@@ -626,7 +626,7 @@ class _TurnRouter(_ProtectedRouter):
         job.turn_id = turn_id
         return job
 
-    def submit(self, text, source, priority, turn_id=None, protected=False):
+    def submit(self, text, source, priority, turn_id=None, protected=False, releases_arrival_hold=True):
         job = super().submit(text, source, priority, turn_id)
         job.turn_id = turn_id
         return job
