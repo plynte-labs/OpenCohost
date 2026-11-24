@@ -64,6 +64,7 @@ from fastapi.responses import JSONResponse
 from opencohost.api import deps
 from opencohost.api.models import (
     MemoriaCaptureRequest,
+    MemoriaCaptureStateResponse,
     MemoriaDeleteRequest,
     MemoriaFlagsRequest,
     MemoriaImportRequest,
@@ -635,6 +636,17 @@ def post_memoria_capture(request: Request, body: MemoriaCaptureRequest):
     # No llm_engine.py change, no _COMMAND_WHITELIST entry.
     request.app.state.host.motor.set_memorias_private(body.paused)
     return MemoriaMutationResponse(ok=True)
+
+
+@router.get("/api/memoria/capture", response_model=MemoriaCaptureStateResponse)
+def get_memoria_capture(request: Request) -> MemoriaCaptureStateResponse:
+    # Read-back of the process-scoped private switch (resets on restart), so the
+    # UI shows backend truth. Flags only; a missing motor reads as not private.
+    motor = getattr(getattr(request.app.state, "host", None), "motor", None)
+    return MemoriaCaptureStateResponse(
+        private=bool(getattr(motor, "memorias_private", False)),
+        available=bool(deps.memorias_enabled()),
+    )
 
 
 @router.get("/api/memoria/notice", response_model=MemoriaNoticeResponse)

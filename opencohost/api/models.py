@@ -1334,6 +1334,18 @@ class MemoriaCaptureRequest(BaseModel):
     paused: bool
 
 
+class MemoriaCaptureStateResponse(BaseModel):
+    """GET /api/memoria/capture response — live capture-privacy switch state.
+
+    `private=True` means auto-capture is paused. `available=False` means the
+    memorias feature is gated off, so the switch cannot take effect. Flags
+    only: never carries chat text.
+    """
+
+    private: bool
+    available: bool
+
+
 class MemoriaMutationResponse(BaseModel):
     """POST /api/memoria/{flags,delete,update} response. R8: never echoes
     title/content — read-back stays metadata-only via /api/memoria/list."""

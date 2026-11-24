@@ -572,3 +572,33 @@ def test_post_memoria_capture_requires_bool(monkeypatch):
         # value OUTSIDE that set (an array here) is used to prove the bool guard.
         resp = client.post("/api/memoria/capture", json={"paused": ["not", "a", "bool"]})
         assert resp.status_code == 422
+
+
+# --- GET /api/memoria/capture (live private-switch read-back) ---
+
+
+def test_get_memoria_capture_reports_live_state(monkeypatch):
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(main_mod, "MEMORIAS_ENABLED", True)
+
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/api/memoria/capture")
+        assert resp.status_code == 200
+        assert resp.json() == {"private": False, "available": True}
+
+        client.post("/api/memoria/capture", json={"paused": True})
+        resp2 = client.get("/api/memoria/capture")
+        assert resp2.json() == {"private": True, "available": True}
+
+
+def test_get_memoria_capture_unavailable_when_gated(monkeypatch):
+    import opencohost.api.main as main_mod
+
+    monkeypatch.setattr(main_mod, "MEMORIAS_ENABLED", False)
+
+    with TestClient(_app()) as client:
+        resp = client.get("/api/memoria/capture")
+        assert resp.status_code == 200
+        assert resp.json() == {"private": False, "available": False}
