@@ -322,3 +322,15 @@ def test_to_dict_shape(folder):
     assert set(d) == {"id", "label", "lang", "num_speakers", "speakers", "sample_rate", "bundled", "status", "reason"}
     assert d["speakers"] == [{"name": "M", "id": 0}, {"name": "F", "id": 1}]
     assert d["label"] == "es_AR-multi"
+
+
+def test_default_piper_voices_labels_contain_no_emojis():
+    import re
+
+    emoji_re = re.compile(r"[\U0001F1E0-\U0001FAFF\u2600-\u27BF\uFE0F]")
+    assert set(settings.PIPER_VOICES) >= {"neutral", "english"}
+    for key, entry in settings.PIPER_VOICES.items():
+        label = entry["label"]
+        assert not emoji_re.search(label), f"PIPER_VOICES[{key!r}] label has emoji: {label!r}"
+    assert settings.PIPER_VOICES["neutral"]["label"] == "Neutral"
+    assert settings.PIPER_VOICES["english"]["label"] == "English"

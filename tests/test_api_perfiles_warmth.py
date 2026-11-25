@@ -161,3 +161,39 @@ def test_owner_gender_unknown_stored_value_reads_empty(profiles_file):
     profiles_file.write_text(json.dumps(data), encoding="utf-8")
     with _client() as client:
         assert client.get("/api/perfiles/old").json()["owner_gender"] == ""
+
+
+def test_warmth_and_max_turns_persist_across_simulated_restart(profiles_file, tmp_path, monkeypatch):
+    """Round-trip across two fresh app instances (simulating a full restart):
+    PUT warmth='sentimental' and max_turns=10, then boot a new app instance
+    and verify both GET /api/perfiles/{name} and the startup set_profile seed
+    preserve those saved values instead of reverting to cold/3."""
+    from opencohost.config import settings as settings_mod
+
+    last_profile_file = tmp_path / "last_profile.json"
+    monkeypatch.setattr(settings_mod, "LAST_PROFILE_FILE", str(last_profile_file))
+
+    # Session 1: save sentimental + max_turns=10 and switch to "old".
+    with _client() as client1:
+        put_resp = client1.put(
+            "/api/perfiles/old",
+            json={"prompt": "Old prompt", "warmth": "sentimental", "max_turns": 10},
+        )
+        assert put_resp.status_code == 200
+        assert put_resp.json()["warmth"] == "sentimental"
+        assert put_resp.json()["max_turns"] == 10
+        sw_resp = client1.post("/api/perfiles/switch", json={"name": "old"})
+        assert sw_resp.status_code == 200
+
+    # Verify on-disk persistence between runs.
+    on_disk = _stored(profiles_file)
+    assert on_disk["old"]["warmth"] == "sentimental"
+    assert on_disk["old"]["max_turns"] == 10
+
+    # Session 2: brand new app instance reading the same perfiles.json.
+    with _client() as client2:
+        get_resp = client2.get("/api/perfiles/old")
+        assert get_resp.status_code == 200
+        body = get_resp.json()
+        assert body["warmth"] == "sentimental"
+        assert body["max_turns"] == 10

@@ -503,8 +503,8 @@ def _resolve_piper_voice_file(filename: str) -> str:
 TTS_LOCAL_MODEL_PATH: str = _resolve_piper_voice_file("es_MX-claude-high.onnx")
 # Offline Piper voice registry for the in-app "Voz de Kira" toggle.
 PIPER_VOICES: dict[str, dict] = {
-    "neutral": {"label": "🌎 Neutral", "file": "es_MX-claude-high.onnx", "lang": "es"},
-    "english": {"label": "🇺🇸 English", "file": "en_US-kristin-medium.onnx", "lang": "en"},
+    "neutral": {"label": "Neutral", "file": "es_MX-claude-high.onnx", "lang": "es"},
+    "english": {"label": "English", "file": "en_US-kristin-medium.onnx", "lang": "en"},
 }
 DEFAULT_PIPER_VOICE = "neutral"
 

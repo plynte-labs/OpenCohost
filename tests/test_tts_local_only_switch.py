@@ -426,7 +426,7 @@ class TestPiperVoiceRegistryLang:
         from opencohost.config import settings as cfg
 
         assert cfg.PIPER_VOICES["english"] == {
-            "label": "🇺🇸 English", "file": "en_US-kristin-medium.onnx", "lang": "en",
+            "label": "English", "file": "en_US-kristin-medium.onnx", "lang": "en",
         }
 
     def test_es_voices_tagged_lang_es(self):

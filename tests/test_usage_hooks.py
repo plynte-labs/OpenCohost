@@ -345,3 +345,63 @@ def test_call_model_name_cloud_uses_the_active_profile_model():
                                  "not-a-dict"])
 def test_call_model_name_cloud_without_a_profile_model_falls_back(cfg):
     assert ledger.call_model_name("gemma4:e4b", is_local=False, provider_cfg=cfg) == "gemma4:e4b"
+
+
+def test_scout_under_cloud_provider_records_cloud_model(monkeypatch):
+    """When the active provider is cloud with pregen_enabled=True, scout_digest
+    routes through cloud_llm_client and must record provider='cloud' with the
+    cloud profile's model id, not the loaded local model."""
+    from opencohost.core.providers.cloud import cloud_llm_client
+    from tests.test_topic_scout import _make_scout_motor
+
+    motor, _fake = _make_scout_motor(monkeypatch, chat_impl=lambda **k: {})
+    motor._current_profile_id = "kira"
+    motor._provider_config = {
+        "active_provider": "gemini",
+        "pregen_enabled": True,
+        "profiles": {
+            "gemini": {
+                "preset": "gemini",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+                "model": "gemini-3.5-flash-lite",
+            }
+        },
+    }
+    monkeypatch.setattr(motor, "_resolve_cloud_api_key", lambda _provider: "test-key", raising=False)
+    monkeypatch.setattr(
+        cloud_llm_client,
+        "send_chat_completion",
+        lambda *a, **k: {
+            "message": {"content": "Tema uno\nTema dos"},
+            "usage": {"prompt_tokens": 80, "completion_tokens": 12},
+        },
+    )
+    motor.scout_digest()
+    rows = [r for r in _usage_rows() if r["kind"] == "topic_scout"]
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "cloud"
+    assert rows[0]["model"] == "gemini-3.5-flash-lite"
+
+
+def test_cloud_vision_describer_records_cloud_model(monkeypatch):
+    from opencohost.core.vision import cloud_describer
+
+    def fake_send(*args, **kwargs):
+        return {
+            "message": {"role": "assistant", "content": "A code editor window."},
+            "usage": {"prompt_tokens": 120, "completion_tokens": 15},
+        }
+
+    monkeypatch.setattr(cloud_describer._client, "send_chat_completion", fake_send)
+    describer = cloud_describer.CloudVisionDescriber(
+        "gemini",
+        "gemini-3.5-flash-lite",
+        key_provider=lambda: "test-key",
+        lang="en",
+    )
+    describer.describe(b"\xff\xd8\xff\xe0jpeg\xff\xd9", "what is on screen?", timeout_s=5.0)
+    rows = [r for r in _usage_rows() if r["kind"] == "vision"]
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "cloud"
+    assert rows[0]["model"] == "gemini-3.5-flash-lite"
+    assert (rows[0]["prompt_tokens"], rows[0]["completion_tokens"]) == (120, 15)
