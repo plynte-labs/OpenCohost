@@ -16,10 +16,12 @@ response/request-free ``CloudLLMResponseError`` via ``raise ... from None``).
 """
 
 import json
+import logging
 import re
 
 import requests
 
+from opencohost.security.cloud_url import is_allowed_cloud_base_url
 from opencohost.core.providers.think_tags import (
     THINK_BLOCK_RE,
     THINK_CLOSE_TAG,
@@ -27,6 +29,8 @@ from opencohost.core.providers.think_tags import (
     ThinkTagStreamSplitter,
     strip_think_blocks,
 )
+
+logger = logging.getLogger(__name__)
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 
@@ -150,6 +154,13 @@ def preset_request_kwargs(preset) -> dict:
     }
 
 
+def _refuse_insecure_url(base_url: str) -> None:
+    """Never attach the key to a non-https, non-private URL (egress guard)."""
+    if not is_allowed_cloud_base_url(base_url):
+        logger.warning("cloud request refused: base URL is not https or a local host")
+        raise CloudLLMResponseError("cloud base URL must be https or a local host")
+
+
 def _request_headers(api_key: str, extra_headers) -> dict:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     for name, value in (extra_headers or {}).items():
@@ -221,6 +232,7 @@ def send_chat_completion(
         reasoning_style=reasoning_style,
         drop_params=drop_params,
     )
+    _refuse_insecure_url(base_url)
     headers = _request_headers(api_key, extra_headers)
     url = f"{base_url.rstrip('/')}{CHAT_COMPLETIONS_PATH}"
     resp = requests.post(url, json=body, headers=headers, timeout=timeout)
@@ -315,6 +327,7 @@ def stream_chat_completion(
     for name in drop_params or ():
         if name != "stream":
             body.pop(name, None)
+    _refuse_insecure_url(base_url)
     headers = _request_headers(api_key, extra_headers)
     url = f"{base_url.rstrip('/')}{CHAT_COMPLETIONS_PATH}"
     resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
@@ -404,6 +417,40 @@ CLOUD_ERROR_BAD_KEY = "bad_key"
 CLOUD_ERROR_RATE_LIMITED = "rate_limited"
 CLOUD_ERROR_AMBIGUOUS_429 = "ambiguous_429"
 CLOUD_ERROR_TRANSIENT = "transient"
+# vision-settings-redesign-20261125 B1/B2. The status code stays the primary
+# signal; only for a few statuses is the SANITIZED provider message consulted
+# (extract_provider_message: key-scrubbed, request echoes dropped, bounded).
+CLOUD_ERROR_IMAGE_UNSUPPORTED = "image_unsupported"
+CLOUD_ERROR_QUOTA_EXHAUSTED = "quota_exhausted"
+
+_IMAGE_TOKEN_RE = re.compile(r"image|vision|multimodal|multi-modal|visual", re.IGNORECASE)
+_IMAGE_STRONG_RE = re.compile(r"image_url|multimodal|multi-modal", re.IGNORECASE)
+_IMAGE_NEGATION_RE = re.compile(
+    r"not\s+support|unsupported|does\s+not\s+accept|doesn'?t\s+accept|not\s+allowed|"
+    r"text[\s-]?only|only\s+text|not\s+multimodal|no\s+image|cannot\s+process|can'?t\s+process",
+    re.IGNORECASE,
+)
+_QUOTA_RE = re.compile(r"quota|credit|billing|payment", re.IGNORECASE)
+
+
+def message_indicates_image_rejection(message: object) -> bool:
+    """True when a sanitized provider message says images are not accepted.
+
+    Conservative: ``image_url``/``multimodal`` wording, or an image/vision word
+    together with an explicit "not supported"-style phrase.
+    """
+    if not message or not isinstance(message, str):
+        return False
+    if _IMAGE_STRONG_RE.search(message):
+        return True
+    return bool(_IMAGE_TOKEN_RE.search(message) and _IMAGE_NEGATION_RE.search(message))
+
+
+def message_indicates_quota_exhausted(message: object) -> bool:
+    """True when a sanitized provider message names quota/credits/billing."""
+    if not message or not isinstance(message, str):
+        return False
+    return bool(_QUOTA_RE.search(message))
 
 
 def _has_retry_timing_info(headers: dict) -> bool:
@@ -422,20 +469,36 @@ def _has_retry_timing_info(headers: dict) -> bool:
 def classify_cloud_error(exc: Exception) -> str:
     """Classify a cloud transport failure for retry/fallback policy (F2).
 
-    Reads only ``status_code``/``headers`` already carried on a
-    ``CloudLLMResponseError`` (see its docstring) -- never response body
-    content, which would mean guessing a provider-specific shape. Anything
+    Reads ``status_code``/``headers`` carried on a ``CloudLLMResponseError``
+    (see its docstring). Only 400/415/422 (image rejection) and 401/403/429
+    (quota) also consult the SANITIZED provider message, by a few conservative
+    keywords; 402 is quota by status alone. Anything
     without a status_code (``ConnectionError``, ``Timeout``, ``socket.timeout``,
     a malformed-2xx-body ``CloudLLMResponseError``) is ``transient``, along
     with every 5xx.
     """
     status_code = getattr(exc, "status_code", None)
+    if status_code == 402:
+        return CLOUD_ERROR_QUOTA_EXHAUSTED
+    if status_code in (401, 403, 429) and not (
+        status_code == 429 and _has_retry_timing_info(getattr(exc, "headers", None) or {})
+    ):
+        # Quota wording only counts where no retry timing says "wait": a 429
+        # that carries Retry-After is a rate limit even if it mentions quota.
+        if message_indicates_quota_exhausted(extract_provider_message(exc)):
+            return CLOUD_ERROR_QUOTA_EXHAUSTED
     if status_code in (401, 403):
         return CLOUD_ERROR_BAD_KEY
     if status_code == 429:
         if _has_retry_timing_info(getattr(exc, "headers", None) or {}):
             return CLOUD_ERROR_RATE_LIMITED
         return CLOUD_ERROR_AMBIGUOUS_429
+    if status_code in (400, 415, 422) and message_indicates_image_rejection(
+        extract_provider_message(exc)
+    ):
+        # Whether the request actually carried images is the caller's to
+        # check: a 400 without images keeps the transient class there.
+        return CLOUD_ERROR_IMAGE_UNSUPPORTED
     return CLOUD_ERROR_TRANSIENT
 
 

@@ -89,6 +89,8 @@ def test_get_returns_settings_and_status():
             "cloud_direct_allowed", "vision_source", "vision_cloud_preset",
             "vision_cloud_model", "vision_cloud_use_chat_key",
             "vision_cloud_key_set", "vision_cloud_chat_key_set",
+            "chat_model_eligible", "chat_model_reason",
+            "vram_warning", "vram_needed_gib", "vram_free_gib", "vram_total_gib",
         }
         assert body["status"] == {
             "state": "ready", "last_error": None,
@@ -365,5 +367,136 @@ def test_models_route_503_when_host_has_no_inventory():
     try:
         resp = client.get("/api/vision/models")
         assert resp.status_code == 503
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------- A3: chat_model
+
+_LOCAL_CFG = {"active_provider": "local", "profiles": {}}
+_NO_VISION_CFG = {
+    "active_provider": "p1",
+    "profiles": {"p1": {"preset": "deepseek", "base_url": "https://x/v1", "model": "deepseek-v4-pro"}},
+}
+_VISION_CFG = {
+    "active_provider": "p1",
+    "profiles": {"p1": {"preset": "custom", "base_url": "https://x/v1", "model": "m", "model_vision": True}},
+}
+
+
+def _provider(monkeypatch, cfg):
+    from opencohost.api import deps
+
+    monkeypatch.setattr(deps, "load_provider_config", lambda: cfg)
+
+
+@pytest.mark.parametrize(
+    "cfg,eligible,reason",
+    [
+        (_LOCAL_CFG, False, "chat_model_requires_cloud_provider"),
+        (_NO_VISION_CFG, False, "chat_model_not_vision_capable"),
+        (_VISION_CFG, True, None),
+    ],
+)
+def test_get_exposes_chat_model_eligibility(monkeypatch, cfg, eligible, reason):
+    _provider(monkeypatch, cfg)
+    app, client = _client()
+    try:
+        body = client.get("/api/vision").json()
+        assert body["chat_model_eligible"] is eligible
+        assert body["chat_model_reason"] == reason
+    finally:
+        client.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "cfg,code",
+    [
+        (_LOCAL_CFG, "chat_model_requires_cloud_provider"),
+        (_NO_VISION_CFG, "chat_model_not_vision_capable"),
+    ],
+)
+@pytest.mark.parametrize("payload", [{"vision_source": "chat_model"}, {"cloud_direct_allowed": True}])
+def test_put_rejects_chat_model_when_the_provider_cannot_see(monkeypatch, cfg, code, payload):
+    _provider(monkeypatch, cfg)
+    app, client = _client()
+    try:
+        before = settings.VISION_SOURCE
+        resp = client.put("/api/vision", json=payload, headers=_operator_headers())
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "invalid_vision_settings"
+        assert resp.json()["errors"] == [{"field": "vision_source", "code": code}]
+        assert settings.VISION_SOURCE == before
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_accepts_chat_model_for_a_vision_capable_provider(monkeypatch):
+    _provider(monkeypatch, _VISION_CFG)
+    app, client = _client()
+    try:
+        resp = client.put("/api/vision", json={"vision_source": "chat_model"}, headers=_operator_headers())
+        assert resp.status_code == 200 and resp.json()["vision_source"] == "chat_model"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_put_unrelated_settings_is_not_blocked_by_an_already_ineligible_chat_model(monkeypatch):
+    _provider(monkeypatch, _LOCAL_CFG)
+    monkeypatch.setattr(settings, "VISION_SOURCE", "chat_model")
+    monkeypatch.setattr(settings, "VISION_CLOUD_DIRECT_ALLOWED", True)
+    app, client = _client()
+    try:
+        resp = client.put("/api/vision", json={"capture_delay_s": 1.5}, headers=_operator_headers())
+        assert resp.status_code == 200
+        assert resp.json()["chat_model_eligible"] is False
+        back = client.put("/api/vision", json={"vision_source": "local"}, headers=_operator_headers())
+        assert back.status_code == 200
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ------------------------------------------------------------------ A4: VRAM
+
+
+class _VramHost(_VisionHost):
+    def __init__(self):
+        super().__init__()
+        self.vram = (1024.0, 12288.0)  # (free_mb, total_mb)
+        self.status["model_loaded"] = False
+
+    def vision_vram_mb(self):
+        return self.vram
+
+
+def test_get_warns_when_the_local_vlm_does_not_fit_next_to_the_local_chat(monkeypatch):
+    _provider(monkeypatch, _LOCAL_CFG)
+    monkeypatch.setattr(settings, "VISION_SOURCE", "local")
+    app, client = _client(_VramHost)
+    try:
+        body = client.get("/api/vision").json()
+        assert body["vram_warning"] == "insufficient"
+        assert body["vram_free_gib"] == 1.0 and body["vram_total_gib"] == 12.0
+        assert body["vram_needed_gib"] > 3.29
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_reports_unknown_vram_without_gpu_detection(monkeypatch):
+    _provider(monkeypatch, _LOCAL_CFG)
+    monkeypatch.setattr(settings, "VISION_SOURCE", "local")
+    app, client = _client()  # FakeHost has no detection
+    try:
+        assert client.get("/api/vision").json()["vram_warning"] == "unknown"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_has_no_vram_warning_for_a_cloud_chat(monkeypatch):
+    _provider(monkeypatch, _VISION_CFG)
+    monkeypatch.setattr(settings, "VISION_SOURCE", "local")
+    app, client = _client(_VramHost)
+    try:
+        assert client.get("/api/vision").json()["vram_warning"] is None
     finally:
         client.__exit__(None, None, None)

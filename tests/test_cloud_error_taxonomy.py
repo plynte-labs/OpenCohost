@@ -368,14 +368,22 @@ def test_extract_error_code_none_for_a_non_cloud_exception():
 
 
 def test_error_code_does_not_change_the_class():
-    """Attribution is observability only -- an exhausted quota still lands in
-    `ambiguous_429` (owner ruling), exactly as before."""
+    """vision-settings-redesign-20261125 B2 supersedes the old owner ruling: a
+    429 whose provider code/message says the quota is exhausted is now
+    `quota_exhausted` (no probe loop), not `ambiguous_429`. A bare 429 and a
+    429 with an unrelated code keep `ambiguous_429`."""
     exc = CloudLLMResponseError(
         "cloud chat HTTP 429: Too Many Requests",
         status_code=429,
         body_excerpt='{"error": {"code": "insufficient_quota"}}',
     )
-    assert classify_cloud_error(exc) == CLOUD_ERROR_AMBIGUOUS_429
+    assert classify_cloud_error(exc) == "quota_exhausted"
+    other = CloudLLMResponseError(
+        "cloud chat HTTP 429: Too Many Requests",
+        status_code=429,
+        body_excerpt='{"error": {"code": "rate_limit_exceeded"}}',
+    )
+    assert classify_cloud_error(other) == CLOUD_ERROR_AMBIGUOUS_429
 
 
 def test_cloud_failure_log_names_provider_and_error_code(tmp_path, caplog):

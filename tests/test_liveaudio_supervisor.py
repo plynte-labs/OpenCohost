@@ -1167,3 +1167,44 @@ def test_desktop_launch_mode_symbols_are_removed():
     ):
         assert not hasattr(supervisor_mod, name), name
     assert not hasattr(LiveAudioSupervisor, "_scan_port")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# LiveAudio locale-sync environment inheritance contract
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_spawn_preserves_opencohost_data_root_in_child_env(tmp_path, monkeypatch):
+    expected_root = str(tmp_path / "opencohost-data")
+    monkeypatch.setenv("OPENCOHOST_DATA_ROOT", expected_root)
+    sup = _supervisor_with_lines()
+    try:
+        assert sup.ensure_started() is True
+        proc = FakePopen.instances[0]
+        env = proc.kwargs.get("env")
+        assert env is None or env.get("OPENCOHOST_DATA_ROOT") == expected_root
+    finally:
+        sup.shutdown()
+
+
+def test_real_spawn_child_inherits_opencohost_data_root(tmp_path, monkeypatch):
+    out_file = tmp_path / "child_data_root.txt"
+    expected_root = str(tmp_path / "custom-data-root")
+    monkeypatch.setenv("OPENCOHOST_DATA_ROOT", expected_root)
+    script = (
+        "import os, pathlib, sys; "
+        "pathlib.Path(sys.argv[1]).write_text("
+        "os.environ.get('OPENCOHOST_DATA_ROOT', ''), encoding='utf-8')"
+    )
+    sup = LiveAudioSupervisor(
+        command=[sys.executable, "-c", script, str(out_file)],
+        parent_pid=os.getpid(),
+    )
+    try:
+        assert sup.ensure_started() is True
+        assert sup._pump_thread is not None
+        sup._pump_thread.join(timeout=10.0)
+        assert not sup._pump_thread.is_alive()
+    finally:
+        sup.shutdown()
+    assert out_file.read_text(encoding="utf-8") == expected_root

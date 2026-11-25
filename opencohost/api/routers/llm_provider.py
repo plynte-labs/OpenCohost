@@ -39,10 +39,23 @@ from opencohost.api.models import (
 from opencohost.config.llm_provider import save_provider_config
 from opencohost.config.settings import LLM_PROVIDER_PRESETS
 from opencohost.core.engine import llm_readiness as llm_readiness_mod
+from opencohost.security.cloud_url import base_url_host_key, is_allowed_cloud_base_url
 from opencohost.stream_admin.oauth_store import OAuthStore
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
+
+_INSECURE_URL = {"detail": "insecure_base_url"}
+_KEY_REENTRY = {"detail": "key_reentry_required"}
+
+
+def _effective_base_url(profile: dict) -> str:
+    """The URL a profile actually sends to: its own, else its preset's default."""
+    url = str(profile.get("base_url") or "").strip()
+    if url:
+        return url
+    preset = LLM_PROVIDER_PRESETS.get(profile.get("preset") or "")
+    return str((preset or {}).get("base_url") or "")
 
 
 @router.get("/api/llm/readiness", response_model=LlmReadinessResponse)
@@ -82,6 +95,10 @@ def put_llm_provider(body: LlmProviderRequest, request: Request):
         return JSONResponse(status_code=422, content={"detail": "invalid profile_id"})
     if body.preset is not None and body.preset not in LLM_PROVIDER_PRESETS:
         return JSONResponse(status_code=422, content={"detail": "unknown preset"})
+
+    new_url = (body.base_url or "").strip()
+    if new_url and not is_allowed_cloud_base_url(new_url):
+        return JSONResponse(status_code=422, content=_INSECURE_URL)
 
     with _llm_provider_lock:
         cfg = deps.load_provider_config()
@@ -128,6 +145,16 @@ def put_llm_provider(body: LlmProviderRequest, request: Request):
             or body.model_vision is not None
         ):
             profile = dict(profiles.get(body.profile_id, {}))
+            old_url = _effective_base_url(profile)
+            if (
+                new_url
+                and old_url
+                and body.api_key is None
+                and base_url_host_key(new_url) != base_url_host_key(old_url)
+                and key_store.has_token(body.profile_id)
+            ):
+                # A stored key is bound to the host it was saved for.
+                return JSONResponse(status_code=422, content=_KEY_REENTRY)
             if "preset" in body.model_fields_set:
                 if body.preset is None:
                     profile.pop("preset", None)
@@ -181,6 +208,8 @@ def put_llm_provider(body: LlmProviderRequest, request: Request):
                     status_code=422,
                     content={"detail": "base_url required for active cloud profile"},
                 )
+            if not is_allowed_cloud_base_url(base_url):
+                return JSONResponse(status_code=422, content=_INSECURE_URL)
             if not str(active_profile.get("model") or ""):
                 return JSONResponse(
                     status_code=422,
@@ -389,9 +418,20 @@ def post_llm_provider_test(body: LlmProviderTestRequest) -> LlmProviderTestRespo
     ).strip()
     if not base_url.startswith(("http://", "https://")):
         return _test_result(label, False, "unexpected")
+    if not is_allowed_cloud_base_url(base_url):
+        return JSONResponse(status_code=422, content=_INSECURE_URL)
 
     api_key = body.api_key
     if not api_key and body.profile_id and _PROFILE_ID_RE.fullmatch(body.profile_id):
+        # A stored key goes only to the host it was saved for (the stored
+        # profile's host, or the preset's host); any other target needs the
+        # key re-entered in this request.
+        bound_hosts = {
+            base_url_host_key(_effective_base_url(stored_profile)),
+            base_url_host_key((preset or {}).get("base_url")),
+        } - {None}
+        if base_url_host_key(base_url) not in bound_hosts:
+            return _test_result(label, False, "key_reentry_required")
         stored = OAuthStore(deps.llm_keys_file()).load(body.profile_id) or {}
         api_key = stored.get("api_key")
     if not api_key:

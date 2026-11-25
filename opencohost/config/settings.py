@@ -2416,6 +2416,58 @@ def save_ptt_companion_dictation(value: bool, config_file: Optional[str] = None)
     atomic_write_text(path, json.dumps(data, indent=2))
 
 
+# Configurable PTT grace (ptt-live-dictation-20261125). ``grace_mode``: ``auto``
+# (adaptive, default) | ``fast`` (preset for instant STT such as Parakeet on
+# CUDA) | ``custom`` (``grace_s`` seconds). OPENCOHOST_PTT_GRACE_S still wins.
+PTT_GRACE_MODE_KEY = "grace_mode"
+PTT_GRACE_MODES = ("auto", "fast", "custom")
+PTT_DEFAULT_GRACE_MODE = "auto"
+PTT_GRACE_S_KEY = "grace_s"
+PTT_GRACE_S_RANGE = (0.3, 3.0)
+PTT_DEFAULT_GRACE_S = 1.2
+# ``fast`` preset: grace after release, per-arrival extension, late drain.
+PTT_FAST_GRACE_S = 0.5
+PTT_FAST_TAIL_EXTENSION_S = 0.3
+PTT_FAST_LATE_DRAIN_S = 0.15
+
+
+def is_valid_ptt_grace_s(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    lo, hi = PTT_GRACE_S_RANGE
+    return value == value and lo <= value <= hi
+
+
+def load_ptt_grace_mode(config_file: Optional[str] = None) -> str:
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    mode = _read_ptt_config(path).get(PTT_GRACE_MODE_KEY)
+    return mode if isinstance(mode, str) and mode in PTT_GRACE_MODES else PTT_DEFAULT_GRACE_MODE
+
+
+def save_ptt_grace_mode(mode: str, config_file: Optional[str] = None) -> None:
+    if mode not in PTT_GRACE_MODES:
+        raise ValueError(f"Invalid grace mode: {mode}")
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    data = _read_ptt_config(path)
+    data[PTT_GRACE_MODE_KEY] = mode
+    atomic_write_text(path, json.dumps(data, indent=2))
+
+
+def load_ptt_grace_s(config_file: Optional[str] = None) -> float:
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    value = _read_ptt_config(path).get(PTT_GRACE_S_KEY)
+    return float(value) if is_valid_ptt_grace_s(value) else PTT_DEFAULT_GRACE_S
+
+
+def save_ptt_grace_s(value: float, config_file: Optional[str] = None) -> None:
+    if not is_valid_ptt_grace_s(value):
+        raise ValueError(f"grace_s must be a number in {PTT_GRACE_S_RANGE}")
+    path = config_file if config_file is not None else PTT_CONFIG_FILE
+    data = _read_ptt_config(path)
+    data[PTT_GRACE_S_KEY] = float(value)
+    atomic_write_text(path, json.dumps(data, indent=2))
+
+
 def piper_voice_path(voice_key: str) -> str:
     """Resolve a Piper voice key to its local .onnx path.
 

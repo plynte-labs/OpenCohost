@@ -88,14 +88,21 @@ from opencohost.api.models import (
 from opencohost.api.ptt_session import PttUnreachable, SessionActive
 from opencohost.config.settings import (
     PTT_DICTATION_MODES,
+    PTT_GRACE_MODES,
+    PTT_GRACE_S_RANGE,
     PTT_HOTKEY_LIST,
+    is_valid_ptt_grace_s,
     is_valid_stt_ws_uri,
     load_ptt_companion_dictation,
     load_ptt_dictation_mode,
+    load_ptt_grace_mode,
+    load_ptt_grace_s,
     load_ptt_hotkey,
     load_ptt_ws_uri,
     save_ptt_companion_dictation,
     save_ptt_dictation_mode,
+    save_ptt_grace_mode,
+    save_ptt_grace_s,
     save_ptt_hotkey,
 )
 from opencohost.stt.discovery import ensure_local_service, is_loopback_host, is_loopback_uri
@@ -204,6 +211,42 @@ def _effective_companion_dictation(request: Request) -> bool:
     controller = getattr(request.app.state, "ptt_controller", None)
     value = getattr(controller, "companion_dictation", None)
     return value if isinstance(value, bool) else load_ptt_companion_dictation()
+
+
+def _effective_grace(request: Request) -> tuple:
+    """(grace_mode, grace_s) the live controller will apply, else persisted."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    mode = getattr(controller, "grace_mode", None)
+    secs = getattr(controller, "grace_s", None)
+    if not (isinstance(mode, str) and mode in PTT_GRACE_MODES):
+        mode = load_ptt_grace_mode()
+    if isinstance(secs, bool) or not isinstance(secs, (int, float)):
+        secs = load_ptt_grace_s()
+    return mode, float(secs)
+
+
+def _apply_ptt_grace(request: Request, mode: str, grace_s: float) -> None:
+    """Live-apply the saved grace config; best effort. Next hold uses it."""
+    controller = getattr(request.app.state, "ptt_controller", None)
+    setter = getattr(controller, "set_grace", None)
+    if setter is None:
+        return
+    try:
+        setter(mode, grace_s)
+    except Exception:
+        pass
+
+
+def _config_response(request: Request) -> PttConfigResponse:
+    grace_mode, grace_s = _effective_grace(request)
+    return PttConfigResponse(
+        stt_ws_uri=load_ptt_ws_uri(),
+        hotkey=load_ptt_hotkey(),
+        dictation_mode=_effective_dictation_mode(request),
+        companion_dictation=_effective_companion_dictation(request),
+        grace_mode=grace_mode,
+        grace_s=grace_s,
+    )
 
 
 def _apply_ptt_companion_dictation(request: Request, value: bool) -> None:
@@ -345,6 +388,7 @@ def get_ptt_state(request: Request) -> PttStateResponse:
     payload["hotkey"] = load_ptt_hotkey()
     payload["dictation_mode"] = _effective_dictation_mode(request)
     payload["companion_dictation"] = _effective_companion_dictation(request)
+    payload["grace_mode"], payload["grace_s"] = _effective_grace(request)
     return PttStateResponse(**payload)
 
 
@@ -391,13 +435,10 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
         and body.hotkey is None
         and body.dictation_mode is None
         and body.companion_dictation is None
+        and body.grace_mode is None
+        and body.grace_s is None
     ):
-        return PttConfigResponse(
-            stt_ws_uri=load_ptt_ws_uri(),
-            hotkey=load_ptt_hotkey(),
-            dictation_mode=_effective_dictation_mode(request),
-            companion_dictation=_effective_companion_dictation(request),
-        )
+        return _config_response(request)
     if body.stt_ws_uri is not None and not is_valid_stt_ws_uri(body.stt_ws_uri):
         return JSONResponse(
             status_code=422,
@@ -413,8 +454,22 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
             status_code=422,
             content={"detail": f"dictation_mode must be one of {list(PTT_DICTATION_MODES)}"},
         )
+    if body.grace_mode is not None and body.grace_mode not in PTT_GRACE_MODES:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"grace_mode must be one of {list(PTT_GRACE_MODES)}"},
+        )
+    if body.grace_s is not None and not is_valid_ptt_grace_s(body.grace_s):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": f"grace_s must be a number in {list(PTT_GRACE_S_RANGE)}"},
+        )
     with _ptt_config_lock:
         try:
+            if body.grace_mode is not None:
+                save_ptt_grace_mode(body.grace_mode)
+            if body.grace_s is not None:
+                save_ptt_grace_s(body.grace_s)
             if body.stt_ws_uri is not None:
                 deps.save_ptt_ws_uri(body.stt_ws_uri)
             if body.hotkey is not None:
@@ -436,12 +491,9 @@ def put_ptt_config(request: Request, body: PttConfigRequest):
         _apply_ptt_dictation_mode(request, body.dictation_mode)
     if body.companion_dictation is not None:
         _apply_ptt_companion_dictation(request, body.companion_dictation)
-    return PttConfigResponse(
-        stt_ws_uri=load_ptt_ws_uri(),
-        hotkey=load_ptt_hotkey(),
-        dictation_mode=_effective_dictation_mode(request),
-        companion_dictation=_effective_companion_dictation(request),
-    )
+    if body.grace_mode is not None or body.grace_s is not None:
+        _apply_ptt_grace(request, load_ptt_grace_mode(), load_ptt_grace_s())
+    return _config_response(request)
 
 
 @router.post("/api/ptt/test", response_model=PttTestResponse)

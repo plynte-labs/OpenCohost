@@ -469,6 +469,7 @@ def test_tts_config_shape_from_accessors(monkeypatch):
     monkeypatch.setattr(main_mod, "load_piper_voice", lambda **kwargs: "es_kira")
     monkeypatch.setattr(main_mod, "load_tts_local_only", lambda: True)
     monkeypatch.setattr(main_mod, "load_tts_speed", lambda: 1.25)
+    monkeypatch.setattr(main_mod, "load_interrupt_on_direct", lambda: False)
     monkeypatch.setattr(main_mod, "EXPERIMENTAL_HEAVY_TTS_ENABLED", True)
     from opencohost.api.routers import i18n_tts as i18n_tts_mod
     from opencohost.i18n import active as i18n_active

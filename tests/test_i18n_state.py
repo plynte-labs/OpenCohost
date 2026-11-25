@@ -6,12 +6,17 @@ it takes effect on the NEXT startup. No runtime switch (owner decision).
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from opencohost.i18n import state
 from opencohost.i18n.cli import main as cli_main
+
+# Capture before conftest._isolate_i18n_locale_file patches state._default_locale_file
+# so the contract test exercises the real default path builder.
+_REAL_DEFAULT_LOCALE_FILE = state._default_locale_file
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +112,36 @@ def test_set_locale_never_raises_when_seeding_fails(tmp_path, monkeypatch):
     state.set_locale("en", locale_file)  # must not raise
 
     assert state.get_locale(locale_file) == "en"
+
+
+@pytest.mark.parametrize("code", ["es", "en"])
+def test_set_locale_liveaudio_contract_path_and_schema(tmp_path, monkeypatch, code):
+    """Cross-process contract: set_locale writes <data root>/config/locale.json
+    with a top-level string "locale" key consumed by `liveaudio-cli serve`."""
+    import opencohost.config.storage as storage_mod
+
+    assert _REAL_DEFAULT_LOCALE_FILE.__module__ == state.__name__
+
+    monkeypatch.setenv("OPENCOHOST_DATA_ROOT", str(tmp_path))
+    assert storage_mod.get_user_data_dir() == tmp_path.resolve()
+
+    monkeypatch.setattr(storage_mod, "USER_DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "_default_locale_file", _REAL_DEFAULT_LOCALE_FILE)
+
+    state.set_locale(code)
+
+    expected_path = tmp_path / "config" / "locale.json"
+    assert expected_path.is_file()
+
+    payload = json.loads(expected_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    assert "locale" in payload
+    assert isinstance(payload["locale"], str)
+    assert payload["locale"] == code
+    assert "set_at" in payload
+    assert isinstance(payload["set_at"], str)
+    datetime.fromisoformat(payload["set_at"])
+    assert state.get_locale() == code
 
 
 # --- CLI -------------------------------------------------------------------

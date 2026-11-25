@@ -260,3 +260,15 @@ def test_memory_keyring_is_not_automatically_selected(monkeypatch):
     monkeypatch.setattr(keyring.backend, "get_all_keyring", lambda: [MemoryKeyring()])
 
     assert ChainerBackend.backends == []
+
+
+def test_cloud_key_save_fails_loudly_when_keyring_unavailable(monkeypatch):
+    from opencohost.security import keyring_store
+
+    monkeypatch.setattr(keyring_store, "_KEYRING_AVAILABLE", False)
+    monkeypatch.setattr(keyring_store, "keyring", None)
+    store = KeyringStore(service_name="test:no-keyring")
+    with pytest.raises(keyring_store.KeyStoreError):
+        store.save("p1", {"api_key": "sk-secret"})
+    assert store.load("p1") is None
+    assert not any("sk-secret" in v for v in keyring_store._FALLBACK_VAULT.values())

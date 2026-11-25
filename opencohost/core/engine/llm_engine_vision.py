@@ -162,6 +162,20 @@ class VisionTurnMixin:
         direct_cloud.log_route(decision)
         return decision.direct
 
+    def _vision_chat_model_ineligible(self) -> Optional[str]:
+        """A3: the stable failure code when the owner chose ``chat_model`` as the
+        vision source but the active provider/model cannot see images; else None.
+        Config-based on purpose (a temporary local fallback is not an ineligible
+        model). Never raises."""
+        try:
+            from opencohost.config import settings
+
+            if getattr(settings, "VISION_SOURCE", "local") != "chat_model":
+                return None
+            return direct_cloud.chat_model_eligibility(self._provider_config)[1]
+        except Exception:
+            return None
+
     def _vision_enabled(self) -> bool:
         """True while the vision controller is not off (V1.24 capability line)."""
         try:
@@ -332,6 +346,29 @@ class VisionTurnMixin:
             return None
         logger.info("[VISION] fail_shortcut outcome=%s skipped_llm=true", look.fail_outcome)
         return reply
+
+    def _vision_cloud_failure_reply(
+        self, contexto, source: str, *, commit_history: bool, history_text: Optional[str] = None,
+        outcome: str = "cloud_unavailable",
+    ):
+        """A2: the canned reply for a look-carrying cloud turn that failed in
+        manual fallback mode, in the owner's language. None on any error.
+        B2: ``outcome="cloud_quota_exhausted"`` picks the out-of-credits line."""
+        try:
+            text = contexto if isinstance(contexto, str) else str(contexto or "")
+            vision = getattr(self, "_vision", None)
+            step = getattr(vision, "step", None)
+            lang = detect_language(text, default=getattr(step, "default_language", "es"))
+            line = failure_line(outcome, lang)
+            if not line:
+                return None
+            return self._vision_fail_reply(
+                VisionLook("", "", outcome, line), contexto, source,
+                commit_history=commit_history, history_text=history_text,
+            )
+        except Exception:
+            logger.debug("[VISION] cloud failure line failed", exc_info=False)
+            return None
 
     def _take_vision_pregen_look(self, key) -> Optional[VisionLook]:
         """Consume the stashed pregen look for ``key`` (once), if still fresh."""

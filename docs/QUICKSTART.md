@@ -68,8 +68,8 @@ ollama pull llama3
 
 Other well-tested options: `qwen3:4b`, `qwen3:1.7b`, `phi4-mini`, `gemma4:e4b`.
 
-OpenCohost never downloads models itself — it lists what Ollama already has. Adding
-and removing models is always `ollama pull` / `ollama rm`.
+You can also search and pull Ollama models from the app's in-app model downloader,
+or manage them from the terminal with `ollama pull` / `ollama rm`.
 
 ---
 
@@ -89,28 +89,26 @@ git submodule update --init --recursive
 python -m venv .venv
 .venv\Scripts\activate
 
-# Install with Edge-TTS voice, platform integrations, and the HTTP API
-pip install -e ".[cloud-tts,integrations,api]"
+# Install with Edge-TTS voice and platform integrations (FastAPI and uvicorn are core dependencies)
+pip install -e ".[cloud-tts,integrations]"
 ```
-
-The `api` extra is **not** optional in practice: it installs FastAPI and uvicorn, which
-are what the desktop app drives Kira through.
 
 **Extras:**
 
 | Extra | What it adds |
 |---|---|
 | `cloud-tts` | Microsoft Edge-TTS (free cloud voice — the default) |
-| `api` | FastAPI + uvicorn — the HTTP API the desktop app spawns and talks to. Required to run the product and to collect the test suite. |
-| `integrations` | OBS WebSocket, NVIDIA VRAM monitor |
+| `integrations` | NVIDIA VRAM monitor (`nvidia-ml-py`) |
 | `local-tts` | Piper TTS — fully offline voice synthesis |
+| `obs` | OBS WebSocket control (`obsws-python`, GPL-3.0-only, opt-in for source installs only; not bundled in the Windows installer) |
+| `vision` | On-demand screen vision (`mss`, `pillow`) |
 | `youtube-chat` | Unofficial YouTube live chat — opt-in, [read this first](PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets (contributors only) |
 
 To add offline Piper TTS as well:
 
 ```powershell
-pip install -e ".[cloud-tts,integrations,api,local-tts]"
+pip install -e ".[cloud-tts,integrations,local-tts]"
 ```
 
 ---
@@ -228,8 +226,8 @@ Edge-TTS requires an active internet connection. If you are offline, install `lo
 and switch to Piper in **Controls → Kira's voice**.
 
 **Model not listed in the app**
-Pull it first with `ollama pull <name>`. The catalog only reflects what Ollama reports —
-OpenCohost does not download models.
+Pull it from the app's in-app model downloader or with `ollama pull <name>`. The
+**Controls → Model** selector lists what Ollama reports locally.
 
 **`pnpm tauri:debug` warns that something is already listening on 8765/8770**
 Tauri will reuse that backend instead of spawning its own, which means `OPENCOHOST_DEBUG=1`
@@ -248,12 +246,12 @@ For more detail, see [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
-## Legacy: the CustomTkinter shell
+## Legacy: the CustomTkinter shell (retired)
 
-`python -m opencohost` still opens the old CustomTkinter desktop shell. It was **frozen
-as legacy on 2026-08-13**: kept around, not maintained, and not the product. Feature
-flags armed by `EngineHost` — the composition root the Tauri app uses — never engage
-there, so it is not a valid surface for evaluating OpenCohost. Use step 4.
+The old CustomTkinter desktop shell (`opencohost/ui/`) was retired and removed in commit
+`1eecab7` ([ADR-052](adr/ADR-052-legacy-customtkinter-ui-retirement.md)). Running
+`python -m opencohost` now only prints a retirement notice pointing to the Tauri desktop
+app and `opencohost-api`. Use step 4.
 
 ---
 

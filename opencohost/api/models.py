@@ -5,9 +5,9 @@ Field names on `StatusResponse` are pinned to the `is_`-prefixed forms
 shortened `ready`/`speaking`/`processing` forms.
 """
 
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictFloat, StrictInt, StringConstraints
 
 from opencohost.config.setup_checkpoint import SetupCheckpoint
 from opencohost.config.setup_checkpoint import SetupCheckpointBody as SetupCheckpointRequest
@@ -1761,6 +1761,12 @@ class PttStateResponse(BaseModel):
     dictation_mode: str = "send"
     # P8: a companion hold dictates (in `always` mode) instead of always sending.
     companion_dictation: bool = False
+    # ptt-live-dictation-20261125: True only while a hold (or its grace flush)
+    # is locked to dictate. Decided at hold start. A flag, never text.
+    dictation: bool = False
+    # Configurable grace: auto | fast | custom, plus grace_s (used by custom).
+    grace_mode: str = "auto"
+    grace_s: float = 1.2
 
 
 class PttConfigRequest(BaseModel):
@@ -1772,6 +1778,8 @@ class PttConfigRequest(BaseModel):
     hotkey: Optional[str] = None
     dictation_mode: Optional[str] = None
     companion_dictation: Optional[StrictBool] = None
+    grace_mode: Optional[str] = None
+    grace_s: Optional[Union[StrictInt, StrictFloat]] = None
 
 
 class PttConfigResponse(BaseModel):
@@ -1781,6 +1789,8 @@ class PttConfigResponse(BaseModel):
     hotkey: str = "F10"
     dictation_mode: str = "send"
     companion_dictation: bool = False
+    grace_mode: str = "auto"
+    grace_s: float = 1.2
 
 
 class PttFocusRequest(BaseModel):

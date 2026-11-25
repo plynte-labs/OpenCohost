@@ -182,6 +182,11 @@ class GenerationAttemptOutcome:
     early_return: Optional[str] = None
     stream: Optional[StreamAttemptState] = None
     failure_reason: Optional[str] = None
+    # B1: the cloud model rejected the turn's images (class image_unsupported);
+    # the caller retries once text-only on the same cloud model.
+    image_rejected: bool = False
+    # B2: the cloud failure class of a failed cloud attempt (None otherwise).
+    cloud_class: Optional[str] = None
 
 
 class GenerationResult(str):
@@ -424,6 +429,7 @@ class GenerationOrchestrator:
                     raise
 
                 _cloud_class = None
+                _image_rejected = False
                 _cloud_attr = ""
                 if is_local and commit_history:
                     turn_state.fail_reason("ollama_transport_error", e)
@@ -437,8 +443,16 @@ class GenerationOrchestrator:
                 else:
                     _fail_profile = self._host._cfg_active_profile(provider_cfg) or {}
                     _cloud_class = cloud_llm_client.classify_cloud_error(e)
+                    _image_rejected = (
+                        _cloud_class == cloud_llm_client.CLOUD_ERROR_IMAGE_UNSUPPORTED
+                    )
+                    if _image_rejected and not (getattr(setup, "cloud_images", ()) or ()):
+                        # B1: a 400 on a request that carried no images is not
+                        # an image rejection; it keeps today's class.
+                        _image_rejected = False
+                        _cloud_class = cloud_llm_client.CLOUD_ERROR_TRANSIENT
                     self._host._last_cloud_failure_class = _cloud_class
-                    if commit_history:
+                    if commit_history and not _image_rejected:
                         turn_state.fail_reason(
                             f"cloud_{_cloud_class}"
                             if f"cloud_{_cloud_class}" in turn_events.REASON_CODES
@@ -483,6 +497,20 @@ class GenerationOrchestrator:
                     turn_state.exc_site(e),
                 )
 
+                if _image_rejected:
+                    # B1: the model refused the images, the cloud itself is fine.
+                    # No fallback, no return probe: the caller retries this turn
+                    # once on the same model without images. No text payload.
+                    self._host.ui_callback("cloud_image_rejected")
+                    if commit_history:
+                        self._host._invalidate_pregen_epoch()
+                    return GenerationAttemptOutcome(
+                        early_return="",
+                        stream=_attempt_stream_state,
+                        image_rejected=True,
+                        cloud_class=_cloud_class,
+                    )
+
                 if (
                     not is_local
                     and _cloud_class == cloud_llm_client.CLOUD_ERROR_RATE_LIMITED
@@ -513,6 +541,13 @@ class GenerationOrchestrator:
                     self._host._cloud_bad_key_notified = True
                     self._host.ui_callback("cloud_bad_key")
 
+                if (
+                    _cloud_class == cloud_llm_client.CLOUD_ERROR_QUOTA_EXHAUSTED
+                    and not getattr(self._host, "_cloud_quota_notified", False)
+                ):
+                    self._host._cloud_quota_notified = True
+                    self._host.ui_callback("cloud_quota_exhausted")
+
                 if not is_local:
                     _probe_retry_after = (
                         cloud_llm_client.parse_retry_after_seconds(getattr(e, "headers", None) or {})
@@ -526,7 +561,9 @@ class GenerationOrchestrator:
                     )
                 if commit_history:
                     self._host._invalidate_pregen_epoch()
-                return GenerationAttemptOutcome(early_return="", stream=_attempt_stream_state)
+                return GenerationAttemptOutcome(
+                    early_return="", stream=_attempt_stream_state, cloud_class=_cloud_class
+                )
             finally:
                 with self._host._lock:
                     self._host._llm_generating = False

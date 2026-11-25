@@ -111,10 +111,16 @@ def _env_float(environ, name: str) -> Optional[float]:
     return v if v == v and v >= 0 else None
 
 
-def resolve_ptt_grace(environ=None, config_path: Optional[str] = None):
+def resolve_ptt_grace(
+    environ=None,
+    config_path: Optional[str] = None,
+    grace_mode: str = "auto",
+    grace_s: Optional[float] = None,
+):
     """Return ``(grace_s, source, silence_timeout_s)``; never raises.
 
-    source: ``override`` | ``liveaudio_config`` | ``default``.
+    source: ``override`` | ``fast_preset`` | ``custom`` | ``liveaudio_config``
+    | ``default``. The env var wins over the persisted mode.
     """
     from opencohost.config import settings as _s
 
@@ -126,6 +132,10 @@ def resolve_ptt_grace(environ=None, config_path: Optional[str] = None):
     override = _env_float(env, "OPENCOHOST_PTT_GRACE_S")
     if override is not None:
         return override, "override", st
+    if grace_mode == "fast":
+        return _s.PTT_FAST_GRACE_S, "fast_preset", st
+    if grace_mode == "custom" and _s.is_valid_ptt_grace_s(grace_s):
+        return float(grace_s), "custom", st
     margin = _env_float(env, "OPENCOHOST_PTT_ASR_MARGIN_S")
     if margin is None:
         margin = _s.PTT_ASR_MARGIN_S
@@ -661,6 +671,8 @@ class PttController:
         grace: Optional[float] = None,
         dictation_mode: str = "send",
         companion_dictation: bool = False,
+        grace_mode: str = "auto",
+        grace_s: Optional[float] = None,
         focus_clock: Optional[Callable[[], float]] = None,
         **session_kwargs,
     ):
@@ -674,13 +686,19 @@ class PttController:
         self._dictation_mode = dictation_mode
         # P8: whether a companion hold may dictate (in `always` mode only).
         self._companion_dictation = companion_dictation is True
+        # Configurable grace (ptt-live-dictation-20261125); read per press.
+        self._grace_mode = grace_mode if grace_mode in _s.PTT_GRACE_MODES else "auto"
+        self._grace_s = (
+            float(grace_s) if _s.is_valid_ptt_grace_s(grace_s) else _s.PTT_DEFAULT_GRACE_S
+        )
         self._focus_stale_s = float(_s.PTT_FOCUS_STALE_S)
         self._focus_clock = focus_clock or time.monotonic
         # Latest main-window focus report: (focused, monotonic_at) or None.
         # Memory only; never persisted.
         self._focus: Optional[tuple] = None
-        # Decision taken at the explicit release of a press: (epoch, dictate).
-        self._release_decision: Optional[tuple] = None
+        # Decision locked at the START of a press: (epoch, dictate). Release
+        # and flush use it as is (ptt-live-dictation-20261125).
+        self._hold_decision: Optional[tuple] = None
         # Press epoch of a hold made from the desktop companion window, which
         # counts as background in `foreground` mode (it never takes focus, so
         # the main window may still report focused while it is used).
@@ -797,6 +815,29 @@ class PttController:
         with self._lock:
             self._companion_dictation = value
 
+    @property
+    def grace_mode(self) -> str:
+        with self._lock:
+            return self._grace_mode
+
+    @property
+    def grace_s(self) -> float:
+        with self._lock:
+            return self._grace_s
+
+    def set_grace(self, mode: str, grace_s: Optional[float] = None) -> None:
+        """Live-apply the grace config; the NEXT hold picks it up."""
+        from opencohost.config import settings as _s
+
+        if mode not in _s.PTT_GRACE_MODES:
+            raise ValueError(f"Invalid grace mode: {mode}")
+        if grace_s is not None and not _s.is_valid_ptt_grace_s(grace_s):
+            raise ValueError("Invalid grace_s")
+        with self._lock:
+            self._grace_mode = mode
+            if grace_s is not None:
+                self._grace_s = float(grace_s)
+
     def report_focus(self, focused: bool) -> None:
         """The main webview's focus state (memory only, time-stamped)."""
         with self._lock:
@@ -820,6 +861,11 @@ class PttController:
             if session is None or session.session_id != session_id:
                 return False
             self._background_epoch = self._press_epoch
+            # The companion marker lands right after start(): re-lock.
+            self._hold_decision = (
+                self._press_epoch,
+                self._should_dictate_locked(self._press_epoch),
+            )
             return True
 
     def _should_dictate_locked(self, epoch: Optional[int]) -> bool:
@@ -837,16 +883,14 @@ class PttController:
     def _on_flush(self, text: str, epoch: Optional[int] = None) -> Optional[str]:
         """Session flush callback: dictate (no turn) or dispatch.
 
-        Uses the decision taken at the explicit release of this press when one
-        exists; exits that never reach ``stop()`` (keepalive starvation, WS
-        drop) decide here. Dictation skips the dispatch AND both drain hooks:
+        Uses the decision locked at the start of this press; only a press
+        without one (never the case for a real hold) decides here. Dictation skips the dispatch AND both drain hooks:
         those exist to make room for a new turn, and none is created. The
         speech-hold release is not on this path (ADR-048), so it is untouched.
         """
         with self._lock:
-            decision = self._release_decision
+            decision = self._hold_decision
             if decision is not None and decision[0] == epoch:
-                self._release_decision = None
                 dictate = decision[1]
             else:
                 dictate = self._should_dictate_locked(epoch)
@@ -936,10 +980,20 @@ class PttController:
             # yet, so this press holds nothing (judge closure — the old
             # "raising factory escapes with the hold set" hole is now
             # unreachable by construction, not by a compensating release).
+            from opencohost.config import settings as _s
+            # Lock dictate-vs-send NOW (focus at press + mode + companion).
+            self._hold_decision = (epoch, self._should_dictate_locked(epoch))
             kwargs = dict(self._session_kwargs)
             if "grace" not in kwargs:
-                eff, src, st = resolve_ptt_grace()
+                eff, src, st = resolve_ptt_grace(
+                    grace_mode=self._grace_mode, grace_s=self._grace_s
+                )
                 kwargs["grace"] = eff
+                if src == "fast_preset":
+                    kwargs.setdefault("tail_extension", _s.PTT_FAST_TAIL_EXTENSION_S)
+                    kwargs.setdefault("late_drain", _s.PTT_FAST_LATE_DRAIN_S)
+                elif src == "custom":
+                    kwargs.setdefault("tail_extension", min(_TAIL_EXTENSION_S, eff))
                 _session_log.info(
                     "[PTT] grace effective=%.2fs source=%s silence_timeout=%.2f",
                     eff, src, st,
@@ -1018,14 +1072,7 @@ class PttController:
                 if session_id is None or session_id == self._session.session_id:
                     session = self._session
                     epoch_to_release = self._press_epoch
-                    # Dictation is decided at RELEASE (ptt-dictation-20261111).
-                    # The first stop of a press wins; a bridge retry keeps it.
-                    rd = self._release_decision
-                    if rd is None or rd[0] != epoch_to_release:
-                        self._release_decision = (
-                            epoch_to_release,
-                            self._should_dictate_locked(epoch_to_release),
-                        )
+                    # The dictation decision was locked at press; stop reuses it.
             else:
                 # If session already idled/closed, release if session_id matches the last session (or was omitted)
                 if session_id is None or session_id == self._last_session_id:
@@ -1035,6 +1082,10 @@ class PttController:
         if epoch_to_release is not None:
             self._release_hold(epoch_to_release)
         return {"state": _FLUSHING if session is not None else _IDLE}
+
+    def _dictation_locked(self) -> bool:
+        d = self._hold_decision
+        return bool(d is not None and d[0] == self._press_epoch and d[1])
 
     def state(self) -> dict:
         # stt_ws_url: the LiveAudio viewer WS address (a URL, never text) —
@@ -1049,6 +1100,7 @@ class PttController:
                     "buffered_chars": 0,
                     "last_error": self._last_error,
                     "stt_ws_url": self._ws_uri,
+                    "dictation": False,
                 }
             return {
                 "state": session.state,
@@ -1056,6 +1108,7 @@ class PttController:
                 "buffered_chars": session.buffered_chars,
                 "last_error": session.last_error,
                 "stt_ws_url": self._ws_uri,
+                "dictation": self._dictation_locked(),
             }
 
     def set_ws_uri(self, ws_uri: str) -> None:

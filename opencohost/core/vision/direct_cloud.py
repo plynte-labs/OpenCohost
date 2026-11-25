@@ -84,6 +84,29 @@ def decide_route(
     return RouteDecision(True, REASON_OK)
 
 
+REASON_CHAT_MODEL_REQUIRES_CLOUD = "chat_model_requires_cloud_provider"
+REASON_CHAT_MODEL_NOT_VISION = "chat_model_not_vision_capable"
+
+
+def chat_model_eligibility(provider_cfg: Optional[dict[str, Any]]) -> tuple[bool, Optional[str]]:
+    """Whether ``vision_source=chat_model`` can work with *provider_cfg*: the same
+    rule as the live route (``decide_route`` over ``profile_model_vision``), minus
+    the opt-in and the vision switch, which the owner controls separately.
+    Returns ``(eligible, stable_reason_code_or_None)``."""
+    cfg = provider_cfg or {}
+    decision = decide_route(
+        provider_is_cloud=(cfg.get("active_provider") or "local") != "local",
+        model_vision=profile_model_vision(cfg),
+        opted_in=True,
+        vision_enabled=True,
+    )
+    if decision.direct:
+        return True, None
+    if decision.reason == REASON_LOCAL:
+        return False, REASON_CHAT_MODEL_REQUIRES_CLOUD
+    return False, REASON_CHAT_MODEL_NOT_VISION
+
+
 def log_route(decision: RouteDecision) -> None:
     logger.info("[VISION] route=%s reason=%s", "direct" if decision.direct else "describe", decision.reason)
 

@@ -225,6 +225,26 @@ FAILURE_LINES: dict[str, dict[str, str]] = {
         "es": "Todavía me estoy despertando la vista, pídemelo otra vez en unos segundos.",
         "en": "My eyes are still waking up, ask me again in a few seconds.",
     },
+    # A2: the look went to the cloud chat model, which did not answer (manual
+    # fallback mode keeps routing to it, so nothing else would speak).
+    "cloud_unavailable": {
+        "es": "No pude ver tu pantalla: el modelo en la nube no respondió.",
+        "en": "I couldn't see your screen: the cloud model didn't answer.",
+    },
+    # B2: manual mode, the cloud provider is out of credits/quota.
+    "cloud_quota_exhausted": {
+        "es": "Me quedé sin créditos en el proveedor de la nube.",
+        "en": "I ran out of credits with the cloud provider.",
+    },
+    # A3: the owner put vision on the chat model, but the chat model cannot see.
+    "chat_model_not_vision_capable": {
+        "es": "Tengo la visión puesta en el modelo del chat, pero tu modelo actual no ve imágenes.",
+        "en": "Vision is set to the chat model, but your current model can't see images.",
+    },
+    "chat_model_requires_cloud_provider": {
+        "es": "Tengo la visión puesta en el modelo del chat, pero ahora el chat es local y no ve imágenes.",
+        "en": "Vision is set to the chat model, but the chat is local right now and can't see images.",
+    },
 }
 # Outcomes that never get a canned line: success, no look, an owner-cancelled
 # turn (speaking after a stop would be wrong), and a step error (fail open).
@@ -233,6 +253,10 @@ _FAILURE_CATEGORY = {
     "describe_timeout": "busy",
     "self_capture": "self",
     OUTCOME_MODEL_WARMING: "warming",
+    "cloud_unavailable": "cloud_unavailable",
+    "cloud_quota_exhausted": "cloud_quota_exhausted",
+    "chat_model_not_vision_capable": "chat_model_not_vision_capable",
+    "chat_model_requires_cloud_provider": "chat_model_requires_cloud_provider",
 }
 
 # V1.15: appended to the failure note when only the automatic PTT look failed
@@ -370,6 +394,7 @@ class VisionTurnStep:
         progress_interval_s: float = PROGRESS_INTERVAL_S,
         progress_wait: Callable[[threading.Event, float], bool] = _event_wait,
         direct_check: Optional[Callable[[], bool]] = None,
+        chat_model_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self.gate = gate
         self._capture = capture
@@ -395,6 +420,9 @@ class VisionTurnStep:
         # P2: True when the frames should go straight to a vision-capable cloud
         # chat model (no describe call, no local vision daemon). None = never.
         self._direct_check = direct_check
+        # A3: a failure code when the owner chose the chat model as the eye but it
+        # cannot see; the look then fails fast with a specific outcome. None = never.
+        self._chat_model_check = chat_model_check
         self._looking = threading.Event()
 
     @property
@@ -454,6 +482,13 @@ class VisionTurnStep:
         direct = self._direct_route()
         if direct:
             reasons.append(REASON_ROUTE_DIRECT)
+        if not direct:
+            blocked = self._chat_model_blocked()
+            if blocked:
+                reasons.append(blocked)
+                return self._finish(
+                    "look", reasons, timings, blocked, attempted=True, look=look
+                )
         if self._ready_check is not None and not direct:
             not_ready = self._ready_check()
             if not_ready == OUTCOME_MODEL_WARMING:
@@ -546,6 +581,16 @@ class VisionTurnStep:
             "look", reasons, timings, OUTCOME_OK, block, look=look,
             transcription=transcription, description=body,
         )
+
+    def _chat_model_blocked(self) -> str:
+        """The A3 failure code, or "" (fail-open on any error)."""
+        if self._chat_model_check is None:
+            return ""
+        try:
+            return str(self._chat_model_check() or "")
+        except Exception:
+            logger.debug("[VISION] chat model check failed", exc_info=False)
+            return ""
 
     def _direct_route(self) -> bool:
         """True when this look goes straight to the cloud chat model. Fail-closed
@@ -752,7 +797,10 @@ class VisionTurnStep:
             frames_captured=look.frames_captured,
             frames_sent=look.frames_sent,
             self_capture_skipped=look.self_skipped,
-            status_line=self._status_line(look) if outcome == OUTCOME_OK and block else "",
+            # A1: a direct look (frames ride in the chat call) has seen nothing yet.
+            status_line=(
+                self._status_line(look) if outcome == OUTCOME_OK and block and not images else ""
+            ),
             mode=look.mode,
             transcription=transcription,
             description=description,

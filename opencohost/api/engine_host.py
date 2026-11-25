@@ -148,6 +148,12 @@ _MOTOR_EVENT_WHITELIST = frozenset(
         # decision, and unnecessary -- that table only wires the legacy CTK
         # UI's own callback, not this whitelist/Tauri emit path).
         "cloud_bad_key",
+        # vision-settings-redesign-20261125 B1/B2: the cloud model refused the
+        # turn's images (UI suggests unticking "ve imagenes") / the provider is
+        # out of credits or quota. Detail stays None (whitelist contract); the
+        # UI reads provider/model from GET /api/llm-provider.
+        "cloud_image_rejected",
+        "cloud_quota_exhausted",
         # E1 (memoria_quality_20260717): fresh-memoria notice for the Tauri
         # chat-panel feed. Detail stays None (whitelist contract) — the event
         # only says "a memoria was saved", never which one. Not added to the
@@ -994,6 +1000,8 @@ class EngineHost:
             on_describing=self._on_vision_describing,
             # P2: a look goes straight to a vision-capable cloud chat model when allowed.
             direct_check=self.motor._vision_direct_eligible,
+            # A3: a specific spoken failure when chat_model is chosen but cannot see.
+            chat_model_check=self.motor._vision_chat_model_ineligible,
         )
         self.motor._vision = self.vision
         self.vision.apply(values)
@@ -1074,6 +1082,17 @@ class EngineHost:
             "port": values.port,
             "last_result": None,
         }
+
+    def vision_vram_mb(self):
+        """A4: ``(free_mb, total_mb)`` from the health monitor's cached NVML poll
+        (no GPU call here), or None when unknown."""
+        try:
+            free_b, total_b = self.motor._nvml_vram_bytes()
+        except Exception:
+            return None
+        if free_b is None or total_b is None:
+            return None
+        return free_b / (1024 * 1024), total_b / (1024 * 1024)
 
     def vision_models(self) -> dict:
         """V1.17: installed models with their vision capability, plus the

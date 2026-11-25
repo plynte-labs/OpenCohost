@@ -30,7 +30,10 @@ _DEFAULT_TEST_ORIGINS = ["http://localhost:5173"]
 # The PTT config and state responses also carry the hotkey and the dictation
 # settings (PttConfigResponse / PttStateResponse, ptt-dictation-20261111). These
 # are the defaults for the isolated test config file (release-050 D16).
-_PTT_DEFAULTS = {"hotkey": "F10", "dictation_mode": "send", "companion_dictation": False}
+_PTT_DEFAULTS = {
+    "hotkey": "F10", "dictation_mode": "send", "companion_dictation": False,
+    "grace_mode": "auto", "grace_s": 1.2,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -232,7 +235,7 @@ def test_get_state_shape_counts_never_text():
         body = resp.json()
         assert set(body.keys()) == {
             "state", "session_id", "buffered_chars", "last_error", "stt_ws_url", "stt_service",
-            "hotkey", "dictation_mode", "companion_dictation",
+            "hotkey", "dictation_mode", "companion_dictation", "dictation", "grace_mode", "grace_s",
         }
         assert isinstance(body["buffered_chars"], int)
         assert body["state"] == "flushing"

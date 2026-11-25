@@ -82,3 +82,89 @@ def test_audio_auth_failure_is_closed(client, tmp_path):
     response = client.get("/api/avatar/vrm/audio/last", headers={"Authorization": "Bearer test-operator"})
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
+
+
+# --- Thumbnail extraction -------------------------------------------------
+
+import json as _json
+import struct as _struct
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"thumb-bytes"
+
+
+def _glb(gltf: dict, bin_data: bytes = PNG) -> bytes:
+    raw = _json.dumps(gltf).encode()
+    raw += b" " * (-len(raw) % 4)
+    body = _struct.pack("<II", len(raw), 0x4E4F534A) + raw
+    padded = bin_data + b"\x00" * (-len(bin_data) % 4)
+    body += _struct.pack("<II", len(padded), 0x004E4942) + padded
+    return _struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body
+
+
+def _images(mime="image/png"):
+    return {
+        "buffers": [{"byteLength": len(PNG)}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(PNG)}],
+        "images": [{"bufferView": 0, "mimeType": mime}],
+    }
+
+
+def test_thumbnail_vrm1(client, tmp_path):
+    gltf = {**_images(), "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 0}}}}
+    (tmp_path / "a.vrm").write_bytes(_glb(gltf))
+    r = client.get("/api/avatar/vrm/thumbnail", params={"name": "a.vrm"})
+    assert r.status_code == 200
+    assert r.content == PNG
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == "private, max-age=3600"
+
+
+def test_thumbnail_vrm0_texture(client, tmp_path):
+    gltf = {**_images("image/jpeg"), "textures": [{"source": 0}],
+            "extensions": {"VRM": {"meta": {"texture": 0}}}}
+    (tmp_path / "b.vrm").write_bytes(_glb(gltf))
+    r = client.get("/api/avatar/vrm/thumbnail", params={"name": "b.vrm"})
+    assert r.status_code == 200
+    assert r.content == PNG
+    assert r.headers["content-type"] == "image/jpeg"
+
+
+@pytest.mark.parametrize("gltf", [
+    {"extensions": {"VRMC_vrm": {"meta": {}}}},
+    {**_images("image/gif"), "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 0}}}},
+    {**_images(), "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 5}}}},
+    {"buffers": [{"byteLength": 4}],
+     "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 9999}],
+     "images": [{"bufferView": 0, "mimeType": "image/png"}],
+     "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 0}}}},
+    {"bufferViews": [{"buffer": 1, "byteOffset": 0, "byteLength": 4}],
+     "images": [{"bufferView": 0, "mimeType": "image/png"}],
+     "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 0}}}},
+])
+def test_thumbnail_missing_or_invalid_is_404(client, tmp_path, gltf):
+    (tmp_path / "c.vrm").write_bytes(_glb(gltf))
+    assert client.get("/api/avatar/vrm/thumbnail", params={"name": "c.vrm"}).status_code == 404
+
+
+@pytest.mark.parametrize("data", [b"", b"glTF", b"not a glb at all" * 4,
+                                  _struct.pack("<III", 0x46546C67, 1, 12)])
+def test_thumbnail_corrupt_is_404(client, tmp_path, data):
+    (tmp_path / "d.vrm").write_bytes(data)
+    assert client.get("/api/avatar/vrm/thumbnail", params={"name": "d.vrm"}).status_code == 404
+
+
+@pytest.mark.parametrize("name", ["../x.vrm", "a.txt", "", "C:x.vrm"])
+def test_thumbnail_rejects_bad_names(client, name):
+    assert client.get("/api/avatar/vrm/thumbnail", params={"name": name}).status_code == 400
+
+
+def test_thumbnail_unknown_file_404(client):
+    assert client.get("/api/avatar/vrm/thumbnail", params={"name": "nope.vrm"}).status_code == 404
+
+
+def test_thumbnail_auth_parity_with_model(client, tmp_path):
+    # /model sets no router-level auth (plain GETs bypass auth middleware): same here.
+    gltf = {**_images(), "extensions": {"VRMC_vrm": {"meta": {"thumbnailImage": 0}}}}
+    (tmp_path / "e.vrm").write_bytes(_glb(gltf))
+    assert client.get("/api/avatar/vrm/model", params={"name": "e.vrm"}).status_code == 200
+    assert client.get("/api/avatar/vrm/thumbnail", params={"name": "e.vrm"}).status_code == 200

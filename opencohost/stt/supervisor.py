@@ -9,6 +9,10 @@ Contract (implemented by LiveAudio unit 1, read-only from here):
   on the first WS client (a probe connection counts as first client).
 - The service exits by itself when the parent PID dies; a lock rejects a
   second instance; the config snapshot is read-only.
+- The child inherits the parent process environment, including
+  ``OPENCOHOST_DATA_ROOT``, which LiveAudio uses to read
+  ``<OPENCOHOST_DATA_ROOT>/config/locale.json`` and align ASR language with
+  Kira's locale.
 - Every WS client first receives
   ``hello {app: 'liveaudio', proto: 1, port: <effective>}``.
 
@@ -390,6 +394,11 @@ class LiveAudioSupervisor:
                 return False
             argv = list(self._argv) + ["--parent-pid", str(self._parent_pid)]
             try:
+                # Cross-process contract: omit env= so subprocess.Popen inherits
+                # parent os.environ (specifically OPENCOHOST_DATA_ROOT), which
+                # LiveAudio reads to locate <OPENCOHOST_DATA_ROOT>/config/locale.json.
+                # If a custom env dict is ever introduced here, it MUST preserve
+                # OPENCOHOST_DATA_ROOT.
                 self._proc = self._popen_factory(
                     argv,
                     shell=False,

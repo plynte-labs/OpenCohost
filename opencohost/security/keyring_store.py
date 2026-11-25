@@ -224,6 +224,10 @@ class KeyringStore:
         """Store the credentials dictionary securely in the OS keyring."""
         token_dict = dict(token)
         serialized = json.dumps(token_dict)
+        if not _KEYRING_AVAILABLE or keyring is None:
+            # No in-memory vault for cloud keys: a key that silently vanishes
+            # on restart while the UI says "saved" is worse than a loud 503.
+            raise KeyStoreError("secure_store_unavailable")
         try:
             self._set_secret(provider, serialized)
             self._track_profile(provider)

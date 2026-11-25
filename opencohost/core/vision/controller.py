@@ -133,6 +133,7 @@ class VisionController:
         on_describing: Optional[Callable[[], None]] = None,
         speak_progress: Optional[Callable[[str], None]] = None,
         direct_check: Optional[Callable[[], bool]] = None,
+        chat_model_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._daemon_factory = daemon_factory
         self._describer_factory = describer_factory
@@ -153,6 +154,7 @@ class VisionController:
         self._speak_progress = speak_progress
         # P2: asked by each look whether it goes straight to a cloud chat model.
         self._direct_check = direct_check
+        self._chat_model_check = chat_model_check
 
         self._lock = threading.RLock()
         self._settings: Any = None
@@ -363,6 +365,7 @@ class VisionController:
             on_describing=self._on_describing,
             speak_progress=self._speak_progress,
             direct_check=self._direct_check,
+            chat_model_check=self._chat_model_check,
         )
         self._transition(STATE_STARTING if _is_local(values) else STATE_READY)
         logger.info(

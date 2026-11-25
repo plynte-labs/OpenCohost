@@ -22,6 +22,7 @@ from opencohost.config import vision_settings as vs
 from opencohost.core import llm_engine
 from opencohost.core.providers.cloud import cloud_llm_client
 from opencohost.core.vision import direct_cloud as dc
+from opencohost.core.vision import turn_step
 from opencohost.core.vision.capture import CapturedFrame
 from opencohost.core.vision.gate import VisionDecision
 from opencohost.core.vision.sanitize import SCREEN_BLOCK_CLOSE, SCREEN_BLOCK_OPEN
@@ -141,9 +142,11 @@ def _restore_vision(monkeypatch):
         monkeypatch.setattr(settings, attr, getattr(settings, attr))
 
 
-def test_vision_route_reads_and_writes_the_opt_in_and_rejects_non_bool(_restore_vision):
+def test_vision_route_reads_and_writes_the_opt_in_and_rejects_non_bool(_restore_vision, monkeypatch):
+    from opencohost.api import deps
     from tests.test_api_vision import _VisionHost, _client, _operator_headers
 
+    monkeypatch.setattr(deps, "load_provider_config", lambda: GEMINI_CFG)
     settings.VISION_CLOUD_DIRECT_ALLOWED = False
     app, client = _client(_VisionHost)
     try:
@@ -335,6 +338,19 @@ def test_direct_screen_look_captures_but_never_describes():
     assert result.description == ""
 
 
+def test_direct_look_claims_nothing_seen_before_the_cloud_call():
+    # A1: the frames only reach the model in the chat call, so "Ya vi" would lie.
+    for text in ("what is on my screen?", "mira mi pantalla"):
+        result = _step([], direct=lambda: True).run(text, "direct")
+        assert result.outcome == "ok" and result.images
+        assert result.status_line == ""
+
+
+def test_describe_look_keeps_its_status_line():
+    result = _step([], direct=lambda: False).run("what is on my screen?", "direct")
+    assert result.status_line
+
+
 def test_direct_screen_look_does_not_wait_for_the_local_vision_daemon():
     calls = []
     result = _step(calls, direct=lambda: True, ready=lambda: "model_missing").run("look", "direct")
@@ -363,6 +379,56 @@ def test_a_failing_direct_check_falls_back_to_the_describe_path():
 
     result = _step(calls, direct=boom).run("look", "direct")
     assert "describe" in calls and result.images == ()
+
+
+# ---------------------------------------------- A3: chat_model eligibility
+
+
+def test_chat_model_eligibility_reuses_the_route_rule():
+    assert dc.chat_model_eligibility(GEMINI_CFG) == (True, None)
+    assert dc.chat_model_eligibility({"active_provider": "local", "profiles": {}}) == (
+        False, "chat_model_requires_cloud_provider")
+    assert dc.chat_model_eligibility({}) == (False, "chat_model_requires_cloud_provider")
+    assert dc.chat_model_eligibility(_cfg("deepseek", "deepseek-v4-pro")) == (
+        False, "chat_model_not_vision_capable")
+    assert dc.chat_model_eligibility(_cfg("deepseek", "deepseek-v4-pro", model_vision=True)) == (
+        True, None)
+
+
+def test_step_with_an_ineligible_chat_model_fails_the_look_with_a_specific_outcome():
+    calls = []
+    step = _step(calls, direct=lambda: False)
+    step._chat_model_check = lambda: "chat_model_not_vision_capable"
+    result = step.run("what is on my screen?", "direct")
+    assert result.outcome == "chat_model_not_vision_capable"
+    assert result.screen_block == "" and "capture" not in calls and "describe" not in calls
+    es = turn_step.failure_line("chat_model_not_vision_capable", "es")
+    assert "modelo del chat" in es and "no ve imágenes" in es
+    assert turn_step.failure_line("chat_model_requires_cloud_provider", "en") !=         turn_step.failure_line("generic", "en")
+
+
+def test_engine_flags_chat_model_source_with_an_ineligible_provider(monkeypatch):
+    monkeypatch.setattr(settings, "VISION_SOURCE", "chat_model", raising=False)
+    local = _motor({"active_provider": "local", "profiles": {}})
+    assert local._vision_chat_model_ineligible() == "chat_model_requires_cloud_provider"
+    assert _motor(_cfg("deepseek", "deepseek-v4-pro"))._vision_chat_model_ineligible() == (
+        "chat_model_not_vision_capable")
+    assert _motor()._vision_chat_model_ineligible() is None
+    monkeypatch.setattr(settings, "VISION_SOURCE", "local", raising=False)
+    assert local._vision_chat_model_ineligible() is None
+
+
+def test_requested_look_with_ineligible_chat_model_speaks_the_specific_line(monkeypatch):
+    monkeypatch.setattr(settings, "VISION_SOURCE", "chat_model", raising=False)
+    motor = _motor(_cfg("deepseek", "deepseek-v4-pro"))
+    calls = []
+    _record_chat(motor, calls)
+    step = _step([], direct=motor._vision_direct_eligible)
+    step._chat_model_check = motor._vision_chat_model_ineligible
+    motor._vision = SimpleNamespace(step=step)
+    out = motor._generar_dialogo("mira mi pantalla, qué ves", source="direct", commit_history=True)
+    assert str(out) == turn_step.failure_line("chat_model_not_vision_capable", "es")
+    assert calls == []
 
 
 def test_direct_look_never_logs_image_bytes(caplog):
@@ -600,6 +666,58 @@ def test_pasted_images_fall_back_without_images_and_with_a_fixed_note():
     assert all(isinstance(m["content"], str) for m in calls[1]["messages"])
     assert "SECRETPNG" not in str(calls[1]["messages"])
     assert dc.IMAGE_UNSEEN_NOTE in _all_text(calls[1])
+
+
+def _manual_cfg():
+    return {**GEMINI_CFG, "fallback_mode": "manual"}
+
+
+def _failing_cloud(motor, calls):
+    def fake(*, is_local, messages, **kwargs):
+        calls.append({"is_local": is_local, "messages": messages})
+        raise ConnectionError("refused")
+
+    motor._ollama_chat_with_watchdog = MagicMock(side_effect=fake)
+
+
+def test_manual_mode_cloud_failure_with_a_direct_look_speaks_an_honest_line():
+    # A2: fallback_mode=manual never retries locally; the look must not end in silence.
+    motor = _motor(_manual_cfg())
+    calls = []
+    _failing_cloud(motor, calls)
+    motor._vision = SimpleNamespace(step=_FakeStep(images=((SECRET_PIXELS, "image/jpeg"),)))
+
+    out = motor._generar_dialogo("what is on my screen?", source="direct", commit_history=True)
+
+    assert [c["is_local"] for c in calls] == [False]
+    assert str(out) == turn_step.failure_line("cloud_unavailable", "en")
+    assert "cloud" in str(out).lower() and "screen" in str(out).lower()
+    assert getattr(out, "speak_source", "") == "direct-vision-fail"
+
+
+def test_manual_mode_cloud_failure_line_follows_the_owner_language():
+    motor = _motor(_manual_cfg())
+    _failing_cloud(motor, [])
+    motor._vision = SimpleNamespace(step=_FakeStep(images=((SECRET_PIXELS, "image/jpeg"),)))
+    out = motor._generar_dialogo("mira mi pantalla, qué ves", source="direct", commit_history=True)
+    assert str(out) == turn_step.failure_line("cloud_unavailable", "es")
+
+
+def test_manual_mode_cloud_failure_with_pasted_images_speaks_the_line():
+    motor = _motor(_manual_cfg())
+    _failing_cloud(motor, [])
+    text = chat_image.compose_direct_turn_text("what is this?", 1)
+    motor.stash_turn_images(text, [(PNG_BYTES, "image/png")])
+    out = motor._generar_dialogo(text, source="direct", commit_history=True)
+    assert str(out)
+
+
+def test_manual_mode_cloud_failure_without_a_look_stays_silent():
+    motor = _motor(_manual_cfg())
+    _failing_cloud(motor, [])
+    motor._vision = SimpleNamespace(step=_FakeStep(images=(), block=""))
+    out = motor._generar_dialogo("tell me a joke", source="direct", commit_history=True)
+    assert str(out) == ""
 
 
 def test_stashed_images_never_attach_to_a_local_provider_or_other_sources():

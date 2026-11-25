@@ -31,6 +31,7 @@ from opencohost.api.auth import TokenFileError, _bearer_token, _resolve_role
 from opencohost.api.models import VisionModelsResponse
 from opencohost.api import deps
 from opencohost.config import vision_settings
+from opencohost.core.vision import direct_cloud, vram_advisory
 from opencohost.core.vision.cloud_describer import resolve_cloud_key, vision_key_id
 from opencohost.core.vision.gate import normalize_mode
 from opencohost.stream_admin.oauth_store import OAuthStore
@@ -106,6 +107,35 @@ class _ChatKeysOnly:
         return self._store.load(profile_id)
 
 
+def _provider_cfg() -> dict:
+    try:
+        cfg = deps.load_provider_config()
+    except Exception:
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _vram_fields(host, values, status, cfg) -> dict:
+    """A4: advisory VRAM numbers from the host's cached GPU poll (no GPU call here)."""
+    free_mb = total_mb = None
+    reader = getattr(host, "vision_vram_mb", None)
+    if callable(reader):
+        try:
+            reading = reader()
+            if reading is not None:
+                free_mb, total_mb = reading
+        except Exception:
+            free_mb = total_mb = None
+    return vram_advisory.assess(
+        source=values.vision_source,
+        chat_is_local=(cfg.get("active_provider") or "local") == "local",
+        vlm_tag=values.model,
+        free_mb=free_mb,
+        total_mb=total_mb,
+        vlm_loaded=status.get("model_loaded") is True,
+    )
+
+
 def _payload(host, values=None) -> dict:
     values = values if values is not None else vision_settings.current()
     status = host.vision_status()
@@ -114,6 +144,12 @@ def _payload(host, values=None) -> dict:
     body["status"] = {key: status.get(key) for key in _STATUS_KEYS}
     # runtime-fixes-20261110 T7: how many images one chat message may carry.
     body["max_images"] = chat_image.MAX_IMAGES
+    # A3: can the active chat model be the vision source (same rule as the live route)?
+    cfg = _provider_cfg()
+    eligible, reason = direct_cloud.chat_model_eligibility(cfg)
+    body["chat_model_eligible"] = eligible
+    body["chat_model_reason"] = reason
+    body.update(_vram_fields(host, values, status, cfg))
     return body
 
 
@@ -155,6 +191,7 @@ def put_vision(request: Request, body=Body(...)):
     with _write_lock:
         merged = vision_settings.with_updates(vision_settings.current(), updates)
         errors = _cloud_errors(merged, new_key if isinstance(new_key, str) else None)
+        errors += _chat_model_errors(merged, updates)
         if errors:
             return JSONResponse(
                 status_code=422, content={"detail": "invalid_vision_settings", "errors": errors}
@@ -166,6 +203,20 @@ def put_vision(request: Request, body=Body(...)):
     if new is None:
         return JSONResponse(status_code=503, content={"detail": "vision_write_failed"})
     return _payload(host, new)
+
+
+def _chat_model_errors(merged, updates) -> list:
+    """A3: choosing ``chat_model`` needs a cloud provider whose model sees images.
+    Only a request that sets the source is checked, so unrelated edits are never
+    blocked by a provider change made after the choice."""
+    if merged.vision_source != "chat_model":
+        return []
+    if "vision_source" not in updates and "cloud_direct_allowed" not in updates:
+        return []
+    eligible, reason = direct_cloud.chat_model_eligibility(_provider_cfg())
+    if eligible:
+        return []
+    return [{"field": "vision_source", "code": reason}]
 
 
 def _cloud_errors(merged, new_key) -> list:

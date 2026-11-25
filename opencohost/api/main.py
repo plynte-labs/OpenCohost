@@ -88,6 +88,8 @@ from opencohost.config.settings import (
     # monkeypatched); routers/ptt.py imports it separately from settings.
     load_ptt_ws_uri,
     load_ptt_companion_dictation,
+    load_ptt_grace_mode,
+    load_ptt_grace_s,
     load_ptt_dictation_mode,
     load_tts_local_only,
     load_motor_tts,
@@ -401,6 +403,8 @@ def create_app(
                 getattr(host, "event_log", None) or EventLogSink(),
                 dictation_mode=load_ptt_dictation_mode(),
                 companion_dictation=load_ptt_companion_dictation(),
+                grace_mode=load_ptt_grace_mode(),
+                grace_s=load_ptt_grace_s(),
                 **_ptt_controller_hooks(host),
             )
             # Local LiveAudio supervisor (liveaudio-service-client track):

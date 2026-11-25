@@ -13,8 +13,9 @@ filename cannot tell you.
 > when those documents were written; historical records are kept as a dated
 > record and deliberately not rewritten.
 >
-> [`QUICKSTART.md`](QUICKSTART.md), [`PRIVACY.md`](PRIVACY.md), and
-> [`api-reference.md`](api-reference.md) were re-verified against the code on
+> [`architecture.md`](architecture.md) was refreshed against the code on
+> 2026-11-12, [`QUICKSTART.md`](QUICKSTART.md) on 2026-11-22, and
+> [`PRIVACY.md`](PRIVACY.md) and [`api-reference.md`](api-reference.md) on
 > 2026-08-14. The rest of this tree has not been through that pass.
 
 ## Getting Kira running
@@ -48,7 +49,7 @@ The pair a cautious reader should check first.
 
 | Document | What it answers |
 |---|---|
-| [`architecture.md`](architecture.md) | Which entry point is the product (Tauri + FastAPI) and which is frozen legacy, plus the system map and module ownership boundaries. |
+| [`architecture.md`](architecture.md) | Which entry point is the product (Tauri + FastAPI), current architecture after CustomTkinter removal (`1eecab7`), system map, and module ownership boundaries. |
 | [`api-reference.md`](api-reference.md) | The backend HTTP surface and the conventions behind it: the error contract, the no-raw-exposure rule, locking, and verb whitelists. Covers 46 of the 72 method+path pairs the app actually serves, and says which are still missing — `GET /openapi.json` on a running backend is the authoritative list. |
 | [`modules/runtime-speech.md`](modules/runtime-speech.md) | How direct speech, agenda speech, TTS generation, and priority arbitration share a single speech owner inside the runtime motor. |
 | [`modules/turn-state.md`](modules/turn-state.md) | The explicit state of one foreground turn: state x event table, terminal states, where each `[TURN_STATE]` event is emitted. |

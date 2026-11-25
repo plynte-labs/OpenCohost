@@ -1,6 +1,8 @@
 """Read-only local VRM assets and the latest actual playback chunk."""
 from pathlib import Path
+import json
 import logging
+import struct
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -95,6 +97,97 @@ def _folder_model(name: str) -> Path:
 @router.get("/model")
 def get_model(request: Request, name: str):
     return model_response(request, _model_path(name))
+
+_GLB_MAGIC = 0x46546C67
+_CHUNK_JSON = 0x4E4F534A
+_MAX_JSON_BYTES = 32 * 1024 * 1024
+_MAX_THUMB_BYTES = 8 * 1024 * 1024
+_THUMB_MIMES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def _is_index(value, size: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < size
+
+
+def _thumbnail_image_index(gltf: dict) -> int | None:
+    """Image index of the embedded VRM 1.0 / 0.x thumbnail, or None."""
+    ext = gltf.get("extensions")
+    if not isinstance(ext, dict):
+        return None
+    v1 = ext.get("VRMC_vrm")
+    meta = v1.get("meta") if isinstance(v1, dict) else None
+    if isinstance(meta, dict) and meta.get("thumbnailImage") is not None:
+        return meta["thumbnailImage"]
+    v0 = ext.get("VRM")
+    meta = v0.get("meta") if isinstance(v0, dict) else None
+    tex = meta.get("texture") if isinstance(meta, dict) else None
+    textures = gltf.get("textures")
+    if isinstance(textures, list) and _is_index(tex, len(textures)) and isinstance(textures[tex], dict):
+        return textures[tex].get("source")
+    return None
+
+
+def _read_vrm_thumbnail(path: Path) -> tuple[bytes, str] | None:
+    """Extract the embedded thumbnail from a GLB, reading only the needed ranges."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+            if len(head) < 20:
+                return None
+            magic, version, _total, json_len, json_type = struct.unpack("<IIIII", head)
+            if magic != _GLB_MAGIC or version != 2 or json_type != _CHUNK_JSON:
+                return None
+            if json_len <= 0 or json_len > _MAX_JSON_BYTES:
+                return None
+            raw = fh.read(json_len)
+            if len(raw) != json_len:
+                return None
+            gltf = json.loads(raw)
+            if not isinstance(gltf, dict):
+                return None
+            image_index = _thumbnail_image_index(gltf)
+            images = gltf.get("images")
+            views = gltf.get("bufferViews")
+            if not isinstance(images, list) or not isinstance(views, list):
+                return None
+            if not _is_index(image_index, len(images)) or not isinstance(images[image_index], dict):
+                return None
+            image = images[image_index]
+            mime = image.get("mimeType")
+            if mime not in _THUMB_MIMES or not _is_index(image.get("bufferView"), len(views)):
+                return None
+            view = views[image["bufferView"]]
+            if not isinstance(view, dict) or view.get("buffer") != 0:
+                return None
+            offset = view.get("byteOffset", 0)
+            length = view.get("byteLength")
+            if not (isinstance(offset, int) and isinstance(length, int)) or isinstance(offset, bool) or isinstance(length, bool):
+                return None
+            if offset < 0 or length <= 0 or length > _MAX_THUMB_BYTES:
+                return None
+            fh.seek(20 + json_len)  # BIN chunk header follows the JSON chunk
+            bin_head = fh.read(8)
+            if len(bin_head) < 8:
+                return None
+            bin_len, bin_type = struct.unpack("<II", bin_head)
+            if bin_type != 0x004E4942 or offset + length > bin_len:
+                return None
+            fh.seek(offset, 1)
+            data = fh.read(length)
+            return (data, mime) if len(data) == length else None
+    except (OSError, ValueError, struct.error, RecursionError):
+        return None
+
+
+@router.get("/thumbnail")
+def get_thumbnail(name: str):
+    # Same exposure as /model: plain GETs carry no router-level auth, and the
+    # name is confined to the model folder by _model_path.
+    found = _read_vrm_thumbnail(_model_path(name))
+    if found is None:
+        raise HTTPException(404, "No thumbnail")
+    data, mime = found
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=3600"})
 
 
 class VrmFolderRequest(BaseModel):

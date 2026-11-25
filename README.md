@@ -2,13 +2,9 @@
 
 <img width="1533" height="875" alt="Screenshot 2026-09-28 020033" src="https://github.com/user-attachments/assets/73b63de6-1fc1-4226-9604-f0345c662656" />
 
-[Opencohost v0.5.0 maybe came next week (November Q3)]
-- [11/12/2026] It's a rought week but i'm seeing a lot of new concepts, and try to polish this fking proyect
-- [11/15/2026] Added safety filters, fixed i18n profiles (semantic, locate bugs and filters between en/es in backend and frontend app), new maze v5 to play cards on agenda mode (fixing and mitigate skeletical repetition of content in agenda mode) [you can make mini podcast without reprompting or interacting opencohost, just make the agenda and listen and relax or brb], added support for google gemini api from google ai studio (tested on free usage with gemini 3.5 flash), and fixed more files.
+OpenCohost gives your stream a co-host that runs on your own computer. Its character is **Kira**, an AI co-host with a distinct personality (dry sarcasm, sharp humor) who listens to you, reads your live chat and answers out loud. Kira thinks with a language model that runs locally through [Ollama](https://ollama.com/) (or an optional cloud API provider). She speaks with Microsoft Edge-TTS, a free cloud voice, by default, or with Piper, a voice that works fully offline.
 
-OpenCohost gives your stream a co-host that runs on your own computer. Its character is **Kira**, an AI co-host with a distinct personality (dry sarcasm, sharp humor) who listens to you, reads your live chat and answers out loud. Kira thinks with a language model that runs locally through [Ollama](https://ollama.com/). She speaks with Microsoft Edge-TTS, a free cloud voice, by default, or with Piper, a voice that works fully offline.
-
-[Website](https://opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI) | [LiveAudio](https://liveaudio.opencohost.com)
+[Website](https://www.opencohost.com) | [Windows App](https://github.com/FranGuh/OpenCohost_UI) | [LiveAudio](https://liveaudio.opencohost.com)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/release-v0.5.0-orange.svg)](https://github.com/plynte-labs/OpenCohost/releases/tag/v0.5.0)
@@ -54,6 +50,7 @@ You need a Windows PC. A graphics card with 6 GB of video memory (VRAM) or more 
 
 1. **Download and run the Windows installer.**
    📥 Windows installer: [OpenCohost-0.5.0-x64-setup.exe](https://github.com/plynte-labs/OpenCohost/releases/download/v0.5.0/OpenCohost-0.5.0-x64-setup.exe)
+   💻 Or via WinGet (`v0.5.0`): `winget install --id plynte-labs.OpenCohost -e`
    The installer is per-user, so it needs no administrator rights. It shows the Welcome page, then the **MIT license** (accept it to continue), then the application folder, and then it installs. It also installs WebView2 if your PC lacks it. On the last page you can create a desktop shortcut and start OpenCohost.
    The installer is about 1.46 GB because it bundles everything Kira needs to run: the Python runtime and engine, the Laya model, the Spanish and English Piper voices and the Microsoft Visual C++ runtime. You do not need to install Python yourself. The installer does **not** install Ollama; that is the next step (or use a cloud API key instead, see below).
 
@@ -134,7 +131,7 @@ Open an [issue](https://github.com/plynte-labs/OpenCohost/issues). There is a te
 
 ## Features and release status
 
-> **Open beta.** OpenCohost is one developer covering a lot of surface — LLM orchestration, TTS, live chat, OBS, a desktop UI — so some things will not work well yet. It runs on my own hardware every day; the core holds up. But "Stable" in the table below means shipped and solid in normal use, not proven under every failure: Windows is the only fully validated platform so far, and the streaming/interruption path and the clause sanitizer have not yet faced a live adverse case. If something misbehaves, report it — that feedback is exactly what this beta is for. Bugs and ideas both go to [Issues](https://github.com/plynte-labs/opencohost/issues); there is a template for each.
+> **Open beta.** OpenCohost covers a wide surface — LLM orchestration, TTS, live chat, OBS, and a desktop UI — and is in active open beta, so some things will not work well yet. The core holds up in daily use. But "Stable" in the table below means shipped and solid in normal use, not proven under every failure: Windows is the only fully validated platform so far, and the streaming/interruption path and the clause sanitizer have not yet faced a live adverse case. If something misbehaves, report it — that feedback is exactly what this beta is for. Bugs and ideas both go to [Issues](https://github.com/plynte-labs/OpenCohost/issues); there is a template for each.
 
 | Feature | Status |
 |---|---|
@@ -160,13 +157,12 @@ Open an [issue](https://github.com/plynte-labs/OpenCohost/issues). There is a te
   issue](https://github.com/plynte-labs/OpenCohost/issues).
 
 📥 Windows installer: [OpenCohost-0.5.0-x64-setup.exe](https://github.com/plynte-labs/OpenCohost/releases/download/v0.5.0/OpenCohost-0.5.0-x64-setup.exe)
+💻 WinGet (`v0.5.0`): `winget install --id plynte-labs.OpenCohost -e`
 
-The installer links in this README work once the `v0.5.0` release is published. `0.5.0` keeps your profiles and settings but starts memories fresh: see [Upgrading from 0.3.0](#upgrading-from-030).
+`0.5.0` keeps your profiles and settings but starts memories fresh: see [Upgrading from 0.3.0](#upgrading-from-030).
 
 ### What's new in `v0.5.0`
 Full list of changes since `0.3.0-alpha.4`, and why this release is `0.5.0`: [CHANGELOG.md](CHANGELOG.md).
-
-*Working on it without a payment, burning my savings to become a better product 4 you since August-October.*
 
 *Star or follow the repository to track the next releases.*
 
@@ -189,10 +185,8 @@ Key highlights in `v0.5.0`:
 - **Cloud provider fix:** Gemini works as a cloud provider, and its key test checks the models and a real chat request.
 - **Turn events log:** one structured event per turn in `logs/turn_events.jsonl`, with no message text.
 - [15-October-2026] Median time-to-first-speech: ~2.4 s, down from ~20 s two weeks earlier — same model (Qwen3.8-9B Q4, local) on the same RTX 3060 12GB. Full replies finish in ~7 s.
-- Liveaudio [liveaudio v1.5.1](https://github.com/plynte-labs/LiveAudio) rewrite in rust now can do faster the STT.
-- I introduced Laya(System One) and a little websearch crawler thing.
-
-> **Roadmap (not in v1):** High-fidelity fully-local voice via Qwen3-TTS / F5 voice cloning is planned as an advanced opt-in in a future release. It requires a separate Python environment, ~2 GB of models, and a GPU with sufficient VRAM.
+- **LiveAudio Rust STT:** [LiveAudio v1.6.0](https://github.com/plynte-labs/LiveAudio) (separate Rust service) handles VAD and Whisper transcription.
+- **Laya (System One) & Web Lookup:** local turn-routing layer and optional owner-controlled web search.
 
 ---
 
@@ -201,7 +195,7 @@ Key highlights in `v0.5.0`:
 ### Requirements
 
 - **Windows 10 / 11** — the primary supported platform. Linux runs from source ([docs/LINUX_GUIDE.md](docs/LINUX_GUIDE.md), in Spanish); clean-machine validation on Linux/macOS is in progress.
-- **[Ollama](https://ollama.com/) installed** — Kira cannot answer without it. When Ollama is installed but not running, the backend tries to start `ollama serve` in the background at boot.
+- **[Ollama](https://ollama.com/) installed** for local models (or bring an optional cloud provider API key in the first-run wizard). When Ollama is installed but not running, the backend tries to start `ollama serve` in the background at boot.
 - **Internet access** for the default Edge-TTS voice, Twitch chat, and pulling models.
 - **Python 3.10+** only when running from source (`requires-python = ">=3.10"` in `pyproject.toml`).
 
@@ -215,7 +209,7 @@ Key highlights in `v0.5.0`:
 
 ### Configuration
 
-**Models.** Models are installed and removed with Ollama itself (`ollama pull` / `ollama rm`). The **Controls → Model** card lists what Ollama reports and switches the active model; it never downloads one. The engine checks Ollama at `http://127.0.0.1:11434/api/tags` and blocks processing and model switching while the service is unavailable.
+**Models.** Models can be searched and pulled from the in-app model downloader or managed with Ollama directly (`ollama pull` / `ollama rm`). The **Controls → Model** card lists what Ollama reports and switches the active model. The engine checks Ollama at `http://127.0.0.1:11434/api/tags` and blocks local Ollama processing and model switching while the service is unavailable.
 
 **Voice (TTS).** Choose the engine in **Controls → Kira's voice**:
 
@@ -294,7 +288,9 @@ pip install -e ".[cloud-tts,integrations,local-tts,dev]"
 |---|---|
 | `cloud-tts` | Edge-TTS — Microsoft free cloud voice (default) |
 | `local-tts` | Piper offline TTS — fully local, no cloud calls |
-| `integrations` | OBS WebSocket, NVIDIA VRAM monitor |
+| `integrations` | NVIDIA VRAM monitor (`nvidia-ml-py`) |
+| `obs` | OBS WebSocket control (`obsws-python`, GPL-3.0-only; opt-in for source installs only, not bundled in the installer) |
+| `vision` | On-demand screen vision (`mss`, `pillow`) |
 | `youtube-chat` | Unofficial YouTube live chat (pytchat) — opt-in, [read this first](docs/PRIVACY.md#youtube-live-chat-is-opt-in-and-unofficial) |
 | `dev` | pytest, pre-commit, detect-secrets |
 | `heavy-tts` | Torch/Transformers stack for the retired Qwen3-TTS server; not used by the product |
@@ -328,9 +324,9 @@ For a standalone backend (headless, or with the front end served separately), us
 ### Architecture
 
 ```
-OpenCohost_UI/                # Product UI — Tauri + React (pnpm tauri:debug), git submodule
-├── src/features/             # One folder per surface: agenda, stream, musica, ...
-└── src-tauri/src/backend.rs  # Spawns the Python backend if none is listening
+OpenCohost_UI/                       # Product UI — Tauri + React (pnpm tauri:debug), git submodule
+├── src/features/                    # One folder per surface: agenda, stream, musica, ...
+└── src-tauri/src/backend/supervisor.rs  # Spawns or adopts the Python backend on loopback
 
 opencohost/
 ├── __main__.py           # Prints a notice: the legacy GUI is retired
@@ -356,7 +352,7 @@ opencohost/
 └── smart_aggregator/     # Live chat aggregator (Twitch; YouTube opt-in)
 ```
 
-Deeper reading: [docs/architecture.md](docs/architecture.md) and [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md).
+Deeper reading: [docs/architecture.md](docs/architecture.md) and [docs/api-reference.md](docs/api-reference.md).
 
 ### HTTP API
 
@@ -370,7 +366,7 @@ uvicorn opencohost.api.main:app --host 127.0.0.1 --port 8765 --workers 1
 
 **Do not bind `--host 0.0.0.0`.** That exposes the engine control surface to your LAN. CORS only restricts browser callers — it does nothing against a script or `curl` hitting the port directly. Keep this on loopback unless you put an authenticating proxy in front of it.
 
-One router per product surface, under `opencohost/api/routers/`: `active_cards`, `agenda`, `agent`, `avatar`, `avatar_vrm`, `chat`, `events`, `guardrails`, `i18n_tts`, `llm_provider`, `memoria`, `model_downloads`, `music`, `obs`, `perfiles`, `personalization`, `ptt`, `self_knowledge`, `speech`, `status`, `stream`, `vision`.
+One router per product surface, under `opencohost/api/routers/`: `active_cards`, `agenda`, `agent`, `avatar`, `avatar_vrm`, `chat`, `decisions`, `events`, `guardrails`, `i18n_tts`, `llm_provider`, `memoria`, `model_downloads`, `music`, `obs`, `perfiles`, `personalization`, `ptt`, `remote`, `reply_length`, `self_knowledge`, `setup`, `speech`, `status`, `stream`, `system`, `update`, `usage`, `vision`, `web_fetch`.
 
 Two worth calling out: `GET /api/status` is a read-only health/engine snapshot, and `POST /api/perfiles/switch` is idempotent via the `Idempotency-Key` header. Full reference: [docs/api-reference.md](docs/api-reference.md).
 

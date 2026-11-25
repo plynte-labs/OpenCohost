@@ -5,6 +5,17 @@ running process keeps the locale it loaded at startup — there is no runtime
 switch (owner decision). Persistence IS the next-boot mechanism: the live
 process never re-reads this file, so a write only affects the next start.
 
+Cross-process contract with LiveAudio (``liveaudio-cli serve``):
+LiveAudio reads Kira's persisted locale file at startup to align speech
+recognition language with OpenCohost:
+- Path: ``<OPENCOHOST_DATA_ROOT>/config/locale.json`` (when
+  ``OPENCOHOST_DATA_ROOT`` is unset, LiveAudio falls back to
+  ``%LOCALAPPDATA%\\OpenCohostData\\config\\locale.json``).
+- Format: JSON object ``{"locale": "<BCP-47 tag>", "set_at": "<ISO timestamp>"}``.
+  LiveAudio inspects only the primary subtag and accepts ``"es"`` or ``"en"``.
+Do not rename this file, move it outside ``<OPENCOHOST_DATA_ROOT>``, or change
+the top-level ``"locale"`` string key without coordinating with LiveAudio.
+
 Reads are tolerant (corrupt/missing → default); the explicit write is loud
 (raises on failure). Mirrors the atomic tmp + os.replace pattern of
 settings.save_last_model.
@@ -20,6 +31,7 @@ DEFAULT_LOCALE = "es"
 
 
 def _default_locale_file() -> Path:
+    """Return ``<USER_DATA_DIR>/config/locale.json`` (external contract with LiveAudio; ``USER_DATA_DIR`` follows ``OPENCOHOST_DATA_ROOT``)."""
     from opencohost.config.storage import USER_DATA_DIR
 
     return Path(USER_DATA_DIR) / "config" / "locale.json"
@@ -42,6 +54,10 @@ def get_locale(locale_file: Path | str | None = None) -> str:
 
 def set_locale(code: str, locale_file: Path | str | None = None) -> None:
     """Persist the desired locale (takes effect on next start). Atomic write.
+
+    Preserves the cross-process LiveAudio contract in
+    ``<OPENCOHOST_DATA_ROOT>/config/locale.json`` with a top-level ``"locale"``
+    string key (``"es"``/``"en"`` BCP-47 tag) and ``"set_at"`` ISO timestamp.
 
     Raises on I/O failure — an explicit set should fail loudly, unlike the
     best-effort runtime persistence elsewhere.

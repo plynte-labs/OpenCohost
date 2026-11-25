@@ -191,10 +191,10 @@ def test_always_mode_skips_the_dispatch_and_reports_dictated():
     assert releases == [1]
 
 
-def test_foreground_with_fresh_focus_at_release_dictates():
+def test_foreground_with_fresh_focus_at_press_dictates():
     controller, created, disp, clock, _rel = _controller(dictation_mode="foreground")
-    session = _hold(controller, created)
     controller.report_focus(True)
+    session = _hold(controller, created)
     clock.now += 1.0
     controller.stop(session.session_id)
     assert session.finish() == "dictated"
@@ -228,26 +228,27 @@ def test_foreground_with_blurred_report_sends():
     assert len(disp.calls) == 1
 
 
-def test_press_focused_release_after_alt_tab_sends():
+def test_press_focused_release_after_alt_tab_still_dictates():
+    # The decision is locked at press: the live text is already in the composer.
     controller, created, disp, clock, _rel = _controller(dictation_mode="foreground")
     controller.report_focus(True)
     session = _hold(controller, created)
     clock.now += 0.5
     controller.report_focus(False)  # alt-tab to the game mid-hold
     controller.stop(session.session_id)
-    assert session.finish() is None
-    assert len(disp.calls) == 1
+    assert session.finish() == "dictated"
+    assert disp.calls == []
 
 
-def test_press_in_game_release_after_alt_tab_back_dictates():
+def test_press_in_game_release_after_alt_tab_back_still_sends():
     controller, created, disp, clock, _rel = _controller(dictation_mode="foreground")
     controller.report_focus(False)
     session = _hold(controller, created)
     clock.now += 0.5
     controller.report_focus(True)
     controller.stop(session.session_id)
-    assert session.finish() == "dictated"
-    assert disp.calls == []
+    assert session.finish() is None
+    assert len(disp.calls) == 1
 
 
 def test_focus_change_during_grace_does_not_flip_the_release_decision():
@@ -276,12 +277,15 @@ def test_a_retried_stop_keeps_the_first_release_decision():
     assert session.finish() == "dictated"
 
 
-def test_mode_changed_during_the_hold_applies_at_release():
+def test_mode_changed_during_the_hold_applies_to_the_next_hold():
     controller, created, disp, _clock, _rel = _controller()
     session = _hold(controller, created)
     controller.set_dictation_mode("always")
     controller.stop(session.session_id)
-    assert session.finish() == "dictated"
+    assert session.finish() is None  # locked at press
+    session2 = _hold(controller, created)
+    controller.stop(session2.session_id)
+    assert session2.finish() == "dictated"
 
 
 def test_mode_changed_after_release_does_not_flip_the_decision():
@@ -388,13 +392,13 @@ def test_send_mode_ignores_the_switch(switch):
     assert session.finish() is None
 
 
-def test_switch_changed_during_the_hold_applies_at_release():
+def test_switch_changed_during_the_hold_applies_to_the_next_hold():
     controller, created, disp, _clock, _rel = _controller(dictation_mode="always")
     session = _hold(controller, created)
     controller.mark_hold_background(session.session_id)
     controller.set_companion_dictation(True)
     controller.stop(session.session_id)
-    assert session.finish() == "dictated"
+    assert session.finish() is None  # locked when the hold was marked
 
 
 def test_switch_changed_after_release_does_not_flip_the_decision():
@@ -624,5 +628,130 @@ def test_persisted_dictation_mode_seeds_the_controller_at_boot():
     try:
         assert app.state.ptt_controller.dictation_mode == "always"
         assert client.get("/api/ptt/state").json()["dictation_mode"] == "always"
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Decision locked at hold start, exposed as ``dictation`` in the state
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_state_dictation_is_false_when_idle():
+    controller, *_ = _controller(dictation_mode="always")
+    assert controller.state()["dictation"] is False
+
+
+def test_state_dictation_is_true_during_a_dictation_hold_and_its_grace():
+    controller, created, disp, _clock, _rel = _controller(dictation_mode="always")
+    session = _hold(controller, created)
+    assert controller.state()["dictation"] is True
+    controller.stop(session.session_id)
+    assert controller.state()["dictation"] is True  # grace flush still pending
+    session.finish()
+    assert controller.state()["dictation"] is False
+
+
+def test_state_dictation_is_false_during_a_send_hold():
+    controller, created, *_ = _controller(dictation_mode="send")
+    _hold(controller, created)
+    assert controller.state()["dictation"] is False
+
+
+def test_state_dictation_follows_focus_at_press_in_foreground_mode():
+    controller, created, disp, clock, _rel = _controller(dictation_mode="foreground")
+    controller.report_focus(True)
+    _hold(controller, created)
+    assert controller.state()["dictation"] is True
+    controller.report_focus(False)  # alt-tab: the lock does not move
+    assert controller.state()["dictation"] is True
+
+
+def test_state_dictation_is_false_for_a_companion_hold_in_foreground_mode():
+    controller, created, *_ = _controller(dictation_mode="foreground")
+    controller.report_focus(True)
+    session = _hold(controller, created)
+    assert controller.state()["dictation"] is True  # before the marker lands
+    controller.mark_hold_background(session.session_id)
+    assert controller.state()["dictation"] is False
+
+
+def test_state_dictation_for_a_companion_hold_in_always_mode_follows_the_switch():
+    controller, created, *_ = _controller(dictation_mode="always", companion_dictation=True)
+    session = _hold(controller, created)
+    controller.mark_hold_background(session.session_id)
+    assert controller.state()["dictation"] is True
+    controller2, created2, *_ = _controller(dictation_mode="always", companion_dictation=False)
+    session2 = _hold(controller2, created2)
+    controller2.mark_hold_background(session2.session_id)
+    assert controller2.state()["dictation"] is False
+
+
+def test_get_state_exposes_dictation_over_http():
+    app, client = _client()
+    try:
+        assert client.get("/api/ptt/state").json()["dictation"] is False
+        controller, created, *_ = _controller(dictation_mode="always")
+        app.state.ptt_controller = controller
+        _hold(controller, created)
+        assert client.get("/api/ptt/state").json()["dictation"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ── configurable grace over HTTP (ptt-live-dictation-20261125 T2) ──────────
+
+
+def test_put_config_grace_persists_live_applies_and_reads_back():
+    app, client = _client()
+    try:
+        st = client.get("/api/ptt/state").json()
+        assert st["grace_mode"] == "auto" and st["grace_s"] == pytest.approx(1.2)
+        controller = PttController("ws://test/whisperlive", app.state.dispatcher, app.state.host.event_log)
+        app.state.ptt_controller = controller
+        resp = client.put("/api/ptt/config", json={"grace_mode": "custom", "grace_s": 0.8})
+        assert resp.status_code == 200
+        assert resp.json()["grace_mode"] == "custom"
+        assert resp.json()["grace_s"] == pytest.approx(0.8)
+        assert settings.load_ptt_grace_mode() == "custom"
+        assert settings.load_ptt_grace_s() == pytest.approx(0.8)
+        assert controller.grace_mode == "custom"
+        st = client.get("/api/ptt/state").json()
+        assert st["grace_mode"] == "custom" and st["grace_s"] == pytest.approx(0.8)
+        resp = client.put("/api/ptt/config", json={"grace_mode": "fast"})
+        assert resp.status_code == 200
+        assert resp.json()["grace_mode"] == "fast"
+        assert resp.json()["grace_s"] == pytest.approx(0.8)  # kept
+    finally:
+        client.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"grace_mode": "turbo"},
+        {"grace_s": 0.1},
+        {"grace_s": 3.5},
+        {"grace_s": "fast"},
+        {"grace_s": True},
+        {"grace_mode": "custom", "grace_s": 99},
+    ],
+)
+def test_put_config_rejects_invalid_grace_with_422(body):
+    app, client = _client()
+    try:
+        resp = client.put("/api/ptt/config", json=body)
+        assert resp.status_code == 422
+        assert settings.load_ptt_grace_mode() == "auto"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_persisted_grace_seeds_the_controller_at_boot():
+    settings.save_ptt_grace_mode("fast")
+    app, client = _client()
+    try:
+        assert app.state.ptt_controller.grace_mode == "fast"
+        assert client.get("/api/ptt/state").json()["grace_mode"] == "fast"
     finally:
         client.__exit__(None, None, None)

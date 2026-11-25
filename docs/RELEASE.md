@@ -95,6 +95,19 @@ asset no longer matches. If a published build is wrong, ship a new version.
 Use this to produce an installer on a Windows machine. Keep the output local.
 Do not upload it.
 
+`scripts/build-release-local.ps1` runs every step below, including the
+`SHA256SUMS.txt` step, and stops at the first failure. It reads the version from
+`opencohost/__init__.py` and keeps the MSVC and Laya inputs in
+`build_artifacts/release-inputs/`. Options: `-ReusePython`, `-Offline`,
+`-NoLaya`, `-DryRun` (preflight and plan only).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-release-local.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File scripts\build-release-local.ps1
+```
+
+The manual steps follow.
+
 Staging moves the current `OpenCohost_UI/src-tauri/resources/` aside, so copy
 any inputs you still need out of it before you stage. The staging script takes
 two inputs from outside `resources/`:

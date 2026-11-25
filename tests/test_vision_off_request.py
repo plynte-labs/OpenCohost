@@ -362,3 +362,26 @@ def test_event_model_accepts_the_detail():
         detail={"reason": "look_requested"},
     )
     assert out.detail == {"reason": "look_requested"}
+
+
+# ---------------------------------------------------------------------------
+# A5 (vision-settings-redesign-20261125): "mira esto" and the typed /mira with
+# vision off are handled, never ignored or answered blind. Pinned end to end.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", ["mira esto", "/mira", "/mira texto", "/MIRA clip"])
+@pytest.mark.parametrize("source", ["direct", "ptt"])
+def test_a5_look_requests_with_vision_off_tell_kira_to_say_it_is_off(text, source):
+    system = _system(text, source, vision_enabled=False)
+
+    assert pa.VISION_OFF_INSTRUCTION in system
+    assert pa.NO_LOOK_INSTRUCTION not in system
+    assert "Never describe, invent or guess" in system
+
+
+@pytest.mark.parametrize("text", ["mira esto", "/mira", "/mira texto"])
+def test_a5_look_requests_with_vision_off_fire_the_quick_enable_event(text):
+    motor = _Motor()
+
+    assert motor._run_vision_look(text, "direct") is NO_LOOK
+    assert motor.calls == 1

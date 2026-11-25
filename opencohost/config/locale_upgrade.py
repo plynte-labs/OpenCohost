@@ -69,7 +69,10 @@ def _infer_locale_from_piper_voice(piper_voice_path: Path) -> str | None:
 
 
 def _persist_inferred_locale(locale_path: Path, locale_code: str) -> bool:
-    """Atomically write ``locale.json`` without touching ``piper_voice.json``."""
+    """Atomically write ``locale.json`` using the ``opencohost.i18n.state`` schema
+    (``{"locale": ..., "set_at": ...}`` consumed cross-process by LiveAudio),
+    without touching ``piper_voice.json``.
+    """
     payload = {"locale": locale_code, "set_at": datetime.now().isoformat()}
     try:
         atomic_write_text(locale_path, json.dumps(payload))

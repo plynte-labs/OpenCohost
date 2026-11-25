@@ -590,6 +590,8 @@ class MotorVocalIA(
         # ui_callback per failure EVENT, not per retried/repeated turn.
         # Resets alongside `_last_cloud_failure_class` on the next success.
         self._cloud_bad_key_notified: bool = False
+        # B2: same latch for `quota_exhausted` (`cloud_quota_exhausted` event).
+        self._cloud_quota_notified: bool = False
         self._cloud_fallback_reason: Optional[str] = None
         self.provider_epoch: int = 0
         # Monotonic deadline of the next scheduled background probe, or None
@@ -2305,6 +2307,7 @@ class MotorVocalIA(
         is_local = self._cfg_is_local(provider_cfg) or self._cloud_fallback_active
         self._log(f"Analizando contexto con {request_model}...")
         cloud_fallback_retry_done = False
+        image_reject_retry_done = False
         # V1.33: a turn never inherits the previous turn's reading token.
         # V1.34: only a FOREGROUND turn (commit_history) clears it. A pregen or
         # connector generation (commit_history=False) can run between the
@@ -2366,7 +2369,7 @@ class MotorVocalIA(
                 # that an image is attached.
                 attempt_block, attempt_note = screen_block, vision_note
                 direct_kw: dict = {}
-                if turn_images and is_local:
+                if (turn_images and is_local) or image_reject_retry_done:  # B1 retry drops images too
                     if look.images:
                         attempt_block = ""
                     if not attempt_block:
@@ -2431,6 +2434,49 @@ class MotorVocalIA(
                             outcome.stream.job if outcome.stream is not None else None
                         ),
                     )
+                if (
+                    getattr(outcome, "image_rejected", False)
+                    and attempt_was_cloud
+                    and not image_reject_retry_done
+                    and not (outcome.stream is not None and outcome.stream.job is not None)
+                ):
+                    # B1: same turn, same cloud model, no images, fixed unseen
+                    # note. Once only; never the cloud->local fallback.
+                    image_reject_retry_done = True
+                    turn_images = []
+                    self._log(
+                        f"cloud_image_rejected: retrying turn without images on the same "
+                        f"cloud model (source={source}).",
+                        level="warning",
+                    )
+                    continue
+                if (
+                    not result
+                    and attempt_was_cloud
+                    and not self._cloud_fallback_active
+                    and provider_cfg.get("fallback_mode", "auto") == "manual"
+                    and not (outcome.stream is not None and outcome.stream.job is not None)
+                ):
+                    manual_reply = None
+                    if turn_images or screen_block:
+                        # A2: manual mode keeps routing to a cloud that just
+                        # failed; a look that carried images must not end in silence.
+                        manual_reply = self._vision_cloud_failure_reply(
+                            contexto, source, commit_history=commit_history,
+                            history_text=history_text,
+                        )
+                    elif (
+                        getattr(outcome, "cloud_class", None)
+                        == cloud_llm_client.CLOUD_ERROR_QUOTA_EXHAUSTED
+                        and source in ("direct", "ptt")
+                    ):
+                        # B2: out of credits: say so once per turn, owner turns only.
+                        manual_reply = self._vision_cloud_failure_reply(
+                            contexto, source, commit_history=commit_history,
+                            history_text=history_text, outcome="cloud_quota_exhausted",
+                        )
+                    if manual_reply is not None:
+                        return manual_reply
                 if (
                     result
                     or cloud_fallback_retry_done
@@ -3239,6 +3285,7 @@ class MotorVocalIA(
         self._last_llm_failure = None
         self._last_cloud_failure_class = None
         self._cloud_bad_key_notified = False
+        self._cloud_quota_notified = False
 
         # 7. Chat repetition guard
         if source == "chat" and eval_res.repetition_verdict is not None and eval_res.repetition_verdict.is_repetitive:
