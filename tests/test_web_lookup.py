@@ -479,3 +479,606 @@ def test_web_prompt_notes_resolve_by_lang_without_spanish_leak():
     assert prompt.results_rule_v2("en") == prompt.WEB_RESULTS_RULE_V2
     assert prompt.results_marker("en") == prompt.WEB_RESULTS_MARKER
 
+
+# --- subjectless follow-up queries ("busca en la web de que trata") --------------------
+
+
+def test_is_subjectless_followup_classifies_anaphoric_and_named_queries():
+    from opencohost.core.web import subject as web_subject
+
+    for query in (
+        "de que trata",
+        "de qué se trata",
+        "de que va",
+        "quien la hizo",
+        "cuantas temporadas tiene",
+        "donde verla",
+        "cuales son sus alternativas",
+        "el juego",
+        "cual es la tematica",
+        "what is it about",
+        "when did it come out",
+        "who directed it",
+    ):
+        assert web_subject.is_subjectless_followup(query), f"expected subjectless: {query!r}"
+
+    for query in (
+        "de que trata Mr Robot",
+        "Python",
+        "que es Docker",
+        "precio RTX 5090",
+        "who directed Inception",
+    ):
+        assert not web_subject.is_subjectless_followup(query), f"expected named subject: {query!r}"
+
+
+def test_merge_followup_query_combines_previous_subject_without_duplication():
+    from opencohost.core.web import subject as web_subject
+
+    merged = web_subject.merge_followup_query("verias Mr Robot?", "de que trata")
+    assert "Mr Robot" in merged
+    assert "de que trata" in merged
+    assert "?" not in merged
+
+
+def test_web_step_attaches_previous_owner_subject_for_subjectless_followup():
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    captured: list[tuple[str, str]] = []
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            captured.append((question, query))
+            return lookup.WebLookupResult(
+                outcome=lookup.OUTCOME_OK,
+                block="WEB RESULTS\nMr. Robot is a drama thriller series.\nEND WEB RESULTS",
+                results=1,
+                kept_links=1,
+                chunks=1,
+                kept_chunks=1,
+                domains=("en.wikipedia.org",),
+                engine="html",
+            )
+
+    motor = FakeMotor()
+    # Turn 1: plain owner turn naming the subject (no web search triggered).
+    look1 = motor._web_step("verias Mr Robot?", "direct", decisions=None, speak=False)
+    assert not look1.searched
+    assert captured == []
+
+    # Turn 2: explicit web search without repeating the subject.
+    look2 = motor._web_step("busca en la web de que trata", "direct", decisions=None, speak=False)
+    assert look2.searched
+    assert len(captured) == 1
+    _question, query = captured[0]
+    assert "Mr Robot" in query
+    assert "de que trata" in query
+
+
+def test_web_step_subjectless_followup_without_prior_subject_returns_no_subject_note():
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    called = False
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            nonlocal called
+            called = True
+            return lookup.WebLookupResult(outcome=lookup.OUTCOME_OK, block="unused")
+
+    motor = FakeMotor()
+    look = motor._web_step("busca en la web de que trata", "direct", decisions=None, speak=False)
+    assert not called
+    assert look.note == prompt.no_subject_note("es")
+
+
+def test_web_step_named_query_does_not_leak_previous_subject():
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    captured: list[str] = []
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            captured.append(query)
+            return lookup.WebLookupResult(
+                outcome=lookup.OUTCOME_OK,
+                block="WEB RESULTS\nDocker is a container platform.\nEND WEB RESULTS",
+                results=1,
+                kept_links=1,
+                chunks=1,
+                kept_chunks=1,
+                domains=("docs.docker.com",),
+                engine="html",
+            )
+
+    motor = FakeMotor()
+    motor._web_step("verias Mr Robot?", "direct", decisions=None, speak=False)
+    motor._web_step("busca en la web que es Docker", "direct", decisions=None, speak=False)
+    assert len(captured) == 1
+    assert "Docker" in captured[0]
+    assert "Mr Robot" not in captured[0]
+
+
+# --- contextual LLM query rewriter (Option B) ------------------------------------------
+
+
+def test_recent_host_context_excludes_viewer_chat_and_strips_pasted_images():
+    from opencohost.core.web import rewrite
+
+    history = [
+        {"role": "user", "content": "viewer secret chat message", "source": "chat"},
+        {"role": "assistant", "content": "reply to viewer", "source": "chat"},
+        {"role": "user", "content": "sabes que es bloodborne?", "source": "direct"},
+        {"role": "assistant", "content": "Sí, es el soulsborne de FromSoftware.", "source": "direct"},
+        {"role": "user", "content": "agenda topic", "source": "kira-agenda"},
+        {"role": "user", "content": "y sobre los jefes?", "source": "ptt"},
+    ]
+    lines = rewrite.recent_host_context(history, max_messages=4)
+    joined = " ".join(text for _, text in lines)
+    assert "viewer secret" not in joined
+    assert "agenda topic" not in joined
+    assert "bloodborne" in joined.lower()
+    assert "jefes" in joined.lower()
+
+
+def test_parse_rewritten_query_cleans_think_quotes_and_rejects_refusals():
+    from opencohost.core.web import rewrite
+
+    assert rewrite.parse_rewritten_query(
+        '<think>User asked about Bloodborne</think>\n"Bloodborne jefes más conocidos"',
+        fallback="cuales son los jefes",
+    ) == "Bloodborne jefes más conocidos"
+
+    assert rewrite.parse_rewritten_query(
+        "Query: Mr Robot sinopsis serie\nExtra explanation line",
+        fallback="de que trata",
+    ) == "Mr Robot sinopsis serie"
+
+    assert rewrite.parse_rewritten_query(
+        "Lo siento, no puedo buscar en internet.",
+        fallback="cuales son los jefes",
+    ) == "cuales son los jefes"
+
+    assert rewrite.parse_rewritten_query(
+        "https://example.com/bad",
+        fallback="cuales son los jefes",
+    ) == "cuales son los jefes"
+
+
+def test_web_step_uses_contextual_rewriter_for_bloodborne_bosses_followup():
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    captured_queries: list[str] = []
+    rewrite_calls: list[list[dict]] = []
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+
+        def __init__(self):
+            self.historial = [
+                {"role": "user", "content": "sabes que es bloodborne?", "source": "direct"},
+                {"role": "assistant", "content": "Sí, conozco Bloodborne, el soulsborne de FromSoftware.", "source": "direct"},
+            ]
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+            rewrite_calls.append(messages)
+            return "Bloodborne jefes más conocidos"
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            captured_queries.append(query)
+            return lookup.WebLookupResult(
+                outcome=lookup.OUTCOME_OK,
+                block="WEB RESULTS\nFather Gascoigne and Lady Maria are iconic Bloodborne bosses.\nEND WEB RESULTS",
+                results=1,
+                kept_links=1,
+                chunks=1,
+                kept_chunks=1,
+                domains=("bloodborne.wiki.fextralife.com",),
+                engine="html",
+            )
+
+    motor = FakeMotor()
+    look = motor._web_step("puedes buscar cuales son los jefes que mas se conocen", "direct", decisions=None, speak=False)
+    assert look.searched
+    assert len(rewrite_calls) == 1
+    assert any("bloodborne" in m["content"].lower() for m in rewrite_calls[0])
+    assert captured_queries == ["Bloodborne jefes más conocidos"]
+
+
+def test_web_step_rewriter_falls_back_cleanly_on_error_and_skips_when_no_history():
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    captured: list[str] = []
+    rewrite_attempts = 0
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+
+        def __init__(self, history):
+            self.historial = history
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+            nonlocal rewrite_attempts
+            rewrite_attempts += 1
+            raise TimeoutError("rewrite timed out")
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            captured.append(query)
+            return lookup.WebLookupResult(
+                outcome=lookup.OUTCOME_OK,
+                block="WEB RESULTS\nDocker is a container platform.\nEND WEB RESULTS",
+                results=1,
+                kept_links=1,
+                chunks=1,
+                kept_chunks=1,
+                domains=("docs.docker.com",),
+                engine="html",
+            )
+
+    # Empty history -> skips rewriter completely (0 extra LLM calls).
+    m_empty = FakeMotor([])
+    m_empty._web_step("busca en la web que es Docker", "direct", decisions=None, speak=False)
+    assert rewrite_attempts == 0
+    assert captured == ["que es Docker"]
+
+    # With history + rewrite timeout -> falls back to deterministic query without failing.
+    m_hist = FakeMotor([
+        {"role": "user", "content": "sabes que es bloodborne?", "source": "direct"},
+        {"role": "assistant", "content": "Sí, conozco Bloodborne.", "source": "direct"},
+    ])
+    look = m_hist._web_step("busca en la web que es Docker", "direct", decisions=None, speak=False)
+    assert rewrite_attempts == 1
+    assert look.searched
+    assert captured[-1] == "que es Docker"
+
+
+def test_web_step_speaks_progress_line_while_search_runs_long_and_stops_on_completion():
+    import time as _time
+    from opencohost.core.engine import llm_engine_web
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    spoken_bridge: list[str] = []
+    spoken_progress: list[str] = []
+
+    class FakeMotor(WebTurnMixin):
+        _current_profile_locale = "es-MX"
+        _speech_router_enabled = True
+        _web_progress_interval_s = 0.03
+
+        def _web_enabled(self) -> bool:
+            return True
+
+        def _web_speak_bridge(self, clean: str, source: str) -> None:
+            spoken_bridge.append(clean)
+
+        def _web_speak_progress(self, line: str, source: str) -> None:
+            spoken_progress.append(line)
+
+        def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+            _time.sleep(0.08)
+            return lookup.WebLookupResult(
+                outcome=lookup.OUTCOME_OK,
+                block="WEB RESULTS\nBloodborne bosses.\nEND WEB RESULTS",
+                results=1,
+                kept_links=1,
+                chunks=1,
+                kept_chunks=1,
+                domains=("example.com",),
+                engine="html",
+            )
+
+    motor = FakeMotor()
+    look = motor._web_step("busca en la web Bloodborne bosses", "direct", decisions=None, speak=True)
+    assert look.searched
+    assert len(spoken_bridge) == 1
+    assert any("Sigo buscando" in line for line in spoken_progress), f"expected progress line, got {spoken_progress}"
+    count_at_done = len(spoken_progress)
+    _time.sleep(0.08)
+    assert len(spoken_progress) == count_at_done, "progress ticker kept firing after web step finished"
+    assert hasattr(llm_engine_web, "WEB_PROGRESS_LINES")
+
+
+def test_extract_topic_and_topic_carry_handles_all_real_followup_conversations_even_on_rewrite_timeout():
+    from opencohost.core.web import subject as web_subject
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    assert web_subject.extract_topic("sabes que es elden ring?") == "elden ring"
+    assert web_subject.extract_topic("sabes que es bloodborne?") == "bloodborne"
+    assert web_subject.extract_topic("que es nvidia parakeet") == "nvidia parakeet"
+    assert web_subject.extract_topic("que es look outside") == "look outside"
+    assert web_subject.extract_topic("verias Mr Robot?") == "Mr Robot"
+
+    assert web_subject.needs_topic_carry("que jefes son los mas dificiles segun la comunidad")
+    assert web_subject.needs_topic_carry("cuales son los jefes que mas se conocen")
+    assert web_subject.needs_topic_carry("cuales son sus alternativas")
+    assert web_subject.needs_topic_carry("el juego")
+    assert web_subject.needs_topic_carry("cual es la tematica")
+    assert web_subject.needs_topic_carry("what are the hardest bosses")
+
+    # Fresh topics must NEVER carry the previous topic.
+    assert not web_subject.needs_topic_carry("que es Docker")
+    assert not web_subject.needs_topic_carry("quien es Alan Turing")
+    assert not web_subject.needs_topic_carry("precio RTX 5090")
+    assert not web_subject.needs_topic_carry("jefes mas dificiles de Dark Souls")
+
+    def _run_pair(turn1: str, turn2: str) -> str:
+        captured: list[str] = []
+
+        class SlowNimMotor(WebTurnMixin):
+            _current_profile_locale = "es-MX"
+
+            def __init__(self):
+                self.historial = [
+                    {"role": "user", "content": turn1, "source": "direct"},
+                    {"role": "assistant", "content": "Sí, lo conozco.", "source": "direct"},
+                ]
+
+            def _web_enabled(self) -> bool:
+                return True
+
+            def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+                raise TimeoutError("NIM queued")
+
+            def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+                captured.append(query)
+                return lookup.WebLookupResult(
+                    outcome=lookup.OUTCOME_OK,
+                    block="WEB RESULTS\nMatch.\nEND WEB RESULTS",
+                    results=1,
+                    kept_links=1,
+                    chunks=1,
+                    kept_chunks=1,
+                    domains=("example.com",),
+                    engine="html",
+                )
+
+        m = SlowNimMotor()
+        m._web_step(turn1, "direct", decisions=None, speak=False)
+        m._web_step(turn2, "direct", decisions=None, speak=False)
+        assert len(captured) == 1
+        return captured[0]
+
+    q_elden = _run_pair("sabes que es elden ring?", "puedes buscar que jefes son los mas dificiles segun la comunidad")
+    assert "elden ring" in q_elden.lower() and "jefes" in q_elden.lower()
+
+    q_bb = _run_pair("sabes que es bloodborne?", "puedes buscar cuales son los jefes que mas se conocen")
+    assert "bloodborne" in q_bb.lower() and "jefes" in q_bb.lower()
+
+    q_para = _run_pair("que es nvidia parakeet", "puedes buscar cuales son sus alternativas")
+    assert "nvidia parakeet" in q_para.lower() and "alternativas" in q_para.lower()
+
+    q_look = _run_pair("que es look outside", "puedes buscar en internet el juego")
+    assert "look outside" in q_look.lower() and "juego" in q_look.lower()
+
+    q_fresh = _run_pair("sabes que es elden ring?", "busca en la web que es Docker")
+    assert "docker" in q_fresh.lower() and "elden ring" not in q_fresh.lower()
+
+
+# --- 3-bug bundle: trigger vocab, hesitant Laya rescue, LRU ActiveTopicStack -----------
+
+
+def test_trigger_recognizes_buscalas_vuelvelo_a_buscar_and_busca_curiosidades():
+    from opencohost.core.web import trigger
+
+    assert trigger.is_bare_search_command("buscalas")
+    assert trigger.is_bare_search_command("esta bien buscalas")
+    assert trigger.is_bare_search_command("vuelvelo a buscar ahora")
+    assert trigger.web_rule("al lenguaje vuelvelo a buscar ahora") == trigger.SEARCH
+    assert trigger.web_rule("si busca curiosidades sobre eso") == trigger.SEARCH
+
+
+def test_lookup_rescues_lexically_matching_links_when_laya_is_hesitant_above_zero():
+    # Spanish/bilingual queries can score 0.15-0.25 on an English ONNX classifier
+    # even when title+snippet match the query stems. Only hard-zero spam stays empty.
+    result, _net = _run(
+        query="patch boss",
+        question="busca sobre patch boss",
+        backend=Laya({"News A": 0.18, "Wiki B": 0.15, "Shop C": 0.02}),
+    )
+    assert result.outcome == "ok"
+    assert result.kept_links >= 1
+    assert "news.example.com" in result.domains or "wiki.example.org" in result.domains
+
+
+def test_active_topic_stack_survives_confirmations_clarifications_ttl_and_sudden_switches():
+    from opencohost.core.web import subject as web_subject
+    from opencohost.core.engine import llm_engine_web
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    stack = web_subject.ActiveTopicStack(maxlen=5)
+    stack.observe("que es rust")
+    assert stack.current().lower() == "rust"
+
+    # Confirmations / filler never erase the active topic.
+    stack.observe("si")
+    stack.observe("esta bien buscalas")
+    assert stack.current().lower() == "rust"
+
+    # Clarification enriches the active topic instead of replacing it with noise.
+    stack.observe("al lenguaje")
+    assert "rust" in stack.current().lower() and "lenguaje" in stack.current().lower()
+
+    # Sudden topic switch moves straight to the top with zero inertia.
+    stack.observe("sabes que es elden ring?")
+    assert stack.current().lower() == "elden ring"
+
+    # End-to-end WebTurnMixin surviving >45s gap + "si" turn (no TTL amnesia).
+    clock = [100.0]
+    captured: list[str] = []
+    orig_mono = llm_engine_web._monotonic
+    llm_engine_web._monotonic = lambda: clock[0]
+    try:
+        class StackMotor(WebTurnMixin):
+            _current_profile_locale = "es-MX"
+
+            def _web_enabled(self) -> bool:
+                return True
+
+            def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+                raise TimeoutError("NIM slow")
+
+            def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+                captured.append(query)
+                return lookup.WebLookupResult(
+                    outcome=lookup.OUTCOME_OK,
+                    block="WEB RESULTS\nRust programming language games.\nEND WEB RESULTS",
+                    results=1,
+                    kept_links=1,
+                    chunks=1,
+                    kept_chunks=1,
+                    domains=("arewegameyet.rs",),
+                    engine="html",
+                )
+
+        m = StackMotor()
+        m._web_step("que es rust", "direct", decisions=None, speak=False)
+        clock[0] += 20.0
+        m._web_step("al lenguaje vuelvelo a buscar ahora", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower() and "lenguaje" in captured[-1].lower()
+
+        # Advance 180 seconds (well past old 45s TTL) + a short "si" confirmation turn.
+        clock[0] += 180.0
+        m._web_step("si", "direct", decisions=None, speak=False)
+        clock[0] += 20.0
+        m._web_step("puedes buscar que juegos usan ese lengujae", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower()
+        assert "juegos" in captured[-1].lower()
+    finally:
+        llm_engine_web._monotonic = orig_mono
+
+
+def test_trigger_english_bare_trailing_and_imperative_parity():
+    from opencohost.core.web import trigger
+
+    # Bare search commands & retries in English
+    for bare in (
+        "look them up",
+        "alright, look them up",
+        "fine, search it again",
+        "yeah search for them now",
+        "try searching it again",
+        "google them",
+        "look it up again",
+    ):
+        assert trigger.is_bare_search_command(bare), f"Expected bare command: {bare!r}"
+
+    # Trailing retry / search with clarification prefix in English
+    for trailing in (
+        "the language, look it up again",
+        "the programming language, search it again now",
+        "I meant the language, look it up again",
+        "its mascot, can you look it up",
+    ):
+        assert trigger.web_rule(trailing) == trigger.SEARCH, f"Expected SEARCH for trailing: {trailing!r}"
+
+    # Natural English imperatives without repeating "online" / "on google"
+    for imp in (
+        "can you search what games use that language",
+        "can you look up what its mascot is",
+        "yes, look up fun facts about that",
+        "search for trivia about it",
+        "can you look up the hardest bosses according to the community",
+        "look up latest Elden Ring news",
+    ):
+        assert trigger.web_rule(imp) == trigger.SEARCH, f"Expected SEARCH for imperative: {imp!r}"
+
+    # Safety guards: ordinary in-game / non-web sentences must remain NO_SEARCH
+    for safe in (
+        "search the room for loot",
+        "look up at the sky",
+        "look for the sword in the chest",
+        "I am searching for a match right now",
+    ):
+        assert trigger.web_rule(safe) == trigger.NO_SEARCH, f"Expected NO_SEARCH for: {safe!r}"
+
+
+def test_english_active_topic_stack_full_conversation_flow():
+    from opencohost.core.engine import llm_engine_web
+    from opencohost.core.engine.llm_engine_web import WebTurnMixin
+
+    clock = [200.0]
+    captured: list[str] = []
+    orig_mono = llm_engine_web._monotonic
+    llm_engine_web._monotonic = lambda: clock[0]
+    try:
+        class EnStackMotor(WebTurnMixin):
+            _current_profile_locale = "en-US"
+
+            def _web_enabled(self) -> bool:
+                return True
+
+            def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+                raise TimeoutError("cloud slow")
+
+            def _web_lookup(self, question: str, query: str) -> lookup.WebLookupResult:
+                captured.append(query)
+                return lookup.WebLookupResult(
+                    outcome=lookup.OUTCOME_OK,
+                    block="WEB RESULTS\nResult snippet.\nEND WEB RESULTS",
+                    results=1,
+                    kept_links=1,
+                    chunks=1,
+                    kept_chunks=1,
+                    domains=("example.org",),
+                    engine="html",
+                )
+
+        m = EnStackMotor()
+        m._web_step("what's Rust?", "direct", decisions=None, speak=False)
+        clock[0] += 15.0
+        m._web_step("can you look up what its mascot is", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower() and "mascot" in captured[-1].lower()
+
+        clock[0] += 15.0
+        m._web_step("I meant the language, look it up again", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower() and "language" in captured[-1].lower()
+
+        # Survive >45s gap + short English confirmation + bare "alright, look them up"
+        clock[0] += 180.0
+        m._web_step("yes", "direct", decisions=None, speak=False)
+        clock[0] += 10.0
+        m._web_step("alright, look them up", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower() and "language" in captured[-1].lower()
+
+        clock[0] += 10.0
+        m._web_step("can you search what games use that language", "direct", decisions=None, speak=False)
+        assert "rust" in captured[-1].lower() and "games" in captured[-1].lower()
+
+        # Sudden topic switch with zero inertia
+        clock[0] += 10.0
+        m._web_step("tell me about Elden Ring", "direct", decisions=None, speak=False)
+        clock[0] += 10.0
+        m._web_step("can you look up what are the hardest bosses", "direct", decisions=None, speak=False)
+        assert "elden ring" in captured[-1].lower()
+        assert "bosses" in captured[-1].lower()
+        assert "rust" not in captured[-1].lower()
+    finally:
+        llm_engine_web._monotonic = orig_mono
+
+
+
+
+
+
+

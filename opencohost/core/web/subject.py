@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import threading
 import unicodedata
 from typing import NamedTuple
 
@@ -164,7 +165,9 @@ _GENERIC_NOUNS = frozenset(
 )
 _CHAT_WORDS = frozenset(
     "hola tal buenas buenos dias tardes noches gracias adios chao bien listo hey "
-    "hi hello thanks thank bye goodbye good morning afternoon evening nice ok okay".split()
+    "claro perfecto genial entendido exacto vale dale si no "
+    "hi hello thanks thank bye goodbye good morning afternoon evening nice ok okay "
+    "yes yeah yep yup sure alright fine nope nah cool great awesome gotcha understood".split()
 )
 _SCAFFOLD_WORDS = frozenset("este esta ano sean sea mas this that these those year more very some any".split())
 _CUE_TOKEN = re.compile(
@@ -191,6 +194,28 @@ def _stop_words() -> frozenset:
 
 # Nouns that name no subject on their own; with a recency cue they make a refinement.
 _REFINE_EXTRA = frozenset({"noticias", "modelos", "news", "models"})
+
+# Predicates, question words, and generic attributes that ask *about* an omitted
+# or anaphoric topic ("de que trata", "quien la hizo", "what is it about") without
+# naming any concrete subject of their own.
+_SUBJECTLESS_PREDICATES = frozenset(
+    "se me te le les nos su sus mi mis tu tus llama llaman ve ven puede pueden "
+    "alternativa alternativas opcion opciones juego pelicula serie libro anime tematica tema genero "
+    "trata tratan va van es son fue fueron hizo hicieron creo crearon dirigio "
+    "salio sale salen estrena estreno cuesta vale dura ver verla verlo verlas verlos "
+    "jugar jugarla jugarlo significa consiste funciona sirve tiene tienen pasa paso "
+    "ocurrio opina opinan dicen dice resumen sinopsis historia trama fecha precio "
+    "temporadas capitulos episodios reparto actores director autor creador lanzamiento "
+    "version actualizacion resena critica calificacion nota puntaje "
+    "curiosidades mascota jefes personajes "
+    "donde cuando quien quienes cuanto cuantos cuantas como cual cuales que porque por "
+    "eso esto ese esa esos esas estos estas aquello ello "
+    "about mean means is are was were did does do made created directed wrote "
+    "release released comes come out cost costs worth long watch play work works "
+    "happen happened plot summary synopsis story date price seasons episodes cast "
+    "author creator rating reviews review facts trivia fun curiosities mascot bosses characters alternatives options "
+    "where when who what how why which it its that this them they he she him her".split()
+)
 
 
 def _split(query: str, extra_generic: frozenset = frozenset()) -> tuple[list[str], list[str]]:
@@ -220,6 +245,203 @@ def is_refinement(query) -> bool:
         return False
     subject, cues = _split(query, _REFINE_EXTRA)
     return not subject and bool(cues)
+
+
+def is_subjectless_followup(query) -> bool:
+    """A follow-up question that names no topic of its own (e.g. "de que trata",
+    "quien la hizo", "what is it about") and therefore needs the previous owner
+    turn's subject before searching."""
+    if not isinstance(query, str) or not query.strip():
+        return False
+    tokens = re.findall(r"\w+", fold(query))
+    if not tokens:
+        return False
+    subject, _cues = _split(query, _SUBJECTLESS_PREDICATES)
+    return not subject
+
+
+_TOPIC_LEAD = re.compile(
+    r"^(?:(?:oye|hey|kira|por\s+favor|porfa|please)\b[\s,.:;!¡?¿]*)*"
+    r"(?:sabes\s+(?:que|quien)\s+(?:es|son|fue|fueron)"
+    r"|(?:que|quien)\s+(?:es|son|fue|fueron)"
+    r"|has\s+(?:visto|jugado|escuchado|probado|leido)(?:\s+(?:de|sobre|a))?"
+    r"|(?:conoces|verias|viste|jugaste|escuchaste|probaste|recomiendas)"
+    r"|(?:hablame|cuentame|dime)\s+(?:de|sobre|acerca\s+de)"
+    r"|do\s+you\s+(?:know(?:\s+(?:what|who)\s+(?:is|are))?|recommend)"
+    r"|(?:what|who)(?:'s|\s+(?:is|are|was|were))"
+    r"|tell\s+me\s+about"
+    r"|explain(?:\s+to\s+me)?(?:\s+about)?"
+    r"|have\s+you\s+(?:played|seen|watched|heard\s+of|read|tried)"
+    r"|would\s+you\s+(?:watch|play))\s+",
+    re.IGNORECASE,
+)
+
+_DEFINITIONAL_NEW = re.compile(
+    r"^(?:(?:que|quien|quienes)\s+(?:es|son|fue|fueron)"
+    r"|(?:what|who)(?:'s|\s+(?:is|are|was|were)))\s+(?!(?:el|la|los|las|the)\b)\S",
+    re.IGNORECASE,
+)
+
+_INTERROGATIVE_LEAD = re.compile(
+    r"^(?:que|cual|cuales|cuanto|cuantos|cuantas|quien|quienes|donde|cuando|como"
+    r"|what|which|who|where|when|how)\b",
+    re.IGNORECASE,
+)
+
+_DEFINITE_ARTICLE = re.compile(r"\b(?:el|la|los|las|del|al|the)\b", re.IGNORECASE)
+_POSSESSIVE_ANAPHORA = re.compile(
+    r"\b(?:su|sus|ese|esa|esos|esas|eso|esto|aquel|aquella|its|their|that|this|them)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_topic(turn_text: str) -> str:
+    """Strip conversational openers ('sabes que es elden ring?') -> 'elden ring'."""
+    if not isinstance(turn_text, str):
+        return ""
+    cleaned = " ".join(w.strip(_TOKEN_EDGE) for w in turn_text.split() if w.strip(_TOKEN_EDGE))
+    if not cleaned:
+        return ""
+    folded = fold(cleaned)
+    m = _TOPIC_LEAD.match(folded)
+    if m:
+        # Preserve original casing from the same character offset (fold is 1:1 char).
+        tail = cleaned[m.end():].strip(_TOKEN_EDGE).strip()
+        if tail:
+            return tail[:QUERY_MAX_CHARS]
+    return cleaned[:QUERY_MAX_CHARS]
+
+
+def _has_named_entity(query: str) -> bool:
+    """True if query contains a non-initial capitalized word or alphanumeric model/number token."""
+    words = [w.strip(_TOKEN_EDGE) for w in query.split() if w.strip(_TOKEN_EDGE)]
+    for idx, w in enumerate(words):
+        if any(ch.isdigit() for ch in w):
+            return True
+        if idx > 0 and w[:1].isupper() and any(ch.isalpha() for ch in w):
+            return True
+        if len(w) >= 2 and w.isupper():
+            return True
+    return False
+
+
+def needs_topic_carry(query) -> bool:
+    """True when a search query lacks its own named topic and refers to the
+    recent conversation ('que jefes son los mas dificiles segun la comunidad',
+    'cuales son sus alternativas', 'el juego', 'what are the hardest bosses')."""
+    if not isinstance(query, str) or not query.strip():
+        return False
+    if is_subjectless_followup(query):
+        return True
+    cleaned = " ".join(w.strip(_TOKEN_EDGE) for w in query.split() if w.strip(_TOKEN_EDGE))
+    folded = fold(cleaned)
+    if _DEFINITIONAL_NEW.match(folded):
+        return False
+    if _has_named_entity(cleaned):
+        return False
+    if _POSSESSIVE_ANAPHORA.search(folded):
+        return True
+    if _INTERROGATIVE_LEAD.match(folded) and _DEFINITE_ARTICLE.search(folded):
+        return True
+    return False
+
+
+_CLARIFICATION_RE = re.compile(
+    r"^(?:(?:i\s+meant|meant|me\s+referia\s+a|me\s+refiero\s+a)\s+)?"
+    r"(?:(?:al|a\s+la|el|la|los|las|del|de\s+la|de|sobre\s+el|sobre\s+la|the|about\s+the)\s+)?"
+    r"(?:lenguaje(?:\s+de\s+programacion)?|programacion|juego|videojuego|serie|pelicula|peli|anime|manga|libro|banda|cancion|modelo|herramienta|libreria|framework"
+    r"|language|programming\s+language|game|video\s+game|series|tv\s+series|show|tv\s+show|movie|film|book|band|song|model|tool|library)$",
+    re.IGNORECASE,
+)
+
+_CLARIFICATION_STRIP = re.compile(
+    r"^(?:(?:i\s+meant|meant|me\s+referia\s+a|me\s+refiero\s+a)\s+)?"
+    r"(?:(?:al|a\s+la|el|la|los|las|del|de\s+la|de|sobre\s+el|sobre\s+la|the|about\s+the)\s+)?",
+    re.IGNORECASE,
+)
+
+
+def is_clarification(text) -> bool:
+    """Short category disambiguator ('al lenguaje', 'the language', 'I meant the language')
+    that refines the current active topic rather than replacing it."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    cleaned = " ".join(w.strip(_TOKEN_EDGE) for w in text.split() if w.strip(_TOKEN_EDGE))
+    if not cleaned or len(cleaned.split()) > 6:
+        return False
+    return bool(_CLARIFICATION_RE.match(fold(cleaned)))
+
+
+class ActiveTopicStack:
+    """Thread-safe LRU stack of recent explicit conversation topics (in memory
+    only, no TTL amnesia, immune to confirmations like 'si' or 'buscalas')."""
+
+    def __init__(self, maxlen: int = 5) -> None:
+        self._maxlen = max(1, int(maxlen))
+        self._topics: list[str] = []
+        self._lock = threading.Lock()
+
+    def current(self) -> str:
+        with self._lock:
+            return self._topics[-1] if self._topics else ""
+
+    def clear(self) -> None:
+        with self._lock:
+            self._topics.clear()
+
+    def observe(self, turn_text: str) -> None:
+        """Update the LRU stack from one owner turn (never raises)."""
+        if not isinstance(turn_text, str) or not turn_text.strip():
+            return
+        from opencohost.core.web.trigger import is_bare_search_command
+
+        cleaned = " ".join(w.strip(_TOKEN_EDGE) for w in turn_text.split() if w.strip(_TOKEN_EDGE))
+        if not cleaned or is_bare_search_command(cleaned):
+            return
+        # Short clarification ('al lenguaje', 'el juego') enriches the active top topic.
+        if is_clarification(cleaned):
+            qual = _CLARIFICATION_STRIP.sub("", fold(cleaned)).strip()
+            if not qual:
+                return
+            with self._lock:
+                if not self._topics:
+                    return
+                top = self._topics[-1]
+                if qual not in fold(top).split():
+                    self._topics[-1] = f"{top} {qual}"[:QUERY_MAX_CHARS].strip()
+            return
+        # Follow-ups without a new subject ask *about* the active topic — do not replace it.
+        if needs_topic_carry(cleaned):
+            return
+        topic = extract_topic(cleaned)
+        if not topic or len(topic) < 2:
+            return
+        if is_subjectless_followup(topic) or is_bare_search_command(topic):
+            return
+        words = _split(topic)[0]
+        if not words:
+            return
+        folded_topic = fold(topic)
+        with self._lock:
+            self._topics = [t for t in self._topics if fold(t) != folded_topic]
+            self._topics.append(topic[:QUERY_MAX_CHARS].strip())
+            if len(self._topics) > self._maxlen:
+                self._topics = self._topics[-self._maxlen:]
+
+
+def merge_followup_query(base: str, followup: str) -> str:
+    """Attach a follow-up question to the extracted previous owner topic."""
+    clean_base = extract_topic(base)
+    clean_followup = " ".join(
+        w.strip(_TOKEN_EDGE) for w in followup.split() if w.strip(_TOKEN_EDGE)
+    )
+    if not clean_base:
+        return clean_followup[:QUERY_MAX_CHARS].strip()
+    if not clean_followup or fold(clean_followup) in fold(clean_base):
+        return clean_base[:QUERY_MAX_CHARS].strip()
+    if fold(clean_base) in fold(clean_followup):
+        return clean_followup[:QUERY_MAX_CHARS].strip()
+    return f"{clean_base} {clean_followup}"[:QUERY_MAX_CHARS].strip()
 
 
 def _cue_words(query: str) -> list[str]:
@@ -272,6 +494,10 @@ def resolve_followup_subject(
     if strict or not live:
         return ""
     last = live[-1]
-    if now - last.ts <= PLAIN_TURN_TTL_S and content_word_count(last.query) >= 2:
-        return last.query
+    if now - last.ts <= PLAIN_TURN_TTL_S:
+        if content_word_count(last.query) >= 2:
+            return last.query
+        topic = extract_topic(last.query)
+        if topic and len(topic) >= 3 and not is_subjectless_followup(topic):
+            return topic
     return ""

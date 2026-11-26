@@ -46,16 +46,16 @@ _MEDIUM = r"(?:internet|la\s+web|la\s+red|web|google|reddit|linea|duckduckgo|bro
 _EN_PREP_MEDIUM = r"(?:in|on|at)\s+(?:the\s+)?(?:web|internet|browser|google|reddit|duckduckgo)"
 _EN_MEDIUM = r"(?:online|(?:(?:in|on|at)\s+)?(?:the\s+)?(?:web|internet|browser|google|reddit|duckduckgo))"
 _COMMANDS = re.compile(
-    r"\b(?:busca|buscar|buscame|buscalo|buscala|buscalos|busquen|buscarlo|buscarla|investiga|investigar|investigarlo|mira|consulta|" + _STT_VERBS + r")"
+    r"\b(?:busca|buscar|buscame|buscalo|buscala|buscalos|buscalas|busquen|buscarlo|buscarla|buscarlos|buscarlas|investiga|investigar|investigarlo|investigarla|investigalos|investigalas|mira|consulta|" + _STT_VERBS + r")"
     r"\s+(?:(?:eso|esto|algo)\s+)?(?:en|por)\s+" + _MEDIUM + r"\b(?:\s+(?:sobre|acerca de|por))?"
     r"|\bgooglea(?:lo|me|la)?\b"
-    r"|\b(?:(?:do|run|make)\s+(?:a\s+)?)?(?:quick\s+)?search\s+(?:(?:it|that|this)\s+)?" + _EN_MEDIUM + r"(?:\s+(?:for|about))?\b"
+    r"|\b(?:(?:do|run|make)\s+(?:a\s+)?)?(?:quick\s+)?search\s+(?:(?:for\s+)?(?:it|that|this|them)\s+)?" + _EN_MEDIUM + r"(?:\s+(?:for|about))?\b"
     r"|\b(?:quick\s+)?look\s+(?:(?:it|this|that|them)\s+)?up\s+" + _EN_MEDIUM + r"(?:\s+(?:for|about))?\b"
     r"|\b(?:(?:take|have)\s+a\s+)?(?:quick\s+)?look(?:\s+out)?\s+" + _EN_PREP_MEDIUM + r"(?:\s+(?:for|about))?\b"
     r"|\b(?:(?:do|run|make)\s+(?:a\s+)?)?(?:quick\s+)?web\s*search(?:\s+(?:on\s+(?:google|reddit|the\s+web|the\s+internet|the\s+browser)\s+)?(?:for|about)?)?\b"
-    r"|\bfind(?:\s+out)?\s+(?:(?:it|this|that)\s+)?online(?:\s+(?:for|about))?\b"
-    r"|\bcheck\s+(?:(?:it|that|this)\s+)?(?:online|(?:on|in)\s+(?:the\s+)?(?:web|internet|browser|google))(?:\s+(?:for|about))?\b"
-    r"|\bgoogle\s+(?:it|that|this|for)\b"
+    r"|\bfind(?:\s+out)?\s+(?:(?:it|this|that|them)\s+)?online(?:\s+(?:for|about))?\b"
+    r"|\bcheck\s+(?:(?:it|that|this|them)\s+)?(?:online|(?:on|in)\s+(?:the\s+)?(?:web|internet|browser|google))(?:\s+(?:for|about))?\b"
+    r"|\bgoogle\s+(?:it|that|this|them|for)\b"
 )
 _NEWS = re.compile(
     r"\bque hay de nuevo\b"
@@ -73,17 +73,18 @@ _EDGE = " \t¿?¡!.,;:\"'«»"
 # filler and the wake word. Its span is what search_query strips.
 _SENTENCE_END = re.compile(r"[.!?¡¿;]+\s*")
 _LEAD = re.compile(
-    r"(?:\s*(?:oye|hey|ok|okay|vale|bueno|ahora|entonces|y|pero|pues|kira|por favor|porfa"
-    r"|please|pls|can\s+you|could\s+you|would\s+you|will\s+you|help\s+me"
+    r"(?:\s*(?:oye|hey|ok|okay|vale|bueno|esta\s+bien|ahora|entonces|y|pero|pues|si|kira|por favor|porfa"
+    r"|yes|yeah|yep|sure|alright|all\s+right|fine|please|pls|can\s+you|could\s+you|would\s+you|will\s+you|help\s+me"
     r"|puedes(?:\s+tu)?|podrias|podras|me\s+(?:puedes|podrias)|ayudame\s+a|quiero\s+que(?:\s+me)?)\b[\s,.:;!¡?¿]*)*\s*"
 )
 _IMPERATIVE = re.compile(
-    r"(?:busca|buscame|buscanos|buscalo|buscala|buscalos|busquen|busques|" + _STT_VERBS + r"|"
-    r"buscar|buscarlo|buscarla|buscarme|"
-    r"investiga|investigame|investigalo|investigar|investigarlo)\b"
-    r"(?P<medium>\s+(?:(?:en|por)\s+)?(?:internet|la\s+web|la\s+red|web|google|reddit|duckduckgo)\b)?"
-    r"(?P<about>\s+(?:sobre|acerca de)\b)?"
-    r"(?P<que>\s+que\b)?"
+    r"(?:busca|buscame|buscanos|buscalo|buscala|buscalos|buscalas|busquen|busques|" + _STT_VERBS + r"|"
+    r"buscar|buscarlo|buscarla|buscarlos|buscarlas|buscarme|"
+    r"investiga|investigame|investigalo|investigar|investigarlo|"
+    r"look\s+up|search(?:\s+for)?|google|research)\b"
+    r"(?P<medium>\s+(?:(?:en|por|in|on|at)\s+)?(?:the\s+)?(?:internet|la\s+web|la\s+red|web|google|reddit|duckduckgo|browser|online)\b)?"
+    r"(?P<about>\s+(?:sobre|acerca de|about)\b)?"
+    r"(?P<que>\s+(?:que|what|which|who|when|where|how|why)\b)?"
 )
 # K3: "busca/buscar si <algo> tiene|existe|sale|hay algo..." is an information
 # query; "busca si hay enemigos" (in-game action) is not, so a bare "si" never
@@ -110,13 +111,18 @@ _TOPIC_CUE = re.compile(
     r"\b(?:tendencias?|recomiend\w*|recomendad\w*|actualmente|hoy en dia|ultim\w+|novedad\w*"
     r"|mejores|lo mejor|nuevos|nuevas|inteligencia artificial|modelos de|agentes de"
     r"|recientes|lanzad[oa]s?"
+    r"|latest|newest|trending|recommended|best|top|hardest|recent|released"
     r"|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre"
+    r"|january|february|march|april|june|july|august|september|october|november|december"
     r"|(?:19|20)\d\d|dos mil)\b"
 )
 _TOPIC_WINDOW = re.compile(r"(?:\s+\S+){1,9}")
 _FOLLOW = re.compile(
-    r"\s+(?:quien|quienes|cuando|cual|cuales|cuanto|cuanta|cuantos|cuantas|como|por que"
-    r"|noticias|informacion|info|datos|ultim[oa]s?)\b"
+    r"\s+(?:(?:the|some|any|fun)\s+)?"
+    r"(?:quien|quienes|cuando|cual|cuales|cuanto|cuanta|cuantos|cuantas|como|por que"
+    r"|noticias|informacion|info|datos|ultim[oa]s?"
+    r"|curiosidades|sinopsis|resumen|historia|alternativas|jefes|personajes"
+    r"|news|information|facts|trivia|details|synopsis|summary|history|alternatives|bosses|characters|mascot|reviews?|ratings?)\b"
 )
 
 # Noun forms (web-trigger-vocab-20261010 T1): "búsqueda web de...", "búsqueda en internet..."
@@ -134,18 +140,24 @@ _WEB_SOURCE = re.compile(
     r"(?:\s+sobre)?",
 )
 
-# Trailing ask (web-trigger-vocab-20261010 T1): "..., puedes buscarlo"
+# Trailing ask (web-trigger-vocab-20261010 T1): "..., puedes buscarlo", "the language, look it up again"
 _TRAILING_ASK = re.compile(
-    r"[,]?\s*(?:(?:puedes|podrias)\s+)?(?:buscarlo|buscarla|buscalo|buscala|investigarlo|investigalo|" + _STT_VERBS + r")"
-    r"(?:\s+(?:en|por)\s+" + _MEDIUM + r")?"
-    r"(?:\s+(?:por favor|porfa))?[\s.?!]*$",
+    r"[,]?\s*(?:(?:puedes|podrias|can\s+you|could\s+you|would\s+you|please|pls|try)\s+)?(?:"
+    r"vuelve(?:lo|la|los|las)?\s+a\s+buscar(?:lo|la|los|las)?"
+    r"|buscarlo|buscarla|buscarlos|buscarlas|buscalo|buscala|buscalos|buscalas|investigarlo|investigalo|" + _STT_VERBS +
+    r"|look\s+(?:it|that|this|them)\s+up"
+    r"|search(?:\s+for)?\s+(?:it|that|this|them)"
+    r"|searching(?:\s+for)?\s+(?:it|that|this|them)"
+    r"|google\s+(?:it|that|this|them))"
+    r"(?:\s+(?:(?:en|por|in|on|at)\s+)?" + _MEDIUM + r"|\s+online)?"
+    r"(?:\s+(?:ahora|ya|de nuevo|otra vez|por favor|porfa|again|now|please|one\s+more\s+time))*[\s.?!]*$",
     re.IGNORECASE,
 )
 
 # Leading fillers to strip in query cleanup (web-trigger-vocab-20261010 T2): "pero", "y", "oye", etc.
 _LEADING_FILLER = re.compile(
-    r"^\s*(?:(?:pero|pues|y|oye|hey|ok|okay|vale|bueno|ahora|entonces|por favor|porfa|puedes|podrias"
-    r"|please|pls|can\s+you|could\s+you|would\s+you|will\s+you)\b[\s,.:;!¡?¿]*)+",
+    r"^\s*(?:(?:pero|pues|y|oye|hey|ok|okay|vale|bueno|esta\s+bien|ahora|entonces|por favor|porfa|puedes|podrias"
+    r"|yes|yeah|yep|sure|alright|all\s+right|fine|please|pls|can\s+you|could\s+you|would\s+you|will\s+you)\b[\s,.:;!¡?¿]*)+",
     re.IGNORECASE,
 )
 
@@ -154,31 +166,35 @@ _LEADING_FILLER = re.compile(
 _FILLER = frozenset(
     "por favor porfa porfis eso esto lo la el algo si ok okay vale dale ya kira oye hey ahora "
     "tambien mejor entonces bueno pues y pero en de web internet google red reddit busca buscalo buscala "
-    "busquela busquelo pusquela pusquelo puscala puscalo buscalos busquen buscar buscarlo buscarla investiga investigalo investigarla investigar "
-    "investigarlo busqueda busquedas dice dicen opina opinan comentan sobre que "
+    "busquela busquelo pusquela pusquelo puscala puscalo buscalos buscalas busquen buscar buscarlo buscarla buscarlos buscarlas "
+    "investiga investigalo investigarla investigalos investigalas investigar investigarlo vuelve vuelvelo vuelvela "
+    "busqueda busquedas dice dicen opina opinan comentan sobre que "
     "puedes podrias ayudame quiero tu me te "
-    "please it that this for now then and the on online browser websearch in at of up out you".split()
+    "please it that this them for now then and the on online browser websearch in at of up out you".split()
 )
 
 
-# A bare search command ("búscalo", "haz la búsqueda"): it names no subject, so
+# A bare search command ("búscalo", "haz la búsqueda", "look them up"): it names no subject, so
 # the engine resolves one from the owner's recent turns. Not a rule `search`
 # by itself: with no subject there is nothing to look up.
 _BARE_LEAD = re.compile(
-    r"^(?:(?:si|ok|okay|vale|dale|ya|bueno|oye|hey|kira|entonces|pues|pero|y|por favor|porfa"
-    r"|puedes|podrias|yes|sure|please|pls|can\s+you|could\s+you|would\s+you|will\s+you)\b[\s,.:;!¡?¿]*)*"
+    r"^(?:(?:si|ok|okay|vale|dale|ya|bueno|esta\s+bien|oye|hey|kira|entonces|pues|pero|y|por favor|porfa"
+    r"|puedes|podrias|yes|yeah|yep|sure|alright|all\s+right|fine|please|pls|can\s+you|could\s+you|would\s+you|will\s+you)\b[\s,.:;!¡?¿]*)*"
 )
 _BARE_TAIL = r"(?:\s+(?:ahora|ya|de nuevo|otra vez|por favor|porfa|now|again|please|one\s+more\s+time))*"
 _BARE_MEDIUM = (
     r"(?:\s+(?:online|(?:(?:en|por|in|on|at)\s+)?(?:the\s+)?(?:internet|la\s+web|la\s+red|web|google|reddit|duckduckgo|browser)))?"
 )
 _BARE_COMMAND = re.compile(
-    r"^(?:(?:buscalo|buscala|buscarlo|buscarla|investigalo|busca\s+eso|buscame\s+eso|" + _STT_VERBS + r")"
+    r"^(?:(?:buscalo|buscala|buscalos|buscalas|buscarlo|buscarla|buscarlos|buscarlas|investigalo|investigalos|investigalas|"
+    r"vuelve(?:lo|la|los|las)?\s+a\s+buscar(?:lo|la|los|las)?|busca\s+eso|buscame\s+eso|" + _STT_VERBS + r")"
     r"|(?:haz|hazme|realiza|realizame|ejecuta|lanza|hacer|realizar)\s+"
     r"(?:la|una|esa|otra|de\s+nuevo\s+la)\s+busqueda"
-    r"|google\s+(?:it|that|this)"
-    r"|look\s+(?:it|that|this)\s+up"
-    r"|search\s+(?:it|that|this)"
+    r"|google\s+(?:it|that|this|them)"
+    r"|look\s+(?:it|that|this|them)\s+up"
+    r"|search\s+(?:for\s+)?(?:it|that|this|them)"
+    r"|(?:try\s+)?(?:search|searching|look)\s+(?:(?:for\s+)?(?:it|that|this|them)\s+)?again"
+    r"|re-?search\s+(?:it|that|this|them)"
     r"|web\s*search"
     r"|(?:search|look)\s+again"
     r"|check\s+online)"
@@ -199,7 +215,7 @@ def is_bare_search_command(text) -> bool:
 # from _FILLER, which the rule's trailing-ask logic also reads.
 _QUERY_FILLER = _FILLER | frozenset(
     "realiza realizar realizame haz hacer hazme ejecuta ejecutar lanza una un otra esa ese si "
-    "can could would will quick search look find check google again".split()
+    "yes yeah yep sure alright fine try can could would will quick search look find check google again".split()
 )
 
 
@@ -286,8 +302,14 @@ def _trailing_ask(folded: str) -> bool:
     if re.search(r"\b(?:en|por)\s+" + _MEDIUM + r"\b", m.group(0)) or re.search(r"\b" + _MEDIUM + r"\b", prefix):
         return True
     content_words = [w for w in re.findall(r"\w+", prefix) if w not in _FILLER]
+    if re.search(r"\bvuelve(?:lo|la|los|las)?\s+a\s+buscar|\bagain\b", m.group(0)) and content_words:
+        return True
     return len(content_words) >= 2 or bool(
-        re.search(r"\b(?:quien|cuando|cual|cuales|como|donde|que|sobre|acerca de|noticias)\b", prefix)
+        re.search(
+            r"\b(?:quien|cuando|cual|cuales|como|donde|que|sobre|acerca de|noticias"
+            r"|who|when|which|what|where|how|about|news)\b",
+            prefix,
+        )
     )
 
 

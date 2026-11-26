@@ -62,6 +62,7 @@ _STOPWORDS = frozenset(
 class Ranked:
     kept: list = field(default_factory=list)
     scored: int = 0
+    scores: tuple = ()
 
 
 def _stems(text) -> set[str]:
@@ -177,7 +178,36 @@ def _rank(backend, qid, question, items, states, keep, floor, deadline, clock) -
         key=lambda i: (-scores[i], i),
     )
     order = good + [i for i, p in enumerate(scores) if p is None]
-    return Ranked([items[i] for i in order[:keep]], scored)
+    return Ranked([items[i] for i in order[:keep]], scored, tuple(scores))
+
+
+LINK_RESCUE_MIN_SCORE = 0.08
+
+
+def rescue_links(
+    query: str,
+    candidates: Sequence,
+    scores: Sequence[Optional[float]],
+    *,
+    keep: int = KEEP_LINKS,
+    min_score: float = LINK_RESCUE_MIN_SCORE,
+) -> list:
+    """When Laya hesitates below LINK_FLOOR (common on Spanish queries) without
+    hard-rejecting at 0.0, keep candidates that share lexical stems with *query*."""
+    wanted = _stems(query)
+    if not wanted or not candidates:
+        return []
+    eligible: list[tuple[float, int, int]] = []
+    for idx, item in enumerate(candidates):
+        p = scores[idx] if idx < len(scores) else None
+        if p is None or p < min_score:
+            continue
+        text = f"{getattr(item, 'title', '')} {getattr(item, 'snippet', '')}"
+        overlap = len(wanted & _stems(text))
+        if overlap > 0:
+            eligible.append((p, overlap, idx))
+    eligible.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    return [candidates[idx] for _, _, idx in eligible[:keep]]
 
 
 def rank_links(

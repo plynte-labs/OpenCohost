@@ -1386,6 +1386,8 @@ class MotorVocalIA(
             self._memory_digest.clear()
             self._digested_turn_keys.clear()
             self._session_topics_reset()
+            if getattr(self, "_active_topics", None) is not None:
+                self._active_topics.clear()
             self._owner_reflection_reset()
             self._log("Historial de conversación limpiado.")
 

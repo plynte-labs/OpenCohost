@@ -37,6 +37,7 @@ turn is the base turn.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -50,6 +51,7 @@ from opencohost.core.decision.consumers import apply_web_decision
 from opencohost.core import turn_origin
 from opencohost.core.engine import turn_timing
 from opencohost.core.web import freshness, link_read
+from opencohost.core.web import rewrite as web_rewrite
 from opencohost.core.web import sources as web_sources
 from opencohost.core.web import prompt as web_prompt
 from opencohost.core.web.fetch import SafeFetcher, default_accept_language
@@ -66,7 +68,13 @@ WEB_SOURCES = frozenset({"direct", "ptt"})
 # Same owner-source prefix as the reply, so emergency stop and the owner
 # sweeps reach the bridge too.
 WEB_BRIDGE_SUFFIX = "-web-bridge"
+WEB_PROGRESS_SUFFIX = "-web-progress"
 WEB_BRIDGE_LINES = {"es": "Déjame buscarlo.", "en": "Let me look that up."}
+WEB_PROGRESS_INTERVAL_S = 5.0
+WEB_PROGRESS_LINES = {
+    "es": ("Sigo buscando…", "Ya casi…", "Un momento más…"),
+    "en": ("Still searching…", "Almost there…", "One more moment…"),
+}
 WEB_LOOK_TTL_S = 60.0
 WEB_CARRY_TTL_S = 45.0
 WEB_CARRY_MAX_CONTENT_WORDS = 3
@@ -75,7 +83,11 @@ SUBJECT_DIRECT = "direct"
 SUBJECT_FOLLOWUP = "followup"
 SUBJECT_CARRY = "carry"
 SUBJECT_REFINE = "refine"
+SUBJECT_REWRITE = "rewrite"
 WEB_LEDGER_MAX = 6
+WEB_QUERY_REWRITE_CLOUD_TIMEOUT_S = 2.5
+WEB_QUERY_REWRITE_LOCAL_TIMEOUT_S = 3.5
+WEB_QUERY_REWRITE_MAX_TOKENS = 48
 # The lookup's own deadline ends a little before the hard cap, so a normal
 # timeout is reported by the lookup itself rather than by the cap.
 _DEADLINE_MARGIN_S = 0.3
@@ -152,14 +164,56 @@ class WebLook(NamedTuple):
 NO_WEB = WebLook()
 
 
+class _WebProgressTicker:
+    """Race-safe progress ticker matching Vision V1.28's _ProgressTicker."""
+
+    def __init__(self, speak_fn, lines: tuple[str, ...], interval_s: float) -> None:
+        self._speak = speak_fn
+        self._lines = lines
+        self._interval_s = max(0.01, float(interval_s))
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.count = 0
+        self._thread = threading.Thread(target=self._run, name="web-progress", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> int:
+        with self._lock:
+            self._stop.set()
+            return self.count
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                line = self._lines[self.count % len(self._lines)]
+                self.count += 1
+                try:
+                    self._speak(line)
+                except Exception:
+                    logger.debug("[WEB] progress tick failed", exc_info=False)
+
+
 class WebTurnMixin:
     """All state lives on the motor."""
 
     _web_look_cache = None  # ((source, text, query), WebLook, at)
     _web_bridge_job = None
+    _web_progress_job = None
+    _web_progress_interval_s = WEB_PROGRESS_INTERVAL_S
     _web_fetcher_factory = SafeFetcher
     _last_web_search: tuple[str, float] | None = None  # (query, monotonic_time)
     _owner_web_turns = None  # deque[LedgerTurn]: owner turns, in memory only
+    _active_topics = None  # ActiveTopicStack: session LRU topics, no 45s TTL amnesia
+
+    def _active_topics_stack(self) -> web_subject.ActiveTopicStack:
+        stack = self._active_topics
+        if stack is None:
+            stack = self._active_topics = web_subject.ActiveTopicStack(maxlen=5)
+        return stack
 
     def _previous_search(self) -> tuple[str, float] | None:
         if self._last_web_search is not None:
@@ -252,9 +306,11 @@ class WebTurnMixin:
         # A URL is never part of a search query (it would leave the machine).
         clean = link_read.strip_links(_strip_wrapper(text)).strip()
         bare = is_bare_search_command(clean)
+        topics = self._active_topics_stack()
         if not bare and apply_web_decision(decisions, web_rule(clean)) != SEARCH:
             _log("skip", WebLookupResult("skipped"))
             self._web_ledger_add(search_query(clean), search_intent=False)
+            topics.observe(clean)
             if _mentions_web(clean):
                 return WebLook(note=web_prompt.not_searched_note(lang))
             return NO_WEB
@@ -262,29 +318,67 @@ class WebTurnMixin:
         # ("de nuevo", "otra vez") is junk, so the subject is always resolved.
         question, query, subject = clean, "" if bare else search_query(clean), SUBJECT_DIRECT
         if bare:
-            # A bare "búscalo": the subject comes from the owner's recent turns
-            # (T3). Only owner text leaves the machine.
+            # A bare "búscalo" / "búscalas": subject comes from the owner's recent
+            # turns or the session LRU active topic stack.
             subject = SUBJECT_FOLLOWUP
-            question = query = self._web_followup_subject()
+            question = query = self._web_followup_subject() or topics.current()
             if not query:
-                _log("search", WebLookupResult(OUTCOME_EMPTY), subject=subject)
-                return WebLook(note=web_prompt.no_subject_note(lang))
+                rescued = self._maybe_rewrite_web_query(clean, "")
+                if rescued:
+                    question = query = rescued
+                    subject = SUBJECT_REWRITE
+                else:
+                    _log("search", WebLookupResult(OUTCOME_EMPTY), subject=subject)
+                    return WebLook(note=web_prompt.no_subject_note(lang))
             self._web_ledger_add(query, search_intent=True)
         elif not query:
             # A rule-search with nothing but trigger words left.
             subject = SUBJECT_FOLLOWUP
-            question = query = self._web_followup_subject()
+            question = query = self._web_followup_subject() or topics.current()
             if not query:
-                _log("search", WebLookupResult(OUTCOME_EMPTY), subject=subject)
-                return WebLook(note=web_prompt.no_subject_note(lang))
+                rescued = self._maybe_rewrite_web_query(clean, "")
+                if rescued:
+                    question = query = rescued
+                    subject = SUBJECT_REWRITE
+                else:
+                    _log("search", WebLookupResult(OUTCOME_EMPTY), subject=subject)
+                    return WebLook(note=web_prompt.no_subject_note(lang))
+            self._web_ledger_add(query, search_intent=True)
+        elif web_subject.is_clarification(query) and topics.current():
+            # "al lenguaje vuelvelo a buscar ahora": refines the active top topic
+            # (e.g. "rust" -> "rust lenguaje") instead of searching bare "al lenguaje".
+            topics.observe(query)
+            subject = SUBJECT_FOLLOWUP
+            question = query = topics.current()
             self._web_ledger_add(query, search_intent=True)
         elif web_subject.is_refinement(query) and (base := self._web_followup_subject(strict=True)):
             # "opciones más recientes este año": narrows the previous request.
             self._web_ledger_add(query, search_intent=True)
             subject = SUBJECT_REFINE
             question = query = web_subject.merge_refinement(base, query)
+        elif web_subject.needs_topic_carry(query):
+            # "busca en la web de que trata" / "que juegos usan ese lenguaje":
+            # attach the recent owner topic deterministically (0 ms fallback
+            # even if the cloud query rewriter times out or the 45s TTL expired).
+            base = self._web_followup_subject() or topics.current()
+            if base:
+                subject = SUBJECT_FOLLOWUP
+                question = query = web_subject.merge_followup_query(base, query)
+                self._web_ledger_add(query, search_intent=True)
+            elif web_subject.is_subjectless_followup(query):
+                rescued = self._maybe_rewrite_web_query(clean, "")
+                if rescued:
+                    question = query = rescued
+                    subject = SUBJECT_REWRITE
+                    self._web_ledger_add(query, search_intent=True)
+                else:
+                    _log("search", WebLookupResult(OUTCOME_EMPTY), subject=SUBJECT_FOLLOWUP)
+                    return WebLook(note=web_prompt.no_subject_note(lang))
+            else:
+                self._web_ledger_add(query, search_intent=True)
         else:
             self._web_ledger_add(query, search_intent=True)
+            topics.observe(query)
             prev = self._previous_search()
             if prev is not None:
                 prev_q, prev_at = prev
@@ -308,20 +402,35 @@ class WebTurnMixin:
                         if prev_cwords:
                             query = f"{query} {' '.join(prev_cwords)}"[:QUERY_MAX_CHARS].strip()
                             subject = SUBJECT_CARRY
-        key = (source, text, query)
         cached = self._web_look_cache
-        if cached is not None and cached[0] == key and _monotonic() - cached[2] <= WEB_LOOK_TTL_S:
+        if cached is not None and cached[0][:2] == (source, text) and _monotonic() - cached[2] <= WEB_LOOK_TTL_S:
             return cached[1]
+        ticker = None
         if speak:
             self._web_speak_bridge(clean, source)
+            ticker = self._start_web_progress(clean, source)
         try:
+            if subject != SUBJECT_REWRITE:
+                rewritten = self._maybe_rewrite_web_query(clean, query)
+                if rewritten:
+                    query = rewritten
+                    question = rewritten
+                    subject = SUBJECT_REWRITE
+                    self._web_ledger_add(query, search_intent=True)
+            key = (source, text, query)
             # Freshness: a time-sensitive query carries the year in its text.
             result = self._web_lookup(question, freshness.with_year(query))
         finally:
-            job, self._web_bridge_job = self._web_bridge_job, None
+            if ticker is not None:
+                ticker.stop()
             retire = getattr(self, "_retire_vision_job", None)
-            if job is not None and callable(retire):
-                retire(job)
+            bridge_job, self._web_bridge_job = self._web_bridge_job, None
+            prog_job, self._web_progress_job = self._web_progress_job, None
+            if callable(retire):
+                if bridge_job is not None:
+                    retire(bridge_job)
+                if prog_job is not None:
+                    retire(prog_job)
         _log("search", result, subject=subject)
         turn_timing.add("web_ms", result.fetch_ms + result.filter_ms)
         if result.outcome == OUTCOME_OK and result.block:
@@ -362,6 +471,117 @@ class WebTurnMixin:
             list(ledger), now=_monotonic(), ttl=float(settings.WEB_SUBJECT_TTL_S), year=None, strict=strict
         )
 
+    def _web_rewrite_enabled(self) -> bool:
+        raw = os.environ.get("OPENCOHOST_WEB_QUERY_REWRITE", "1").strip().lower()
+        return raw not in ("0", "false", "off", "no")
+
+    def _snapshot_recent_host_history(self) -> list[tuple[str, str]]:
+        history = getattr(self, "historial", None)
+        if not history:
+            return []
+        lock = getattr(self, "_history_lock", None)
+        try:
+            if lock is not None:
+                with lock:
+                    snap = list(history)
+            else:
+                snap = list(history)
+        except Exception:
+            return []
+        return web_rewrite.recent_host_context(snap)
+
+    def _invoke_web_rewrite_llm(self, messages: list[dict], *, timeout: float) -> str:
+        """Run one short non-streaming rewrite call on the active LLM (cloud or resident local)."""
+        is_local = getattr(self, "_is_local", True)
+        started = _monotonic()
+        response = None
+        model_for_usage = None
+        if not is_local:
+            cfg = getattr(self, "_provider_config", None)
+            if not cfg:
+                return ""
+            from opencohost.core.engine.llm_inference_service import get_inference_service
+
+            response = get_inference_service(self).cloud_chat(
+                provider_cfg=cfg,
+                messages=messages,
+                options={"num_predict": WEB_QUERY_REWRITE_MAX_TOKENS, "temperature": 0.0},
+                timeout=timeout,
+            )
+            model_for_usage = getattr(self, "current_model", None)
+        else:
+            loaded = getattr(self, "_loaded_model", None)
+            if not loaded:
+                return ""
+            chat_fn = getattr(self, "_ollama_scout_chat", None)
+            if not callable(chat_fn):
+                ollama_client = getattr(self, "ollama", None)
+                chat_fn = getattr(ollama_client, "chat", None) if ollama_client is not None else None
+            if not callable(chat_fn):
+                return ""
+            options: dict = {"num_predict": WEB_QUERY_REWRITE_MAX_TOKENS, "temperature": 0.0}
+            with_ctx = getattr(self, "_with_num_ctx", None)
+            resolve_ctx = getattr(self, "_resolve_local_num_ctx", None)
+            if callable(with_ctx) and callable(resolve_ctx):
+                options = with_ctx(options, resolve_ctx(loaded))
+            response = chat_fn(
+                model=loaded,
+                messages=messages,
+                options=options,
+                keep_alive=settings.LLM_KEEP_ALIVE,
+                think=False,
+            )
+            model_for_usage = loaded
+        usage_record = getattr(self, "_usage_record", None)
+        if response is not None and callable(usage_record):
+            usage_record(
+                response,
+                kind="web_query_rewrite",
+                model=model_for_usage,
+                is_local=bool(is_local),
+                started=started,
+            )
+        if isinstance(response, dict):
+            msg = response.get("message")
+            return str(msg.get("content") or "") if isinstance(msg, dict) else ""
+        msg = getattr(response, "message", None)
+        return str(getattr(msg, "content", "") or "") if msg is not None else ""
+
+    def _maybe_rewrite_web_query(self, clean: str, fallback_query: str) -> str:
+        """Contextually rewrite *clean* using recent host history. Never raises; returns '' to keep fallback."""
+        if not self._web_rewrite_enabled():
+            return ""
+        recent = self._snapshot_recent_host_history()
+        if not recent:
+            return ""
+        messages = web_rewrite.build_rewrite_messages(clean, recent)
+        t0 = _monotonic()
+        is_local = getattr(self, "_is_local", True)
+        transport = "local" if is_local else "cloud"
+        timeout = WEB_QUERY_REWRITE_LOCAL_TIMEOUT_S if is_local else WEB_QUERY_REWRITE_CLOUD_TIMEOUT_S
+        try:
+            raw = self._invoke_web_rewrite_llm(messages, timeout=timeout)
+        except TimeoutError:
+            logger.info("[WEB_REWRITE] outcome=timeout ms=%d transport=%s", int((_monotonic() - t0) * 1000), transport)
+            return ""
+        except Exception as exc:
+            logger.info(
+                "[WEB_REWRITE] outcome=error reason=%s ms=%d transport=%s",
+                _closed(type(exc).__name__), int((_monotonic() - t0) * 1000), transport,
+            )
+            return ""
+        ms = int((_monotonic() - t0) * 1000)
+        if not raw or not raw.strip():
+            logger.info("[WEB_REWRITE] outcome=empty ms=%d transport=%s", ms, transport)
+            return ""
+        rewritten = web_rewrite.parse_rewritten_query(raw, fallback=fallback_query)
+        if not rewritten or rewritten == fallback_query:
+            logger.info("[WEB_REWRITE] outcome=fallback ms=%d transport=%s", ms, transport)
+            return ""
+        turn_timing.add("web_ms", ms)
+        logger.info("[WEB_REWRITE] outcome=ok ms=%d transport=%s", ms, transport)
+        return rewritten
+
     def _web_lookup(self, question: str, query: str) -> WebLookupResult:
         """Run the lookup on its own thread, bounded by the hard budget."""
         budget = max(0.1, float(settings.WEB_FETCH_BUDGET_S))
@@ -393,29 +613,68 @@ class WebTurnMixin:
             return WebLookupResult(OUTCOME_TIMEOUT, fetch_ms=int(budget * 1000), phase=phase[0] if phase else "")
         return box[0]
 
+    def _resolve_web_speech_lang(self, clean: str) -> str:
+        from opencohost.core.vision.turn_step import detect_language
+
+        session_lang = self._web_session_lang()
+        if (
+            session_lang == "en"
+            and not _EXPLICIT_ES_BRIDGE_WORDS.search(_fold(clean))
+            and not re.search(r"[¿¡ñáéíóú]", clean, re.IGNORECASE)
+        ):
+            return "en"
+        return detect_language(clean, default=session_lang)
+
     def _web_speak_bridge(self, clean: str, source: str) -> None:
         if not getattr(self, "_speech_router_enabled", False):
             return
         try:
             from opencohost.core.speech.router import PRIORITY_OWNER
-            from opencohost.core.vision.turn_step import detect_language
 
-            session_lang = self._web_session_lang()
-            if (
-                session_lang == "en"
-                and not _EXPLICIT_ES_BRIDGE_WORDS.search(_fold(clean))
-                and not re.search(r"[¿¡ñáéíóú]", clean, re.IGNORECASE)
-            ):
-                bridge_lang = "en"
-            else:
-                bridge_lang = detect_language(clean, default=session_lang)
-            line = WEB_BRIDGE_LINES.get(bridge_lang, WEB_BRIDGE_LINES[session_lang])
+            bridge_lang = self._resolve_web_speech_lang(clean)
+            line = WEB_BRIDGE_LINES.get(bridge_lang, WEB_BRIDGE_LINES[self._web_session_lang()])
             self._web_bridge_job = self._ensure_router().submit(
                 line, f"{source}{WEB_BRIDGE_SUFFIX}", PRIORITY_OWNER,
                 releases_arrival_hold=False,
             )
         except Exception:
             logger.debug("[WEB] bridge submit failed", exc_info=False)
+
+    def _web_speak_progress(self, line: str, source: str) -> None:
+        """Speak one progress line while a web lookup runs long (never piles up)."""
+        if not getattr(self, "_speech_router_enabled", False):
+            return
+        try:
+            from opencohost.core.speech.router import PRIORITY_OWNER, SpeechJobState
+
+            busy = (SpeechJobState.QUEUED, SpeechJobState.ACTIVE, SpeechJobState.SUSPENDED)
+            for job in (self._web_bridge_job, self._web_progress_job):
+                if job is not None and getattr(job, "state", None) in busy:
+                    return
+            self._web_progress_job = self._ensure_router().submit(
+                line, f"{source}{WEB_PROGRESS_SUFFIX}", PRIORITY_OWNER,
+                releases_arrival_hold=False,
+            )
+        except Exception:
+            logger.debug("[WEB] progress line submit failed", exc_info=False)
+
+    def _start_web_progress(self, clean: str, source: str):
+        if not getattr(self, "_speech_router_enabled", False):
+            return None
+        try:
+            lang = self._resolve_web_speech_lang(clean)
+            lines = WEB_PROGRESS_LINES.get(lang, WEB_PROGRESS_LINES["es"])
+            interval = getattr(self, "_web_progress_interval_s", WEB_PROGRESS_INTERVAL_S)
+            ticker = _WebProgressTicker(
+                lambda line: self._web_speak_progress(line, source),
+                lines,
+                interval,
+            )
+            ticker.start()
+            return ticker
+        except Exception:
+            logger.debug("[WEB] progress ticker failed to start", exc_info=False)
+            return None
 
 
 def _strip_wrapper(text: str) -> str:
@@ -429,7 +688,7 @@ def _strip_wrapper(text: str) -> str:
 
 def _closed(value) -> str:
     """A closed log code (letters, digits, underscore) or "-"."""
-    return _CODE_SAFE.sub("", str(value or ""))[:24] or "-"
+    return _CODE_SAFE.sub("", str(value or "").lower())[:24] or "-"
 
 
 def _link_log(origin: str, outcome: str, host: str, chars: int, ms: int) -> None:

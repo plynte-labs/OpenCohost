@@ -442,7 +442,10 @@ def _run(
     candidates = rank.lexical_prefilter(
         query, results, [f"{r.title} {r.snippet}" for r in results], keep=rank.LINK_CANDIDATES
     )
-    links = rank.rank_links(backend, question, candidates, deadline=deadline, clock=clock).kept
+    ranked_links = rank.rank_links(backend, question, candidates, deadline=deadline, clock=clock)
+    links = ranked_links.kept
+    if not links and candidates:
+        links = rank.rescue_links(query, candidates, ranked_links.scores, keep=rank.KEEP_LINKS)
     counts["filter_ms"] += _ms(clock() - started)
     tally = {"results": len(results), "kept_links": len(links)}
     if not links:
