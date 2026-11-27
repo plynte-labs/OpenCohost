@@ -181,7 +181,7 @@ _MEMORIA_DOMAIN_STOPWORDS: frozenset[str] = frozenset({
     # dijo/ptt. Also retroactively neutralizes the stored "contexto"-polluted
     # signatures at scoring time, since select_top_k stopword-filters the topic
     # side. Do not expand/shrink without updating the RC-1/RC-7 tests in lockstep.
-    "acaba", "decir", "dijo", "ptt", "contexto",
+    "acaba", "decir", "dijo", "ptt", "contexto", "context",
     # NOTE (F2): the typed-turn wrapper's verbs ("escribio"/"typed") were briefly
     # added here and then removed — blacklisting content words to cancel template
     # boilerplate is the wrong layer. It shifted stable_key for turns using those
@@ -528,12 +528,15 @@ def _restore_scrubbed_key(conn: sqlite3.Connection, profile_id: str, stable_key:
 
 # es/en negation markers. Checked on the RAW text (see _has_negation_marker),
 # never on `_significant_tokens` output: whether "no" happens to survive
-# stopword filtering must never decide this. "n['']t\\b" covers isn't/
-# doesn't/won't/can't after lowercasing; the curly apostrophe is included
-# because _strip_accents does not fold it to ASCII.
+# stopword filtering must never decide this. "\b\w+n['’]t\b" matches genuine
+# contractions with an apostrophe (isn't/doesn’t/can't) while avoiding false
+# matches on words ending in "nt" ("content", "want", "went", "different"),
+# paired with explicit apostropheless contractions.
 _NEGATION_MARKER_PATTERNS: tuple[str, ...] = (
     r"\bno\b", r"\bnunca\b", r"\bjamas\b", r"\bya\s+no\b", r"\btampoco\b",
-    r"\bnot\b", r"\bnever\b", r"\bno\s+longer\b", r"n['’]?t\b",
+    r"\bnot\b", r"\bnever\b", r"\bno\s+longer\b", r"\b\w+n['’]t\b",
+    r"\b(?:aint|arent|cant|couldnt|didnt|doesnt|dont|hadnt|hasnt|havent|"
+    r"isnt|mightnt|mustnt|neednt|shant|shouldnt|wasnt|werent|wont|wouldnt)\b",
 )
 _NEGATION_RE = re.compile("|".join(_NEGATION_MARKER_PATTERNS), re.IGNORECASE)
 
@@ -586,6 +589,11 @@ MEMORIA_ORIGIN_DEFAULT = "shared_content"
 _SHARED_CONTENT_TAG = "[shared content] "
 
 
+def _strip_shared_content_tag(text: str) -> str:
+    """Remove the prompt-internal ``[shared content] `` prefix before matching."""
+    return text[len(_SHARED_CONTENT_TAG):] if text.startswith(_SHARED_CONTENT_TAG) else text
+
+
 def _now_text() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -598,17 +606,50 @@ def _now_text() -> str:
 # a fragment shorter than this is noise, not context (candidate 2).
 _MIN_CLIP_REMAINDER_CHARS = 40
 
-# W3 (memoria_recall_20260718): high-frequency Spanish function words that
-# survive normalize_tokens AND _MEMORIA_DOMAIN_STOPWORDS but never discriminate
-# between memories — they only inflate the shared-token score in select_top_k,
-# letting an incidental function-word overlap cross the >=2-shared-token gate.
-# SCORING-ONLY: subtracted from both the topic and signature sets inside
-# select_top_k. Deliberately NOT added to _MEMORIA_DOMAIN_STOPWORDS — that would
-# shift derive_stable_key / is_capturable (design rejected: re-capture dupes,
-# shaves user-side capture gates). Also retroactively neutralizes already-stored
-# polluted signatures at scoring time.
+# W3 (memoria_recall_20260718): high-frequency Spanish & English closed-class
+# function words (pronouns, prepositions, auxiliaries, interrogatives,
+# conjunctions) that never discriminate between memories — they only inflate the
+# shared-token score in select_top_k. No main lexical verbs (like/want/have/use/
+# play/tengo/quiero/gusta/juego) or polarity/content words (no/not/sin/may/can/
+# will/well/still) are included so short two-word facts keep discriminating terms.
 _SCORING_STOPWORDS: frozenset[str] = frozenset({
-    "que", "mi", "se", "esa", "este", "como", "para",
+    # Spanish closed-class
+    "a", "algo", "ante", "aqui", "asi", "aunque", "bajo", "bien", "como", "con",
+    "contra", "cual", "cuales", "cuando", "cuanta", "cuantas", "cuanto", "cuantos",
+    "de", "del", "desde", "donde", "durante", "e", "el", "ella", "ellas", "ello",
+    "ellos", "en", "entre", "era", "eran", "eres", "es", "esa", "esas", "ese",
+    "eso", "esos", "esta", "estaba", "estaban", "estan", "estas", "este", "esto",
+    "estos", "estoy", "estuvo", "fue", "fueron", "ha", "habia", "hacia", "han",
+    "hasta", "hay", "he", "hemos", "la", "las", "le", "les", "lo", "los", "mas",
+    "me", "mi", "mientras", "mis", "misma", "mismo", "muy", "nada", "ni",
+    "nos", "nosotras", "nosotros", "nuestra", "nuestras", "nuestro", "nuestros",
+    "o", "os", "otra", "otras", "otro", "otros", "para", "pero", "por", "porque",
+    "pues", "que", "quien", "quienes", "se", "sea", "segun", "ser", "si", "sido",
+    "sino", "sobre", "solo", "son", "soy", "su", "sus", "tan", "tanto",
+    "te", "ti", "todo", "todos", "todas", "tras", "tu", "tus", "u", "ud", "un",
+    "una", "unas", "uno", "unos", "usted", "ustedes", "vos", "y", "ya", "yo",
+    # English closed-class (strictly no main verbs or polarity/content words)
+    "about", "above", "across", "actually", "after", "again", "against", "all",
+    "almost", "already", "also", "although", "am", "among", "an", "and",
+    "another", "any", "anything", "are", "around", "as", "at", "be", "because",
+    "been", "before", "behind", "being", "below", "beneath", "beside", "between",
+    "beyond", "both", "but", "by", "concerning", "could", "did", "do",
+    "does", "doing", "done", "down", "during", "each", "either", "enough", "ever",
+    "every", "everything", "except", "for", "from", "he", "her", "here", "hers",
+    "herself", "him", "himself", "his", "how", "however", "i", "if", "in",
+    "inside", "into", "is", "it", "its", "itself", "just", "me", "might",
+    "mine", "more", "most", "much", "must", "my", "myself", "near", "neither",
+    "never", "none", "nor", "nothing", "now", "of", "off", "on",
+    "once", "only", "onto", "or", "other", "our", "ours", "ourselves", "out",
+    "outside", "over", "past", "please", "quite", "rather", "really",
+    "regarding", "shall", "she", "should", "since", "so", "some", "something",
+    "such", "than", "that", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "these", "they", "this", "those", "though",
+    "through", "throughout", "till", "to", "too", "toward", "towards", "under",
+    "unless", "until", "up", "upon", "us", "very", "was", "were", "we",
+    "what", "when", "where", "whether", "which", "while", "who", "whom", "whose",
+    "with", "within", "without", "would", "yet", "why", "you", "your",
+    "yours", "yourself", "yourselves",
 })
 
 
@@ -640,7 +681,8 @@ def _lexical_scores(
 
     Raw IDF Sum over the shared significant tokens between topic and the
     row's signature (title fallback); requires >= *min_shared* shared
-    (default _MIN_SHARED_TOKENS).
+    (default _MIN_SHARED_TOKENS), or 1 when the candidate's own filtered
+    signature contains a single surviving token under the default gate.
     """
     topic = set(_significant_tokens(topic_text)) - _SCORING_STOPWORDS
     if not topic or not rows:
@@ -650,7 +692,8 @@ def _lexical_scores(
     for row in rows:
         sig = set((row["signature"] or row["title"]).split()) - _SCORING_STOPWORDS
         shared = topic & sig
-        if len(shared) >= min_shared:
+        effective_min = 1 if (min_shared == _MIN_SHARED_TOKENS and len(sig) == 1) else min_shared
+        if len(shared) >= effective_min:
             scored.append((sum(idf_map[token] for token in shared), row))
     return scored
 
@@ -834,8 +877,15 @@ def build_injection_lines(
         if stats is not None:
             stats["semantic"] = 0
     for row in selected:
+        candidate_line = _injection_text(row)
+        clean_candidate = _strip_shared_content_tag(candidate_line)
+        if any(
+            _is_lexical_duplicate(clean_candidate, _strip_shared_content_tag(kept_line))
+            for kept_line in lines
+        ):
+            continue
         used = _append_within_budget(
-            lines, used, _injection_text(row), max_chars, clip_to_remaining=True,
+            lines, used, candidate_line, max_chars, clip_to_remaining=True,
         )
 
     return lines
@@ -927,6 +977,16 @@ _META_RECALL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p i
     r"\bme\s+(recuerdas?|recordas)\b(?!\s+\w)",
     r"\bte\s+(acuerdas?|acordas)\s+de\s+mi\b",
     r"\bdo\s+you\s+remember\s+me\b(?!\s+\w)",
+    # English parity: meta/session recall queries (guarded against general knowledge & hardware memory)
+    r"\bwhat\s+(?:else\s+)?(?:do\s+|can\s+|could\s+)?you\s+(?:remember|recall)\b",
+    r"\bwhat\s+(?:else\s+)?(?:do\s+)?you\s+know\s+about\s+(?:me|us)\b",
+    r"\b(?:remember|recall|know)\s+anything\s+about\s+(?:me|us)\b",
+    r"\bwho\s+am\s+i\b",
+    r"\bwhat\s+(?:did|have)\s+(?:we|i)\s+(?:talk\s+about|discuss|say|chat\s+about|cover|decide)\b",
+    r"\b(last|past|previous)\s+(session|chat|conversation|stream)\b",
+    r"\b(session|chat|conversation|stream)\s+(before|earlier)\b",
+    r"\b(?:my|your)\s+memories\b",
+    r"\b(?:in|from|based\s+on)\s+(?:my|your)\s+memory\b(?!\s+\w)",
 ))
 
 
@@ -955,10 +1015,11 @@ _RECALL_QUESTION_EXTRA_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(
     r"\brecordas\b",
     r"\b(que|lo\s+que|del\s+que|de\s+lo\s+que)\s+(hablamos|discutimos|comentamos|platicamos|charlamos|dijimos)\b",
     r"\bque\s+te\s+(conte|dije|comente|hable|mencione)\b",
-    r"\bdo\s+you\s+(remember|recall)\b(?!\s+me\s+\w)",
-    r"\bwhat\s+(did|do)\s+we\s+(say|discuss|talk)\b",
-    r"\bwe\s+(discussed|talked\s+about|spoke\s+about|were\s+talking\s+about)\b",
-    r"\b(did|have)\s+i\s+(tell|told|mention|mentioned)\s+you\b",
+    r"\b(?:do|can|could|would)\s+you\s+(?:remember|recall)\b(?!\s+me\s+\w)",
+    r"\bwhat\s+(?:did|do|were)\s+we\s+(?:say|discuss|talk(?:\s+about)?|chat(?:\s+about)?|decide|agree(?:\s+on)?)\b",
+    r"\bwhat\s+did\s+i\s+(?:say|tell\s+you|mention)\b",
+    r"\bwe\s+(?:discussed|talked\s+about|spoke\s+about|were\s+talking\s+about|chatted\s+about)\b",
+    r"\b(?:did|have)\s+i\s+(?:ever\s+)?(?:tell|told|mention|mentioned)\b",
 ))
 
 # Patterns that are only a recall question when the sentence is ALSO a
@@ -967,10 +1028,11 @@ _RECALL_QUESTION_EXTRA_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(
 _RECALL_CUED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in (
     r"\b(que|lo\s+que|del\s+que|de\s+lo\s+que)\s+vimos\b",
     r"\bte\s+(hable|conte|comente|dije|mencione)\s+(de|del|sobre|acerca)\b",
-    r"\blast\s+(session|time|stream)\b",
+    r"\blast\s+(session|time|stream|chat|conversation)\b",
+    r"\b(?:what|which|who)\s+(?:we|i)\s+(?:talked\s+about|discussed|mentioned|played|watched)\b",
 ))
 _QUESTION_OPENER = re.compile(
-    r"^\W*(y\s+)?(de\s+)?(que|cual|cuando|como|what|when|did|do|have|te|se|me)\b")
+    r"^\W*(y\s+)?(de\s+)?(que|cual|cuando|como|what|when|where|who|which|did|do|can|could|would|have|te|se|me)\b")
 
 # "me recordas al profe" / "me recuerdas mucho a mi primo": resemblance, not
 # memory. Bare "recordas" followed by a/al only counts with the "me" pronoun.
@@ -989,17 +1051,23 @@ _RECALL_FRAME_TOKENS: frozenset[str] = frozenset({
     "stream", "conversacion", "memoria", "memorias", "tu", "tus", "mis",
     "del", "los", "las", "una", "uno", "sobre", "con", "por", "lo", "le", "me",
     "nos", "ya", "si", "no", "es", "fue", "era",
-    "what", "do", "you", "your", "remember", "recall", "about", "we", "did", "say",
-    "said", "discuss", "discussed", "talk", "talked", "spoke", "last", "session",
-    "time", "the", "that", "this", "our", "us", "was", "were", "me", "my", "of",
-    "to", "in", "on", "and", "or", "yesterday", "earlier", "before",
+    "what", "who", "when", "where", "why", "how", "which", "else",
+    "do", "does", "did", "can", "could", "would", "should", "ever",
+    "you", "your", "yours", "remember", "remembered", "recall", "recalled",
+    "memories", "memory", "about", "we", "say", "said", "discuss", "discussed",
+    "talk", "talked", "talking", "spoke", "speak", "chat", "chatted",
+    "last", "past", "previous", "prior", "session", "sessions", "conversation",
+    "time", "times", "the", "that", "this", "those", "these", "our", "us",
+    "was", "were", "my", "mine", "of", "to", "in", "on", "at", "from", "by",
+    "and", "or", "yesterday", "earlier", "before", "regarding", "concerning",
     # judge round 1: general-question vocabulary that is never a topic.
     "sabes", "sabe", "sabias", "sabian", "hay", "ultimo", "ultima", "otro",
     "dia", "dias", "rato", "hace", "conte", "dije", "contame", "cuentame",
     "vos", "base", "hola", "usa", "responder", "respondeme", "responde",
-    "acuerdan", "acuerdo", "hable", "comente", "mencione", "dijeron",
-    "today", "tonight", "i", "told", "tell", "anything", "mention", "mentioned",
-    "have", "had", "know", "knew", "tell",
+    "acuerdan", "hable", "comente", "mencione", "dijeron",
+    "today", "tonight", "i", "told", "tell", "anything", "something", "everything",
+    "nothing", "mention", "mentioned", "have", "had", "know", "knew", "cover",
+    "covered", "decide", "decided", "agree", "agreed",
 })
 
 
@@ -1057,11 +1125,22 @@ _CORRECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in
     r"\bcorreccion\s*[:,]",
     r"\bno,?\s+en\s+realidad\s+(es|era|son|eran|fue|fueron)\b",
     r"\bperdon,\s+(es|era|son|eran|fue)\b",
+    r"\bmejor\s+dicho\b",
+    r"\ben\s+realidad\s+(?:no\s*,|ahora\s+(?:uso|vivo|trabajo|prefiero)|(?:yo\s+)?(?:uso|vivo|trabajo|cambie|me\s+mude))\b",
+    r"\bya\s+no\s+(?:vivo|trabajo|uso|juego|tengo|prefiero)\b",
+    r"\b(?:deje\s+de\s+usar|cambie\s+de\s+\w+\s+a|me\s+cambie\s+a)\b",
+    r"\bperdon,\s+(?:en\s+realidad|quise\s+decir|me\s+equivoque)\b",
     r"\bi\s+meant\b",
     r"\bcorrection\s*[:,]",
     r"\bi\s+was\s+wrong\b",
     r"\bi\s+misspoke\b",
     r"\bactually,\s+(it'?s|it\s+(is|was)|that'?s|my\s+\w+\s+(is|was))\b",
+    r"\bactually[,]?\s+i\s+(?:switched|moved|changed|use|live|work|prefer|play|have|run)\b",
+    r"\b(?:i\s+)?no\s+longer\s+(?:live|work|use|play|have|prefer|run|stream)\b",
+    r"\bi\s+stopped\s+using\b",
+    r"\bscratch\s+that\b",
+    r"\bwait,\s+no,\s*",
+    r"\bnever\s*mind\s*,?\s*(?:it'?s|i\s+(?:use|live|work|switched|moved|meant))\b",
 ))
 
 
@@ -1917,6 +1996,42 @@ class MemoriaStore:
         except sqlite3.Error as exc:
             self._warn_once(
                 f"memoria store list_durable_rows_for_dedup failed (fail-open): {type(exc).__name__}"
+            )
+            return []
+
+    def list_superseded_contents(self, profile_id: str, limit: int = 25) -> list[dict]:
+        """Old superseded non-private fact contents plus replacement timestamp.
+
+        Used to suppress stale recalled episodes that predate a judge-superseded
+        fact update. Fail-open to [] on SQLite errors; never returns private rows."""
+        try:
+            with closing(self._connect(timeout=READ_TIMEOUT_SECONDS)) as conn, conn:
+                rows = conn.execute(
+                    "SELECT old.content AS content, "
+                    "COALESCE(NULLIF(rep.judged_at, ''), rep.updated_at, old.updated_at) AS superseded_at, "
+                    "COALESCE(rep.content, '') AS replacement_content "
+                    "FROM memorias AS old "
+                    "LEFT JOIN memorias AS rep ON rep.id = old.superseded_by "
+                    "WHERE old.profile_id = ? "
+                    "AND old.superseded_by IS NOT NULL "
+                    "AND old.private = 0 "
+                    "AND old.content != '' "
+                    "AND (rep.id IS NULL OR rep.private = 0) "
+                    "ORDER BY COALESCE(NULLIF(rep.judged_at, ''), rep.updated_at, old.updated_at) DESC, "
+                    "old.id ASC LIMIT ?",
+                    (profile_id, int(limit)),
+                ).fetchall()
+                return [
+                    {
+                        "content": row["content"],
+                        "superseded_at": row["superseded_at"] or "",
+                        "replacement_content": row["replacement_content"] or "",
+                    }
+                    for row in rows
+                ]
+        except sqlite3.Error as exc:
+            self._warn_once(
+                f"memoria store list_superseded_contents failed (fail-open): {type(exc).__name__}"
             )
             return []
 

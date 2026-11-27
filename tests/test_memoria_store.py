@@ -2653,3 +2653,171 @@ def test_apply_promotion_batch_preserves_lang(tmp_path) -> None:
     assert promoted_row["status"] == "promoted"
     assert promoted_row["lang"] == "en"  # preserved!
 
+
+def test_unit2_english_meta_recall_and_topical_anchors() -> None:
+    from opencohost.core.memory.memoria_store import (
+        _SCORING_STOPWORDS,
+        is_meta_recall_query,
+        is_recall_question,
+        recall_topic_anchors,
+        select_top_k,
+    )
+
+    for q in (
+        "What do you remember about me?",
+        "what else do you know about me",
+        "what did we discuss in the last session?",
+        "from our previous stream",
+    ):
+        assert is_meta_recall_query(q) is True, q
+
+    # Non-recall / hardware / general-knowledge phrases stay out.
+    for q in (
+        "My computer RAM memory is full",
+        "What do you know about black holes?",
+        "I set a personal record yesterday",
+        "Tell me a joke about programmers",
+    ):
+        assert is_meta_recall_query(q) is False, q
+
+    assert is_recall_question("Did I mention my Neovim config to you?") is True
+    assert is_recall_question("Tell me a story") is False
+    assert recall_topic_anchors("What do you remember about me?") == ()
+    assert recall_topic_anchors("What do you remember about my cat Milo?") == ("cat", "milo")
+
+    # Closed-class EN stopwords excluded; main verbs preserved.
+    for verb in ("like", "want", "have", "use", "play", "tengo", "quiero", "gusta", "juego"):
+        assert verb not in _SCORING_STOPWORDS
+    noise = [{"id": "1", "title": "other thing", "signature": "what about this your with from"}]
+    assert select_top_k("what about this your with from", noise) == []
+    main_verb_row = [{"id": "1", "title": "play chess", "signature": "play chess weekends"}]
+    assert len(select_top_k("I play chess often", main_verb_row)) == 1
+
+
+def test_unit3_expanded_bilingual_correction_patterns() -> None:
+    from opencohost.core.memory.memoria_store import is_correction_turn
+
+    positives = (
+        "Actually, I switched to Neovim for coding",
+        "I no longer live in Seattle",
+        "I stopped using Chrome last month",
+        "Scratch that, my microphone is an SM7B",
+        "Wait, no, I work remotely now",
+        "Mejor dicho, prefiero té verde",
+        "Ya no vivo en Madrid, vivo en Valencia",
+        "Dejé de usar VSCode hace semanas",
+        "Perdón, en realidad uso Arch Linux",
+    )
+    for phrase in positives:
+        assert is_correction_turn(phrase) is True, phrase
+
+    negatives = (
+        "no, thanks",
+        "en realidad virtual es muy inmersiva",
+        "actually I enjoy coffee on rainy mornings",
+        "wait no way that happened",
+        "I use Neovim daily for editing",
+    )
+    for phrase in negatives:
+        assert is_correction_turn(phrase) is False, phrase
+
+
+def test_unit4_list_superseded_contents_returns_old_claim_timestamp_and_privacy(tmp_path) -> None:
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    old_id = store.upsert_draft("p1", "p1|city", "city", "old Madrid draft")
+    store.update_row(old_id, content="The operator lives in Madrid", status="promoted")
+    old_row = store.get(old_id)
+
+    priv_id = store.upsert_draft("p1", "p1|priv", "secret", "secret fact")
+    store.update_row(priv_id, content="Secret private address", status="promoted")
+    store.set_flags(priv_id, private=True)
+
+    other_id = store.upsert_draft("p2", "p2|city", "other", "other profile draft")
+    store.update_row(other_id, content="Profile two lives in Berlin", status="promoted")
+
+    rep_id = store.upsert_draft("p1", "p1|new_city", "new city", "I moved to Lisbon")
+    rep_row = store.get(rep_id)
+    store.apply_promotion_batch(
+        "p1",
+        [rep_row],
+        decisions=[(1, "The operator moved to Lisbon", False, "")],
+        unresolved={},
+        now_s=2000,
+        origins={1: "self_stated"},
+        updates={1: (old_row["id"], old_row["revision"])},
+    )
+
+    superseded = store.list_superseded_contents("p1")
+    assert len(superseded) == 1
+    assert superseded[0]["content"] == "The operator lives in Madrid"
+    assert superseded[0]["superseded_at"] != ""
+    assert superseded[0]["replacement_content"] == "The operator moved to Lisbon"
+    assert all("Secret" not in s["content"] for s in superseded)
+    assert all("Berlin" not in s["content"] for s in superseded)
+
+
+def test_has_negation_marker_ignores_nt_suffix_words_and_keeps_contractions() -> None:
+    from opencohost.core.memory.memoria_store import _has_negation_marker
+
+    assert _has_negation_marker("content want went different student account") is False
+    assert _has_negation_marker("The operator isn't using Chrome") is True
+    assert _has_negation_marker("The operator doesn’t drink coffee") is True
+    assert _has_negation_marker("Operator cant stand spoilers") is True
+    assert _has_negation_marker("Operator wont stream tonight") is True
+    assert _has_negation_marker("No le gusta el café") is True
+
+
+def test_select_top_k_retrieves_short_two_word_facts_without_dropping_polarity_or_modals() -> None:
+    from opencohost.core.memory.memoria_store import select_top_k
+
+    facts = [
+        {"id": "f_gluten", "title": "Sin gluten", "signature": "sin gluten"},
+        {"id": "f_dairy", "title": "No dairy", "signature": "no dairy"},
+        {"id": "f_may", "title": "May 2025", "signature": "may 2025"},
+        {"id": "f_can", "title": "Can opener", "signature": "can opener"},
+        {"id": "f_water", "title": "Still water", "signature": "still water"},
+        {"id": "f_one", "title": "espresso", "signature": "de espresso"},
+        {"id": "f_multi", "title": "pizza", "signature": "pizza noche amigos"},
+    ]
+    assert [r["id"] for r in select_top_k("busco receta sin gluten", facts, k=1)] == ["f_gluten"]
+    assert [r["id"] for r in select_top_k("I eat no dairy food", facts, k=1)] == ["f_dairy"]
+    assert [r["id"] for r in select_top_k("what happened in May 2025", facts, k=1)] == ["f_may"]
+    assert [r["id"] for r in select_top_k("where is the can opener", facts, k=1)] == ["f_can"]
+    assert [r["id"] for r in select_top_k("prefer still water today", facts, k=1)] == ["f_water"]
+    assert [r["id"] for r in select_top_k("espresso", facts, k=1)] == ["f_one"]
+    # Multi-token facts still enforce >=2 shared tokens.
+    assert select_top_k("pizza", facts) == []
+
+
+def test_list_superseded_contents_hides_private_replacement_content(tmp_path) -> None:
+    store = MemoriaStore(tmp_path / "memorias.db")
+    old_id = store.upsert_draft("p1", "p1|old_k", "city", "old public city")
+    store.update_row(old_id, content="The operator lives in Madrid", status="promoted")
+    old_row = store.get(old_id)
+
+    rep_id = store.upsert_draft("p1", "p1|rep_k", "new city", "moved to secret")
+    rep_row = store.get(rep_id)
+    store.apply_promotion_batch(
+        "p1",
+        [rep_row],
+        decisions=[(1, "Secret new address PRIVATE_SENTINEL", False, "")],
+        unresolved={},
+        now_s=2000,
+        origins={1: "self_stated"},
+        updates={1: (old_row["id"], old_row["revision"])},
+    )
+    store.set_flags(rep_id, private=True)
+
+    superseded = store.list_superseded_contents("p1")
+    assert superseded == []
+    assert "PRIVATE_SENTINEL" not in str(superseded)
+
+    # Deleting rep leaves rep.id IS NULL -> old row remains available with blank replacement_content.
+    assert store.delete_row(rep_id) is True
+    superseded_after_del = store.list_superseded_contents("p1")
+    assert len(superseded_after_del) == 1
+    assert superseded_after_del[0]["content"] == "The operator lives in Madrid"
+    assert superseded_after_del[0]["replacement_content"] == ""
+

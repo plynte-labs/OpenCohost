@@ -811,3 +811,282 @@ def test_select_top_k_repeated_token_counted_once_per_document():
     assert len(ranked) == 1
     assert ranked[0]["id"] == "r1"
 
+
+def test_unit2_cross_lang_semantic_fallback_and_no_reconcile_thrash(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from opencohost.config import settings
+    from opencohost.core.memory_v5_shadow.fact_index import FactSemanticIndex, content_fingerprint
+    from opencohost.core.memory_v5_shadow.semantic_cache import FactEmbeddingRecord, SemanticCacheStore
+
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
+    monkeypatch.setattr(settings, "MEMORY_FACTS_ENABLED", True)
+    monkeypatch.setattr(settings, "MEMORY_SEMANTIC_ENABLED", True)
+
+    store = MemoriaStore(tmp_path / "memorias.db")
+    es_id = store.insert_curated("p1", "vive madrid", "El operador vive en Madrid.", lang="es")
+    en_id = store.insert_curated("p1", "unrelated topic", "The operator collects vinyl records.", lang="en")
+    draft_id = store.upsert_draft("p1", "p1|draft1", "draft madrid", "contexto: unjudged draft madrid", lang="es")
+    es_row = store.get(es_id)
+    en_row = store.get(en_id)
+
+    # list_injection_candidates(lang=...) stays strictly filtered.
+    assert [r["id"] for r in store.list_injection_candidates("p1", lang="en")] == [en_id]
+
+    cache = SemanticCacheStore(tmp_path / "cache.db")
+    cache.initialize()
+    vec_match = [1.0] + [0.0] * 383
+    vec_other = [0.0, 1.0] + [0.0] * 382
+    cache.upsert_fact_embedding(FactEmbeddingRecord(
+        es_id, "p1", es_row["revision"], content_fingerprint(es_row["content"]),
+        "minilm-l12", "v1", vec_match, "2026-09-01T00:00:00Z",
+    ))
+    cache.upsert_fact_embedding(FactEmbeddingRecord(
+        en_id, "p1", en_row["revision"], content_fingerprint(en_row["content"]),
+        "minilm-l12", "v1", vec_other, "2026-09-01T00:00:00Z",
+    ))
+
+    scheduled = []
+    idx = FactSemanticIndex(cache, worker=MagicMock(), scheduler=lambda fn: scheduled.append(fn))
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.ollama = MagicMock()
+    motor.pygame = MagicMock()
+    motor._memory = SimpleNamespace(fact_index=idx)
+
+    # Same-lang view over freshly cached en+es rows must NOT thrash reconcile.
+    scores, code = motor._fact_semantic_scores("p1", [en_row], vec_match, lang="en")
+    assert code == "none"
+    assert scheduled == []
+
+    # Cross-lang fallback rescues high-cosine durable Spanish row on English query.
+    block = motor._build_memorias_injection_block(
+        "p1", "where do I live?", fact_query_vec=vec_match, lang="en"
+    )
+    assert "El operador vive en Madrid." in block
+    assert "unjudged draft madrid" not in block
+
+    # Low-cosine cross-lang rows stay excluded.
+    low_block = motor._build_memorias_injection_block(
+        "p1", "random unmatched question", fact_query_vec=[0.0, 0.0, 1.0] + [0.0] * 381, lang="en"
+    )
+    assert low_block == ""
+    cache.close()
+
+
+def test_unit2_unanchored_meta_recall_injects_durable_facts_when_summary_disabled(monkeypatch, tmp_path):
+    from opencohost.config import settings
+
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
+    monkeypatch.setattr(settings, "MEMORY_FACTS_ENABLED", True)
+    monkeypatch.setattr(settings, "MEMORY_SUMMARY_RECALL_ENABLED", False)
+
+    store = MemoriaStore(tmp_path / "memorias.db")
+    pin_id = store.insert_curated("p1", "pinned bio", "The operator prefers ergonomic keyboards.", lang="en")
+    store.set_flags(pin_id, pinned=True)
+    prom_id = store.upsert_draft("p1", "p1|tea", "oolong tea", "raw draft tea", lang="en")
+    store.update_row(prom_id, content="The operator drinks oolong tea.", status="promoted")
+    store.upsert_draft("p1", "p1|unjudged", "unjudged fact", "raw unjudged trivia", lang="en")
+    store.insert_summary("p1", "summary", "old keyword summary row", lang="en")
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.ollama = MagicMock()
+    motor.pygame = MagicMock()
+
+    block = motor._build_memorias_injection_block("p1", "What do you remember about me?", lang="en")
+    assert "The operator prefers ergonomic keyboards." in block
+    assert "The operator drinks oolong tea." in block
+    assert "raw unjudged trivia" not in block
+    assert "old keyword summary row" not in block
+
+
+def test_unit4_build_injection_lines_dedups_non_pinned_subset_and_keeps_opposite_polarity(tmp_path):
+    from opencohost.core.memory.memoria_store import build_injection_lines
+
+    db_path = tmp_path / "memorias.db"
+    store = MemoriaStore(db_path)
+
+    p_id = store.insert_curated("p1", "ergonomic split keyboards", "The operator uses ergonomic split keyboards daily.")
+    store.set_flags(p_id, pinned=True)
+    dup_id = store.insert_curated("p1", "split keyboards", "The operator uses split keyboards.")
+    keep_id = store.insert_curated("p1", "keyboards modular synths", "The operator collects vintage keyboards and modular synths.")
+    neg_id = store.insert_curated("p1", "ergonomic keyboards not", "The operator does not use ergonomic keyboards.")
+
+    rows = store.list_injection_candidates("p1")
+    lines = build_injection_lines(rows, "keyboards ergonomic split modular synths", top_k=4)
+
+    assert "The operator uses ergonomic split keyboards daily." in lines
+    assert "The operator uses split keyboards." not in lines
+    assert "The operator collects vintage keyboards and modular synths." in lines
+    assert "The operator does not use ergonomic keyboards." in lines
+
+
+def test_unit4_end_to_end_block_suppresses_redundant_and_stale_superseded_episodes(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from opencohost.config import settings
+    from opencohost.core.memory_v5_shadow.semantic import ConversationalExchange
+
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
+    monkeypatch.setattr(settings, "MEMORY_FACTS_ENABLED", True)
+    monkeypatch.setattr(settings, "MEMORY_RECALL_MAX_EPISODES", 4)
+
+    store = MemoriaStore(tmp_path / "memorias.db")
+    old_id = store.upsert_draft("p1", "p1|vscode", "vscode python", "vscode raw")
+    store.update_row(old_id, content="The operator uses VSCode for Python coding.", status="promoted")
+    old_row = store.get(old_id)
+
+    rep_id = store.upsert_draft("p1", "p1|neovim", "neovim python", "neovim raw")
+    rep_row = store.get(rep_id)
+    store.apply_promotion_batch(
+        "p1",
+        [rep_row],
+        decisions=[(1, "The operator switched to Neovim for Python coding.", False, "")],
+        unresolved={},
+        now_s=3000,
+        origins={1: "self_stated"},
+        updates={1: (old_row["id"], old_row["revision"])},
+    )
+    esp_id = store.insert_curated("p1", "black espresso morning", "The operator drinks black espresso every morning.")
+
+    def _ep(eid, started_at, user_text):
+        ex = ConversationalExchange(
+            exchange_ordinal=1, session_id="s1", user_event_id=f"u_{eid}",
+            assistant_event_id=f"a_{eid}", user_text=user_text,
+            assistant_text="ok", combined_text=user_text, occurred_at=started_at,
+        )
+        return SimpleNamespace(
+            episode_id=eid, session_id="s1", started_at=started_at,
+            composite_score=0.9, exchanges=[ex], best_exchange_key=f"u_{eid}:a_{eid}",
+        )
+
+    episodes = [
+        _ep("ep_stale", "2020-01-01T10:00:00Z", "I use VSCode for Python coding everyday"),
+        _ep("ep_dup", "2099-01-01T10:00:00Z", "Black espresso every morning"),
+        _ep("ep_valid", "2099-01-02T10:00:00Z", "I customized Neovim Lua plugins recently"),
+        _ep("ep_post", "2099-01-03T10:00:00Z", "Tried VSCode once again for debugging"),
+    ]
+
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.ollama = MagicMock()
+    motor.pygame = MagicMock()
+
+    block = motor._build_memorias_injection_block(
+        "p1",
+        "Python Neovim black espresso morning",
+        episodes=episodes,
+    )
+    assert "I use VSCode for Python coding everyday" not in block
+    assert "Black espresso every morning" not in block
+    assert "I customized Neovim Lua plugins recently" in block
+    assert "Tried VSCode once again for debugging" in block
+
+
+def test_unit4_build_injection_lines_shared_content_polarity_and_cross_origin_dedup(tmp_path):
+    """[shared content] prefix and words ending in 'nt' must not invert polarity
+    or break cross-origin deduplication in build_injection_lines."""
+    from opencohost.core.memory.memoria_store import build_injection_lines
+
+    store = MemoriaStore(tmp_path / "memorias.db")
+    p_id = store.upsert_draft("p1", "p1|sun_neg", "sunday neg", "never stream late on sunday")
+    store.update_row(p_id, content="Never stream late on Sunday", status="promoted")
+    store.set_flags(p_id, pinned=True)
+
+    pos_id = store.upsert_draft("p1", "p1|sun_pos", "sunday pos", "stream late on sunday")
+    store.update_row(pos_id, content="Stream late on Sunday", status="promoted")
+
+    with sqlite3.connect(str(tmp_path / "memorias.db")) as conn:
+        conn.execute("UPDATE memorias SET origin = 'shared_content' WHERE id IN (?, ?)", (p_id, pos_id))
+
+    rows = store.list_injection_candidates("p1")
+    lines = build_injection_lines(rows, "stream late on Sunday", top_k=4)
+    assert "[shared content] Never stream late on Sunday" in lines
+    assert "[shared content] Stream late on Sunday" in lines
+
+    # Cross-origin dedup: self_stated vs shared_content on same statement
+    store2 = MemoriaStore(tmp_path / "memorias2.db")
+    self_id = store2.upsert_draft("p1", "p1|py_self", "python dark mode", "likes dark mode python")
+    store2.update_row(self_id, content="Likes dark mode and Python", status="promoted")
+    store2.set_flags(self_id, pinned=True)
+
+    shared_id = store2.upsert_draft("p1", "p1|py_shared", "python dark mode shared", "likes dark mode python")
+    store2.update_row(shared_id, content="Likes dark mode and Python", status="promoted")
+    with sqlite3.connect(str(tmp_path / "memorias2.db")) as conn:
+        conn.execute("UPDATE memorias SET origin = 'self_stated' WHERE id = ?", (self_id,))
+        conn.execute("UPDATE memorias SET origin = 'shared_content' WHERE id = ?", (shared_id,))
+
+    rows2 = store2.list_injection_candidates("p1")
+    lines2 = build_injection_lines(rows2, "likes dark mode and python", top_k=4)
+    assert lines2 == ["Likes dark mode and Python"]
+
+
+def test_fact_semantic_scores_and_cross_lang_fallback_reconcile_deleted_orphans(monkeypatch, tmp_path):
+    """Cross-lang fallback and empty-store lang=None checks reconcile orphaned
+    fact_embeddings back down to 0 so count_fact_embeddings reaches cold."""
+    from types import SimpleNamespace
+    from opencohost.config import settings
+    from opencohost.core.memory_v5_shadow.fact_index import FactSemanticIndex, content_fingerprint
+    from opencohost.core.memory_v5_shadow.semantic_cache import FactEmbeddingRecord, SemanticCacheStore
+
+    monkeypatch.setattr(llm_engine, "MEMORIAS_ENABLED", True)
+    monkeypatch.setattr(llm_engine, "MEMORIAS_DB", str(tmp_path / "memorias.db"))
+    monkeypatch.setattr(settings, "MEMORY_FACTS_ENABLED", True)
+    monkeypatch.setattr(settings, "MEMORY_SEMANTIC_ENABLED", True)
+
+    store = MemoriaStore(tmp_path / "memorias.db")
+    es_id = store.insert_curated("p1", "vive madrid", "El operador vive en Madrid.", lang="es")
+    es_row = store.get(es_id)
+
+    cache = SemanticCacheStore(tmp_path / "cache.db")
+    cache.initialize()
+    vec = [1.0] + [0.0] * 383
+    cache.upsert_fact_embedding(FactEmbeddingRecord(
+        es_id, "p1", es_row["revision"], content_fingerprint(es_row["content"]),
+        "minilm-l12", "v1", vec, "2026-09-01T00:00:00Z",
+    ))
+    cache.upsert_fact_embedding(FactEmbeddingRecord(
+        "mem_deleted_orphan", "p1", 1, "deadbeef00000000",
+        "minilm-l12", "v1", vec, "2026-09-01T00:00:00Z",
+    ))
+    assert cache.count_fact_embeddings("p1") == 2
+
+    scheduled = []
+    idx = FactSemanticIndex(cache, worker=MagicMock(), scheduler=lambda fn: scheduled.append(fn))
+    motor = llm_engine.MotorVocalIA(queue.Queue(), lambda e: None)
+    motor.ollama = MagicMock()
+    motor.pygame = MagicMock()
+    motor._memory = SimpleNamespace(fact_index=idx)
+
+    # Cross-lang fallback inspects all_rows with ignore_orphans=False -> drops mem_deleted_orphan.
+    block = motor._build_memorias_injection_block(
+        "p1", "where do I live?", fact_query_vec=vec, lang="en"
+    )
+    assert "El operador vive en Madrid." in block
+    assert len(scheduled) == 1
+    scheduled.pop(0)()
+    assert cache.count_fact_embeddings("p1") == 1
+
+    # Now delete the last remaining fact from SQLite directly and run cross-lang / empty check.
+    assert store.delete_row(es_id) is True
+    block_after_delete = motor._build_memorias_injection_block(
+        "p1", "where do I live?", fact_query_vec=vec, lang="en"
+    )
+    assert block_after_delete == ""
+    assert len(scheduled) == 1
+    scheduled.pop(0)()
+    assert cache.count_fact_embeddings("p1") == 0
+
+    # Also direct _fact_semantic_scores(lang=None) with empty rows cleans orphans.
+    cache.upsert_fact_embedding(FactEmbeddingRecord(
+        "mem_deleted_orphan2", "p1", 1, "deadbeef00000001",
+        "minilm-l12", "v1", vec, "2026-09-01T00:00:00Z",
+    ))
+    assert cache.count_fact_embeddings("p1") == 1
+    scores, code = motor._fact_semantic_scores("p1", [], vec, lang=None)
+    assert scores is None and code is None
+    assert len(scheduled) == 1
+    scheduled.pop(0)()
+    assert cache.count_fact_embeddings("p1") == 0
+    cache.close()
+

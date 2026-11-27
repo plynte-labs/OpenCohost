@@ -21,7 +21,14 @@ from opencohost.config.settings import (
     MEMORIAS_MAX_INJECT_CHARS,
     MEMORIAS_PINNED_CLIP_CHARS,
 )
-from opencohost.core.memory.memoria_store import _clip_for_injection
+from opencohost.core.memory.memoria_store import (
+    _SCORING_STOPWORDS,
+    _clip_for_injection,
+    _has_negation_marker,
+    _is_lexical_duplicate,
+    _significant_tokens,
+    _strip_shared_content_tag,
+)
 from opencohost.i18n import active as _i18n_active
 
 # One episode line never exceeds the pinned-fact clip, so two episodes cannot
@@ -238,6 +245,77 @@ def format_episode_line(
     return prefix + _clip_for_injection(user, min(len(user), room))
 
 
+def _parse_utc_iso(ts: Any) -> Optional[datetime]:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _is_redundant_with_injected(user_text: str, injected_fact_lines: Sequence[str]) -> bool:
+    for fact_line in injected_fact_lines:
+        clean_fact = _strip_shared_content_tag(str(fact_line or ""))
+        if not clean_fact:
+            continue
+        if _is_lexical_duplicate(user_text, clean_fact) or _is_lexical_duplicate(clean_fact, user_text):
+            return True
+    return False
+
+
+def _sup_field(item: Any, name: str) -> str:
+    if isinstance(item, dict):
+        return str(item.get(name) or "")
+    try:
+        return str(item[name] or "")
+    except (KeyError, IndexError, TypeError):
+        return str(getattr(item, name, "") or "")
+
+
+def _matches_superseded_fact(
+    user_text: str, episode_started_at: Any, superseded_facts: Sequence[Any]
+) -> bool:
+    ep_dt = _parse_utc_iso(episode_started_at)
+    if ep_dt is None:
+        return False
+    ep_tokens = set(_significant_tokens(user_text)) - _SCORING_STOPWORDS
+    if len(ep_tokens) < 2:
+        return False
+    ep_neg = _has_negation_marker(user_text)
+    for item in superseded_facts:
+        old_content = _sup_field(item, "content")
+        superseded_at = _sup_field(item, "superseded_at")
+        replacement_content = _sup_field(item, "replacement_content")
+        if not old_content or not superseded_at:
+            continue
+        sup_dt = _parse_utc_iso(superseded_at)
+        if sup_dt is None or ep_dt > sup_dt:
+            continue
+        if _has_negation_marker(old_content) != ep_neg:
+            continue
+        old_tokens = set(_significant_tokens(old_content)) - _SCORING_STOPWORDS
+        if not old_tokens:
+            continue
+        shared_old = len(ep_tokens & old_tokens)
+        if shared_old < 2 or (shared_old / min(len(ep_tokens), len(old_tokens))) < 0.6:
+            continue
+        if replacement_content:
+            rep_tokens = set(_significant_tokens(replacement_content)) - _SCORING_STOPWORDS
+            if rep_tokens:
+                shared_rep = len(ep_tokens & rep_tokens)
+                if shared_rep > shared_old or (shared_rep / len(rep_tokens)) > (
+                    shared_old / len(old_tokens)
+                ):
+                    continue
+        return True
+    return False
+
+
 def append_episode_lines(
     lines: list[str],
     episodes: Sequence[Any],
@@ -246,15 +324,32 @@ def append_episode_lines(
     max_episodes: int = 2,
     now: Optional[datetime] = None,
     tz: Optional[tzinfo] = None,
+    injected_fact_lines: Sequence[str] = (),
+    superseded_facts: Sequence[Any] = (),
 ) -> int:
     """Append up to *max_episodes* episode lines AFTER the existing fact
     *lines* (mutated in place) without exceeding *max_chars* for the whole
-    "\\n"-joined list. Existing lines are never touched. Returns how many
-    episode lines were appended.
+    "\\n"-joined list. Existing lines are never touched. Suppresses episodes that
+    are lexically redundant with *injected_fact_lines* or match older
+    *superseded_facts* predating their superseding replacement. Returns how
+    many episode lines were appended.
     """
     used = len("\n".join(lines))
     appended = 0
-    for episode in list(episodes)[: max(0, max_episodes)]:
+    cap = max(0, max_episodes)
+    for episode in list(episodes):
+        if appended >= cap:
+            break
+        ex = _best_exchange(episode)
+        user_text = _collapse(ex.user_text) if ex is not None else ""
+        if user_text and injected_fact_lines and _is_redundant_with_injected(
+            user_text, injected_fact_lines
+        ):
+            continue
+        if user_text and superseded_facts and _matches_superseded_fact(
+            user_text, getattr(episode, "started_at", ""), superseded_facts
+        ):
+            continue
         sep = 1 if lines else 0
         limit = min(max_chars - used - sep, EPISODE_LINE_MAX_CHARS)
         if limit < EPISODE_LINE_MIN_CHARS:

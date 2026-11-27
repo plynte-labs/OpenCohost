@@ -307,7 +307,7 @@ def test_eligible_pair_meeting_token_minimum_creates_draft_with_nonempty_title_c
     assert row["content"] != ""
     assert "contexto:" in row["content"]
     assert "→ Kira:" not in row["content"]  # owner-only-drafts: user side only
-    assert len(row["content"]) <= 300
+    assert len(row["content"]) <= 400
 
 
 def test_eviction_capture_stores_user_side_signature(monkeypatch, tmp_path):
@@ -336,17 +336,17 @@ def test_eviction_capture_stores_user_side_signature(monkeypatch, tmp_path):
 # C1 content shaping (memoria_quality_20260717) — _build_memoria_content
 # ---------------------------------------------------------------------------
 
-def test_content_uses_24word_user_budget_ledger_stays_8():
-    """Memoria CONTENT carries a wider user budget (24 words) than the digest
+def test_content_uses_36word_user_budget_ledger_stays_8():
+    """Memoria CONTENT carries a wider user budget (36 words) than the digest
     ledger line (still 8) — the two are decoupled."""
     motor, _, _ = _make_motor()
-    user = " ".join(f"palabra{i:02d}" for i in range(1, 26))  # 25 words
+    user = " ".join(f"palabra{i:02d}" for i in range(1, 38))  # 37 words
     asst = "El streamer prefiere synthwave calmo posta. Fin."
 
     content = motor._build_memoria_content(user, asst)
     assert "palabra09" in content   # past the 8-word digest budget
-    assert "palabra24" in content
-    assert "palabra25" not in content  # capped at 24
+    assert "palabra36" in content
+    assert "palabra37" not in content  # capped at 36
 
     ledger = motor._build_ledger_line(user, asst)
     assert "palabra08" in ledger
@@ -377,7 +377,7 @@ def test_wrapped_turn_spends_the_whole_word_budget_on_operator_words(wrapper):
     inconsistent: honest title, taxed content.
     """
     motor, _, _ = _make_motor()
-    user = " ".join(f"palabra{i:02d}" for i in range(1, 26))  # 25 words
+    user = " ".join(f"palabra{i:02d}" for i in range(1, 38))  # 37 words
     wrapped = wrapper().format(text=user)
     asst = "Eso suena tremendo problema de configuracion. Fin."
     frame = wrapper().split("{text}")[0].strip()
@@ -388,8 +388,8 @@ def test_wrapped_turn_spends_the_whole_word_budget_on_operator_words(wrapper):
     assert frame not in ledger
 
     content = motor._build_memoria_content(wrapped, asst)
-    assert "palabra24" in content       # full 24-word budget spent on the operator
-    assert "palabra25" not in content
+    assert "palabra36" in content       # full 36-word budget spent on the operator
+    assert "palabra37" not in content
     assert frame not in content
 
 
@@ -832,3 +832,139 @@ def test_get_memoria_store_constructs_exactly_once_under_racing_threads(monkeypa
 
     assert len(constructions) == 1
     assert len(results) == 2 and results[0] is results[1]
+
+
+def test_unit3_correction_targets_anchored_older_pair_and_unjudged_db_draft(monkeypatch, tmp_path):
+    """Explicit corrections find a topic-anchored prior draft up to 3 captured pairs
+    back OR in unjudged DB drafts, leaving unrelated intermediate turns intact."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    # Pair 1 (target) -> Pair 2 (unrelated intermediate turn) -> Pair 3 (correction of Pair 1)
+    motor._commit_history("I live in Madrid right now", "Madrid is sunny.", source="direct")
+    motor._commit_history("I played Balatro on stream today", "Balatro is addictive.", source="direct")
+    motor._commit_history(
+        "Actually, I moved from Madrid, I live in Lisbon now",
+        "Lisbon sounds great.",
+        source="direct",
+    )
+
+    rows = _store(tmp_path).list_for_profile("profile-1")
+    assert len(rows) == 2
+    contents = [r["content"] for r in rows]
+    assert any("Lisbon" in c for c in contents)
+    assert any("Balatro" in c for c in contents)
+    assert not any("I live in Madrid right now" in c for c in contents)
+
+    # Now verify unjudged DB fallback after historial evicts the older pair.
+    motor2, _, _ = _make_motor()
+    db2 = tmp_path / "memorias2.db"
+    _enable_memorias(monkeypatch, motor2, tmp_path / "sub2")
+    motor2._commit_history("My microphone model is Blue Yeti", "Classic USB mic.", source="direct")
+    motor2._commit_history("I drank matcha latte earlier", "Nice tea choice.", source="direct")
+    motor2._commit_history("I bought new running sneakers", "Great for cardio.", source="direct")
+    motor2._commit_history("My monitor refresh rate is 144Hz", "Smooth frames.", source="direct")
+    # By now Blue Yeti was evicted from RAM historial (HISTORY_MAX_TURNS=3), still unjudged in DB.
+    motor2._commit_history(
+        "Wait, no, I stopped using that Blue Yeti microphone",
+        "Noted!",
+        source="direct",
+    )
+    rows2 = _store(tmp_path / "sub2").list_for_profile("profile-1")
+    assert any("stopped using that Blue Yeti microphone" in r["content"] for r in rows2)
+    assert any("144Hz" in r["content"] for r in rows2)
+    assert not any("My microphone model is Blue Yeti" in r["content"] for r in rows2)
+    # Only the original microphone draft should have been rewritten; other 3 stay intact.
+    assert len(rows2) == 4
+
+
+def test_unit3_elliptical_immediate_correction_and_private_isolation(monkeypatch, tmp_path):
+    """Immediate elliptical corrections still supersede the prior non-private pair,
+    and private pairs are never rewritten."""
+    motor, _, _ = _make_motor()
+    _enable_memorias(monkeypatch, motor, tmp_path)
+
+    motor._commit_history("I am 34 years old right now", "Got it.", source="direct")
+    motor._commit_history("I misspoke, it is 35", "Thirty-five, noted.", source="direct")
+
+    rows = _store(tmp_path).list_for_profile("profile-1")
+    assert len(rows) == 1
+    assert "35" in rows[0]["content"]
+    assert rows[0]["revision"] == 2
+
+    # Private turns stay untouched even on a correction cue.
+    motor.set_memorias_private(True)
+    motor._commit_history("My secret code is Alpha", "Kept private.", source="direct")
+    motor.set_memorias_private(False)
+    motor._commit_history("I misspoke, Alpha was Beta", "Ok.", source="direct")
+    rows_after = _store(tmp_path).list_for_profile("profile-1")
+    assert any("35" in r["content"] for r in rows_after)
+
+
+def test_unit3_context_prefix_and_single_generic_verb_do_not_hijack_unrelated_drafts(monkeypatch, tmp_path):
+    """'context:' EN ledger label and weak single-verb overlap ('use') must not
+    hijack unrelated drafts OR steal supersession from immediate_correction_fallback."""
+    from opencohost.i18n import active as i18n_active
+    from opencohost.i18n.startup import resolve_active_bundle
+
+    i18n_active.set_active_bundle(resolve_active_bundle(locale="en"))
+    try:
+        # 1) "context:" EN ledger prefix in an unjudged DB draft must not match "context of my schedule".
+        sub1 = tmp_path / "c1"
+        sub1.mkdir(parents=True, exist_ok=True)
+        motor1, _, _ = _make_motor()
+        _enable_memorias(monkeypatch, motor1, sub1)
+        motor1._commit_history("My keyboard is a Corne split", "Nice ergonomic split!", source="direct")
+        motor1._commit_history("I drank iced matcha latte", "Tasty.", source="direct")
+        motor1._commit_history("I played Hades yesterday", "Great game.", source="direct")
+        motor1._commit_history("My stream schedule starts around noon", "Noon schedule works.", source="direct")
+        motor1._commit_history(
+            "I misspoke about the context of my schedule",
+            "Schedule context updated.",
+            source="direct",
+        )
+        rows1 = _store(sub1).list_for_profile("profile-1")
+        contents1 = [r["content"] for r in rows1]
+        assert any("Corne split" in c for c in contents1)
+        assert any("context of my schedule" in c for c in contents1)
+        assert not any("starts around noon" in c for c in contents1)
+
+        # 2) Single generic verb ("use") must not overwrite "I use Arch Linux" in RAM OR DB,
+        # and weak DB match must not steal immediate_correction_fallback.
+        sub2 = tmp_path / "c2"
+        sub2.mkdir(parents=True, exist_ok=True)
+        motor2, _, _ = _make_motor()
+        _enable_memorias(monkeypatch, motor2, sub2)
+        motor2._commit_history("I use Arch Linux every day", "Arch btw.", source="direct")
+        motor2._commit_history("I drank iced matcha latte earlier", "Tasty.", source="direct")
+        motor2._commit_history("My lighting brightness is medium", "Noted.", source="direct")
+        motor2._commit_history(
+            "Actually, I use dark mode in VSCode instead",
+            "VSCode dark mode noted.",
+            source="direct",
+        )
+        rows2 = _store(sub2).list_for_profile("profile-1")
+        contents2 = [r["content"] for r in rows2]
+        assert any("Arch Linux" in c for c in contents2)
+        assert any("dark mode in VSCode" in c for c in contents2)
+
+        sub3 = tmp_path / "c3"
+        sub3.mkdir(parents=True, exist_ok=True)
+        motor3, _, _ = _make_motor()
+        _enable_memorias(monkeypatch, motor3, sub3)
+        motor3._commit_history("I use Arch Linux every day", "Arch btw.", source="direct")
+        motor3._commit_history("I drank iced matcha latte earlier", "Tasty.", source="direct")
+        motor3._commit_history("I played Hades on stream yesterday", "Fun run.", source="direct")
+        motor3._commit_history("My lighting brightness is medium", "Noted.", source="direct")
+        motor3._commit_history(
+            "Wait, no, I use dark mode in VSCode instead",
+            "VSCode dark mode noted.",
+            source="direct",
+        )
+        rows3 = _store(sub3).list_for_profile("profile-1")
+        contents3 = [r["content"] for r in rows3]
+        assert any("Arch Linux" in c for c in contents3)
+        assert any("dark mode in VSCode" in c for c in contents3)
+        assert not any("lighting brightness is medium" in c for c in contents3)
+    finally:
+        i18n_active.reset_active_bundle()

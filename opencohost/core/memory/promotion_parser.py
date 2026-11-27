@@ -43,6 +43,10 @@ ALSO REJECT, even when the six above look satisfied:
 - GENERAL KNOWLEDGE — the item is a definition, an aphorism, a motivational
   line or a general truth anyone could already know, with nothing operator-
   specific in it. Reject it.
+- SUPERSEDED WITHIN THIS BATCH — if two candidates in CANDIDATES address the
+  same subject and contradict each other (or a later candidate updates or
+  corrects an earlier one), KEEP only the latest valid claim and reject the
+  earlier contradicted candidate with reason "transient".
 
 ORIGIN: for every item say whose fact it is.
   "self_stated"    — the operator said it about themselves or their own
@@ -98,6 +102,45 @@ new, use "new". If unsure between duplicate and new, use "new".
 """
 
 _PROMOTION_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+_EMBEDDED_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+
+
+def _extract_judge_json_text(text: str) -> str:
+    """Normalize a judge reply before JSON validation.
+
+    Strips reasoning ``<think>`` blocks (including orphan ``</think>``),
+    optional markdown code fences even when wrapped in prose, and extracts the
+    outermost JSON object when surrounding chatter is present. Never raises.
+    """
+    from opencohost.core.providers.think_tags import strip_think_blocks
+
+    cleaned, _thinking = strip_think_blocks(text, "")
+    cleaned = cleaned.strip()
+    fence_match = _EMBEDDED_FENCE_RE.search(cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    else:
+        cleaned = _PROMOTION_FENCE_RE.sub("", cleaned).strip()
+
+    if not cleaned:
+        return cleaned
+
+    decoder = json.JSONDecoder()
+    first_dict_slice: str | None = None
+    pos = cleaned.find("{")
+    while pos != -1:
+        try:
+            obj, end_idx = decoder.raw_decode(cleaned, pos)
+            if isinstance(obj, dict):
+                candidate = cleaned[pos:end_idx]
+                if "decisions" in obj:
+                    return candidate
+                if first_dict_slice is None:
+                    first_dict_slice = candidate
+        except ValueError:
+            pass
+        pos = cleaned.find("{", pos + 1)
+    return first_dict_slice if first_dict_slice is not None else cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +232,7 @@ def _parse_promotion_decisions(text: str, batch_len: int) -> list[tuple[int, str
     """
     if not text or not isinstance(text, str):
         return []
-    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
+    stripped = _extract_judge_json_text(text)
     try:
         raw_dict = json.loads(stripped)
     except Exception:
@@ -229,7 +272,7 @@ def _parse_promotion_diagnostics(text: str, batch_len: int) -> PromotionParseDia
     """Parse the judge's reply into applied decisions and per-draft diagnostics."""
     if not text or not isinstance(text, str):
         return PromotionParseDiagnostics(decisions=[], top_level_valid=False, unresolved={})
-    stripped = _PROMOTION_FENCE_RE.sub("", text.strip())
+    stripped = _extract_judge_json_text(text)
     try:
         payload = json.loads(stripped)
     except Exception:

@@ -12,8 +12,17 @@ from opencohost.config.storage import atomic_write_text
 from opencohost.core.memory import episodic_merge
 from opencohost.core.memory.pasted_image import strip_pasted_image_block
 from opencohost.core.memory.memoria_store import (
-    STRONG_LEXICAL_SHARED_TOKENS, MemoriaStore, is_correction_turn,
-    is_recall_question, is_topical_recall_question, recall_topic_anchors,
+    MEMORIAS_MAX_PINNED_INJECT,
+    STRONG_LEXICAL_SHARED_TOKENS,
+    MemoriaStore,
+    _SCORING_STOPWORDS,
+    _append_within_budget,
+    _injection_text,
+    _significant_tokens,
+    is_correction_turn,
+    is_recall_question,
+    is_topical_recall_question,
+    recall_topic_anchors,
 )
 
 # Module object, not names off it: `_eng.X` resolves at CALL time, so the suite's
@@ -32,6 +41,55 @@ from opencohost.core.engine import turn_timing
 
 _SESSION_TOPICS_INIT_LOCK = threading.Lock()
 _SESSION_TOPICS_MAX_PENDING = 8
+_DURABLE_FACT_STATUSES = frozenset({"promoted", "curated", "imported"})
+_CROSS_LANG_SEMANTIC_MIN_SCORE = 0.55
+_LEDGER_CONTEXT_PREFIX_RE = re.compile(r"^\s*(?:contexto|context)\s*:\s*", re.IGNORECASE)
+_WEAK_CORRECTION_VERBS: frozenset[str] = frozenset({
+    "use", "uses", "using", "used",
+    "play", "plays", "playing", "played",
+    "live", "lives", "living", "lived",
+    "work", "works", "working", "worked",
+    "have", "has", "having", "had",
+    "run", "runs", "running", "ran",
+    "prefer", "prefers", "preferred", "preferring",
+    "like", "likes", "liked", "liking",
+    "want", "wants", "wanted", "wanting",
+    "get", "gets", "got", "getting",
+    "make", "makes", "made", "making",
+    "take", "takes", "took", "taken", "taking",
+    "keep", "keeps", "kept", "keeping",
+    "go", "goes", "went", "going", "gone",
+    "uso", "usa", "usan", "usaba", "usando",
+    "vivo", "vive", "viven", "vivia", "viviendo", "vivi",
+    "juego", "juega", "juegan", "jugaba", "jugando", "jugue",
+    "tengo", "tiene", "tienen", "tenia", "tuve", "teniendo",
+    "trabajo", "trabaja", "trabajan", "trabajaba", "trabajando", "trabaje",
+    "gusta", "gustan", "gusto", "gustaba",
+    "quiero", "quiere", "quieren", "queria", "quise",
+    "hago", "hace", "hacen", "hacia", "hice", "haciendo",
+    "voy", "va", "van", "iba", "fui",
+})
+
+
+def _correction_anchors(text: str) -> set[str]:
+    """Extract non-stopword topic anchors after stripping ledger ``context:`` labels."""
+    stripped = _LEDGER_CONTEXT_PREFIX_RE.sub("", text or "")
+    return set(_significant_tokens(stripped)) - _SCORING_STOPWORDS
+
+
+def _correction_anchor_rank(corr_anchors: set[str], cand_text: str) -> Optional[tuple[int, int]]:
+    """Score correction anchor overlap, rejecting single generic-verb matches.
+
+    Requires ``>= 2`` shared non-stopword anchors OR ``>= 1`` strong (non-generic-verb)
+    shared anchor, returning ``(strong_count, total_shared)`` for ranking.
+    """
+    shared = corr_anchors & _correction_anchors(cand_text)
+    if not shared:
+        return None
+    strong = len(shared - _WEAK_CORRECTION_VERBS)
+    if len(shared) >= 2 or strong >= 1:
+        return (strong, len(shared))
+    return None
 
 
 def _digest_fragment_key(clean_user: str) -> Optional[str]:
@@ -66,6 +124,85 @@ class MemoriaCaptureMixin:
         if decision in (None, "", "DISABLED"):
             return True
         return str(decision).startswith("ACCEPTED")
+
+    @staticmethod
+    def _unanchored_meta_recall_facts_allowed(contexto: str) -> bool:
+        """When summary recall is disabled, serve durable facts on unanchored meta-recall."""
+        if _settings.MEMORY_SUMMARY_RECALL_ENABLED:
+            return False
+        return bool(_eng.is_meta_recall_query(contexto) and not recall_topic_anchors(contexto))
+
+    def _durable_meta_recall_lines(
+        self, profile_id: str, primary_rows, *, lang: Optional[str] = None,
+    ) -> tuple[list[str], int]:
+        """Pinned + newest durable non-summary lines (never raw drafts or summaries)."""
+        candidates = [
+            r for r in primary_rows
+            if r["status"] in _DURABLE_FACT_STATUSES and not self._is_summary_row(r)
+        ]
+        if not candidates and lang is not None:
+            all_rows = self._get_memoria_store().list_injection_candidates(profile_id, lang=None)
+            candidates = [
+                r for r in all_rows
+                if r["status"] in _DURABLE_FACT_STATUSES and not self._is_summary_row(r)
+            ]
+        if not candidates:
+            return [], 0
+        lines = _eng.build_recency_lines(candidates)
+        pinned_count = min(
+            sum(1 for r in candidates if r["pinned"]),
+            MEMORIAS_MAX_PINNED_INJECT,
+            len(lines),
+        )
+        return lines, pinned_count
+
+    def _cross_lang_semantic_fallback(
+        self,
+        profile_id: str,
+        lines: list[str],
+        primary_rows,
+        fact_query_vec,
+    ) -> int:
+        """Rescue high-cosine (>= 0.55) durable non-summary facts from other languages."""
+        all_rows = self._get_memoria_store().list_injection_candidates(profile_id, lang=None)
+        fb_scores, _ = self._fact_semantic_scores(
+            profile_id,
+            all_rows,
+            fact_query_vec,
+            lang=None,
+            ignore_orphans=False,
+            reconcile_rows=all_rows,
+        )
+        if not all_rows or not fb_scores:
+            return 0
+        primary_ids = {r["id"] for r in primary_rows}
+        candidates = [
+            r for r in all_rows
+            if r["id"] not in primary_ids
+            and r["status"] in _DURABLE_FACT_STATUSES
+            and not self._is_summary_row(r)
+        ]
+        if not candidates:
+            return 0
+        matched = [
+            (fb_scores[r["id"]], r)
+            for r in candidates
+            if fb_scores.get(r["id"], -1.0) >= _CROSS_LANG_SEMANTIC_MIN_SCORE
+        ]
+        if not matched:
+            return 0
+        matched.sort(key=lambda pair: pair[0], reverse=True)
+        used = sum(len(line) for line in lines) + max(0, len(lines) - 1)
+        added = 0
+        for _, row in matched[:3]:
+            before = len(lines)
+            used = _append_within_budget(
+                lines, used, _injection_text(row), _settings.MEMORIAS_MAX_INJECT_CHARS,
+                clip_to_remaining=True,
+            )
+            if len(lines) > before:
+                added += 1
+        return added
 
     @staticmethod
     def _is_summary_row(row) -> bool:
@@ -452,8 +589,19 @@ class MemoriaCaptureMixin:
             # the two appends must not split the pair's tag (B-S1) — the flip
             # then correctly applies forward, to the next turn's pair instead.
             priv = self._memorias_private
-            # T6(b) (ADR-061): the pair this turn may correct is the one right
-            # before it, read BEFORE the append can evict it.
+            # T6(b) (ADR-061): collect up to the last 3 eligible captured pairs
+            # BEFORE appending this turn (so none are lost on eviction).
+            recent_captured_pairs = []
+            for idx in range(len(self.historial) - 2, -1, -2):
+                u_msg = self.historial[idx]
+                a_msg = self.historial[idx + 1]
+                if (
+                    u_msg.get("source") in _eng._DIGEST_CAPTURE_SOURCES
+                    and u_msg.get("private") is False
+                ):
+                    recent_captured_pairs.append((u_msg, a_msg))
+                    if len(recent_captured_pairs) >= 3:
+                        break
             previous_pair = (
                 (self.historial[-2], self.historial[-1]) if len(self.historial) >= 2 else None
             )
@@ -470,20 +618,20 @@ class MemoriaCaptureMixin:
                 'private': priv, 'model': model,
             })
 
-            # B1 (memoria_quality_20260717) — capture-at-commit: the pair that
-            # just ENTERED historial becomes a memoria immediately, not only
-            # when it is later evicted/flushed. This is the durability fix (F2):
-            # a hard kill before eviction/close no longer loses the exchange.
-            # Built under the lock (same discipline as eviction capture);
-            # upserted AFTER the lock releases. Belt-and-braces with eviction +
-            # flush: the stable_key upsert (ON CONFLICT(profile_id,stable_key)
-            # ... WHERE status='draft') is idempotent, so a pair captured here
-            # and again later is a no-op revision bump, never a duplicate row.
             committed_memoria_capture = self._build_memoria_draft(
                 safe_context, dialogo, source=source, private=priv,
             )
             correction_target = self._correction_target(
-                committed_memoria_capture, safe_context, previous_pair,
+                committed_memoria_capture,
+                safe_context,
+                previous_pair,
+                recent_pairs=recent_captured_pairs,
+                anchored_only=bool(recent_captured_pairs),
+            )
+            immediate_correction_fallback = (
+                self._correction_target(committed_memoria_capture, safe_context, previous_pair)
+                if correction_target is None and previous_pair is not None
+                else None
             )
             # WU1 shadow: allocate monotonic sequence and enqueue under _history_lock (pure RAM, < 5us).
             mem = getattr(self, "_memory", None)
@@ -564,6 +712,13 @@ class MemoriaCaptureMixin:
         for pending_memoria_capture in pending_memoria_captures:
             self._capture_memoria(*pending_memoria_capture)
         if committed_memoria_capture is not None:
+            if correction_target is None and is_correction_turn(safe_context):
+                correction_target = (
+                    self._find_unjudged_draft_correction_target(
+                        committed_memoria_capture, safe_context
+                    )
+                    or immediate_correction_fallback
+                )
             if (
                 correction_target is not None
                 and self._supersede_memoria(committed_memoria_capture, *correction_target)
@@ -873,16 +1028,53 @@ class MemoriaCaptureMixin:
         if executor is not None:
             executor.submit(lambda: None).result(timeout=timeout)
 
-    def _correction_target(self, capture, user_text: str, previous_pair) -> Optional[tuple[str, str]]:
-        """T6(b) (ADR-061) - when this turn's draft *capture* is an explicit
-        correction and the pair right before it was itself captured (so it is
-        a non-private, same-window draft), return that draft's
-        ``(stable_key, title)`` so the correction can supersede it. None
-        otherwise: the correction is then stored as an ordinary new draft.
-        The previous key is derived through _build_memoria_draft itself, so a
-        recall turn (user-side-only key, T7) is found under the key it was
-        actually stored with. MUST be called while _history_lock is held."""
-        if capture is None or previous_pair is None or not is_correction_turn(user_text):
+    def _correction_target(
+        self,
+        capture,
+        user_text: str,
+        previous_pair,
+        *,
+        recent_pairs=None,
+        anchored_only: bool = False,
+    ) -> Optional[tuple[str, str]]:
+        """T6(b) (ADR-061) - when *capture* is an explicit correction, return
+        ``(stable_key, title)`` for the target draft to supersede.
+
+        Scans up to *recent_pairs* (last 3 eligible non-private captured pairs)
+        for shared non-stopword topic anchor overlap first; falls back to
+        immediate *previous_pair* only when *anchored_only* is False. MUST run
+        while _history_lock is held (pure RAM only, never I/O)."""
+        if capture is None or not is_correction_turn(user_text):
+            return None
+        corr_anchors = _correction_anchors(user_text)
+        pairs = list(recent_pairs) if recent_pairs is not None else (
+            [previous_pair] if previous_pair is not None else []
+        )
+        best_match: Optional[tuple[int, int, int, tuple[str, str]]] = None
+        for idx, pair in enumerate(pairs):
+            if pair is None:
+                continue
+            cand_user, cand_asst = pair
+            if (
+                not cand_user.get("mem_captured", False)
+                or cand_user.get("private") is not False
+                or cand_user.get("source") not in _eng._DIGEST_CAPTURE_SOURCES
+            ):
+                continue
+            built = self._build_memoria_draft(
+                cand_user.get("content", ""), cand_asst.get("content", ""),
+                source=cand_user.get("source"), private=cand_user.get("private"),
+            )
+            if built is None or built[1] == capture[1]:
+                continue
+            anchor_rank = _correction_anchor_rank(corr_anchors, cand_user.get("content", ""))
+            if anchor_rank is not None:
+                rank = (anchor_rank[0], anchor_rank[1], -idx, (built[1], built[2]))
+                if best_match is None or rank[:3] > best_match[:3]:
+                    best_match = rank
+        if best_match is not None:
+            return best_match[3]
+        if anchored_only or previous_pair is None:
             return None
         prev_user, prev_asst = previous_pair
         if not prev_user.get("mem_captured", False) or prev_user.get("private") is not False:
@@ -894,6 +1086,32 @@ class MemoriaCaptureMixin:
         if prev is None:
             return None
         return prev[1], prev[2]
+
+    def _find_unjudged_draft_correction_target(
+        self, capture: tuple[str, str, str, str, str], user_text: str,
+    ) -> Optional[tuple[str, str]]:
+        """Unlocked fallback: match explicit correction against unjudged non-private
+        drafts in the store requiring >=2 shared anchors or >=1 non-generic anchor."""
+        profile_id, committed_key, *_ = capture
+        corr_anchors = _correction_anchors(user_text)
+        if not corr_anchors:
+            return None
+        try:
+            drafts = self._get_memoria_store().list_unjudged_drafts(profile_id, limit=25)
+        except Exception:
+            return None
+        best: Optional[tuple[int, int, str, str, str]] = None
+        for row in drafts:
+            skey = row["stable_key"] or ""
+            if not skey or skey == committed_key:
+                continue
+            anchor_rank = _correction_anchor_rank(corr_anchors, row["content"] or "")
+            if anchor_rank is not None:
+                updated = row["updated_at"] or ""
+                candidate = (anchor_rank[0], anchor_rank[1], updated, skey, row["title"] or "")
+                if best is None or candidate[:3] > best[:3]:
+                    best = candidate
+        return (best[3], best[4]) if best is not None else None
 
     def _supersede_memoria(
         self, capture: tuple[str, str, str, str, str], prev_key: str, prev_title: str,
@@ -1191,22 +1409,41 @@ class MemoriaCaptureMixin:
             note_topic = ""
             if facts_on and is_topical_recall_question(contexto):
                 note_topic = " ".join(recall_topic_anchors(contexto)[:3])[:60]
-            if not rows and not episodes and not note_topic:
+            can_cross_lang = (
+                facts_on
+                and _settings.MEMORY_SEMANTIC_ENABLED
+                and fact_query_vec is not None
+                and lang is not None
+            )
+            meta_facts_fallback = facts_on and self._unanchored_meta_recall_facts_allowed(contexto)
+            if not rows and not episodes and not note_topic and not can_cross_lang and not meta_facts_fallback:
                 return ""
             # W2b/W4 (memoria_recall_20260718): a meta/temporal recall query
             # ("¿qué recordás de mí?", "de qué hablamos la sesión pasada") has
             # no topical anchor for select_top_k — route it to RECENCY (session
-            # summaries first). W4 gating is structural: recency fires ONLY on a
-            # detected meta query; a topical 0-match keeps injecting nothing
-            # (owner mitigation — the existing select_top_k path, untouched).
-            if not rows:
-                lines = []
-                routing_branch = "episodic"
-            elif self._summary_recall_allowed(contexto, recall_stats):
+            # summaries first when enabled, durable non-summary facts when off).
+            if rows and self._summary_recall_allowed(contexto, recall_stats):
                 lines = _eng.build_recency_lines(rows)
                 routing_branch = "meta-recall"
                 if semantic_scores and recall_stats is not None:
                     recall_stats["fact_fallback"] = "skipped"
+            elif meta_facts_fallback:
+                lines, pinned_count = self._durable_meta_recall_lines(
+                    profile_id, rows, lang=lang
+                )
+                routing_branch = "meta-recall-facts"
+                if semantic_scores and recall_stats is not None:
+                    recall_stats["fact_fallback"] = "skipped"
+            elif not rows:
+                lines = []
+                routing_branch = "episodic"
+                if can_cross_lang:
+                    added = self._cross_lang_semantic_fallback(
+                        profile_id, lines, rows, fact_query_vec
+                    )
+                    if added:
+                        semantic_count += added
+                        routing_branch = "cross-lang-semantic"
             elif semantic_scores:
                 fact_stats: dict = {}
                 fact_rows = [r for r in rows if not self._is_summary_row(r)]
@@ -1216,6 +1453,13 @@ class MemoriaCaptureMixin:
                 semantic_count = int(fact_stats.get("semantic", 0))
                 pinned_count = int(fact_stats.get("pinned", 0))
                 routing_branch = "hybrid"
+                if can_cross_lang and len(lines) - pinned_count == 0:
+                    added = self._cross_lang_semantic_fallback(
+                        profile_id, lines, rows, fact_query_vec
+                    )
+                    if added:
+                        semantic_count += added
+                        routing_branch = "cross-lang-semantic"
             else:
                 fact_rows = [r for r in rows if not self._is_summary_row(r)]
                 fact_stats = {}
@@ -1230,14 +1474,27 @@ class MemoriaCaptureMixin:
                     )
                 pinned_count = int(fact_stats.get("pinned", 0))
                 routing_branch = "lexical"
+                if can_cross_lang and len(lines) - pinned_count == 0:
+                    added = self._cross_lang_semantic_fallback(
+                        profile_id, lines, rows, fact_query_vec
+                    )
+                    if added:
+                        semantic_count += added
+                        routing_branch = "cross-lang-semantic"
             lexical_count = len(lines)
             episode_count = 0
             if episodes:
+                superseded_facts = (
+                    self._get_memoria_store().list_superseded_contents(profile_id, limit=25)
+                    if facts_on else ()
+                )
                 episode_count = episodic_merge.append_episode_lines(
                     lines,
                     episodes,
                     max_chars=_settings.MEMORIAS_MAX_INJECT_CHARS,
                     max_episodes=_settings.MEMORY_RECALL_MAX_EPISODES,
+                    injected_fact_lines=list(lines),
+                    superseded_facts=superseded_facts,
                 )
             if recall_stats is not None:
                 recall_stats["lexical"] = lexical_count
@@ -1293,7 +1550,14 @@ class MemoriaCaptureMixin:
             return ""
         
     def _fact_semantic_scores(
-        self, profile_id: str, rows, query_vec, *, lang: Optional[str] = None
+        self,
+        profile_id: str,
+        rows,
+        query_vec,
+        *,
+        lang: Optional[str] = None,
+        ignore_orphans: Optional[bool] = None,
+        reconcile_rows=None,
     ):
         """ADR-060 fact ranking inputs for this turn -> (scores|None, code|None).
 
@@ -1303,7 +1567,7 @@ class MemoriaCaptureMixin:
         pre-assembly recall step already chose. Never raises.
         """
         mem = getattr(self, "_memory", None)
-        if mem is None or not rows:
+        if mem is None:
             return None, None
         # Lazy: v5 OFF must not import the v5 package (OFF-zero contract);
         # with a live subsystem it is already loaded.
@@ -1312,15 +1576,27 @@ class MemoriaCaptureMixin:
         index = getattr(mem, "fact_index", None)
         if not isinstance(index, FactSemanticIndex):
             return None, None
+        orphan_flag = (lang is not None) if ignore_orphans is None else ignore_orphans
+        if not rows:
+            if not orphan_flag:
+                try:
+                    if index.cache_store.count_fact_embeddings(profile_id) > 0:
+                        index.schedule_reconcile(profile_id, ())
+                except Exception as exc:
+                    _eng.logger.warning(
+                        "memory_facts: empty reconcile failed (fail-open) exc=%s profile_id=%s",
+                        type(exc).__name__, profile_id,
+                    )
+            return None, None
         try:
-            view = index.view(profile_id, rows, query_vec)
+            view = index.view(profile_id, rows, query_vec, ignore_orphans=orphan_flag)
             if view.needs_reconcile:
-                reconcile_rows = rows
-                if lang is not None:
+                target_rows = reconcile_rows if reconcile_rows is not None else rows
+                if reconcile_rows is None and lang is not None:
                     full_rows = self._get_memoria_store().list_injection_candidates(profile_id)
                     if full_rows:
-                        reconcile_rows = full_rows
-                index.schedule_reconcile(profile_id, reconcile_rows)
+                        target_rows = full_rows
+                index.schedule_reconcile(profile_id, target_rows)
         except Exception as exc:
             _eng.logger.warning(
                 "memory_facts: view failed (fail-open) exc=%s profile_id=%s",
@@ -1543,13 +1819,11 @@ class MemoriaCaptureMixin:
     # would otherwise become the whole stored content. Comma-inclusive so we
     # only strip the opener, not a mid-sentence "Mirá".
     _MEMORIA_KIRA_LEADING_TICS = ("Mirá vos,", "Mirá,", "Che,", "Posta,")
-    _MEMORIA_CONTENT_USER_WORDS = 24
-    # T6(d) (ADR-061): draft body cap, kept at 300 on measurement. Drafts are
-    # the promotion judge's INPUT (it distils keepers to <= 220 chars); 28 of
-    # 324 real drafts reach the cap, so lowering it starves the judge, and
-    # raising it stores more raw words. Injection stays bounded by the 700-char
-    # budget and clip_to_remaining either way.
-    _MEMORIA_CONTENT_MAX_CHARS = 300
+    _MEMORIA_CONTENT_USER_WORDS = 36
+    # Draft body cap bumped from 300 to 400 alongside the 36-word budget so
+    # longer operator facts survive intact to the promotion judge while keeping
+    # injection bounded by MEMORIAS_MAX_INJECT_CHARS and clip_to_remaining.
+    _MEMORIA_CONTENT_MAX_CHARS = 400
 
     @classmethod
     def _contentful_kira_sentence(cls, asst_text: str) -> str:

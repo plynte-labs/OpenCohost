@@ -299,33 +299,49 @@ class ScoutPromotionMixin:
         if isinstance(exc, TimeoutError):
             return "judge_watchdog"
         status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return "model_rate_limited"
+        if status_code in {401, 403}:
+            return "model_auth_error"
         if status_code in {404, 410}:
             return "model_unavailable"
         if isinstance(status_code, int) and status_code >= 500:
             return "model_server_error"
         transport_module = type(exc).__module__.split(".", 1)[0]
-        if isinstance(exc, (ConnectionError, OSError)) or transport_module in {
-            "httpcore",
-            "httpx",
-            "requests",
-            "urllib3",
-        }:
+        if (
+            isinstance(exc, (ConnectionError, OSError))
+            or transport_module in {"httpcore", "httpx", "requests", "urllib3"}
+            or hasattr(exc, "body_excerpt")
+        ):
             return "model_transport"
         return "unexpected_precommit"
+
+    def _cloud_promotion_enabled(self) -> bool:
+        """Explicit opt-in gate for running promotion via the active cloud model."""
+        from opencohost.config.llm_provider import is_cloud_promotion_enabled
+
+        return is_cloud_promotion_enabled(getattr(self, "_provider_config", None))
+
+    def _cloud_promotion_model(self) -> str:
+        """Active cloud profile's model name when available, else empty string."""
+        cfg = getattr(self, "_provider_config", None) or {}
+        profile = self._cfg_active_profile(cfg) or {}
+        return str(profile.get("model") or "").strip()
+
+    def _use_cloud_promotion(self) -> bool:
+        """True only when cloud is active, opt-in is enabled, and no local model is loaded."""
+        return (
+            not self._is_local
+            and self._cloud_promotion_enabled()
+            and not self._loaded_model
+        )
 
     def _judge_model(self) -> str:
         """Return only the model this motor already loaded locally.
 
-        The promotion sweep sends up to 8 draft contents
-        (excerpts of the owner's own conversation) to whatever model this
-        resolves to. Memory content stays on the machine; the judge is the
-        only place in the memoria pipeline that ever crosses the network, so
-        it must never follow a cloud provider — never the active profile's
-        model, never ``_cloud_chat``.
-
-        No configured-model fallback is allowed: requesting an unloaded model
-        would cold-load it solely for housekeeping. Always returns a string
-        because reasoning classification lowercases the result.
+        When operating in local mode or with cloud promotion opt-in off,
+        returns ``self._loaded_model or ""`` so unloaded motors gate with
+        ``model_not_loaded`` without probing Ollama or touching cloud APIs.
         """
         return self._loaded_model or ""
 
@@ -429,28 +445,47 @@ class ScoutPromotionMixin:
         )
         if existing_block:
             prompt = prompt.replace("\0X\0", related.existing_block)
-        budget = self._judge_timeout_seconds()
+        use_cloud = self._use_cloud_promotion()
         options = {
             "temperature": 0,
             "num_predict": _eng._PROMOTION_NUM_PREDICT,
         }
-        judge_model = self._judge_model()
-        # Resolved for the judge model itself (it may differ from chat's).
-        self._with_num_ctx(options, self._resolve_local_num_ctx(judge_model))
-        normalized_model = judge_model.lower().replace("_", "-")
-        think = "low" if "gpt-oss" in normalized_model else False
-        if chat_callable is None:
-            # Rebuilt per sweep because the budget is adaptive. The
-            # judge transport (`_ollama_judge_chat`) is pinned local regardless
-            # of the active provider, so it always needs this client.
-            self._ollama_judge_client = self._create_ollama_scout_client(
-                self.ollama, timeout=budget,
-            )
-        call = chat_callable or self._ollama_judge_chat
         messages = [{"role": "user", "content": prompt}]
-
         from opencohost.core.memory.models import MemoryJudgeResult
         json_schema = MemoryJudgeResult.model_json_schema()
+
+        if use_cloud:
+            judge_model = self._cloud_promotion_model()
+            budget = float(_eng.CLOUD_CHAT_TIMEOUT)
+            think = False
+            cfg = self._provider_config
+            if chat_callable is None:
+                from opencohost.core.engine.llm_inference_service import (
+                    get_inference_service,
+                )
+
+                inference_svc = get_inference_service(self)
+                call = lambda **kw: inference_svc.cloud_chat(
+                    provider_cfg=cfg, timeout=budget, **kw
+                )
+            else:
+                call = chat_callable
+        else:
+            budget = self._judge_timeout_seconds()
+            judge_model = self._judge_model()
+            # Resolved for the judge model itself (it may differ from chat's).
+            self._with_num_ctx(options, self._resolve_local_num_ctx(judge_model))
+            normalized_model = judge_model.lower().replace("_", "-")
+            think = "low" if "gpt-oss" in normalized_model else False
+            if chat_callable is None:
+                # Rebuilt per sweep because the budget is adaptive. The
+                # judge transport (`_ollama_judge_chat`) is pinned local
+                # regardless of the active provider, so it always needs this
+                # client.
+                self._ollama_judge_client = self._create_ollama_scout_client(
+                    self.ollama, timeout=budget,
+                )
+            call = chat_callable or self._ollama_judge_chat
 
         _usage_t0 = time.monotonic()
         response = self._ollama_chat_with_watchdog(
@@ -464,7 +499,7 @@ class ScoutPromotionMixin:
             keep_alive=_eng.LLM_KEEP_ALIVE,
         )
         self._usage_record(response, kind="memoria_judge", model=judge_model,
-                           is_local=True, started=_usage_t0)
+                           is_local=not use_cloud, started=_usage_t0)
         text = self._scout_extract_text(response)
         return _eng._parse_promotion_diagnostics(text, len(batch))
 
@@ -472,7 +507,10 @@ class ScoutPromotionMixin:
         """Return a normal lifecycle gate without probing infrastructure."""
         if not _eng.MEMORIAS_ENABLED:
             return "memorias_disabled"
-        if not self._judge_model():
+        if self._use_cloud_promotion():
+            if not self._cloud_promotion_model():
+                return "model_not_loaded"
+        elif not self._judge_model():
             return "model_not_loaded"
         if (
             self._pending_model_switch
@@ -603,7 +641,7 @@ class ScoutPromotionMixin:
             return None
 
     def _retrieve_related_facts(self, profile_id: str, store, batch: list) -> dict:
-        """F2: ``{draft index (1-based): [ExistingFact, ...]}`` -- up to 2
+        """F2: ``{draft index (1-based): [ExistingFact, ...]}`` -- up to 3
         existing durable facts of THIS profile related to each draft, for the
         judge's EXISTING FACTS section. Runs BEFORE the judge call.
 
@@ -790,19 +828,20 @@ class ScoutPromotionMixin:
                     )
                 return counts
 
-            resident, residency_failure = self._judge_model_residency()
-            if not resident:
-                counts["skipped"] = "model_not_resident"
-                if residency_failure:
-                    self._record_promotion_profile_failure(
-                        profile_id, residency_failure, now_s,
-                    )
-                if self._promotion_last_gate != "model_not_resident":
-                    self._promotion_last_gate = "model_not_resident"
-                    _eng.logger.warning(
-                        "memoria promotion sweep gated: model_not_resident"
-                    )
-                return counts
+            if not self._use_cloud_promotion():
+                resident, residency_failure = self._judge_model_residency()
+                if not resident:
+                    counts["skipped"] = "model_not_resident"
+                    if residency_failure:
+                        self._record_promotion_profile_failure(
+                            profile_id, residency_failure, now_s,
+                        )
+                    if self._promotion_last_gate != "model_not_resident":
+                        self._promotion_last_gate = "model_not_resident"
+                        _eng.logger.warning(
+                            "memoria promotion sweep gated: model_not_resident"
+                        )
+                    return counts
             self._promotion_last_gate = ""
 
             try:
@@ -862,13 +901,15 @@ class ScoutPromotionMixin:
             related_by_draft = self._retrieve_related_facts(profile_id, store, batch)
             if related_by_draft:
                 from opencohost.core.memory.promotion_related import (
+                    EXISTING_BUDGET_CHARS,
                     build_related_context,
                 )
 
                 related_ctx = build_related_context(
                     batch,
                     related_by_draft,
-                    budget_chars=_eng._PROMOTION_DRAFT_CHARS,
+                    budget_chars=_eng._PROMOTION_DRAFT_CHARS + EXISTING_BUDGET_CHARS,
+                    existing_budget_chars=EXISTING_BUDGET_CHARS,
                 )
             try:
                 if related_ctx is not None and related_ctx.existing_map:

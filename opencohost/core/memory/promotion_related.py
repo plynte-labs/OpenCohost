@@ -15,24 +15,24 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from opencohost.core.memory.memoria_store import _significant_tokens
+from opencohost.core.memory.memoria_store import _SCORING_STOPWORDS, _significant_tokens
 
 # MiniLM cosine band inside which an existing fact is "related" to a draft
-# (calibration, F1): updates span 0.33..0.955 and same-subject unrelated facts
-# 0.10..0.48, so 0.40 keeps 19/20 updates at the cost of a few distractors the
-# judge then rejects. The ceiling is the auto-dedup threshold: at or above it
-# the store already drops the candidate as a duplicate.
-RELATED_BAND_LOW = 0.40
+# (calibration, F1): 0.35 broadens cross-session contradiction recall across
+# paraphrases and bilingual updates while staying bounded per draft.
+RELATED_BAND_LOW = 0.35
 RELATED_BAND_HIGH = 0.97
 # Up to this many existing facts per draft (a batch is at most 4 drafts).
-RELATED_PER_DRAFT = 2
+RELATED_PER_DRAFT = 3
+# Dedicated character budget for EXISTING FACTS lines so full-size draft batches
+# (~5000 chars) never starve contradiction context.
+EXISTING_BUDGET_CHARS = 2500
 # Each EXISTING line is clipped to this many characters (text only).
 EXISTING_CLIP_CHARS = 220
-# Lexical fallback (no usable vector for a row): the draft and the fact must
-# share at least this many significant (non-stopword) tokens. Conservative on
-# purpose: a false "related" only costs prompt chars, and the judge still
-# defaults to `new` when unsure.
+# Lexical fallback: 1 shared token when no vector exists; 2 when a known vector
+# scored below RELATED_BAND_LOW.
 LEXICAL_MIN_SHARED_TOKENS = 1
+LEXICAL_BELOW_BAND_MIN_SHARED = 2
 
 _DURABLE_TARGET_STATUSES = frozenset({"promoted", "imported", "curated"})
 
@@ -58,27 +58,30 @@ def rank_related(
 ) -> list[ExistingFact]:
     """Up to *limit* facts related to *draft_text*, best first.
 
-    A fact with an entry in *semantic_scores* (fact id -> cosine) is related
-    when the score falls in ``[RELATED_BAND_LOW, RELATED_BAND_HIGH)``. A fact
-    WITHOUT a score (no vector, dead worker) uses the lexical fallback: it is
-    related when it shares at least ``LEXICAL_MIN_SHARED_TOKENS`` significant
-    tokens with the draft, ranked by that overlap. Semantic hits rank ahead of
-    lexical ones only through their score being compared on the same list;
-    lexical overlap is mapped below the semantic band so a real cosine wins.
+    A fact with an entry in *semantic_scores* (fact id -> cosine) in
+    ``[RELATED_BAND_LOW, RELATED_BAND_HIGH)`` qualifies semantically. A fact
+    below ``RELATED_BAND_LOW`` (or without a vector) still checks lexical
+    overlap (``>= 2`` shared non-stopword tokens when scored below band, ``>= 1``
+    when uncached), capped strictly below ``RELATED_BAND_LOW`` so semantic hits
+    rank ahead.
     """
     scores = semantic_scores or {}
-    draft_tokens = set(_significant_tokens(draft_text))
+    draft_tokens = set(_significant_tokens(draft_text)) - _SCORING_STOPWORDS
     ranked: list[tuple[float, int, ExistingFact]] = []
     for order, fact in enumerate(facts):
         score = scores.get(fact.id)
         if score is not None:
             if RELATED_BAND_LOW <= score < RELATED_BAND_HIGH:
                 ranked.append((score, order, fact))
-            continue
-        shared = len(draft_tokens & set(_significant_tokens(fact.content)))
-        if shared >= LEXICAL_MIN_SHARED_TOKENS:
-            # shared / 100 stays under RELATED_BAND_LOW for any realistic count.
-            ranked.append((shared / 100.0, order, fact))
+                continue
+            if score >= RELATED_BAND_HIGH:
+                continue
+        fact_tokens = set(_significant_tokens(fact.content)) - _SCORING_STOPWORDS
+        shared = len(draft_tokens & fact_tokens)
+        min_needed = LEXICAL_MIN_SHARED_TOKENS if score is None else LEXICAL_BELOW_BAND_MIN_SHARED
+        if shared >= min_needed:
+            # Cap below RELATED_BAND_LOW so semantic hits always rank first.
+            ranked.append((min(shared, 34) / 100.0, order, fact))
     ranked.sort(key=lambda item: (-item[0], item[1]))
     return [fact for _, _, fact in ranked[:limit]]
 
@@ -109,14 +112,13 @@ def build_related_context(
     related_by_draft: dict[int, list[ExistingFact]],
     *,
     budget_chars: int,
+    existing_budget_chars: int = EXISTING_BUDGET_CHARS,
 ) -> RelatedContext:
-    """Draft block plus the ``EXISTING FACTS`` block within *budget_chars*.
+    """Draft block plus the ``EXISTING FACTS`` block within budget.
 
-    *budget_chars* bounds draft text + EXISTING lines + related tags (the
-    static rules text is excluded, like the base prompt). Existing facts are
-    de-duplicated across the batch and labelled E1..En in first-seen order;
-    when over budget the LAST items are dropped first and drafts are never
-    cut. With nothing kept, the result is the plain pre-F2 draft block.
+    *existing_budget_chars* caps the rendered ``EXISTING FACTS`` section so
+    large draft batches never starve contradiction detection, while
+    *budget_chars* preserves the overall combined cap when tightened.
     """
     ordered: list[ExistingFact] = []
     seen: set[str] = set()
@@ -132,7 +134,7 @@ def build_related_context(
         labels = {f.id: f"E{n}" for n, f in enumerate(trial, start=1)}
         existing_chars = sum(len(f"E{n}. {_clip(f.content)}\n") for n, f in enumerate(trial, start=1))
         used = len(_render(batch, related_by_draft, labels)) + existing_chars
-        if used > budget_chars:
+        if existing_chars > existing_budget_chars or used > budget_chars:
             break
         kept.append(fact)
 

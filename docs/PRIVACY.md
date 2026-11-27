@@ -75,6 +75,14 @@ viewer chat → [filtering] → PROMPT → your chosen cloud provider → respon
 
 To stay fully local for inference, simply leave this off — that is the shipped default.
 
+#### Cloud memoria draft promotion (opt-in, off by default)
+
+By default, **memoria promotion does not use a cloud provider**: if you are on a cloud provider and have no local Ollama model loaded, automatic draft promotion stays paused on your machine (`model_not_loaded`). Drafts are never sent to a cloud API unless you explicitly opt in by setting `"cloud_promotion_enabled": true` in `config/llm_provider.json` (or `OPENCOHOST_CLOUD_PROMOTION_ENABLED=1` in the environment).
+
+- **What is sent when enabled (only when no local judge model is loaded):** up to 4 non-private, active operator-only draft excerpts per sweep (plus up to a few active non-private related fact strings for deduplication and contradiction checks) to your active cloud provider's configured model.
+- **What is never sent:** viewer chat messages, rows marked private, muted/inactive rows, other profiles' rows, and API keys.
+- **Provider policy applies:** any excerpts sent under this opt-in are governed by your cloud provider's retention and training policy. Leave `"cloud_promotion_enabled"` at `false` (default) to keep all unjudged memoria drafts on your machine until a local model is loaded.
+
 #### Sending images directly to the cloud model (opt-in, off by default)
 
 By default, when Kira looks at your screen or you paste an image into the chat, a **local** vision model describes it and only that text description goes to the chat model. If you turn on **Send images directly to the cloud model** (Vision settings) **and** the active provider is a cloud provider whose chosen model can see images, the picture itself is sent instead:

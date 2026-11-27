@@ -660,3 +660,58 @@ def test_put_preset_none_without_profile_id_422():
         assert resp.status_code == 422
         assert resp.json() == {"detail": "profile_id required"}
 
+
+def test_load_provider_config_cloud_promotion_opt_in_and_env_override(tmp_path, monkeypatch):
+    from opencohost.config.llm_provider import (
+        is_cloud_promotion_enabled,
+        load_provider_config,
+        save_provider_config,
+    )
+
+    cfg_path = tmp_path / "llm_provider.json"
+    monkeypatch.delenv("OPENCOHOST_CLOUD_PROMOTION_ENABLED", raising=False)
+    default_cfg = load_provider_config(str(cfg_path))
+    assert default_cfg["cloud_promotion_enabled"] is False
+    assert is_cloud_promotion_enabled(default_cfg) is False
+
+    default_cfg["cloud_promotion_enabled"] = True
+    save_provider_config(default_cfg, str(cfg_path))
+    loaded = load_provider_config(str(cfg_path))
+    assert loaded["cloud_promotion_enabled"] is True
+    assert is_cloud_promotion_enabled(loaded) is True
+
+    monkeypatch.setenv("OPENCOHOST_CLOUD_PROMOTION_ENABLED", "0")
+    loaded_with_env_off = load_provider_config(str(cfg_path))
+    # Persisted config keeps True, runtime resolution honors env override=0.
+    assert loaded_with_env_off["cloud_promotion_enabled"] is True
+    assert is_cloud_promotion_enabled(loaded_with_env_off) is False
+
+    monkeypatch.setenv("OPENCOHOST_CLOUD_PROMOTION_ENABLED", "1")
+    cfg_path_off = tmp_path / "llm_provider_off.json"
+    save_provider_config({"active_provider": "openai", "cloud_promotion_enabled": False}, str(cfg_path_off))
+    loaded_off = load_provider_config(str(cfg_path_off))
+    assert loaded_off["cloud_promotion_enabled"] is False
+    assert is_cloud_promotion_enabled(loaded_off) is True
+
+    # Hand-edited string booleans parse strictly.
+    cfg_path_str = tmp_path / "llm_provider_str.json"
+    cfg_path_str.write_text(json.dumps({"cloud_promotion_enabled": "false"}), encoding="utf-8")
+    assert load_provider_config(str(cfg_path_str))["cloud_promotion_enabled"] is False
+    cfg_path_str.write_text(json.dumps({"cloud_promotion_enabled": "0"}), encoding="utf-8")
+    assert load_provider_config(str(cfg_path_str))["cloud_promotion_enabled"] is False
+
+
+def test_cloud_promotion_env_override_not_persisted_on_put_to_disk(monkeypatch):
+    import opencohost.config.llm_provider as llm_provider_mod
+
+    monkeypatch.setenv("OPENCOHOST_CLOUD_PROMOTION_ENABLED", "1")
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.put("/api/llm/provider", json={"pregen_enabled": True})
+        assert resp.status_code == 200
+
+    persisted = json.loads(
+        open(llm_provider_mod.LLM_PROVIDER_CONFIG_FILE, "r", encoding="utf-8").read()
+    )
+    assert persisted["cloud_promotion_enabled"] is False
+

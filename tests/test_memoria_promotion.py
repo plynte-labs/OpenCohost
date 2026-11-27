@@ -1551,3 +1551,241 @@ def test_the_gate_reason_is_reported_so_a_dead_sweep_is_observable(monkeypatch, 
     assert motor._loaded_model is not None
     motor._current_profile_id = "profile-1"
     assert motor.promote_pending_drafts(chat_callable=_Recorder(_decisions()))["skipped"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Opt-in cloud promotion judge & resilient JSON extraction
+# ---------------------------------------------------------------------------
+
+def test_cloud_provider_opt_in_routes_judge_via_cloud_chat_and_filters_private(monkeypatch, tmp_path):
+    """When cloud_promotion_enabled=True and _loaded_model is None on cloud,
+    bypass local residency checks, route through inference_service.cloud_chat,
+    record usage with is_local=False, and strictly exclude private/inactive drafts."""
+    from opencohost.config.settings import CLOUD_CHAT_TIMEOUT
+    from opencohost.core.providers.cloud import cloud_llm_client
+    from opencohost.core.usage import ledger
+
+    motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
+    motor._loaded_model = None
+    motor._provider_config["cloud_promotion_enabled"] = True
+
+    store = _store(tmp_path)
+    public_id = _seed_draft(store, "profile-1", "k_pub", "operator streams every Friday night in English")
+    private_id = _seed_draft(store, "profile-1", "k_priv", "secret private turn should never leak", private=True)
+    inactive_id = _seed_draft(store, "profile-1", "k_inact", "muted inactive turn should never leak")
+    with sqlite3.connect(str(store.db_path)) as conn:
+        conn.execute("UPDATE memorias SET inactive = 1 WHERE id = ?", (inactive_id,))
+
+    cloud_calls = []
+    monkeypatch.setattr(
+        cloud_llm_client,
+        "send_chat_completion",
+        lambda **kwargs: cloud_calls.append(kwargs) or {
+            "message": {
+                "content": (
+                    "<think>analyzing candidate facts</think>\n"
+                    "Here is the JSON result:\n"
+                    "```json\n"
+                    + json.dumps({
+                        "decisions": [{
+                            "i": 1,
+                            "keep": True,
+                            "text": "The operator streams every Friday night.",
+                            "origin": "self_stated",
+                        }]
+                    })
+                    + "\n```"
+                )
+            }
+        },
+    )
+
+    recorded_usage = []
+    monkeypatch.setattr(
+        ledger,
+        "record_response",
+        lambda resp, **kw: recorded_usage.append(kw),
+    )
+
+    counts = motor.promote_pending_drafts()
+
+    assert counts["skipped"] == ""
+    assert counts["kept"] == 1
+    assert motor.ollama.Client.call_count == 0
+    assert len(cloud_calls) == 1
+    assert cloud_calls[0]["model"] == "glm-5.2"
+    assert cloud_calls[0]["timeout"] == CLOUD_CHAT_TIMEOUT
+    prompt_text = cloud_calls[0]["messages"][0]["content"]
+    assert "operator streams every Friday night in English" in prompt_text
+    assert "secret private turn" not in prompt_text
+    assert "muted inactive turn" not in prompt_text
+    assert _row(tmp_path, public_id)["status"] == "promoted"
+    assert _row(tmp_path, private_id)["status"] == "draft"
+    assert _row(tmp_path, inactive_id)["status"] == "draft"
+    assert recorded_usage == [
+        {
+            "model": "glm-5.2",
+            "is_local": False,
+            "kind": "memoria_judge",
+            "profile_id": "profile-1",
+            "wall_ms": recorded_usage[0]["wall_ms"],
+        }
+    ]
+
+
+def test_cloud_provider_opt_in_via_env_override_unblocks_judge(monkeypatch, tmp_path):
+    """OPENCOHOST_CLOUD_PROMOTION_ENABLED=1 enables cloud promotion opt-in
+    without changing local residency behaviour when turned off."""
+    from opencohost.config.settings import CLOUD_CHAT_TIMEOUT
+
+    monkeypatch.setenv("OPENCOHOST_CLOUD_PROMOTION_ENABLED", "1")
+    motor = _go_cloud(_make_motor(monkeypatch, tmp_path), model="glm-5.2")
+    motor._loaded_model = None
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "operator drinks iced espresso daily")
+
+    watched_timeouts = []
+    orig_watchdog = motor._ollama_chat_with_watchdog
+
+    def _spy_watchdog(*, timeout, **kwargs):
+        watched_timeouts.append(timeout)
+        return orig_watchdog(timeout=timeout, **kwargs)
+
+    motor._ollama_chat_with_watchdog = _spy_watchdog
+    stub = _Recorder(
+        "Okay!\n"
+        + _decisions({"i": 1, "keep": True, "text": "The operator drinks iced espresso daily.", "origin": "self_stated"})
+        + "\nAll done."
+    )
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert counts["skipped"] == ""
+    assert counts["kept"] == 1
+    assert motor.ollama.Client.call_count == 0
+    assert stub.calls[0]["model"] == "glm-5.2"
+    assert watched_timeouts == [float(CLOUD_CHAT_TIMEOUT) + 2]
+
+
+def test_cloud_provider_opt_in_without_cloud_model_gates_model_not_loaded(monkeypatch, tmp_path):
+    motor = _make_motor(monkeypatch, tmp_path)
+    motor._loaded_model = None
+    motor._provider_config = {
+        "active_provider": "nvidia_nim",
+        "cloud_promotion_enabled": True,
+        "profiles": {"nvidia_nim": {"base_url": "https://x/v1", "model": ""}},
+    }
+    _seed_draft(_store(tmp_path), "profile-1", "k1", "operator builds custom keyboards")
+    stub = _Recorder(_decisions({"i": 1, "keep": True, "text": "x"}))
+
+    counts = motor.promote_pending_drafts(chat_callable=stub)
+
+    assert stub.calls == []
+    assert motor.ollama.Client.call_count == 0
+    assert counts["skipped"] == "model_not_loaded"
+
+
+def test_parse_promotion_diagnostics_extracts_think_fence_and_outer_json():
+    from opencohost.core.memory.promotion_parser import _parse_promotion_diagnostics
+
+    raw = (
+        "<think>Thinking about {unrelated: \"braces\"} here.</think>\n"
+        "Here are the decisions:\n"
+        "```json\n"
+        "{\"decisions\":[{\"i\":1,\"keep\":true,\"text\":\"The operator uses Linux.\",\"origin\":\"self_stated\"}]}\n"
+        "```\n"
+        "Hope that helps!"
+    )
+    diag = _parse_promotion_diagnostics(raw, 1)
+    assert diag.top_level_valid is True
+    assert diag.decisions == [(1, "The operator uses Linux.", False, "")]
+    assert diag.origins == {1: "self_stated"}
+
+
+def test_unit3_rank_related_band_limit_and_lexical_fallback():
+    from opencohost.core.memory.promotion_related import (
+        EXISTING_BUDGET_CHARS,
+        RELATED_BAND_LOW,
+        RELATED_PER_DRAFT,
+        ExistingFact,
+        rank_related,
+    )
+
+    assert RELATED_BAND_LOW == pytest.approx(0.35)
+    assert RELATED_PER_DRAFT == 3
+    assert EXISTING_BUDGET_CHARS == 2500
+
+    facts = [
+        ExistingFact("f_sem_low", "p1", "promoted", 1, "unrelated phrasing here", 0),
+        ExistingFact("f_sem_mid", "p1", "promoted", 1, "another fact about setup", 0),
+        ExistingFact("f_lex_rescue", "p1", "promoted", 1, "The operator plays hollow knight silversonic", 0),
+        ExistingFact("f_lex_one", "p1", "promoted", 1, "The operator collects vintage keyboards", 0),
+        ExistingFact("f_sem_hi", "p1", "promoted", 1, "gaming setup detail", 0),
+    ]
+    scores = {
+        "f_sem_low": 0.36,      # inside [0.35, 0.97)
+        "f_sem_mid": 0.42,      # inside [0.35, 0.97)
+        "f_lex_rescue": 0.22,   # below 0.35, but shares >= 2 sig tokens ("hollow", "knight")
+        "f_lex_one": 0.20,      # below 0.35, shares only 1 sig token ("keyboards") -> excluded
+        "f_sem_hi": 0.98,       # >= 0.97 -> duplicate band, skipped
+    }
+    picked = rank_related("The operator switched to hollow knight on keyboards", facts, scores)
+    picked_ids = [f.id for f in picked]
+    assert picked_ids == ["f_sem_mid", "f_sem_low", "f_lex_rescue"]
+
+
+def test_unit3_existing_facts_keep_dedicated_budget_with_4900_char_drafts(monkeypatch, tmp_path):
+    """Long drafts near _PROMOTION_DRAFT_CHARS (4900/5000 chars) must NOT starve
+    EXISTING FACTS out of the promotion judge prompt."""
+    motor = _make_motor(monkeypatch, tmp_path)
+    store = _store(tmp_path)
+    existing_id = _seed_draft(store, "profile-1", "ex", "existing fact placeholder")
+    store.update_row(
+        existing_id,
+        content="The operator lives in Madrid Spain and enjoys espresso in the morning.",
+        status="promoted",
+    )
+
+    # 4 drafts totaling ~4900 chars (<= 5000 draft cap): without dedicated
+    # EXISTING_BUDGET_CHARS, adding a 150+ char existing line > 5000 dropped it.
+    _seed_draft(
+        store, "profile-1", "d1",
+        "operator moved from Madrid Spain to Lisbon Portugal " + ("x" * 1160),
+    )
+    for i in range(2, 5):
+        _seed_draft(store, "profile-1", f"d{i}", f"batch item {i} " + ("y" * 1210))
+
+    stub = _Recorder(_decisions())
+    motor.promote_pending_drafts(chat_callable=stub)
+
+    assert "EXISTING FACTS" in stub.prompt
+    assert "The operator lives in Madrid Spain" in stub.prompt
+
+
+def test_unit3_judge_prompt_carries_intra_batch_contradiction_rule():
+    from opencohost.core.memory.promotion_parser import _PROMOTION_JUDGE_PROMPT
+
+    lowered = _PROMOTION_JUDGE_PROMPT.lower()
+    assert "contradict" in lowered
+    assert "transient" in lowered
+
+
+def test_parse_promotion_diagnostics_extracts_json_with_trailing_prose_and_leading_braces():
+    from opencohost.core.memory.promotion_parser import _parse_promotion_diagnostics
+
+    trailing_prose = (
+        '{"decisions":[{"i":1,"keep":true,"text":"The operator uses Fedora Linux.","origin":"self_stated"}]}\n'
+        "Hope that helps!"
+    )
+    diag1 = _parse_promotion_diagnostics(trailing_prose, 1)
+    assert diag1.top_level_valid is True
+    assert diag1.decisions == [(1, "The operator uses Fedora Linux.", False, "")]
+    assert diag1.origins == {1: "self_stated"}
+
+    leading_invalid_braces = (
+        '{note}\n'
+        '{"decisions":[{"i":1,"keep":true,"text":"The operator uses Fedora Linux.","origin":"self_stated"}]}'
+    )
+    diag2 = _parse_promotion_diagnostics(leading_invalid_braces, 1)
+    assert diag2.top_level_valid is True
+    assert diag2.decisions == [(1, "The operator uses Fedora Linux.", False, "")]
+    assert diag2.origins == {1: "self_stated"}
