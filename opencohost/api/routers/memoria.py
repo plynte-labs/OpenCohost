@@ -216,6 +216,21 @@ def _forget_v5_row(request: Request, profile_id: str, stable_key: "str | None") 
         logger.warning("memory_v5: row forget failed exc=%s", type(exc).__name__)
 
 
+def _drop_v5_fact_embedding(request: Request, row_id: str) -> None:
+    """Drop a deleted or private/inactive fact's cached v5 vector. Fail-open."""
+    mem = _v5_memory(request)
+    if mem is None or not row_id:
+        return
+    fact_index = getattr(mem, "fact_index", None)
+    remove_fn = getattr(fact_index, "remove_fact_embedding", None)
+    if not callable(remove_fn):
+        return
+    try:
+        remove_fn(row_id)
+    except Exception as exc:
+        logger.debug("memory_v5: drop_fact_embedding skipped exc=%s", type(exc).__name__)
+
+
 def _legacy_profile_key(profile_id: str) -> "str | None":
     """The profile's current display NAME whose stable `id` == profile_id.
 
@@ -411,7 +426,7 @@ def post_memoria_purge(request: Request, body: MemoriaPurgeRequest) -> MemoriaPu
 
 
 @router.post("/api/memoria/flags", response_model=MemoriaMutationResponse)
-def post_memoria_flags(body: MemoriaFlagsRequest):
+def post_memoria_flags(request: Request, body: MemoriaFlagsRequest):
     if not deps.memorias_enabled():
         return MemoriaMutationResponse(ok=False)  # benign no-op, mirrors purge deleted=0
     if body.pinned is None and body.private is None and body.inactive is None:
@@ -443,6 +458,8 @@ def post_memoria_flags(body: MemoriaFlagsRequest):
         # rowcount==0 on a pre-found row: it vanished in the check-then-act
         # race window -- that is not-found, not a write failure.
         return JSONResponse(status_code=404, content={"detail": "memoria not found"})
+    if body.private is True or body.inactive is True:
+        _drop_v5_fact_embedding(request, body.id)
     return MemoriaMutationResponse(ok=True)
 
 
@@ -465,6 +482,7 @@ def post_memoria_delete(request: Request, body: MemoriaDeleteRequest):
         return JSONResponse(status_code=404, content={"detail": "memoria not found"})
     if not store.delete_row(body.id):
         return JSONResponse(status_code=503, content={"detail": "memoria_write_failed"})
+    _drop_v5_fact_embedding(request, body.id)
     _forget_v5_row(request, body.profile_id, row["stable_key"] if "stable_key" in row.keys() else None)
     _reset_session_topics(request)
     return MemoriaMutationResponse(ok=True)

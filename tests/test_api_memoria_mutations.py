@@ -602,3 +602,65 @@ def test_get_memoria_capture_unavailable_when_gated(monkeypatch):
         resp = client.get("/api/memoria/capture")
         assert resp.status_code == 200
         assert resp.json() == {"private": False, "available": False}
+
+
+def test_post_memoria_delete_and_flags_purge_v5_fact_embedding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from opencohost.core.memory_v5_shadow.fact_index import FactSemanticIndex
+    from opencohost.core.memory_v5_shadow.semantic_cache import FactEmbeddingRecord, SemanticCacheStore
+
+    db_path = tmp_path / "memorias.db"
+    _seed_memorias_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+        "status, pinned, private, inactive, created_at, updated_at) VALUES "
+        "('mem_b', 'default', 'k2', 1, 'title b', 'content b', 'promoted', 0, 0, 0, "
+        "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO memorias (id, profile_id, stable_key, revision, title, content, "
+        "status, pinned, private, inactive, created_at, updated_at) VALUES "
+        "('mem_c', 'default', 'k3', 1, 'title c', 'content c', 'promoted', 0, 0, 0, "
+        "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+    _enable(monkeypatch, db_path)
+
+    cache = SemanticCacheStore(tmp_path / "cache.db")
+    cache.initialize()
+    vec = [1.0] + [0.0] * 383
+    for fid in ("mem_a", "mem_b", "mem_c"):
+        cache.upsert_fact_embedding(FactEmbeddingRecord(
+            fid, "default", 1, "h_" + fid, "minilm-l12", "v1", vec, "2026-09-01T00:00:00Z"
+        ))
+    idx = FactSemanticIndex(cache, worker=MagicMock())
+    assert cache.count_fact_embeddings("default") == 3
+
+    app = _app()
+    with TestClient(app) as client:
+        app.state.host.motor._memory = SimpleNamespace(fact_index=idx)
+
+        # Pinning does NOT drop vector.
+        r_pin = client.post("/api/memoria/flags", json={"profile_id": "default", "id": "mem_c", "pinned": True})
+        assert r_pin.status_code == 200
+        assert cache.count_fact_embeddings("default") == 3
+
+        # Marking private=True drops cached vector.
+        r_priv = client.post("/api/memoria/flags", json={"profile_id": "default", "id": "mem_a", "private": True})
+        assert r_priv.status_code == 200
+        assert {rec.fact_id for rec in cache.get_fact_embeddings_by_profile("default")} == {"mem_b", "mem_c"}
+
+        # Marking inactive=True drops cached vector.
+        r_inact = client.post("/api/memoria/flags", json={"profile_id": "default", "id": "mem_b", "inactive": True})
+        assert r_inact.status_code == 200
+        assert {rec.fact_id for rec in cache.get_fact_embeddings_by_profile("default")} == {"mem_c"}
+
+        # Deleting drops cached vector down to 0.
+        r_del = client.post("/api/memoria/delete", json={"profile_id": "default", "id": "mem_c"})
+        assert r_del.status_code == 200
+        assert cache.count_fact_embeddings("default") == 0
+
+    cache.close()

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from opencohost.core.memory.memoria_store import (
@@ -39,7 +38,7 @@ class IncrementalSemanticIndexer:
         cache_store: SemanticCacheStore,
         worker: SemanticWorkerService,
         model_id: str = "minilm-l12",
-        model_version: str = "v1",
+        model_version: str = "v2",
     ) -> None:
         self.shadow_conn = shadow_conn
         self.cache_store = cache_store
@@ -76,12 +75,12 @@ class IncrementalSemanticIndexer:
         if not exchanges:
             return False
 
-        # 4. Batch embed unique exchange texts via isolated worker
+        # 4. Batch embed unique user-side texts via isolated worker
         unique_texts: list[str] = []
         text_to_keys: dict[str, list[str]] = {}
         for ex in exchanges:
             key = f"{ex.user_event_id}:{ex.assistant_event_id}"
-            t = ex.combined_text
+            t = ex.user_text
             if t not in text_to_keys:
                 text_to_keys[t] = []
                 unique_texts.append(t)
@@ -97,18 +96,16 @@ class IncrementalSemanticIndexer:
             for k in text_to_keys[text]:
                 key_to_vec[k] = vec
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        # 5. Persist ExchangeEmbeddingRecords with real lexical tokens
+        # 5. Persist ExchangeEmbeddingRecords with user-side lexical tokens
         ex_vecs: list[list[float]] = []
         for ex in exchanges:
             key = f"{ex.user_event_id}:{ex.assistant_event_id}"
             vec = key_to_vec[key]
             ex_vecs.append(vec)
-            content_h = hashlib.sha256(ex.combined_text.encode("utf-8")).hexdigest()[:16]
+            content_h = hashlib.sha256(ex.user_text.encode("utf-8")).hexdigest()[:16]
 
             # Extract normalized tokens minus domain & scoring stopwords
-            comb_tokens = set(_significant_tokens(ex.combined_text)) - _SCORING_STOPWORDS
+            comb_tokens = set(_significant_tokens(ex.user_text)) - _SCORING_STOPWORDS
             lexical_tokens_str = " ".join(sorted(comb_tokens))
 
             rec = ExchangeEmbeddingRecord(
@@ -134,7 +131,7 @@ class IncrementalSemanticIndexer:
             exchange_vectors=ex_vecs,
         )
         if rep is not None:
-            all_texts = [ex.combined_text for ex in exchanges]
+            all_texts = [ex.user_text for ex in exchanges]
             combined_hash = hashlib.sha256("".join(all_texts).encode("utf-8")).hexdigest()[:16]
             ep_rec = EpisodeEmbeddingRecord(
                 episode_id=episode_id,
@@ -184,7 +181,7 @@ class IncrementalSemanticIndexer:
             # Staleness validation: check content fingerprint
             raw_events = load_episode_evidence_events(self.shadow_conn, eid)
             exs, _ = extract_exchanges_from_events(raw_events, session_id=sid)
-            texts = [ex.combined_text for ex in exs]
+            texts = [ex.user_text for ex in exs]
             current_fp = hashlib.sha256("".join(texts).encode("utf-8")).hexdigest()[:16]
             if cached_ep.content_fingerprint != current_fp:
                 logger.info("Episode %s cache is stale (content fingerprint mismatch). Rebuilding.", eid)

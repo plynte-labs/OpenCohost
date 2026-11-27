@@ -186,12 +186,19 @@ class FactSemanticIndex:
             return None, FACT_FALLBACK_TIMEOUT
         return list(vec), FACT_FALLBACK_NONE
 
-    def view(self, profile_id: str, rows: Iterable[Any], query_vec: Optional[list[float]]) -> FactIndexView:
+    def view(
+        self,
+        profile_id: str,
+        rows: Iterable[Any],
+        query_vec: Optional[list[float]],
+        *,
+        ignore_orphans: bool = False,
+    ) -> FactIndexView:
         """Cosines for eligible *rows* with a VALID cached vector. Pure read."""
         rows = list(rows)
         desired = self._desired(profile_id, rows)
         cached = {rec.fact_id: rec for rec in self.cache_store.get_fact_embeddings_by_profile(profile_id)}
-        needs = any(fid not in desired for fid in cached)
+        needs = False if ignore_orphans else any(fid not in desired for fid in cached)
         valid: dict[str, FactEmbeddingRecord] = {}
         for fid, key in desired.items():
             rec = cached.get(fid)
@@ -207,6 +214,18 @@ class FactSemanticIndex:
                 if v.shape == q.shape:
                     scores[fid] = float(np.dot(q, v))
         return FactIndexView(scores=scores, needs_reconcile=needs)
+
+    def remove_fact_embedding(self, fact_id: str) -> None:
+        """Drop one deleted or invalidated fact's cached vector immediately. Fail-open."""
+        fid = str(fact_id or "").strip()
+        if not fid:
+            return
+        try:
+            self.cache_store.delete_fact_embeddings([fid])
+        except Exception as exc:
+            _oc_logger.debug(
+                "memory_facts: remove_fact_embedding skipped exc=%s", type(exc).__name__
+            )
 
     # -- background -----------------------------------------------------------
 

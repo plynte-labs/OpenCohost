@@ -154,11 +154,30 @@ class HybridEpisodicRanker:
             )
             return CandidateScoreResult(True, round(score, 4), "ACCEPTED_EXPLICIT_CORROBORATED")
 
-        else:  # IMPLICIT or NONE (opportunistic)
-            # NONE reuses the IMPLICIT strict cutoffs verbatim — no numeric
-            # threshold tuning. Its extra strictness comes from the
-            # deterministic lexical/cache preflight in the coordinator, which
-            # only lets anchored queries reach this scorer at all.
+        elif intent == RecallIntent.IMPLICIT:
+            # Lexically corroborated IMPLICIT turns relax to 0.55; uncorroborated
+            # IMPLICIT turns keep the strict 0.78 / 0.85 cutoffs unchanged.
+            if lexical_score > 0.0:
+                if exchange_cosine < 0.55:
+                    return CandidateScoreResult(False, exchange_cosine, "REJECTED_LOW_SEMANTIC")
+            else:
+                if exchange_cosine < 0.78:
+                    return CandidateScoreResult(False, exchange_cosine, "REJECTED_LOW_SEMANTIC")
+                if exchange_cosine < 0.85:
+                    return CandidateScoreResult(False, exchange_cosine, "REJECTED_LEXICAL_UNSUBSTANTIATED")
+
+            score = (
+                0.45 * exchange_cosine
+                + 0.25 * lexical_score
+                + 0.10 * episode_cosine
+                + 0.10 * cohesion_mean
+                + 0.10 * recency_prior
+            )
+            return CandidateScoreResult(True, round(score, 4), "ACCEPTED_IMPLICIT_HIGH_CONFIDENCE")
+
+        else:  # NONE (opportunistic)
+            # NONE keeps the strict 0.78 / 0.85 cutoffs alongside the deterministic
+            # lexical/cache preflight in the coordinator.
             if exchange_cosine < 0.78:
                 return CandidateScoreResult(False, exchange_cosine, "REJECTED_LOW_SEMANTIC")
             if exchange_cosine < 0.85 and lexical_score <= 0.0:
@@ -171,12 +190,7 @@ class HybridEpisodicRanker:
                 + 0.10 * cohesion_mean
                 + 0.10 * recency_prior
             )
-            accepted_code = (
-                "ACCEPTED_OPPORTUNISTIC_CORROBORATED"
-                if intent == RecallIntent.NONE
-                else "ACCEPTED_IMPLICIT_HIGH_CONFIDENCE"
-            )
-            return CandidateScoreResult(True, round(score, 4), accepted_code)
+            return CandidateScoreResult(True, round(score, 4), "ACCEPTED_OPPORTUNISTIC_CORROBORATED")
 
     def apply_mmr_diversity(
         self,
